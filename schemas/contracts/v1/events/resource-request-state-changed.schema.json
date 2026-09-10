@@ -48,7 +48,14 @@
       "description": "PostgreSQL-authoritative request projection without provider internals.",
       "properties": {
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -68,14 +75,7 @@
           "$ref": "#/$defs/ResourceRequestId"
         },
         "projectId": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProjectId"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/ProjectId"
         },
         "requestKey": {
           "type": "string"
@@ -109,7 +109,7 @@
         "generation",
         "requestKey",
         "requesterId",
-        "courseId",
+        "projectId",
         "target",
         "requestedResources",
         "requestedDurationSeconds",
@@ -151,27 +151,55 @@
       "type": "string"
     },
     "ResourceTarget": {
-      "additionalProperties": false,
-      "description": "Immutable identity of a Resource request's target Work environment.",
-      "properties": {
-        "environmentId": {
-          "$ref": "#/$defs/EnvironmentId"
+      "description": "Immutable identity of a Resource request's target.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Capacity for a long-lived Environment/Work aggregate that already owns its identity.",
+          "properties": {
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "const": "environment",
+              "type": "string"
+            },
+            "releaseId": {
+              "$ref": "#/$defs/ReleaseId"
+            },
+            "releaseVersion": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "releaseId",
+            "releaseVersion"
+          ],
+          "type": "object"
         },
-        "releaseId": {
-          "$ref": "#/$defs/ReleaseId"
-        },
-        "releaseVersion": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
+        {
+          "additionalProperties": false,
+          "description": "Capacity for a one-shot task. Resource does not create a fake Environment row.",
+          "properties": {
+            "kind": {
+              "const": "task",
+              "type": "string"
+            },
+            "taskRunId": {
+              "$ref": "#/$defs/TaskRunId"
+            }
+          },
+          "required": [
+            "kind",
+            "taskRunId"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "environmentId",
-        "releaseId",
-        "releaseVersion"
-      ],
-      "type": "object"
+      ]
     },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
@@ -184,6 +212,10 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
     },
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
@@ -238,7 +270,15 @@
       "$ref": "#/$defs/Sequence"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent projects omit this field."
     },
     "data": {
       "$ref": "#/$defs/ResourceRequestChanged"
@@ -251,6 +291,10 @@
     },
     "id": {
       "$ref": "#/$defs/EventId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope for every platform event, including independent Work events."
     },
     "source": {
       "type": "string"
@@ -280,7 +324,7 @@
     "time",
     "datacontenttype",
     "dataschema",
-    "courseId",
+    "projectId",
     "aggregateRevision",
     "aggregateSequence",
     "traceId",

@@ -97,6 +97,22 @@ pub struct PresignedUpload {
     pub expires_at: UtcTimestamp,
 }
 
+/// Short-lived GET URL for one exact immutable object version.
+///
+/// The URL is intended for a per-attempt init container.  It contains the S3
+/// authorization material, so callers must keep it in a Secret that is mounted
+/// only by that init container and must never put it in a normal `ConfigMap` or
+/// log record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresignedDownload {
+    /// Signed URL for the exact object version.
+    pub url: String,
+    /// Headers that must be supplied byte-for-byte by the client.
+    pub required_headers: BTreeMap<String, String>,
+    /// Server-side expiry.
+    pub expires_at: UtcTimestamp,
+}
+
 /// Verified bytes and immutable S3 version identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedObject {
@@ -109,6 +125,9 @@ pub struct VerifiedObject {
 /// Storage boundary used by Control and Agent without exposing credentials.
 #[async_trait]
 pub trait ImmutableObjectStore: Send + Sync {
+    /// Returns the deployment binding used in every public artifact reference.
+    fn binding(&self) -> &str;
+
     /// Signs one conditional immutable upload.
     async fn presign_upload(
         &self,
@@ -122,9 +141,7 @@ pub trait ImmutableObjectStore: Send + Sync {
     async fn read_verified(
         &self,
         key: &str,
-        version: &str,
-        expected_size: u64,
-        media_type: &str,
+        expected: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError>;
 
     /// Resolves the current upload version once, then verifies and freezes that exact version.
@@ -253,6 +270,65 @@ impl S3ImmutableObjectStore {
         Ok(key)
     }
 
+    /// Signs a bounded GET for one exact immutable object version.
+    ///
+    /// The expected size and media type are checked before signing so a caller
+    /// cannot accidentally hand an unbounded or underspecified object to a
+    /// runner.  The init container still verifies the downloaded bytes against
+    /// the caller's digest before publishing files into its `EmptyDir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the object identity, configured size or media type
+    /// is invalid, or when the object-store client cannot create a bounded
+    /// presigned request.
+    pub async fn presign_download(
+        &self,
+        key: &str,
+        version: &str,
+        expected_size: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PresignedDownload, ObjectStoreError> {
+        self.validate_key(key)?;
+        if version.trim().is_empty()
+            || expected_size == 0
+            || expected_size > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let expires = Duration::from_secs(self.config.upload_ttl_seconds);
+        let request = self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .version_id(version)
+            .presigned(
+                PresigningConfig::expires_in(expires)
+                    .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+            )
+            .await
+            .map_err(|_| ObjectStoreError::SigningFailed)?;
+        let required_headers = request
+            .headers()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        let ttl = time::Duration::seconds(
+            i64::try_from(self.config.upload_ttl_seconds)
+                .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+        );
+        let expires_at = UtcTimestamp::from_utc(now.get() + ttl)
+            .map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+        Ok(PresignedDownload {
+            url: request.uri().to_string(),
+            required_headers,
+            expires_at,
+        })
+    }
+
     /// Stores an immutable version in a versioned bucket without requiring
     /// S3 Object Lock. The conditional write, version id, and read-back hash
     /// still make the artifact identity explicit for clusters whose existing
@@ -297,8 +373,14 @@ impl S3ImmutableObjectStore {
             .filter(|value| !value.is_empty() && *value != "null")
             .ok_or(ObjectStoreError::VersioningRequired)?
             .to_owned();
-        self.read_verified(key, &version, size_bytes, media_type)
-            .await
+        let expected = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes,
+            media_type: media_type.to_owned(),
+        };
+        self.read_verified(key, &expected).await
     }
 
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
@@ -316,6 +398,10 @@ impl S3ImmutableObjectStore {
 
 #[async_trait]
 impl ImmutableObjectStore for S3ImmutableObjectStore {
+    fn binding(&self) -> &str {
+        S3ImmutableObjectStore::binding(self)
+    }
+
     async fn presign_upload(
         &self,
         key: &str,
@@ -368,12 +454,19 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
     async fn read_verified(
         &self,
         key: &str,
-        version: &str,
-        expected_size: u64,
-        media_type: &str,
+        expected: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         self.validate_key(key)?;
-        if version.trim().is_empty() || expected_size == 0 || media_type.trim().is_empty() {
+        if expected.store_binding != self.config.binding
+            || expected.object_version.trim().is_empty()
+            || expected.size_bytes == 0
+            || expected.size_bytes > self.config.max_object_bytes
+            || expected.media_type.trim().is_empty()
+            || expected
+                .media_type
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+        {
             return Err(ObjectStoreError::ObjectIdentityInvalid);
         }
         let response = match self
@@ -381,7 +474,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .get_object()
             .bucket(&self.config.bucket)
             .key(key)
-            .version_id(version)
+            .version_id(&expected.object_version)
             .send()
             .await
         {
@@ -404,7 +497,7 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
                     binding = self.config.binding,
                     endpoint = %self.config.endpoint,
                     object_key = %key,
-                    object_version = %version,
+                    object_version = %expected.object_version,
                     diagnostic_code = "LW_OBJECT_STORE_UNAVAILABLE",
                     error_class = %error_class,
                     error_chain = ?chain,
@@ -422,11 +515,11 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .and_then(|observed| u64::try_from(observed).ok());
         if response
             .version_id()
-            .is_none_or(|observed| observed != version)
-            || observed_size != Some(expected_size)
+            .is_none_or(|observed| observed != expected.object_version)
+            || observed_size != Some(expected.size_bytes)
             || response
                 .content_type()
-                .is_none_or(|observed| observed != media_type)
+                .is_none_or(|observed| observed != expected.media_type)
         {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
@@ -447,17 +540,11 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             return Err(ObjectStoreError::ObjectUnavailable);
         };
         let body = body.into_bytes().to_vec();
-        if u64::try_from(body.len()).ok() != Some(expected_size) {
+        if u64::try_from(body.len()).ok() != Some(expected.size_bytes) {
             return Err(ObjectStoreError::ObjectIdentityMismatch);
         }
         Ok(VerifiedObject {
-            reference: ArtifactRef {
-                artifact_id: ArtifactId::new(),
-                store_binding: self.config.binding.clone(),
-                object_version: version.to_owned(),
-                size_bytes: expected_size,
-                media_type: media_type.to_owned(),
-            },
+            reference: expected.clone(),
             bytes: body,
         })
     }
@@ -482,8 +569,14 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .filter(|value| !value.is_empty() && *value != "null")
             .ok_or(ObjectStoreError::VersioningRequired)?
             .to_owned();
-        self.read_verified(key, &version, expected_size, media_type)
-            .await
+        let expected = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes: expected_size,
+            media_type: media_type.to_owned(),
+        };
+        self.read_verified(key, &expected).await
     }
 
     async fn put_governance_locked(
@@ -551,8 +644,14 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         {
             return Err(ObjectStoreError::ObjectLockIdentityMismatch);
         }
-        self.read_verified(key, &version, size_bytes, media_type)
-            .await
+        let expected = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes,
+            media_type: media_type.to_owned(),
+        };
+        self.read_verified(key, &expected).await
     }
 
     async fn delete_orphan(&self, key: &str, version: &str) -> Result<(), ObjectStoreError> {
@@ -633,7 +732,7 @@ impl ObjectStoreError {
 #[cfg(test)]
 mod tests {
     use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
-    use contracts::UtcTimestamp;
+    use contracts::{ArtifactRef, UtcTimestamp};
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 
@@ -776,18 +875,25 @@ mod tests {
         );
         assert_eq!(
             store
-                .read_verified(key, &version, u64::try_from(bytes.len())?, "text/plain",)
+                .read_verified(
+                    key,
+                    &ArtifactRef {
+                        artifact_id: frozen.reference.artifact_id,
+                        store_binding: frozen.reference.store_binding.clone(),
+                        object_version: version.clone(),
+                        size_bytes: u64::try_from(bytes.len())?,
+                        media_type: "text/plain".to_owned(),
+                    },
+                )
                 .await?
                 .bytes,
             bytes
         );
+        let reread = store.read_verified(key, &frozen.reference).await?;
+        assert_eq!(reread.reference, frozen.reference);
+        assert_eq!(reread.bytes, bytes);
         store.delete_orphan(key, &version).await?;
-        assert!(
-            store
-                .read_verified(key, &version, u64::try_from(bytes.len())?, "text/plain",)
-                .await
-                .is_err()
-        );
+        assert!(store.read_verified(key, &frozen.reference).await.is_err());
         let observed_now = time::OffsetDateTime::now_utc();
         let observed_now =
             observed_now.replace_nanosecond(observed_now.nanosecond() / 1_000_000 * 1_000_000)?;

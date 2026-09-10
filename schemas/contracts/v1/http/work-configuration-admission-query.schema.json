@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact Work environment and actor revisions used to resolve a Control admission binding.\n\nThe run revision is included so the returned binding cannot be silently substituted after the\ncaller observed a different immutable AgentRun.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "executionId": {
+      "description": "`None` starts a new Environment execution; `Some` resumes this persisted VM execution.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "runRevision": {
+      "$ref": "#/$defs/Revision"
+    }
+  },
+  "required": [
+    "projectId",
+    "environmentId",
+    "environmentRevision",
+    "actorId",
+    "runRevision"
+  ],
+  "title": "WorkConfigurationAdmissionQuery",
+  "type": "object"
+}

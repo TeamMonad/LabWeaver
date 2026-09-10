@@ -6,29 +6,27 @@
 
 mod support;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
+use auth::ServiceIdentity;
+use axum::Extension;
 use contracts::environment::{
     EnvironmentInstance, EnvironmentOperationKind, EnvironmentOwnerResolutionRequest,
 };
 use contracts::{ActorId, CourseId};
 use environment_service::{
-    LifecycleCommand, MtlsConfig, MtlsServerError, OwnerResolver, OwnerResolverPolicy,
-    PgEnvironmentStore, PgReleaseProjectionStore, authorize_owner_resolution,
-    owner_resolver_router, plan_command, serve_owner_resolver_mtls,
-};
-use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose, SanType, string::Ia5String,
+    LifecycleCommand, OwnerResolver, PgEnvironmentStore, PgReleaseProjectionStore,
+    authorize_owner_resolution, owner_resolver_router, plan_command,
 };
 use reqwest::{Client, StatusCode};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-const ALLOWED_CALLER_SAN: &str = "spiffe://labweaver/access-service";
+const OWNER_RESOLUTION_PERMISSION: &str = "environment.owner.resolve";
 
 #[tokio::test]
 async fn resolver_uses_real_postgres_and_owner_resolution_logic()
@@ -42,28 +40,24 @@ async fn resolver_uses_real_postgres_and_owner_resolution_logic()
         .max_connections(4)
         .connect(&database_url)
         .await?;
-    migrate(&pool).await?;
+    support::apply_environment_migrations(&pool).await?;
 
     let mut authoritative = support::ready_instance();
     authoritative.eligibility_expires_at = support::timestamp("2030-07-15T00:00:00.000Z");
     insert_instance(&pool, &authoritative).await?;
 
-    let ca = test_ca()?;
-    let (server_certificate, server_key) = leaf_certificate(&ca, "localhost", false)?;
-
     let store = PgEnvironmentStore::new(pool.clone());
-    let resolver = OwnerResolver::new(
-        store.clone(),
-        PgReleaseProjectionStore::new(pool.clone()),
-        OwnerResolverPolicy::new([ALLOWED_CALLER_SAN])?,
-    );
-    let (address, shutdown, server) = start_server(
-        owner_resolver_router(resolver.clone()),
-        &ca.pem(),
-        &server_certificate,
-        &server_key,
-    )
-    .await?;
+    let resolver = OwnerResolver::new(store.clone(), PgReleaseProjectionStore::new(pool.clone()));
+    let caller = ServiceIdentity {
+        issuer: "https://keycloak.example.test/realms/workloads".to_owned(),
+        subject: "service-account-access".to_owned(),
+        client_id: "labweaver-access".to_owned(),
+        expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+        permissions: [OWNER_RESOLUTION_PERMISSION.to_owned()]
+            .into_iter()
+            .collect(),
+    };
+    let (address, shutdown, server) = start_server(owner_resolver_router(resolver), caller).await?;
     let client = reqwest::Client::new();
 
     let original_request = request_for(&authoritative);
@@ -78,7 +72,7 @@ async fn resolver_uses_real_postgres_and_owner_resolution_logic()
     );
 
     let mut wrong_course = original_request.clone();
-    wrong_course.course_id = CourseId::new();
+    wrong_course.course_id = Some(CourseId::new());
     assert_eq!(
         resolve(&client, address, &wrong_course).await?.status(),
         StatusCode::FORBIDDEN
@@ -172,36 +166,6 @@ async fn resolver_uses_real_postgres_and_owner_resolution_logic()
     Ok(())
 }
 
-#[tokio::test]
-async fn shutdown_future_failure_is_propagated_as_a_typed_server_error()
--> Result<(), Box<dyn std::error::Error>> {
-    let ca = test_ca()?;
-    let (server_certificate, server_key) = leaf_certificate(&ca, "localhost", false)?;
-    let config = MtlsConfig::from_pem(
-        ca.pem().as_bytes(),
-        server_certificate.as_bytes(),
-        server_key.as_bytes(),
-    )?;
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
-    let result = serve_owner_resolver_mtls(listener, axum::Router::new(), config, async {
-        Err(MtlsServerError::ShutdownSignal(std::io::Error::other(
-            "injected signal registration failure",
-        )))
-    })
-    .await;
-    assert!(matches!(result, Err(MtlsServerError::ShutdownSignal(_))));
-    Ok(())
-}
-
-async fn migrate(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let migration = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
-    );
-    sqlx::raw_sql(&migration).execute(pool).await?;
-    Ok(())
-}
-
 async fn insert_instance(
     pool: &PgPool,
     instance: &EnvironmentInstance,
@@ -209,13 +173,14 @@ async fn insert_instance(
     instance.validate()?;
     sqlx::query(
         "INSERT INTO environment.environment_instances \
-         (environment_id, course_id, owner_actor_id, release_id, generation, observed_generation, desired_state, \
+         (environment_id, project_id, course_id, owner_actor_id, release_id, generation, observed_generation, desired_state, \
           observed_state, provider_binding, lease_id, revision, terminal_diagnostic, \
           eligibility_expires_at, contract) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
     )
     .bind(instance.id.as_uuid())
-    .bind(instance.course_id.as_uuid())
+    .bind(instance.project_id.as_uuid())
+    .bind(instance.course_id.map(contracts::CourseId::as_uuid))
     .bind(instance.owner_id.as_uuid())
     .bind(instance.release_id.as_uuid())
     .bind(i64::try_from(instance.generation)?)
@@ -270,6 +235,7 @@ fn wire<T: serde::Serialize>(value: &T) -> Result<String, Box<dyn std::error::Er
 fn request_for(instance: &EnvironmentInstance) -> EnvironmentOwnerResolutionRequest {
     EnvironmentOwnerResolutionRequest {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         owner_actor_id: instance.owner_id,
         expected_revision: instance.revision,
@@ -305,69 +271,25 @@ async fn resolve(
 
 async fn start_server(
     router: axum::Router,
-    ca_pem: &str,
-    server_certificate_pem: &str,
-    server_private_key_pem: &str,
+    caller: ServiceIdentity,
 ) -> Result<
     (
         SocketAddr,
         oneshot::Sender<()>,
-        tokio::task::JoinHandle<Result<(), environment_service::MtlsServerError>>,
+        tokio::task::JoinHandle<Result<(), std::io::Error>>,
     ),
     Box<dyn std::error::Error>,
 > {
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let config = MtlsConfig::from_pem(
-        ca_pem.as_bytes(),
-        server_certificate_pem.as_bytes(),
-        server_private_key_pem.as_bytes(),
-    )?;
+    let router = router.layer(Extension(caller));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(serve_owner_resolver_mtls(
-        listener,
-        router,
-        config,
-        async move {
-            let _ = shutdown_rx.await;
-            Ok(())
-        },
-    ));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
     Ok((address, shutdown_tx, server))
-}
-
-fn test_ca() -> Result<CertifiedIssuer<'static, KeyPair>, rcgen::Error> {
-    let mut parameters = CertificateParams::new(Vec::<String>::new())?;
-    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    parameters.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
-    CertifiedIssuer::self_signed(parameters, KeyPair::generate()?)
-}
-
-fn leaf_certificate(
-    ca: &CertifiedIssuer<'static, KeyPair>,
-    san: &str,
-    client: bool,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let mut parameters = if san.starts_with("spiffe://") {
-        let mut parameters = CertificateParams::new(Vec::<String>::new())?;
-        parameters
-            .subject_alt_names
-            .push(SanType::URI(Ia5String::try_from(san)?));
-        parameters
-    } else {
-        CertificateParams::new(vec![san.to_owned()])?
-    };
-    parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    parameters.extended_key_usages = vec![if client {
-        ExtendedKeyUsagePurpose::ClientAuth
-    } else {
-        ExtendedKeyUsagePurpose::ServerAuth
-    }];
-    let key = KeyPair::generate()?;
-    let certificate = parameters.signed_by(&key, ca)?;
-    Ok((certificate.pem(), key.serialize_pem()))
 }

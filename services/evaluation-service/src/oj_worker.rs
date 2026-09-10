@@ -14,6 +14,8 @@
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
+use std::os::unix::fs::FileTypeExt as _;
+#[cfg(unix)]
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::{
     env, fs,
@@ -29,8 +31,8 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use landlock::{
-    ABI, Access as _, AccessFs, CompatLevel, Compatible as _, Ruleset, RulesetAttr as _,
-    RulesetCreatedAttr as _, RulesetStatus, path_beneath_rules,
+    ABI, Access as _, AccessFs, BitFlags, CompatLevel, Compatible as _, PathBeneath, PathFd,
+    Ruleset, RulesetAttr as _, RulesetCreated, RulesetCreatedAttr as _, RulesetStatus,
 };
 #[cfg(unix)]
 use nix::{
@@ -41,6 +43,7 @@ use nix::{
     unistd::{Pid, execv},
 };
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     process::Command,
@@ -49,6 +52,7 @@ use tokio::{
 
 use crate::{
     PvcSnapshotSource, SnapshotSource,
+    execution::{ProgramCommandPaths, expand_program_argv},
     oj::{
         OJ_EVIDENCE_RECEIPT_SCHEMA_VERSION, OJ_EVIDENCE_SCHEMA_VERSION, OjAggregate, OjCaseBinding,
         OjCaseEvidence, OjCaseStatus, OjError, OjEvidenceReceipt, OjExecutionEvidence,
@@ -62,17 +66,32 @@ const DEFAULT_COMMAND_PATH: &str = "/etc/labweaver/oj/command.json";
 const SUBMISSION_ROOT: &str = "/input/submission";
 const EVALUATOR_ROOT: &str = "/input/evaluator";
 const WORK_ROOT: &str = "/work";
+const BUILD_ROOT: &str = "/work/build";
+const CASES_ROOT: &str = "/work/cases";
+/// Staged copy of the explicitly approved evaluator support files.
+///
+/// The evaluator is mounted as one bind mount.  Landlock cannot grant a child file read access
+/// through that mount while keeping the mount's other files unreadable, so support files are
+/// copied into this worker-owned tree before the compiler or submission sandbox is installed.
+const SUPPORT_ROOT: &str = "/support";
 const EVIDENCE_PATH: &str = "/evidence/evidence.json";
-const GXX_PATH: &str = "/usr/bin/g++";
 const SERVICE_PATH: &str = "/usr/local/bin/labweaver-service";
-const SUBMISSION_SOURCE_PATH: &str = "/work/submission.cpp";
-const SUBMISSION_BINARY_PATH: &str = "/work/submission";
+const PROGRAM_BINARY_PATH: &str = "/work/build/program";
 const COMPILE_HELPER_READY_PATH: &str = "/work/.compile-helper-ready";
 const CASE_HELPER_READY_PATH: &str = "/work/.case-helper-ready";
+const COMPILE_INVOCATION_PATH: &str = "/work/.compile-invocation.json";
+const CASE_INVOCATION_PATH: &str = "/work/.case-invocation.json";
+const COMPILE_INVOCATION_ENV: &str = "LABWEAVER_OJ_COMPILE_INVOCATION";
+const CASE_INVOCATION_ENV: &str = "LABWEAVER_OJ_CASE_INVOCATION";
 const HELPER_READY_CONTENT: &[u8] = b"ready\n";
-#[cfg(any(target_os = "linux", test))]
-const SUBMISSION_READ_PATHS: [&str; 10] = [
-    SUBMISSION_BINARY_PATH,
+/// Reserved helper exit status used to distinguish infrastructure failures from compiler/runtime
+/// exit statuses returned by the approved program.
+pub const OJ_HELPER_FAILURE_EXIT_CODE: i32 = 125;
+const PROFILE_MAX_BYTES: u64 = 64 * 1024;
+const INVOCATION_MAX_BYTES: u64 = 256 * 1024;
+const SUBMISSION_READ_PATHS: [&str; 11] = [
+    BUILD_ROOT,
+    "/usr/bin",
     "/lib",
     "/lib64",
     "/usr/lib",
@@ -83,12 +102,13 @@ const SUBMISSION_READ_PATHS: [&str; 10] = [
     "/dev/null",
     "/dev/urandom",
 ];
-#[cfg(any(target_os = "linux", test))]
-const COMPILER_READ_PATHS: [&str; 11] = [
+const COMPILER_READ_PATHS: [&str; 13] = [
     "/usr/bin",
     "/usr/include",
     "/usr/lib",
+    "/usr/libexec",
     "/usr/lib64",
+    "/usr/x86_64-pc-linux-gnu",
     "/usr/share",
     "/lib",
     "/lib64",
@@ -99,6 +119,8 @@ const COMPILER_READ_PATHS: [&str; 11] = [
 ];
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
+const MAX_SUPPORT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SUPPORT_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_SUBMISSION_PROCESSES: u64 = 64;
 #[cfg(target_os = "linux")]
@@ -114,14 +136,29 @@ pub async fn run_oj_worker() -> Result<OjEvidenceReceipt, OjWorkerError> {
         .map_or_else(|| PathBuf::from(DEFAULT_COMMAND_PATH), PathBuf::from);
     let request = read_request(&command_path)?;
     let request_sha256 = request.request_sha256()?;
+    let evaluator_identity = request
+        .evaluator_identity
+        .ok_or(OjWorkerError::ProfileInvalid)?;
     let submission =
         PvcSnapshotSource::open(Path::new(SUBMISSION_ROOT), request.submission_identity)
             .map_err(|_| OjWorkerError::SourceUnavailable)?;
-    let source = read_verified(&submission, &request.source).await?;
-    let source_path = PathBuf::from(SUBMISSION_SOURCE_PATH);
-    write_new(&source_path, &source)?;
-    let binary_path = Path::new(WORK_ROOT).join("submission");
-    let compile = Box::pin(compile_cpp17(&request, &source_path, &binary_path)).await?;
+    let _source = read_verified(&submission, &request.source).await?;
+    let evaluator = PvcSnapshotSource::open(Path::new(EVALUATOR_ROOT), evaluator_identity)
+        .map_err(|_| OjWorkerError::SourceUnavailable)?;
+    let profile = read_profile(&evaluator, &request).await?;
+    validate_profile_support(&profile, &request, &evaluator).await?;
+    prepare_workspace(&request)?;
+    let support_paths = materialize_support_files(&profile, &evaluator).await?;
+    let source_path = Path::new(SUBMISSION_ROOT).join(&request.source.path);
+    let binary_path = PathBuf::from(PROGRAM_BINARY_PATH);
+    let paths = ProgramCommandPaths::new(
+        source_path,
+        binary_path.clone(),
+        PathBuf::from(SUBMISSION_ROOT),
+        PathBuf::from(SUPPORT_ROOT),
+    )
+    .map_err(|_| OjWorkerError::ProfileInvalid)?;
+    let compile = Box::pin(compile_program(&request, &profile, &paths, &support_paths)).await?;
     if !compile.status.success() || compile.capture.timed_out || compile.capture.output_exceeded {
         let evidence = compile_failure_evidence(&request, request_sha256, &compile)?;
         return persist_evidence(&request, &evidence);
@@ -131,12 +168,6 @@ pub async fn run_oj_worker() -> Result<OjEvidenceReceipt, OjWorkerError> {
         return persist_evidence(&request, &evidence);
     }
     let checker = request.checker.ok_or(OjWorkerError::CommandInvalid)?;
-    let evaluator_identity = request
-        .evaluator_identity
-        .ok_or(OjWorkerError::CommandInvalid)?;
-    let evaluator = PvcSnapshotSource::open(Path::new(EVALUATOR_ROOT), evaluator_identity)
-        .map_err(|_| OjWorkerError::SourceUnavailable)?;
-
     let mut cases = Vec::with_capacity(request.cases.len());
     for case in &request.cases {
         let input = read_verified(&evaluator, &case.input).await?;
@@ -149,6 +180,9 @@ pub async fn run_oj_worker() -> Result<OjEvidenceReceipt, OjWorkerError> {
                 &input,
                 &expected,
                 checker,
+                &profile,
+                &paths,
+                &support_paths,
             ))
             .await?,
         );
@@ -227,22 +261,338 @@ struct CompletedProcess {
     capture: ProcessCapture,
 }
 
-async fn compile_cpp17(
+async fn read_profile(
+    evaluator: &PvcSnapshotSource,
     request: &OjExecutionRequest,
-    source: &Path,
-    binary: &Path,
-) -> Result<CompletedProcess, OjWorkerError> {
-    if source != Path::new(SUBMISSION_SOURCE_PATH)
-        || binary != Path::new(SUBMISSION_BINARY_PATH)
-        || Path::new(COMPILE_HELPER_READY_PATH).exists()
+) -> Result<contracts::evaluation::ApprovedProgramProfile, OjWorkerError> {
+    let bytes = evaluator
+        .read_file(&request.toolchain_profile, PROFILE_MAX_BYTES)
+        .await
+        .map_err(|_| OjWorkerError::ProfileUnavailable)?;
+    let profile: contracts::evaluation::ApprovedProgramProfile =
+        serde_json::from_slice(&bytes).map_err(|_| OjWorkerError::ProfileInvalid)?;
+    profile
+        .validate_for_phase(match request.phase {
+            OjExecutionPhase::Compile => contracts::evaluation::ProgramPhase::Compile,
+            OjExecutionPhase::Test => contracts::evaluation::ProgramPhase::Test,
+        })
+        .map_err(|_| OjWorkerError::ProfileInvalid)?;
+    Ok(profile)
+}
+
+async fn validate_profile_support(
+    profile: &contracts::evaluation::ApprovedProgramProfile,
+    request: &OjExecutionRequest,
+    evaluator: &PvcSnapshotSource,
+) -> Result<(), OjWorkerError> {
+    let private_paths = request
+        .cases
+        .iter()
+        .flat_map(|case| [&case.input.path, &case.expected.path])
+        .collect::<std::collections::BTreeSet<_>>();
+    for path in &profile.support_files {
+        if private_paths.contains(path) || path == &request.toolchain_profile {
+            return Err(OjWorkerError::ProfileInvalid);
+        }
+        let metadata = evaluator
+            .metadata(path)
+            .await
+            .map_err(|_| OjWorkerError::ProfileUnavailable)?
+            .ok_or(OjWorkerError::ProfileUnavailable)?;
+        if !matches!(metadata.kind, crate::collector::SourceKind::File) {
+            return Err(OjWorkerError::ProfileInvalid);
+        }
+    }
+    Ok(())
+}
+
+/// Copies only the support files named by the approved profile into the worker-owned workspace.
+///
+/// Keeping this copy separate from the evaluator bind mount is required for the Landlock policy:
+/// the mount root must remain traversal-only, while each staged file can receive ordinary read
+/// access.  The source capability validates the path and file kind again while reading bytes, and
+/// the destination is created below a fresh directory without following links.
+async fn materialize_support_files(
+    profile: &contracts::evaluation::ApprovedProgramProfile,
+    evaluator: &PvcSnapshotSource,
+) -> Result<Vec<PathBuf>, OjWorkerError> {
+    let mut total_bytes = 0_u64;
+    let mut staged_paths = Vec::with_capacity(profile.support_files.len());
+    for relative_path in &profile.support_files {
+        let metadata = evaluator
+            .metadata(relative_path)
+            .await
+            .map_err(|_| OjWorkerError::ProfileUnavailable)?
+            .ok_or(OjWorkerError::ProfileUnavailable)?;
+        if !matches!(metadata.kind, crate::collector::SourceKind::File)
+            || metadata.size_bytes > MAX_SUPPORT_FILE_BYTES
+        {
+            return Err(OjWorkerError::SourceInvalid);
+        }
+        total_bytes = total_bytes
+            .checked_add(metadata.size_bytes)
+            .filter(|size| *size <= MAX_SUPPORT_TOTAL_BYTES)
+            .ok_or(OjWorkerError::SourceInvalid)?;
+        let bytes = evaluator
+            .read_file(relative_path, MAX_SUPPORT_FILE_BYTES)
+            .await
+            .map_err(|_| OjWorkerError::SourceInvalid)?;
+        if u64::try_from(bytes.len()).ok() != Some(metadata.size_bytes) {
+            return Err(OjWorkerError::SourceInvalid);
+        }
+        let destination = Path::new(SUPPORT_ROOT).join(relative_path);
+        let parent = destination
+            .parent()
+            .ok_or(OjWorkerError::WorkspaceInvalid)?;
+        ensure_parent_directories(Path::new(SUPPORT_ROOT), parent)?;
+        write_new(&destination, &bytes)?;
+        staged_paths.push(destination);
+    }
+    Ok(staged_paths)
+}
+
+fn prepare_workspace(request: &OjExecutionRequest) -> Result<(), OjWorkerError> {
+    ensure_empty_or_create_directory(Path::new(BUILD_ROOT))?;
+    ensure_empty_or_create_directory(Path::new(CASES_ROOT))?;
+    ensure_empty_or_create_directory(Path::new(SUPPORT_ROOT))?;
+    for case in &request.cases {
+        let path = case_directory(case)?;
+        ensure_new_directory(&path)?;
+    }
+    Ok(())
+}
+
+fn case_directory(case: &OjCaseBinding) -> Result<PathBuf, OjWorkerError> {
+    if !case
+        .id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err(OjWorkerError::WorkspaceInvalid);
     }
+    Ok(Path::new(CASES_ROOT).join(&case.id))
+}
+
+fn ensure_empty_directory(path: &Path) -> Result<(), OjWorkerError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(OjWorkerError::WorkspaceInvalid);
+    }
+    if fs::read_dir(path)
+        .map_err(|_| OjWorkerError::WorkspaceInvalid)?
+        .next()
+        .is_some()
+    {
+        return Err(OjWorkerError::WorkspaceInvalid);
+    }
+    Ok(())
+}
+
+fn ensure_empty_or_create_directory(path: &Path) -> Result<(), OjWorkerError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => ensure_empty_directory(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|_| OjWorkerError::WorkspaceInvalid)
+        }
+        Err(_) => Err(OjWorkerError::WorkspaceInvalid),
+    }
+}
+
+fn ensure_parent_directories(root: &Path, parent: &Path) -> Result<(), OjWorkerError> {
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(OjWorkerError::WorkspaceInvalid);
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+            }
+            Ok(_) | Err(_) => return Err(OjWorkerError::WorkspaceInvalid),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_new_directory(path: &Path) -> Result<(), OjWorkerError> {
+    fs::create_dir(path).map_err(|_| OjWorkerError::WorkspaceInvalid)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HelperInvocation {
+    argv: Vec<String>,
+    cwd: String,
+    read_paths: Vec<String>,
+    write_paths: Vec<String>,
+}
+
+impl HelperInvocation {
+    fn new(
+        argv: Vec<String>,
+        cwd: PathBuf,
+        read_paths: Vec<PathBuf>,
+        write_paths: Vec<PathBuf>,
+    ) -> Result<Self, OjWorkerError> {
+        if argv.is_empty()
+            || argv.len() > 128
+            || !Path::new(&argv[0]).is_absolute()
+            || argv.iter().any(|argument| {
+                argument.is_empty() || argument.len() > 1024 || argument.contains('\0')
+            })
+            || !cwd.is_absolute()
+            || cwd.to_string_lossy().chars().any(char::is_control)
+            || read_paths.is_empty()
+            || read_paths.len() > 256
+            || write_paths.is_empty()
+            || write_paths.len() > 8
+        {
+            return Err(OjWorkerError::ProfileInvalid);
+        }
+        let to_string = |path: PathBuf| {
+            path.to_str()
+                .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+                .map(str::to_owned)
+                .ok_or(OjWorkerError::ProfileInvalid)
+        };
+        Ok(Self {
+            argv,
+            cwd: to_string(cwd)?,
+            read_paths: read_paths
+                .into_iter()
+                .map(to_string)
+                .collect::<Result<_, _>>()?,
+            write_paths: write_paths
+                .into_iter()
+                .map(to_string)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+fn write_invocation(path: &Path, invocation: &HelperInvocation) -> Result<(), OjWorkerError> {
+    let bytes = serde_jcs::to_vec(invocation).map_err(|_| OjWorkerError::ProfileInvalid)?;
+    let size = u64::try_from(bytes.len()).map_err(|_| OjWorkerError::ProfileInvalid)?;
+    if bytes.is_empty() || size > INVOCATION_MAX_BYTES {
+        return Err(OjWorkerError::ProfileInvalid);
+    }
+    write_new(path, &bytes)
+}
+
+fn read_invocation(env_name: &str) -> Result<(PathBuf, HelperInvocation), OjWorkerError> {
+    let path = env::var_os(env_name)
+        .map(PathBuf::from)
+        .ok_or(OjWorkerError::CommandInvalid)?;
+    let metadata = fs::symlink_metadata(&path).map_err(|_| OjWorkerError::CommandUnavailable)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > INVOCATION_MAX_BYTES
+    {
+        return Err(OjWorkerError::CommandInvalid);
+    }
+    let bytes = fs::read(&path).map_err(|_| OjWorkerError::CommandUnavailable)?;
+    if u64::try_from(bytes.len()).ok() != Some(metadata.len()) {
+        return Err(OjWorkerError::CommandInvalid);
+    }
+    let invocation = serde_json::from_slice::<HelperInvocation>(&bytes)
+        .map_err(|_| OjWorkerError::CommandInvalid)?;
+    validate_helper_invocation(&invocation)?;
+    Ok((path, invocation))
+}
+
+fn validate_helper_invocation(invocation: &HelperInvocation) -> Result<(), OjWorkerError> {
+    if invocation.argv.is_empty()
+        || invocation.argv.len() > 128
+        || !Path::new(&invocation.argv[0]).is_absolute()
+        || invocation
+            .argv
+            .iter()
+            .any(|argument| argument.is_empty() || argument.len() > 1024 || argument.contains('\0'))
+        || !Path::new(&invocation.cwd).is_absolute()
+        || invocation.cwd.chars().any(char::is_control)
+        || invocation.read_paths.is_empty()
+        || invocation.read_paths.len() > 256
+        || invocation.write_paths.is_empty()
+        || invocation.write_paths.len() > 8
+        || invocation
+            .read_paths
+            .iter()
+            .chain(invocation.write_paths.iter())
+            .any(|path| {
+                !Path::new(path).is_absolute()
+                    || path.chars().any(char::is_control)
+                    || !Path::new(path).exists()
+            })
+    {
+        return Err(OjWorkerError::CommandInvalid);
+    }
+    Ok(())
+}
+
+fn compiler_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = canonical_system_read_paths(&COMPILER_READ_PATHS);
+    paths.push(PathBuf::from(SUBMISSION_ROOT));
+    let _ = support_paths;
+    paths.push(PathBuf::from(SUPPORT_ROOT));
+    paths
+}
+
+fn execution_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = canonical_system_read_paths(&SUBMISSION_READ_PATHS);
+    let _ = support_paths;
+    paths.push(PathBuf::from(SUPPORT_ROOT));
+    paths
+}
+
+/// Returns the fixed system roots in the form accepted by Landlock.
+///
+/// Minimal container images commonly retain compatibility symlinks such as `/lib -> /usr/lib`
+/// and `/lib64 -> /usr/lib64`. Landlock rules are inode based, so opening the canonical target
+/// preserves access through those symlinks while avoiding a symlink path in the rules themselves.
+/// Missing optional roots remain omitted because the same profile must run on merged and non-merged
+/// Linux filesystem layouts.
+fn canonical_system_read_paths(paths: &[&str]) -> Vec<PathBuf> {
+    let mut canonical = Vec::new();
+    for path in paths {
+        let path = Path::new(path);
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !canonical.contains(&path) {
+            canonical.push(path);
+        }
+    }
+    canonical
+}
+
+async fn compile_program(
+    request: &OjExecutionRequest,
+    profile: &contracts::evaluation::ApprovedProgramProfile,
+    paths: &ProgramCommandPaths,
+    support_paths: &[PathBuf],
+) -> Result<CompletedProcess, OjWorkerError> {
+    let argv = expand_program_argv(profile, contracts::evaluation::ProgramPhase::Compile, paths)
+        .map_err(|_| OjWorkerError::ProfileInvalid)?;
+    let invocation = HelperInvocation::new(
+        argv,
+        PathBuf::from(BUILD_ROOT),
+        compiler_read_paths(support_paths),
+        vec![PathBuf::from(BUILD_ROOT)],
+    )?;
+    write_invocation(Path::new(COMPILE_INVOCATION_PATH), &invocation)?;
     let mut command = Command::new(SERVICE_PATH);
     command
         .env_clear()
-        .env("TMPDIR", WORK_ROOT)
-        .current_dir(WORK_ROOT)
+        .env(COMPILE_INVOCATION_ENV, COMPILE_INVOCATION_PATH)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("TMPDIR", BUILD_ROOT)
+        .current_dir(BUILD_ROOT)
         .arg("--mode")
         .arg("oj-compile-exec");
     let process = Box::pin(execute_process(
@@ -254,6 +604,7 @@ async fn compile_cpp17(
     ))
     .await?;
     consume_helper_ready(Path::new(COMPILE_HELPER_READY_PATH))?;
+    ensure_helper_started(&process)?;
     Ok(process)
 }
 
@@ -264,6 +615,9 @@ async fn run_case(
     input: &[u8],
     expected: &[u8],
     checker: crate::oj::OjCheckerKind,
+    profile: &contracts::evaluation::ApprovedProgramProfile,
+    paths: &ProgramCommandPaths,
+    support_paths: &[PathBuf],
 ) -> Result<OjCaseEvidence, OjWorkerError> {
     let cpu_seconds = request
         .limits
@@ -271,9 +625,25 @@ async fn run_case(
         .checked_add(999)
         .map(|milliseconds| milliseconds / 1000)
         .ok_or(OjWorkerError::LimitInvalid)?;
+    if binary != Path::new(PROGRAM_BINARY_PATH) {
+        return Err(OjWorkerError::WorkspaceInvalid);
+    }
+    let case_path = case_directory(case)?;
+    let argv = expand_program_argv(profile, contracts::evaluation::ProgramPhase::Test, paths)
+        .map_err(|_| OjWorkerError::ProfileInvalid)?;
+    let invocation = HelperInvocation::new(
+        argv,
+        case_path.clone(),
+        execution_read_paths(support_paths),
+        vec![case_path.clone()],
+    )?;
+    write_invocation(Path::new(CASE_INVOCATION_PATH), &invocation)?;
     let mut command = Command::new(SERVICE_PATH);
     command
         .env_clear()
+        .env(CASE_INVOCATION_ENV, CASE_INVOCATION_PATH)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("TMPDIR", case_path.to_string_lossy().as_ref())
         .current_dir(WORK_ROOT)
         .arg("--mode")
         .arg("oj-case-exec")
@@ -283,9 +653,6 @@ async fn run_case(
         .arg(cpu_seconds.to_string())
         .arg("--file-bytes")
         .arg(request.limits.output_bytes.to_string());
-    if binary != Path::new(SUBMISSION_BINARY_PATH) {
-        return Err(OjWorkerError::WorkspaceInvalid);
-    }
     if Path::new(CASE_HELPER_READY_PATH).exists() {
         return Err(OjWorkerError::WorkspaceInvalid);
     }
@@ -298,6 +665,7 @@ async fn run_case(
     ))
     .await?;
     consume_helper_ready(Path::new(CASE_HELPER_READY_PATH))?;
+    ensure_helper_started(&process)?;
     let status = classify_case(&process, request.limits.memory_bytes, checker, expected);
     let awarded_points = if status == OjCaseStatus::Accepted {
         case.max_points
@@ -384,6 +752,16 @@ pub fn run_oj_case_exec(
     {
         return Err(OjWorkerError::LimitInvalid);
     }
+    let (invocation_path, invocation) = read_invocation(CASE_INVOCATION_ENV)?;
+    let expected_case_root = Path::new(CASES_ROOT);
+    if !Path::new(&invocation.cwd).starts_with(expected_case_root)
+        || Path::new(&invocation.cwd).parent() != Some(expected_case_root)
+        || invocation.write_paths != vec![invocation.cwd.clone()]
+    {
+        return Err(OjWorkerError::CommandInvalid);
+    }
+    fs::remove_file(&invocation_path).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+    std::env::set_current_dir(&invocation.cwd).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
     let mut ready = create_helper_ready(Path::new(CASE_HELPER_READY_PATH))?;
     setrlimit(Resource::RLIMIT_AS, memory_bytes, memory_bytes)
         .map_err(|_| OjWorkerError::LimitApply)?;
@@ -397,12 +775,17 @@ pub fn run_oj_case_exec(
     setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(|_| OjWorkerError::LimitApply)?;
     require_submission_cgroup_process_limit()?;
     apply_submission_process_limit()?;
-    apply_submission_filesystem_sandbox()?;
+    apply_submission_filesystem_sandbox(&invocation.read_paths, &invocation.write_paths)?;
     apply_submission_syscall_sandbox()?;
     mark_helper_ready(&mut ready)?;
-    let binary =
-        CString::new(SUBMISSION_BINARY_PATH).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
-    match execv(&binary, std::slice::from_ref(&binary)) {
+    let arguments = invocation
+        .argv
+        .iter()
+        .map(|argument| CString::new(argument.as_str()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+    let executable = arguments.first().ok_or(OjWorkerError::CommandInvalid)?;
+    match execv(executable, &arguments) {
         Ok(never) => match never {},
         Err(_) => Err(OjWorkerError::ProcessSpawn),
     }
@@ -425,30 +808,25 @@ pub fn run_oj_case_exec(
 /// Returns a stable [`OjWorkerError`] when the workspace, sandbox, or compiler exec is invalid.
 #[cfg(unix)]
 pub fn run_oj_compile_exec() -> Result<(), OjWorkerError> {
-    if !Path::new(SUBMISSION_SOURCE_PATH).is_file()
-        || !Path::new(GXX_PATH).is_file()
-        || Path::new(SUBMISSION_BINARY_PATH).exists()
+    let (invocation_path, invocation) = read_invocation(COMPILE_INVOCATION_ENV)?;
+    if invocation.cwd != BUILD_ROOT
+        || invocation.write_paths != vec![BUILD_ROOT.to_owned()]
+        || !Path::new(SUBMISSION_ROOT).is_dir()
+        || !Path::new(EVALUATOR_ROOT).is_dir()
     {
-        return Err(OjWorkerError::WorkspaceInvalid);
+        return Err(OjWorkerError::CommandInvalid);
     }
+    fs::remove_file(&invocation_path).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+    std::env::set_current_dir(&invocation.cwd).map_err(|_| OjWorkerError::WorkspaceInvalid)?;
     let mut ready = create_helper_ready(Path::new(COMPILE_HELPER_READY_PATH))?;
-    apply_compiler_filesystem_sandbox()?;
+    apply_compiler_filesystem_sandbox(&invocation.read_paths, &invocation.write_paths)?;
     mark_helper_ready(&mut ready)?;
-    let arguments = [
-        GXX_PATH,
-        "-std=c++17",
-        "-O2",
-        "-pipe",
-        "-fno-diagnostics-color",
-        "-o",
-        SUBMISSION_BINARY_PATH,
-        "--",
-        SUBMISSION_SOURCE_PATH,
-    ]
-    .into_iter()
-    .map(CString::new)
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| OjWorkerError::WorkspaceInvalid)?;
+    let arguments = invocation
+        .argv
+        .iter()
+        .map(|argument| CString::new(argument.as_str()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| OjWorkerError::WorkspaceInvalid)?;
     let compiler = arguments.first().ok_or(OjWorkerError::WorkspaceInvalid)?;
     match execv(compiler, &arguments) {
         Ok(never) => match never {},
@@ -490,23 +868,68 @@ fn consume_helper_ready(path: &Path) -> Result<(), OjWorkerError> {
     fs::remove_file(path).map_err(|_| OjWorkerError::WorkspaceInvalid)
 }
 
-#[cfg(target_os = "linux")]
-fn apply_submission_filesystem_sandbox() -> Result<(), OjWorkerError> {
-    if !Path::new(SUBMISSION_BINARY_PATH).is_file() {
-        return Err(OjWorkerError::WorkspaceInvalid);
+fn ensure_helper_started(process: &CompletedProcess) -> Result<(), OjWorkerError> {
+    if process.status.code() == Some(OJ_HELPER_FAILURE_EXIT_CODE) {
+        return Err(OjWorkerError::ProcessSpawn);
     }
+    Ok(())
+}
+
+fn validate_sandbox_paths(
+    read_paths: &[String],
+    write_paths: &[String],
+) -> Result<(), OjWorkerError> {
+    if read_paths.is_empty() || write_paths.is_empty() {
+        return Err(OjWorkerError::SandboxUnavailable);
+    }
+    for path in read_paths.iter().chain(write_paths.iter()) {
+        let path = Path::new(path);
+        let metadata = fs::symlink_metadata(path).map_err(|_| OjWorkerError::SandboxUnavailable)?;
+        let file_type = metadata.file_type();
+        let file_like = file_type.is_file() || {
+            #[cfg(unix)]
+            {
+                file_type.is_char_device()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
+        if file_type.is_symlink() || !file_like && !metadata.is_dir() {
+            return Err(OjWorkerError::SandboxUnavailable);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn apply_submission_filesystem_sandbox(
+    read_paths: &[String],
+    write_paths: &[String],
+) -> Result<(), OjWorkerError> {
+    validate_sandbox_paths(read_paths, write_paths)?;
     let abi = ABI::V3;
-    let readable = SUBMISSION_READ_PATHS
-        .into_iter()
-        .filter(|path| Path::new(path).exists());
-    let status = Ruleset::default()
+    let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(abi))
         .map_err(|_| OjWorkerError::SandboxUnavailable)?
         .create()
-        .map_err(|_| OjWorkerError::SandboxUnavailable)?
-        .add_rules(path_beneath_rules(readable, AccessFs::from_read(abi)))
-        .map_err(|_| OjWorkerError::SandboxUnavailable)?
+        .map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    let ruleset = add_sandbox_path_rule(ruleset, WORK_ROOT, AccessFs::Execute.into())?;
+    let ruleset = add_sandbox_path_rules(ruleset, read_paths, abi, false)?;
+    // Landlock path rules are evaluated for every directory component during
+    // traversal.  The evaluator root rule below grants traversal within the
+    // mounted tree, while this parent rule grants traversal into that tree.
+    let ruleset = add_sandbox_path_rule(ruleset, "/input", AccessFs::Execute.into())?;
+    let ruleset = add_sandbox_path_rule(
+        ruleset,
+        EVALUATOR_ROOT,
+        (AccessFs::Execute | AccessFs::ReadDir).into(),
+    )?;
+    let ruleset = add_sandbox_path_rules(ruleset, write_paths, abi, true)?;
+    let ruleset = add_sandbox_path_rules(ruleset, &[CASE_HELPER_READY_PATH.to_owned()], abi, true)?;
+    let status = ruleset
         .restrict_self()
         .map_err(|_| OjWorkerError::SandboxUnavailable)?;
     if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
@@ -658,24 +1081,25 @@ fn apply_submission_syscall_sandbox() -> Result<(), OjWorkerError> {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_compiler_filesystem_sandbox() -> Result<(), OjWorkerError> {
+fn apply_compiler_filesystem_sandbox(
+    read_paths: &[String],
+    write_paths: &[String],
+) -> Result<(), OjWorkerError> {
+    validate_sandbox_paths(read_paths, write_paths)?;
     let abi = ABI::V3;
-    let readable = COMPILER_READ_PATHS
-        .into_iter()
-        .filter(|path| Path::new(path).exists());
-    let writable = [WORK_ROOT]
-        .into_iter()
-        .filter(|path| Path::new(path).is_dir());
-    let status = Ruleset::default()
+    let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(abi))
         .map_err(|_| OjWorkerError::SandboxUnavailable)?
         .create()
-        .map_err(|_| OjWorkerError::SandboxUnavailable)?
-        .add_rules(path_beneath_rules(readable, AccessFs::from_read(abi)))
-        .map_err(|_| OjWorkerError::SandboxUnavailable)?
-        .add_rules(path_beneath_rules(writable, AccessFs::from_all(abi)))
-        .map_err(|_| OjWorkerError::SandboxUnavailable)?
+        .map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    let ruleset = add_sandbox_path_rule(ruleset, WORK_ROOT, AccessFs::Execute.into())?;
+    let ruleset = add_sandbox_path_rules(ruleset, read_paths, abi, false)?;
+    let ruleset = add_sandbox_path_rule(ruleset, "/input", AccessFs::Execute.into())?;
+    let ruleset = add_sandbox_path_rules(ruleset, write_paths, abi, true)?;
+    let ruleset =
+        add_sandbox_path_rules(ruleset, &[COMPILE_HELPER_READY_PATH.to_owned()], abi, true)?;
+    let status = ruleset
         .restrict_self()
         .map_err(|_| OjWorkerError::SandboxUnavailable)?;
     if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
@@ -684,8 +1108,57 @@ fn apply_compiler_filesystem_sandbox() -> Result<(), OjWorkerError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn add_sandbox_path_rules(
+    mut ruleset: RulesetCreated,
+    paths: &[String],
+    abi: ABI,
+    writable: bool,
+) -> Result<RulesetCreated, OjWorkerError> {
+    for path in paths {
+        let metadata = fs::symlink_metadata(path).map_err(|_| OjWorkerError::SandboxUnavailable)?;
+        let access = if metadata.is_dir() {
+            if writable {
+                AccessFs::from_all(abi)
+            } else {
+                AccessFs::from_read(abi)
+            }
+        } else {
+            // Landlock's directory-only rights (for example READ_DIR and MAKE_REG) are
+            // rejected for regular files and device nodes under HardRequirement.  The
+            // invocation path lists include /dev/null and /dev/urandom, so select the
+            // file-safe subset explicitly instead of relying on an implicit downgrade. Read
+            // paths stay read-only; only fixed marker files and declared write roots receive
+            // write rights.
+            let file_access = AccessFs::from_file(abi);
+            if writable {
+                file_access
+            } else {
+                AccessFs::from_read(abi) & file_access
+            }
+        };
+        ruleset = add_sandbox_path_rule(ruleset, path, access)?;
+    }
+    Ok(ruleset)
+}
+
+#[cfg(target_os = "linux")]
+fn add_sandbox_path_rule(
+    ruleset: RulesetCreated,
+    path: &str,
+    access: BitFlags<AccessFs>,
+) -> Result<RulesetCreated, OjWorkerError> {
+    let descriptor = PathFd::new(path).map_err(|_| OjWorkerError::SandboxUnavailable)?;
+    ruleset
+        .add_rule(PathBeneath::new(descriptor, access))
+        .map_err(|_| OjWorkerError::SandboxUnavailable)
+}
+
 #[cfg(not(target_os = "linux"))]
-fn apply_submission_filesystem_sandbox() -> Result<(), OjWorkerError> {
+fn apply_submission_filesystem_sandbox(
+    _read_paths: &[String],
+    _write_paths: &[String],
+) -> Result<(), OjWorkerError> {
     Err(OjWorkerError::SandboxUnavailable)
 }
 
@@ -705,7 +1178,10 @@ fn apply_submission_syscall_sandbox() -> Result<(), OjWorkerError> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_compiler_filesystem_sandbox() -> Result<(), OjWorkerError> {
+fn apply_compiler_filesystem_sandbox(
+    _read_paths: &[String],
+    _write_paths: &[String],
+) -> Result<(), OjWorkerError> {
     Err(OjWorkerError::SandboxUnavailable)
 }
 
@@ -958,24 +1434,18 @@ struct MemoryObservation {
 
 async fn monitor_peak_memory(process_id: u32, stop: Arc<AtomicBool>) -> MemoryObservation {
     let status_path = PathBuf::from(format!("/proc/{process_id}/status"));
-    let executable_path = PathBuf::from(format!("/proc/{process_id}/exe"));
     let mut observation = MemoryObservation::default();
     while !stop.load(Ordering::Acquire) {
-        let is_submission = fs::read_link(&executable_path)
-            .ok()
-            .is_some_and(|path| path == Path::new(SUBMISSION_BINARY_PATH));
-        if is_submission {
-            let Some(status) = fs::read_to_string(&status_path).ok() else {
-                break;
-            };
-            for line in status.lines() {
-                if let Some(value) = line.strip_prefix("VmRSS:") {
-                    observation.peak_resident_bytes =
-                        max_memory(observation.peak_resident_bytes, parse_proc_kib(value));
-                } else if let Some(value) = line.strip_prefix("VmSize:") {
-                    observation.peak_virtual_bytes =
-                        max_memory(observation.peak_virtual_bytes, parse_proc_kib(value));
-                }
+        let Some(status) = fs::read_to_string(&status_path).ok() else {
+            break;
+        };
+        for line in status.lines() {
+            if let Some(value) = line.strip_prefix("VmRSS:") {
+                observation.peak_resident_bytes =
+                    max_memory(observation.peak_resident_bytes, parse_proc_kib(value));
+            } else if let Some(value) = line.strip_prefix("VmSize:") {
+                observation.peak_virtual_bytes =
+                    max_memory(observation.peak_virtual_bytes, parse_proc_kib(value));
             }
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1040,6 +1510,10 @@ pub enum OjWorkerError {
     SourceInvalid,
     #[error("OJ source hash or size does not match")]
     SourceIdentityMismatch,
+    #[error("OJ approved program profile is unavailable")]
+    ProfileUnavailable,
+    #[error("OJ approved program profile is invalid")]
+    ProfileInvalid,
     #[error("OJ work volume is invalid")]
     WorkspaceInvalid,
     #[error("OJ process could not be spawned")]
@@ -1067,6 +1541,8 @@ impl OjWorkerError {
             Self::SourceUnavailable => "LW_OJ_SOURCE_UNAVAILABLE",
             Self::SourceInvalid => "LW_OJ_SOURCE_INVALID",
             Self::SourceIdentityMismatch => "LW_OJ_SOURCE_IDENTITY_MISMATCH",
+            Self::ProfileUnavailable => "LW_OJ_PROFILE_UNAVAILABLE",
+            Self::ProfileInvalid => "LW_OJ_PROFILE_INVALID",
             Self::WorkspaceInvalid => "LW_OJ_WORKSPACE_INVALID",
             Self::ProcessSpawn => "LW_OJ_PROCESS_SPAWN_FAILED",
             Self::ProcessIo => "LW_OJ_PROCESS_IO_FAILED",
@@ -1083,13 +1559,12 @@ impl OjWorkerError {
 mod tests {
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
-    #[cfg(target_os = "linux")]
     use std::process::Command as StdCommand;
 
     use super::{
-        COMMAND_PATH_ENV, COMPILER_READ_PATHS, CompletedProcess, EVALUATOR_ROOT, ProcessCapture,
-        SUBMISSION_READ_PATHS, classify_case, consume_helper_ready, create_helper_ready,
-        mark_helper_ready,
+        COMMAND_PATH_ENV, COMPILER_READ_PATHS, CompletedProcess, EVALUATOR_ROOT,
+        OJ_HELPER_FAILURE_EXIT_CODE, ProcessCapture, SUBMISSION_READ_PATHS, classify_case,
+        consume_helper_ready, create_helper_ready, ensure_helper_started, mark_helper_ready,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1098,12 +1573,9 @@ mod tests {
     };
     use crate::oj::{OjCaseStatus, OjCheckerKind};
 
-    fn process(raw_status: i32, stdout: &[u8]) -> CompletedProcess {
+    fn process(status: std::process::ExitStatus, stdout: &[u8]) -> CompletedProcess {
         CompletedProcess {
-            #[cfg(unix)]
-            status: std::process::ExitStatus::from_raw(raw_status),
-            #[cfg(not(unix))]
-            status: std::process::ExitStatus::default(),
+            status,
             capture: ProcessCapture {
                 stdout: stdout.to_vec(),
                 stderr: Vec::new(),
@@ -1117,8 +1589,8 @@ mod tests {
     }
 
     #[test]
-    fn case_classification_is_closed_and_deterministic() {
-        let accepted = process(0, b"42\n");
+    fn accepted_and_wrong_answer_classification_is_portable() {
+        let accepted = process(exit_status(0), b"42\n");
         assert_eq!(
             classify_case(&accepted, 32 * 1024 * 1024, OjCheckerKind::Exact, b"42\n"),
             OjCaseStatus::Accepted
@@ -1127,8 +1599,38 @@ mod tests {
             classify_case(&accepted, 32 * 1024 * 1024, OjCheckerKind::Exact, b"41\n"),
             OjCaseStatus::WrongAnswer
         );
+    }
 
-        let memory = process(11, b"");
+    #[test]
+    fn output_limit_and_timeout_classification_is_portable() {
+        let mut output = process(exit_status(0), b"");
+        output.capture.output_exceeded = true;
+        assert_eq!(
+            classify_case(&output, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
+            OjCaseStatus::OutputLimitExceeded
+        );
+
+        let mut wall_timeout = process(exit_status(1), b"");
+        wall_timeout.capture.timed_out = true;
+        assert_eq!(
+            classify_case(&wall_timeout, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
+            OjCaseStatus::TimeLimitExceeded
+        );
+    }
+
+    #[test]
+    fn nonzero_exit_classification_is_portable() {
+        let runtime = process(exit_status(1), b"");
+        assert_eq!(
+            classify_case(&runtime, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
+            OjCaseStatus::RuntimeError
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_classification_uses_real_wait_statuses() {
+        let memory = process(std::process::ExitStatus::from_raw(11), b"");
         let mut memory = memory;
         memory.capture.peak_virtual_memory_bytes = Some(31 * 1024 * 1024);
         assert_eq!(
@@ -1136,37 +1638,45 @@ mod tests {
             OjCaseStatus::MemoryLimitExceeded
         );
 
-        let cpu = process(24, b"");
+        let cpu = process(std::process::ExitStatus::from_raw(24), b"");
         assert_eq!(
             classify_case(&cpu, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
             OjCaseStatus::TimeLimitExceeded
         );
 
-        let self_sigkill = process(9, b"");
+        let self_sigkill = process(std::process::ExitStatus::from_raw(9), b"");
         assert_eq!(
             classify_case(&self_sigkill, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
             OjCaseStatus::RuntimeError
         );
+    }
 
-        let mut wall_timeout = process(9, b"");
-        wall_timeout.capture.timed_out = true;
-        assert_eq!(
-            classify_case(&wall_timeout, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
-            OjCaseStatus::TimeLimitExceeded
-        );
+    #[allow(
+        clippy::expect_used,
+        reason = "the subprocess helper is a test-only exit-status oracle and setup failures invalidate the test process"
+    )]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        StdCommand::new(std::env::current_exe().expect("test executable is available"))
+            .arg("--exact")
+            .arg("oj_worker::tests::exit_status_helper")
+            .env("LABWEAVER_OJ_TEST_EXIT_CODE", code.to_string())
+            .status()
+            .expect("test executable can produce an exit status")
+    }
 
-        let runtime = process(256, b"");
-        assert_eq!(
-            classify_case(&runtime, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
-            OjCaseStatus::RuntimeError
-        );
-
-        let mut output = process(0, b"");
-        output.capture.output_exceeded = true;
-        assert_eq!(
-            classify_case(&output, 32 * 1024 * 1024, OjCheckerKind::Exact, b""),
-            OjCaseStatus::OutputLimitExceeded
-        );
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "the subprocess helper receives a test-controlled numeric exit code"
+    )]
+    fn exit_status_helper() {
+        if let Some(code) = std::env::var_os("LABWEAVER_OJ_TEST_EXIT_CODE") {
+            let code = code
+                .to_string_lossy()
+                .parse::<i32>()
+                .expect("test exit code is numeric");
+            std::process::exit(code);
+        }
     }
 
     #[test]
@@ -1214,6 +1724,20 @@ mod tests {
         std::fs::write(&path, b"forged")?;
         assert!(consume_helper_ready(&path).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn helper_exec_failure_is_infrastructure_but_compiler_exit_is_student_result() {
+        let helper_failure = process(exit_status(OJ_HELPER_FAILURE_EXIT_CODE), b"");
+        assert!(matches!(
+            ensure_helper_started(&helper_failure),
+            Err(super::OjWorkerError::ProcessSpawn)
+        ));
+
+        // A compiler which started successfully and rejected the submission keeps the normal
+        // nonzero status, allowing the caller to emit compile_error evidence.
+        let compiler_rejected = process(exit_status(1), b"syntax error");
+        assert!(ensure_helper_started(&compiler_rejected).is_ok());
     }
 
     #[cfg(target_os = "linux")]

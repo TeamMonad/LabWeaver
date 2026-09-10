@@ -1,7 +1,6 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { API_AUTH_MODE, API_BASE_URL } from '@/config'
 import { getOidcAccessToken } from '@/composables/useAuth'
-import { IS_FIXTURE } from '@/config/dataMode'
 import type { ProblemDetails } from '@/generated/contracts'
 import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
@@ -41,7 +40,10 @@ export class LabWeaverApiError extends Error {
 
 function normalizedBaseUrl(value: string): string {
   const raw = value.trim()
-  if (raw === '/') return '/'
+  // The generated client appends its path to this value. An empty base keeps
+  // root-origin requests single-slash relative instead of producing a
+  // protocol-relative request such as //api/....
+  if (raw === '/') return ''
   const trimmed = raw.replace(/\/+$/, '')
   if (!trimmed || trimmed.endsWith('/api/v1')) {
     throw new LabWeaverApiError(
@@ -118,17 +120,9 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
 
   instance.interceptors.request.use(async (config) => {
     if (authentication.mode === 'bearer') {
-      let token = await authentication.accessToken()
-      // Fixture/dev fallback: allow plain localStorage test tokens when OIDC is not configured.
-      if (!token && IS_FIXTURE) {
-        token = localStorage.getItem('access_token') ?? undefined
-      }
+      const token = await authentication.accessToken()
       if (!token) {
-        // In fixture mode the local handler is responsible for producing 401;
-        // in live mode we fail closed immediately.
-        if (!IS_FIXTURE) {
-          throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
-        }
+        throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current OIDC bearer token is required.')
       } else {
         config.headers.Authorization = `Bearer ${token}`
       }
@@ -157,8 +151,8 @@ function attachResponseInterceptor(instance: AxiosInstance): void {
       if (error.code === AxiosError.ECONNABORTED) {
         return Promise.reject(new LabWeaverApiError('LW_SDK_REQUEST_TIMEOUT', 'The API request timed out.'))
       }
-      // Preserve AxiosError (including fixture responses and ProblemDetails) so the
-      // generated SDK can expose response.data through its result.error field.
+      // Preserve AxiosError and ProblemDetails so the generated SDK can expose
+      // response.data through its result.error field.
       return Promise.reject(error)
     },
   )
@@ -216,34 +210,15 @@ attachAuthInterceptor(
 )
 attachResponseInterceptor(sdkTransport)
 
-/**
- * Initialize the generated SDK client transport.
- *
- * In fixture mode this dynamically installs the local fixture adapter so that
- * fixture modules are not part of the production bundle. Must be awaited before
- * the Vue app mounts so that the first SDK calls use the configured transport.
- */
+/** Initialize the generated SDK client transport before the Vue app mounts. */
 export async function initializeSdkClient(): Promise<void> {
-  // The compile-time __IS_FIXTURE__ flag is a literal `false` in production
-  // builds, so Rollup eliminates this branch and the fixture adapter chunk is
-  // never emitted (enforced by the production bundle gate). The runtime
-  // IS_FIXTURE check stays as defense-in-depth for fixture builds.
-  if (__IS_FIXTURE__ && IS_FIXTURE) {
-    const { installFixtureAdapter } = await import('@/fixture/install')
-    installFixtureAdapter(sdkTransport)
-  }
-
   // Make the generated SDK functions use the configured SDK transport.
   defaultSdkClient.setConfig({
     axios: sdkTransport,
     baseURL: '',
     auth:
-      IS_FIXTURE || API_AUTH_MODE === 'bearer'
+      API_AUTH_MODE === 'bearer'
         ? async () => {
-            // Fixture mode does not use OIDC; fall back to the local test token.
-            // Live bearer mode resolves the OIDC session token so fetch-based
-            // SDK transports (SSE) authenticate exactly like axios transports.
-            if (IS_FIXTURE) return localStorage.getItem('access_token') ?? undefined
             return getOidcAccessToken()
           }
         : // BFF mode relies on the session cookie; same-origin fetch sends it.
@@ -253,8 +228,6 @@ export async function initializeSdkClient(): Promise<void> {
 
 /** Health checks are intentionally outside the authenticated Public API contract. */
 export async function healthCheck(options?: { timeout?: number }): Promise<{ ok: boolean; status: number }> {
-  // fetch (not axios/XHR) so the fixture fetch interceptor can serve liveness
-  // locally and the probe behaves identically in fixture and live modes.
   const controller = new AbortController()
   const timeout = options?.timeout ?? 5000
   const timer = setTimeout(() => controller.abort(), timeout)

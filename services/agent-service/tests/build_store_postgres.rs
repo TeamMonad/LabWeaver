@@ -30,7 +30,6 @@ use agent_service::build_store::{
     BuildCommandDecision, BuildWorker, BuildWorkerOutcome, PgBuildStore,
 };
 use async_trait::async_trait;
-use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::{AgentBuildRequested, CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, subjects};
 use contracts::http::{
     IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildState,
@@ -38,13 +37,16 @@ use contracts::http::{
 };
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest};
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId,
+    ActorId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, EventId, ProjectId,
     Revision, Sequence, UtcTimestamp,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+mod support;
+use support::apply_agent_migrations;
 
 #[derive(Clone)]
 struct SlowProvider {
@@ -75,7 +77,10 @@ impl BuildSupplyChainProvider for SlowProvider {
             repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             private: true,
             storage_quota_bytes: 10 * 1024 * 1024 * 1024,
-            robot_subject: format!("robot$course-{}+runtime-puller", command.request.course_id),
+            robot_subject: format!(
+                "robot$project-{}+runtime-puller",
+                command.request.project_id
+            ),
         })
     }
 
@@ -136,12 +141,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let baseline = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
-    );
-    sqlx::raw_sql(&baseline).execute(&pool).await?;
+    apply_agent_migrations(&pool).await?;
 
     let command = build_command()?;
     let event = command_event(command.clone())?;
@@ -196,6 +196,7 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
         .load_status(
             command.request.id,
             &InternalAgentBuildStatusQuery {
+                project_id: command.request.project_id,
                 course_id: command.request.course_id,
             },
         )
@@ -203,12 +204,12 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     assert_eq!(running.state, InternalAgentBuildState::Running);
     assert_eq!(running.revision, revision(2)?);
     let cancellation = InternalAgentBuildCancellationRequest {
+        project_id: command.request.project_id,
         course_id: command.request.course_id,
         build_request_id: command.request.id,
         expected_state: running.state,
         expected_revision: running.revision,
         actor_id: ActorId::new(),
-        authority_san_uri: "spiffe://labweaver/control-service".to_owned(),
         requested_at: cancellation_requested_at,
     };
     let cancellation_key = IdempotencyKey::parse(&format!("cancel:{}", command.request.id))?;
@@ -295,8 +296,8 @@ async fn heartbeat_observes_live_cancellation_and_commits_one_terminal_event()
     assert_eq!(
         robot_subject,
         format!(
-            "robot$course-{}+runtime-puller",
-            successful_command.request.course_id
+            "robot$project-{}+runtime-puller",
+            successful_command.request.project_id
         )
     );
     assert_eq!(completed_events, 1);
@@ -437,12 +438,7 @@ async fn executor_fence_survives_restart_and_cleanup_dominates_its_generation()
         .max_connections(3)
         .connect(&url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}\n{}",
-        include_str!("../../../migrations/agent/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/agent/0002_allow_content_addressed_image_reuse.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    apply_agent_migrations(&pool).await?;
     let command = build_command()?;
     let deadline = add_time(database_now(&pool).await?, time::Duration::minutes(1))?;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -670,20 +666,19 @@ async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::
 }
 
 fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
+    let project_id = ProjectId::new();
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
-    let approval_id = ApprovalId::new();
     let request = BuildRequest {
         id: BuildRequestId::new(),
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         candidate_id,
         candidate_revision: revision(1)?,
-        approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
         context_object_key: "build-contexts/context.tar.gz".to_owned(),
         dockerfile_path: "Dockerfile".to_owned(),
-        base_image_digest: format!("sha256:{}", "c".repeat(64)),
         output_repository: format!(
             "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
         ),
@@ -693,21 +688,9 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         max_memory_bytes: 2_147_483_648,
         created_at: now(),
     };
-    let approval = CandidateApproval {
-        id: approval_id,
-        candidate_id,
-        candidate_revision: revision(1)?,
-        policy_revision: revision(1)?,
-        trust_revision: revision(1)?,
-        actor_id: ActorId::new(),
-        decision: CandidateDecision::Approved,
-        reason: "reviewed".to_owned(),
-        decided_at: now(),
-    };
-    let idempotency_key = format!("approval:{approval_id}");
+    let idempotency_key = format!("build:{}", request.id);
     Ok(AgentBuildRequested {
         request,
-        approval,
         idempotency_key,
     })
 }
@@ -729,6 +712,7 @@ fn command_event(
         time: now(),
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
+        project_id: command.request.project_id,
         course_id: command.request.course_id,
         aggregate_revision: revision(1)?,
         aggregate_sequence: Sequence(1),

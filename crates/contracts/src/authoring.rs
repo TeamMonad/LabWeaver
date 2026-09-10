@@ -6,11 +6,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::diagnostic;
-use crate::evaluation::EvaluationSpec;
-use crate::supply_chain::VirtualMachineBaseDisk;
+use crate::evaluation::{EvaluationRuntimeIdentity, EvaluationSpec};
+use crate::supply_chain::{ImageArtifact, VirtualMachineBaseDisk};
 use crate::{
-    ActorId, AgentRunId, ApprovalId, ArtifactRef, CandidateId, CourseId, PolicyId,
-    ProblemPackageId, RetentionSnapshot, Revision, UtcTimestamp,
+    ActorId, AgentRunId, ApprovalId, ArtifactRef, CandidateId, CourseId, DiagnosticCode,
+    EnvironmentId, EvaluationReleaseId, PolicyId, ProblemPackageId, ProjectId, ReleaseId,
+    RetentionSnapshot, Revision, UtcTimestamp, WorkConfigurationPlanId,
+    WorkConfigurationPreauthorizationId,
 };
 
 /// One immutable file in a teacher ProblemPackage.
@@ -28,7 +30,8 @@ pub struct PackageFile {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProblemPackage {
     pub id: ProblemPackageId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub revision: Revision,
     pub files: Vec<PackageFile>,
     pub retention: RetentionSnapshot,
@@ -61,6 +64,18 @@ impl ProblemPackage {
             }
             previous = Some(&file.path);
             validate_artifact_ref(&file.object)?;
+        }
+        Ok(())
+    }
+
+    /// Verifies that this package belongs to the exact project context supplied by its caller.
+    pub fn validate_ownership(
+        &self,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+    ) -> Result<(), AuthoringError> {
+        if self.project_id != project_id || self.course_id != course_id {
+            return Err(AuthoringError::OwnershipMismatch);
         }
         Ok(())
     }
@@ -110,12 +125,13 @@ pub enum DeniedDataClass {
     UnallowlistedStudentSubmission,
 }
 
-/// Versioned course policy governing all LLM egress.
+/// Versioned project policy governing all LLM egress. A course is optional teaching context.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CourseLlmEgressPolicy {
+pub struct ProjectLlmEgressPolicy {
     pub id: PolicyId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub revision: Revision,
     pub binding: ClaudeCodeBindingV1,
     pub budget: LlmBudget,
@@ -124,7 +140,7 @@ pub struct CourseLlmEgressPolicy {
     pub activated_at: UtcTimestamp,
 }
 
-impl CourseLlmEgressPolicy {
+impl ProjectLlmEgressPolicy {
     /// Validates explicit Claude Code identity, budgets, and hard-deny classifications.
     pub fn validate(&self) -> Result<(), AuthoringError> {
         if !valid_runtime_identity(&self.binding.runtime_binding, 256)
@@ -176,6 +192,18 @@ impl CourseLlmEgressPolicy {
         }
         Ok(())
     }
+
+    /// Verifies that this policy belongs to the exact project context supplied by its caller.
+    pub fn validate_ownership(
+        &self,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+    ) -> Result<(), AuthoringError> {
+        if self.project_id != project_id || self.course_id != course_id {
+            return Err(AuthoringError::OwnershipMismatch);
+        }
+        Ok(())
+    }
 }
 
 fn valid_claude_code_version(value: &str) -> bool {
@@ -221,6 +249,138 @@ pub enum EnvironmentClass {
 pub enum RuntimeKind {
     Container,
     VirtualMachine,
+}
+
+/// Immutable purpose selected by Control for one Agent run.
+///
+/// The purpose is authoritative: callers cannot substitute an environment class, target
+/// environment, actor, or runtime through an untyped request field. Authoring creates a new
+/// Environment/Evaluation package, while WorkConfiguration targets one existing Work environment
+/// and produces one configuration plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentRunPurpose {
+    Authoring {
+        #[serde(rename = "environmentClass")]
+        environment_class: EnvironmentClass,
+    },
+    WorkConfiguration {
+        #[serde(rename = "environmentId")]
+        environment_id: EnvironmentId,
+        #[serde(rename = "environmentRevision")]
+        environment_revision: Revision,
+        #[serde(rename = "actorId")]
+        actor_id: ActorId,
+        /// Runtime selected by the authoritative Work environment.
+        ///
+        /// Control resolves this value from the environment instance before dispatching the
+        /// run. Agent uses it as the immutable execution routing key, so a missing or altered
+        /// runtime cannot silently select a different executor.
+        #[serde(rename = "runtimeKind")]
+        runtime_kind: RuntimeKind,
+    },
+}
+
+impl AgentRunPurpose {
+    /// Returns the target existing environment for a Work configuration run.
+    #[must_use]
+    pub const fn work_environment(&self) -> Option<(EnvironmentId, Revision, ActorId)> {
+        match self {
+            Self::Authoring { .. } => None,
+            Self::WorkConfiguration {
+                environment_id,
+                environment_revision,
+                actor_id,
+                ..
+            } => Some((*environment_id, *environment_revision, *actor_id)),
+        }
+    }
+
+    /// Returns the immutable runtime selected for a Work configuration run.
+    #[must_use]
+    pub const fn work_runtime_kind(&self) -> Option<RuntimeKind> {
+        match self {
+            Self::Authoring { .. } => None,
+            Self::WorkConfiguration { runtime_kind, .. } => Some(*runtime_kind),
+        }
+    }
+}
+
+/// Immutable generated configuration plan for one existing Work environment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkConfigurationPlan {
+    pub id: WorkConfigurationPlanId,
+    pub revision: Revision,
+    pub script_artifact: ArtifactRef,
+    pub verification_script_artifact: Option<ArtifactRef>,
+    pub summary: String,
+    pub requires_restart: bool,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+}
+
+impl WorkConfigurationPlan {
+    /// Validates bounded plan metadata and immutable script artifact identities.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        validate_artifact_ref(&self.script_artifact)?;
+        if let Some(artifact) = &self.verification_script_artifact {
+            validate_artifact_ref(artifact)?;
+        }
+        if self.summary.trim().is_empty() || self.summary.len() > 8_192 {
+            return Err(AuthoringError::InvalidWorkConfiguration(
+                "configuration plan summary must be non-empty and bounded".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Concrete per-Work grant for executing one exact immutable configuration plan.
+///
+/// The grant binds both script artifacts and the plan revision. It therefore cannot authorize a
+/// newly generated script, a changed verification script, or a plan whose restart requirement was
+/// altered after approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkConfigurationPreauthorization {
+    pub id: WorkConfigurationPreauthorizationId,
+    pub project_id: ProjectId,
+    pub environment_id: EnvironmentId,
+    pub environment_revision: Revision,
+    pub actor_id: ActorId,
+    pub plan_id: WorkConfigurationPlanId,
+    pub plan_revision: Revision,
+    pub script_artifact: ArtifactRef,
+    pub verification_script_artifact: Option<ArtifactRef>,
+    pub expires_at: UtcTimestamp,
+    pub revision: Revision,
+}
+
+impl WorkConfigurationPreauthorization {
+    /// Validates grant identity and exact artifact bindings against a generated plan.
+    pub fn validate_against_plan(
+        &self,
+        plan: &WorkConfigurationPlan,
+    ) -> Result<(), AuthoringError> {
+        plan.validate()?;
+        validate_artifact_ref(&self.script_artifact)?;
+        if let Some(artifact) = &self.verification_script_artifact {
+            validate_artifact_ref(artifact)?;
+        }
+        if self.environment_id != plan.environment_id
+            || self.environment_revision != plan.environment_revision
+            || self.plan_id != plan.id
+            || self.plan_revision != plan.revision
+            || self.script_artifact != plan.script_artifact
+            || self.verification_script_artifact != plan.verification_script_artifact
+        {
+            return Err(AuthoringError::InvalidWorkConfiguration(
+                "preauthorization does not bind the exact configuration plan".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Bounded runtime resources expressed without Kubernetes-dependent parsing.
@@ -335,7 +495,6 @@ pub enum EnvironmentRuntimeSpec {
     Container {
         provider_binding: String,
         build_context: ArtifactRef,
-        base_image_digest: String,
         service_port: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal: Option<Box<TerminalSpec>>,
@@ -458,12 +617,10 @@ impl EnvironmentSpec {
             EnvironmentRuntimeSpec::Container {
                 provider_binding,
                 build_context,
-                base_image_digest,
                 service_port,
                 terminal,
             } => {
                 if provider_binding.trim().is_empty()
-                    || base_image_digest.trim().is_empty()
                     || *service_port == 0
                     || self.security.root_filesystem_policy
                         != RootFilesystemPolicy::ReadOnlyRequired
@@ -473,7 +630,7 @@ impl EnvironmentSpec {
                         .any(|entry| entry.service_port == *service_port)
                 {
                     return Err(AuthoringError::InvalidEnvironmentSpec(
-                        "container binding, base digest, and port are required".to_owned(),
+                        "container binding and port are required".to_owned(),
                     ));
                 }
                 validate_artifact_ref(build_context)?;
@@ -544,6 +701,7 @@ enum EnvironmentDocumentKind {
 pub enum AgentTrackKind {
     Environment,
     Evaluation,
+    WorkConfiguration,
 }
 
 /// State of one immutable Agent attempt.
@@ -553,6 +711,7 @@ pub enum AgentAttemptState {
     Pending,
     Running,
     Repairing,
+    AwaitingApproval,
     Succeeded,
     Failed,
     Cancelled,
@@ -598,6 +757,7 @@ pub enum AgentRunState {
     Running,
     PartiallySucceeded,
     Succeeded,
+    AwaitingApproval,
     Failed,
     Cancelling,
     Cancelled,
@@ -608,14 +768,16 @@ pub enum AgentRunState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRun {
     pub id: AgentRunId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub package_id: ProblemPackageId,
     pub policy_id: PolicyId,
     pub policy_revision: Revision,
-    pub requested_runtime: RuntimeKind,
+    pub purpose: AgentRunPurpose,
     pub state: AgentRunState,
     pub revision: Revision,
     pub tracks: Vec<AgentTrack>,
+    pub plan: Option<WorkConfigurationPlan>,
 }
 
 impl AgentRun {
@@ -626,15 +788,43 @@ impl AgentRun {
             .iter()
             .map(|track| track.kind)
             .collect::<BTreeSet<_>>();
-        if kinds
-            != [AgentTrackKind::Environment, AgentTrackKind::Evaluation]
+        let expected_kinds = match self.purpose {
+            AgentRunPurpose::Authoring { .. } => {
+                [AgentTrackKind::Environment, AgentTrackKind::Evaluation]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            }
+            AgentRunPurpose::WorkConfiguration { .. } => [AgentTrackKind::WorkConfiguration]
                 .into_iter()
-                .collect()
-            || self.tracks.len() != 2
-        {
+                .collect::<BTreeSet<_>>(),
+        };
+        if kinds != expected_kinds || self.tracks.len() != expected_kinds.len() {
             return Err(AuthoringError::InvalidAgentRun(
-                "exactly one environment and one evaluation track are required".to_owned(),
+                "AgentRun tracks do not match its immutable purpose".to_owned(),
             ));
+        }
+        if matches!(self.purpose, AgentRunPurpose::Authoring { .. }) && self.plan.is_some() {
+            return Err(AuthoringError::InvalidAgentRun(
+                "authoring runs cannot carry a Work configuration plan".to_owned(),
+            ));
+        }
+        if let AgentRunPurpose::WorkConfiguration {
+            environment_id,
+            environment_revision,
+            ..
+        } = self.purpose
+        {
+            if let Some(plan) = &self.plan
+                && (plan.environment_id != environment_id
+                    || plan.environment_revision != environment_revision)
+            {
+                return Err(AuthoringError::InvalidAgentRun(
+                    "configuration plan target does not match run purpose".to_owned(),
+                ));
+            }
+            if let Some(plan) = &self.plan {
+                plan.validate()?;
+            }
         }
         for track in &self.tracks {
             for (index, attempt) in track.attempts.iter().enumerate() {
@@ -646,6 +836,9 @@ impl AgentRun {
                         "attempt numbers must be contiguous and one-based".to_owned(),
                     ));
                 }
+                let approved_work_execution = track.kind == AgentTrackKind::WorkConfiguration
+                    && self.plan.is_some()
+                    && attempt.state == AgentAttemptState::Running;
                 match attempt.state {
                     AgentAttemptState::Succeeded if !attempt.usage_observed => {
                         return Err(AuthoringError::InvalidAgentRun(
@@ -655,7 +848,7 @@ impl AgentRun {
                     AgentAttemptState::Pending
                     | AgentAttemptState::Running
                     | AgentAttemptState::Repairing
-                        if attempt.usage_observed =>
+                        if attempt.usage_observed && !approved_work_execution =>
                     {
                         return Err(AuthoringError::InvalidAgentRun(
                             "non-terminal attempt cannot claim observed usage".to_owned(),
@@ -681,11 +874,41 @@ impl AgentRun {
                     "candidate identity requires a successful latest attempt".to_owned(),
                 ));
             }
+            if track.kind == AgentTrackKind::WorkConfiguration && track.candidate_id.is_some() {
+                return Err(AuthoringError::InvalidAgentRun(
+                    "Work configuration tracks do not carry candidate identities".to_owned(),
+                ));
+            }
         }
         let derived = self.derived_state()?;
-        if (self.state == AgentRunState::Cancelling && derived != AgentRunState::Running)
-            || (self.state != AgentRunState::Cancelling && self.state != derived)
-        {
+        let work_configuration = matches!(self.purpose, AgentRunPurpose::WorkConfiguration { .. });
+        let state_is_coherent = if work_configuration {
+            match self.state {
+                // A generated Work plan is a proposal until Control binds a concrete grant.
+                AgentRunState::AwaitingApproval => {
+                    self.plan.is_some() && derived == AgentRunState::AwaitingApproval
+                }
+                // Running with a plan is the approved execution phase. Running without a plan
+                // remains valid while the Agent is still generating the proposal.
+                AgentRunState::Running => derived == AgentRunState::Running,
+                // Cancellation may race either proposal generation or approved execution.
+                AgentRunState::Cancelling => {
+                    derived == AgentRunState::Running
+                        || (self.plan.is_some() && derived == AgentRunState::AwaitingApproval)
+                }
+                // A Work run cannot be successful until it has an immutable plan. The execution
+                // and verification result is recorded by the owner of the Work environment.
+                AgentRunState::Succeeded => {
+                    self.plan.is_some() && derived == AgentRunState::Succeeded
+                }
+                _ => self.state == derived,
+            }
+        } else if self.state == AgentRunState::Cancelling {
+            derived == AgentRunState::Running
+        } else {
+            self.state == derived
+        };
+        if !state_is_coherent {
             return Err(AuthoringError::InvalidAgentRun(
                 "declared run state does not match retained track attempts".to_owned(),
             ));
@@ -693,8 +916,35 @@ impl AgentRun {
         Ok(())
     }
 
+    /// Verifies the immutable package and policy bindings used to create this run.
+    pub fn validate_against(
+        &self,
+        package: &ProblemPackage,
+        policy: &ProjectLlmEgressPolicy,
+    ) -> Result<(), AuthoringError> {
+        if self.project_id != package.project_id
+            || self.course_id != package.course_id
+            || self.project_id != policy.project_id
+            || self.course_id != policy.course_id
+            || self.package_id != package.id
+            || self.policy_id != policy.id
+        {
+            return Err(AuthoringError::OwnershipMismatch);
+        }
+        if self.policy_revision != policy.revision {
+            return Err(AuthoringError::InvalidAgentRun(
+                "run policy revision does not match the bound policy".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Derives aggregate state without discarding either track's outcome.
     pub fn derived_state(&self) -> Result<AgentRunState, AuthoringError> {
+        let expected_track_count = match self.purpose {
+            AgentRunPurpose::Authoring { .. } => 2,
+            AgentRunPurpose::WorkConfiguration { .. } => 1,
+        };
         let latest = self
             .tracks
             .iter()
@@ -707,6 +957,13 @@ impl AgentRun {
             .iter()
             .filter(|state| matches!(state, Some(AgentAttemptState::Succeeded)))
             .count();
+        if matches!(self.purpose, AgentRunPurpose::WorkConfiguration { .. })
+            && latest
+                .iter()
+                .all(|state| matches!(state, Some(AgentAttemptState::AwaitingApproval)))
+        {
+            return Ok(AgentRunState::AwaitingApproval);
+        }
         let terminal = latest
             .iter()
             .filter(|state| {
@@ -720,17 +977,20 @@ impl AgentRun {
                 )
             })
             .count();
-        if succeeded == 2 {
+        if succeeded == expected_track_count {
             Ok(AgentRunState::Succeeded)
-        } else if terminal == 2 && succeeded == 1 {
+        } else if expected_track_count > 1
+            && terminal == expected_track_count
+            && succeeded == expected_track_count - 1
+        {
             Ok(AgentRunState::PartiallySucceeded)
-        } else if terminal == 2
+        } else if terminal == expected_track_count
             && latest
                 .iter()
                 .all(|state| matches!(state, Some(AgentAttemptState::Cancelled)))
         {
             Ok(AgentRunState::Cancelled)
-        } else if terminal == 2 {
+        } else if terminal == expected_track_count {
             Ok(AgentRunState::Failed)
         } else {
             Ok(AgentRunState::Running)
@@ -744,6 +1004,8 @@ impl AgentRun {
 pub struct EnvironmentCandidate {
     pub id: CandidateId,
     pub run_id: AgentRunId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub revision: Revision,
     pub spec: EnvironmentSpec,
     pub policy_revision: Revision,
@@ -761,6 +1023,17 @@ impl EnvironmentCandidate {
         }
         Ok(())
     }
+
+    /// Verifies that this candidate remains within its run's project context.
+    pub fn validate_against_run(&self, run: &AgentRun) -> Result<(), AuthoringError> {
+        if self.run_id != run.id
+            || self.project_id != run.project_id
+            || self.course_id != run.course_id
+        {
+            return Err(AuthoringError::OwnershipMismatch);
+        }
+        Ok(())
+    }
 }
 
 /// Immutable validated Evaluation candidate.
@@ -769,6 +1042,8 @@ impl EnvironmentCandidate {
 pub struct EvaluationCandidate {
     pub id: CandidateId,
     pub run_id: AgentRunId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub revision: Revision,
     pub spec: EvaluationSpec,
     pub policy_revision: Revision,
@@ -782,6 +1057,17 @@ impl EvaluationCandidate {
             return Err(AuthoringError::InvalidAgentRun(
                 "candidate model is invalid".to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Verifies that this candidate remains within its run's project context.
+    pub fn validate_against_run(&self, run: &AgentRun) -> Result<(), AuthoringError> {
+        if self.run_id != run.id
+            || self.project_id != run.project_id
+            || self.course_id != run.course_id
+        {
+            return Err(AuthoringError::OwnershipMismatch);
         }
         Ok(())
     }
@@ -827,6 +1113,116 @@ impl CandidateApproval {
     }
 }
 
+/// One teacher decision that binds a complete immutable authoring package.
+///
+/// The decision carries only stable identities and the resolved runtime artifact. Control writes
+/// it once after validating the package, both candidates, and the authoritative build projection;
+/// Environment and Evaluation consume this same binding instead of composing independent
+/// candidate approvals.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthoringApproval {
+    pub id: ApprovalId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub revision: Revision,
+    pub package_id: ProblemPackageId,
+    pub package_revision: Revision,
+    pub environment_candidate_id: CandidateId,
+    pub environment_candidate_revision: Revision,
+    pub evaluation_candidate_id: CandidateId,
+    pub evaluation_candidate_revision: Revision,
+    /// Exact Evaluation execution identity frozen when this approval is completed.
+    pub evaluation_runtime_identity: EvaluationRuntimeIdentity,
+    pub image_artifact: ImageArtifact,
+    pub actor_id: ActorId,
+    pub reason: String,
+    pub approved_at: UtcTimestamp,
+}
+
+impl AuthoringApproval {
+    /// Validates the bounded immutable approval identity.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        if self.environment_candidate_id == self.evaluation_candidate_id
+            || self.reason.trim().is_empty()
+            || self.reason.chars().count() > 500
+        {
+            return Err(AuthoringError::InvalidApproval);
+        }
+        self.evaluation_runtime_identity
+            .validate()
+            .map_err(|_| AuthoringError::InvalidApproval)?;
+        self.image_artifact
+            .validate()
+            .map_err(|_| AuthoringError::InvalidArtifactReference)
+    }
+
+    /// Verifies that the approval belongs to the requested project context.
+    pub fn validate_ownership(
+        &self,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+    ) -> Result<(), AuthoringError> {
+        if self.project_id != project_id || self.course_id != course_id {
+            return Err(AuthoringError::OwnershipMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Durable publication state for one immutable authoring approval.
+///
+/// Control records the state while Environment and Evaluation publish their respective
+/// releases. The state is a projection of those downstream acknowledgements and never changes
+/// the immutable approval itself.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthoringPublicationState {
+    Pending,
+    Publishing,
+    Ready,
+    Failed,
+}
+
+/// Project-scoped publication status for a complete authoring approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthoringApprovalPublicationStatus {
+    pub approval: AuthoringApproval,
+    pub status: AuthoringPublicationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_release_id: Option<ReleaseId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_release_id: Option<EvaluationReleaseId>,
+    /// Exact Evaluation release revision acknowledged by the downstream publisher.
+    ///
+    /// The release identifier alone is insufficient for admission because a release can be
+    /// revised independently of its identity. Control persists this value with the publication
+    /// projection once Evaluation has returned its durable publish result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_release_revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<DiagnosticCode>,
+    pub updated_at: UtcTimestamp,
+    pub revision: Revision,
+}
+
+impl AuthoringApprovalPublicationStatus {
+    /// Validates the immutable approval embedded in the publication projection.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        self.approval.validate()
+    }
+
+    /// Verifies that the projection belongs to the requested project context.
+    pub fn validate_ownership(
+        &self,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+    ) -> Result<(), AuthoringError> {
+        self.approval.validate_ownership(project_id, course_id)
+    }
+}
+
 fn validate_artifact_ref(reference: &ArtifactRef) -> Result<(), AuthoringError> {
     if reference.store_binding.trim().is_empty()
         || reference.object_version.trim().is_empty()
@@ -861,6 +1257,12 @@ pub enum AuthoringError {
     InvalidEnvironmentSpec(String),
     #[error("invalid AgentRun: {0}")]
     InvalidAgentRun(String),
+    #[error("invalid Work configuration: {0}")]
+    InvalidWorkConfiguration(String),
+    #[error("invalid complete authoring approval")]
+    InvalidApproval,
+    #[error("project ownership context does not match")]
+    OwnershipMismatch,
 }
 
 impl AuthoringError {
@@ -874,9 +1276,12 @@ impl AuthoringError {
             | Self::InvalidEnvironmentSpec(_) => diagnostic::INVALID_REQUEST,
             Self::InvalidBudget | Self::HardDenyClassesModified => diagnostic::ACCESS_DENIED,
             Self::PackageHashMismatch => diagnostic::HASH_MISMATCH,
-            Self::InvalidPackage(_) | Self::InvalidArtifactReference | Self::InvalidAgentRun(_) => {
-                diagnostic::CONTRACT_DOCUMENT_INVALID
-            }
+            Self::InvalidPackage(_)
+            | Self::InvalidArtifactReference
+            | Self::InvalidAgentRun(_)
+            | Self::InvalidWorkConfiguration(_)
+            | Self::InvalidApproval
+            | Self::OwnershipMismatch => diagnostic::CONTRACT_DOCUMENT_INVALID,
         }
     }
 }
@@ -901,5 +1306,213 @@ mod terminal_tests {
         let mut wrong_directory = valid.clone();
         wrong_directory.working_directory = "/tmp".to_owned();
         assert!(wrong_directory.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod agent_run_state_tests {
+    use std::error::Error;
+
+    use super::{
+        AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
+        AgentTrackKind, EnvironmentClass, LlmUsage, WorkConfigurationPlan,
+    };
+    use crate::{ArtifactId, ArtifactRef, PolicyId, ProblemPackageId, ProjectId, Revision};
+
+    fn attempt(state: AgentAttemptState) -> AgentAttempt {
+        AgentAttempt {
+            number: 1,
+            state,
+            checkpoint: None,
+            usage: LlmUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                requests: 0,
+                cost_microusd: 0,
+            },
+            usage_observed: state == AgentAttemptState::Succeeded,
+            diagnostic_code: match state {
+                AgentAttemptState::Failed | AgentAttemptState::Cancelled => {
+                    Some("LW_AGENT_ATTEMPT_FAILED".to_owned())
+                }
+                AgentAttemptState::Pending
+                | AgentAttemptState::Running
+                | AgentAttemptState::Repairing
+                | AgentAttemptState::AwaitingApproval
+                | AgentAttemptState::Succeeded => None,
+            },
+        }
+    }
+
+    fn track(kind: AgentTrackKind, state: AgentAttemptState) -> AgentTrack {
+        AgentTrack {
+            kind,
+            attempts: vec![attempt(state)],
+            candidate_id: None,
+        }
+    }
+
+    fn plan(
+        environment_id: crate::EnvironmentId,
+        environment_revision: Revision,
+    ) -> Result<WorkConfigurationPlan, Box<dyn Error>> {
+        Ok(WorkConfigurationPlan {
+            id: crate::WorkConfigurationPlanId::new(),
+            revision: Revision::new(1)?,
+            script_artifact: ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "object-store".to_owned(),
+                object_version: "v1".to_owned(),
+                size_bytes: 1,
+                media_type: "text/plain".to_owned(),
+            },
+            verification_script_artifact: None,
+            summary: "apply configuration".to_owned(),
+            requires_restart: false,
+            environment_id,
+            environment_revision,
+        })
+    }
+
+    fn run(
+        purpose: AgentRunPurpose,
+        state: AgentRunState,
+        tracks: Vec<AgentTrack>,
+    ) -> Result<AgentRun, Box<dyn Error>> {
+        Ok(AgentRun {
+            id: crate::AgentRunId::new(),
+            project_id: ProjectId::new(),
+            course_id: None,
+            package_id: ProblemPackageId::new(),
+            policy_id: PolicyId::new(),
+            policy_revision: Revision::new(1)?,
+            purpose,
+            state,
+            revision: Revision::new(1)?,
+            tracks,
+            plan: None,
+        })
+    }
+
+    #[test]
+    fn authoring_uses_two_track_aggregate_state() -> Result<(), Box<dyn Error>> {
+        let purpose = AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Experiment,
+        };
+        let succeeded = run(
+            purpose,
+            AgentRunState::Succeeded,
+            vec![
+                track(AgentTrackKind::Environment, AgentAttemptState::Succeeded),
+                track(AgentTrackKind::Evaluation, AgentAttemptState::Succeeded),
+            ],
+        )?;
+        assert_eq!(succeeded.derived_state()?, AgentRunState::Succeeded);
+        assert!(succeeded.validate().is_ok());
+
+        let partial = run(
+            purpose,
+            AgentRunState::PartiallySucceeded,
+            vec![
+                track(AgentTrackKind::Environment, AgentAttemptState::Succeeded),
+                track(AgentTrackKind::Evaluation, AgentAttemptState::Failed),
+            ],
+        )?;
+        assert_eq!(partial.derived_state()?, AgentRunState::PartiallySucceeded);
+        assert!(partial.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn work_configuration_uses_one_track_and_allows_awaiting_approval() -> Result<(), Box<dyn Error>>
+    {
+        let environment_id = crate::EnvironmentId::new();
+        let environment_revision = Revision::new(2)?;
+        let purpose = AgentRunPurpose::WorkConfiguration {
+            environment_id,
+            environment_revision,
+            actor_id: crate::ActorId::new(),
+            runtime_kind: super::RuntimeKind::Container,
+        };
+        let mut awaiting = run(
+            purpose,
+            AgentRunState::AwaitingApproval,
+            vec![track(
+                AgentTrackKind::WorkConfiguration,
+                AgentAttemptState::AwaitingApproval,
+            )],
+        )?;
+        awaiting.plan = Some(plan(environment_id, environment_revision)?);
+        awaiting.tracks[0].attempts[0].usage_observed = true;
+        assert_eq!(awaiting.derived_state()?, AgentRunState::AwaitingApproval);
+        assert!(awaiting.validate().is_ok());
+
+        let mut approved = awaiting.clone();
+        approved.state = AgentRunState::Running;
+        approved.tracks[0].attempts[0].state = AgentAttemptState::Running;
+        assert_eq!(approved.derived_state()?, AgentRunState::Running);
+        assert!(approved.validate().is_ok());
+
+        let mut unplanned_execution = approved.clone();
+        unplanned_execution.plan = None;
+        assert!(unplanned_execution.validate().is_err());
+
+        let mut authoring_with_observed_running = run(
+            AgentRunPurpose::Authoring {
+                environment_class: EnvironmentClass::Experiment,
+            },
+            AgentRunState::Running,
+            vec![
+                track(AgentTrackKind::Environment, AgentAttemptState::Running),
+                track(AgentTrackKind::Evaluation, AgentAttemptState::Pending),
+            ],
+        )?;
+        authoring_with_observed_running.tracks[0].attempts[0].usage_observed = true;
+        assert!(authoring_with_observed_running.validate().is_err());
+
+        let missing_plan = run(
+            purpose,
+            AgentRunState::AwaitingApproval,
+            vec![track(
+                AgentTrackKind::WorkConfiguration,
+                AgentAttemptState::AwaitingApproval,
+            )],
+        )?;
+        assert!(missing_plan.validate().is_err());
+
+        let failed = run(
+            purpose,
+            AgentRunState::Failed,
+            vec![track(
+                AgentTrackKind::WorkConfiguration,
+                AgentAttemptState::Failed,
+            )],
+        )?;
+        assert_eq!(failed.derived_state()?, AgentRunState::Failed);
+        assert!(failed.validate().is_ok());
+
+        let mut approved = run(
+            purpose,
+            AgentRunState::Running,
+            vec![track(
+                AgentTrackKind::WorkConfiguration,
+                AgentAttemptState::Running,
+            )],
+        )?;
+        approved.plan = Some(plan(environment_id, environment_revision)?);
+        assert_eq!(approved.derived_state()?, AgentRunState::Running);
+        assert!(approved.validate().is_ok());
+
+        let mut stale_success = run(
+            purpose,
+            AgentRunState::Running,
+            vec![track(
+                AgentTrackKind::WorkConfiguration,
+                AgentAttemptState::Succeeded,
+            )],
+        )?;
+        stale_success.plan = Some(plan(environment_id, environment_revision)?);
+        assert!(stale_success.validate().is_err());
+        Ok(())
     }
 }

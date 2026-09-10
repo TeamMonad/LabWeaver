@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Environment request for the authoritative Work execution target.\n\nEnvironment resolves the runtime from the exact Work aggregate and its Resource lease. The\ncaller cannot choose a runtime kind or replace the actor/project scope.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "projectId",
+    "actorId",
+    "expectedRevision"
+  ],
+  "title": "EnvironmentWorkConfigurationTargetQuery",
+  "type": "object"
+}

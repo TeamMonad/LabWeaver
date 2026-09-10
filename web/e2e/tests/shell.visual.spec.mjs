@@ -21,6 +21,15 @@ for (const theme of themes) {
         await expect(page.locator('.drawer-item')).toHaveCount(4)
         await expect(page.locator('.drawer-item').first()).toBeVisible()
       }
+      if (bp.name === 'mobile') {
+        const widths = await page.evaluate(() => ({
+          viewport: document.documentElement.clientWidth,
+          document: document.documentElement.scrollWidth,
+          body: document.body.scrollWidth,
+        }))
+        expect(widths.document).toBeLessThanOrEqual(widths.viewport)
+        expect(widths.body).toBeLessThanOrEqual(widths.viewport)
+      }
       await expect(page).toHaveScreenshot(`home-${theme}-${bp.name}.png`, {
         fullPage: true,
         animations: 'disabled',

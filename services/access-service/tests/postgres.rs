@@ -1,9 +1,14 @@
 //! Real `PostgreSQL` evidence for Access schema constraints and token storage.
 
+use base64::Engine as _;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+
+mod support;
+use support::apply_access_migrations;
 
 #[tokio::test]
 #[allow(
@@ -21,12 +26,7 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .max_connections(4)
         .connect(&url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA access; SET search_path TO access;\n{}\n{}",
-        include_str!("../../../migrations/access/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    apply_access_migrations(&pool).await?;
 
     let actor = Uuid::now_v7();
     sqlx::query("INSERT INTO access.actors (actor_id,issuer,subject_sha256) VALUES ($1,'https://issuer.example.test','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')")
@@ -39,13 +39,14 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .bind(Uuid::now_v7()).bind(actor).bind(fingerprint).execute(&pool).await.is_err());
 
     let course = Uuid::now_v7();
+    let project = Uuid::now_v7();
     let environment = Uuid::now_v7();
     let grant_id = Uuid::now_v7();
     let contract = serde_json::json!({"request": {}});
-    sqlx::query("INSERT INTO access.access_grants (grant_id,actor_id,course_id,environment_id,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,$4,1,'requested',now(),now()+interval '30 minutes',$5)")
-        .bind(grant_id).bind(actor).bind(course).bind(environment).bind(&contract).execute(&pool).await?;
-    assert!(sqlx::query("INSERT INTO access.access_grants (grant_id,actor_id,course_id,environment_id,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,$4,1,'active',now(),now()+interval '30 minutes',$5)")
-        .bind(Uuid::now_v7()).bind(actor).bind(course).bind(environment).bind(&contract).execute(&pool).await.is_err());
+    sqlx::query("INSERT INTO access.access_grants (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,$4,$5,1,'requested',now(),now()+interval '30 minutes',$6)")
+        .bind(grant_id).bind(actor).bind(project).bind(course).bind(environment).bind(&contract).execute(&pool).await?;
+    assert!(sqlx::query("INSERT INTO access.access_grants (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,$4,$5,1,'active',now(),now()+interval '30 minutes',$6)")
+        .bind(Uuid::now_v7()).bind(actor).bind(project).bind(course).bind(environment).bind(&contract).execute(&pool).await.is_err());
 
     let token_columns: Vec<String> = sqlx::query_scalar(
         "SELECT column_name FROM information_schema.columns WHERE table_schema='access' AND table_name='ssh_authorizations' ORDER BY column_name"
@@ -75,6 +76,95 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
 
     assert!(sqlx::query("INSERT INTO access.gateway_sessions (session_id,grant_id,grant_revision,actor_id,endpoint_id,state,started_at,expires_at,contract) VALUES ($1,$2,1,$3,$4,'active',now(),now()+interval '5 minutes','{}')")
         .bind(Uuid::now_v7()).bind(grant_id).bind(actor).bind(Uuid::now_v7()).execute(&pool).await.is_err());
+
+    let key_material = format!(
+        "test-key:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32])
+    );
+    let key_ring = auth::KeyRing::parse("test-key".to_owned(), &key_material)?;
+    let session_issued_at = OffsetDateTime::now_utc().replace_nanosecond(0)?;
+    let configured_expiry =
+        auth::configured_session_expiry(session_issued_at, Duration::seconds(900))?;
+    let local_session = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: actor,
+            roles: vec![contracts::PlatformRole::Student],
+            authorization_revision: 1,
+            expires_at: configured_expiry,
+            idle_ttl: Duration::seconds(300),
+            oidc_sid: Some("test-oidc-session".to_owned()),
+            logout_hint: "test-logout-hint".to_owned(),
+        },
+        session_issued_at,
+    )
+    .await?;
+    let loaded_session = auth::load_bff_session(
+        &pool,
+        &key_ring,
+        local_session.session_id,
+        Duration::seconds(300),
+        session_issued_at + Duration::seconds(10),
+    )
+    .await?;
+    assert_eq!(loaded_session.expires_at, configured_expiry);
+
+    let bounded_expiry = session_issued_at + Duration::seconds(120);
+    let bounded_session = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: actor,
+            roles: vec![contracts::PlatformRole::Student],
+            authorization_revision: 1,
+            expires_at: bounded_expiry,
+            idle_ttl: Duration::seconds(300),
+            oidc_sid: Some("bounded-oidc-session".to_owned()),
+            logout_hint: "bounded-logout-hint".to_owned(),
+        },
+        session_issued_at,
+    )
+    .await?;
+    let bounded_loaded = auth::load_bff_session(
+        &pool,
+        &key_ring,
+        bounded_session.session_id,
+        Duration::seconds(300),
+        session_issued_at + Duration::seconds(10),
+    )
+    .await?;
+    assert_eq!(bounded_loaded.idle_expires_at, bounded_expiry);
+    assert!(matches!(
+        auth::load_bff_session(
+            &pool,
+            &key_ring,
+            bounded_session.session_id,
+            Duration::seconds(300),
+            bounded_expiry,
+        )
+        .await,
+        Err(auth::RepositoryError::SessionRejected)
+    ));
+
+    auth::revoke_bff_session(
+        &pool,
+        local_session.session_id,
+        "LW_AUTH_SESSION_REVOKED",
+        session_issued_at + Duration::seconds(20),
+    )
+    .await?;
+    assert!(matches!(
+        auth::load_bff_session(
+            &pool,
+            &key_ring,
+            local_session.session_id,
+            Duration::seconds(300),
+            session_issued_at + Duration::seconds(21),
+        )
+        .await,
+        Err(auth::RepositoryError::SessionRejected)
+    ));
 
     let idempotency_key = "same-client-key";
     for scope in [
@@ -128,15 +218,15 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     sqlx::query("INSERT INTO access.bff_sessions (session_id,actor_id,platform_roles,authorization_revision,expires_at,idle_expires_at,encrypted_csrf_token,csrf_encryption_key_id) VALUES ($1,$2,ARRAY['student'],1,now()+interval '30 minutes',now()+interval '15 minutes',$3,'test-key')")
         .bind(bff_session_id).bind(actor).bind(vec![7_u8; 32]).execute(&pool).await?;
     let capability_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,'experiment',1,now(),now()+interval '30 seconds',now()+interval '15 minutes',$7,$8,$9,'test-key','actor:test',$10)")
-        .bind(capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(course).bind(environment)
+    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,$7,'experiment',1,now(),now()+interval '30 seconds',now()+interval '15 minutes',$8,$9,$10,'test-key','actor:test',$11)")
+        .bind(capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(project).bind(course).bind(environment)
         .bind("f".repeat(64)).bind("a".repeat(64)).bind(vec![9_u8; 32]).bind("d".repeat(64)).execute(&pool).await?;
-    assert!(sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,'experiment',1,now(),now()+interval '31 seconds',now()+interval '15 minutes',$7,$8,$9,'test-key','actor:test',$10)")
-        .bind(Uuid::now_v7()).bind(grant_id).bind(actor).bind(bff_session_id).bind(course).bind(environment)
+    assert!(sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,$7,'experiment',1,now(),now()+interval '31 seconds',now()+interval '15 minutes',$8,$9,$10,'test-key','actor:test',$11)")
+        .bind(Uuid::now_v7()).bind(grant_id).bind(actor).bind(bff_session_id).bind(project).bind(course).bind(environment)
         .bind("b".repeat(64)).bind("c".repeat(64)).bind(vec![9_u8; 32]).bind("e".repeat(64)).execute(&pool).await.is_err());
     let console_session_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,course_id,environment_id,environment_revision,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,1,'test-proxy','opening',now(),now()+interval '15 minutes')")
-        .bind(console_session_id).bind(capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(course).bind(environment).execute(&pool).await?;
+    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,project_id,course_id,environment_id,environment_revision,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,$8,1,'test-proxy','opening',now(),now()+interval '15 minutes')")
+        .bind(console_session_id).bind(capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(project).bind(course).bind(environment).execute(&pool).await?;
     let consumed = sqlx::query("UPDATE access.console_capabilities SET consumed_at=now(),session_id=$2,secret_scrubbed_at=now(),encrypted_handoff_secret='\\x'::bytea WHERE capability_id=$1 AND consumed_at IS NULL")
         .bind(capability_id).bind(console_session_id).execute(&pool).await?.rows_affected();
     let replay = sqlx::query("UPDATE access.console_capabilities SET consumed_at=now() WHERE capability_id=$1 AND consumed_at IS NULL")
@@ -144,11 +234,11 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     assert_eq!((consumed, replay), (1, 0));
     let work_capability_id = Uuid::now_v7();
     let work_lease_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,'work',1,$7,3,now()+interval '20 minutes',now(),now()+interval '30 seconds',now()+interval '15 minutes',$8,$9,$10,'test-key','actor:work',$11)")
-        .bind(work_capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(course).bind(environment).bind(work_lease_id)
+    sqlx::query("INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,$6,$7,'work',1,$8,3,now()+interval '20 minutes',now(),now()+interval '30 seconds',now()+interval '15 minutes',$9,$10,$11,'test-key','actor:work',$12)")
+        .bind(work_capability_id).bind(grant_id).bind(actor).bind(bff_session_id).bind(project).bind(course).bind(environment).bind(work_lease_id)
         .bind("1".repeat(64)).bind("2".repeat(64)).bind(vec![9_u8; 32]).bind("3".repeat(64)).execute(&pool).await?;
-    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,1,$8,3,now()+interval '20 minutes','test-proxy','opening',now(),now()+interval '15 minutes')")
-        .bind(Uuid::now_v7()).bind(work_capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(course).bind(environment).bind(work_lease_id).execute(&pool).await?;
+    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,project_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,state,opened_at,authorization_expires_at) VALUES ($1,$2,'xterm',$3,$4,1,$5,$6,$7,$8,1,$9,3,now()+interval '20 minutes','test-proxy','opening',now(),now()+interval '15 minutes')")
+        .bind(Uuid::now_v7()).bind(work_capability_id).bind(bff_session_id).bind(grant_id).bind(actor).bind(project).bind(course).bind(environment).bind(work_lease_id).execute(&pool).await?;
     let console_columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema='access' AND table_name IN ('console_capabilities','console_sessions')")
         .fetch_all(&pool).await?;
     for forbidden in [
@@ -171,5 +261,20 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     let authorized_after_revocation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access.access_grants g JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id WHERE g.grant_id=$1 AND g.state='active' AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>now()) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END)")
         .bind(grant_id).fetch_one(&pool).await?;
     assert!(!authorized_after_revocation);
+
+    auth::revoke_bff_session(
+        &pool,
+        bff_session_id,
+        "LW_AUTH_SESSION_REVOKED",
+        time::OffsetDateTime::now_utc(),
+    )
+    .await?;
+    let session_revoked: bool = sqlx::query_scalar(
+        "SELECT revoked_at IS NOT NULL FROM access.bff_sessions WHERE session_id=$1",
+    )
+    .bind(bff_session_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_revoked);
     Ok(())
 }

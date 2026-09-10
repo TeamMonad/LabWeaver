@@ -1,9 +1,8 @@
-import { beforeEach, describe, expect, it } from 'vitest'
-import { createFixtureConsoleSocketFactory } from '@/fixture/consoleSocket'
-import { consumeLocator, resetConsoleCapabilityStore } from '@/fixture/stores/consoleCapabilityStore'
+import { describe, expect, it } from 'vitest'
+import { createMockConsoleSocketFactory } from './consoleSocketMock'
 import type { ConsoleSocketState } from '@/console/socket'
 
-function connectWith(factory: ReturnType<typeof createFixtureConsoleSocketFactory>, locator: string) {
+function connectWith(factory: ReturnType<typeof createMockConsoleSocketFactory>, locator: string) {
   const states: Array<[ConsoleSocketState, string | undefined]> = []
   const socket = factory(locator, 'labweaver.console.xterm.v1', {
     onStateChange: (state, code) => states.push([state, code]),
@@ -12,27 +11,10 @@ function connectWith(factory: ReturnType<typeof createFixtureConsoleSocketFactor
   return { states, socket }
 }
 
-describe('console locator one-time consumption (ADR 0012)', () => {
-  beforeEach(() => {
-    resetConsoleCapabilityStore()
-  })
-
-  it('allows the first consumption and denies the second', async () => {
-    const factory = createFixtureConsoleSocketFactory()
-    const locator = '/connect/console/session-1'
-
-    const first = connectWith(factory, locator)
+describe('console external transport boundary', () => {
+  it('opens a mocked external console connection', async () => {
+    const result = connectWith(createMockConsoleSocketFactory(), '/connect/console/session-1')
     await new Promise((r) => setTimeout(r, 0))
-    expect(first.states).toContainEqual(['open', undefined])
-
-    const second = connectWith(factory, locator)
-    await new Promise((r) => setTimeout(r, 0))
-    expect(second.states).toContainEqual(['error', 'CONSOLE_LOCATOR_CONSUMED'])
-    expect(second.states).not.toContainEqual(['open', undefined])
-  })
-
-  it('consumeLocator returns true once and false afterwards', () => {
-    expect(consumeLocator('/connect/console/session-9')).toBe(true)
-    expect(consumeLocator('/connect/console/session-9')).toBe(false)
+    expect(result.states).toContainEqual(['open', undefined])
   })
 })

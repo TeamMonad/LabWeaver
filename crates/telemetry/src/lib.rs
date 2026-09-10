@@ -306,6 +306,7 @@ fn safe_log_field(name: &str) -> bool {
             | "revision"
             | "attempt"
             | "delivery_attempt"
+            | "max_delivery_attempt"
             | "provider_step"
             | "binding"
             | "provider"
@@ -760,6 +761,7 @@ mod tests {
                 operation = "telemetry.format",
                 outcome = "succeeded",
                 duration_ms = 7_u64,
+                max_delivery_attempt = 10_i64,
                 trace_id = "01900000000070008000000000000001",
                 token = "TOKEN_SENTINEL",
                 path = "/PRIVATE/PATH_SENTINEL",
@@ -799,6 +801,7 @@ mod tests {
         }
         assert_eq!(event["service"], "telemetry-test");
         assert_eq!(event["token"], "redacted_unclassified");
+        assert_eq!(event["max_delivery_attempt"], 10);
         Ok(())
     }
 

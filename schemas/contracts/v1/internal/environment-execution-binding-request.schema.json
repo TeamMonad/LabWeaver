@@ -1,0 +1,183 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentExecutionPurpose": {
+      "description": "The consumer and immutable purpose of one short-lived VM execution binding.\n\nEvaluation probes and private Work configuration use the same Environment-owned\nissuer, but they are separate purposes so an issued credential cannot be replayed\nacross service boundaries.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Run one approved evaluation probe attempt.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "evaluation_probe",
+              "type": "string"
+            },
+            "runId": {
+              "$ref": "#/$defs/EvaluationRunId"
+            },
+            "stepRunId": {
+              "$ref": "#/$defs/EvaluationStepRunId"
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "stepRunId",
+            "attempt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Configure one private Work environment for an Agent run.",
+          "properties": {
+            "agentRunId": {
+              "$ref": "#/$defs/AgentRunId"
+            },
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            },
+            "runRevision": {
+              "$ref": "#/$defs/Revision"
+            }
+          },
+          "required": [
+            "kind",
+            "agentRunId",
+            "runRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Resume one persisted VM Work execution after an Agent or Environment restart.",
+          "properties": {
+            "agentRunId": {
+              "$ref": "#/$defs/AgentRunId"
+            },
+            "executionId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "work_configuration_recovery",
+              "type": "string"
+            },
+            "planId": {
+              "$ref": "#/$defs/WorkConfigurationPlanId"
+            },
+            "planRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "runRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "sourceIdentity": {
+              "description": "Persistent VM target UID from the Agent execution intent.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "agentRunId",
+            "runRevision",
+            "executionId",
+            "planId",
+            "planRevision",
+            "sourceIdentity"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EvaluationRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationRunId`.",
+      "type": "string"
+    },
+    "EvaluationStepRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `EvaluationStepRunId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "WorkConfigurationPlanId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Evaluation or Agent request for one fresh VM execution credential.\n\nThe public key is generated for this request and is never persisted as a\nreusable actor key. `runtime_kind` is repeated in the request to make a\ncontainer/VM mix-up fail before credential issuance.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expectedRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "publicKeyOpenssh": {
+      "type": "string"
+    },
+    "purpose": {
+      "$ref": "#/$defs/EnvironmentExecutionPurpose"
+    },
+    "runtimeKind": {
+      "$ref": "#/$defs/RuntimeKind"
+    }
+  },
+  "required": [
+    "projectId",
+    "actorId",
+    "expectedRevision",
+    "runtimeKind",
+    "purpose",
+    "publicKeyOpenssh"
+  ],
+  "title": "EnvironmentExecutionBindingRequest",
+  "type": "object"
+}

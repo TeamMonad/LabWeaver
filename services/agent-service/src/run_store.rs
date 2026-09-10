@@ -6,17 +6,23 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::authoring::{
-    AgentAttempt, AgentAttemptState, AgentRun, AgentRunState, AgentTrack, AgentTrackKind,
-    CourseLlmEgressPolicy, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, LlmUsage,
-    ProblemPackage,
+    AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
+    AgentTrackKind, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, LlmUsage,
+    ProblemPackage, ProjectLlmEgressPolicy, WorkConfigurationPlan,
+    WorkConfigurationPreauthorization,
 };
 use contracts::diagnostic;
 use contracts::events::{
     AgentRunEvent, CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, subjects,
 };
-use contracts::http::{CreateAgentRunRequest, IdempotencyKey};
+use contracts::http::{
+    AgentWorkExecutionIntentMetadata, AgentWorkExecutionIntentQuery, ContainerWorkExecutionRequest,
+    CreateAgentRunRequest, IdempotencyKey, InternalAgentRunRequest,
+    InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
+};
 use contracts::{
-    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, Revision, Sequence, UtcTimestamp,
+    AgentRunId, ArtifactId, CandidateId, CourseId, EventId, ProjectId, Revision, Sequence,
+    UtcTimestamp, WorkConfigurationPlanId,
 };
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
 use serde::{Deserialize, Serialize};
@@ -33,11 +39,14 @@ use crate::claude_code::{
 const CREATE_OPERATION: &str = "create_agent_run_v1";
 const CANCEL_OPERATION: &str = "cancel_agent_run_v1";
 const RETRY_OPERATION: &str = "retry_agent_run_track_v1";
+const APPROVE_WORK_CONFIGURATION_OPERATION: &str = "approve_work_configuration_v1";
 
 /// Input required to reserve one idempotent `AgentRun`.
 pub struct ReserveAgentRun<'a> {
-    /// Authoritative course from the authenticated route scope.
-    pub course_id: CourseId,
+    /// Authoritative project from the authenticated route scope.
+    pub project_id: ProjectId,
+    /// Optional teaching course associated with the project.
+    pub course_id: Option<CourseId>,
     /// Public immutable create request.
     pub request: &'a CreateAgentRunRequest,
     /// Validated HTTP idempotency key.
@@ -45,7 +54,7 @@ pub struct ReserveAgentRun<'a> {
     /// Egress input already verified against the immutable package.
     pub input: &'a ImmutableEgressInput,
     /// Immutable course policy bound to the runtime.
-    pub policy: &'a CourseLlmEgressPolicy,
+    pub policy: &'a ProjectLlmEgressPolicy,
     /// Event timestamp supplied by the service clock.
     pub now: UtcTimestamp,
     /// Sanitized distributed trace identity.
@@ -58,15 +67,17 @@ pub struct AgentRunDispatchLease {
     /// Authoritative reserved run.
     pub run: AgentRun,
     /// Immutable public create request.
-    pub request: CreateAgentRunRequest,
-    /// Control-authoritative class required for the Environment track.
-    pub expected_environment_class: EnvironmentClass,
+    pub request: InternalAgentRunRequest,
+    /// Control-authoritative immutable purpose for the run.
+    pub purpose: AgentRunPurpose,
+    /// Exact Work configuration grant, when the request reuses an approved plan.
+    pub preauthorization: Option<WorkConfigurationPreauthorization>,
     /// Control-verified package contract.
     pub package: ProblemPackage,
     /// Opaque object keys indexed by package artifact identity.
     pub object_locators: BTreeMap<ArtifactId, String>,
     /// Control-verified active course policy.
-    pub policy: CourseLlmEgressPolicy,
+    pub policy: ProjectLlmEgressPolicy,
     /// Original request key used only for exact reservation replay.
     pub idempotency_key: IdempotencyKey,
     /// Sanitized distributed trace identity.
@@ -150,6 +161,8 @@ pub enum AgentRunDispatch {
 pub struct AgentTrackLease {
     /// Parent run identity.
     pub run_id: AgentRunId,
+    /// Immutable run snapshot used to bind a Work configuration plan.
+    pub run: AgentRun,
     /// Independently scheduled track.
     pub track: AgentTrackKind,
     /// Monotonic attempt owned by this lease.
@@ -158,6 +171,61 @@ pub struct AgentTrackLease {
     pub worker_id: String,
     lease_token: Uuid,
     cancellation_requested: bool,
+}
+
+/// Durable ownership of one approved Work execution side effect.
+///
+/// The request is kept as JSON because the VM request is an Agent-private contract while the
+/// container request is shared with Environment.  Both variants are validated by the execution
+/// transport before they are persisted and again when a receipt is committed.
+#[derive(Clone, Debug)]
+pub struct WorkExecutionLease {
+    /// Parent run snapshot at claim time.
+    pub run: AgentRun,
+    /// Parent run identity.
+    pub run_id: AgentRunId,
+    /// Approved Work attempt number.
+    pub attempt: u32,
+    /// Fenced worker identity.
+    pub worker_id: String,
+    /// Persisted private execution intent.
+    pub request: Value,
+    /// Whether this claim created the durable intent before the first side effect.
+    pub fresh: bool,
+    pub(crate) lease_token: Uuid,
+}
+
+/// Minimal shape used to project a persisted private VM request into the Control-facing
+/// recovery metadata contract.  Keep this private so the request itself cannot become an API
+/// surface accidentally.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedVmExecutionIntent {
+    kind: String,
+    execution_id: Uuid,
+    run_id: AgentRunId,
+    run_revision: Revision,
+    plan_id: WorkConfigurationPlanId,
+    plan_revision: Revision,
+    environment_id: contracts::EnvironmentId,
+    environment_revision: Revision,
+    actor_id: contracts::ActorId,
+    script_content: String,
+    verification_script_content: Option<String>,
+    target: PersistedVmExecutionTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedVmExecutionTarget {
+    source_identity: String,
+}
+
+/// Returns the JSON representation of the shared container execution request.
+pub fn container_execution_request_value(
+    request: &ContainerWorkExecutionRequest,
+) -> Result<Value, AgentRunStoreError> {
+    serde_json::to_value(request).map_err(|_| AgentRunStoreError::InvalidContract)
 }
 
 /// Agent-owned `PostgreSQL` repository using the fixed runtime identity/search path.
@@ -179,47 +247,42 @@ impl PostgresAgentRunStore {
         &self.pool
     }
 
-    /// Atomically reserves a Control-verified dispatch for background preparation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid identities, conflicting idempotency, or persistence failure.
-    #[allow(clippy::too_many_arguments)]
+    /// Atomically reserves the full Control-to-Agent command, including its immutable purpose.
     #[allow(clippy::too_many_lines)]
-    pub async fn reserve_dispatch(
+    pub async fn reserve_internal_dispatch(
         &self,
-        course_id: CourseId,
-        request: &CreateAgentRunRequest,
-        expected_environment_class: EnvironmentClass,
-        package: &ProblemPackage,
-        object_locators: &BTreeMap<ArtifactId, String>,
-        policy: &CourseLlmEgressPolicy,
+        command: &InternalCreateAgentRunRequest,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
     ) -> Result<AgentRunReservation, AgentRunStoreError> {
-        package
+        command
             .validate()
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
-        policy
-            .validate()
-            .map_err(|_| AgentRunStoreError::InvalidContract)?;
-        if package.course_id != course_id
-            || policy.course_id != course_id
-            || request.package_id != package.id
-            || request.package_revision != package.revision
-            || request.policy_id != policy.id
-            || request.policy_revision != policy.revision
-        {
-            return Err(AgentRunStoreError::IdentityMismatch);
+        if trace_id.trim().is_empty() {
+            return Err(AgentRunStoreError::InvalidContract);
         }
-        let expected_artifacts = package
+        command
+            .package
+            .validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        command
+            .policy
+            .validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let expected_artifacts = command
+            .package
             .files
             .iter()
             .map(|file| file.object.artifact_id)
             .collect::<BTreeSet<_>>();
-        if object_locators.keys().copied().collect::<BTreeSet<_>>() != expected_artifacts
-            || object_locators.values().any(|key| {
+        if command
+            .object_locators
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != expected_artifacts
+            || command.object_locators.values().any(|key| {
                 key.trim().is_empty()
                     || key.contains("..")
                     || key.bytes().any(|byte| byte.is_ascii_control())
@@ -227,25 +290,25 @@ impl PostgresAgentRunStore {
         {
             return Err(AgentRunStoreError::IdentityMismatch);
         }
-        let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
-            "courseId": course_id,
-            "request": request,
-            "expectedEnvironmentClass": expected_environment_class,
-        }))
-        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let request_hash =
+            Sha256Digest::of_canonical(command).map_err(|_| AgentRunStoreError::InvalidContract)?;
         let dispatch_sha256 = Sha256Digest::of_canonical(&serde_json::json!({
-            "request": request,
-            "expectedEnvironmentClass": expected_environment_class,
-            "package": package,
-            "objectLocators": object_locators,
-            "policy": policy,
+            "request": command.request,
+            "purpose": command.purpose,
+            "preauthorization": command.preauthorization,
+            "package": command.package,
+            "objectLocators": command.object_locators,
+            "policy": command.policy,
         }))
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            tracing::error!(
+                event = "agent.persistence_failed",
+                operation = "reserve_internal_dispatch.begin",
+                error = %error,
+            );
+            AgentRunStoreError::PersistenceFailed
+        })?;
         match IdempotencyStore::reserve(
             &mut transaction,
             Domain::Agent,
@@ -254,8 +317,14 @@ impl PostgresAgentRunStore {
             request_hash,
         )
         .await
-        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
-        {
+        .map_err(|error| {
+            tracing::error!(
+                event = "agent.persistence_failed",
+                operation = "reserve_internal_dispatch.idempotency_reserve",
+                error = %error,
+            );
+            AgentRunStoreError::PersistenceFailed
+        })? {
             IdempotencyDecision::Replay(value) => {
                 let reserved = decode_run(value)?;
                 let run = load_run_for_update(&mut transaction, reserved.id).await?;
@@ -269,37 +338,87 @@ impl PostgresAgentRunStore {
             IdempotencyDecision::InProgress => return Err(AgentRunStoreError::RunInProgress),
             IdempotencyDecision::Reserved => {}
         }
-        let run = requested_run(request, course_id)?;
+        let run = requested_internal_run(&command.request, command.purpose)?;
         let contract =
             serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let purpose = serde_json::to_value(command.purpose)
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let preauthorization = command
+            .preauthorization
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
         sqlx::query(
-            "INSERT INTO agent.agent_runs (run_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256,policy_revision,contract) \
-             VALUES ($1,$2,$3,$4,'requested',$5,$6,$7,$8)",
+            "INSERT INTO agent.agent_runs (run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256,policy_revision,purpose,plan,contract) \
+             VALUES ($1,$2,$3,$4,$5,'requested',$6,$7,$8,$9,$10,$11)",
         )
-        .bind(run.id.as_uuid()).bind(course_id.as_uuid()).bind(package.id.as_uuid())
-        .bind(revision_i64(run.revision)?).bind(&policy.binding.runtime_binding)
-        .bind(dispatch_sha256.to_string()).bind(revision_i64(policy.revision)?).bind(&contract)
-        .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        for track in [AgentTrackKind::Environment, AgentTrackKind::Evaluation] {
-            sqlx::query("INSERT INTO agent.agent_track_work_items (run_id,track,state,input_sha256) VALUES ($1,$2,'requested',$3)")
-                .bind(run.id.as_uuid()).bind(track_name(track)).bind(dispatch_sha256.to_string())
-                .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        .bind(run.id.as_uuid())
+        .bind(run.project_id.as_uuid())
+        .bind(run.course_id.map(CourseId::as_uuid))
+        .bind(run.package_id.as_uuid())
+        .bind(revision_i64(run.revision)?)
+        .bind(&command.policy.binding.runtime_binding)
+        .bind(dispatch_sha256.to_string())
+        .bind(revision_i64(command.policy.revision)?)
+        .bind(&purpose)
+        .bind(Option::<Value>::None)
+        .bind(&contract)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                event = "agent.persistence_failed",
+                operation = "reserve_internal_dispatch.insert_run",
+                error = %error,
+            );
+            AgentRunStoreError::PersistenceFailed
+        })?;
+        for track in tracks_for_purpose(command.purpose) {
+            sqlx::query(
+                "INSERT INTO agent.agent_track_work_items \
+                 (run_id,track,state,input_sha256) VALUES ($1,$2,'requested',$3)",
+            )
+            .bind(run.id.as_uuid())
+            .bind(track_name(track))
+            .bind(dispatch_sha256.to_string())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    event = "agent.persistence_failed",
+                    operation = "reserve_internal_dispatch.insert_track",
+                    track = track_name(track),
+                    error = %error,
+                );
+                AgentRunStoreError::PersistenceFailed
+            })?;
         }
         sqlx::query(
-            "INSERT INTO agent.agent_run_dispatches (run_id,dispatch_sha256,idempotency_key,request,expected_environment_class,package,object_locators,policy,trace_id,state) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')",
+            "INSERT INTO agent.agent_run_dispatches \
+             (run_id,dispatch_sha256,idempotency_key,request,purpose,preauthorization,package,object_locators,policy,trace_id,state) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')",
         )
-        .bind(run.id.as_uuid()).bind(dispatch_sha256.to_string()).bind(idempotency_key.as_str())
-        .bind(serde_json::to_value(request).map_err(|_| AgentRunStoreError::InvalidContract)?)
-        .bind(environment_class_name(expected_environment_class))
-        .bind(serde_json::to_value(package).map_err(|_| AgentRunStoreError::InvalidContract)?)
-        .bind(
-            serde_json::to_value(object_locators)
-                .map_err(|_| AgentRunStoreError::InvalidContract)?,
-        )
-        .bind(serde_json::to_value(policy).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(run.id.as_uuid())
+        .bind(dispatch_sha256.to_string())
+        .bind(idempotency_key.as_str())
+        .bind(serde_json::to_value(&command.request).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(purpose)
+        .bind(preauthorization)
+        .bind(serde_json::to_value(&command.package).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(serde_json::to_value(&command.object_locators).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(serde_json::to_value(&command.policy).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .bind(trace_id)
-        .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                event = "agent.persistence_failed",
+                operation = "reserve_internal_dispatch.insert_dispatch",
+                error = %error,
+            );
+            AgentRunStoreError::PersistenceFailed
+        })?;
         enqueue_run_event(
             &mut transaction,
             &run,
@@ -319,11 +438,22 @@ impl PostgresAgentRunStore {
             &contract,
         )
         .await
-        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        .map_err(|error| {
+            tracing::error!(
+                event = "agent.persistence_failed",
+                operation = "reserve_internal_dispatch.idempotency_complete",
+                error = %error,
+            );
+            AgentRunStoreError::PersistenceFailed
+        })?;
+        transaction.commit().await.map_err(|error| {
+            tracing::error!(
+                event = "agent.persistence_failed",
+                operation = "reserve_internal_dispatch.commit",
+                error = %error,
+            );
+            AgentRunStoreError::PersistenceFailed
+        })?;
         Ok(AgentRunReservation::Created(run))
     }
 
@@ -343,11 +473,14 @@ impl PostgresAgentRunStore {
             .await
             .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let row = sqlx::query(
-            "SELECT run_id,dispatch_sha256,idempotency_key,request,expected_environment_class,package,object_locators,policy,trace_id \
+            "SELECT run_id,dispatch_sha256,idempotency_key,request,purpose,preauthorization,package,object_locators,policy,trace_id \
              FROM agent.agent_run_dispatches \
              WHERE (state IN ('pending','prepared') OR (state='preparing' AND lease_expires_at <= now())) \
                AND EXISTS (SELECT 1 FROM agent.agent_track_work_items work \
+                           JOIN agent.agent_runs run ON run.run_id=work.run_id \
                            WHERE work.run_id=agent_run_dispatches.run_id \
+                             AND (work.track <> 'work_configuration' \
+                                  OR (run.plan IS NULL AND work.execution_request IS NULL)) \
                              AND (work.state='requested' OR \
                                   (work.state='running' AND work.lease_expires_at <= now()))) \
              ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
@@ -379,11 +512,17 @@ impl PostgresAgentRunStore {
                     .map_err(|_| AgentRunStoreError::InvalidContract)?,
             )
             .map_err(|_| AgentRunStoreError::InvalidContract)?,
-            expected_environment_class: serde_json::from_value(Value::String(
-                row.try_get("expected_environment_class")
+            purpose: serde_json::from_value(
+                row.try_get("purpose")
                     .map_err(|_| AgentRunStoreError::InvalidContract)?,
-            ))
+            )
             .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            preauthorization: row
+                .try_get::<Option<Value>, _>("preauthorization")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
             package: serde_json::from_value(
                 row.try_get("package")
                     .map_err(|_| AgentRunStoreError::InvalidContract)?,
@@ -451,7 +590,10 @@ impl PostgresAgentRunStore {
         let work = sqlx::query("UPDATE agent.agent_track_work_items SET input_sha256=$2,updated_at=now() WHERE run_id=$1 AND input_sha256 IN ($2,$3)")
             .bind(lease.run.id.as_uuid()).bind(input_sha256.to_string()).bind(lease.dispatch_sha256.to_string())
             .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        if work.rows_affected() != 2 {
+        if work.rows_affected()
+            != u64::try_from(lease.run.tracks.len())
+                .map_err(|_| AgentRunStoreError::InvalidContract)?
+        {
             return Err(AgentRunStoreError::StateConflict);
         }
         transaction
@@ -531,7 +673,9 @@ impl PostgresAgentRunStore {
         };
         let work = sqlx::query("UPDATE agent.agent_track_work_items SET state=$2,attempt_number=1,worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE run_id=$1 AND state='requested'")
             .bind(run.id.as_uuid()).bind(work_state).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        if work.rows_affected() != 2 {
+        if work.rows_affected()
+            != u64::try_from(run.tracks.len()).map_err(|_| AgentRunStoreError::InvalidContract)?
+        {
             return Err(AgentRunStoreError::StateConflict);
         }
         sqlx::query("UPDATE agent.agent_run_dispatches SET state='failed',terminal_diagnostic=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE run_id=$1 AND lease_token=$2")
@@ -566,6 +710,7 @@ impl PostgresAgentRunStore {
     ) -> Result<AgentRunReservation, AgentRunStoreError> {
         validate_reservation(&command)?;
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "projectId": command.project_id,
             "courseId": command.course_id,
             "request": command.request,
         }))
@@ -599,28 +744,31 @@ impl PostgresAgentRunStore {
             IdempotencyDecision::Reserved => {}
         }
 
-        let run = requested_run(command.request, command.course_id)?;
+        let run = requested_run(command.request)?;
         let contract =
             serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
         sqlx::query(
             "INSERT INTO agent.agent_runs \
-             (run_id, course_id, problem_package_id, revision, state, provider_binding, \
-              input_sha256, policy_revision, contract) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (run_id, project_id, course_id, problem_package_id, revision, state, provider_binding, \
+              input_sha256, policy_revision, purpose, plan, contract) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(run.id.as_uuid())
-        .bind(run.course_id.as_uuid())
+        .bind(run.project_id.as_uuid())
+        .bind(run.course_id.map(CourseId::as_uuid))
         .bind(run.package_id.as_uuid())
         .bind(revision_i64(run.revision)?)
         .bind("requested")
         .bind(&command.policy.binding.runtime_binding)
         .bind(command.input.sha256().to_string())
         .bind(revision_i64(command.policy.revision)?)
+        .bind(serde_json::to_value(run.purpose).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(Option::<Value>::None)
         .bind(&contract)
         .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
-        for track in [AgentTrackKind::Environment, AgentTrackKind::Evaluation] {
+        for track in tracks_for_purpose(run.purpose) {
             sqlx::query(
                 "INSERT INTO agent.agent_track_work_items \
                  (run_id, track, state, input_sha256) VALUES ($1, $2, 'requested', $3)",
@@ -687,6 +835,8 @@ impl PostgresAgentRunStore {
             "SELECT work.state, work.input_sha256, work.attempt_number, \
                     work.next_retry_at <= now() AS due, \
                     work.lease_expires_at > now() AS lease_current, \
+                    run.plan IS NOT NULL AS has_plan, \
+                    work.execution_request IS NOT NULL AS has_execution_request, \
                     run.cancellation_requested_at IS NOT NULL AS cancellation_requested \
              FROM agent.agent_track_work_items work \
              JOIN agent.agent_runs run ON run.run_id=work.run_id \
@@ -698,6 +848,20 @@ impl PostgresAgentRunStore {
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .ok_or(AgentRunStoreError::StateConflict)?;
+        if track_kind == AgentTrackKind::WorkConfiguration
+            && (row
+                .try_get::<bool, _>("has_plan")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?
+                || row
+                    .try_get::<bool, _>("has_execution_request")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?)
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            return Ok(None);
+        }
         let Some(claim) = decode_claimable_track(&row, input_sha256)? else {
             transaction
                 .rollback()
@@ -735,6 +899,7 @@ impl PostgresAgentRunStore {
             .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         Ok(Some(AgentTrackLease {
             run_id,
+            run: run.clone(),
             track: track_kind,
             attempt,
             worker_id: worker_id.to_owned(),
@@ -837,13 +1002,15 @@ impl PostgresAgentRunStore {
     /// Returns an error for stale revision, conflicting idempotency, or persistence failure.
     pub async fn request_cancellation_revisioned(
         &self,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         run_id: AgentRunId,
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
     ) -> Result<AgentRun, AgentRunStoreError> {
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "projectId": project_id,
             "courseId": course_id,
             "runId": run_id,
             "expectedRevision": expected_revision,
@@ -876,8 +1043,8 @@ impl PostgresAgentRunStore {
             IdempotencyDecision::Reserved => {}
         }
         let mut run = load_run_for_update(&mut transaction, run_id).await?;
-        if run.course_id != course_id {
-            return Err(AgentRunStoreError::CourseMismatch);
+        if run.project_id != project_id || run.course_id != course_id {
+            return Err(AgentRunStoreError::IdentityMismatch);
         }
         if run.revision != expected_revision {
             return Err(AgentRunStoreError::StateConflict);
@@ -915,15 +1082,21 @@ impl PostgresAgentRunStore {
     /// # Errors
     ///
     /// Returns an error for stale revision, invalid track state, or persistence failure.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "revisioned retry keeps the idempotency and state transition atomic"
+    )]
     pub async fn retry_track_revisioned(
         &self,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         run_id: AgentRunId,
         track: AgentTrackKind,
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
     ) -> Result<AgentRun, AgentRunStoreError> {
         let request_hash = Sha256Digest::of_canonical(&serde_json::json!({
+            "projectId": project_id,
             "courseId": course_id,
             "runId": run_id,
             "track": track,
@@ -957,8 +1130,8 @@ impl PostgresAgentRunStore {
             IdempotencyDecision::Reserved => {}
         }
         let mut run = load_run_for_update(&mut transaction, run_id).await?;
-        if run.course_id != course_id {
-            return Err(AgentRunStoreError::CourseMismatch);
+        if run.project_id != project_id || run.course_id != course_id {
+            return Err(AgentRunStoreError::IdentityMismatch);
         }
         if run.revision != expected_revision
             || !matches!(
@@ -980,6 +1153,25 @@ impl PostgresAgentRunStore {
             Some(AgentAttemptState::Failed | AgentAttemptState::Cancelled)
         ) {
             return Err(AgentRunStoreError::StateConflict);
+        }
+        if track == AgentTrackKind::WorkConfiguration {
+            let has_execution_request = sqlx::query_scalar::<_, bool>(
+                "SELECT execution_request IS NOT NULL
+                 FROM agent.agent_track_work_items
+                 WHERE run_id=$1 AND track='work_configuration'
+                 FOR UPDATE",
+            )
+            .bind(run_id.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            .ok_or(AgentRunStoreError::StateConflict)?;
+            // A generated plan is an immutable proposal.  Retrying that same track would
+            // silently re-enter LLM generation while leaving the old proposal attached to the
+            // run.  A new Work configuration request must create a new run instead.
+            if run.plan.is_some() || has_execution_request {
+                return Err(AgentRunStoreError::StateConflict);
+            }
         }
         let updated = sqlx::query("UPDATE agent.agent_track_work_items SET state='requested',next_retry_at=now(),worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE run_id=$1 AND track=$2 AND state IN ('failed','cancelled')")
             .bind(run_id.as_uuid()).bind(track_name(track)).execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
@@ -1022,6 +1214,53 @@ impl PostgresAgentRunStore {
         now: UtcTimestamp,
         trace_id: &str,
     ) -> Result<StoredAgentTrackOutcome, AgentRunStoreError> {
+        self.complete_track_with_plan(lease, outcome, now, trace_id, None)
+            .await
+    }
+
+    /// Commits a Work configuration result and its immutable generated plan.
+    ///
+    /// The plan is written in the same transaction as the successful track checkpoint, so a
+    /// downstream admission reader cannot observe a successful script proposal without its exact
+    /// artifact bindings.
+    pub async fn complete_work_track(
+        &self,
+        lease: &AgentTrackLease,
+        outcome: Result<ClaudeCodeExecution, ClaudeCodeFailure>,
+        package: &ProblemPackage,
+        preauthorization: Option<&WorkConfigurationPreauthorization>,
+        now: UtcTimestamp,
+        trace_id: &str,
+    ) -> Result<StoredAgentTrackOutcome, AgentRunStoreError> {
+        if lease.track != AgentTrackKind::WorkConfiguration {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let plan = match &outcome {
+            Ok(execution) => Some(bind_work_configuration_plan(
+                &lease.run,
+                package,
+                preauthorization,
+                execution,
+                now,
+            )?),
+            Err(_) => None,
+        };
+        self.complete_track_with_plan(lease, outcome, now, trace_id, plan)
+            .await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "track completion keeps receipt, plan, and aggregate updates atomic"
+    )]
+    async fn complete_track_with_plan(
+        &self,
+        lease: &AgentTrackLease,
+        outcome: Result<ClaudeCodeExecution, ClaudeCodeFailure>,
+        now: UtcTimestamp,
+        trace_id: &str,
+        plan: Option<WorkConfigurationPlan>,
+    ) -> Result<StoredAgentTrackOutcome, AgentRunStoreError> {
         let mut transaction = self
             .pool
             .begin()
@@ -1061,13 +1300,29 @@ impl PostgresAgentRunStore {
                 environment_checkpoint(&run, lease.attempt, outcome, now)?
             }
             AgentTrackKind::Evaluation => evaluation_checkpoint(&run, lease.attempt, outcome, now)?,
+            AgentTrackKind::WorkConfiguration => {
+                work_configuration_checkpoint(&run, lease.attempt, outcome, now)?
+            }
         };
         apply_checkpoint(&mut run, &checkpoint)?;
+        if let Some(plan) = plan {
+            if lease.track != AgentTrackKind::WorkConfiguration {
+                return Err(AgentRunStoreError::InvalidContract);
+            }
+            run.plan = Some(plan);
+        }
         let derived = run
             .derived_state()
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
         run.state = if cancellation_requested && derived == AgentRunState::Running {
             AgentRunState::Cancelling
+        } else if lease.track == AgentTrackKind::WorkConfiguration
+            && checkpoint.candidate.is_none()
+            && checkpoint.audit.outcome == RuntimeAuditOutcome::Succeeded
+        {
+            // Generating and materializing a plan never executes it. A Control grant is
+            // consumed by the separate execution path after explicit approval.
+            AgentRunState::AwaitingApproval
         } else {
             derived
         };
@@ -1126,8 +1381,8 @@ impl PostgresAgentRunStore {
     /// Returns a stable missing-run, contract or persistence failure.
     pub async fn load(&self, run_id: AgentRunId) -> Result<AgentRun, AgentRunStoreError> {
         let row = sqlx::query(
-            "SELECT course_id, problem_package_id, revision, state, input_sha256, \
-                    policy_revision, contract \
+            "SELECT project_id, course_id, problem_package_id, revision, state, input_sha256, \
+                    policy_revision, plan, contract \
              FROM agent.agent_runs WHERE run_id = $1",
         )
         .bind(run_id.as_uuid())
@@ -1136,6 +1391,578 @@ impl PostgresAgentRunStore {
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .ok_or(AgentRunStoreError::RunNotFound)?;
         decode_run_row(&row)
+    }
+
+    /// Applies one exact Control-issued Work preauthorization and queues the existing generated
+    /// plan for execution. Approval never marks the run successful; the Work runtime must report
+    /// execution and verification separately before a terminal success can be recorded.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "approval validates and persists the plan binding in one transaction"
+    )]
+    pub async fn approve_work_configuration(
+        &self,
+        run_id: AgentRunId,
+        request: &InternalApproveWorkConfigurationRequest,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+    ) -> Result<AgentRun, AgentRunStoreError> {
+        if request.project_id != request.preauthorization.project_id
+            || request.preauthorization.expires_at <= now
+        {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        let request_hash =
+            Sha256Digest::of_canonical(request).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Agent,
+            APPROVE_WORK_CONFIGURATION_OPERATION,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                return serde_json::from_value(value)
+                    .map_err(|_| AgentRunStoreError::InvalidContract);
+            }
+            IdempotencyDecision::Conflict => return Err(AgentRunStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(AgentRunStoreError::RunInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        let mut run = load_run_for_update(&mut transaction, run_id).await?;
+        if run.project_id != request.project_id
+            || run.course_id != request.course_id
+            || run.revision != request.expected_run_revision
+            || run.state != AgentRunState::AwaitingApproval
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let AgentRunPurpose::WorkConfiguration {
+            environment_id,
+            environment_revision,
+            actor_id,
+            ..
+        } = run.purpose
+        else {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        };
+        let plan = run.plan.as_ref().ok_or(AgentRunStoreError::StateConflict)?;
+        if request.preauthorization.environment_id != environment_id
+            || request.preauthorization.environment_revision != environment_revision
+            || request.preauthorization.actor_id != actor_id
+            || request.preauthorization.project_id != run.project_id
+            || request
+                .preauthorization
+                .validate_against_plan(plan)
+                .is_err()
+        {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        // The plan remains immutable.  Approval moves the existing proposal attempt into the
+        // execution phase; it must never append another LLM attempt.
+        let track = run
+            .tracks
+            .iter_mut()
+            .find(|track| track.kind == AgentTrackKind::WorkConfiguration)
+            .ok_or(AgentRunStoreError::InvalidContract)?;
+        let attempt = track
+            .attempts
+            .last_mut()
+            .filter(|attempt| attempt.state == AgentAttemptState::AwaitingApproval)
+            .ok_or(AgentRunStoreError::StateConflict)?;
+        let attempt_number = attempt.number;
+        attempt.state = AgentAttemptState::Running;
+        attempt.diagnostic_code = None;
+        run.state = AgentRunState::Running;
+        run.revision = next_revision(run.revision)?;
+        run.validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        update_run(&mut transaction, &run).await?;
+        let queued = sqlx::query(
+            "UPDATE agent.agent_track_work_items
+             SET state='requested', attempt_number=$2, worker_id=NULL, lease_token=NULL,
+                  lease_expires_at=NULL, heartbeat_at=NULL, execution_request=NULL,
+                  execution_receipt=NULL, updated_at=now()
+              WHERE run_id=$1 AND track='work_configuration' AND state='awaiting_approval'
+                AND attempt_number=$2 AND execution_request IS NULL AND execution_receipt IS NULL",
+        )
+        .bind(run.id.as_uuid())
+        .bind(i64::from(attempt_number))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if queued.rows_affected() != 1 {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let value = serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Agent,
+            APPROVE_WORK_CONFIGURATION_OPERATION,
+            idempotency_key.as_str(),
+            &value,
+        )
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(run)
+    }
+
+    /// Claims the approved Work execution side effect or recovers an expired owner.
+    ///
+    /// A fresh intent is written in the same transaction as the first execution lease.  Recovery
+    /// accepts no replacement intent: it returns the previously persisted JSON and therefore keeps
+    /// a restart bound to the same run, plan and revision.  An expired owner is never allowed to
+    /// issue a second intent.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "execution claim and recovery fencing share one transaction"
+    )]
+    pub async fn claim_work_execution(
+        &self,
+        run_id: AgentRunId,
+        worker_id: &str,
+        lease_duration: Duration,
+        fresh_request: Option<Value>,
+    ) -> Result<Option<WorkExecutionLease>, AgentRunStoreError> {
+        validate_worker(worker_id, lease_duration)?;
+        let lease_milliseconds = lease_milliseconds(lease_duration)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let run = load_run_for_update(&mut transaction, run_id).await?;
+        if !matches!(run.purpose, AgentRunPurpose::WorkConfiguration { .. })
+            || run.plan.is_none()
+            || !matches!(
+                run.state,
+                AgentRunState::Running | AgentRunState::Cancelling
+            )
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT state,attempt_number,execution_request,execution_receipt,
+                    lease_expires_at > now() AS lease_current
+             FROM agent.agent_track_work_items
+             WHERE run_id=$1 AND track='work_configuration' FOR UPDATE",
+        )
+        .bind(run_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        .ok_or(AgentRunStoreError::StateConflict)?;
+        let state = row
+            .try_get::<String, _>("state")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let attempt_number = row
+            .try_get::<i64, _>("attempt_number")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let expected_attempt = work_execution_attempt(&run)?;
+        if attempt_number != i64::from(expected_attempt) {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            return Ok(None);
+        }
+        let lease_current = row
+            .try_get::<Option<bool>, _>("lease_current")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?
+            .unwrap_or(false);
+        let persisted_request = row
+            .try_get::<Option<Value>, _>("execution_request")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let persisted_receipt = row
+            .try_get::<Option<Value>, _>("execution_receipt")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if persisted_receipt.is_some() {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            return Ok(None);
+        }
+        let (request, fresh) = match (
+            state.as_str(),
+            lease_current,
+            persisted_request,
+            fresh_request,
+        ) {
+            ("requested", false, None, Some(request)) if run.state == AgentRunState::Running => {
+                if !request.is_object() {
+                    return Err(AgentRunStoreError::InvalidContract);
+                }
+                (request, true)
+            }
+            // A cancellation racing with approval must not start a fresh side effect.  Recovery
+            // with an already persisted request remains allowed in the running branch below.
+            ("requested", false, None, Some(_)) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                return Ok(None);
+            }
+            ("running", false, Some(request), None) => (request, false),
+            ("running" | "requested", true, _, _) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                return Ok(None);
+            }
+            _ => return Err(AgentRunStoreError::StateConflict),
+        };
+        let lease_token = Uuid::now_v7();
+        let updated = sqlx::query(
+            "UPDATE agent.agent_track_work_items
+             SET state='running', worker_id=$2, lease_token=$3,
+                 heartbeat_at=date_trunc('milliseconds', clock_timestamp()),
+                 lease_expires_at=date_trunc('milliseconds', clock_timestamp())
+                     + ($4 * interval '1 millisecond'),
+                 execution_request=COALESCE(execution_request,$5), updated_at=now()
+             WHERE run_id=$1 AND track='work_configuration' AND attempt_number=$6
+               AND state IN ('requested','running')
+               AND (lease_expires_at IS NULL OR lease_expires_at <= now())",
+        )
+        .bind(run_id.as_uuid())
+        .bind(worker_id)
+        .bind(lease_token)
+        .bind(lease_milliseconds)
+        .bind(&request)
+        .bind(attempt_number)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentRunStoreError::LeaseLost);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(Some(WorkExecutionLease {
+            run,
+            run_id,
+            attempt: expected_attempt,
+            worker_id: worker_id.to_owned(),
+            request,
+            fresh,
+            lease_token,
+        }))
+    }
+
+    /// Returns approved Work execution rows that are ready for a fresh claim or recovery.
+    ///
+    /// A requested row has no persisted intent and must be supplied a newly built request by the
+    /// caller. A running row is returned only after its owner lease expires; its existing intent
+    /// is the sole input accepted by [`Self::claim_work_execution`].
+    pub async fn work_execution_candidates(
+        &self,
+        limit: u16,
+    ) -> Result<Vec<(AgentRunId, bool)>, AgentRunStoreError> {
+        if limit == 0 || limit > 128 {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let rows = sqlx::query(
+            "SELECT work.run_id,work.state FROM agent.agent_track_work_items work
+             JOIN agent.agent_runs run ON run.run_id=work.run_id
+             WHERE work.track='work_configuration' AND run.plan IS NOT NULL
+               AND ((work.state='requested' AND run.state='running'
+                     AND work.execution_request IS NULL)
+                    OR (work.state='running' AND run.state IN ('running','cancelling')
+                        AND work.execution_request IS NOT NULL
+                        AND work.lease_expires_at <= now()))
+             ORDER BY work.updated_at,work.run_id LIMIT $1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        rows.into_iter()
+            .map(|row| {
+                let run_id = row
+                    .try_get::<Uuid, _>("run_id")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let state = row
+                    .try_get::<String, _>("state")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let id = AgentRunId::from_str(&run_id.to_string())
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                match state.as_str() {
+                    "requested" => Ok((id, true)),
+                    "running" => Ok((id, false)),
+                    _ => Err(AgentRunStoreError::InvalidContract),
+                }
+            })
+            .collect()
+    }
+
+    /// Reads the metadata of one persisted VM execution intent for Control.
+    ///
+    /// The complete private request remains Agent-owned.  This endpoint exposes only the exact
+    /// identity and byte digests that Control needs to fence Environment recovery; scripts,
+    /// credentials, and provider details never cross this boundary.
+    pub async fn work_execution_intent_metadata(
+        &self,
+        run_id: AgentRunId,
+        query: &AgentWorkExecutionIntentQuery,
+    ) -> Result<AgentWorkExecutionIntentMetadata, AgentRunStoreError> {
+        let row = sqlx::query(
+            "SELECT run.project_id,run.course_id,work.execution_request
+             FROM agent.agent_track_work_items work
+             JOIN agent.agent_runs run ON run.run_id=work.run_id
+             WHERE work.run_id=$1 AND work.track='work_configuration'",
+        )
+        .bind(run_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        .ok_or(AgentRunStoreError::RunNotFound)?;
+
+        let project_id = row
+            .try_get::<Uuid, _>("project_id")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let project_id = ProjectId::from_str(&project_id.to_string())
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let course_id = row
+            .try_get::<Option<Uuid>, _>("course_id")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?
+            .map(|value| CourseId::from_str(&value.to_string()))
+            .transpose()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if project_id != query.project_id || course_id != query.course_id {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        let request = row
+            .try_get::<Option<Value>, _>("execution_request")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?
+            .ok_or(AgentRunStoreError::StateConflict)?;
+        let request: PersistedVmExecutionIntent =
+            serde_json::from_value(request).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if request.kind != "virtual_machine"
+            || request.run_id != run_id
+            || request.execution_id != query.execution_id
+        {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        let metadata = AgentWorkExecutionIntentMetadata {
+            execution_id: request.execution_id,
+            run_id: request.run_id,
+            run_revision: request.run_revision,
+            project_id,
+            course_id,
+            environment_id: request.environment_id,
+            environment_revision: request.environment_revision,
+            actor_id: request.actor_id,
+            plan_id: request.plan_id,
+            plan_revision: request.plan_revision,
+            source_identity: request.target.source_identity,
+            script_sha256: Sha256Digest::of_bytes(request.script_content.as_bytes()).to_string(),
+            verification_script_sha256: request
+                .verification_script_content
+                .as_deref()
+                .map(|value| Sha256Digest::of_bytes(value.as_bytes()).to_string()),
+        };
+        metadata
+            .validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        Ok(metadata)
+    }
+
+    /// Renews one exact Work execution lease and reports durable run cancellation.
+    ///
+    /// The execution worker may spend longer than one lease polling a remote runtime. The
+    /// same worker/token fence therefore covers every poll and completion, just like an Agent
+    /// generation track lease.
+    pub async fn heartbeat_work_execution(
+        &self,
+        lease: &WorkExecutionLease,
+        lease_duration: Duration,
+    ) -> Result<bool, AgentRunStoreError> {
+        validate_worker(&lease.worker_id, lease_duration)?;
+        let lease_milliseconds = lease_milliseconds(lease_duration)?;
+        let cancellation = sqlx::query_scalar::<_, bool>(
+            "UPDATE agent.agent_track_work_items work \
+             SET heartbeat_at=date_trunc('milliseconds', clock_timestamp()), \
+                 lease_expires_at=date_trunc('milliseconds', clock_timestamp()) \
+                     + ($5 * interval '1 millisecond'), updated_at=now() \
+             FROM agent.agent_runs run \
+             WHERE work.run_id=$1 AND work.track='work_configuration' \
+               AND work.worker_id=$2 AND work.lease_token=$3 \
+               AND work.attempt_number=$4 AND work.lease_expires_at > now() \
+               AND work.state='running' AND run.run_id=work.run_id \
+             RETURNING run.cancellation_requested_at IS NOT NULL",
+        )
+        .bind(lease.run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token)
+        .bind(i64::from(lease.attempt))
+        .bind(lease_milliseconds)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        cancellation.ok_or(AgentRunStoreError::LeaseLost)
+    }
+
+    /// Persists one terminal Work receipt and transitions the already approved attempt.
+    ///
+    /// The lease fence covers both the receipt and the public run aggregate.  Callers must validate
+    /// the receipt against the saved request before invoking this method; the database row is still
+    /// checked for ownership and a duplicate receipt is rejected.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "receipt completion updates the fenced lease and aggregate atomically"
+    )]
+    pub async fn complete_work_execution(
+        &self,
+        lease: &WorkExecutionLease,
+        receipt: Value,
+        succeeded: bool,
+        diagnostic_code: Option<&str>,
+        now: UtcTimestamp,
+        trace_id: &str,
+    ) -> Result<AgentRun, AgentRunStoreError> {
+        if !receipt.is_object() || trace_id.trim().is_empty() {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        if !succeeded && diagnostic_code.is_none_or(str::is_empty) {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let mut run = load_run_for_update(&mut transaction, lease.run_id).await?;
+        let row = sqlx::query(
+            "SELECT execution_request,execution_receipt,lease_expires_at > now() AS lease_current
+             FROM agent.agent_track_work_items
+             WHERE run_id=$1 AND track='work_configuration' AND state='running'
+               AND worker_id=$2 AND lease_token=$3 AND attempt_number=$4 FOR UPDATE",
+        )
+        .bind(lease.run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token)
+        .bind(i64::from(lease.attempt))
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        .ok_or(AgentRunStoreError::LeaseLost)?;
+        let lease_current = row
+            .try_get::<Option<bool>, _>("lease_current")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if lease_current != Some(true) {
+            return Err(AgentRunStoreError::LeaseLost);
+        }
+        let saved_request = row
+            .try_get::<Value, _>("execution_request")
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if saved_request != lease.request
+            || row
+                .try_get::<Option<Value>, _>("execution_receipt")
+                .map_err(|_| AgentRunStoreError::InvalidContract)?
+                .is_some()
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let track = run
+            .tracks
+            .iter_mut()
+            .find(|track| track.kind == AgentTrackKind::WorkConfiguration)
+            .ok_or(AgentRunStoreError::InvalidContract)?;
+        let attempt = track
+            .attempts
+            .last_mut()
+            .filter(|attempt| {
+                attempt.number == lease.attempt && attempt.state == AgentAttemptState::Running
+            })
+            .ok_or(AgentRunStoreError::StateConflict)?;
+        attempt.state = if succeeded {
+            AgentAttemptState::Succeeded
+        } else if diagnostic_code == Some("LW_AGENT_WORK_EXECUTION_CANCELLED") {
+            AgentAttemptState::Cancelled
+        } else {
+            AgentAttemptState::Failed
+        };
+        attempt.diagnostic_code = if succeeded {
+            None
+        } else {
+            diagnostic_code.map(str::to_owned)
+        };
+        run.state = run
+            .derived_state()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        run.revision = next_revision(run.revision)?;
+        run.validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        update_run(&mut transaction, &run).await?;
+        let updated = sqlx::query(
+            "UPDATE agent.agent_track_work_items
+             SET state=$6, execution_receipt=$5, worker_id=NULL, lease_token=NULL,
+                 lease_expires_at=NULL, heartbeat_at=NULL, updated_at=now()
+             WHERE run_id=$1 AND track='work_configuration' AND worker_id=$2
+               AND lease_token=$3 AND attempt_number=$4 AND state='running'",
+        )
+        .bind(lease.run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token)
+        .bind(i64::from(lease.attempt))
+        .bind(receipt)
+        .bind(if succeeded {
+            "succeeded"
+        } else if diagnostic_code == Some("LW_AGENT_WORK_EXECUTION_CANCELLED") {
+            "cancelled"
+        } else {
+            "failed"
+        })
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if updated.rows_affected() != 1 {
+            return Err(AgentRunStoreError::LeaseLost);
+        }
+        if is_terminal_run(run.state) {
+            let (subject, diagnostic) = terminal_event(&run);
+            let sequence = next_outbox_sequence(&mut transaction, run.id).await?;
+            enqueue_run_event(
+                &mut transaction,
+                &run,
+                subject,
+                sequence,
+                u64::from(lease.attempt),
+                diagnostic,
+                now,
+                trace_id,
+            )
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(run)
     }
 
     /// Loads both retained checkpoints in sequence order for recovery or projection.
@@ -1208,8 +2035,10 @@ pub struct AgentRunService {
 
 /// Complete service command for an idempotent dual-track execution.
 pub struct ExecuteAgentRun<'a> {
-    /// Authoritative course route scope.
-    pub course_id: CourseId,
+    /// Authoritative project route scope.
+    pub project_id: ProjectId,
+    /// Optional teaching course route scope.
+    pub course_id: Option<CourseId>,
     /// Immutable public create request.
     pub request: &'a CreateAgentRunRequest,
     /// Control-authoritative class required for the Environment candidate.
@@ -1264,6 +2093,10 @@ impl AgentRunService {
     /// # Errors
     ///
     /// Returns the stable reservation, runtime-state, contract or persistence failure.
+    #[allow(
+        clippy::large_futures,
+        reason = "the public dispatch preserves one reservation and execution boundary"
+    )]
     pub async fn execute(
         &self,
         command: ExecuteAgentRun<'_>,
@@ -1271,6 +2104,7 @@ impl AgentRunService {
         let reservation = self
             .store
             .reserve(ReserveAgentRun {
+                project_id: command.project_id,
                 course_id: command.course_id,
                 request: command.request,
                 idempotency_key: command.idempotency_key,
@@ -1365,6 +2199,77 @@ impl AgentRunService {
         }
     }
 
+    /// Executes one Control-reserved typed dispatch without attempting a second reservation.
+    ///
+    /// Authoring keeps its existing dual-track execution, while Work configuration owns one
+    /// independently fenced track and binds its generated plan in the completion transaction.
+    #[allow(
+        clippy::large_futures,
+        reason = "the background dispatch preserves the reserved run boundary"
+    )]
+    pub async fn execute_reserved_dispatch(
+        &self,
+        lease: AgentRunDispatchLease,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        now: UtcTimestamp,
+    ) -> Result<AgentRunDispatch, AgentRunStoreError> {
+        match lease.request {
+            InternalAgentRunRequest::Authoring(request) => {
+                let AgentRunPurpose::Authoring { environment_class } = lease.purpose else {
+                    return Err(AgentRunStoreError::IdentityMismatch);
+                };
+                self.execute_reserved(
+                    ExecuteAgentRun {
+                        project_id: lease.run.project_id,
+                        course_id: lease.run.course_id,
+                        request: &request,
+                        expected_environment_class: environment_class,
+                        idempotency_key: &lease.idempotency_key,
+                        input,
+                        cancellation,
+                        now,
+                        trace_id: &lease.trace_id,
+                    },
+                    lease.run,
+                )
+                .await
+            }
+            InternalAgentRunRequest::WorkConfiguration(_) => {
+                if !matches!(lease.purpose, AgentRunPurpose::WorkConfiguration { .. }) {
+                    return Err(AgentRunStoreError::IdentityMismatch);
+                }
+                let track = self
+                    .store
+                    .claim_track(
+                        lease.run.id,
+                        AgentTrackKind::WorkConfiguration,
+                        input.sha256(),
+                        &self.worker_id,
+                        self.lease_duration,
+                    )
+                    .await?;
+                let executed = self
+                    .execute_work_track(
+                        track,
+                        input,
+                        cancellation,
+                        now,
+                        &lease.trace_id,
+                        &lease.package,
+                        lease.preauthorization.as_ref(),
+                    )
+                    .await?;
+                let current = self.store.load(lease.run.id).await?;
+                if executed {
+                    Ok(AgentRunDispatch::Progressed(current))
+                } else {
+                    Ok(AgentRunDispatch::Replayed(current))
+                }
+            }
+        }
+    }
+
     async fn execute_track(
         &self,
         lease: Option<AgentTrackLease>,
@@ -1410,6 +2315,60 @@ impl AgentRunService {
         };
         self.store
             .complete_track(&lease, outcome, now, trace_id)
+            .await?;
+        Ok(true)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "work execution carries the persisted plan and authorization context"
+    )]
+    async fn execute_work_track(
+        &self,
+        lease: Option<AgentTrackLease>,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        now: UtcTimestamp,
+        trace_id: &str,
+        package: &ProblemPackage,
+        preauthorization: Option<&WorkConfigurationPreauthorization>,
+    ) -> Result<bool, AgentRunStoreError> {
+        let Some(lease) = lease else {
+            return Ok(false);
+        };
+        if lease.cancellation_requested {
+            cancellation.cancel();
+        }
+        let generation = self.runtime.generate_for_class(
+            lease.track,
+            input,
+            cancellation.clone(),
+            EnvironmentClass::Work,
+        );
+        tokio::pin!(generation);
+        let heartbeat_period = self
+            .lease_duration
+            .checked_div(3)
+            .unwrap_or(self.lease_duration)
+            .max(Duration::from_millis(10));
+        let mut heartbeat = tokio::time::interval(heartbeat_period);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                outcome = &mut generation => break outcome,
+                _ = heartbeat.tick() => {
+                    match self.store.heartbeat_track(&lease, self.lease_duration).await {
+                        Ok(true) => cancellation.cancel(),
+                        Ok(false) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        };
+        self.store
+            .complete_work_track(&lease, outcome, package, preauthorization, now, trace_id)
             .await?;
         Ok(true)
     }
@@ -1510,8 +2469,25 @@ fn append_claimed_attempt(
     Ok(attempt)
 }
 
+fn work_execution_attempt(run: &AgentRun) -> Result<u32, AgentRunStoreError> {
+    let track = run
+        .tracks
+        .iter()
+        .find(|track| track.kind == AgentTrackKind::WorkConfiguration)
+        .ok_or(AgentRunStoreError::InvalidContract)?;
+    let attempt = track
+        .attempts
+        .last()
+        .filter(|attempt| attempt.state == AgentAttemptState::Running)
+        .ok_or(AgentRunStoreError::StateConflict)?;
+    Ok(attempt.number)
+}
+
 fn validate_reservation(command: &ReserveAgentRun<'_>) -> Result<(), AgentRunStoreError> {
     if command.trace_id.trim().is_empty()
+        || command.project_id != command.input.project_id()
+        || command.request.project_id != command.project_id
+        || command.request.course_id != command.course_id
         || command.course_id != command.input.course_id()
         || command.request.package_id != command.input.package_id()
         || command.request.package_revision != command.input.package_revision()
@@ -1519,6 +2495,7 @@ fn validate_reservation(command: &ReserveAgentRun<'_>) -> Result<(), AgentRunSto
         || command.request.policy_revision != command.policy.revision
         || command.input.policy_id() != command.policy.id
         || command.input.policy_revision() != command.policy.revision
+        || command.policy.project_id != command.project_id
         || command.policy.course_id != command.course_id
     {
         return Err(AgentRunStoreError::IdentityMismatch);
@@ -1533,7 +2510,8 @@ fn validate_reserved_run(
     command: &ExecuteAgentRun<'_>,
     run: &AgentRun,
 ) -> Result<(), AgentRunStoreError> {
-    if run.course_id != command.course_id
+    if run.project_id != command.project_id
+        || run.course_id != command.course_id
         || run.package_id != command.request.package_id
         || run.policy_id != command.request.policy_id
         || run.state == AgentRunState::Failed
@@ -1542,6 +2520,7 @@ fn validate_reserved_run(
         return Err(AgentRunStoreError::IdentityMismatch);
     }
     if command.trace_id.trim().is_empty()
+        || command.input.project_id() != command.project_id
         || command.input.course_id() != command.course_id
         || command.input.package_id() != command.request.package_id
         || command.input.package_revision() != command.request.package_revision
@@ -1551,17 +2530,17 @@ fn validate_reserved_run(
     Ok(())
 }
 
-fn requested_run(
-    request: &CreateAgentRunRequest,
-    course_id: CourseId,
-) -> Result<AgentRun, AgentRunStoreError> {
+fn requested_run(request: &CreateAgentRunRequest) -> Result<AgentRun, AgentRunStoreError> {
     let run = AgentRun {
         id: AgentRunId::new(),
-        course_id,
+        project_id: request.project_id,
+        course_id: request.course_id,
         package_id: request.package_id,
         policy_id: request.policy_id,
         policy_revision: request.policy_revision,
-        requested_runtime: request.requested_runtime,
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: request.environment_class,
+        },
         state: AgentRunState::Requested,
         revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
         tracks: vec![
@@ -1576,16 +2555,65 @@ fn requested_run(
                 candidate_id: None,
             },
         ],
+        plan: None,
     };
     run.validate()
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
     Ok(run)
 }
 
-const fn environment_class_name(value: EnvironmentClass) -> &'static str {
-    match value {
-        EnvironmentClass::Experiment => "experiment",
-        EnvironmentClass::Work => "work",
+fn requested_internal_run(
+    request: &InternalAgentRunRequest,
+    purpose: AgentRunPurpose,
+) -> Result<AgentRun, AgentRunStoreError> {
+    let (project_id, course_id, package_id, policy_id, policy_revision) = match request {
+        InternalAgentRunRequest::Authoring(request) => (
+            request.project_id,
+            request.course_id,
+            request.package_id,
+            request.policy_id,
+            request.policy_revision,
+        ),
+        InternalAgentRunRequest::WorkConfiguration(request) => (
+            request.project_id,
+            request.course_id,
+            request.package_id,
+            request.policy_id,
+            request.policy_revision,
+        ),
+    };
+    let tracks = tracks_for_purpose(purpose)
+        .into_iter()
+        .map(|kind| AgentTrack {
+            kind,
+            attempts: Vec::new(),
+            candidate_id: None,
+        })
+        .collect();
+    let run = AgentRun {
+        id: AgentRunId::new(),
+        project_id,
+        course_id,
+        package_id,
+        policy_id,
+        policy_revision,
+        purpose,
+        state: AgentRunState::Requested,
+        revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
+        tracks,
+        plan: None,
+    };
+    run.validate()
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    Ok(run)
+}
+
+fn tracks_for_purpose(purpose: AgentRunPurpose) -> Vec<AgentTrackKind> {
+    match purpose {
+        AgentRunPurpose::Authoring { .. } => {
+            vec![AgentTrackKind::Environment, AgentTrackKind::Evaluation]
+        }
+        AgentRunPurpose::WorkConfiguration { .. } => vec![AgentTrackKind::WorkConfiguration],
     }
 }
 
@@ -1594,8 +2622,8 @@ async fn load_run_for_update(
     run_id: AgentRunId,
 ) -> Result<AgentRun, AgentRunStoreError> {
     let row = sqlx::query(
-        "SELECT course_id, problem_package_id, revision, state, input_sha256, \
-                policy_revision, contract \
+        "SELECT project_id, course_id, problem_package_id, revision, state, input_sha256, \
+                policy_revision, plan, contract \
          FROM agent.agent_runs WHERE run_id = $1 FOR UPDATE",
     )
     .bind(run_id.as_uuid())
@@ -1619,8 +2647,23 @@ fn decode_run_row(row: &PgRow) -> Result<AgentRun, AgentRunStoreError> {
         .try_get::<Value, _>("contract")
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
     let run = decode_run(value)?;
+    let persisted_plan = row
+        .try_get::<Option<Value>, _>("plan")
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    let contract_plan = run
+        .plan
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    if persisted_plan != contract_plan {
+        return Err(AgentRunStoreError::InvalidContract);
+    }
+    let project_id = row
+        .try_get::<uuid::Uuid, _>("project_id")
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
     let course_id = row
-        .try_get::<uuid::Uuid, _>("course_id")
+        .try_get::<Option<uuid::Uuid>, _>("course_id")
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
     let package_id = row
         .try_get::<uuid::Uuid, _>("problem_package_id")
@@ -1638,7 +2681,8 @@ fn decode_run_row(row: &PgRow) -> Result<AgentRun, AgentRunStoreError> {
         .try_get::<String, _>("input_sha256")
         .ok()
         .and_then(|value| Sha256Digest::from_str(&value).ok());
-    if course_id != run.course_id.as_uuid()
+    if project_id != run.project_id.as_uuid()
+        || course_id != run.course_id.map(CourseId::as_uuid)
         || package_id != run.package_id.as_uuid()
         || u64::try_from(revision).ok() != Some(run.revision.get())
         || u64::try_from(policy_revision).ok() != Some(run.policy_revision.get())
@@ -1653,14 +2697,21 @@ async fn update_run(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run: &AgentRun,
 ) -> Result<(), AgentRunStoreError> {
+    let plan = run
+        .plan
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
     let contract = serde_json::to_value(run).map_err(|_| AgentRunStoreError::InvalidContract)?;
     let updated = sqlx::query(
-        "UPDATE agent.agent_runs SET revision = $2, state = $3, contract = $4, updated_at = now() \
-         WHERE run_id = $1 AND revision = $5",
+        "UPDATE agent.agent_runs SET revision = $2, state = $3, plan = $4, contract = $5, updated_at = now() \
+         WHERE run_id = $1 AND revision = $6",
     )
     .bind(run.id.as_uuid())
     .bind(revision_i64(run.revision)?)
     .bind(run_state(run.state))
+    .bind(plan)
     .bind(contract)
     .bind(
         i64::try_from(
@@ -1691,22 +2742,11 @@ fn environment_checkpoint(
             let CandidateDocument::Environment(spec) = execution.document else {
                 return Err(AgentRunStoreError::InvalidContract);
             };
-            if spec.runtime.kind() != run.requested_runtime {
-                let mut audit = execution.audit;
-                audit.outcome = RuntimeAuditOutcome::Failed;
-                audit.diagnostic_code = Some(diagnostic::EVIDENCE_INVALID.to_owned());
-                return Ok(AgentTrackCheckpoint {
-                    run_id: run.id,
-                    sequence: checkpoint_sequence(AgentTrackKind::Environment, attempt)?,
-                    track: AgentTrackKind::Environment,
-                    attempt,
-                    audit,
-                    candidate: None,
-                });
-            }
             let candidate = EnvironmentCandidate {
                 id: CandidateId::new(),
                 run_id: run.id,
+                project_id: run.project_id,
+                course_id: run.course_id,
                 revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
                 spec,
                 policy_revision: run.policy_revision,
@@ -1750,6 +2790,8 @@ fn evaluation_checkpoint(
             let candidate = EvaluationCandidate {
                 id: CandidateId::new(),
                 run_id: run.id,
+                project_id: run.project_id,
+                course_id: run.course_id,
                 revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
                 spec,
                 policy_revision: run.policy_revision,
@@ -1779,6 +2821,85 @@ fn evaluation_checkpoint(
     }
 }
 
+fn work_configuration_checkpoint(
+    run: &AgentRun,
+    attempt: u32,
+    result: Result<ClaudeCodeExecution, ClaudeCodeFailure>,
+    _now: UtcTimestamp,
+) -> Result<AgentTrackCheckpoint, AgentRunStoreError> {
+    let audit = match result {
+        Ok(execution) => {
+            if !matches!(execution.document, CandidateDocument::WorkConfiguration(_)) {
+                return Err(AgentRunStoreError::InvalidContract);
+            }
+            execution.audit
+        }
+        Err(failure) => failure.audit().clone(),
+    };
+    Ok(AgentTrackCheckpoint {
+        run_id: run.id,
+        sequence: checkpoint_sequence(AgentTrackKind::WorkConfiguration, attempt)?,
+        track: AgentTrackKind::WorkConfiguration,
+        attempt,
+        audit,
+        candidate: None,
+    })
+}
+
+fn bind_work_configuration_plan(
+    run: &AgentRun,
+    package: &ProblemPackage,
+    _preauthorization: Option<&WorkConfigurationPreauthorization>,
+    execution: &ClaudeCodeExecution,
+    _now: UtcTimestamp,
+) -> Result<WorkConfigurationPlan, AgentRunStoreError> {
+    package
+        .validate()
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    if package.project_id != run.project_id
+        || package.course_id != run.course_id
+        || package.id != run.package_id
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    let CandidateDocument::WorkConfiguration(draft) = &execution.document else {
+        return Err(AgentRunStoreError::InvalidContract);
+    };
+    draft
+        .validate()
+        .map_err(|()| AgentRunStoreError::InvalidContract)?;
+    let script_artifact = draft
+        .script_artifact
+        .clone()
+        .ok_or(AgentRunStoreError::InvalidContract)?;
+    let verification_script_artifact = draft.verification_script_artifact.clone();
+    let (environment_id, environment_revision) = match run.purpose {
+        AgentRunPurpose::WorkConfiguration {
+            environment_id,
+            environment_revision,
+            ..
+        } => (environment_id, environment_revision),
+        AgentRunPurpose::Authoring { .. } => return Err(AgentRunStoreError::InvalidContract),
+    };
+    let plan = WorkConfigurationPlan {
+        id: WorkConfigurationPlanId::new(),
+        revision: Revision::new(1).unwrap_or_else(|error| unreachable!("one is valid: {error}")),
+        script_artifact,
+        verification_script_artifact,
+        summary: draft.summary.clone(),
+        requires_restart: draft.requires_restart,
+        environment_id,
+        environment_revision,
+    };
+    plan.validate()
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    // A preauthorization belongs to an already generated plan. A new Agent invocation always
+    // creates a new plan identity, so a stale or mismatched grant is deliberately ignored and the
+    // fresh plan remains AwaitingApproval. Control rebinds a new grant only after reviewing this
+    // exact plan.
+    Ok(plan)
+}
+
 fn apply_checkpoint(
     run: &mut AgentRun,
     checkpoint: &AgentTrackCheckpoint,
@@ -1794,6 +2915,7 @@ fn apply_checkpoint(
         .ok_or(AgentRunStoreError::InvalidContract)?;
     if attempt.number != checkpoint.attempt
         || checkpoint.audit.track != checkpoint.track
+        || checkpoint.audit.project_id != run.project_id
         || checkpoint.audit.course_id != run.course_id
         || checkpoint.audit.package_id != run.package_id
         || checkpoint.audit.policy_id != run.policy_id
@@ -1803,6 +2925,8 @@ fn apply_checkpoint(
     }
     attempt.usage = checkpoint.audit.usage;
     attempt.usage_observed = checkpoint.audit.usage_observed;
+    let work_succeeded = checkpoint.track == AgentTrackKind::WorkConfiguration
+        && checkpoint.audit.outcome == RuntimeAuditOutcome::Succeeded;
     if let Some(candidate) = &checkpoint.candidate {
         attempt.state = AgentAttemptState::Succeeded;
         attempt.diagnostic_code = None;
@@ -1810,6 +2934,14 @@ fn apply_checkpoint(
             StoredCandidate::Environment(candidate) => candidate.id,
             StoredCandidate::Evaluation(candidate) => candidate.id,
         });
+    } else if work_succeeded {
+        // A generated Work configuration is a proposal.  Keep the attempt in the
+        // approval state until the separately authorized runtime execution reports
+        // its result; marking it succeeded here would make the proposal look
+        // complete and would violate the Work run state machine.
+        attempt.state = AgentAttemptState::AwaitingApproval;
+        attempt.diagnostic_code = None;
+        track.candidate_id = None;
     } else {
         attempt.state = if checkpoint.audit.outcome == RuntimeAuditOutcome::Cancelled {
             AgentAttemptState::Cancelled
@@ -1848,7 +2980,11 @@ async fn insert_checkpoint(
 }
 
 fn checkpoint_state(checkpoint: &AgentTrackCheckpoint) -> &'static str {
-    if checkpoint.candidate.is_some() {
+    if checkpoint.track == AgentTrackKind::WorkConfiguration
+        && checkpoint.audit.outcome == RuntimeAuditOutcome::Succeeded
+    {
+        "awaiting_approval"
+    } else if checkpoint.candidate.is_some() {
         "succeeded"
     } else if checkpoint.audit.outcome == RuntimeAuditOutcome::Cancelled {
         "cancelled"
@@ -1896,6 +3032,7 @@ async fn enqueue_run_event(
         time: now,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
+        project_id: run.project_id,
         course_id: run.course_id,
         aggregate_revision: run.revision,
         aggregate_sequence: Sequence(sequence),
@@ -1975,6 +3112,7 @@ fn checkpoint_sequence(track: AgentTrackKind, attempt: u32) -> Result<u64, Agent
     base.checked_add(match track {
         AgentTrackKind::Environment => 1,
         AgentTrackKind::Evaluation => 2,
+        AgentTrackKind::WorkConfiguration => 3,
     })
     .ok_or(AgentRunStoreError::InvalidContract)
 }
@@ -1983,6 +3121,7 @@ const fn track_name(track: AgentTrackKind) -> &'static str {
     match track {
         AgentTrackKind::Environment => "environment",
         AgentTrackKind::Evaluation => "evaluation",
+        AgentTrackKind::WorkConfiguration => "work_configuration",
     }
 }
 
@@ -2020,6 +3159,7 @@ const fn run_state(state: AgentRunState) -> &'static str {
         AgentRunState::Running => "running",
         AgentRunState::PartiallySucceeded => "partially_succeeded",
         AgentRunState::Succeeded => "succeeded",
+        AgentRunState::AwaitingApproval => "awaiting_approval",
         AgentRunState::Failed => "failed",
         AgentRunState::Cancelling => "cancelling",
         AgentRunState::Cancelled => "cancelled",

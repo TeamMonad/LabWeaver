@@ -89,7 +89,12 @@ const oidcEnabled = OIDC_ENABLED
 
 const userDisplayName = computed(() => {
   const profile = auth.user.value?.profile
-  return (profile?.name as string) || (profile?.preferred_username as string) || (profile?.email as string) || '已登录用户'
+  if (!profile) return '已登录用户'
+  const claims = profile as Record<string, unknown>
+  return (typeof claims.name === 'string' && claims.name)
+    || (typeof claims.preferred_username === 'string' && claims.preferred_username)
+    || (typeof claims.email === 'string' && claims.email)
+    || '已登录用户'
 })
 
 const themeIcon = computed(() => {
@@ -302,6 +307,11 @@ function cycleTheme() {
 }
 
 @media (max-width: 599px) {
+  .top-app-bar .top-project-selector,
+  .top-app-bar .shell-button {
+    display: none;
+  }
+
   .brand-subtitle,
   .text-button__label,
   .filled-button__label {

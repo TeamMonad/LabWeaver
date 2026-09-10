@@ -1,9 +1,5 @@
 {
   "$defs": {
-    "ApprovalId": {
-      "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
-      "type": "string"
-    },
     "ArtifactId": {
       "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
       "type": "string"
@@ -94,6 +90,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -109,12 +109,6 @@
   "additionalProperties": false,
   "description": "Approved, immutable build request.",
   "properties": {
-    "approvalId": {
-      "$ref": "#/$defs/ApprovalId"
-    },
-    "baseImageDigest": {
-      "type": "string"
-    },
     "builderBinding": {
       "type": "string"
     },
@@ -132,7 +126,14 @@
       "type": "string"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "createdAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -163,19 +164,20 @@
     },
     "outputRepository": {
       "type": "string"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     }
   },
   "required": [
     "id",
-    "courseId",
+    "projectId",
     "candidateId",
     "candidateRevision",
-    "approvalId",
     "builderBinding",
     "context",
     "contextObjectKey",
     "dockerfilePath",
-    "baseImageDigest",
     "outputRepository",
     "network",
     "maxDurationMilliseconds",

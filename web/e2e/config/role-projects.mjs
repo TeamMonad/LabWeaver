@@ -1,10 +1,3 @@
-export const REQUIREMENTS_BASELINE = Object.freeze({
-  type: 'merged_pull_request',
-  pr: 36,
-  head: 'a9bc7a8ab013a35a846a4b428bad22ecc48eca1b',
-  merge_commit: '0f80e4e9c4b2334d4a833d1fb6a2263ecc3dda9a',
-})
-
 export const ROLE_PROJECTS = Object.freeze([
   Object.freeze({
     name: 'setup',
@@ -36,14 +29,14 @@ export const ROLE_PROJECTS = Object.freeze([
   }),
   Object.freeze({
     name: 'visual-regression',
-    actor: 'Visual regression evidence',
+    actor: 'Visual regression',
     aliases: [],
     testMatch: /tests\/.*\.visual\.spec\.mjs$/,
     storageState: null,
   }),
   Object.freeze({
     name: 'a11y',
-    actor: 'Accessibility scan evidence',
+    actor: 'Accessibility scan',
     aliases: [],
     testMatch: /tests\/.*\.a11y\.spec\.mjs$/,
     storageState: null,

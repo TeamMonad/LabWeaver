@@ -2,11 +2,23 @@
 
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
-    let result = run().await;
+    let helper_mode = is_oj_helper_mode();
+    let result = Box::pin(run()).await;
     if let Err(error) = &result {
         write_termination_diagnostic(error.diagnostic_code());
+        if helper_mode {
+            std::process::exit(evaluation_service::OJ_HELPER_FAILURE_EXIT_CODE);
+        }
     }
     result
+}
+
+fn is_oj_helper_mode() -> bool {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    arguments.first().is_some_and(|mode| mode == "--mode")
+        && arguments
+            .get(1)
+            .is_some_and(|value| value == "oj-compile-exec" || value == "oj-case-exec")
 }
 
 async fn run() -> Result<(), MainError> {
@@ -24,6 +36,10 @@ async fn run() -> Result<(), MainError> {
         [mode, value] if mode == "--mode" && value == "ansible-probe-worker" => {
             let receipt = evaluation_service::run_ansible_probe_worker().await?;
             write_termination_receipt(&receipt)?;
+            return Ok(());
+        }
+        [mode, value] if mode == "--mode" && value == "artifact-materializer" => {
+            evaluation_service::run_artifact_materializer().await?;
             return Ok(());
         }
         [mode, value] if mode == "--mode" && value == "oj-compile-exec" => {
@@ -52,11 +68,11 @@ async fn run() -> Result<(), MainError> {
             return Ok(());
         }
         [] => {
-            evaluation_service::run_evaluation_service().await?;
+            Box::pin(evaluation_service::run_evaluation_service()).await?;
             return Ok(());
         }
         [mode, value] if mode == "--mode" && value == "evaluation-service" => {
-            evaluation_service::run_evaluation_service().await?;
+            Box::pin(evaluation_service::run_evaluation_service()).await?;
             return Ok(());
         }
         _ => {}
@@ -96,6 +112,8 @@ enum MainError {
     #[error(transparent)]
     AnsibleProbeWorker(#[from] evaluation_service::AnsibleProbeWorkerError),
     #[error(transparent)]
+    Materializer(#[from] evaluation_service::MaterializerError),
+    #[error(transparent)]
     Process(#[from] evaluation_service::EvaluationProcessError),
     #[error("LW_OJ_RECEIPT_WRITE_FAILED")]
     Receipt,
@@ -108,6 +126,7 @@ impl MainError {
             Self::Worker(error) => error.diagnostic_code(),
             Self::OjWorker(error) => error.diagnostic_code(),
             Self::AnsibleProbeWorker(error) => error.diagnostic_code(),
+            Self::Materializer(error) => error.diagnostic_code(),
             Self::Process(_) => "LW_EVALUATION_PROCESS_FAILED",
             Self::Receipt => "LW_OJ_RECEIPT_WRITE_FAILED",
         }

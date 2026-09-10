@@ -141,6 +141,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ImageArtifactId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
@@ -246,10 +250,20 @@
       "$ref": "#/$defs/Revision"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "id": {
       "$ref": "#/$defs/ReleaseId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "publishedAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -278,7 +292,7 @@
   },
   "required": [
     "id",
-    "courseId",
+    "projectId",
     "version",
     "candidateId",
     "agentRunId",

@@ -1,6 +1,6 @@
-//! Fail-closed mTLS client for the Environment-authoritative owner resolver.
+//! Fail-closed JWT client for the Environment-authoritative owner resolver.
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use contracts::{
     UtcTimestamp,
@@ -12,26 +12,35 @@ use contracts::{
     },
     http::StrongEtag,
 };
-use reqwest::{Certificate, Client, Identity, StatusCode, Url, header};
+use reqwest::{Certificate, Client, StatusCode, Url, header};
 
-use crate::TransportSecurityMode;
+use crate::{ServiceTokenClient, TransportSecurityMode};
 
 /// Configured Environment owner resolver client.
 #[derive(Clone)]
 pub struct EnvironmentOwnerResolverClient {
     client: Client,
+    service_token_client: ServiceTokenClient,
+    service_token_audience: String,
+    service_token_scopes: BTreeSet<String>,
     base_uri: Url,
     max_retries: u8,
     retry_backoff: Duration,
 }
 
 impl EnvironmentOwnerResolverClient {
-    /// Builds an mTLS client from deployment-resolved certificate material.
+    /// Builds a JWT-authenticated client from deployment-resolved trust material.
+    ///
+    /// The service token client is injected so token acquisition and caching use
+    /// the same configured issuer, audience, and permission policy as the
+    /// caller's other internal requests.  The resolver connection itself still
+    /// uses the deployment CA for server-only TLS in strict mode.
     pub fn new(
         config: &EnvironmentOwnerResolverClientConfig,
-        ca_certificate_pem: &[u8],
-        client_certificate_pem: &[u8],
-        client_private_key_pem: &[u8],
+        trusted_ca_pem: &[u8],
+        service_token_client: ServiceTokenClient,
+        service_token_audience: String,
+        service_token_scopes: BTreeSet<String>,
         retry_backoff: Duration,
         transport_security: TransportSecurityMode,
     ) -> Result<Self, OwnerResolverClientError> {
@@ -41,59 +50,51 @@ impl EnvironmentOwnerResolverClient {
         if retry_backoff.is_zero() || retry_backoff > Duration::from_secs(5) {
             return Err(OwnerResolverClientError::Configuration);
         }
+        if service_token_audience.trim().is_empty()
+            || service_token_scopes.is_empty()
+            || service_token_scopes.iter().any(|scope| {
+                scope.trim().is_empty()
+                    || scope != scope.trim()
+                    || scope.len() > 128
+                    || !scope.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
+                    })
+            })
+        {
+            return Err(OwnerResolverClientError::Configuration);
+        }
         let base_uri = Url::parse(&config.resolver_uri)
             .map_err(|_| OwnerResolverClientError::Configuration)?;
-        let server_name = base_uri
-            .host_str()
-            .ok_or(OwnerResolverClientError::Configuration)?;
-        if !config
-            .allowed_server_sans
-            .iter()
-            .any(|allowed| allowed == server_name)
-        {
+        if !resolver_endpoint_allowed(&base_uri, transport_security) {
             return Err(OwnerResolverClientError::Configuration);
         }
-        if transport_security == TransportSecurityMode::InsecureTestOnly
-            && !server_name.eq_ignore_ascii_case("localhost")
-            && !server_name
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-        {
-            return Err(OwnerResolverClientError::Configuration);
-        }
-
-        let roots = Certificate::from_pem_bundle(ca_certificate_pem)
-            .map_err(|_| OwnerResolverClientError::CertificateMaterial)?;
+        let roots = Certificate::from_pem_bundle(trusted_ca_pem)
+            .map_err(|_| OwnerResolverClientError::Configuration)?;
         if roots.is_empty() {
-            return Err(OwnerResolverClientError::CertificateMaterial);
+            return Err(OwnerResolverClientError::Configuration);
         }
-        let mut identity_pem =
-            Vec::with_capacity(client_certificate_pem.len() + client_private_key_pem.len() + 1);
-        identity_pem.extend_from_slice(client_certificate_pem);
-        identity_pem.push(b'\n');
-        identity_pem.extend_from_slice(client_private_key_pem);
-        let identity = Identity::from_pem(&identity_pem)
-            .map_err(|_| OwnerResolverClientError::CertificateMaterial)?;
-
-        let mut builder = Client::builder()
-            .tls_built_in_root_certs(false)
+        let mut client_builder = Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .identity(identity)
             .timeout(Duration::from_millis(config.timeout_milliseconds));
-        // Private single-university: allow plain HTTP when transport is InsecureTestOnly.
         if transport_security == TransportSecurityMode::InsecureTestOnly {
-            builder = builder.danger_accept_invalid_certs(true);
+            client_builder = client_builder.danger_accept_invalid_certs(true);
         } else {
-            builder = builder.https_only(true);
+            client_builder = client_builder
+                .https_only(true)
+                .tls_built_in_root_certs(false);
         }
         for root in roots {
-            builder = builder.add_root_certificate(root);
+            client_builder = client_builder.add_root_certificate(root);
         }
-        let client = builder
+        let client = client_builder
             .build()
-            .map_err(|_| OwnerResolverClientError::CertificateMaterial)?;
+            .map_err(|_| OwnerResolverClientError::Configuration)?;
         Ok(Self {
             client,
+            service_token_client,
+            service_token_audience,
+            service_token_scopes,
             base_uri,
             max_retries: config.max_retries,
             retry_backoff,
@@ -115,7 +116,6 @@ impl EnvironmentOwnerResolverClient {
             Err(OwnerResolverClientError::Unavailable) => "unavailable",
             Err(OwnerResolverClientError::ResponseInvalid) => "invalid_response",
             Err(OwnerResolverClientError::Configuration) => "configuration",
-            Err(OwnerResolverClientError::CertificateMaterial) => "certificate",
         };
         metrics::counter!("labweaver_auth_owner_resolutions", "result" => outcome).increment(1);
         metrics::histogram!("labweaver_auth_owner_resolution_duration_seconds")
@@ -135,9 +135,19 @@ impl EnvironmentOwnerResolverClient {
             request.environment_id
         ));
         for attempt in 0..=self.max_retries {
+            let mut headers = header::HeaderMap::new();
+            self.service_token_client
+                .bearer_auth_for(
+                    &mut headers,
+                    &self.service_token_audience,
+                    &self.service_token_scopes,
+                )
+                .await
+                .map_err(|_| OwnerResolverClientError::Unavailable)?;
             match self
                 .client
                 .post(endpoint.clone())
+                .headers(headers)
                 .json(request)
                 .send()
                 .await
@@ -145,7 +155,12 @@ impl EnvironmentOwnerResolverClient {
                 Ok(response) if response.status().is_success() => {
                     return validate_endpoint_response(response, request, now).await;
                 }
-                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
+                Ok(response)
+                    if matches!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    ) =>
+                {
                     return Err(OwnerResolverClientError::ScopeDenied);
                 }
                 Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
@@ -181,9 +196,19 @@ impl EnvironmentOwnerResolverClient {
             request.environment_id
         ));
         for attempt in 0..=self.max_retries {
+            let mut headers = header::HeaderMap::new();
+            self.service_token_client
+                .bearer_auth_for(
+                    &mut headers,
+                    &self.service_token_audience,
+                    &self.service_token_scopes,
+                )
+                .await
+                .map_err(|_| OwnerResolverClientError::Unavailable)?;
             match self
                 .client
                 .post(endpoint.clone())
+                .headers(headers)
                 .json(request)
                 .send()
                 .await
@@ -191,7 +216,12 @@ impl EnvironmentOwnerResolverClient {
                 Ok(response) if response.status().is_success() => {
                     return validate_console_response(response, request, now).await;
                 }
-                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
+                Ok(response)
+                    if matches!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    ) =>
+                {
                     return Err(OwnerResolverClientError::ScopeDenied);
                 }
                 Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
@@ -226,9 +256,19 @@ impl EnvironmentOwnerResolverClient {
             request.environment_id
         ));
         for attempt in 0..=self.max_retries {
+            let mut headers = header::HeaderMap::new();
+            self.service_token_client
+                .bearer_auth_for(
+                    &mut headers,
+                    &self.service_token_audience,
+                    &self.service_token_scopes,
+                )
+                .await
+                .map_err(|_| OwnerResolverClientError::Unavailable)?;
             match self
                 .client
                 .post(endpoint.clone())
+                .headers(headers)
                 .json(request)
                 .send()
                 .await
@@ -236,7 +276,12 @@ impl EnvironmentOwnerResolverClient {
                 Ok(response) if response.status().is_success() => {
                     return validate_response(response, request, now).await;
                 }
-                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
+                Ok(response)
+                    if matches!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    ) =>
+                {
                     return Err(OwnerResolverClientError::ScopeDenied);
                 }
                 Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
@@ -259,6 +304,19 @@ impl EnvironmentOwnerResolverClient {
         }
         Err(OwnerResolverClientError::Unavailable)
     }
+}
+
+fn resolver_endpoint_allowed(url: &Url, transport_security: TransportSecurityMode) -> bool {
+    if transport_security == TransportSecurityMode::Strict {
+        return url.scheme() == "https" && url.host_str().is_some();
+    }
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 async fn validate_endpoint_response(
@@ -328,6 +386,7 @@ async fn validate_response(
         .map_err(|_| OwnerResolverClientError::ResponseInvalid)?;
     let expected_etag = StrongEtag::from_revision(resolution.environment_revision).header_value();
     if resolution.environment_id != request.environment_id
+        || resolution.project_id != request.project_id
         || resolution.course_id != request.course_id
         || resolution.owner_actor_id != request.owner_actor_id
         || resolution.environment_revision != request.expected_revision
@@ -345,9 +404,6 @@ pub enum OwnerResolverClientError {
     /// Deployment configuration violates the owner resolver contract.
     #[error("LW_AUTH_CONFIG_BINDING_MISSING")]
     Configuration,
-    /// A configured CA, client certificate, or private key was malformed.
-    #[error("LW_AUTH_CONFIG_BINDING_MISSING")]
-    CertificateMaterial,
     /// The Environment authority rejected course, owner, or revision binding.
     #[error("LW_AUTH_ENVIRONMENT_SCOPE_DENIED")]
     ScopeDenied,

@@ -1,6 +1,7 @@
-//! Real mTLS coverage for the Access-to-Environment ownership boundary.
+//! Real service-JWT coverage for the Access-to-Environment ownership boundary.
 
 use std::{
+    collections::BTreeSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
@@ -9,10 +10,13 @@ use std::{
     time::Duration,
 };
 
-use auth::{EnvironmentOwnerResolverClient, OwnerResolverClientError, TransportSecurityMode};
+use auth::{
+    EnvironmentOwnerResolverClient, OwnerResolverClientError, ServiceTokenClient,
+    ServiceTokenClientConfig, TransportSecurityMode, no_redirect_http_client,
+};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Form, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
@@ -25,63 +29,65 @@ use contracts::environment::{
 };
 use contracts::http::StrongEtag;
 use contracts::{ActorId, CourseId, EndpointId, EnvironmentId, Revision, UtcTimestamp};
-use environment_service::{MtlsConfig, serve_owner_resolver_mtls};
-use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
-};
+use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose};
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::oneshot};
+
+const SERVICE_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOiJsYWJ3ZWF2ZXItZW52aXJvbm1lbnQifQ.sig";
 
 #[derive(Clone)]
 struct ResolverState {
     mode: Arc<AtomicU8>,
+    issuer: String,
+    service_token: String,
 }
 
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "one ephemeral-CA scenario preserves the full mTLS, tamper, outage and SAN lifecycle"
+    reason = "one local authority scenario preserves token, tamper, outage, and retry lifecycle"
 )]
-async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
+async fn client_enforces_jwt_identity_response_binding_and_bounded_outage()
 -> Result<(), Box<dyn std::error::Error>> {
     let ca = test_ca()?;
-    let (server_certificate, server_key) = leaf_certificate(&ca, "localhost", false)?;
-    let (client_certificate, client_key) = leaf_certificate(&ca, "access-service.internal", true)?;
     let mode = Arc::new(AtomicU8::new(0));
-    let router = Router::new()
-        .route(
-            "/internal/v1/environments/{environment_id}/owner:resolve",
-            post(resolve_owner),
-        )
-        .route(
-            "/internal/v1/environments/{environment_id}/endpoint-eligibility:resolve",
-            post(resolve_endpoint_eligibility),
-        )
-        .with_state(ResolverState {
-            mode: Arc::clone(&mode),
-        });
-    let (address, shutdown, server) =
-        start_server(router, &ca.pem(), &server_certificate, &server_key).await?;
+    let (address, shutdown, server) = start_server(Arc::clone(&mode)).await?;
+    let issuer = format!("http://localhost:{}/realms/test", address.port());
     let config = EnvironmentOwnerResolverClientConfig {
         resolver_uri: format!("http://localhost:{}", address.port()),
         ca_certificate_locator: "secret://access/owner-resolver-ca".to_owned(),
-        client_certificate_locator: "secret://access/owner-resolver-client-certificate".to_owned(),
-        client_private_key_locator: "secret://access/owner-resolver-client-private-key".to_owned(),
-        allowed_server_sans: vec!["localhost".to_owned()],
         timeout_milliseconds: 1_000,
         max_retries: 1,
     };
+    let token_config = ServiceTokenClientConfig::new(
+        &issuer,
+        "access-service".to_owned(),
+        "test-secret".to_owned(),
+        "labweaver-environment".to_owned(),
+        BTreeSet::from(["environment.owner.resolve".to_owned()]),
+        30,
+        TransportSecurityMode::InsecureTestOnly,
+    )?;
+    let token_http = no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?;
+    let service_token_client = ServiceTokenClient::discover(token_config, token_http).await?;
     let client = EnvironmentOwnerResolverClient::new(
         &config,
         ca.pem().as_bytes(),
-        client_certificate.as_bytes(),
-        client_key.as_bytes(),
+        service_token_client,
+        "labweaver-environment".to_owned(),
+        BTreeSet::from([
+            "environment.console.resolve".to_owned(),
+            "environment.endpoint.resolve".to_owned(),
+            "environment.owner.resolve".to_owned(),
+        ]),
         Duration::from_millis(5),
         TransportSecurityMode::InsecureTestOnly,
     )?;
     let request = EnvironmentOwnerResolutionRequest {
         environment_id: EnvironmentId::new(),
-        course_id: CourseId::new(),
+        project_id: contracts::ProjectId::new(),
+        course_id: Some(CourseId::new()),
         owner_actor_id: ActorId::new(),
         expected_revision: Revision::new(7)?,
     };
@@ -93,6 +99,7 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
 
     let endpoint_request = EnvironmentEndpointEligibilityRequest {
         environment_id: request.environment_id,
+        project_id: request.project_id,
         course_id: request.course_id,
         actor_id: request.owner_actor_id,
         subject_kind: EnvironmentAccessSubjectKind::Owner,
@@ -150,21 +157,67 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
 
     mode.store(0, Ordering::SeqCst);
     let unrelated_ca = test_ca()?;
+    let token_config = ServiceTokenClientConfig::new(
+        &issuer,
+        "access-service".to_owned(),
+        "test-secret".to_owned(),
+        "labweaver-environment".to_owned(),
+        BTreeSet::from(["environment.owner.resolve".to_owned()]),
+        30,
+        TransportSecurityMode::InsecureTestOnly,
+    )?;
+    let token_http = no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?;
+    let service_token_client = ServiceTokenClient::discover(token_config, token_http).await?;
     let insecure_client = EnvironmentOwnerResolverClient::new(
         &config,
         unrelated_ca.pem().as_bytes(),
-        client_certificate.as_bytes(),
-        client_key.as_bytes(),
+        service_token_client,
+        "labweaver-environment".to_owned(),
+        BTreeSet::from([
+            "environment.console.resolve".to_owned(),
+            "environment.endpoint.resolve".to_owned(),
+            "environment.owner.resolve".to_owned(),
+        ]),
         Duration::from_millis(5),
         TransportSecurityMode::InsecureTestOnly,
     )?;
     let insecure_resolution = insecure_client.resolve(&request, now).await?;
     assert_eq!(insecure_resolution.environment_id, request.environment_id);
 
+    let mut disallowed = config.clone();
+    disallowed.resolver_uri = "http://resolver.internal:1234".to_owned();
+    let token_config = ServiceTokenClientConfig::new(
+        &issuer,
+        "access-service".to_owned(),
+        "test-secret".to_owned(),
+        "labweaver-environment".to_owned(),
+        BTreeSet::from(["environment.owner.resolve".to_owned()]),
+        30,
+        TransportSecurityMode::InsecureTestOnly,
+    )?;
+    let token_http = no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?;
+    let service_token_client = ServiceTokenClient::discover(token_config, token_http).await?;
+    assert!(matches!(
+        EnvironmentOwnerResolverClient::new(
+            &disallowed,
+            ca.pem().as_bytes(),
+            service_token_client,
+            "labweaver-environment".to_owned(),
+            BTreeSet::from([
+                "environment.console.resolve".to_owned(),
+                "environment.endpoint.resolve".to_owned(),
+                "environment.owner.resolve".to_owned(),
+            ]),
+            Duration::from_millis(5),
+            TransportSecurityMode::InsecureTestOnly,
+        ),
+        Err(OwnerResolverClientError::Configuration)
+    ));
+
     shutdown
         .send(())
         .map_err(|()| "owner resolver shutdown receiver disappeared")?;
-    server.await??;
+    server.await?;
     assert_eq!(
         client.resolve(&request, now).await,
         Err(OwnerResolverClientError::Unavailable)
@@ -176,26 +229,51 @@ async fn client_enforces_mtls_identity_response_binding_and_bounded_outage()
         Err(OwnerResolverClientError::Unavailable)
     );
 
-    let mut disallowed = config;
-    disallowed.allowed_server_sans = vec!["different.internal".to_owned()];
-    assert!(matches!(
-        EnvironmentOwnerResolverClient::new(
-            &disallowed,
-            ca.pem().as_bytes(),
-            client_certificate.as_bytes(),
-            client_key.as_bytes(),
-            Duration::from_millis(5),
-            TransportSecurityMode::InsecureTestOnly,
-        ),
-        Err(OwnerResolverClientError::Configuration)
-    ));
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct TokenRequest {
+    grant_type: Option<String>,
+}
+
+async fn discovery(State(state): State<ResolverState>) -> Json<Value> {
+    Json(json!({
+        "issuer": state.issuer,
+        "authorization_endpoint": format!("{}/authorize", state.issuer),
+        "token_endpoint": format!("{}/token", state.issuer),
+        "jwks_uri": format!("{}/jwks", state.issuer),
+        "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["ES256"],
+        "grant_types_supported": ["client_credentials"]
+    }))
+}
+
+async fn token_endpoint(
+    State(state): State<ResolverState>,
+    Form(request): Form<TokenRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    if request.grant_type.as_deref() != Some("client_credentials") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Json(json!({
+        "access_token": state.service_token,
+        "token_type": "Bearer",
+        "expires_in": 300
+    })))
+}
+
+async fn jwks() -> Json<Value> {
+    Json(json!({"keys": []}))
 }
 
 async fn resolve_owner(
     State(state): State<ResolverState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<EnvironmentOwnerResolutionRequest>,
 ) -> Result<Response, StatusCode> {
+    require_service_token(&headers, &state)?;
     if state.mode.load(Ordering::SeqCst) == 1 {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -206,6 +284,7 @@ async fn resolve_owner(
     };
     let resolution = EnvironmentOwnerResolution {
         environment_id,
+        project_id: request.project_id,
         course_id: request.course_id,
         owner_actor_id: request.owner_actor_id,
         environment_revision: request.expected_revision,
@@ -219,8 +298,10 @@ async fn resolve_owner(
 
 async fn resolve_endpoint_eligibility(
     State(state): State<ResolverState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<EnvironmentEndpointEligibilityRequest>,
 ) -> Result<Response, StatusCode> {
+    require_service_token(&headers, &state)?;
     if state.mode.load(Ordering::SeqCst) == 1 {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -241,6 +322,7 @@ async fn resolve_endpoint_eligibility(
     };
     let resolution = EnvironmentEndpointEligibility {
         environment_id,
+        project_id: request.project_id,
         course_id: request.course_id,
         owner_actor_id: request.actor_id,
         environment_revision,
@@ -261,36 +343,59 @@ async fn resolve_endpoint_eligibility(
     Ok(([(header::ETAG, etag)], Json(resolution)).into_response())
 }
 
+fn require_service_token(
+    headers: &axum::http::HeaderMap,
+    state: &ResolverState,
+) -> Result<(), StatusCode> {
+    let expected = format!("Bearer {}", state.service_token);
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
 async fn start_server(
-    router: Router,
-    ca_pem: &str,
-    server_certificate_pem: &str,
-    server_private_key_pem: &str,
+    mode: Arc<AtomicU8>,
 ) -> Result<
-    (
-        SocketAddr,
-        oneshot::Sender<()>,
-        tokio::task::JoinHandle<Result<(), environment_service::MtlsServerError>>,
-    ),
+    (SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>),
     Box<dyn std::error::Error>,
 > {
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let address = listener.local_addr()?;
-    let config = MtlsConfig::from_pem(
-        ca_pem.as_bytes(),
-        server_certificate_pem.as_bytes(),
-        server_private_key_pem.as_bytes(),
-    )?;
+    let issuer = format!("http://localhost:{}/realms/test", address.port());
+    let router = Router::new()
+        .route(
+            "/realms/test/.well-known/openid-configuration",
+            axum::routing::get(discovery),
+        )
+        .route("/realms/test/token", post(token_endpoint))
+        .route("/realms/test/jwks", axum::routing::get(jwks))
+        .route(
+            "/internal/v1/environments/{environment_id}/owner:resolve",
+            post(resolve_owner),
+        )
+        .route(
+            "/internal/v1/environments/{environment_id}/endpoint-eligibility:resolve",
+            post(resolve_endpoint_eligibility),
+        )
+        .with_state(ResolverState {
+            mode,
+            issuer,
+            service_token: SERVICE_TOKEN.to_owned(),
+        });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(serve_owner_resolver_mtls(
-        listener,
-        router,
-        config,
-        async move {
-            let _ = shutdown_rx.await;
-            Ok(())
-        },
-    ));
+    let server = tokio::spawn(async move {
+        tokio::select! {
+            result = axum::serve(listener, router) => {
+                let _ = result;
+            }
+            _ = shutdown_rx => {}
+        }
+    });
     Ok((address, shutdown_tx, server))
 }
 
@@ -303,21 +408,4 @@ fn test_ca() -> Result<CertifiedIssuer<'static, KeyPair>, rcgen::Error> {
         KeyUsagePurpose::CrlSign,
     ];
     CertifiedIssuer::self_signed(parameters, KeyPair::generate()?)
-}
-
-fn leaf_certificate(
-    ca: &CertifiedIssuer<'static, KeyPair>,
-    san: &str,
-    client: bool,
-) -> Result<(String, String), rcgen::Error> {
-    let mut parameters = CertificateParams::new(vec![san.to_owned()])?;
-    parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    parameters.extended_key_usages = vec![if client {
-        ExtendedKeyUsagePurpose::ClientAuth
-    } else {
-        ExtendedKeyUsagePurpose::ServerAuth
-    }];
-    let key = KeyPair::generate()?;
-    let certificate = parameters.signed_by(&key, ca)?;
-    Ok((certificate.pem(), key.serialize_pem()))
 }

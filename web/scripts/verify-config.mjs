@@ -1,34 +1,14 @@
-import { execFileSync } from 'node:child_process'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPlaywrightConfig } from '../playwright.config.mjs'
-import { PROJECT_NAMES, REQUIREMENTS_BASELINE, ROLE_PROJECTS_BY_NAME } from '../e2e/config/role-projects.mjs'
+import { PROJECT_NAMES, ROLE_PROJECTS_BY_NAME } from '../e2e/config/role-projects.mjs'
 import { findFixedSleeps } from './fixed-sleep-check.mjs'
-
-const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const REPOSITORY_ROOT = path.resolve(WEB_ROOT, '..')
-const DEFAULT_REPORT_PATH = path.join(WEB_ROOT, 'artifacts', 'playwright', 'playwright-role-config-report.json')
-
-const dataMode = process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live'
-const isFixture = dataMode === 'fixture'
-const evidenceLabel = isFixture ? 'fixture' : 'live'
-
-export function resolveReportPath() {
-  return process.env.LABWEAVER_E2E_REPORT_PATH
-    ? path.resolve(process.env.LABWEAVER_E2E_REPORT_PATH)
-    : DEFAULT_REPORT_PATH
-}
-
-function currentCommit() {
-  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim()
-}
 
 function diagnostic(condition, code, diagnostics) {
   if (!condition) diagnostics.push(code)
 }
 
-export async function validateConfiguration({ requirementsBaselineHead } = {}) {
+export async function validateConfiguration() {
   const diagnostics = []
   const config = createPlaywrightConfig({ ci: true })
   const names = config.projects.map((project) => project.name)
@@ -57,72 +37,16 @@ export async function validateConfiguration({ requirementsBaselineHead } = {}) {
   diagnostic(config.use.trace === 'retain-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
   diagnostic(config.use.screenshot === 'only-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
   diagnostic(config.use.video === 'retain-on-failure', 'PW_TRACE_RETENTION_DISABLED', diagnostics)
+  diagnostic(!('ignoreHTTPSErrors' in config.use), 'PW_TLS_VERIFICATION_DISABLED', diagnostics)
   diagnostic(config.forbidOnly === true, 'PW_PROJECT_SET_INVALID', diagnostics)
-  diagnostic(/^\.\/test-results(?:\/(live|fixture))?$/.test(config.outputDir), 'PW_PROJECT_SET_INVALID', diagnostics)
-  diagnostic(typeof config.metadata === 'object' && config.metadata !== null, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-  diagnostic(config.metadata?.dataMode === dataMode, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-  diagnostic(config.metadata?.evidenceLabel === evidenceLabel, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-  diagnostic(typeof config.metadata?.sourceCommit === 'string' && /^[0-9a-f]{40}$/i.test(config.metadata.sourceCommit), 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-  if (isFixture) {
-    diagnostic(typeof config.metadata?.fixtureManifestHash === 'string' && /^[0-9a-f]{16}$/i.test(config.metadata.fixtureManifestHash), 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-    diagnostic(typeof config.metadata?.browser === 'string' && config.metadata.browser.length > 0, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-    diagnostic(typeof config.metadata?.browserVersion === 'string' && config.metadata.browserVersion.length > 0, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-    diagnostic(typeof config.metadata?.viewport === 'object' && config.metadata.viewport !== null, 'PW_EVIDENCE_IDENTITY_MISSING', diagnostics)
-  }
-  diagnostic(!requirementsBaselineHead || requirementsBaselineHead === REQUIREMENTS_BASELINE.head, 'PW_REQUIREMENTS_BASELINE_CHANGED', diagnostics)
+  diagnostic(config.outputDir === './test-results', 'PW_PROJECT_SET_INVALID', diagnostics)
   const fixedSleeps = await findFixedSleeps()
   if (fixedSleeps.length > 0) diagnostics.push('PW_FIXED_SLEEP_DETECTED')
   return { diagnostics: [...new Set(diagnostics)], fixedSleeps }
 }
 
-export function buildReport({
-  diagnostics,
-  overall,
-  checks,
-  runtimeE2e = 'not_executed',
-  evidenceLevel = 'E1',
-  generatedAt = new Date().toISOString(),
-}) {
-  const event = overall === 'passed'
-    ? 'playwright_role_config_verified'
-    : overall === 'blocked'
-      ? 'playwright_role_config_blocked'
-      : 'playwright_role_config_failed'
-  return {
-    schemaVersion: 1,
-    event,
-    overall,
-    repository: 'TeamMonad/LabWeaver',
-    issue: 9,
-    commit: currentCommit(),
-    requirements_baseline: REQUIREMENTS_BASELINE,
-    projects: PROJECT_NAMES,
-    role_mapping: {
-      teacher: ROLE_PROJECTS_BY_NAME.teacher.aliases,
-      student: ROLE_PROJECTS_BY_NAME.student.aliases,
-      'platform-admin': ROLE_PROJECTS_BY_NAME['platform-admin'].aliases,
-    },
-    trace: 'retain-on-failure',
-    fixed_sleep_scan: diagnostics.includes('PW_FIXED_SLEEP_DETECTED') ? 'failed' : 'passed',
-    runtime_e2e: runtimeE2e,
-    evidenceLevel,
-    generatedAt,
-    diagnostics,
-    ...(checks ? { checks } : {}),
-  }
-}
-
-export async function writeReport(report, { reportPath = resolveReportPath() } = {}) {
-  await mkdir(path.dirname(reportPath), { recursive: true })
-  const temporaryPath = `${reportPath}.${process.pid}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
-  await rename(temporaryPath, reportPath)
-}
-
 async function main() {
-  const { diagnostics, fixedSleeps } = await validateConfiguration({
-    requirementsBaselineHead: process.env.PW_REQUIREMENTS_BASELINE_HEAD,
-  })
+  const { diagnostics, fixedSleeps } = await validateConfiguration()
   if (diagnostics.length > 0) {
     for (const code of diagnostics) console.error(code)
     for (const finding of fixedSleeps) console.error(finding)

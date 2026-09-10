@@ -1,11 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
 import { ROLE_PROJECTS } from './e2e/config/role-projects.mjs'
-import { resolveEvidenceMetadata } from './e2e/evidence.mjs'
-
-const dataMode = process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live'
-const isFixture = dataMode === 'fixture'
-const evidenceLabel = isFixture ? 'fixture' : 'live'
-const evidenceMetadata = resolveEvidenceMetadata({ dataMode, evidenceLabel })
 
 export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
   const projects = ROLE_PROJECTS.map((project) => {
@@ -15,17 +9,13 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     }
 
     if (project.name === 'setup') {
-      return {
-        ...base,
-        testIgnore: isFixture ? /auth\.setup\.mjs$/ : /auth\.fixture\.setup\.mjs$/,
-      }
+      return base
     }
 
     if (project.storageState) {
       return {
         ...base,
         dependencies: ['setup'],
-        testIgnore: isFixture ? /\.live\.spec\.mjs$/ : /\.fixture\.spec\.mjs$/,
         use: { storageState: project.storageState },
       }
     }
@@ -41,40 +31,38 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
 
   return {
     testDir: './e2e',
-    outputDir: `./test-results/${evidenceLabel}`,
-    timeout: isFixture ? 30_000 : 120_000,
-    snapshotPathTemplate: `{testDir}/{testFileDir}/{testFileName}-snapshots/${evidenceLabel}/{arg}-{projectName}{ext}`,
+    outputDir: './test-results',
+    timeout: 120_000,
+    snapshotPathTemplate: `{testDir}/{testFileDir}/{testFileName}-snapshots/{arg}-{projectName}{ext}`,
     forbidOnly: ci,
     retries: ci ? 2 : 0,
     workers: ci ? 1 : undefined,
     reporter: [
       ['list'],
-      ['html', { outputFolder: `playwright-report-${evidenceLabel}`, open: 'never' }],
-      ['json', { outputFile: `playwright-report-${evidenceLabel}/report.json` }],
+      ['html', { outputFolder: 'playwright-report', open: 'never' }],
+      ['json', { outputFile: 'playwright-report/report.json' }],
     ],
     use: {
       baseURL: process.env.LABWEAVER_BASE_URL || 'http://localhost:4173',
-      ignoreHTTPSErrors: process.env.LABWEAVER_E2E_IGNORE_HTTPS_ERRORS === 'true',
       trace: 'retain-on-failure',
       screenshot: 'only-on-failure',
       video: 'retain-on-failure',
-      actionTimeout: isFixture ? 10_000 : 30_000,
-      navigationTimeout: isFixture ? 15_000 : 60_000,
+      actionTimeout: 30_000,
+      navigationTimeout: 60_000,
     },
     expect: {
-      timeout: isFixture ? 10_000 : 30_000,
+      timeout: 30_000,
       // The pinned Chromium image is identical in CI and local generation, but
       // Linux kernel/font rasterization still changes anti-aliased edge pixels.
       // Keep the allowance below a layout-sized change while avoiding false
       // failures on otherwise byte-for-byte identical content and geometry.
-      ...(isFixture ? { toHaveScreenshot: { maxDiffPixelRatio: 0.025 } } : {}),
+      toHaveScreenshot: { maxDiffPixelRatio: 0.025 },
     },
     projects,
-    metadata: evidenceMetadata,
-    ...(isFixture || !process.env.LABWEAVER_BASE_URL
+    ...(!process.env.LABWEAVER_BASE_URL
       ? {
           webServer: {
-            command: isFixture ? 'pnpm preview:fixture' : 'pnpm preview --port 4173',
+            command: 'pnpm preview --port 4173',
             url: 'http://localhost:4173',
             reuseExistingServer: !ci,
           },

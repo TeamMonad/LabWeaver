@@ -10,7 +10,7 @@ use std::str::FromStr; // internal persistence hash, not contract hash
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EnvironmentId, EventId, FrozenSubmissionId, OperationId,
-    Revision, Sequence, UtcTimestamp,
+    ProjectId, Revision, Sequence, UtcTimestamp,
     events::{
         CloudEvent, EVENT_CONTRACTS, EventContract, SPEC_VERSION, SubmissionFreezeRequested,
         subjects,
@@ -28,7 +28,10 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 pub struct SubmissionFreezeCommand {
     pub frozen_submission_id: FrozenSubmissionId,
     pub operation_id: OperationId,
-    pub course_id: CourseId,
+    /// Project scope carried into the immutable event context. Course is an optional teaching
+    /// association; independent project work remains a first-class freeze request.
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub actor_id: ActorId,
     pub environment_revision: Revision,
@@ -93,14 +96,19 @@ impl PgFreezeCommandStore {
     pub async fn terminal_failure(
         &self,
         frozen_submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         actor_id: ActorId,
     ) -> Result<Option<DiagnosticCode>, FreezeCommandStoreError> {
         let diagnostic: Option<String> = sqlx::query_scalar(
             "SELECT diagnostic_code FROM evaluation.submission_freeze_commands \
-             WHERE frozen_submission_id=$1 AND actor_id=$2 AND state='failed' \
+             WHERE frozen_submission_id=$1 AND project_id=$2 \
+             AND course_id IS NOT DISTINCT FROM $3 AND actor_id=$4 AND state='failed' \
              AND cleanup_verified=true",
         )
         .bind(frozen_submission_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(contracts::CourseId::as_uuid))
         .bind(actor_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
@@ -283,16 +291,16 @@ impl PgFreezeCommandStore {
         let manifest_sha256 = Sha256Digest::of_canonical(&command.manifest)
             .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;
         let mut transaction = self.pool.begin().await?;
-        let lock_identity = format!("{}:{}", command.course_id, command.idempotency_key);
+        let lock_identity = format!("{}:{}", command.project_id, command.idempotency_key);
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 540001))")
             .bind(lock_identity)
             .fetch_one(&mut *transaction)
             .await?;
         if let Some(row) = sqlx::query(
             "SELECT frozen_submission_id,operation_id,request_sha256 FROM evaluation.submission_freeze_commands \
-             WHERE course_id=$1 AND idempotency_key=$2",
+             WHERE project_id=$1 AND idempotency_key=$2",
         )
-        .bind(command.course_id.as_uuid())
+        .bind(command.project_id.as_uuid())
         .bind(&command.idempotency_key)
         .fetch_optional(&mut *transaction)
         .await?
@@ -311,12 +319,13 @@ impl PgFreezeCommandStore {
         }
         sqlx::query(
             "INSERT INTO evaluation.submission_freeze_commands \
-             (frozen_submission_id,operation_id,course_id,environment_id,actor_id,idempotency_key,request_sha256,manifest_sha256,state,contract) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9)",
+             (frozen_submission_id,operation_id,project_id,course_id,environment_id,actor_id,idempotency_key,request_sha256,manifest_sha256,state,contract) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10)",
         )
         .bind(command.frozen_submission_id.as_uuid())
         .bind(command.operation_id.as_uuid())
-        .bind(command.course_id.as_uuid())
+        .bind(command.project_id.as_uuid())
+        .bind(command.course_id.map(contracts::CourseId::as_uuid))
         .bind(command.environment_id.as_uuid())
         .bind(command.actor_id.as_uuid())
         .bind(&command.idempotency_key)
@@ -372,6 +381,7 @@ async fn enqueue_requested(
         time: command.requested_at,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
+        project_id: command.project_id,
         course_id: command.course_id,
         aggregate_revision: Revision::new(1)
             .map_err(|_| FreezeCommandStoreError::ContractInvalid)?,
@@ -408,7 +418,8 @@ fn request_hash(
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Identity<'a> {
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         environment_id: EnvironmentId,
         actor_id: ActorId,
         environment_revision: Revision,
@@ -416,6 +427,7 @@ fn request_hash(
         manifest: &'a SubmissionManifest,
     }
     Sha256Digest::of_canonical(&Identity {
+        project_id: command.project_id,
         course_id: command.course_id,
         environment_id: command.environment_id,
         actor_id: command.actor_id,

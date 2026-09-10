@@ -1,6 +1,6 @@
 #![allow(dead_code, clippy::panic)]
 
-use std::str::FromStr;
+use std::{error::Error, path::Path, str::FromStr};
 
 use contracts::authoring::{EnvironmentClass, RuntimeKind};
 use contracts::environment::{
@@ -9,8 +9,37 @@ use contracts::environment::{
     OperationState,
 };
 use contracts::{
-    ActorId, CourseId, EndpointId, EnvironmentId, OperationId, ReleaseId, Revision, UtcTimestamp,
+    ActorId, CourseId, EndpointId, EnvironmentId, OperationId, ProjectId, ReleaseId, Revision,
+    UtcTimestamp,
 };
+use persistence_sqlx::{Domain, MigrationCatalog};
+use sqlx::PgPool;
+
+/// Creates the Environment schema from every migration declared in the repository catalog.
+///
+/// Integration tests must use the same ordered and hash-checked SQL as the service migration
+/// coordinator so newly added tables cannot silently be absent from a test database.
+pub async fn apply_environment_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    sqlx::query("CREATE SCHEMA environment")
+        .execute(pool)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET search_path = environment, pg_catalog")
+        .execute(&mut *connection)
+        .await?;
+    let migration_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let catalog = MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
+    let environment_migrations = catalog
+        .domains
+        .iter()
+        .find(|domain| domain.name == Domain::Environment)
+        .ok_or_else(|| std::io::Error::other("migration catalog has no environment domain"))?;
+    for migration in &environment_migrations.migrations {
+        let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
+        sqlx::raw_sql(&sql).execute(&mut *connection).await?;
+    }
+    Ok(())
+}
 
 pub fn timestamp(value: &str) -> UtcTimestamp {
     UtcTimestamp::from_str(value).unwrap_or_else(|error| panic!("invalid test timestamp: {error}"))
@@ -21,7 +50,8 @@ pub fn ready_instance() -> EnvironmentInstance {
     EnvironmentInstance {
         id: EnvironmentId::new(),
         display_label: "Ready environment".to_owned(),
-        course_id: CourseId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
         owner_id: ActorId::new(),
         class: EnvironmentClass::Experiment,
         runtime_kind: RuntimeKind::Container,
@@ -75,7 +105,8 @@ pub fn requested_instance() -> EnvironmentInstance {
     EnvironmentInstance {
         id: EnvironmentId::new(),
         display_label: "Requested environment".to_owned(),
-        course_id: CourseId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
         owner_id: ActorId::new(),
         class: EnvironmentClass::Experiment,
         runtime_kind: RuntimeKind::Container,

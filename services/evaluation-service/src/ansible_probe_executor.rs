@@ -7,10 +7,12 @@
 
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
 
+use contracts::UtcTimestamp;
 use reqwest::{Certificate, Client, Method, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -22,6 +24,8 @@ use crate::{
         AnsibleProbeCleanupTarget, AnsibleProbeJobBinding, AnsibleProbeJobError,
         AnsibleProbeJobResources,
     },
+    control_plane::EvaluationExecutionResources,
+    execution::ExecutionTiming,
 };
 
 const FIELD_MANAGER: &str = "labweaver-ansible-probe-executor";
@@ -42,7 +46,6 @@ pub struct AnsibleProbeExecutorConfiguration {
 pub struct AnsibleProbeKubernetesExecutor {
     configuration: AnsibleProbeExecutorConfiguration,
     client: Client,
-    token: String,
 }
 
 impl AnsibleProbeKubernetesExecutor {
@@ -62,7 +65,7 @@ impl AnsibleProbeKubernetesExecutor {
         {
             return Err(AnsibleProbeExecutorError::ConfigurationInvalid);
         }
-        let token = read_bound_text(&configuration.kubernetes_bearer_token_file)?;
+        read_bound_text(&configuration.kubernetes_bearer_token_file)?;
         let ca = Certificate::from_pem(&read_bound_file(&configuration.kubernetes_ca_file)?)
             .map_err(|_| AnsibleProbeExecutorError::ConfigurationInvalid)?;
         let client = Client::builder()
@@ -78,7 +81,6 @@ impl AnsibleProbeKubernetesExecutor {
         Ok(Self {
             configuration,
             client,
-            token,
         })
     }
 
@@ -97,13 +99,42 @@ impl AnsibleProbeKubernetesExecutor {
         &self,
         binding: &AnsibleProbeJobBinding,
     ) -> Result<AnsibleProbeJobResources, AnsibleProbeExecutorError> {
+        self.start_inner(binding, None).await
+    }
+
+    /// Applies an attempt bundle together with the fresh Environment-issued
+    /// SSH key and certificate Secrets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the binding, SSH credentials, or Kubernetes
+    /// operations fail validation or cannot be applied.
+    pub async fn start_with_ssh_credentials(
+        &self,
+        binding: &AnsibleProbeJobBinding,
+        private_key_openssh: &str,
+        certificate_openssh: &str,
+    ) -> Result<AnsibleProbeJobResources, AnsibleProbeExecutorError> {
+        self.start_inner(binding, Some((private_key_openssh, certificate_openssh)))
+            .await
+    }
+
+    async fn start_inner(
+        &self,
+        binding: &AnsibleProbeJobBinding,
+        ssh_credentials: Option<(&str, &str)>,
+    ) -> Result<AnsibleProbeJobResources, AnsibleProbeExecutorError> {
         if binding.namespace != self.configuration.runner_namespace {
             return Err(AnsibleProbeExecutorError::BindingInvalid);
         }
         self.require_runner_default_deny().await?;
-        let resources = AnsibleProbeJobResources::build(binding)?;
-        let expected = [
+        let mut resources = AnsibleProbeJobResources::build(binding)?;
+        if let Some((private_key_openssh, certificate_openssh)) = ssh_credentials {
+            resources.attach_ssh_credentials(private_key_openssh, certificate_openssh)?;
+        }
+        let mut expected = vec![
             ("v1", "configmaps", &resources.config_map),
+            ("v1", "secrets", &resources.materializer_secret),
             (
                 "networking.k8s.io/v1",
                 "networkpolicies",
@@ -111,8 +142,14 @@ impl AnsibleProbeKubernetesExecutor {
             ),
             ("batch/v1", "jobs", &resources.job),
         ];
+        if let Some(secret) = resources.ssh_private_key_secret() {
+            expected.push(("v1", "secrets", secret));
+        }
+        if let Some(secret) = resources.ssh_certificate_secret() {
+            expected.push(("v1", "secrets", secret));
+        }
         let mut existing = 0_usize;
-        for (api_version, plural, document) in expected {
+        for &(api_version, plural, document) in &expected {
             if let Some(current) = self
                 .get(
                     binding.namespace.as_str(),
@@ -153,6 +190,28 @@ impl AnsibleProbeKubernetesExecutor {
             .await?;
             self.apply(
                 binding.namespace.as_str(),
+                "v1",
+                "secrets",
+                resources.materializer_secret_name(),
+                &resources.materializer_secret,
+            )
+            .await?;
+            if let (Some(name), Some(secret)) = (
+                resources.ssh_private_key_secret_name(),
+                resources.ssh_private_key_secret(),
+            ) {
+                self.apply(binding.namespace.as_str(), "v1", "secrets", name, secret)
+                    .await?;
+            }
+            if let (Some(name), Some(secret)) = (
+                resources.ssh_certificate_secret_name(),
+                resources.ssh_certificate_secret(),
+            ) {
+                self.apply(binding.namespace.as_str(), "v1", "secrets", name, secret)
+                    .await?;
+            }
+            self.apply(
+                binding.namespace.as_str(),
                 "batch/v1",
                 "jobs",
                 resources.name(),
@@ -183,17 +242,64 @@ impl AnsibleProbeKubernetesExecutor {
         resources: &AnsibleProbeJobResources,
         request: &AnsibleProbeExecutionRequest,
     ) -> Result<AnsibleProbeJobObservation, AnsibleProbeExecutorError> {
+        self.observe_job(resources.name(), None, request).await
+    }
+
+    /// Observes a recovered attempt using only durable object references.
+    /// Signed materializer data is never reconstructed on this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovered resource identity or observed
+    /// Kubernetes state is invalid or unavailable.
+    pub async fn observe_recovery(
+        &self,
+        resources: &EvaluationExecutionResources,
+        request: &AnsibleProbeExecutionRequest,
+    ) -> Result<AnsibleProbeJobObservation, AnsibleProbeExecutorError> {
+        if resources.namespace != self.configuration.runner_namespace
+            || resources.kind != crate::control_plane::EvaluationExecutionKind::AnsibleProbe
+        {
+            return Err(AnsibleProbeExecutorError::BindingInvalid);
+        }
+        let job = resources
+            .objects
+            .iter()
+            .find(|object| object.resource == "jobs");
+        if let Some(job) = job {
+            self.observe_job(&job.name, Some(job.uid.as_str()), request)
+                .await
+        } else {
+            request
+                .validate()
+                .map_err(|_| AnsibleProbeExecutorError::BindingInvalid)?;
+            self.observe_job(&attempt_job_name(request.attempt_id), None, request)
+                .await
+        }
+    }
+
+    async fn observe_job(
+        &self,
+        job_name: &str,
+        expected_uid: Option<&str>,
+        request: &AnsibleProbeExecutionRequest,
+    ) -> Result<AnsibleProbeJobObservation, AnsibleProbeExecutorError> {
         let Some(job) = self
             .get(
                 self.configuration.runner_namespace.as_str(),
                 "batch/v1",
                 "jobs",
-                resources.name(),
+                job_name,
             )
             .await?
         else {
             return Ok(AnsibleProbeJobObservation::Missing);
         };
+        if expected_uid
+            .is_some_and(|uid| job.pointer("/metadata/uid").and_then(Value::as_str) != Some(uid))
+        {
+            return Err(AnsibleProbeExecutorError::IdentityConflict);
+        }
         verify_owned(&job, request)?;
         let succeeded = job.pointer("/status/succeeded").and_then(Value::as_u64) == Some(1);
         let failed = job
@@ -214,7 +320,12 @@ impl AnsibleProbeKubernetesExecutor {
         }
         let pod = &items[0];
         verify_owned(pod, request)?;
-        let terminated = pod.pointer("/status/containerStatuses/0/state/terminated");
+        let container = main_container_status(pod)?;
+        let timing = container
+            .map(execution_timing)
+            .transpose()?
+            .unwrap_or_else(ExecutionTiming::unknown);
+        let terminated = container.and_then(|status| status.pointer("/state/terminated"));
         if succeeded {
             let message = terminated
                 .ok_or(AnsibleProbeExecutorError::ObservationInvalid)?
@@ -226,7 +337,7 @@ impl AnsibleProbeKubernetesExecutor {
             receipt
                 .validate_for(request)
                 .map_err(|_| AnsibleProbeExecutorError::ReceiptInvalid)?;
-            return Ok(AnsibleProbeJobObservation::Completed(receipt));
+            return Ok(AnsibleProbeJobObservation::Completed { receipt, timing });
         }
         let job_reason = job
             .pointer("/status/conditions")
@@ -243,13 +354,217 @@ impl AnsibleProbeKubernetesExecutor {
                 diagnostic_code: AnsibleProbeTerminalFailure::Timeout
                     .diagnostic_code()
                     .to_owned(),
+                timing,
             });
         }
-        let terminated = terminated.ok_or(AnsibleProbeExecutorError::ObservationInvalid)?;
-        let diagnostic_code = failed_container_diagnostic(terminated);
+        let diagnostic_code =
+            terminated.map_or("LW_AP_INFRASTRUCTURE_ERROR", failed_container_diagnostic);
         Ok(AnsibleProbeJobObservation::Failed {
             diagnostic_code: diagnostic_code.to_owned(),
+            timing,
         })
+    }
+
+    /// Captures immutable Kubernetes object identities after applying the
+    /// complete attempt bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any expected object is unavailable, not owned by
+    /// this attempt, or has an invalid identity.
+    pub async fn capture_object_refs(
+        &self,
+        resources: &AnsibleProbeJobResources,
+        request: &AnsibleProbeExecutionRequest,
+    ) -> Result<Vec<(String, String, String, String)>, AnsibleProbeExecutorError> {
+        let mut refs = Vec::with_capacity(resources.cleanup_plan().len());
+        for target in resources.cleanup_plan() {
+            let api_version = api_version(&target)?.to_owned();
+            let current = self
+                .get(
+                    target.namespace.as_str(),
+                    api_version.as_str(),
+                    target.resource.as_str(),
+                    target.name.as_str(),
+                )
+                .await?
+                .ok_or(AnsibleProbeExecutorError::ObservationInvalid)?;
+            verify_owned(&current, request)?;
+            let uid = current
+                .pointer("/metadata/uid")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(AnsibleProbeExecutorError::IdentityConflict)?;
+            refs.push((api_version, target.resource, target.name, uid.to_owned()));
+        }
+        Ok(refs)
+    }
+
+    /// Captures all currently existing objects for a pre-start intent using
+    /// only deterministic names and the persisted request.  Partial bundles
+    /// return every verified UID found so cleanup remains identity-bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovered request, resource identity, or any
+    /// observed object fails validation.
+    pub async fn capture_intent_object_refs(
+        &self,
+        resources: &EvaluationExecutionResources,
+        request: &AnsibleProbeExecutionRequest,
+    ) -> Result<Option<Vec<(String, String, String, String)>>, AnsibleProbeExecutorError> {
+        if resources.namespace != self.configuration.runner_namespace
+            || resources.kind != crate::control_plane::EvaluationExecutionKind::AnsibleProbe
+            || !resources.objects.is_empty()
+        {
+            return Err(AnsibleProbeExecutorError::BindingInvalid);
+        }
+        request
+            .validate()
+            .map_err(|_| AnsibleProbeExecutorError::BindingInvalid)?;
+        if request.run_id != resources.run_id.as_uuid()
+            || request.step_run_id != resources.step_run_id.as_uuid()
+            || request.attempt_id != resources.task_run_id.as_uuid()
+        {
+            return Err(AnsibleProbeExecutorError::IdentityConflict);
+        }
+        let targets = recovery_cleanup_plan(resources.namespace.as_str(), request);
+        let mut refs = Vec::with_capacity(targets.len());
+        for target in &targets {
+            let api_version = api_version(target)?.to_owned();
+            let Some(current) = self
+                .get(
+                    target.namespace.as_str(),
+                    api_version.as_str(),
+                    target.resource.as_str(),
+                    target.name.as_str(),
+                )
+                .await?
+            else {
+                continue;
+            };
+            verify_owned(&current, request)?;
+            let uid = current
+                .pointer("/metadata/uid")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(AnsibleProbeExecutorError::IdentityConflict)?;
+            refs.push((
+                api_version,
+                target.resource.clone(),
+                target.name.clone(),
+                uid.to_owned(),
+            ));
+        }
+        Ok((!refs.is_empty()).then_some(refs))
+    }
+
+    /// Deletes and verifies a recovered attempt using only persisted refs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovered identity is invalid or Kubernetes
+    /// cannot delete or verify one of the owned objects.
+    pub async fn cleanup_recovery(
+        &self,
+        resources: &EvaluationExecutionResources,
+    ) -> Result<bool, AnsibleProbeExecutorError> {
+        if resources.namespace != self.configuration.runner_namespace
+            || resources.kind != crate::control_plane::EvaluationExecutionKind::AnsibleProbe
+        {
+            return Err(AnsibleProbeExecutorError::BindingInvalid);
+        }
+        if resources.objects.is_empty() {
+            let request: AnsibleProbeExecutionRequest =
+                serde_json::from_value(resources.request.clone())
+                    .map_err(|_| AnsibleProbeExecutorError::BindingInvalid)?;
+            request
+                .validate()
+                .map_err(|_| AnsibleProbeExecutorError::BindingInvalid)?;
+            if request.run_id != resources.run_id.as_uuid()
+                || request.step_run_id != resources.step_run_id.as_uuid()
+                || request.attempt_id != resources.task_run_id.as_uuid()
+            {
+                return Err(AnsibleProbeExecutorError::IdentityConflict);
+            }
+            return self
+                .cleanup_intent(resources.namespace.as_str(), &request)
+                .await;
+        }
+        for object in &resources.objects {
+            let target = AnsibleProbeCleanupTarget {
+                namespace: resources.namespace.clone(),
+                resource: object.resource.clone(),
+                name: object.name.clone(),
+                propagation_policy: "Foreground".to_owned(),
+            };
+            let current = self
+                .get(
+                    target.namespace.as_str(),
+                    object.api_version.as_str(),
+                    target.resource.as_str(),
+                    target.name.as_str(),
+                )
+                .await?;
+            let Some(current) = current else { continue };
+            verify_recovery_owned(&current, object, resources)?;
+            let preconditions = delete_preconditions(&current)?;
+            self.delete(&target, &preconditions).await?;
+        }
+        for object in &resources.objects {
+            let current = self
+                .get(
+                    resources.namespace.as_str(),
+                    object.api_version.as_str(),
+                    object.resource.as_str(),
+                    object.name.as_str(),
+                )
+                .await?;
+            if let Some(current) = current {
+                verify_recovery_owned(&current, object, resources)?;
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn cleanup_intent(
+        &self,
+        namespace: &str,
+        request: &AnsibleProbeExecutionRequest,
+    ) -> Result<bool, AnsibleProbeExecutorError> {
+        let targets = recovery_cleanup_plan(namespace, request);
+        for target in &targets {
+            let Some(current) = self
+                .get(
+                    target.namespace.as_str(),
+                    api_version(target)?,
+                    target.resource.as_str(),
+                    target.name.as_str(),
+                )
+                .await?
+            else {
+                continue;
+            };
+            verify_owned(&current, request)?;
+            let preconditions = delete_preconditions(&current)?;
+            self.delete(target, &preconditions).await?;
+        }
+        for target in &targets {
+            if let Some(current) = self
+                .get(
+                    target.namespace.as_str(),
+                    api_version(target)?,
+                    target.resource.as_str(),
+                    target.name.as_str(),
+                )
+                .await?
+            {
+                verify_owned(&current, request)?;
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Cancels an attempt by invoking the same exact cleanup boundary.
@@ -285,7 +600,7 @@ impl AnsibleProbeKubernetesExecutor {
                 .await?
             {
                 let expected = resources
-                    .document_for(target.resource.as_str())
+                    .document_for_target(&target)
                     .ok_or(AnsibleProbeExecutorError::BindingInvalid)?;
                 verify_cleanup_owned(&current, expected)?;
                 let preconditions = delete_preconditions(&current)?;
@@ -303,7 +618,7 @@ impl AnsibleProbeKubernetesExecutor {
                 .await?
             {
                 let expected = resources
-                    .document_for(target.resource.as_str())
+                    .document_for_target(&target)
                     .ok_or(AnsibleProbeExecutorError::BindingInvalid)?;
                 verify_cleanup_owned(&resource, expected)?;
                 return Ok(false);
@@ -337,7 +652,7 @@ impl AnsibleProbeKubernetesExecutor {
             .authorized(self.client.request(
                 Method::PATCH,
                 self.resource_url(namespace, api_version, plural, name)?,
-            ))
+            ))?
             .query(&[("fieldManager", FIELD_MANAGER)])
             .header("content-type", "application/apply-patch+yaml")
             .body(
@@ -364,10 +679,12 @@ impl AnsibleProbeKubernetesExecutor {
         name: &str,
     ) -> Result<Option<Value>, AnsibleProbeExecutorError> {
         let response = self
-            .authorized(
-                self.client
-                    .get(self.resource_url(namespace, api_version, plural, name)?),
-            )
+            .authorized(self.client.get(self.resource_url(
+                namespace,
+                api_version,
+                plural,
+                name,
+            )?))?
             .send()
             .await
             .map_err(|_| AnsibleProbeExecutorError::KubernetesUnavailable)?;
@@ -393,7 +710,7 @@ impl AnsibleProbeKubernetesExecutor {
                 self.configuration.runner_namespace.as_str(),
                 "v1",
                 "pods",
-            )?))
+            )?))?
             .query(&[(
                 "labelSelector",
                 format!("labweaver.io/attempt-id={}", request.attempt_id),
@@ -422,7 +739,7 @@ impl AnsibleProbeKubernetesExecutor {
                 api_version(target)?,
                 target.resource.as_str(),
                 target.name.as_str(),
-            )?))
+            )?))?
             .json(&delete_options(target, preconditions))
             .send()
             .await
@@ -430,8 +747,12 @@ impl AnsibleProbeKubernetesExecutor {
         classify_delete_status(response.status())
     }
 
-    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request.bearer_auth(&self.token)
+    fn authorized(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, AnsibleProbeExecutorError> {
+        let token = read_bound_text(&self.configuration.kubernetes_bearer_token_file)?;
+        Ok(request.bearer_auth(token))
     }
 
     fn resource_url(
@@ -517,8 +838,102 @@ pub enum AnsibleProbeCancellationObservation {
 pub enum AnsibleProbeJobObservation {
     Missing,
     Running,
-    Completed(AnsibleProbeEvidenceReceipt),
-    Failed { diagnostic_code: String },
+    Completed {
+        receipt: AnsibleProbeEvidenceReceipt,
+        timing: ExecutionTiming,
+    },
+    Failed {
+        diagnostic_code: String,
+        timing: ExecutionTiming,
+    },
+}
+
+fn main_container_status(pod: &Value) -> Result<Option<&Value>, AnsibleProbeExecutorError> {
+    let statuses = pod
+        .pointer("/status/containerStatuses")
+        .and_then(Value::as_array)
+        .ok_or(AnsibleProbeExecutorError::ObservationInvalid)?;
+    let matches = statuses
+        .iter()
+        .filter(|status| status.pointer("/name").and_then(Value::as_str) == Some("ansible-probe"))
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(AnsibleProbeExecutorError::ObservationInvalid);
+    }
+    Ok(matches.into_iter().next())
+}
+
+fn execution_timing(status: &Value) -> Result<ExecutionTiming, AnsibleProbeExecutorError> {
+    let terminated = status.pointer("/state/terminated");
+    let started = status
+        .pointer("/state/terminated/startedAt")
+        .and_then(Value::as_str)
+        .map(parse_kubernetes_timestamp)
+        .transpose()?;
+    let finished = terminated
+        .and_then(|value| value.pointer("/finishedAt"))
+        .and_then(Value::as_str)
+        .map(parse_kubernetes_timestamp)
+        .transpose()?;
+    if started.is_some() != finished.is_some() {
+        return Ok(ExecutionTiming::unknown());
+    }
+    let timing = ExecutionTiming {
+        started_at: started,
+        terminated_at: finished,
+    };
+    timing
+        .validate()
+        .map_err(|_| AnsibleProbeExecutorError::ObservationInvalid)?;
+    Ok(timing)
+}
+
+fn parse_kubernetes_timestamp(value: &str) -> Result<UtcTimestamp, AnsibleProbeExecutorError> {
+    let parsed = time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map_err(|_| AnsibleProbeExecutorError::ObservationInvalid)?
+        .to_offset(time::UtcOffset::UTC);
+    let milliseconds = parsed.nanosecond() / 1_000_000 * 1_000_000;
+    let normalized = parsed
+        .replace_nanosecond(milliseconds)
+        .map_err(|_| AnsibleProbeExecutorError::ObservationInvalid)?;
+    UtcTimestamp::from_utc(normalized).map_err(|_| AnsibleProbeExecutorError::ObservationInvalid)
+}
+
+fn verify_recovery_owned(
+    resource: &Value,
+    object: &crate::control_plane::EvaluationExecutionObjectRef,
+    resources: &EvaluationExecutionResources,
+) -> Result<(), AnsibleProbeExecutorError> {
+    let metadata = resource
+        .pointer("/metadata")
+        .and_then(Value::as_object)
+        .ok_or(AnsibleProbeExecutorError::IdentityConflict)?;
+    if metadata.get("name").and_then(Value::as_str) != Some(object.name.as_str())
+        || metadata.get("namespace").and_then(Value::as_str) != Some(resources.namespace.as_str())
+        || metadata.get("uid").and_then(Value::as_str) != Some(object.uid.as_str())
+    {
+        return Err(AnsibleProbeExecutorError::IdentityConflict);
+    }
+    let labels = metadata
+        .get("labels")
+        .and_then(Value::as_object)
+        .ok_or(AnsibleProbeExecutorError::IdentityConflict)?;
+    let owned = [
+        ("labweaver.io/managed-by", "evaluation-service".to_owned()),
+        ("labweaver.io/run-id", resources.run_id.to_string()),
+        (
+            "labweaver.io/step-run-id",
+            resources.step_run_id.to_string(),
+        ),
+        ("labweaver.io/attempt-id", resources.task_run_id.to_string()),
+    ]
+    .into_iter()
+    .all(|(key, expected)| labels.get(key).and_then(Value::as_str) == Some(expected.as_str()));
+    if owned {
+        Ok(())
+    } else {
+        Err(AnsibleProbeExecutorError::IdentityConflict)
+    }
 }
 
 /// The two terminal diagnostics the executor itself can assign to a failed
@@ -718,13 +1133,45 @@ fn api_prefix(api_version: &str) -> String {
     }
 }
 
+fn attempt_job_name(attempt_id: uuid::Uuid) -> String {
+    format!("lw-ap-{}", &attempt_id.simple().to_string()[..20])
+}
+
+fn recovery_cleanup_plan(
+    namespace: &str,
+    request: &AnsibleProbeExecutionRequest,
+) -> Vec<AnsibleProbeCleanupTarget> {
+    let name = attempt_job_name(request.attempt_id);
+    let materializer = format!("{name}-materializer");
+    let (private_key, certificate) = (
+        request.ssh_identity.private_key_secret.clone(),
+        request.ssh_identity.certificate_secret.clone(),
+    );
+    [
+        ("jobs", name.clone()),
+        ("networkpolicies", name.clone()),
+        ("configmaps", name),
+        ("secrets", materializer),
+        ("secrets", private_key),
+        ("secrets", certificate),
+    ]
+    .into_iter()
+    .map(|(resource, name)| AnsibleProbeCleanupTarget {
+        namespace: namespace.to_owned(),
+        resource: resource.to_owned(),
+        name,
+        propagation_policy: "Foreground".to_owned(),
+    })
+    .collect()
+}
+
 fn api_version(
     target: &AnsibleProbeCleanupTarget,
 ) -> Result<&'static str, AnsibleProbeExecutorError> {
     match target.resource.as_str() {
         "jobs" => Ok("batch/v1"),
         "networkpolicies" => Ok("networking.k8s.io/v1"),
-        "configmaps" => Ok("v1"),
+        "configmaps" | "secrets" => Ok("v1"),
         _ => Err(AnsibleProbeExecutorError::BindingInvalid),
     }
 }
@@ -745,18 +1192,37 @@ fn is_stable_diagnostic(value: &str) -> bool {
 }
 
 fn read_bound_file(path: &Path) -> Result<Vec<u8>, AnsibleProbeExecutorError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| AnsibleProbeExecutorError::ConfigurationUnavailable)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() == 0
-        || metadata.len() > MAX_BOUND_FILE_BYTES
-    {
+    let file = fs::File::open(path).map_err(|source| {
+        AnsibleProbeExecutorError::ConfigurationUnavailable {
+            operation: "open",
+            source,
+        }
+    })?;
+    let metadata =
+        file.metadata().map_err(
+            |source| AnsibleProbeExecutorError::ConfigurationUnavailable {
+                operation: "metadata",
+                source,
+            },
+        )?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BOUND_FILE_BYTES {
         return Err(AnsibleProbeExecutorError::ConfigurationInvalid);
     }
-    let bytes = fs::read(path).map_err(|_| AnsibleProbeExecutorError::ConfigurationUnavailable)?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .map_err(|_| AnsibleProbeExecutorError::ConfigurationInvalid)?,
+    );
+    file.take(MAX_BOUND_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(
+            |source| AnsibleProbeExecutorError::ConfigurationUnavailable {
+                operation: "read",
+                source,
+            },
+        )?;
     if u64::try_from(bytes.len()).map_err(|_| AnsibleProbeExecutorError::ConfigurationInvalid)?
         != metadata.len()
+        || bytes.len() as u64 > MAX_BOUND_FILE_BYTES
     {
         return Err(AnsibleProbeExecutorError::ConfigurationInvalid);
     }
@@ -776,8 +1242,12 @@ fn read_bound_text(path: &Path) -> Result<String, AnsibleProbeExecutorError> {
 
 #[derive(Debug, Error)]
 pub enum AnsibleProbeExecutorError {
-    #[error("ansible probe executor configuration is unavailable")]
-    ConfigurationUnavailable,
+    #[error("ansible probe executor configuration is unavailable during {operation}: {source}")]
+    ConfigurationUnavailable {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("ansible probe executor configuration is invalid")]
     ConfigurationInvalid,
     #[error("ansible probe Job binding is invalid")]
@@ -804,7 +1274,7 @@ impl AnsibleProbeExecutorError {
     #[must_use]
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
-            Self::ConfigurationUnavailable => "LW_AP_EXECUTOR_CONFIG_UNAVAILABLE",
+            Self::ConfigurationUnavailable { .. } => "LW_AP_EXECUTOR_CONFIG_UNAVAILABLE",
             Self::ConfigurationInvalid => "LW_AP_EXECUTOR_CONFIG_INVALID",
             Self::BindingInvalid => "LW_AP_JOB_BINDING_INVALID",
             Self::KubernetesUnavailable => "LW_AP_KUBERNETES_UNAVAILABLE",
@@ -821,9 +1291,9 @@ impl AnsibleProbeExecutorError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::{fs, net::Ipv4Addr};
 
-    use contracts::evaluation::FactAssertion;
+    use contracts::{EvaluationRunId, EvaluationStepRunId, TaskRunId, evaluation::FactAssertion};
     use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
     use reqwest::StatusCode;
     use serde_json::{Value, json};
@@ -831,15 +1301,20 @@ mod tests {
 
     use super::{
         AnsibleProbeCancellationObservation, AnsibleProbeDeletePreconditions,
-        AnsibleProbeExecutorError, cancellation_observation, classify_delete_status,
-        delete_options, delete_preconditions, failed_container_diagnostic, verify_cleanup_owned,
-        verify_owned, verify_runner_default_deny,
+        AnsibleProbeExecutorError, attempt_job_name, cancellation_observation,
+        classify_delete_status, delete_options, delete_preconditions, failed_container_diagnostic,
+        read_bound_file, recovery_cleanup_plan, verify_cleanup_owned, verify_owned,
+        verify_runner_default_deny,
     };
+    #[cfg(unix)]
+    use super::{AnsibleProbeExecutorConfiguration, AnsibleProbeKubernetesExecutor};
+    use crate::EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION;
     use crate::ansible_probe::{
         ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeExecutionLimits,
         AnsibleProbeExecutionRequest, AnsibleProbeSshIdentity, AnsibleProbeTarget,
     };
     use crate::ansible_probe_job::AnsibleProbeCleanupTarget;
+    use crate::control_plane::{EvaluationExecutionKind, EvaluationExecutionResources};
 
     fn assertion(fact: &str, expected: &serde_json::Value) -> FactAssertion {
         match serde_json::from_value(json!({ "fact": fact, "expected": expected })) {
@@ -856,7 +1331,7 @@ mod tests {
             attempt_id: Uuid::now_v7(),
             trace_id: "trace-ansible-probe-executor-test".to_owned(),
             runner_image_digest: format!("labweaver/ansible-probe@sha256:{}", "2".repeat(64)),
-            playbook_profile: "linux-nginx-probe-v1".to_owned(),
+            playbook_profile: "linux-nginx-probe-v1/playbook.yml".to_owned(),
             module_allowlist: vec!["ansible.builtin.service_facts".to_owned()],
             read_only: true,
             assertions: vec![assertion("host.reachable", &json!(true))],
@@ -865,6 +1340,7 @@ mod tests {
                 port: 22,
                 username: "labweaver".to_owned(),
             },
+            source_identity: "source-identity".to_owned(),
             ssh_identity: AnsibleProbeSshIdentity {
                 private_key_secret: "probe-ssh-key".to_owned(),
                 certificate_secret: "probe-ssh-cert".to_owned(),
@@ -885,6 +1361,147 @@ mod tests {
             Ok(digest) => digest.to_string(),
             Err(error) => unreachable!("fixture request identity must compute: {error}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_bound_file_accepts_a_kubernetes_projected_symlink()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let revision = directory.path().join("..2026_09_09_00_00_00.000000001");
+        fs::create_dir(&revision)?;
+        fs::write(revision.join("ca.crt"), b"projected-ca")?;
+        symlink(&revision, directory.path().join("..data"))?;
+        let projected = directory.path().join("ca.crt");
+        symlink("..data/ca.crt", &projected)?;
+
+        assert_eq!(read_bound_file(&projected)?, b"projected-ca");
+        Ok(())
+    }
+
+    #[test]
+    fn read_bound_file_rejects_empty_and_oversized_files() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let empty = directory.path().join("empty");
+        fs::write(&empty, [])?;
+        assert!(matches!(
+            read_bound_file(&empty),
+            Err(AnsibleProbeExecutorError::ConfigurationInvalid)
+        ));
+
+        let oversized = directory.path().join("oversized");
+        fs::write(
+            &oversized,
+            vec![b'x'; usize::try_from(super::MAX_BOUND_FILE_BYTES + 1)?],
+        )?;
+        assert!(matches!(
+            read_bound_file(&oversized),
+            Err(AnsibleProbeExecutorError::ConfigurationInvalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn read_bound_file_preserves_unavailable_source_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let missing = directory.path().join("missing");
+        assert!(matches!(
+            read_bound_file(&missing),
+            Err(AnsibleProbeExecutorError::ConfigurationUnavailable { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_reads_a_rotated_projected_token_for_each_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let first_revision = directory.path().join("..2026_09_09_00_00_00.000000001");
+        let second_revision = directory.path().join("..2026_09_09_00_00_01.000000001");
+        fs::create_dir(&first_revision)?;
+        fs::create_dir(&second_revision)?;
+        fs::write(first_revision.join("token"), b"first-token")?;
+        fs::write(second_revision.join("token"), b"second-token")?;
+        symlink(&first_revision, directory.path().join("..data"))?;
+        let projected = directory.path().join("token");
+        symlink("..data/token", &projected)?;
+        let executor = AnsibleProbeKubernetesExecutor {
+            configuration: AnsibleProbeExecutorConfiguration {
+                kubernetes_api_server: reqwest::Url::parse("https://kubernetes.example.test/")?,
+                kubernetes_bearer_token_file: projected,
+                kubernetes_ca_file: directory.path().join("ca.crt"),
+                runner_namespace: "labweaver-evaluation-runs".to_owned(),
+                request_timeout_milliseconds: 2_000,
+            },
+            client: reqwest::Client::new(),
+        };
+
+        let first = executor
+            .authorized(executor.client.get("https://kubernetes.example.test/"))?
+            .build()?;
+        assert_eq!(
+            first.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer first-token"
+        );
+
+        fs::remove_file(directory.path().join("..data"))?;
+        symlink(&second_revision, directory.path().join("..data"))?;
+        let second = executor
+            .authorized(executor.client.get("https://kubernetes.example.test/"))?
+            .build()?;
+        assert_eq!(
+            second.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer second-token"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancel_empty_intent_plan_is_attempt_scoped_and_covers_ssh_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = request();
+        let run_id: EvaluationRunId = request.run_id.to_string().parse()?;
+        let step_run_id: EvaluationStepRunId = request.step_run_id.to_string().parse()?;
+        let task_run_id: TaskRunId = request.attempt_id.to_string().parse()?;
+        let intent = EvaluationExecutionResources {
+            schema_version: EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
+            run_id,
+            step_run_id,
+            task_run_id,
+            namespace: "labweaver-evaluation-runs".to_owned(),
+            kind: EvaluationExecutionKind::AnsibleProbe,
+            request: serde_json::to_value(&request)?,
+            objects: Vec::new(),
+        };
+        intent.validate_for(run_id, step_run_id, task_run_id)?;
+
+        let targets = recovery_cleanup_plan(intent.namespace.as_str(), &request);
+        assert_eq!(targets.len(), 6);
+        let attempt_name = attempt_job_name(request.attempt_id);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.resource == "jobs" && target.name == attempt_name)
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| { target.resource == "configmaps" && target.name == attempt_name })
+        );
+        assert!(targets.iter().any(|target| {
+            target.resource == "secrets" && target.name == request.ssh_identity.private_key_secret
+        }));
+        assert!(targets.iter().any(|target| {
+            target.resource == "secrets" && target.name == request.ssh_identity.certificate_secret
+        }));
+        Ok(())
     }
 
     fn owned_resource(request: &AnsibleProbeExecutionRequest) -> Value {

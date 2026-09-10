@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, io::Cursor, str::FromStr, sync::Arc};
 
-use auth::{BffSession, EncryptedValue};
+use auth::{BffSession, EncryptedValue, ServiceTokenClient};
 use axum::{
     Json,
     body::Bytes,
@@ -16,7 +16,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use contracts::{
     AccessGrantId, ActorId, ConsoleCapabilityId, ConsoleSessionId, CourseId, EnvironmentId,
-    Revision,
+    ProjectId, Revision,
     access::{ConsoleCapability, ConsoleCapabilityAvailability, ConsoleKind, ConsoleLeaseFence},
     environment::{EnvironmentAccessSubjectKind, EnvironmentConsoleEligibilityRequest},
     http::{IssueConsoleCapabilityRequest, StrongEtag},
@@ -38,7 +38,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    ApiError, AppState, authenticated_session, grants, require_browser_origin, utc_timestamp,
+    ApiError, AppState, ServiceTokenTarget, authenticated_session, grants, require_browser_origin,
+    utc_timestamp,
 };
 
 const HANDOFF_COOKIE: &str = "labweaver_console_handoff";
@@ -103,17 +104,27 @@ impl ConsoleRegistry {
 pub(super) struct ConsoleGateway {
     base_uri: url::Url,
     connector: Connector,
+    service_token_client: Arc<ServiceTokenClient>,
+    service_token_target: ServiceTokenTarget,
 }
 
 impl ConsoleGateway {
     pub(super) fn new(
         base_uri: &str,
         ca_pem: &[u8],
-        certificate_pem: &[u8],
-        key_pem: &[u8],
+        service_token_client: Arc<ServiceTokenClient>,
+        service_token_target: ServiceTokenTarget,
     ) -> Result<Self, ApiError> {
         let base_uri = url::Url::parse(base_uri)
             .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_CONFIG_INVALID"))?;
+        if base_uri.scheme() != "https"
+            || base_uri.host_str().is_none()
+            || base_uri.path() != "/"
+            || base_uri.query().is_some()
+            || base_uri.fragment().is_some()
+        {
+            return Err(ApiError::internal("LW_ACCESS_CONSOLE_CONFIG_INVALID"));
+        }
         let mut roots = RootCertStore::empty();
         for certificate in rustls_pemfile::certs(&mut Cursor::new(ca_pem)) {
             roots
@@ -126,19 +137,14 @@ impl ConsoleGateway {
         if roots.is_empty() {
             return Err(ApiError::internal("LW_ACCESS_CONSOLE_CERTIFICATE_INVALID"));
         }
-        let certificates = rustls_pemfile::certs(&mut Cursor::new(certificate_pem))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_CERTIFICATE_INVALID"))?;
-        let key = rustls_pemfile::private_key(&mut Cursor::new(key_pem))
-            .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_CERTIFICATE_INVALID"))?
-            .ok_or_else(|| ApiError::internal("LW_ACCESS_CONSOLE_CERTIFICATE_INVALID"))?;
         let tls = ClientConfig::builder()
             .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_CERTIFICATE_INVALID"))?;
+            .with_no_client_auth();
         Ok(Self {
             base_uri,
             connector: Connector::Rustls(Arc::new(tls)),
+            service_token_client,
+            service_token_target,
         })
     }
 
@@ -284,6 +290,8 @@ pub(super) async fn issue_capability(
         kind: request.kind,
         access_grant_id: grant_id,
         access_grant_revision: availability.access_grant_revision,
+        project_id: availability.project_id,
+        course_id: availability.course_id,
         environment_id: availability.environment_id,
         environment_class: availability.environment_class,
         environment_revision: availability.environment_revision,
@@ -343,7 +351,7 @@ async fn resolve_availability(
 ) -> Result<ConsoleCapabilityAvailability, ApiError> {
     let now = OffsetDateTime::now_utc();
     let row = sqlx::query(
-        "SELECT actor_id,course_id,environment_id,environment_revision,revision,expires_at \
+        "SELECT actor_id,project_id,course_id,environment_id,environment_revision,revision,expires_at \
          FROM access.access_grants WHERE grant_id=$1 AND state='active' AND expires_at>$2",
     )
     .bind(grant_id.as_uuid())
@@ -356,18 +364,25 @@ async fn resolve_availability(
     if actor_id != session.actor_id {
         return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
     }
-    let course_id = CourseId::from_str(&row.get::<Uuid, _>("course_id").to_string())
+    let project_id = ProjectId::from_str(&row.get::<Uuid, _>("project_id").to_string())
+        .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
+    let course_id = row
+        .get::<Option<Uuid>, _>("course_id")
+        .map(|value| CourseId::from_str(&value.to_string()))
+        .transpose()
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let environment_id = EnvironmentId::from_str(&row.get::<Uuid, _>("environment_id").to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let environment_revision = revision(row.get("environment_revision"))?;
     let access_grant_revision = revision(row.get("revision"))?;
     let membership =
-        grants::active_membership(&state.pool, course_id, actor_id, &session.roles).await?;
+        grants::active_membership(&state.pool, project_id, course_id, actor_id, &session.roles)
+            .await?;
     let actor = ActorId::from_str(&actor_id.to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let request = EnvironmentConsoleEligibilityRequest {
         environment_id,
+        project_id,
         course_id,
         actor_id: actor,
         subject_kind: if matches!(
@@ -407,6 +422,8 @@ async fn resolve_availability(
     let availability = ConsoleCapabilityAvailability {
         access_grant_id: grant_id,
         access_grant_revision,
+        project_id,
+        course_id,
         environment_id,
         environment_class: eligibility.environment_class,
         environment_revision,
@@ -432,16 +449,19 @@ async fn insert_capability(
     let lease = capability.lease_fence.as_ref();
     let inserted = sqlx::query(
         "INSERT INTO access.console_capabilities \
-         (capability_id,kind,access_grant_id,access_grant_revision,bff_session_id,actor_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) \
-         SELECT $1,$2,$3,$4,$5,$6,g.course_id,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
+         (capability_id,kind,access_grant_id,access_grant_revision,bff_session_id,actor_id,project_id,course_id,environment_id,environment_class,environment_revision,lease_id,lease_revision,lease_expires_at,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) \
+         SELECT $1,$2,$3,$4,$5,$6,g.project_id,g.course_id,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
          FROM access.access_grants g
          JOIN access.bff_sessions s ON s.session_id=$5 AND s.actor_id=$6
-         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id
          WHERE g.grant_id=$3 AND g.actor_id=$6 AND g.state='active' AND g.revision=$4 AND g.environment_revision=$9
-           AND g.expires_at>clock_timestamp() AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
-           AND s.idle_expires_at>clock_timestamp() AND cm.state='active' AND cm.role=ANY(s.platform_roles)
-           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END
-           AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp())",
+            AND g.expires_at>clock_timestamp() AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
+            AND s.idle_expires_at>clock_timestamp()
+            AND EXISTS (SELECT 1 FROM access.project_memberships pm WHERE pm.project_id=g.project_id AND pm.actor_id=g.actor_id AND pm.state='active' AND pm.role=ANY(s.platform_roles)
+              AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END
+              AND (pm.expires_at IS NULL OR pm.expires_at>clock_timestamp()))
+            AND (g.course_id IS NULL OR EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=g.course_id AND cm.actor_id=g.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles)
+              AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END
+              AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp())))",
     )
     .bind(capability.id.as_uuid()).bind(console_kind_db(capability.kind)).bind(capability.access_grant_id.as_uuid())
     .bind(i64_revision(capability.access_grant_revision)?).bind(session.session_id).bind(session.actor_id)
@@ -566,7 +586,7 @@ async fn consume_capability(
         return Err(ApiError::unavailable("LW_CONSOLE_CAPACITY_EXHAUSTED"));
     }
     let row = sqlx::query(
-        "SELECT c.capability_id,c.kind,c.access_grant_id,c.access_grant_revision,c.actor_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,c.handoff_secret_sha256,c.expires_at,c.authorization_expires_at,c.consumed_at,g.state,g.revision AS current_grant_revision,g.environment_revision AS current_environment_revision,g.expires_at AS grant_expires_at,s.revoked_at,s.expires_at AS bff_expires_at,s.idle_expires_at,EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=c.course_id AND cm.actor_id=c.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (cm.expires_at IS NULL OR cm.expires_at > clock_timestamp())) AS membership_active \
+        "SELECT c.capability_id,c.kind,c.access_grant_id,c.access_grant_revision,c.actor_id,c.project_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,c.handoff_secret_sha256,c.expires_at,c.authorization_expires_at,c.consumed_at,g.state,g.revision AS current_grant_revision,g.environment_revision AS current_environment_revision,g.expires_at AS grant_expires_at,s.revoked_at,s.expires_at AS bff_expires_at,s.idle_expires_at,(EXISTS (SELECT 1 FROM access.project_memberships pm WHERE pm.project_id=c.project_id AND pm.actor_id=c.actor_id AND pm.state='active' AND pm.role=ANY(s.platform_roles) AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (pm.expires_at IS NULL OR pm.expires_at > clock_timestamp())) AND (c.course_id IS NULL OR EXISTS (SELECT 1 FROM access.course_memberships cm WHERE cm.course_id=c.course_id AND cm.actor_id=c.actor_id AND cm.state='active' AND cm.role=ANY(s.platform_roles) AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END AND (cm.expires_at IS NULL OR cm.expires_at > clock_timestamp())))) AS membership_active \
          FROM access.console_capabilities c JOIN access.access_grants g ON g.grant_id=c.access_grant_id JOIN access.bff_sessions s ON s.session_id=c.bff_session_id \
          WHERE c.locator_sha256=$1 FOR UPDATE OF c",
     ).bind(Sha256Digest::of_bytes(locator.as_bytes()).to_string()).fetch_optional(&mut *tx).await
@@ -623,7 +643,12 @@ async fn consume_capability(
     };
     sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,revision,state,opened_at,authorization_expires_at) SELECT $1,c.capability_id,c.kind,c.bff_session_id,c.access_grant_id,c.access_grant_revision,c.actor_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,$2,1,'opening',$3,c.authorization_expires_at FROM access.console_capabilities c WHERE c.capability_id=$4")
         .bind(session_id.as_uuid()).bind(state.console_proxy_owner.as_str()).bind(now).bind(capability_id).execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let course_id = CourseId::from_str(&row.get::<Uuid, _>("course_id").to_string())
+    let project_id = ProjectId::from_str(&row.get::<Uuid, _>("project_id").to_string())
+        .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
+    let course_id = row
+        .get::<Option<Uuid>, _>("course_id")
+        .map(|value| CourseId::from_str(&value.to_string()))
+        .transpose()
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let grant_id = AccessGrantId::from_str(&row.get::<Uuid, _>("access_grant_id").to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
@@ -634,6 +659,7 @@ async fn consume_capability(
     grants::enqueue_event_value(
         &mut tx,
         contracts::events::subjects::ACCESS_CONSOLE_SESSION_STATE_CHANGED,
+        project_id,
         course_id,
         session_id.as_uuid(),
         Revision::new(1).map_err(|_| ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID"))?,
@@ -641,6 +667,8 @@ async fn consume_capability(
             console_session_id: session_id,
             access_grant_id: grant_id,
             access_grant_revision: grant_revision,
+            project_id,
+            course_id,
             environment_id,
             environment_revision,
             state: contracts::access::ConsoleSessionState::Opening,
@@ -788,14 +816,20 @@ pub(super) async fn enqueue_console_event(
     diagnostic: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<(), ApiError> {
-    let row = sqlx::query("SELECT course_id,access_grant_id,access_grant_revision,environment_id,environment_revision,revision,terminate_by FROM access.console_sessions WHERE session_id=$1")
+    let row = sqlx::query("SELECT project_id,course_id,access_grant_id,access_grant_revision,environment_id,environment_revision,revision,terminate_by FROM access.console_sessions WHERE session_id=$1")
         .bind(session_id.as_uuid()).fetch_one(&mut **tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let course_id = CourseId::from_str(&row.get::<Uuid, _>("course_id").to_string())
+    let project_id = ProjectId::from_str(&row.get::<Uuid, _>("project_id").to_string())
+        .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
+    let course_id = row
+        .get::<Option<Uuid>, _>("course_id")
+        .map(|value| CourseId::from_str(&value.to_string()))
+        .transpose()
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let revision = revision(row.get("revision"))?;
     grants::enqueue_event_value(
         tx,
         contracts::events::subjects::ACCESS_CONSOLE_SESSION_STATE_CHANGED,
+        project_id,
         course_id,
         session_id.as_uuid(),
         revision,
@@ -806,6 +840,8 @@ pub(super) async fn enqueue_console_event(
             )
             .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?,
             access_grant_revision: revision_from_row(&row, "access_grant_revision")?,
+            project_id,
+            course_id,
             environment_id: EnvironmentId::from_str(
                 &row.get::<Uuid, _>("environment_id").to_string(),
             )
@@ -830,10 +866,20 @@ async fn bridge_inner(
     browser: WebSocket,
     cancellation: CancellationToken,
 ) -> Result<(), &'static str> {
-    let request = state
+    let mut request = state
         .console_gateway
         .request(session)
         .map_err(|_| "LW_CONSOLE_UPSTREAM_INVALID")?;
+    state
+        .console_gateway
+        .service_token_client
+        .bearer_auth_for(
+            request.headers_mut(),
+            &state.console_gateway.service_token_target.audience,
+            &state.console_gateway.service_token_target.scopes,
+        )
+        .await
+        .map_err(|_| "LW_CONSOLE_UPSTREAM_AUTH_FAILED")?;
     let (upstream, response) = connect_async_tls_with_config(
         request,
         None,

@@ -16,6 +16,10 @@
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -29,13 +33,20 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Resource-authoritative Lease update for an existing Work aggregate.\n\nEnvironment accepts this only from the Resource service mTLS identity after\nindependently resolving the exact active Lease. It extends eligibility but\ncannot change the immutable release, Provider, owner, course, or capacity\nbinding selected by the original handoff.",
+  "description": "Resource-authoritative Lease update for an existing Work aggregate.\n\nEnvironment accepts this only from the authenticated Resource service after\nindependently resolving the exact active Lease. It extends eligibility but\ncannot change the immutable release, Provider, owner, course, or capacity\nbinding selected by the original handoff.",
   "properties": {
     "capacityBinding": {
       "type": "string"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
@@ -52,6 +63,9 @@
     "ownerActorId": {
       "$ref": "#/$defs/ActorId"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "traceId": {
       "type": "string"
     },
@@ -67,7 +81,7 @@
     "leaseId",
     "leaseRevision",
     "environmentId",
-    "courseId",
+    "projectId",
     "ownerActorId",
     "capacityBinding",
     "expiresAt",

@@ -16,6 +16,78 @@
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
     },
+    "GpuAllocation": {
+      "additionalProperties": false,
+      "description": "The catalog resolution captured on an approved capacity claim.",
+      "properties": {
+        "allocationBinding": {
+          "type": "string"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entryId": {
+          "$ref": "#/$defs/GpuCatalogEntryId",
+          "description": "Exact catalog row used to resolve this allocation."
+        },
+        "mode": {
+          "$ref": "#/$defs/GpuAllocationMode"
+        },
+        "providerBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entryId",
+        "class",
+        "count",
+        "mode",
+        "providerBinding",
+        "allocationBinding",
+        "catalogRevision"
+      ],
+      "type": "object"
+    },
+    "GpuAllocationMode": {
+      "description": "Allocation mode selected by the Resource GPU catalog.\n\nCallers submit only a catalog class and count. The mode is resolved from the\nactive catalog entry and is never accepted as an untrusted request override.",
+      "enum": [
+        "exclusive",
+        "container_time_slice",
+        "vm_vgpu"
+      ],
+      "type": "string"
+    },
+    "GpuCatalogEntryId": {
+      "description": "Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
@@ -37,12 +109,53 @@
       "format": "uint64",
       "minimum": 1,
       "type": "integer"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Resource-to-Environment command to create one Work aggregate from an already-approved\nLease and capacity shell. Environment resolves the release projection locally.",
   "properties": {
+    "approvedResources": {
+      "$ref": "#/$defs/WorkloadResources",
+      "description": "Exact approved limits and catalog resolution consumed by Environment."
+    },
     "capacityBinding": {
       "type": "string"
     },
@@ -53,13 +166,30 @@
       "$ref": "#/$defs/Revision"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "displayLabel": {
       "type": "string"
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
+    },
+    "gpuAllocation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocation"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "leaseId": {
       "$ref": "#/$defs/LeaseId"
@@ -71,14 +201,7 @@
       "$ref": "#/$defs/ActorId"
     },
     "projectId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ProjectId"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/ProjectId"
     },
     "providerBinding": {
       "type": "string"
@@ -116,13 +239,14 @@
     "claimId",
     "claimRevision",
     "environmentId",
-    "courseId",
+    "projectId",
     "ownerActorId",
     "displayLabel",
     "releaseId",
     "releaseVersion",
     "providerBinding",
     "capacityBinding",
+    "approvedResources",
     "traceId"
   ],
   "title": "ResourceWorkHandoff",

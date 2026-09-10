@@ -7,12 +7,22 @@ import {
   deleteEnvironment,
 } from '@/generated/contracts'
 import type { CreateEnvironmentRequestSchema, EnvironmentOperationAcceptedSchema } from '@/generated/contracts'
-import { extractProblemDetails, makeDiagnostic } from '@/types/async'
+import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
 
-export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
+type CreateEnvironmentInput = Pick<CreateEnvironmentRequestSchema, 'releaseId' | 'releaseVersion'> &
+  Partial<Pick<CreateEnvironmentRequestSchema, 'courseId' | 'displayLabel'>>
+
+export type LifecycleMutationResult =
+  | { ok: true; accepted: EnvironmentOperationAcceptedSchema }
+  | { ok: false; diagnostic: DiagnosticViewModel }
+
+export function useEnvironmentLifecycle(
+  projectId: Ref<string | undefined>,
+  courseId: Ref<string | undefined> = ref(undefined),
+) {
   const operating = ref<Set<string>>(new Set())
   const lastAccepted = ref<EnvironmentOperationAcceptedSchema | null>(null)
 
@@ -26,17 +36,21 @@ export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
    * intent so that retrying after a network timeout replays the same create
    * instead of minting a second environment. Omit it only for first attempts.
    */
-  async function create(request: CreateEnvironmentRequestSchema, intentKey?: string) {
-    const id = courseId.value
+  async function create(request: CreateEnvironmentInput, intentKey?: string): Promise<LifecycleMutationResult> {
+    const id = projectId.value
     if (!id) {
       return {
         ok: false,
-        diagnostic: makeDiagnostic('COURSE_CONTEXT_MISSING', '课程上下文缺失，无法创建环境。', false),
+        diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false),
       }
     }
     const result = await createEnvironment({
       headers: { 'Idempotency-Key': intentKey ?? idempotencyKey() },
-      body: request,
+      body: {
+        ...request,
+        projectId: id,
+        ...(courseId.value ? { courseId: courseId.value } : {}),
+      },
     })
     if (result.error) {
       const problem = extractProblemDetails(result.error)
@@ -53,7 +67,7 @@ export function useEnvironmentLifecycle(courseId: Ref<string | undefined>) {
     return { ok: true, accepted: result.data }
   }
 
-  async function act(environmentId: string, revision: number, action: LifecycleAction) {
+  async function act(environmentId: string, revision: number, action: LifecycleAction): Promise<LifecycleMutationResult> {
     track(`${environmentId}:${action}`, true)
     try {
       const headers = { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(revision) }

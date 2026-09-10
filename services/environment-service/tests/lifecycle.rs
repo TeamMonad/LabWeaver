@@ -8,6 +8,7 @@ use contracts::environment::{
     DesiredEnvironmentState, EndpointHealth, EnvironmentLeaseAuthorization,
     EnvironmentOperationKind, EnvironmentResetTarget, ObservedEnvironmentState, OperationState,
 };
+use contracts::resource::WorkloadResources;
 use contracts::{ActorId, ArtifactId, ArtifactRef, LeaseId, OperationId};
 use environment_service::{
     LifecycleCommand, LifecycleError, ProviderObservation, apply_provider_failure,
@@ -379,6 +380,82 @@ fn expire_stop_checkpoint_is_followed_by_cleanup() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn failed_expire_can_retry_or_recover_through_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+    let current = ready_instance();
+    let expire = plan_command(
+        &current,
+        &command(&current, EnvironmentOperationKind::Expire),
+        OperationId::new(),
+    )?;
+    let failed = apply_provider_failure(
+        &expire,
+        expire.operation.id,
+        "LW_ENVIRONMENT_PROVIDER_REJECTED",
+    )?;
+    assert_eq!(
+        failed.failed_phase,
+        Some(ObservedEnvironmentState::Expiring)
+    );
+    assert_eq!(failed.desired_state, DesiredEnvironmentState::Deleted);
+
+    for kind in [
+        EnvironmentOperationKind::Retry,
+        EnvironmentOperationKind::Recover,
+    ] {
+        let resumed = plan_command(&failed, &command(&failed, kind), OperationId::new())?;
+        assert_eq!(resumed.desired_state, DesiredEnvironmentState::Deleted);
+        assert_eq!(resumed.observed_state, ObservedEnvironmentState::Expiring);
+        assert_eq!(
+            resumed.operation.retry_from_phase,
+            Some(ObservedEnvironmentState::Expiring)
+        );
+        assert_eq!(
+            environment_service::next_action(&resumed, timestamp("2026-07-14T01:00:01.000Z"))?,
+            environment_service::ReconcileAction::Stop
+        );
+
+        let stopped = apply_provider_observation(
+            &resumed,
+            resumed.operation.id,
+            ProviderObservation {
+                next_state: ObservedEnvironmentState::Stopped,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete: false,
+            },
+        )?;
+        assert_eq!(
+            environment_service::next_action(&stopped, timestamp("2026-07-14T01:00:02.000Z"))?,
+            environment_service::ReconcileAction::Cleanup
+        );
+
+        let deleting = apply_provider_observation(
+            &stopped,
+            stopped.operation.id,
+            ProviderObservation {
+                next_state: ObservedEnvironmentState::Deleting,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete: false,
+            },
+        )?;
+        let deleted = apply_provider_observation(
+            &deleting,
+            deleting.operation.id,
+            ProviderObservation {
+                next_state: ObservedEnvironmentState::Deleted,
+                endpoints: Vec::new(),
+                cleanup_evidence: Some(cleanup_evidence()),
+                operation_complete: true,
+            },
+        )?;
+        assert_eq!(deleted.observed_state, ObservedEnvironmentState::Deleted);
+        assert_eq!(deleted.operation.state, OperationState::Succeeded);
+    }
+    Ok(())
+}
+
+#[test]
 fn timeout_cleanup_requires_recorded_revocation_when_endpoints_existed() {
     let current = ready_instance();
     let mut restart = command(&current, EnvironmentOperationKind::Restart);
@@ -677,15 +754,24 @@ fn lease_authorization(
     expires_at: &str,
 ) -> EnvironmentLeaseAuthorization {
     EnvironmentLeaseAuthorization {
+        resource_request_id: contracts::ResourceRequestId::new(),
         lease_id: instance.lease_id.unwrap_or_default(),
         lease_revision: revision(3),
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         owner_actor_id: instance.owner_id,
         capacity_binding: instance
             .capacity_binding
             .clone()
             .unwrap_or_else(|| "cpu-standard-v1".to_owned()),
+        approved_resources: WorkloadResources {
+            cpu_millicores: 1000,
+            memory_bytes: 1_073_741_824,
+            storage_bytes: 1_073_741_824,
+            gpu: None,
+        },
+        gpu_allocation: None,
         active_from: timestamp("2026-07-14T00:00:00.000Z"),
         expires_at: timestamp(expires_at),
     }

@@ -6,8 +6,21 @@
         "accessGrantId": {
           "$ref": "#/$defs/AccessGrantId"
         },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "effectiveAt": {
           "$ref": "#/$defs/UtcTimestamp"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
         },
         "revision": {
           "$ref": "#/$defs/Revision"
@@ -18,6 +31,7 @@
       },
       "required": [
         "accessGrantId",
+        "projectId",
         "revision",
         "state",
         "effectiveAt"
@@ -34,6 +48,10 @@
     },
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -64,7 +82,15 @@
       "$ref": "#/$defs/Sequence"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent projects omit this field."
     },
     "data": {
       "$ref": "#/$defs/AccessGrantChanged"
@@ -77,6 +103,10 @@
     },
     "id": {
       "$ref": "#/$defs/EventId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope for every platform event, including independent Work events."
     },
     "source": {
       "type": "string"
@@ -106,7 +136,7 @@
     "time",
     "datacontenttype",
     "dataschema",
-    "courseId",
+    "projectId",
     "aggregateRevision",
     "aggregateSequence",
     "traceId",

@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "FixedDecimal": {
+      "description": "Canonical signed decimal with exactly six fractional digits.\n\nDecimal values cross the API as strings so JavaScript clients and SQL\ndrivers cannot round monetary values through binary floating point. The\ninternal scaled representation is available to Resource arithmetic without\nintroducing a database-specific decimal dependency into the contracts crate.",
+      "format": "fixed-decimal-6",
+      "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
+      "type": "string"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "A fixed-precision amount with an explicit ISO-4217-like currency code.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Project budget mutation. Amounts are decimal strings with six fractional digits.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "limit": {
+      "$ref": "#/$defs/Money"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "warningAt": {
+      "$ref": "#/$defs/Money"
+    }
+  },
+  "required": [
+    "projectId",
+    "limit",
+    "warningAt"
+  ],
+  "title": "UpsertResourceBudgetRequest",
+  "type": "object"
+}

@@ -14,17 +14,21 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use contracts::authoring::{
-    CandidateApproval, CandidateDecision, EnvironmentEntrySpec, EnvironmentRuntimeSpec,
-    EnvironmentSpec, RuntimeKind,
+    CandidateApproval, CandidateDecision, EnvironmentClass, EnvironmentEntrySpec,
+    EnvironmentRuntimeSpec, EnvironmentSpec, RuntimeKind,
 };
-use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
+use contracts::environment::{
+    DesiredEnvironmentState, EndpointProtocol, EnvironmentLeaseAuthorization,
+    EnvironmentOperationKind, ObservedEnvironmentState,
+};
 use contracts::events::ReleasePublished;
+use contracts::resource::{GpuAllocation, GpuAllocationMode, GpuRequest, WorkloadResources};
 use contracts::supply_chain::{
     EnvironmentTemplateRelease, ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
 };
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, ImageArtifactId, PolicyId,
-    ReleaseId, Revision, UtcTimestamp,
+    ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, GpuCatalogEntryId, ImageArtifactId,
+    LeaseId, PolicyId, ReleaseId, ResourceRequestId, Revision, UtcTimestamp,
 };
 use environment_service::{
     ContainerReleaseResolver, EnvironmentProvider, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
@@ -532,6 +536,85 @@ fn plan_is_deterministic_private_and_digest_bound() {
     );
 }
 
+#[test]
+fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
+    let projection = projection();
+    let mut instance = instance_for(&projection);
+    let lease_id = LeaseId::new();
+    let capacity_binding = "vm-vgpu-capacity-1".to_owned();
+    let gpu_class = "nvidia-vgpu".to_owned();
+    let allocation_binding = "nvidia.com/grid-t4-4c".to_owned();
+    let gpu_allocation = GpuAllocation {
+        entry_id: GpuCatalogEntryId::new(),
+        class: gpu_class.clone(),
+        count: 2,
+        mode: GpuAllocationMode::VmVgpu,
+        provider_binding: "kubevirt-primary-v1".to_owned(),
+        allocation_binding: allocation_binding.clone(),
+        catalog_revision: revision(1),
+    };
+    instance.class = EnvironmentClass::Work;
+    instance.lease_id = Some(lease_id);
+    instance.capacity_binding = Some(capacity_binding.clone());
+    instance.operation.lease_authorization = Some(EnvironmentLeaseAuthorization {
+        resource_request_id: ResourceRequestId::new(),
+        lease_id,
+        lease_revision: revision(1),
+        environment_id: instance.id,
+        project_id: instance.project_id,
+        course_id: instance.course_id,
+        owner_actor_id: instance.owner_id,
+        capacity_binding,
+        approved_resources: WorkloadResources {
+            cpu_millicores: 2_000,
+            memory_bytes: 2_147_483_648,
+            storage_bytes: 10_737_418_240,
+            gpu: Some(GpuRequest {
+                class: gpu_class,
+                count: 2,
+            }),
+        },
+        gpu_allocation: Some(gpu_allocation),
+        active_from: timestamp("2026-07-16T08:00:00.000Z"),
+        expires_at: timestamp("2026-07-16T09:00:00.000Z"),
+    });
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("valid VM vGPU plan");
+
+    let virtual_machine = resource(&plan, "VirtualMachine");
+    let gpus = virtual_machine
+        .document
+        .pointer("/spec/template/spec/domain/devices/gpus")
+        .and_then(serde_json::Value::as_array)
+        .expect("VM GPU devices");
+    assert_eq!(gpus.len(), 2);
+    for (index, gpu) in gpus.iter().enumerate() {
+        assert_eq!(
+            gpu.pointer("/name"),
+            Some(&json!(format!("runtime-gpu-{index}")))
+        );
+        assert_eq!(
+            gpu.pointer("/deviceName"),
+            Some(&json!("nvidia.com/grid-t4-4c"))
+        );
+    }
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1grid-t4-4c"),
+        Some(&json!("2"))
+    );
+    let quota = resource(&plan, "ResourceQuota");
+    assert_eq!(
+        quota
+            .document
+            .pointer("/spec/hard/limits.nvidia.com~1grid-t4-4c"),
+        Some(&json!("2"))
+    );
+}
+
 #[tokio::test]
 async fn readiness_requires_vm_ssh_and_current_generation() {
     let release_projection = projection();
@@ -699,10 +782,21 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     assert_eq!(backend.count_kind("DataVolume"), 1);
 
     let mut instance = provision;
-    instance.observed_state = ObservedEnvironmentState::Deleting;
+    instance.observed_state = ObservedEnvironmentState::Stopped;
     instance.desired_state = DesiredEnvironmentState::Deleted;
     instance.generation = 2;
     instance.operation.id = contracts::OperationId::new();
+    instance.operation.kind = EnvironmentOperationKind::Expire;
+
+    let checkpoint = provider
+        .execute(ReconcileAction::Cleanup, &instance)
+        .await
+        .expect("cleanup enters deleting state");
+    assert_eq!(checkpoint.next_state, ObservedEnvironmentState::Deleting);
+    assert!(!checkpoint.operation_complete);
+    assert!(checkpoint.cleanup_evidence.is_none());
+
+    instance.observed_state = ObservedEnvironmentState::Deleting;
 
     let observation = provider
         .execute(ReconcileAction::Cleanup, &instance)
@@ -721,6 +815,34 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
         ["apply", "delete"]
     );
     assert!(backend.objects.lock().expect("objects lock").is_empty());
+}
+
+#[tokio::test]
+async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
+    let projection = projection();
+    let mut instance = instance_for(&projection);
+    instance.observed_state = ObservedEnvironmentState::Expiring;
+    instance.desired_state = DesiredEnvironmentState::Deleted;
+    instance.operation.kind = EnvironmentOperationKind::Expire;
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider(projection, backend.clone());
+
+    let observation = provider
+        .execute(ReconcileAction::Stop, &instance)
+        .await
+        .expect("expire stop succeeds");
+
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert!(!observation.operation_complete);
+    assert!(observation.endpoints.is_empty());
+    assert_eq!(
+        backend
+            .operations
+            .lock()
+            .expect("operations lock")
+            .as_slice(),
+        ["stop"]
+    );
 }
 
 #[test]
@@ -907,6 +1029,7 @@ fn count_resource(plan: &KubeVirtResourcePlan, kind: &str) -> usize {
 
 fn instance_for(projection: &ReleasePublished) -> contracts::environment::EnvironmentInstance {
     let mut instance = support::requested_instance();
+    instance.project_id = projection.release.project_id;
     instance.course_id = projection.release.course_id;
     instance.release_id = projection.release.id;
     instance.release_version = projection.release.version;
@@ -958,11 +1081,13 @@ fn projection() -> ReleasePublished {
     }))
     .expect("valid EnvironmentSpec");
     let artifact_id = ImageArtifactId::new();
-    let course_id = contracts::CourseId::new();
+    let project_id = contracts::ProjectId::new();
+    let course_id = Some(contracts::CourseId::new());
     let candidate_id = CandidateId::new();
     let published_at = timestamp("2026-07-16T08:00:00.000Z");
     let release = EnvironmentTemplateRelease {
         id: ReleaseId::new(),
+        project_id,
         course_id,
         version: 1,
         candidate_id,

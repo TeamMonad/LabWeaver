@@ -1,20 +1,20 @@
-//! mTLS-only Kubernetes exec PTY for the fixed `runtime` container.
+//! JWT-authenticated Kubernetes exec PTY for the fixed `runtime` container.
 
-use crate::{
-    MtlsConfig, RuntimeExecutorConfiguration, VerifiedCallerIdentity, serve_owner_resolver_mtls,
-};
+use crate::{RuntimeExecutorConfiguration, http_transport};
+use auth::{ServiceIdentity, ServiceTokenVerifier};
 use axum::{
     Router,
     extract::{
-        Extension, State,
+        Extension, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
 use contracts::{
-    CourseId, EnvironmentId, ReleaseId,
+    CourseId, EnvironmentId, ProjectId, ReleaseId,
     access::{ConsoleClientControl, ConsoleKind},
     authoring::TerminalSpec,
 };
@@ -25,10 +25,10 @@ use kube::{
     api::{AttachParams, ListParams, TerminalSize},
 };
 use serde::Deserialize;
-use std::{io::Cursor, net::SocketAddr, str::FromStr, time::Duration};
+use std::{fmt::Write as _, io::Cursor, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const ENVIRONMENT_SERVICE_SAN: &str = "spiffe://labweaver/environment-service";
+const EXECUTE_PERMISSION: &str = "environment.console.execute";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_SESSION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -36,15 +36,13 @@ const MAX_SESSION_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TerminalExecutorServerConfig {
     pub bind_addr: String,
-    pub client_ca_file: String,
     pub server_certificate_file: String,
     pub server_private_key_file: String,
-    pub allowed_caller_san: String,
 }
 pub struct TerminalExecutorServer {
     listener: tokio::net::TcpListener,
     router: Router,
-    tls: MtlsConfig,
+    tls: Arc<rustls::ServerConfig>,
 }
 #[derive(Clone)]
 struct ExecutorState {
@@ -54,7 +52,8 @@ struct ExecutorState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ExecRequest {
     environment_id: EnvironmentId,
-    course_id: CourseId,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
     release_id: ReleaseId,
     release_version: u64,
     terminal: TerminalSpec,
@@ -66,26 +65,27 @@ impl TerminalExecutorServer {
     pub async fn new(
         server: &TerminalExecutorServerConfig,
         kubernetes: &RuntimeExecutorConfiguration,
+        verifier: Arc<ServiceTokenVerifier>,
     ) -> Result<Self, TerminalExecutorServerError> {
-        if server.allowed_caller_san != ENVIRONMENT_SERVICE_SAN {
-            return Err(TerminalExecutorServerError::Configuration);
-        }
         let listener = tokio::net::TcpListener::bind(
             SocketAddr::from_str(&server.bind_addr)
                 .map_err(|_| TerminalExecutorServerError::Configuration)?,
         )
         .await?;
-        let tls = MtlsConfig::from_pem(
-            &std::fs::read(&server.client_ca_file)?,
-            &std::fs::read(&server.server_certificate_file)?,
-            &std::fs::read(&server.server_private_key_file)?,
+        let tls = http_transport::load_server_config(
+            &server.server_certificate_file,
+            &server.server_private_key_file,
         )?;
         let state = ExecutorState {
             client: explicit_kube_client(kubernetes)?,
         };
         let router = Router::new()
             .route("/internal/v1/container-terminal", get(upgrade))
-            .with_state(state);
+            .with_state(state)
+            .layer(middleware::from_fn_with_state(
+                verifier,
+                require_service_token,
+            ));
         Ok(Self {
             listener,
             router,
@@ -93,14 +93,26 @@ impl TerminalExecutorServer {
         })
     }
     pub async fn serve(self) -> Result<(), TerminalExecutorServerError> {
-        serve_owner_resolver_mtls(
-            self.listener,
-            self.router,
-            self.tls,
-            std::future::pending::<Result<(), crate::MtlsServerError>>(),
-        )
-        .await?;
+        http_transport::serve_tls(self.listener, self.router, self.tls).await?;
         Ok(())
+    }
+}
+
+async fn require_service_token(
+    State(verifier): State<Arc<ServiceTokenVerifier>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match verifier
+        .authenticate_with_permission(request.headers(), EXECUTE_PERMISSION)
+        .await
+    {
+        Ok(identity) => {
+            let mut request = request;
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(error) => TerminalExecutorServerError::ServiceAuth(error).into_response(),
     }
 }
 fn explicit_kube_client(
@@ -137,13 +149,10 @@ fn explicit_kube_client(
 }
 async fn upgrade(
     State(state): State<ExecutorState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    _caller: Option<Extension<ServiceIdentity>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, TerminalExecutorServerError> {
-    if !caller.is_some_and(|Extension(identity)| identity.contains_san(ENVIRONMENT_SERVICE_SAN)) {
-        return Err(TerminalExecutorServerError::CallerDenied);
-    }
     let protocol = ConsoleKind::Xterm.websocket_subprotocol();
     if !headers
         .get(header::SEC_WEBSOCKET_PROTOCOL)
@@ -182,10 +191,13 @@ async fn execute(state: ExecutorState, mut socket: WebSocket) -> Result<(), &'st
     if request.release_version == 0 {
         return Err("LW_CONTAINER_CONSOLE_REQUEST_INVALID");
     }
-    let labels = format!(
-        "app=runtime,labweaver.io/environment-id={},labweaver.io/course-id={},labweaver.io/release-id={},labweaver.io/release-version={}",
-        request.environment_id, request.course_id, request.release_id, request.release_version
+    let mut labels = format!(
+        "app=runtime,labweaver.io/environment-id={},labweaver.io/project-id={},labweaver.io/release-id={},labweaver.io/release-version={}",
+        request.environment_id, request.project_id, request.release_id, request.release_version
     );
+    if let Some(course_id) = request.course_id {
+        let _ = write!(labels, ",labweaver.io/course-id={course_id}");
+    }
     let candidates = pods
         .list(&ListParams::default().labels(&labels))
         .await
@@ -284,13 +296,22 @@ pub enum TerminalExecutorServerError {
     #[error("LW_CONTAINER_CONSOLE_IO_FAILED")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Tls(#[from] crate::MtlsServerError),
+    HttpTransport(#[from] crate::http_transport::HttpTransportError),
+    #[error(transparent)]
+    ServiceAuth(#[from] auth::ServiceAuthError),
 }
 impl IntoResponse for TerminalExecutorServerError {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::CallerDenied => StatusCode::FORBIDDEN,
+            Self::CallerDenied | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied) => {
+                StatusCode::FORBIDDEN
+            }
             Self::SubprotocolRequired => StatusCode::BAD_REQUEST,
+            Self::ServiceAuth(
+                auth::ServiceAuthError::CredentialsMissing
+                | auth::ServiceAuthError::TokenRejected
+                | auth::ServiceAuthError::TokenExpired,
+            ) => StatusCode::UNAUTHORIZED,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
         (status, self.to_string()).into_response()

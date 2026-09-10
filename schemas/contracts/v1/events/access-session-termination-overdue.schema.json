@@ -21,11 +21,24 @@
         "accessGrantRevision": {
           "$ref": "#/$defs/Revision"
         },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "effectiveAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
         "gatewaySessionId": {
           "$ref": "#/$defs/GatewaySessionId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
         },
         "reasonCode": {
           "type": "string"
@@ -48,6 +61,7 @@
         "gatewaySessionId",
         "accessGrantId",
         "accessGrantRevision",
+        "projectId",
         "state",
         "effectiveAt",
         "reasonCode"
@@ -56,6 +70,10 @@
     },
     "GatewaySessionId": {
       "description": "Strongly typed UUIDv7 identifier for `GatewaySessionId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -86,7 +104,15 @@
       "$ref": "#/$defs/Sequence"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent projects omit this field."
     },
     "data": {
       "$ref": "#/$defs/GatewaySessionChanged"
@@ -99,6 +125,10 @@
     },
     "id": {
       "$ref": "#/$defs/EventId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope for every platform event, including independent Work events."
     },
     "source": {
       "type": "string"
@@ -128,7 +158,7 @@
     "time",
     "datacontenttype",
     "dataschema",
-    "courseId",
+    "projectId",
     "aggregateRevision",
     "aggregateSequence",
     "traceId",

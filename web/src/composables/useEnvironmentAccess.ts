@@ -21,7 +21,8 @@ const ACTIVATION_POLL_MS = 500
 export function useEnvironmentAccess(
   environmentId: Ref<string | undefined>,
   environmentRevision: Ref<number | undefined>,
-  courseId: Ref<string | undefined>,
+  projectId: Ref<string | undefined>,
+  courseId: Ref<string | undefined> = ref(undefined),
 ) {
   const endpoints = ref<AsyncState<EnvironmentEndpointSchema[]>>({ kind: 'idle' })
   const grant = ref<AsyncState<AccessGrantSchema>>({ kind: 'idle' })
@@ -54,12 +55,13 @@ export function useEnvironmentAccess(
   async function createGrant() {
     const id = environmentId.value
     const rev = environmentRevision.value
+    const pid = projectId.value
     const cid = courseId.value
     const eps = endpoints.value.kind === 'success' ? endpoints.value.data : []
-    if (!id || rev === undefined || !cid) {
+    if (!id || rev === undefined || !pid) {
       return {
         ok: false,
-        diagnostic: makeDiagnostic('ACCESS_GRANT_NOT_READY', '环境信息缺失，无法签发访问授权。', false),
+        diagnostic: makeDiagnostic('ACCESS_GRANT_NOT_READY', '环境项目归属或版本信息缺失，无法签发访问授权。', false),
       }
     }
     if (eps.length === 0) {
@@ -74,11 +76,12 @@ export function useEnvironmentAccess(
         path: { environmentId: id },
         headers: { 'Idempotency-Key': idempotencyKey() },
         body: {
-          courseId: cid,
           environmentId: id,
           environmentRevision: rev,
           endpointIds: eps.map((e) => e.id),
           expiresAt: addHours(new Date(), 1),
+          projectId: pid,
+          ...(cid ? { courseId: cid } : {}),
         },
       })
       if (result.error) {

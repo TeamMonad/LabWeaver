@@ -6,11 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-#[cfg(target_os = "linux")]
-use sha2::{Digest, Sha256};
 
 mod integration;
-mod local_preflight;
 mod platform_images;
 
 #[derive(Debug, Parser)]
@@ -47,9 +44,6 @@ enum Command {
     PlatformApplication(EnvironmentArgs),
     /// Deploy the independently reviewed Resource authority profile.
     ResourceApplication(EnvironmentArgs),
-    /// Read-only Docker Desktop capability discovery for local validation.
-    #[command(subcommand)]
-    Local(LocalCommand),
     Rollback(RollbackArgs),
     Package(PackageArgs),
     PackageValidate(PackageValidateArgs),
@@ -161,18 +155,6 @@ struct RollbackArgs {
     release_revision: String,
     #[arg(long)]
     yes: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum LocalCommand {
-    /// Probe Docker Desktop Kubernetes without applying any object.
-    Preflight(LocalPreflightArgs),
-}
-
-#[derive(Debug, Args)]
-struct LocalPreflightArgs {
-    #[arg(long, default_value = "local-hostpath")]
-    profile: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -353,9 +335,6 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::PlatformHarborRoute(args) => platform_harbor_route(&args),
         Command::PlatformApplication(args) => platform_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
-        Command::Local(LocalCommand::Preflight(args)) => {
-            local_preflight::run(&repository_root(), &args.profile)
-        }
         Command::Rollback(args) => platform_images::rollback(
             &args.env,
             &args.release_revision,
@@ -702,18 +681,6 @@ fn validate_environment_name(environment: &str) -> Result<(), AppError> {
 }
 
 #[cfg(target_os = "linux")]
-fn require_infrastructure_file(role: &'static str, path: &std::path::Path) -> Result<(), AppError> {
-    if path.is_file() {
-        return Ok(());
-    }
-    Err(AppError::ExternalCommand {
-        role,
-        code: None,
-        detail: Some(format!("required file is missing: {}", path.display())),
-    })
-}
-
-#[cfg(target_os = "linux")]
 fn resolve_infrastructure_file(
     role: &'static str,
     roots: [&std::path::Path; 2],
@@ -743,7 +710,7 @@ fn resolve_infrastructure_directory(
         .ok_or_else(|| AppError::ExternalCommand {
             role,
             code: None,
-            detail: Some(format!("locked Ansible {leaf} are missing")),
+            detail: Some(format!("required Ansible {leaf} are missing")),
         })
 }
 
@@ -753,235 +720,158 @@ fn infrastructure_path(path: &std::path::Path) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn infrastructure_commit_sha() -> Result<String, AppError> {
-    let commit_sha =
-        std::env::var("LABWEAVER_SOURCE_COMMIT").map_err(|_| AppError::ExternalCommand {
-            role: "infrastructure source identity",
-            code: None,
-            detail: Some(
-                "LABWEAVER_SOURCE_COMMIT is required and must be the verified bundle commit".into(),
-            ),
-        })?;
-    if commit_sha
-        .chars()
-        .all(|character| character.is_ascii_hexdigit())
-        && (40..=64).contains(&commit_sha.len())
-    {
-        return Ok(commit_sha);
+struct InfrastructureInputs {
+    inventory: String,
+    vault_password: String,
+    playbook: String,
+    ansible_config: String,
+    collections_path: String,
+    roles_path: String,
+    harbor_data_backup_locator: String,
+    identity_secret_locator: String,
+}
+
+#[cfg(target_os = "linux")]
+impl InfrastructureInputs {
+    fn load(environment: &str, playbook_name: &str) -> Result<Self, AppError> {
+        let root = infrastructure_root()?;
+        let source_ansible_root = root.join("deploy/ansible");
+        let dependency_root = infrastructure_dependency_root()?;
+        let dependency_ansible_root = dependency_root.as_deref().map(|path| {
+            if path.join("deploy/ansible").is_dir() {
+                path.join("deploy/ansible")
+            } else {
+                path.to_path_buf()
+            }
+        });
+
+        let dependency_roots = dependency_ansible_root.as_deref().map_or(
+            [source_ansible_root.as_path(), source_ansible_root.as_path()],
+            |path| [path, source_ansible_root.as_path()],
+        );
+        let source_roots = dependency_ansible_root.as_deref().map_or(
+            [source_ansible_root.as_path(), source_ansible_root.as_path()],
+            |path| [source_ansible_root.as_path(), path],
+        );
+
+        let inventory = resolve_infrastructure_file(
+            "infrastructure deployment input",
+            dependency_roots,
+            &format!("inventories/{environment}/hosts.yml"),
+        )?;
+        let vault_password = resolve_infrastructure_file(
+            "infrastructure deployment input",
+            dependency_roots,
+            &format!("inventories/{environment}/.vault-password"),
+        )?;
+        let playbook = resolve_infrastructure_file(
+            "infrastructure playbook",
+            source_roots,
+            &format!("playbooks/{playbook_name}"),
+        )?;
+        let ansible_config =
+            resolve_infrastructure_file("Ansible configuration", source_roots, "ansible.cfg")?;
+        let collections_path = resolve_infrastructure_directory(
+            "Ansible collections",
+            dependency_roots,
+            "collections",
+        )?;
+        let roles_path = resolve_infrastructure_directory("Ansible roles", source_roots, "roles")?;
+
+        let PlaybookLocators {
+            identity_secret_locator,
+        } = PlaybookLocators::load(playbook_name)?;
+
+        Ok(Self {
+            inventory: infrastructure_path(&inventory),
+            vault_password: infrastructure_path(&vault_password),
+            playbook: infrastructure_path(&playbook),
+            ansible_config: infrastructure_path(&ansible_config),
+            collections_path: infrastructure_path(&collections_path),
+            roles_path: infrastructure_path(&roles_path),
+            harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
+                .unwrap_or_default(),
+            identity_secret_locator,
+        })
     }
-    Err(AppError::ExternalCommand {
-        role: "infrastructure source identity",
+}
+
+#[cfg(target_os = "linux")]
+struct PlaybookLocators {
+    identity_secret_locator: String,
+}
+
+#[cfg(target_os = "linux")]
+impl PlaybookLocators {
+    fn load(playbook_name: &str) -> Result<Self, AppError> {
+        let identity_foundation = matches!(
+            playbook_name,
+            "91-identity-foundation.yml" | "92-identity-foundation-verify.yml"
+        );
+        Ok(Self {
+            identity_secret_locator: locator(
+                "LABWEAVER_IDENTITY_SECRET_LOCATOR",
+                "identity-foundation secret locator",
+                identity_foundation,
+            )?,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn locator(variable: &str, role: &'static str, required: bool) -> Result<String, AppError> {
+    if required {
+        required_environment_value(variable, role)
+    } else {
+        Ok(std::env::var(variable).unwrap_or_default())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn required_environment_value(variable: &str, role: &'static str) -> Result<String, AppError> {
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::ExternalCommand {
+            role,
+            code: None,
+            detail: Some(format!("{variable} is required")),
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn infrastructure_root() -> Result<PathBuf, AppError> {
+    std::env::current_dir().map_err(|error| AppError::ExternalCommand {
+        role: "infrastructure working directory",
         code: None,
-        detail: Some("LABWEAVER_SOURCE_COMMIT must contain 40-64 hexadecimal characters".into()),
+        detail: Some(error.to_string()),
     })
 }
 
 #[cfg(target_os = "linux")]
-fn file_sha256(path: &std::path::Path) -> Result<String, AppError> {
-    let data = std::fs::read(path).map_err(|error| AppError::ExternalCommand {
-        role: "infrastructure identity hash input",
-        code: None,
-        detail: Some(error.to_string()),
-    })?;
-    Ok(format!("sha256:{:x}", Sha256::digest(data)))
-}
-
-#[cfg(target_os = "linux")]
-fn inventory_identity_hash(root: &std::path::Path) -> Result<String, AppError> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|error| AppError::ExternalCommand {
-            role: "infrastructure inventory identity",
-            code: None,
-            detail: Some(error.to_string()),
-        })? {
-            let path = entry
-                .map_err(|error| AppError::ExternalCommand {
-                    role: "infrastructure inventory identity",
-                    code: None,
-                    detail: Some(error.to_string()),
-                })?
-                .path();
+fn infrastructure_dependency_root() -> Result<Option<PathBuf>, AppError> {
+    match std::env::var("LABWEAVER_ANSIBLE_DEPENDENCY_ROOT") {
+        Ok(value) if !value.trim().is_empty() => {
+            let path = PathBuf::from(value);
             if path.is_dir() {
-                pending.push(path);
-            } else if path.file_name().and_then(|name| name.to_str()) != Some(".vault-password") {
-                files.push(path);
+                Ok(Some(path))
+            } else {
+                Err(AppError::ExternalCommand {
+                    role: "Ansible dependency root",
+                    code: None,
+                    detail: Some(
+                        "LABWEAVER_ANSIBLE_DEPENDENCY_ROOT is not a readable directory".into(),
+                    ),
+                })
             }
         }
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(AppError::ExternalCommand {
+            role: "Ansible dependency root",
+            code: None,
+            detail: Some(error.to_string()),
+        }),
     }
-    files.sort();
-    let mut hasher = Sha256::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| AppError::ExternalCommand {
-                role: "infrastructure inventory identity",
-                code: None,
-                detail: Some(error.to_string()),
-            })?;
-        let data = std::fs::read(&path).map_err(|error| AppError::ExternalCommand {
-            role: "infrastructure inventory identity",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-        hasher.update(relative.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        hasher.update((data.len() as u64).to_be_bytes());
-        hasher.update(data);
-    }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
-#[cfg(target_os = "linux")]
-fn approved_controller_identity(lock_path: &std::path::Path) -> Result<String, AppError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let approved = controller_identity_field(
-        &std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
-            role: "approved infrastructure controller lock",
-            code: None,
-            detail: Some(error.to_string()),
-        })?,
-        "approved_controller_ids",
-    )?;
-    let locator = std::env::var("LABWEAVER_CONTROLLER_IDENTITY_FILE").map_err(|_| {
-        AppError::ExternalCommand {
-            role: "approved router controller identity",
-            code: None,
-            detail: Some("LABWEAVER_CONTROLLER_IDENTITY_FILE is required".into()),
-        }
-    })?;
-    let locator_path = std::path::PathBuf::from(locator);
-    let metadata = std::fs::metadata(&locator_path).map_err(|error| AppError::ExternalCommand {
-        role: "approved router controller identity",
-        code: None,
-        detail: Some(error.to_string()),
-    })?;
-    if metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
-        return Err(AppError::ExternalCommand {
-            role: "approved router controller identity",
-            code: None,
-            detail: Some("identity locator must be root-owned and mode 0600 or stricter".into()),
-        });
-    }
-    let identity =
-        std::fs::read_to_string(locator_path).map_err(|error| AppError::ExternalCommand {
-            role: "approved router controller identity",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    let controller_id = controller_identity_field(&identity, "controller_id")?;
-    let declared_machine_id = controller_identity_field(&identity, "machine_id")?;
-    let actual_machine_id =
-        std::fs::read_to_string("/etc/machine-id").map_err(|error| AppError::ExternalCommand {
-            role: "approved router controller identity",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    let approved_ids = approved.split(',').map(str::trim).collect::<Vec<_>>();
-    if !approved_ids.contains(&controller_id.as_str())
-        || declared_machine_id != actual_machine_id.trim()
-    {
-        return Err(AppError::ExternalCommand {
-            role: "approved router controller identity",
-            code: None,
-            detail: Some("controller identity does not match the approved controller lock".into()),
-        });
-    }
-    Ok(controller_id)
-}
-
-#[cfg(target_os = "linux")]
-fn require_ansible_version(
-    lock_path: &std::path::Path,
-    ansible_binary: &std::path::Path,
-) -> Result<(), AppError> {
-    let lock = std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
-        role: "approved infrastructure controller lock",
-        code: None,
-        detail: Some(error.to_string()),
-    })?;
-    let expected = controller_identity_field(&lock, "ansible_core_version")?;
-    let output = ProcessCommand::new(ansible_binary)
-        .arg("--version")
-        .output()
-        .map_err(|error| AppError::ExternalCommand {
-            role: "approved Ansible version",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if output.status.success() && stdout.contains(&format!("core {expected}")) {
-        return Ok(());
-    }
-    Err(AppError::ExternalCommand {
-        role: "approved Ansible version",
-        code: output.status.code(),
-        detail: Some(format!("expected ansible-core {expected}")),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn require_python_module_version(
-    lock_path: &std::path::Path,
-    ansible_binary: &std::path::Path,
-    module: &'static str,
-    lock_field: &str,
-) -> Result<(), AppError> {
-    let lock = std::fs::read_to_string(lock_path).map_err(|error| AppError::ExternalCommand {
-        role: "approved infrastructure controller lock",
-        code: None,
-        detail: Some(error.to_string()),
-    })?;
-    let expected = controller_identity_field(&lock, lock_field)?;
-    let canonical_ansible =
-        std::fs::canonicalize(ansible_binary).map_err(|error| AppError::ExternalCommand {
-            role: "approved Ansible Python runtime",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    let python = canonical_ansible
-        .parent()
-        .ok_or_else(|| AppError::ExternalCommand {
-            role: "approved Ansible Python runtime",
-            code: None,
-            detail: Some("ansible-playbook has no parent runtime directory".into()),
-        })?
-        .join("python");
-    require_infrastructure_file("approved Ansible Python runtime", &python)?;
-    let code = format!("import importlib.metadata; print(importlib.metadata.version({module:?}))");
-    let output = ProcessCommand::new(python)
-        .args(["-c", &code])
-        .output()
-        .map_err(|error| AppError::ExternalCommand {
-            role: "approved Ansible Python dependency",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
-        return Ok(());
-    }
-    Err(AppError::ExternalCommand {
-        role: "approved Ansible Python dependency",
-        code: output.status.code(),
-        detail: Some(format!("expected Python module {module} {expected}")),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn controller_identity_field(content: &str, key: &str) -> Result<String, AppError> {
-    content
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(&format!("{key}:")))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| AppError::ExternalCommand {
-            role: "approved router controller identity",
-            code: None,
-            detail: Some(format!("required {key} field is missing")),
-        })
 }
 
 #[cfg(target_os = "linux")]
@@ -1063,10 +953,6 @@ fn run_infrastructure_with_package(
         ansible_config,
         collections_path,
         roles_path,
-        commit_sha,
-        controller_id,
-        inventory_hash,
-        component_lock_hash,
         harbor_data_backup_locator,
         identity_secret_locator,
     } = InfrastructureInputs::load(environment, playbook_name)?;
@@ -1090,14 +976,6 @@ fn run_infrastructure_with_package(
         .add_env("ANSIBLE_NOCOWS", "1")
         .add_env("ANSIBLE_VAULT_PASSWORD_FILE", vault_password)
         .add_env("LABWEAVER_RUN_ID", &run_id)
-        .add_env("LABWEAVER_COMMIT_SHA", &commit_sha)
-        .add_env(
-            "LABWEAVER_PACKAGE_SOURCE_COMMIT",
-            std::env::var("LABWEAVER_PACKAGE_SOURCE_COMMIT").unwrap_or_else(|_| String::new()),
-        )
-        .add_env("LABWEAVER_CONTROLLER_ID", &controller_id)
-        .add_env("LABWEAVER_INVENTORY_HASH", &inventory_hash)
-        .add_env("LABWEAVER_COMPONENT_LOCK_HASH", &component_lock_hash)
         .add_env(
             "LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR",
             harbor_data_backup_locator,
@@ -1116,9 +994,6 @@ fn run_infrastructure_with_package(
     for (name, value) in extra_environment {
         runner.add_env(*name, value);
     }
-    // ansible-rs 1.1.0 appends configured arguments twice in `run`; all
-    // controller identity and vault inputs therefore travel through the
-    // explicit environment contract above.
     runner
         .run(Play::from_file(playbook))
         .map(|_| ())
@@ -1253,25 +1128,6 @@ mod tests {
         }
         if error.to_string() != "deploy is a destructive operation and requires explicit --yes" {
             return Err("unexpected confirmation message".into());
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn controller_identity_field_rejects_an_unapproved_controller() -> Result<(), String> {
-        let locked = super::controller_identity_field(
-            "approved_controller_ids: edge-router,wsl-a-controller\n",
-            "approved_controller_ids",
-        )
-        .map_err(|error| error.to_string())?;
-        let presented = super::controller_identity_field(
-            "controller_id: unapproved-linux-host\n",
-            "controller_id",
-        )
-        .map_err(|error| error.to_string())?;
-        if locked == presented {
-            return Err("an unapproved Linux controller was accepted".into());
         }
         Ok(())
     }

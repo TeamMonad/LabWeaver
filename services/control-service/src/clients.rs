@@ -1,18 +1,30 @@
-//! Explicit mTLS clients for Control-owned authorization and Agent coordination.
+//! Explicit TLS clients for Control-owned authorization and Agent coordination.
 #![allow(
     missing_docs,
     clippy::missing_errors_doc,
     reason = "deployment YAML keys are documented by the checked-in example configuration"
 )]
 
-use std::time::Duration;
+use std::{
+    collections::BTreeSet,
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use auth::ServiceTokenClient;
 
 use contracts::authoring::{AgentRun, AgentTrackKind};
+use contracts::environment::{
+    EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
+};
 use contracts::evaluation::EvaluationRelease;
 use contracts::http::{
-    CursorPage, EvaluationReleaseListQuery, IdempotencyKey, InternalAgentBuildCancellationRequest,
-    InternalAgentBuildCancellationResult, InternalAgentBuildStatusQuery,
-    InternalAgentRunMutationRequest, InternalAgentRunOutcome, InternalCreateAgentRunRequest,
+    AgentWorkExecutionIntentMetadata, AgentWorkExecutionIntentQuery, CursorPage,
+    EvaluationReleaseListQuery, GeneratedArtifactQuery, GeneratedArtifactRecord, IdempotencyKey,
+    InternalAgentBuildCancellationRequest, InternalAgentBuildCancellationResult,
+    InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
+    InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPublishEvaluationReleaseRequest,
     InternalWithdrawEvaluationReleaseRequest,
 };
@@ -20,60 +32,45 @@ use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
     EvaluationReleaseId, ImageArtifactId,
 };
-use reqwest::{Certificate, Identity, StatusCode, Url};
+use reqwest::{Certificate, StatusCode, Url};
 use serde::Deserialize;
 use thiserror::Error;
 
-/// Non-secret downstream endpoint plus mounted mTLS credential locators.
+/// Non-secret downstream endpoint plus the CA used for server-only TLS.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MtlsClientFileConfig {
+pub struct ServiceHttpClientConfig {
     pub base_url: Url,
     pub ca_certificate_file: String,
-    pub client_certificate_file: String,
-    pub client_private_key_file: String,
     pub timeout_milliseconds: u64,
 }
 
-impl MtlsClientFileConfig {
-    /// Creates one bounded client without ambient proxies or credentials.
-    ///
-    /// For private single-university delivery the inner hop may be plain HTTP
-    /// without mTLS; HTTPS with client certs remains supported when files exist.
+impl ServiceHttpClientConfig {
+    /// Creates one bounded TLS client without ambient proxies or credentials.
     pub fn build(&self) -> Result<reqwest::Client, DownstreamError> {
-        if !matches!(self.base_url.scheme(), "http" | "https")
+        if self.base_url.scheme() != "https"
             || self.base_url.host_str().is_none()
             || self.timeout_milliseconds == 0
             || self.timeout_milliseconds > 30_000
+            || self.ca_certificate_file.trim().is_empty()
         {
             return Err(DownstreamError::Configuration);
         }
         let mut builder = reqwest::Client::builder()
             .no_proxy()
+            .https_only(true)
+            .tls_built_in_root_certs(false)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_millis(self.timeout_milliseconds));
-        if self.base_url.scheme() == "https" {
-            // Optional mTLS: if cert files are configured, attach them; otherwise plain TLS.
-            if !self.ca_certificate_file.is_empty()
-                && !self.client_certificate_file.is_empty()
-                && !self.client_private_key_file.is_empty()
-            {
-                if let Ok(ca) = std::fs::read(&self.ca_certificate_file)
-                    && let Ok(cert) = Certificate::from_pem(&ca)
-                {
-                    builder = builder.add_root_certificate(cert);
-                }
-                if let (Ok(mut identity), Ok(key)) = (
-                    std::fs::read(&self.client_certificate_file),
-                    std::fs::read(&self.client_private_key_file),
-                ) {
-                    identity.extend_from_slice(b"\n");
-                    identity.extend_from_slice(&key);
-                    if let Ok(id) = Identity::from_pem(&identity) {
-                        builder = builder.identity(id);
-                    }
-                }
-                builder = builder.https_only(true);
-            }
+        let ca =
+            std::fs::read(&self.ca_certificate_file).map_err(|_| DownstreamError::Configuration)?;
+        let roots =
+            Certificate::from_pem_bundle(&ca).map_err(|_| DownstreamError::Configuration)?;
+        if roots.is_empty() {
+            return Err(DownstreamError::Configuration);
+        }
+        for root in roots {
+            builder = builder.add_root_certificate(root);
         }
         builder.build().map_err(|_| DownstreamError::Configuration)
     }
@@ -85,17 +82,59 @@ impl MtlsClientFileConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ServiceTokenTarget {
+    audience: &'static str,
+    scopes: &'static [&'static str],
+}
+
+const ACCESS_SERVICE_TARGET: ServiceTokenTarget = ServiceTokenTarget {
+    audience: "labweaver-access",
+    scopes: &["access.authorization.decide"],
+};
+const AGENT_SERVICE_TARGET: ServiceTokenTarget = ServiceTokenTarget {
+    audience: "labweaver-agent",
+    scopes: &["agent.control.invoke"],
+};
+const ENVIRONMENT_SERVICE_TARGET: ServiceTokenTarget = ServiceTokenTarget {
+    audience: "labweaver-environment",
+    scopes: &["environment.work.read"],
+};
+const EVALUATION_SERVICE_TARGET: ServiceTokenTarget = ServiceTokenTarget {
+    audience: "labweaver-evaluation",
+    scopes: &["evaluation.control.invoke"],
+};
+
+impl ServiceTokenTarget {
+    fn scopes(self) -> BTreeSet<String> {
+        self.scopes
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect()
+    }
+}
+
 /// Access Service authorization adapter.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AccessClient {
-    config: MtlsClientFileConfig,
+    config: ServiceHttpClientConfig,
     client: reqwest::Client,
+    service_token_client: Arc<ServiceTokenClient>,
+    token_target: ServiceTokenTarget,
 }
 
 impl AccessClient {
-    pub fn new(config: MtlsClientFileConfig) -> Result<Self, DownstreamError> {
+    pub fn new_authenticated(
+        config: ServiceHttpClientConfig,
+        service_token_client: Arc<ServiceTokenClient>,
+    ) -> Result<Self, DownstreamError> {
         let client = config.build()?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            service_token_client,
+            token_target: ACCESS_SERVICE_TARGET,
+        })
     }
 
     pub async fn authorize(
@@ -103,27 +142,41 @@ impl AccessClient {
         request: &AuthorizationDecisionRequest,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<AuthorizationDecision, DownstreamError> {
-        send_json(correlate(
-            self.client
-                .post(self.config.endpoint("internal/v1/auth/decision")?)
-                .json(request),
-            headers,
-        ))
+        send_json(
+            correlate(
+                self.client
+                    .post(self.config.endpoint("internal/v1/auth/decision")?)
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await
     }
 }
 
 /// Agent Service authority adapter.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AgentClient {
-    config: MtlsClientFileConfig,
+    config: ServiceHttpClientConfig,
     client: reqwest::Client,
+    service_token_client: Arc<ServiceTokenClient>,
+    token_target: ServiceTokenTarget,
 }
 
 impl AgentClient {
-    pub fn new(config: MtlsClientFileConfig) -> Result<Self, DownstreamError> {
+    pub fn new_authenticated(
+        config: ServiceHttpClientConfig,
+        service_token_client: Arc<ServiceTokenClient>,
+    ) -> Result<Self, DownstreamError> {
         let client = config.build()?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            service_token_client,
+            token_target: AGENT_SERVICE_TARGET,
+        })
     }
 
     pub async fn create(
@@ -132,13 +185,17 @@ impl AgentClient {
         key: &IdempotencyKey,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<AgentRun, DownstreamError> {
-        send_json(correlate(
-            self.client
-                .post(self.config.endpoint("internal/v1/agent-runs")?)
-                .header("Idempotency-Key", key.as_str())
-                .json(request),
-            headers,
-        ))
+        send_json(
+            correlate(
+                self.client
+                    .post(self.config.endpoint("internal/v1/agent-runs")?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await
     }
 
@@ -148,6 +205,8 @@ impl AgentClient {
                 self.config
                     .endpoint(&format!("internal/v1/agent-runs/{run_id}"))?,
             ),
+            &self.service_token_client,
+            self.token_target,
         )
         .await
     }
@@ -159,16 +218,20 @@ impl AgentClient {
         key: &IdempotencyKey,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<AgentRun, DownstreamError> {
-        send_json(correlate(
-            self.client
-                .post(
-                    self.config
-                        .endpoint(&format!("internal/v1/agent-runs/{run_id}/cancel"))?,
-                )
-                .header("Idempotency-Key", key.as_str())
-                .json(request),
-            headers,
-        ))
+        send_json(
+            correlate(
+                self.client
+                    .post(
+                        self.config
+                            .endpoint(&format!("internal/v1/agent-runs/{run_id}/cancel"))?,
+                    )
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await
     }
 
@@ -183,17 +246,111 @@ impl AgentClient {
         let track = match track {
             AgentTrackKind::Environment => "environment",
             AgentTrackKind::Evaluation => "evaluation",
+            AgentTrackKind::WorkConfiguration => "work_configuration",
         };
-        send_json(correlate(
-            self.client
-                .post(self.config.endpoint(&format!(
-                    "internal/v1/agent-runs/{run_id}/tracks/{track}/retry"
-                ))?)
-                .header("Idempotency-Key", key.as_str())
-                .json(request),
-            headers,
-        ))
+        send_json(
+            correlate(
+                self.client
+                    .post(self.config.endpoint(&format!(
+                        "internal/v1/agent-runs/{run_id}/tracks/{track}/retry"
+                    ))?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await
+    }
+
+    /// Binds one exact Control-issued Work configuration grant to an awaiting Agent run.
+    pub async fn approve_work_configuration(
+        &self,
+        run_id: AgentRunId,
+        request: &InternalApproveWorkConfigurationRequest,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<AgentRun, DownstreamError> {
+        let run: AgentRun = send_json(
+            correlate(
+                self.client
+                    .post(self.config.endpoint(&format!(
+                        "internal/v1/agent-runs/{run_id}/work-configuration/approve"
+                    ))?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await?;
+        if run.id != run_id
+            || run.project_id != request.project_id
+            || run.course_id != request.course_id
+        {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        Ok(run)
+    }
+
+    /// Resolves one Agent-owned generated artifact metadata record for an exact package scope.
+    pub async fn generated_artifact(
+        &self,
+        artifact_id: contracts::ArtifactId,
+        query: &GeneratedArtifactQuery,
+    ) -> Result<GeneratedArtifactRecord, DownstreamError> {
+        let record: GeneratedArtifactRecord = send_json(
+            self.client
+                .get(
+                    self.config
+                        .endpoint(&format!("internal/v1/generated-artifacts/{artifact_id}"))?,
+                )
+                .query(query),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await?;
+        if record.artifact.artifact_id != artifact_id
+            || record.project_id != query.project_id
+            || record.course_id != query.course_id
+            || record.package_id != query.package_id
+            || record.package_revision != query.package_revision
+        {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        Ok(record)
+    }
+
+    /// Reads the private VM execution intent metadata needed by Control to issue an exact
+    /// recovery admission.  Scripts and credentials remain entirely Agent-owned.
+    pub async fn work_execution_intent(
+        &self,
+        run_id: AgentRunId,
+        query: &AgentWorkExecutionIntentQuery,
+    ) -> Result<AgentWorkExecutionIntentMetadata, DownstreamError> {
+        let metadata: AgentWorkExecutionIntentMetadata = send_json(
+            self.client
+                .get(self.config.endpoint(&format!(
+                    "internal/v1/agent-runs/{run_id}/work-execution-intent"
+                ))?)
+                .query(query),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await?;
+        metadata
+            .validate()
+            .map_err(|_| DownstreamError::IdentityMismatch)?;
+        if metadata.run_id != run_id
+            || metadata.project_id != query.project_id
+            || metadata.course_id != query.course_id
+            || metadata.execution_id != query.execution_id
+        {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        Ok(metadata)
     }
 
     /// Sends one fully fenced build cancellation over the existing Control mTLS identity.
@@ -213,6 +370,8 @@ impl AgentClient {
                 ))?)
                 .header("Idempotency-Key", key.as_str())
                 .json(request),
+            &self.service_token_client,
+            self.token_target,
         )
         .await
     }
@@ -230,6 +389,8 @@ impl AgentClient {
                         .endpoint(&format!("internal/v1/build-requests/{build_request_id}"))?,
                 )
                 .query(query),
+            &self.service_token_client,
+            self.token_target,
         )
         .await
     }
@@ -243,6 +404,8 @@ impl AgentClient {
                 self.config
                     .endpoint(&format!("internal/v1/agent-runs/{run_id}/outcome"))?,
             ),
+            &self.service_token_client,
+            self.token_target,
         )
         .await?;
         outcome
@@ -260,6 +423,8 @@ impl AgentClient {
                 self.config
                     .endpoint(&format!("internal/v1/image-artifacts/{artifact_id}"))?,
             ),
+            &self.service_token_client,
+            self.token_target,
         )
         .await?;
         resolution
@@ -270,16 +435,116 @@ impl AgentClient {
 }
 
 /// Evaluation authority adapter. All targets are fixed by deployment configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EvaluationClient {
-    config: MtlsClientFileConfig,
+    config: ServiceHttpClientConfig,
     client: reqwest::Client,
+    service_token_client: Arc<ServiceTokenClient>,
+    token_target: ServiceTokenTarget,
+}
+
+/// Environment authority adapter for the narrow Work configuration target lookup.
+#[derive(Clone)]
+pub struct EnvironmentClient {
+    config: ServiceHttpClientConfig,
+    client: reqwest::Client,
+    service_token_client: Arc<ServiceTokenClient>,
+    token_target: ServiceTokenTarget,
+}
+
+impl EnvironmentClient {
+    pub fn new_authenticated(
+        config: ServiceHttpClientConfig,
+        service_token_client: Arc<ServiceTokenClient>,
+    ) -> Result<Self, DownstreamError> {
+        let client = config.build()?;
+        Ok(Self {
+            config,
+            client,
+            service_token_client,
+            token_target: ENVIRONMENT_SERVICE_TARGET,
+        })
+    }
+
+    /// Resolves the runtime only from Environment's authoritative Work aggregate and lease.
+    pub async fn work_configuration_target(
+        &self,
+        environment_id: contracts::EnvironmentId,
+        query: &EnvironmentWorkConfigurationTargetQuery,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<EnvironmentWorkConfigurationTarget, DownstreamError> {
+        let target: EnvironmentWorkConfigurationTarget = send_json(
+            correlate(
+                self.client
+                    .get(self.config.endpoint(&format!(
+                        "internal/v1/environments/{environment_id}/work-configuration-target"
+                    ))?)
+                    .query(query),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await?;
+        target
+            .validate_for(environment_id, query)
+            .map_err(|_| DownstreamError::IdentityMismatch)?;
+        Ok(target)
+    }
+}
+
+impl fmt::Debug for AccessClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AccessClient")
+            .field("config", &self.config)
+            .field("service_token_configured", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for AgentClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentClient")
+            .field("config", &self.config)
+            .field("service_token_configured", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for EnvironmentClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvironmentClient")
+            .field("config", &self.config)
+            .field("service_token_configured", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for EvaluationClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvaluationClient")
+            .field("config", &self.config)
+            .field("service_token_configured", &true)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EvaluationClient {
-    pub fn new(config: MtlsClientFileConfig) -> Result<Self, DownstreamError> {
+    pub fn new_authenticated(
+        config: ServiceHttpClientConfig,
+        service_token_client: Arc<ServiceTokenClient>,
+    ) -> Result<Self, DownstreamError> {
         let client = config.build()?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            service_token_client,
+            token_target: EVALUATION_SERVICE_TARGET,
+        })
     }
 
     pub async fn publish(
@@ -288,13 +553,17 @@ impl EvaluationClient {
         key: &IdempotencyKey,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<EvaluationRelease, DownstreamError> {
-        let release: EvaluationRelease = send_json(correlate(
-            self.client
-                .post(self.config.endpoint("internal/v1/evaluation-releases")?)
-                .header("Idempotency-Key", key.as_str())
-                .json(request),
-            headers,
-        ))
+        let release: EvaluationRelease = send_json(
+            correlate(
+                self.client
+                    .post(self.config.endpoint("internal/v1/evaluation-releases")?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await?;
         validate_release(release)
     }
@@ -305,18 +574,22 @@ impl EvaluationClient {
         query: &EvaluationReleaseListQuery,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<CursorPage<EvaluationRelease>, DownstreamError> {
-        let mut page: CursorPage<EvaluationRelease> = send_json(correlate(
-            self.client
-                .get(self.config.endpoint("internal/v1/evaluation-releases")?)
-                .header("x-labweaver-course-id", course_id.to_string())
-                .query(query),
-            headers,
-        ))
+        let mut page: CursorPage<EvaluationRelease> = send_json(
+            correlate(
+                self.client
+                    .get(self.config.endpoint("internal/v1/evaluation-releases")?)
+                    .header("x-labweaver-course-id", course_id.to_string())
+                    .query(query),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await?;
         if page
             .items
             .iter()
-            .any(|release| release.course_id != course_id)
+            .any(|release| release.course_id != Some(course_id))
         {
             return Err(DownstreamError::IdentityMismatch);
         }
@@ -333,13 +606,17 @@ impl EvaluationClient {
         release_id: EvaluationReleaseId,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<EvaluationRelease, DownstreamError> {
-        let release: EvaluationRelease = send_json(correlate(
-            self.client.get(
-                self.config
-                    .endpoint(&format!("internal/v1/evaluation-releases/{release_id}"))?,
+        let release: EvaluationRelease = send_json(
+            correlate(
+                self.client.get(
+                    self.config
+                        .endpoint(&format!("internal/v1/evaluation-releases/{release_id}"))?,
+                ),
+                headers,
             ),
-            headers,
-        ))
+            &self.service_token_client,
+            self.token_target,
+        )
         .await?;
         if release.id != release_id {
             return Err(DownstreamError::IdentityMismatch);
@@ -354,20 +631,24 @@ impl EvaluationClient {
         key: &IdempotencyKey,
         headers: &reqwest::header::HeaderMap,
     ) -> Result<EvaluationRelease, DownstreamError> {
-        let release: EvaluationRelease = send_json(correlate(
-            self.client
-                .post(self.config.endpoint(&format!(
-                    "internal/v1/evaluation-releases/{release_id}/withdraw"
-                ))?)
-                .header("Idempotency-Key", key.as_str())
-                .header(
-                    "If-Match",
-                    contracts::http::StrongEtag::from_revision(request.expected_revision)
-                        .header_value(),
-                )
-                .json(request),
-            headers,
-        ))
+        let release: EvaluationRelease = send_json(
+            correlate(
+                self.client
+                    .post(self.config.endpoint(&format!(
+                        "internal/v1/evaluation-releases/{release_id}/withdraw"
+                    ))?)
+                    .header("Idempotency-Key", key.as_str())
+                    .header(
+                        "If-Match",
+                        contracts::http::StrongEtag::from_revision(request.expected_revision)
+                            .header_value(),
+                    )
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
         .await?;
         if release.id != release_id || release.course_id != request.course_id {
             return Err(DownstreamError::IdentityMismatch);
@@ -397,12 +678,48 @@ fn validate_release(release: EvaluationRelease) -> Result<EvaluationRelease, Dow
 
 async fn send_json<T: serde::de::DeserializeOwned>(
     request: reqwest::RequestBuilder,
+    service_token_client: &ServiceTokenClient,
+    target: ServiceTokenTarget,
 ) -> Result<T, DownstreamError> {
-    let response = request
-        .send()
+    let mut headers = reqwest::header::HeaderMap::new();
+    let scopes = target.scopes();
+    service_token_client
+        .bearer_auth_for(&mut headers, target.audience, &scopes)
         .await
         .map_err(|_| DownstreamError::Unavailable)?;
+    let request = request.headers(headers);
+    let started = Instant::now();
+    let response = request.send().await.map_err(|error| {
+        tracing::warn!(
+            event = "control.downstream.request_failed",
+            component = "downstream-client",
+            operation = "http.request",
+            outcome = "failed",
+            duration_ms = elapsed_millis(started),
+            binding = target.audience,
+            error_kind = reqwest_error_kind(&error),
+            failure_stage = "control.downstream.request",
+            retryable = error.is_timeout() || error.is_connect(),
+            safe_detail = "redacted_unclassified",
+        );
+        DownstreamError::Unavailable
+    })?;
     let status = response.status();
+    if !status.is_success() {
+        tracing::warn!(
+            event = "control.downstream.response_rejected",
+            component = "downstream-client",
+            operation = "http.response",
+            outcome = "rejected",
+            duration_ms = elapsed_millis(started),
+            binding = target.audience,
+            http_status = status.as_u16(),
+            error_kind = "upstream_http",
+            failure_stage = "control.downstream.response",
+            retryable = status.is_server_error(),
+            safe_detail = "redacted_unclassified",
+        );
+    }
     if status == StatusCode::NOT_FOUND {
         return Err(DownstreamError::NotFound);
     }
@@ -415,10 +732,44 @@ async fn send_json<T: serde::de::DeserializeOwned>(
     if !status.is_success() {
         return Err(DownstreamError::Unavailable);
     }
-    response
-        .json()
-        .await
-        .map_err(|_| DownstreamError::ProtocolInvalid)
+    response.json().await.map_err(|error| {
+        tracing::warn!(
+            event = "control.downstream.response_invalid",
+            component = "downstream-client",
+            operation = "http.response.decode",
+            outcome = "failed",
+            duration_ms = elapsed_millis(started),
+            binding = target.audience,
+            http_status = status.as_u16(),
+            error_kind = reqwest_error_kind(&error),
+            failure_stage = "control.downstream.response.decode",
+            retryable = false,
+            safe_detail = "redacted_unclassified",
+        );
+        DownstreamError::ProtocolInvalid
+    })
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_builder() {
+        "builder"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "transport"
+    }
 }
 
 /// Payload-free downstream failure classification.

@@ -1,13 +1,47 @@
 //! Regression coverage for teacher authoring and Claude Code runtime bindings.
 
-use contracts::authoring::{AuthoringError, CourseLlmEgressPolicy};
-use contracts::{CourseId, PolicyId};
+use contracts::authoring::{AuthoringError, ProjectLlmEgressPolicy};
+use contracts::http::{HttpContractError, InternalImageArtifactResolution};
+use contracts::supply_chain::ImageArtifact;
+use contracts::{BuildRequestId, ImageArtifactId, PolicyId, ProjectId};
 use serde_json::{Value, json};
+
+#[test]
+fn work_configuration_purpose_binds_runtime_kind_on_the_wire()
+-> Result<(), Box<dyn std::error::Error>> {
+    let purpose = contracts::authoring::AgentRunPurpose::WorkConfiguration {
+        environment_id: contracts::EnvironmentId::new(),
+        environment_revision: contracts::Revision::new(3)?,
+        actor_id: contracts::ActorId::new(),
+        runtime_kind: contracts::authoring::RuntimeKind::VirtualMachine,
+    };
+    let encoded = serde_json::to_value(purpose)?;
+    assert_eq!(encoded["kind"], "work_configuration");
+    assert_eq!(encoded["runtimeKind"], "virtual_machine");
+
+    let decoded: contracts::authoring::AgentRunPurpose = serde_json::from_value(encoded)?;
+    assert_eq!(
+        decoded.work_runtime_kind(),
+        Some(contracts::authoring::RuntimeKind::VirtualMachine)
+    );
+    Ok(())
+}
+
+#[test]
+fn work_configuration_purpose_requires_runtime_kind() {
+    let value = json!({
+        "kind": "work_configuration",
+        "environmentId": contracts::EnvironmentId::new(),
+        "environmentRevision": 1,
+        "actorId": contracts::ActorId::new(),
+    });
+    assert!(serde_json::from_value::<contracts::authoring::AgentRunPurpose>(value).is_err());
+}
 
 fn valid_policy_json() -> Value {
     json!({
         "id": PolicyId::new(),
-        "courseId": CourseId::new(),
+        "projectId": ProjectId::new(),
         "revision": 1,
         "binding": {
             "runtimeBinding": "claude-code-production",
@@ -37,8 +71,38 @@ fn valid_policy_json() -> Value {
 }
 
 #[test]
+fn project_ownership_is_required_when_course_context_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let project_id = ProjectId::new();
+    let other_project_id = ProjectId::new();
+
+    let mut policy_value = valid_policy_json();
+    policy_value["projectId"] = json!(project_id);
+    let policy: ProjectLlmEgressPolicy = serde_json::from_value(policy_value)?;
+    assert!(policy.validate_ownership(other_project_id, None).is_err());
+
+    let package: contracts::authoring::ProblemPackage = serde_json::from_value(json!({
+        "id": contracts::ProblemPackageId::new(),
+        "projectId": project_id,
+        "courseId": null,
+        "revision": 1,
+        "files": [],
+        "retention": {
+            "policyId": PolicyId::new(),
+            "policyRevision": 1,
+            "class": "course_material",
+            "retainUntil": "2026-07-14T08:00:00.000Z",
+            "disposition": "delete"
+        },
+        "completedAt": "2026-07-14T08:00:00.000Z"
+    }))?;
+    assert!(package.validate_ownership(other_project_id, None).is_err());
+    Ok(())
+}
+
+#[test]
 fn claude_code_binding_is_explicit_and_provider_opaque() -> Result<(), Box<dyn std::error::Error>> {
-    let policy: CourseLlmEgressPolicy = serde_json::from_value(valid_policy_json())?;
+    let policy: ProjectLlmEgressPolicy = serde_json::from_value(valid_policy_json())?;
     policy.validate()?;
 
     assert_eq!(policy.binding.runtime_binding, "claude-code-production");
@@ -56,7 +120,7 @@ fn legacy_openai_binding_is_rejected() {
         "strictStructuredOutputs": true
     });
 
-    assert!(serde_json::from_value::<CourseLlmEgressPolicy>(value).is_err());
+    assert!(serde_json::from_value::<ProjectLlmEgressPolicy>(value).is_err());
 }
 
 #[test]
@@ -65,7 +129,7 @@ fn runtime_binding_and_immutable_worker_identity_are_required()
     for field in ["runtimeBinding", "claudeCodeVersion"] {
         let mut value = valid_policy_json();
         value["binding"][field] = json!("");
-        let policy: CourseLlmEgressPolicy = serde_json::from_value(value)?;
+        let policy: ProjectLlmEgressPolicy = serde_json::from_value(value)?;
         let error = match policy.validate() {
             Ok(()) => return Err("empty runtime identity accepted".into()),
             Err(error) => error,
@@ -82,7 +146,7 @@ fn runtime_binding_and_immutable_worker_identity_are_required()
         let mut invalid = valid_policy_json();
         invalid["binding"]["maxInFlightPerWorker"] = json!(value);
         assert!(
-            serde_json::from_value::<CourseLlmEgressPolicy>(invalid)?
+            serde_json::from_value::<ProjectLlmEgressPolicy>(invalid)?
                 .validate()
                 .is_err()
         );
@@ -96,7 +160,7 @@ fn moving_claude_model_aliases_are_not_immutable_bindings() -> Result<(), Box<dy
     for alias in ["default", "sonnet", "Sonnet", "opus", "haiku", "opusplan"] {
         let mut value = valid_policy_json();
         value["binding"]["model"] = json!(alias);
-        let policy: CourseLlmEgressPolicy = serde_json::from_value(value)?;
+        let policy: ProjectLlmEgressPolicy = serde_json::from_value(value)?;
         assert_eq!(policy.validate(), Err(AuthoringError::ModelRequired));
     }
     Ok(())
@@ -108,7 +172,7 @@ fn claude_code_version_and_retry_bounds_are_fail_closed() -> Result<(), Box<dyn 
     for version in ["latest", "2.1", "2.01.3", "2.1.3-beta"] {
         let mut value = valid_policy_json();
         value["binding"]["claudeCodeVersion"] = json!(version);
-        let policy: CourseLlmEgressPolicy = serde_json::from_value(value)?;
+        let policy: ProjectLlmEgressPolicy = serde_json::from_value(value)?;
         assert_eq!(
             policy.validate(),
             Err(AuthoringError::RuntimeIdentityInvalid)
@@ -116,7 +180,47 @@ fn claude_code_version_and_retry_bounds_are_fail_closed() -> Result<(), Box<dyn 
     }
     let mut value = valid_policy_json();
     value["budget"]["maxTransientRetries"] = json!(3);
-    let policy: CourseLlmEgressPolicy = serde_json::from_value(value)?;
+    let policy: ProjectLlmEgressPolicy = serde_json::from_value(value)?;
     assert_eq!(policy.validate(), Err(AuthoringError::InvalidBudget));
     Ok(())
+}
+
+#[test]
+fn internal_artifact_resolution_requires_a_valid_exact_artifact_identity() {
+    let artifact_id = ImageArtifactId::new();
+    let artifact = ImageArtifact::Container {
+        id: artifact_id,
+        build_request_id: BuildRequestId::new(),
+        repository: "registry.example/labweaver/runner".to_owned(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+    };
+
+    let valid = InternalImageArtifactResolution {
+        artifact_id,
+        artifact: artifact.clone(),
+    };
+    assert!(valid.validate().is_ok());
+
+    let wrong_id = InternalImageArtifactResolution {
+        artifact_id: ImageArtifactId::new(),
+        artifact: artifact.clone(),
+    };
+    assert!(matches!(
+        wrong_id.validate(),
+        Err(HttpContractError::InvalidInternalIdentity)
+    ));
+
+    let invalid_digest = InternalImageArtifactResolution {
+        artifact_id,
+        artifact: ImageArtifact::Container {
+            id: artifact_id,
+            build_request_id: BuildRequestId::new(),
+            repository: "registry.example/labweaver/runner".to_owned(),
+            digest: "sha256:not-a-digest".to_owned(),
+        },
+    };
+    assert!(matches!(
+        invalid_digest.validate(),
+        Err(HttpContractError::InvalidInternalIdentity)
+    ));
 }

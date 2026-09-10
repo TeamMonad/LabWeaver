@@ -137,14 +137,21 @@
   "additionalProperties": false,
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent project work omits this field."
     },
     "manifest": {
       "$ref": "#/$defs/SubmissionManifest"
     }
   },
   "required": [
-    "courseId",
     "manifest"
   ],
   "title": "FreezeSubmissionRequest",

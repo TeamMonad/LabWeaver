@@ -1,42 +1,53 @@
 //! Access-BFF authenticated public Environment lifecycle API.
 
-use std::{str::FromStr, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Extension, Path, Query, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use contracts::{
-    ActorId, DiagnosticCode, EnvironmentId, Revision, StreamSequence, UtcTimestamp,
+    ActorId, DiagnosticCode, EnvironmentId, Revision, UtcTimestamp,
     authoring::{EnvironmentClass, EnvironmentRuntimeSpec},
     environment::{
         EndpointHealth, EnvironmentAccessEligibilityState, EnvironmentAccessEligibilitySummary,
-        EnvironmentCreateSpec, EnvironmentInstance, EnvironmentLeaseVerificationRequest,
+        EnvironmentCreateSpec, EnvironmentExecutionBinding, EnvironmentExecutionBindingRequest,
+        EnvironmentExecutionPurpose, EnvironmentInstance, EnvironmentLeaseVerificationRequest,
         EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
-        EnvironmentOwnerSummary, EnvironmentSummary, ResourceWorkCleanup,
-        ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
+        EnvironmentOwnerSummary, EnvironmentResetTarget, EnvironmentSummary,
+        EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
+        ResourceWorkCleanup, ResourceWorkCleanupStatus, ResourceWorkHandoff,
+        ResourceWorkLeaseUpdate,
     },
     http::{
+        ContainerWorkExecutionQuery, ContainerWorkExecutionReceipt, ContainerWorkExecutionRequest,
         CreateEnvironmentRequest, DEFAULT_PAGE_LIMIT, EnvironmentInventoryQuery,
-        EnvironmentOperationAccepted, IdempotencyKey, SnapshotPage, StrongEtag,
+        EnvironmentOperationAccepted, EnvironmentOperationListQuery, IdempotencyKey,
+        ResetEnvironmentRequest, SnapshotPage, StrongEtag,
     },
     submission::{EnvironmentFreezeBinding, EnvironmentFreezeBindingRequest},
 };
 use uuid::Uuid;
 
 use crate::{
-    ContainerReleaseResolver, EnvironmentStoreError, FreezeBindingError, FreezeBindingService,
-    NatsAccessRevoker, NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore,
-    PgReleaseProjectionStore, ReleaseProjectionError, VerifiedCallerIdentity,
+    ContainerReleaseResolver, ContainerWorkExecutionService, EnvironmentInventoryFilter,
+    EnvironmentStoreError, FreezeBindingError, FreezeBindingService, NatsAccessRevoker,
+    NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
+    ReleaseProjectionError, WorkExecutionError, work_execution::validate_work_environment,
 };
 
-const ACCESS_SERVICE_SAN: &str = "spiffe://labweaver/access-service";
-const EVALUATION_SERVICE_SAN: &str = "spiffe://labweaver/evaluation-service";
-const RESOURCE_SERVICE_SAN: &str = "spiffe://labweaver/resource-service";
+const ACCESS_PERMISSION: &str = "access.environment.forward";
+const EVALUATION_PERMISSION: &str = "evaluation.environment.freeze";
+const EVALUATION_EXECUTION_PERMISSION: &str = "environment:resolve_evaluation_execution_binding";
+const WORK_EXECUTION_PERMISSION: &str = "environment:resolve_work_execution_binding";
+const WORK_READ_PERMISSION: &str = "environment.work.read";
+const RESOURCE_PERMISSION: &str = "resource.environment.manage";
+const WORK_CONFIGURATION_PERMISSION: &str = "environment.work.configure";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
 const OPERATION_DEADLINE: Duration = Duration::from_mins(15);
@@ -49,6 +60,7 @@ pub struct EnvironmentApiState {
     access_revoker: NatsAccessRevoker,
     lease_verifier: NatsResourceLeaseVerifier,
     freeze_bindings: FreezeBindingService,
+    pub(crate) work_executions: Option<ContainerWorkExecutionService>,
 }
 
 impl EnvironmentApiState {
@@ -66,11 +78,19 @@ impl EnvironmentApiState {
             access_revoker,
             lease_verifier,
             freeze_bindings,
+            work_executions: None,
         }
+    }
+
+    /// Installs the production Work execution owner after startup dependencies are ready.
+    #[must_use]
+    pub fn with_work_executions(mut self, service: ContainerWorkExecutionService) -> Self {
+        self.work_executions = Some(service);
+        self
     }
 }
 
-/// Builds the public routes served only behind the existing mTLS acceptor.
+/// Builds the Environment API routes.
 pub fn environment_api_router(state: EnvironmentApiState) -> Router {
     let router = Router::new()
         .route(
@@ -80,6 +100,14 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
         .route(
             "/api/v1/environments/{environment_id}",
             get(get_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/operations",
+            get(list_environment_operations),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/operations/{operation_id}",
+            get(get_environment_operation),
         )
         .route(
             "/api/v1/environments/{environment_id}/start",
@@ -98,6 +126,18 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             post(retry_environment),
         )
         .route(
+            "/api/v1/environments/{environment_id}/reset",
+            post(reset_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/cancel",
+            post(cancel_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/recover",
+            post(recover_environment),
+        )
+        .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::delete(delete_environment),
         )
@@ -108,6 +148,18 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
         .route(
             "/internal/v1/environments/{environment_id}/freeze-binding",
             post(resolve_freeze_binding),
+        )
+        .route(
+            "/internal/v1/environments/{environment_id}/execution-binding/evaluation",
+            post(resolve_evaluation_execution_binding),
+        )
+        .route(
+            "/internal/v1/environments/{environment_id}/execution-binding/work",
+            post(resolve_work_execution_binding),
+        )
+        .route(
+            "/internal/v1/environments/{environment_id}/work-configuration-target",
+            get(resolve_work_configuration_target),
         )
         .route(
             "/internal/v1/resource/work-handoffs",
@@ -125,13 +177,106 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             "/internal/v1/resource/work-cleanups/{environment_id}",
             get(read_resource_work_cleanup),
         )
+        .route(
+            "/internal/v1/work-configurations",
+            post(start_work_configuration),
+        )
+        .route(
+            "/internal/v1/work-configurations/{run_id}",
+            get(query_work_configuration),
+        )
+        .route(
+            "/internal/v1/work-configurations/{run_id}/cancel",
+            post(cancel_work_configuration),
+        )
         .with_state(state);
     telemetry::instrument_http(router, "environment-service", "environment-api")
 }
 
+async fn start_work_configuration(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<ContainerWorkExecutionReceipt>), EnvironmentApiError> {
+    require_permission(caller, WORK_CONFIGURATION_PERMISSION)?;
+    let request = contracts::parse_strict_json::<ContainerWorkExecutionRequest>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let service = state
+        .work_executions
+        .ok_or(EnvironmentApiError::WorkExecutionUnavailable)?;
+    let receipt = service
+        .start(request)
+        .await
+        .map_err(EnvironmentApiError::WorkExecution)?;
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
+async fn query_work_configuration(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(run_id): Path<contracts::AgentRunId>,
+    Query(query): Query<ContainerWorkExecutionQuery>,
+) -> Result<Json<ContainerWorkExecutionReceipt>, EnvironmentApiError> {
+    require_permission(caller, WORK_CONFIGURATION_PERMISSION)?;
+    let service = state
+        .work_executions
+        .ok_or(EnvironmentApiError::WorkExecutionUnavailable)?;
+    Ok(Json(
+        service
+            .query(run_id, &query)
+            .await
+            .map_err(EnvironmentApiError::WorkExecution)?,
+    ))
+}
+
+async fn cancel_work_configuration(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(run_id): Path<contracts::AgentRunId>,
+    Query(query): Query<ContainerWorkExecutionQuery>,
+) -> Result<Json<ContainerWorkExecutionReceipt>, EnvironmentApiError> {
+    require_permission(caller, WORK_CONFIGURATION_PERMISSION)?;
+    let service = state
+        .work_executions
+        .ok_or(EnvironmentApiError::WorkExecutionUnavailable)?;
+    Ok(Json(
+        service
+            .cancel(run_id, &query)
+            .await
+            .map_err(EnvironmentApiError::WorkExecution)?,
+    ))
+}
+
+/// Applies the service-account JWT boundary to an Environment route tree.
+///
+/// The TLS transport protects the bearer token in transit. The verifier is the
+/// only source of the caller identity; no request header or client certificate
+/// is treated as an identity assertion.
+pub fn with_service_auth(router: Router, verifier: Arc<auth::ServiceTokenVerifier>) -> Router {
+    router.layer(middleware::from_fn_with_state(
+        verifier,
+        require_service_token,
+    ))
+}
+
+async fn require_service_token(
+    State(verifier): State<Arc<auth::ServiceTokenVerifier>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match verifier.authenticate(request.headers()).await {
+        Ok(identity) => {
+            let mut request = request;
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(error) => EnvironmentApiError::ServiceAuth(error).into_response(),
+    }
+}
+
 async fn accept_resource_work_lease_update(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     body: Bytes,
 ) -> Result<Json<EnvironmentInstance>, EnvironmentApiError> {
     require_resource_service(caller)?;
@@ -148,6 +293,7 @@ async fn accept_resource_work_lease_update(
                 version: 1,
                 lease_id: update.lease_id,
                 environment_id: update.environment_id,
+                project_id: update.project_id,
                 course_id: update.course_id,
                 owner_actor_id: update.owner_actor_id,
                 capacity_binding: update.capacity_binding,
@@ -170,7 +316,7 @@ async fn accept_resource_work_lease_update(
 
 async fn accept_resource_work_cleanup(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_resource_service(caller)?;
@@ -182,9 +328,18 @@ async fn accept_resource_work_cleanup(
     let instance = state.store.load(cleanup.environment_id).await?;
     if instance.class != EnvironmentClass::Work
         || instance.lease_id != Some(cleanup.lease_id)
+        || instance.project_id != cleanup.project_id
         || instance.course_id != cleanup.course_id
         || instance.owner_id != cleanup.owner_actor_id
         || instance.capacity_binding.as_deref() != Some(cleanup.capacity_binding.as_str())
+    {
+        return Err(EnvironmentApiError::LeaseFenceInvalid);
+    }
+    if instance
+        .operation
+        .lease_authorization
+        .as_ref()
+        .is_none_or(|authorization| authorization.lease_revision != cleanup.lease_revision)
     {
         return Err(EnvironmentApiError::LeaseFenceInvalid);
     }
@@ -237,6 +392,8 @@ async fn accept_resource_work_cleanup(
             ),
             &command,
             None,
+            None,
+            instance.project_id,
             instance.course_id,
         )
         .await?;
@@ -245,40 +402,25 @@ async fn accept_resource_work_cleanup(
 
 async fn read_resource_work_cleanup(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(environment_id): Path<EnvironmentId>,
 ) -> Result<Json<ResourceWorkCleanupStatus>, EnvironmentApiError> {
     require_resource_service(caller)?;
-    let instance = state.store.load(environment_id).await?;
-    Ok(Json(ResourceWorkCleanupStatus {
-        version: 1,
-        environment_id,
-        revision: instance.revision,
-        observed_state: instance.observed_state,
-        cleanup_complete: instance.observed_state
-            == contracts::environment::ObservedEnvironmentState::Deleted,
-        diagnostic_code: instance.last_diagnostic_code,
-    }))
+    Ok(Json(state.store.load_cleanup_status(environment_id).await?))
 }
 
 fn require_resource_service(
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
 ) -> Result<(), EnvironmentApiError> {
-    if caller.is_some_and(|Extension(identity)| identity.contains_san(RESOURCE_SERVICE_SAN)) {
-        Ok(())
-    } else {
-        Err(EnvironmentApiError::CallerDenied)
-    }
+    require_permission(caller, RESOURCE_PERMISSION)
 }
 
 async fn accept_resource_work_handoff(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
-    if !caller.is_some_and(|Extension(identity)| identity.contains_san(RESOURCE_SERVICE_SAN)) {
-        return Err(EnvironmentApiError::CallerDenied);
-    }
+    require_permission(caller, RESOURCE_PERMISSION)?;
     let handoff = contracts::parse_strict_json::<ResourceWorkHandoff>(&body)
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
     handoff
@@ -289,6 +431,7 @@ async fn accept_resource_work_handoff(
         .resolve(handoff.release_id, handoff.release_version)
         .await?;
     if release.withdrawn_at.is_some()
+        || release.projection.release.project_id != handoff.project_id
         || release.projection.release.course_id != handoff.course_id
         || release.projection.environment_spec.class != EnvironmentClass::Work
     {
@@ -313,6 +456,7 @@ async fn accept_resource_work_handoff(
                 version: 1,
                 lease_id: handoff.lease_id,
                 environment_id: handoff.environment_id,
+                project_id: handoff.project_id,
                 course_id: handoff.course_id,
                 owner_actor_id: handoff.owner_actor_id,
                 capacity_binding: handoff.capacity_binding.clone(),
@@ -337,6 +481,7 @@ async fn accept_resource_work_handoff(
         reset_target: None,
     };
     let create = EnvironmentCreateSpec {
+        project_id: handoff.project_id,
         course_id: handoff.course_id,
         owner_actor_id: handoff.owner_actor_id,
         display_label: handoff.display_label,
@@ -356,20 +501,25 @@ async fn accept_resource_work_handoff(
     );
     let accepted = state
         .store
-        .accept_api_command(&idempotency_key, &command, Some(&create), handoff.course_id)
+        .accept_api_command(
+            &idempotency_key,
+            &command,
+            Some(&create),
+            Some(authorization),
+            handoff.project_id,
+            handoff.course_id,
+        )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(accepted)))
 }
 
 async fn resolve_freeze_binding(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(environment_id): Path<EnvironmentId>,
     body: Bytes,
 ) -> Result<Json<EnvironmentFreezeBinding>, EnvironmentApiError> {
-    if !caller.is_some_and(|Extension(identity)| identity.contains_san(EVALUATION_SERVICE_SAN)) {
-        return Err(EnvironmentApiError::CallerDenied);
-    }
+    require_permission(caller, EVALUATION_PERMISSION)?;
     let request = contracts::parse_strict_json::<EnvironmentFreezeBindingRequest>(&body)
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
     Ok(Json(
@@ -380,9 +530,115 @@ async fn resolve_freeze_binding(
     ))
 }
 
+async fn resolve_evaluation_execution_binding(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    body: Bytes,
+) -> Result<Json<EnvironmentExecutionBinding>, EnvironmentApiError> {
+    require_permission(caller, EVALUATION_EXECUTION_PERMISSION)?;
+    let request = parse_execution_binding_request(&body)?;
+    if !matches!(
+        &request.purpose,
+        EnvironmentExecutionPurpose::EvaluationProbe { .. }
+    ) {
+        return Err(EnvironmentApiError::RequestInvalid);
+    }
+    Ok(Json(
+        state
+            .freeze_bindings
+            .resolve_execution(environment_id, &request)
+            .await?,
+    ))
+}
+
+async fn resolve_work_execution_binding(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    body: Bytes,
+) -> Result<Json<EnvironmentExecutionBinding>, EnvironmentApiError> {
+    require_permission(caller, WORK_EXECUTION_PERMISSION)?;
+    let request = parse_execution_binding_request(&body)?;
+    if !matches!(
+        &request.purpose,
+        EnvironmentExecutionPurpose::WorkConfiguration { .. }
+            | EnvironmentExecutionPurpose::WorkConfigurationRecovery { .. }
+    ) {
+        return Err(EnvironmentApiError::RequestInvalid);
+    }
+    Ok(Json(
+        state
+            .freeze_bindings
+            .resolve_execution(environment_id, &request)
+            .await?,
+    ))
+}
+
+async fn resolve_work_configuration_target(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    Query(query): Query<EnvironmentWorkConfigurationTargetQuery>,
+) -> Result<Response, EnvironmentApiError> {
+    require_permission(caller, WORK_READ_PERMISSION)?;
+    let now = state.store.current_time().await?;
+    let instance = state.store.load(environment_id).await?;
+    if instance.project_id != query.project_id
+        || instance.course_id != query.course_id
+        || instance.owner_id != query.actor_id
+    {
+        return Err(EnvironmentApiError::ScopeDenied);
+    }
+    if instance.revision != query.expected_revision {
+        return Err(EnvironmentApiError::RevisionConflict);
+    }
+    validate_work_environment(
+        &instance,
+        query.project_id,
+        query.course_id,
+        query.actor_id,
+        query.expected_revision,
+        now,
+    )
+    .map_err(EnvironmentApiError::WorkExecution)?;
+    let target = EnvironmentWorkConfigurationTarget {
+        environment_id,
+        environment_revision: instance.revision,
+        project_id: instance.project_id,
+        course_id: instance.course_id,
+        actor_id: instance.owner_id,
+        runtime_kind: instance.runtime_kind,
+    };
+    target
+        .validate_for(environment_id, &query)
+        .map_err(|_| EnvironmentApiError::ResponseInvalid)?;
+    let mut response = Json(target).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&StrongEtag::from_revision(instance.revision).header_value())
+            .map_err(|_| EnvironmentApiError::ResponseInvalid)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+fn parse_execution_binding_request(
+    body: &Bytes,
+) -> Result<EnvironmentExecutionBindingRequest, EnvironmentApiError> {
+    let request = contracts::parse_strict_json::<EnvironmentExecutionBindingRequest>(body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    request
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    Ok(request)
+}
+
 async fn list_environments(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Query(query): Query<EnvironmentInventoryQuery>,
     headers: HeaderMap,
 ) -> Result<Json<SnapshotPage<EnvironmentSummary>>, EnvironmentApiError> {
@@ -391,36 +647,34 @@ async fn list_environments(
     query
         .validate()
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
-    if query.project_id.is_some()
-        || query.runtime_kind.is_some()
-        || query.class.is_some()
-        || query.desired_state.is_some()
-        || query.observed_state.is_some()
-        || query.release_id.is_some()
-        || query.cursor.is_some()
-    {
-        return Err(EnvironmentApiError::InventoryFilterUnsupported);
-    }
-    let (records, snapshot_at) = state
+    let page = state
         .store
         .list_owned(
-            query.course_id,
-            actor(&headers)?,
+            EnvironmentInventoryFilter {
+                project_id: query.project_id,
+                course_id: query.course_id,
+                owner_actor_id: actor(&headers)?,
+                runtime_kind: query.runtime_kind,
+                class: query.class,
+                desired_state: query.desired_state,
+                observed_state: query.observed_state,
+                release_id: query.release_id,
+            },
+            query.cursor.as_deref(),
             query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
         )
         .await?;
-    let snapshot_sequence = records
-        .iter()
-        .map(|record| record.stream_sequence)
-        .max_by_key(|sequence| sequence.0)
-        .unwrap_or(StreamSequence(1));
+    let snapshot_at = page.snapshot_at;
+    let records = page.records;
+    let next_cursor = page.next_cursor;
+    let snapshot_sequence = page.snapshot_sequence;
     let items = records
         .into_iter()
         .map(|record| environment_summary(record, snapshot_at))
         .collect::<Result<Vec<_>, EnvironmentApiError>>()?;
     Ok(Json(SnapshotPage {
         items,
-        next_cursor: None,
+        next_cursor,
         snapshot_sequence,
         snapshot_at,
     }))
@@ -444,8 +698,8 @@ fn environment_summary(
     let summary = EnvironmentSummary {
         id: record.instance.id,
         display_label: record.instance.display_label,
+        project_id: record.instance.project_id,
         course_id: record.instance.course_id,
-        project_id: None,
         owner: EnvironmentOwnerSummary {
             relation: EnvironmentOwnerRelation::SelfOwned,
             display_label: None,
@@ -461,7 +715,7 @@ fn environment_summary(
         created_at: record.created_at,
         updated_at: record.updated_at,
         last_changed_stream_sequence: record.stream_sequence,
-        current_operation: None,
+        current_operation: record.current_operation,
         access: EnvironmentAccessEligibilitySummary {
             state: if eligible {
                 EnvironmentAccessEligibilityState::Eligible
@@ -483,7 +737,7 @@ fn environment_summary(
 async fn create_environment(
     State(state): State<EnvironmentApiState>,
     Extension(context): Extension<telemetry::RequestContext>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
@@ -501,6 +755,7 @@ async fn create_environment(
         .resolve(request.release_id, request.release_version)
         .await?;
     if release.withdrawn_at.is_some()
+        || release.projection.release.project_id != request.project_id
         || release.projection.release.course_id != request.course_id
         || release.projection.environment_spec.class != EnvironmentClass::Experiment
     {
@@ -531,6 +786,7 @@ async fn create_environment(
         reset_target: None,
     };
     let create = EnvironmentCreateSpec {
+        project_id: request.project_id,
         course_id: request.course_id,
         owner_actor_id: actor_id,
         display_label: request
@@ -548,14 +804,21 @@ async fn create_environment(
     };
     let accepted = state
         .store
-        .accept_api_command(key.as_str(), &command, Some(&create), request.course_id)
+        .accept_api_command(
+            key.as_str(),
+            &command,
+            Some(&create),
+            None,
+            request.project_id,
+            request.course_id,
+        )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(accepted)))
 }
 
 async fn get_environment(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(environment_id): Path<EnvironmentId>,
     headers: HeaderMap,
 ) -> Result<Response, EnvironmentApiError> {
@@ -564,9 +827,67 @@ async fn get_environment(
     instance_response(instance)
 }
 
+async fn get_environment_operation(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path((environment_id, operation_id)): Path<(EnvironmentId, contracts::OperationId)>,
+    headers: HeaderMap,
+) -> Result<Json<contracts::environment::EnvironmentOperationSnapshot>, EnvironmentApiError> {
+    require_access_bff(caller)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    load_owned(&state, environment_id, actor_id).await?;
+    let operation = state
+        .store
+        .get_operation(environment_id, actor_id, operation_id)
+        .await?;
+    Ok(Json(operation.snapshot))
+}
+
+async fn list_environment_operations(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    Query(query): Query<EnvironmentOperationListQuery>,
+    headers: HeaderMap,
+) -> Result<
+    Json<SnapshotPage<contracts::environment::EnvironmentOperationSnapshot>>,
+    EnvironmentApiError,
+> {
+    require_access_bff(caller)?;
+    require_session(&headers)?;
+    query
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let actor_id = actor(&headers)?;
+    load_owned(&state, environment_id, actor_id).await?;
+    let page = state
+        .store
+        .list_operations(
+            environment_id,
+            actor_id,
+            query.kind,
+            query.state,
+            query.cursor.as_deref(),
+            query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
+        )
+        .await?;
+    let items = page
+        .records
+        .into_iter()
+        .map(|record| record.snapshot)
+        .collect();
+    Ok(Json(SnapshotPage {
+        items,
+        next_cursor: page.next_cursor,
+        snapshot_sequence: page.snapshot_sequence,
+        snapshot_at: page.snapshot_at,
+    }))
+}
+
 async fn list_endpoints(
     State(state): State<EnvironmentApiState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(environment_id): Path<EnvironmentId>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, EnvironmentApiError> {
@@ -580,7 +901,7 @@ macro_rules! lifecycle_handler {
         async fn $name(
             State(state): State<EnvironmentApiState>,
             Extension(context): Extension<telemetry::RequestContext>,
-            caller: Option<Extension<VerifiedCallerIdentity>>,
+            caller: Option<Extension<auth::ServiceIdentity>>,
             Path(environment_id): Path<EnvironmentId>,
             headers: HeaderMap,
         ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
@@ -593,6 +914,7 @@ macro_rules! lifecycle_handler {
                 $reason,
                 $preserve,
                 context.trace_id(),
+                None,
             )
             .await
         }
@@ -630,6 +952,79 @@ lifecycle_handler!(
     false
 );
 
+async fn reset_environment(
+    State(state): State<EnvironmentApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_access_bff(caller)?;
+    let request = contracts::parse_strict_json::<ResetEnvironmentRequest>(&body)
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    request
+        .validate()
+        .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    accept_lifecycle(
+        &state,
+        environment_id,
+        &headers,
+        EnvironmentOperationKind::Reset,
+        Some("environment_reset"),
+        false,
+        context.trace_id(),
+        Some(request.reset_target),
+    )
+    .await
+}
+
+async fn cancel_environment(
+    State(state): State<EnvironmentApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_access_bff(caller)?;
+    accept_lifecycle(
+        &state,
+        environment_id,
+        &headers,
+        EnvironmentOperationKind::Cancel,
+        Some("environment_cancelled"),
+        false,
+        context.trace_id(),
+        None,
+    )
+    .await
+}
+
+async fn recover_environment(
+    State(state): State<EnvironmentApiState>,
+    Extension(context): Extension<telemetry::RequestContext>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(environment_id): Path<EnvironmentId>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
+    require_access_bff(caller)?;
+    accept_lifecycle(
+        &state,
+        environment_id,
+        &headers,
+        EnvironmentOperationKind::Recover,
+        None,
+        true,
+        context.trace_id(),
+        None,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the HTTP boundary passes each lifecycle precondition and immutable command field explicitly"
+)]
 async fn accept_lifecycle(
     state: &EnvironmentApiState,
     environment_id: EnvironmentId,
@@ -638,6 +1033,7 @@ async fn accept_lifecycle(
     revocation_reason: Option<&'static str>,
     preserve_mutable_disk: bool,
     trace_id: &str,
+    reset_target: Option<EnvironmentResetTarget>,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_session(headers)?;
     let instance = load_owned(state, environment_id, actor(headers)?).await?;
@@ -667,7 +1063,7 @@ async fn accept_lifecycle(
         access_revocation_revision,
         preserve_mutable_disk,
         max_attempts: 3,
-        reset_target: None,
+        reset_target,
     };
     let accepted = state
         .store
@@ -675,6 +1071,8 @@ async fn accept_lifecycle(
             idempotency_key(headers)?.as_str(),
             &command,
             None,
+            None,
+            instance.project_id,
             instance.course_id,
         )
         .await?;
@@ -694,13 +1092,19 @@ async fn load_owned(
 }
 
 fn require_access_bff(
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
 ) -> Result<(), EnvironmentApiError> {
-    if caller.is_some_and(|Extension(identity)| identity.contains_san(ACCESS_SERVICE_SAN)) {
-        Ok(())
-    } else {
-        Err(EnvironmentApiError::CallerDenied)
-    }
+    require_permission(caller, ACCESS_PERMISSION)
+}
+
+fn require_permission(
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    permission: &str,
+) -> Result<(), EnvironmentApiError> {
+    caller
+        .is_some_and(|Extension(identity)| identity.allows(permission))
+        .then_some(())
+        .ok_or(EnvironmentApiError::CallerDenied)
 }
 
 fn actor(headers: &HeaderMap) -> Result<ActorId, EnvironmentApiError> {
@@ -792,8 +1196,10 @@ pub enum EnvironmentApiError {
     ClockInvalid,
     #[error("LW_ENVIRONMENT_RESPONSE_INVALID")]
     ResponseInvalid,
-    #[error("LW_ENVIRONMENT_INVENTORY_FILTER_UNSUPPORTED")]
-    InventoryFilterUnsupported,
+    #[error("LW_ENVIRONMENT_WORK_EXECUTION_UNAVAILABLE")]
+    WorkExecutionUnavailable,
+    #[error(transparent)]
+    ServiceAuth(#[from] auth::ServiceAuthError),
     #[error(transparent)]
     Store(#[from] EnvironmentStoreError),
     #[error(transparent)]
@@ -802,23 +1208,51 @@ pub enum EnvironmentApiError {
     Messaging(#[from] NatsMessagingError),
     #[error(transparent)]
     FreezeBinding(#[from] FreezeBindingError),
+    #[error(transparent)]
+    WorkExecution(#[from] WorkExecutionError),
 }
 
 impl IntoResponse for EnvironmentApiError {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::CallerDenied | Self::ScopeDenied => StatusCode::FORBIDDEN,
-            Self::IdentityInvalid => StatusCode::UNAUTHORIZED,
+            Self::CallerDenied
+            | Self::ScopeDenied
+            | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied) => StatusCode::FORBIDDEN,
+            Self::IdentityInvalid
+            | Self::ServiceAuth(
+                auth::ServiceAuthError::CredentialsMissing
+                | auth::ServiceAuthError::TokenRejected
+                | auth::ServiceAuthError::TokenExpired,
+            ) => StatusCode::UNAUTHORIZED,
             Self::RequestInvalid
             | Self::IdempotencyRequired
             | Self::IdempotencyInvalid
-            | Self::InventoryFilterUnsupported => StatusCode::BAD_REQUEST,
+            | Self::FreezeBinding(FreezeBindingError::ExecutionBindingInvalid)
+            | Self::WorkExecution(
+                WorkExecutionError::RequestInvalid
+                | WorkExecutionError::ReceiptInvalid
+                | WorkExecutionError::ObservationInvalid,
+            )
+            | Self::Store(
+                EnvironmentStoreError::InvalidInventoryCursor
+                | EnvironmentStoreError::InvalidOperationCursor
+                | EnvironmentStoreError::InvalidLimit,
+            ) => StatusCode::BAD_REQUEST,
             Self::RevisionRequired => StatusCode::PRECONDITION_REQUIRED,
-            Self::RevisionConflict | Self::LeaseFenceInvalid => StatusCode::PRECONDITION_FAILED,
+            Self::RevisionConflict
+            | Self::LeaseFenceInvalid
+            | Self::WorkExecution(
+                WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
+            ) => StatusCode::PRECONDITION_FAILED,
             Self::ReleaseDenied => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Store(EnvironmentStoreError::EnvironmentNotFound)
-            | Self::Release(ReleaseProjectionError::NotFound) => StatusCode::NOT_FOUND,
-            Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
+            Self::Store(
+                EnvironmentStoreError::EnvironmentNotFound
+                | EnvironmentStoreError::OperationNotFound,
+            )
+            | Self::Release(ReleaseProjectionError::NotFound)
+            | Self::WorkExecution(WorkExecutionError::NotFound) => StatusCode::NOT_FOUND,
+            Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)
+            | Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             Self::Store(

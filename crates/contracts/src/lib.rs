@@ -3,6 +3,7 @@
 //! This crate owns wire types, validation, lifecycle semantics, REST/SSE descriptions,
 //! CloudEvents payloads, and generated schemas. It deliberately contains no Axum router,
 //! persistence implementation, provider integration, or fallback behavior.
+#![recursion_limit = "256"]
 #![allow(
     missing_docs,
     reason = "wire fields are normatively documented by generated schemas and formal contract documents"
@@ -25,6 +26,7 @@ pub mod evaluation;
 pub mod events;
 pub mod foundation;
 pub mod http;
+pub mod project;
 pub mod resource;
 pub mod schema;
 pub mod submission;
@@ -38,6 +40,9 @@ pub use auth::{
 pub use diagnostic::{DiagnosticCode, ProblemDetails, Violation};
 pub use foundation::*;
 pub use http::{OperationScopeKind, operation_contract};
+pub use project::{
+    CreateProjectRequest, Project, ProjectError, ProjectState, UpdateProjectRequest,
+};
 
 /// Stable public REST major version.
 pub const API_VERSION: &str = "v1";

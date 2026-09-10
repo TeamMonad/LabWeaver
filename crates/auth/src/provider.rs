@@ -145,13 +145,18 @@ impl OidcProvider {
             serde_json::from_slice(&payload).map_err(|_| OidcProviderError::IdTokenRejected)?;
         let expires_at = OffsetDateTime::from_unix_timestamp(raw.exp)
             .map_err(|_| OidcProviderError::IdTokenRejected)?;
-        Ok(VerifiedOidcIdentity {
+        let identity = VerifiedOidcIdentity {
             subject: claims.subject().as_str().to_owned(),
             expires_at,
             sid: raw.sid,
             claims: serde_json::Value::Object(raw.claims),
             logout_hint: encoded,
-        })
+        };
+        // `IdToken::claims` validates the token against the provider library's
+        // current clock. Recheck the extracted expiry before returning the
+        // identity so callers have an explicit, testable callback boundary.
+        identity.validate_expiry_at(OffsetDateTime::now_utc())?;
+        Ok(identity)
     }
 
     /// Builds a standards-based RP-Initiated Logout URL from Discovery
@@ -187,7 +192,9 @@ pub fn no_redirect_http_client(
     trusted_ca_pem: Option<&[u8]>,
     transport_security: TransportSecurityMode,
 ) -> Result<reqwest::Client, OidcProviderError> {
-    let mut builder = reqwest::Client::builder().redirect(Policy::none());
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(Policy::none());
     if transport_security == TransportSecurityMode::Strict {
         builder = builder.https_only(true);
     } else {
@@ -265,6 +272,21 @@ pub struct VerifiedOidcIdentity {
     pub logout_hint: String,
 }
 
+impl VerifiedOidcIdentity {
+    /// Validates that the provider ID token is still acceptable at the point
+    /// where the authorization callback is creating local session state.
+    ///
+    /// This is deliberately separate from the local BFF session lifetime. An
+    /// ID token proves the authentication event; its expiry does not shorten a
+    /// session whose absolute lifetime is governed by Access configuration.
+    pub fn validate_expiry_at(&self, now: OffsetDateTime) -> Result<(), OidcProviderError> {
+        if self.expires_at <= now {
+            return Err(OidcProviderError::IdTokenRejected);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 struct RawIdTokenClaims {
     exp: i64,
@@ -317,7 +339,12 @@ pub enum OidcProviderError {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransportSecurityMode, Url, endpoint_transport_allowed};
+    use time::{Duration, OffsetDateTime};
+
+    use super::{
+        OidcProviderError, TransportSecurityMode, Url, VerifiedOidcIdentity,
+        endpoint_transport_allowed,
+    };
 
     #[test]
     fn discovered_endpoint_transport_is_strict_or_loopback_only()
@@ -342,5 +369,22 @@ mod tests {
             TransportSecurityMode::InsecureTestOnly
         ));
         Ok(())
+    }
+
+    #[test]
+    fn expired_id_token_is_rejected_at_callback_time() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::seconds(120);
+        let identity = VerifiedOidcIdentity {
+            subject: "subject".to_owned(),
+            expires_at: now - Duration::seconds(1),
+            sid: None,
+            claims: serde_json::Value::Object(serde_json::Map::new()),
+            logout_hint: "verified-token".to_owned(),
+        };
+
+        assert_eq!(
+            identity.validate_expiry_at(now),
+            Err(OidcProviderError::IdTokenRejected)
+        );
     }
 }

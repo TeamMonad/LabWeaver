@@ -14,6 +14,8 @@ use contracts::authoring::{
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
+use contracts::events::ReleasePublished;
+use contracts::resource::{GpuAllocation, GpuAllocationMode};
 use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{ArtifactRef, EndpointId, EnvironmentId, OperationId, Revision, UtcTimestamp};
 use futures_util::StreamExt;
@@ -935,6 +937,11 @@ pub struct KubeVirtSshBootstrap {
     pub gateway_pod_label: String,
     pub collector_namespace: String,
     pub collector_pod_label: String,
+    /// Optional exact ingress selector for Evaluation execution Jobs. Freeze
+    /// collectors keep their own selector because they use a different SSH
+    /// principal and protocol.
+    pub evaluation_namespace: Option<String>,
+    pub evaluation_pod_label: Option<String>,
     pub guest_user: String,
     pub user_ca_public_key: String,
 }
@@ -963,9 +970,26 @@ impl KubeVirtSshBootstrap {
             gateway_pod_label,
             collector_namespace,
             collector_pod_label,
+            evaluation_namespace: None,
+            evaluation_pod_label: None,
             guest_user,
             user_ca_public_key: public_key.normalized_openssh,
         })
+    }
+
+    /// Adds the exact namespace and pod label allowed to reach the VM for
+    /// Evaluation execution. Both values are deployment-owned selectors.
+    pub fn with_evaluation_ingress(
+        mut self,
+        evaluation_namespace: String,
+        evaluation_pod_label: String,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if !valid_dns_label(&evaluation_namespace) || !valid_dns_label(&evaluation_pod_label) {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        self.evaluation_namespace = Some(evaluation_namespace);
+        self.evaluation_pod_label = Some(evaluation_pod_label);
+        Ok(self)
     }
 }
 
@@ -1484,6 +1508,7 @@ where
         if instance.runtime_kind != RuntimeKind::VirtualMachine
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
+            || instance.project_id != projection.release.project_id
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
         {
@@ -1535,13 +1560,16 @@ where
         let namespace = format!("lw-env-{}", instance.id);
         let virtual_machine_name = "runtime".to_owned();
         let data_volume_name = "rootdisk".to_owned();
-        let labels = json!({
+        let mut labels = json!({
             "app.kubernetes.io/name": "labweaver-vm-runtime",
             "labweaver.io/environment-id": instance.id.to_string(),
-            "labweaver.io/course-id": instance.course_id.to_string(),
+            "labweaver.io/project-id": instance.project_id.to_string(),
             "labweaver.io/managed": "true",
             "labweaver.io/environment": "true",
         });
+        if let Some(course_id) = instance.course_id {
+            labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
         let annotations = json!({
             "labweaver.io/release-id": projection.release.id.to_string(),
             "labweaver.io/release-version": projection.release.version.to_string(),
@@ -1550,24 +1578,22 @@ where
             "labweaver.io/base-disk-sha256": base_disk.capacity_bytes.to_string(),
             "labweaver.io/environment-generation": instance.generation.to_string(),
         });
-        let resources = &projection.environment_spec.resources;
-        let cpu = format!("{}m", resources.cpu_millicores);
-        let memory = resources.memory_bytes.to_string();
-        let storage = resources.storage_bytes.to_string();
+        let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
+            approved_resources(instance, projection)?;
+        let cpu = format!("{cpu_millicores}m");
+        let memory = memory_bytes.to_string();
+        let storage = storage_bytes.to_string();
         let budget = self.configuration.resource_budget;
-        if resources.storage_bytes > budget.cdi_scratch_storage_bytes {
+        if storage_bytes > budget.cdi_scratch_storage_bytes {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
-        let quota_cpu_request_millicores = resources
-            .cpu_millicores
+        let quota_cpu_request_millicores = cpu_millicores
             .checked_add(budget.cdi_importer_cpu_request_millicores)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_cpu_limit_millicores = resources
-            .cpu_millicores
+        let quota_cpu_limit_millicores = cpu_millicores
             .checked_add(budget.cdi_importer_cpu_limit_millicores)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let vmi_memory_limit_bytes = resources
-            .memory_bytes
+        let vmi_memory_limit_bytes = memory_bytes
             .checked_add(budget.vmi_memory_overhead_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
         let quota_memory_request_bytes = vmi_memory_limit_bytes
@@ -1576,8 +1602,7 @@ where
         let quota_memory_limit_bytes = vmi_memory_limit_bytes
             .checked_add(budget.cdi_importer_memory_limit_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_storage_bytes = resources
-            .storage_bytes
+        let quota_storage_bytes = storage_bytes
             .checked_add(budget.cdi_scratch_storage_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
         let quota_cpu_request = format!("{quota_cpu_request_millicores}m");
@@ -1586,6 +1611,53 @@ where
         let quota_memory_limit = quota_memory_limit_bytes.to_string();
         let quota_storage = quota_storage_bytes.to_string();
         let vmi_memory_limit = vmi_memory_limit_bytes.to_string();
+        let vmi_requests = json!({"cpu":cpu,"memory":memory});
+        let mut vmi_limits = json!({"cpu":cpu,"memory":vmi_memory_limit});
+        let mut gpu_devices = Vec::new();
+        if let Some(ref allocation) = gpu_allocation {
+            // Resource resolves the catalog mode and binding before this projection. VM vGPU
+            // entries must use their own extended-resource binding; this provider consumes the
+            // exact binding and never treats a node label as a GPU allocation proof.
+            if allocation.mode != GpuAllocationMode::VmVgpu
+                || allocation.provider_binding != self.binding
+                || !valid_extended_resource_name(&allocation.allocation_binding)
+            {
+                return Err(ReleaseProjectionError::SecurityPostureInvalid);
+            }
+            let quantity = json!(allocation.count.to_string());
+            vmi_limits[&allocation.allocation_binding] = quantity;
+            for index in 0..allocation.count {
+                gpu_devices.push(json!({
+                    "name": format!("runtime-gpu-{index}"),
+                    "deviceName": allocation.allocation_binding,
+                }));
+            }
+        }
+        let mut pod_labels = json!({
+            "app": "runtime",
+            "labweaver.io/environment-id": instance.id.to_string(),
+            "labweaver.io/project-id": instance.project_id.to_string(),
+            "labweaver.io/release-id": projection.release.id.to_string(),
+            "labweaver.io/release-version": projection.release.version.to_string()
+        });
+        if let Some(course_id) = instance.course_id {
+            pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
+        let mut quota_hard = serde_json::Map::from_iter([
+            ("requests.cpu".to_owned(), json!(quota_cpu_request)),
+            ("limits.cpu".to_owned(), json!(quota_cpu_limit)),
+            ("requests.memory".to_owned(), json!(quota_memory_request)),
+            ("limits.memory".to_owned(), json!(quota_memory_limit)),
+            ("requests.storage".to_owned(), json!(quota_storage)),
+            ("persistentvolumeclaims".to_owned(), json!("2")),
+            ("pods".to_owned(), json!("2")),
+        ]);
+        if let Some(allocation) = gpu_allocation {
+            quota_hard.insert(
+                format!("limits.{}", allocation.allocation_binding),
+                json!(allocation.count.to_string()),
+            );
+        }
         let quota_annotations = json!({
             "labweaver.io/vmi-memory-overhead-bytes": budget.vmi_memory_overhead_bytes.to_string(),
             "labweaver.io/cdi-importer-cpu-request-millicores": budget.cdi_importer_cpu_request_millicores.to_string(),
@@ -1599,6 +1671,29 @@ where
         let cloud_init_network_data = BASE64_STANDARD.encode(
             b"version: 2\nethernets:\n  default:\n    match:\n      name: \"en*\"\n    dhcp4: true\n",
         );
+        let mut ssh_ingress = vec![
+            json!({
+                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},
+                "podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}
+            }),
+            json!({
+                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.collector_namespace}},
+                "podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.collector_pod_label}}
+            }),
+        ];
+        if let (Some(namespace), Some(pod_label)) = (
+            &self.configuration.ssh.evaluation_namespace,
+            &self.configuration.ssh.evaluation_pod_label,
+        ) {
+            ssh_ingress.push(json!({
+                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":namespace}},
+                "podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:pod_label}}
+            }));
+        }
+        ssh_ingress.push(json!({
+            "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},
+            "podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:"kubevirt-executor"}}
+        }));
         let mut documents = vec![
             resource(
                 "Namespace",
@@ -1616,7 +1711,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"ResourceQuota",
                     "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels,"annotations":quota_annotations},
-                    "spec":{"hard":{"requests.cpu":quota_cpu_request,"limits.cpu":quota_cpu_limit,"requests.memory":quota_memory_request,"limits.memory":quota_memory_limit,"requests.storage":quota_storage,"persistentvolumeclaims":"2","pods":"2"}}
+                    "spec":{"hard":quota_hard}
                 }),
             ),
             resource(
@@ -1636,11 +1731,7 @@ where
                 json!({
                     "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
                     "metadata":{"name":"openssh-gateway-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":[
-                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.gateway_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.gateway_pod_label}}},
-                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.ssh.collector_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:self.configuration.ssh.collector_pod_label}}},
-                        {"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.configuration.storage.data_source_namespace}},"podSelector":{"matchLabels":{GATEWAY_LABEL_KEY:"kubevirt-executor"}}}
-                    ],"ports":[{"protocol":"TCP","port":ssh_port}]}]}
+                    "spec":{"podSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"policyTypes":["Ingress"],"ingress":[{"from":ssh_ingress,"ports":[{"protocol":"TCP","port":ssh_port}]}]}
                 }),
             ),
             resource(
@@ -1696,21 +1787,16 @@ where
                     "spec":{
                         "runStrategy":"Always",
                         "template":{
-                            "metadata":{"labels":{
-                                "app":"runtime",
-                                "labweaver.io/environment-id":instance.id.to_string(),
-                                "labweaver.io/course-id":instance.course_id.to_string(),
-                                "labweaver.io/release-id":projection.release.id.to_string(),
-                                "labweaver.io/release-version":projection.release.version.to_string()
-                            }},
+                            "metadata":{"labels":pod_labels},
                             "spec":{
                                 "terminationGracePeriodSeconds":30,
                                 "nodeSelector":{KUBEVIRT_NODE_LABEL_KEY:KUBEVIRT_NODE_LABEL_VALUE},
                                 "domain":{
-                                    "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":vmi_memory_limit}},
+                                    "resources":{"requests":vmi_requests,"limits":vmi_limits},
                                     "devices":{
                                         "autoattachGraphicsDevice":true,
                                         "autoattachSerialConsole":true,
+                                        "gpus":gpu_devices,
                                         "disks":[
                                             {"name":"rootdisk","disk":{"bus":"virtio"},"bootOrder":1},
                                             {"name":"cloudinit","disk":{"bus":"virtio"}}
@@ -1798,7 +1884,7 @@ where
 
     fn cloud_init_user_data(&self) -> String {
         format!(
-            "#cloud-config\nusers:\n  - name: {user}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n  - path: /etc/ssh/sshd_config.d/99-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin no\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n  - [install, -d, -o, {user}, -g, {user}, -m, '0700', /home/{user}/workspace]\n  - [sshd, -t]\n  - [systemctl, enable, --now, ssh.service]\n",
+            "#cloud-config\nusers:\n  - name: {user}\n    lock_passwd: true\n    shell: /bin/bash\nwrite_files:\n  - path: /etc/ssh/labweaver_user_ca.pub\n    owner: root:root\n    permissions: '0644'\n    content: |\n      {ca}\n  - path: /etc/ssh/auth_principals/{user}\n    owner: root:root\n    permissions: '0644'\n    content: |\n      labweaver-gateway\n      labweaver-collector\n      labweaver-evaluation\n      labweaver-agent\n  - path: /etc/ssh/sshd_config.d/99-labweaver.conf\n    owner: root:root\n    permissions: '0644'\n    content: |\n      TrustedUserCAKeys /etc/ssh/labweaver_user_ca.pub\n      AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u\n      AuthorizedKeysFile none\n      PubkeyAuthentication yes\n      AuthenticationMethods publickey\n      AllowUsers {user}\n      PasswordAuthentication no\n      KbdInteractiveAuthentication no\n      PermitRootLogin no\n      AllowTcpForwarding no\n      AllowAgentForwarding no\n      PermitTunnel no\n      X11Forwarding no\nruncmd:\n  - [install, -d, -o, {user}, -g, {user}, -m, '0700', /home/{user}/workspace]\n  - [sshd, -t]\n  - [systemctl, enable, --now, ssh.service]\n",
             user = self.configuration.ssh.guest_user,
             ca = self.configuration.ssh.user_ca_public_key,
         )
@@ -1847,6 +1933,12 @@ where
         instance: &EnvironmentInstance,
     ) -> Result<ProviderObservation, ProviderFailure> {
         let fence = KubeVirtBackendFence::for_action(instance, action)?;
+        let no_endpoints = |next_state, operation_complete| ProviderObservation {
+            next_state,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete,
+        };
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Deleting
         {
@@ -1871,6 +1963,12 @@ where
                 operation_complete: true,
             });
         }
+        if action == ReconcileAction::Cleanup
+            && instance.observed_state == ObservedEnvironmentState::Stopped
+            && instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted
+        {
+            return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+        }
         let resolved = self
             .releases
             .resolve(instance.release_id, instance.release_version)
@@ -1879,12 +1977,6 @@ where
         let plan = self
             .plan(instance, &resolved, action)
             .map_err(|error| projection_failure(&error))?;
-        let no_endpoints = |next_state, operation_complete| ProviderObservation {
-            next_state,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete,
-        };
         match (action, instance.observed_state) {
             (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
                 Ok(no_endpoints(ObservedEnvironmentState::Validating, false))
@@ -1928,7 +2020,11 @@ where
                     .record_stopped(&fence, &plan, &observed)
                     .await
                     .map_err(|error| observation_store_failure(&error))?;
-                Ok(no_endpoints(ObservedEnvironmentState::Stopped, true))
+                Ok(no_endpoints(
+                    ObservedEnvironmentState::Stopped,
+                    instance.desired_state
+                        == contracts::environment::DesiredEnvironmentState::Stopped,
+                ))
             }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::Rejected,
@@ -2102,6 +2198,48 @@ fn valid_binding(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
 }
 
+fn approved_resources(
+    instance: &EnvironmentInstance,
+    projection: &ReleasePublished,
+) -> Result<(u32, u64, u64, Option<GpuAllocation>), ReleaseProjectionError> {
+    match instance.class {
+        contracts::authoring::EnvironmentClass::Experiment => {
+            let resources = &projection.environment_spec.resources;
+            Ok((
+                resources.cpu_millicores,
+                resources.memory_bytes,
+                resources.storage_bytes,
+                None,
+            ))
+        }
+        contracts::authoring::EnvironmentClass::Work => {
+            let authorization = instance
+                .operation
+                .lease_authorization
+                .as_ref()
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            if authorization.project_id != instance.project_id
+                || authorization.course_id != instance.course_id
+                || authorization.owner_actor_id != instance.owner_id
+                || Some(authorization.lease_id) != instance.lease_id
+                || Some(authorization.capacity_binding.as_str())
+                    != instance.capacity_binding.as_deref()
+            {
+                return Err(ReleaseProjectionError::IdentityMismatch);
+            }
+            authorization
+                .validate()
+                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+            Ok((
+                authorization.approved_resources.cpu_millicores,
+                authorization.approved_resources.memory_bytes,
+                authorization.approved_resources.storage_bytes,
+                authorization.gpu_allocation.clone(),
+            ))
+        }
+    }
+}
+
 fn valid_subject(value: &str) -> bool {
     valid_binding(value) && !value.contains('*') && !value.contains('>')
 }
@@ -2114,6 +2252,16 @@ fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_extended_resource_name(value: &str) -> bool {
+    let Some((prefix, name)) = value.rsplit_once('/') else {
+        return valid_dns_label(value);
+    };
+    !prefix.is_empty()
+        && prefix.len() <= 253
+        && prefix.split('.').all(valid_dns_label)
+        && valid_dns_label(name)
 }
 
 fn valid_guest_user(value: &str) -> bool {

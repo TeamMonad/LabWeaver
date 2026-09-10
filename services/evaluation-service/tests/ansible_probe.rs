@@ -33,7 +33,7 @@ fn request() -> AnsibleProbeExecutionRequest {
         attempt_id: Uuid::now_v7(),
         trace_id: "trace-ansible-probe-test".to_owned(),
         runner_image_digest: format!("labweaver/ansible-probe@sha256:{}", "2".repeat(64)),
-        playbook_profile: "linux-nginx-probe-v1".to_owned(),
+        playbook_profile: "linux-nginx-probe-v1/playbook.yml".to_owned(),
         module_allowlist: vec![
             "ansible.builtin.service_facts".to_owned(),
             "ansible.builtin.stat".to_owned(),
@@ -48,6 +48,7 @@ fn request() -> AnsibleProbeExecutionRequest {
             port: 22,
             username: "labweaver".to_owned(),
         },
+        source_identity: "source-identity".to_owned(),
         ssh_identity: AnsibleProbeSshIdentity {
             private_key_secret: "probe-ssh-key".to_owned(),
             certificate_secret: "probe-ssh-cert".to_owned(),

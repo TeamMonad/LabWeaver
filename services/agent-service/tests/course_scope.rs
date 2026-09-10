@@ -1,13 +1,20 @@
 //! Real `PostgreSQL` proof that Agent mutations bind the authoritative course before state changes.
 
 use agent_service::run_store::{AgentRunStoreError, PostgresAgentRunStore};
-use contracts::authoring::{AgentRun, AgentRunState, AgentTrack, AgentTrackKind, RuntimeKind};
+use contracts::authoring::{
+    AgentRun, AgentRunPurpose, AgentRunState, AgentTrack, AgentTrackKind, EnvironmentClass,
+};
 use contracts::http::IdempotencyKey;
-use contracts::{AgentRunId, CourseId, PolicyId, ProblemPackageId, Revision, UtcTimestamp};
+use contracts::{
+    AgentRunId, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision, UtcTimestamp,
+};
 use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+mod support;
+use support::apply_agent_migrations;
 
 #[tokio::test]
 async fn revisioned_mutation_rejects_cross_course_before_writing_state()
@@ -21,26 +28,25 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
         .max_connections(4)
         .connect(&database_url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0001_platform_baseline.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    apply_agent_migrations(&pool).await?;
 
     let run = requested_run()?;
     let contract = serde_json::to_value(&run)?;
+    let purpose = serde_json::to_value(run.purpose)?;
     sqlx::query(
         "INSERT INTO agent.agent_runs \
-         (run_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256, \
-          policy_revision,contract) VALUES ($1,$2,$3,$4,'requested',$5,$6,$7,$8)",
+         (run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256, \
+          policy_revision,purpose,contract) VALUES ($1,$2,$3,$4,$5,'requested',$6,$7,$8,$9,$10)",
     )
     .bind(run.id.as_uuid())
-    .bind(run.course_id.as_uuid())
+    .bind(run.project_id.as_uuid())
+    .bind(run.course_id.map(CourseId::as_uuid))
     .bind(run.package_id.as_uuid())
     .bind(i64::try_from(run.revision.get())?)
     .bind("claude-code-v1")
     .bind(Sha256Digest::of_bytes(b"input").to_string())
     .bind(i64::try_from(run.policy_revision.get())?)
+    .bind(purpose)
     .bind(contract)
     .execute(&pool)
     .await?;
@@ -48,14 +54,15 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
     let now = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
     let result = store
         .request_cancellation_revisioned(
-            CourseId::new(),
+            ProjectId::new(),
+            run.course_id,
             run.id,
             run.revision,
             &IdempotencyKey::parse("cross-course-cancel")?,
             now,
         )
         .await;
-    assert_eq!(result, Err(AgentRunStoreError::CourseMismatch));
+    assert_eq!(result, Err(AgentRunStoreError::IdentityMismatch));
     assert!(!cancellation_requested(&pool, run.id).await?);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM agent.idempotency_ledger")
@@ -66,6 +73,7 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
 
     store
         .request_cancellation_revisioned(
+            run.project_id,
             run.course_id,
             run.id,
             run.revision,
@@ -80,11 +88,14 @@ async fn revisioned_mutation_rejects_cross_course_before_writing_state()
 fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
     let run = AgentRun {
         id: AgentRunId::new(),
-        course_id: CourseId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
         package_id: ProblemPackageId::new(),
         policy_id: PolicyId::new(),
         policy_revision: Revision::new(1)?,
-        requested_runtime: RuntimeKind::Container,
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Experiment,
+        },
         state: AgentRunState::Requested,
         revision: Revision::new(1)?,
         tracks: vec![
@@ -99,6 +110,7 @@ fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
                 candidate_id: None,
             },
         ],
+        plan: None,
     };
     run.validate()?;
     Ok(run)

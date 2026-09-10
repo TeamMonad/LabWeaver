@@ -18,6 +18,7 @@ persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 reqwest.workspace = true
 hyper-util.workspace = true
 rustls.workspace = true
+rustls-pemfile.workspace = true
 serde_yaml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,6 +34,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 testcontainers = { version = "=0.25.0", features = ["blocking"] }

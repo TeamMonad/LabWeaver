@@ -132,6 +132,10 @@
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
@@ -224,8 +228,19 @@
       "minimum": 0,
       "type": "integer"
     },
+    "contentSha256": {
+      "description": "SHA-256 of the exact canonical archive bytes addressed by `object`.",
+      "type": "string"
+    },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "derivedArchive": {
       "anyOf": [
@@ -258,6 +273,9 @@
     "object": {
       "$ref": "#/$defs/ArtifactRef"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "retention": {
       "$ref": "#/$defs/RetentionSnapshot"
     },
@@ -270,13 +288,14 @@
   },
   "required": [
     "id",
-    "courseId",
+    "projectId",
     "actorId",
     "agentRunId",
     "attempt",
     "manifestRevision",
     "files",
     "object",
+    "contentSha256",
     "environment",
     "retention",
     "systemFacts",

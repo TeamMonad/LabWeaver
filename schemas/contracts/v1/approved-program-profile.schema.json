@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Approved direct-exec command vectors stored as a package file.\n\nEvery argument is passed directly to the process.  Only the four closed path tokens accepted\nby `validate_argument` may be substituted by an execution worker; no shell parsing is part of\nthis contract.",
+  "properties": {
+    "compileArgv": {
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "runArgv": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "type": "string"
+    },
+    "supportFiles": {
+      "default": [],
+      "description": "Package-relative auxiliary scripts or modules explicitly approved for evaluator reads.\n\nAn empty list means that no auxiliary package files are authorized; it does not select a\nfallback evaluator directory. Environment removes entries that overlap private test\nsources before the profile reaches an execution attempt.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runArgv"
+  ],
+  "title": "ApprovedProgramProfile",
+  "type": "object"
+}

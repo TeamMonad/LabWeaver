@@ -78,7 +78,7 @@
               "$ref": "#/$defs/Revision"
             },
             "state": {
-              "$ref": "#/$defs/EnvironmentOperationStatus"
+              "$ref": "#/$defs/OperationState"
             }
           },
           "required": [
@@ -126,7 +126,14 @@
       "description": "Public event envelope used for course-scoped inventory synchronization.",
       "properties": {
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "data": {
           "$ref": "#/$defs/EnvironmentManagementEvent"
@@ -138,14 +145,7 @@
           "$ref": "#/$defs/EventId"
         },
         "projectId": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProjectId"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/ProjectId"
         },
         "streamSequence": {
           "$ref": "#/$defs/StreamSequence"
@@ -154,24 +154,11 @@
       "required": [
         "eventId",
         "streamSequence",
-        "courseId",
+        "projectId",
         "effectiveAt",
         "data"
       ],
       "type": "object"
-    },
-    "EnvironmentOperationStatus": {
-      "description": "Public operation state used by REST snapshots and SSE projections.\n\nThe runtime aggregate retains its historical `OperationState`; timeout is exposed as a\ndistinct terminal fact instead of forcing clients to infer it from a generic failure code.",
-      "enum": [
-        "accepted",
-        "running",
-        "cancelling",
-        "succeeded",
-        "failed",
-        "cancelled",
-        "timed_out"
-      ],
-      "type": "string"
     },
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
@@ -197,6 +184,18 @@
     },
     "OperationId": {
       "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "OperationState": {
+      "description": "Persistent operation state.",
+      "enum": [
+        "accepted",
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
       "type": "string"
     },
     "ProjectId": {

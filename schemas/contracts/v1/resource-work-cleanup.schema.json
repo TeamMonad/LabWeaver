@@ -16,6 +16,10 @@
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -31,7 +35,14 @@
       "type": "string"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
@@ -44,6 +55,9 @@
     },
     "ownerActorId": {
       "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "reasonCode": {
       "type": "string"
@@ -63,7 +77,7 @@
     "leaseId",
     "leaseRevision",
     "environmentId",
-    "courseId",
+    "projectId",
     "ownerActorId",
     "capacityBinding",
     "reasonCode",

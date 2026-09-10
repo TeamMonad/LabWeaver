@@ -2,7 +2,7 @@
   <section class="results-page" aria-labelledby="results-heading">
     <header>
       <h2 id="results-heading">评测结果</h2>
-      <p>仅展示当前课程中属于你的终态 EvaluationRun；失败或取消不会显示部分总分。</p>
+      <p>仅展示当前项目中属于你的终态 EvaluationRun；失败或取消不会显示部分总分。</p>
     </header>
 
     <AsyncStateView :state="evaluation.results" empty-text="当前课程暂无终态评测结果" @retry="evaluation.load()">
@@ -52,15 +52,17 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
-import { useCourseContext } from '@/composables/useCourseContext'
+import { useProjects } from '@/composables/useProjects'
 import { useEvaluationResults } from '@/composables/useEvaluationResults'
 import type { StudentEvaluationResultSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
 
-const course = useCourseContext()
-const evaluation = useEvaluationResults(course.courseId)
+const projects = useProjects()
+const projectId = computed(() => projects.selectedProjectId ?? undefined)
+const evaluation = useEvaluationResults(projectId)
 
 function stateLabel(state: StudentEvaluationResultSchema['state']) {
   return { succeeded: '成功', failed: '失败', cancelled: '已取消' }[state] ?? state

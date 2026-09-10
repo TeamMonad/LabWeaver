@@ -1,16 +1,18 @@
 //! OpenSSH authorization and fixed-session helper for the Sprint 2 gateway.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
 use contracts::UtcTimestamp;
 use contracts::access::{
     CloseGatewaySessionRequest, CreateGatewaySessionRequest, GatewaySession, GatewaySessionState,
     HeartbeatGatewaySessionRequest, SshAuthorization, SshAuthorizationRequest,
 };
-use reqwest::{Certificate, Client, Identity, StatusCode};
+use reqwest::{Certificate, Client, StatusCode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use ssh_key::{HashAlg, PublicKey};
@@ -74,35 +76,46 @@ struct GatewayConfig {
     access_url: String,
     gateway_identity: String,
     client: Client,
+    service_token_client: ServiceTokenClient,
     context: telemetry::RequestContext,
 }
 
 impl GatewayConfig {
-    fn load(context: telemetry::RequestContext) -> Result<Self, GatewayError> {
+    async fn load(context: telemetry::RequestContext) -> Result<Self, GatewayError> {
         let access_url = required_env("LABWEAVER_ACCESS_URL")?;
         let gateway_identity = required_env("LABWEAVER_GATEWAY_IDENTITY")?;
-        let cert_path = PathBuf::from(required_env("LABWEAVER_MTLS_CERT")?);
-        let key_path = PathBuf::from(required_env("LABWEAVER_MTLS_KEY")?);
-        let ca_path = PathBuf::from(required_env("LABWEAVER_MTLS_CA")?);
-        let mut identity_pem = std::fs::read(cert_path).map_err(|_| GatewayError::Configuration)?;
-        identity_pem.extend(std::fs::read(key_path).map_err(|_| GatewayError::Configuration)?);
-        let identity =
-            Identity::from_pem(&identity_pem).map_err(|_| GatewayError::Configuration)?;
+        let ca_path = required_env("LABWEAVER_ACCESS_CA_FILE")?;
+        let oidc_ca_path = PathBuf::from(required_env("LABWEAVER_SERVICE_OIDC_CA")?);
+        let oidc_ca = std::fs::read(oidc_ca_path).map_err(|_| GatewayError::Configuration)?;
         let ca = Certificate::from_pem(
             &std::fs::read(ca_path).map_err(|_| GatewayError::Configuration)?,
         )
         .map_err(|_| GatewayError::Configuration)?;
         let client = Client::builder()
-            .identity(identity)
             .add_root_certificate(ca)
             .https_only(true)
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|_| GatewayError::Configuration)?;
+        let service_token_config = ServiceTokenClientConfig::new(
+            &required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?,
+            required_env("LABWEAVER_SERVICE_CLIENT_ID")?,
+            read_secret_file("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?,
+            required_env("LABWEAVER_SERVICE_AUDIENCE")?,
+            required_scopes("LABWEAVER_SERVICE_SCOPES")?,
+            required_u64("LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS")?,
+            TransportSecurityMode::Strict,
+        )
+        .map_err(|_| GatewayError::Configuration)?;
+        let service_token_client =
+            ServiceTokenClient::discover_with_trust(service_token_config, Some(oidc_ca.as_slice()))
+                .await
+                .map_err(|_| GatewayError::Configuration)?;
         Ok(Self {
             access_url: access_url.trim_end_matches('/').to_owned(),
             gateway_identity,
             client,
+            service_token_client,
             context,
         })
     }
@@ -123,6 +136,10 @@ impl GatewayConfig {
         self.context
             .inject_headers(&mut headers)
             .map_err(|_| GatewayError::Configuration)?;
+        self.service_token_client
+            .bearer_auth(&mut headers)
+            .await
+            .map_err(|_| GatewayError::Authority)?;
         request = request.headers(headers);
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
@@ -241,7 +258,7 @@ async fn run(context: &telemetry::RequestContext) -> Result<(), GatewayError> {
                 .next()
                 .ok_or(GatewayError::InputStage("authorized_keys.source_address"))?;
             authorized_keys(
-                &GatewayConfig::load(context.clone())?,
+                &GatewayConfig::load(context.clone()).await?,
                 &local_user,
                 &key,
                 &connection_id,
@@ -257,7 +274,7 @@ async fn run(context: &telemetry::RequestContext) -> Result<(), GatewayError> {
                 return Err(GatewayError::InvalidInput);
             }
             force_command(
-                &GatewayConfig::load(context.clone())?,
+                &GatewayConfig::load(context.clone()).await?,
                 &authorization_id,
                 &token,
                 &connection_id,
@@ -566,6 +583,33 @@ fn required_env(name: &str) -> Result<String, GatewayError> {
     env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .ok_or(GatewayError::Configuration)
+}
+
+fn required_u64(name: &str) -> Result<u64, GatewayError> {
+    required_env(name)?
+        .parse::<u64>()
+        .map_err(|_| GatewayError::Configuration)
+}
+
+fn read_secret_file(name: &str) -> Result<String, GatewayError> {
+    let path = PathBuf::from(required_env(name)?);
+    let secret = std::fs::read_to_string(path).map_err(|_| GatewayError::Configuration)?;
+    let secret = secret.trim();
+    (!secret.is_empty())
+        .then(|| secret.to_owned())
+        .ok_or(GatewayError::Configuration)
+}
+
+fn required_scopes(name: &str) -> Result<BTreeSet<String>, GatewayError> {
+    let scopes = required_env(name)?
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    (!scopes.is_empty())
+        .then_some(scopes)
         .ok_or(GatewayError::Configuration)
 }
 

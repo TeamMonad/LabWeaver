@@ -27,16 +27,21 @@ subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-environment-service = { path = "../../services/environment-service" }
+hyper.workspace = true
+hyper-util.workspace = true
 rcgen.workspace = true
 scraper.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
 
 [lints]
 workspace = true

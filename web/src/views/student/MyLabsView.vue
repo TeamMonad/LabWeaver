@@ -10,8 +10,8 @@
 
     <DiagnosticBanner
       v-if="isContextMissing"
-      code="COURSE_CONTEXT_MISSING"
-      message="课程上下文未绑定，无法加载你的实验列表。请通过顶栏课程选择器选择课程或联系管理员。"
+      code="PROJECT_CONTEXT_MISSING"
+      message="项目上下文未绑定，无法加载你的实验列表。请通过顶栏项目选择器选择项目或联系管理员。"
       :retryable="false"
       severity="error"
     />
@@ -37,6 +37,15 @@
           </button>
         </template>
       </GcpActionBar>
+
+      <DiagnosticBanner
+        v-if="createDiagnostic"
+        :code="createDiagnostic.code"
+        :message="createDiagnostic.message"
+        :retryable="createDiagnostic.retryable"
+        severity="error"
+        @retry="retryCreate"
+      />
 
       <!-- GCP Filter Bar -->
       <GcpFilterBar
@@ -242,9 +251,9 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useCourseContext } from '@/composables/useCourseContext'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { useProjects } from '@/composables/useProjects'
 import { listEnvironments } from '@/generated/contracts'
 import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
@@ -257,16 +266,18 @@ import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import GcpFilterBar, { type FilterChip, type FilterPreset } from '@/components/common/GcpFilterBar.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { formatTimestamp, idempotencyKey } from '@/utils/format'
-import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
+import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 
-const course = useCourseContext()
-const courseId = course.courseId
-const isContextMissing = computed(() => course.context.value === null)
+const projects = useProjects()
+const projectId = computed(() => projects.selectedProjectId ?? undefined)
+const selectedProject = computed(() => projects.selectedProject)
+const courseId = computed(() => selectedProject.value?.courseId ?? undefined)
+const isContextMissing = computed(() => !projectId.value)
 
 const router = useRouter()
-const releases = useEnvironmentTemplateReleases(courseId)
-const lifecycle = useEnvironmentLifecycle(courseId)
+const releases = useEnvironmentTemplateReleases(projectId, courseId)
+const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 
 const state = ref<AsyncState<EnvironmentSummary[]>>({ kind: 'idle' })
 const autoRefreshEnabled = ref(true)
@@ -274,6 +285,8 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 const inspectedEnv = ref<EnvironmentSummary | null>(null)
 const showCreateModal = ref(false)
+const createDiagnostic = ref<DiagnosticViewModel | null>(null)
+const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
 
 const filterSearch = ref('')
 const activeFilterChips = ref<FilterChip[]>([])
@@ -331,28 +344,49 @@ function selectRowForInspect(env: EnvironmentSummary) {
 
 function openCreateDrawer() {
   showCreateModal.value = true
+  createDiagnostic.value = null
   void releases.load()
 }
 
 async function handleCreate(rel: EnvironmentTemplateReleaseViewSchema) {
-  const op = await lifecycle.createEnvironment(rel.id, idempotencyKey())
-  if (op) {
+  createDiagnostic.value = null
+  pendingRelease.value = rel
+  const result = await lifecycle.create(
+    {
+      releaseId: rel.id,
+      releaseVersion: rel.version,
+    },
+    idempotencyKey(),
+  )
+  if (result.ok) {
+    pendingRelease.value = null
     showCreateModal.value = false
     await load()
+  } else {
+    createDiagnostic.value = result.diagnostic
   }
 }
 
+function retryCreate() {
+  if (pendingRelease.value) void handleCreate(pendingRelease.value)
+}
+
 async function load() {
-  const id = courseId.value
+  const id = projectId.value
   if (!id) {
     state.value = {
       kind: 'blocked',
-      diagnostic: makeDiagnostic('COURSE_CONTEXT_MISSING', '课程上下文缺失，无法加载实验列表。', false),
+      diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法加载实验列表。', false),
     }
     return
   }
   state.value = { kind: 'loading', message: '加载实验列表…' }
-  const result = await listEnvironments({ query: { courseId: id } })
+  const result = await listEnvironments({
+    query: {
+      projectId: id,
+      ...(courseId.value ? { courseId: courseId.value } : {}),
+    },
+  })
   if (result.error) {
     const problem = extractProblemDetails(result.error)
     state.value = {
@@ -393,7 +427,7 @@ function onVisibilityChange() {
   if (document.visibilityState === 'visible' && autoRefreshEnabled.value) void load()
 }
 
-watch(courseId, load, { immediate: true })
+watch(projectId, load, { immediate: true })
 watch(autoRefreshEnabled, (enabled) => {
   if (enabled) scheduleRefresh()
   else if (pollTimer) {
@@ -411,7 +445,13 @@ if (typeof document !== 'undefined') {
 }
 
 function openEnvironment(environmentId: string) {
-  void router.push(`/student/environments?environmentId=${environmentId}`)
+  void router.push({
+    path: '/student/environments',
+    query: {
+      environmentId,
+      ...(projectId.value ? { projectId: projectId.value } : {}),
+    },
+  })
 }
 </script>
 

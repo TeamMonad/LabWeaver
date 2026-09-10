@@ -1,6 +1,6 @@
 /**
- * Production bundle gate: ensure no MSW, fixture handlers, demo-only code,
- * fixture identity, or fixture manifest ends up in the production build.
+ * Production bundle gate: ensure test-only network mocking does not end up in
+ * the production build.
  *
  * Scans JS/CSS/HTML and source maps.
  */
@@ -14,29 +14,9 @@ const distDir = path.resolve(__dirname, '../dist')
 const forbiddenPatterns = [
   /mockServiceWorker/i,
   /msw[/\\]/i,
-  /fixture handler/i,
-  /FIXTURE_MODE_ENABLED/i,
-  /伪角色/i,
-  /FIXTURE MODE/i,
-  /dataMode=fixture/i,
-  /fixture-actor/i,
-  /fixture-token/i,
-  /fixture-bypass/i,
-  /fixture-manifest/i,
-  /src[/\\]fixture[/\\]/i,
-  /components[/\\]fixture[/\\]/i,
-  /VITE_DATA_MODE=fixture/i,
-  /installFixtureAdapter/i,
-  /fixtureAdapter/i,
-  /installFixtureFetch/i,
-  /fixtureFetch/i,
-  /fetchInterceptor/i,
-  /createSshKeyFixtures/i,
 ]
 
 const forbiddenFilenameFragments = [
-  'FixtureBanner',
-  'fixture',
   'mockServiceWorker',
 ]
 

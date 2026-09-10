@@ -1,23 +1,20 @@
-import { ref, computed } from 'vue'
+import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import { listProjects } from '@/generated/contracts'
+import type { ProjectSchema } from '@/generated/contracts'
 
 /**
- * Course context store.
+ * Project context store.
  *
- * This store binds the current user's selected course/project context once the
- * backend Access/Control contract is available. It intentionally remains a
- * skeleton for Issue #55 because the A3 AUTH-02a contract that defines the
- * course membership API shape is scheduled for 2026-07-15 (#47).
- *
- * TODO(#55): replace placeholder types and API client calls with the real
- * contract once #47 is merged.
+ * Project is the durable scope for Work and Evaluation.  A project may carry
+ * an optional course association, so the browser keeps the server projection
+ * and never invents a course when the API is unavailable.
  */
 
 export interface CourseContext {
-  courseId: string
-  courseName: string
-  role: 'teacher' | 'student' | 'admin' | 'researcher'
-  projectId?: string
+  projectId: string
+  projectName: string
+  courseId?: string | null
 }
 
 export const useCourseStore = defineStore('course', () => {
@@ -27,20 +24,19 @@ export const useCourseStore = defineStore('course', () => {
 
   const isBound = computed(() => currentContext.value !== null)
 
-  /**
-   * Load course context for the authenticated user.
-   *
-   * Currently returns null until the backend contract is frozen. Callers must
-   * fail-closed (do not render course-scoped UI) when this returns null or
-   * throws.
-   */
-  async function loadContext(_userId: string): Promise<void> {
+  /** Load project contexts visible to the authenticated actor. */
+  async function loadContext(_userId?: string): Promise<void> {
     isLoading.value = true
     error.value = null
     try {
-      // Placeholder: real implementation will call the Control Service course
-      // membership endpoint defined by #47 AUTH-02a.
-      currentContext.value = null
+      const result = await listProjects({})
+      if (result.error) throw result.error
+      availableCourses.value = result.data.map(toContext)
+      const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('labweaver_project_id') : null
+      const selected = availableCourses.value.find((context) => context.projectId === currentContext.value?.projectId)
+        ?? availableCourses.value.find((context) => context.projectId === saved)
+        ?? availableCourses.value[0]
+      currentContext.value = selected ?? null
     } catch (err) {
       error.value = err instanceof Error ? err : new Error(String(err))
       currentContext.value = null
@@ -49,39 +45,18 @@ export const useCourseStore = defineStore('course', () => {
     }
   }
 
-  const availableCourses = ref<CourseContext[]>([
-    {
-      courseId: 'course-cs101',
-      courseName: '操作系统核心实验 (CS101)',
-      role: 'student',
-    },
-    {
-      courseId: 'course-ai201',
-      courseName: '自主智能体与大模型工程 (AI201)',
-      role: 'student',
-    },
-    {
-      courseId: 'course-sys301',
-      courseName: '云原生系统架构与容器实训 (SYS301)',
-      role: 'teacher',
-    },
-  ])
+  const availableCourses = ref<CourseContext[]>([])
 
-  function setContext(context: CourseContext | string | null, role: CourseContext['role'] = 'student'): void {
+  function setContext(context: CourseContext | string | null): void {
     if (typeof context === 'string') {
-      const found = availableCourses.value.find((c) => c.courseId === context)
-      currentContext.value = found ?? {
-        courseId: context,
-        courseName: context,
-        role,
-      }
+      currentContext.value = availableCourses.value.find((item) => item.projectId === context) ?? null
     } else {
       currentContext.value = context
     }
     error.value = null
     if (currentContext.value && typeof localStorage !== 'undefined') {
       try {
-        localStorage.setItem('labweaver_course_context', JSON.stringify(currentContext.value))
+      localStorage.setItem('labweaver_project_id', currentContext.value.projectId)
       } catch {
         // ignore quota errors in private browsing
       }
@@ -94,7 +69,7 @@ export const useCourseStore = defineStore('course', () => {
     isLoading.value = false
     if (typeof localStorage !== 'undefined') {
       try {
-        localStorage.removeItem('labweaver_course_context')
+      localStorage.removeItem('labweaver_project_id')
       } catch {
         // ignore
       }
@@ -112,3 +87,11 @@ export const useCourseStore = defineStore('course', () => {
     clearContext,
   }
 })
+
+function toContext(project: ProjectSchema): CourseContext {
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    courseId: project.courseId,
+  }
+}

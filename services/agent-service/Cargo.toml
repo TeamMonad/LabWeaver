@@ -24,6 +24,11 @@ persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 hyper-util.workspace = true
 regex = "1.12.2"
 reqwest.workspace = true
+rand.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
 serde_yaml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -40,6 +45,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jsonwebtoken.workspace = true
+rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }
 testcontainers = { version = "=0.25.0", features = ["blocking"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
 

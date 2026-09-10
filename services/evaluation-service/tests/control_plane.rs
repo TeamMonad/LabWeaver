@@ -4,18 +4,25 @@
     reason = "the integration fixture uses fixed valid contract identities"
 )]
 
+mod support;
+
 use std::time::Duration;
 
+use contracts::authoring::{PackageFile, ProblemPackage};
 use contracts::{
-    ActorId, ApprovalId, CandidateId, CourseId, DiagnosticCode, EnvironmentId, EvaluationRunId,
-    EvaluationStepRunId, FrozenSubmissionId, Revision, UtcTimestamp,
+    ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, CourseId, DiagnosticCode,
+    EnvironmentId, EvaluationRunId, EvaluationStepRunId, FrozenSubmissionId, PolicyId,
+    ProblemPackageId, ProjectId, ReleaseId, RetentionClass, RetentionDisposition,
+    RetentionSnapshot, Revision, TaskRunId, UtcTimestamp,
     evaluation::{
-        EvaluationRunIdentity, EvaluationRunState, EvaluationRuntimeIdentity, EvaluationSpec,
-        EvaluationStepCompletion, EvaluationStepRole, EvaluationStepRunState,
+        EvaluationExecutionBinding, EvaluationRelease, EvaluationRunIdentity, EvaluationRunState,
+        EvaluationRuntimeIdentity, EvaluationSpec, EvaluationStepCompletion, EvaluationStepRole,
+        EvaluationStepRunState,
     },
     http::{
-        IdempotencyKey, InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
-        InternalPublishEvaluationReleaseRequest, InternalWithdrawEvaluationReleaseRequest,
+        AuthoringPublicationAdmissionBinding, IdempotencyKey, InternalCreateEvaluationRunRequest,
+        InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
+        InternalWithdrawEvaluationReleaseRequest,
     },
 };
 use evaluation_service::{
@@ -70,11 +77,23 @@ async fn release_and_run_are_idempotent_and_close_identity()
     let run_key = idempotency("run-idem-0001")?;
     let first_run = fixture
         .store
-        .create_run(&run_request, &run_key, fixture.now().await?, "trace-run-1")
+        .create_run(
+            &run_request,
+            &run_key,
+            fixture.now().await?,
+            "trace-run-1",
+            &admission(&release),
+        )
         .await?;
     let replayed_run = fixture
         .store
-        .create_run(&run_request, &run_key, fixture.now().await?, "trace-run-1")
+        .create_run(
+            &run_request,
+            &run_key,
+            fixture.now().await?,
+            "trace-run-1",
+            &admission(&release),
+        )
         .await?;
     let run = match (first_run, replayed_run) {
         (EvaluationRunReservation::Created(run), EvaluationRunReservation::Replayed(replay))
@@ -104,6 +123,7 @@ async fn release_and_run_are_idempotent_and_close_identity()
             &idempotency("run-idem-0002")?,
             fixture.now().await?,
             "trace-run-1",
+            &admission(&release),
         )
         .await
         .expect_err("runtime identity mismatch must fail closed");
@@ -134,14 +154,15 @@ async fn release_withdrawal_is_revision_fenced_and_idempotent()
     assert_eq!(
         fixture
             .store
-            .list_releases(fixture.course_id, None, 10)
+            .list_releases(fixture.project_id, Some(fixture.course_id), None, 10)
             .await?
             .items
             .len(),
         1
     );
     let request = InternalWithdrawEvaluationReleaseRequest {
-        course_id: fixture.course_id,
+        project_id: fixture.project_id,
+        course_id: Some(fixture.course_id),
         expected_revision: release.revision,
         withdrawn_by: fixture.actor_id,
         reason_code: DiagnosticCode::registered("LW_EVALUATION_RELEASE_WITHDRAWN"),
@@ -223,7 +244,13 @@ async fn terminal_student_results_are_owner_scoped_and_survive_release_withdrawa
     assert!(
         fixture
             .store
-            .student_results(fixture.course_id, fixture.actor_id, None, 10)
+            .student_results(
+                fixture.project_id,
+                Some(fixture.course_id),
+                fixture.actor_id,
+                None,
+                10,
+            )
             .await?
             .items
             .is_empty(),
@@ -247,7 +274,12 @@ async fn terminal_student_results_are_owner_scoped_and_survive_release_withdrawa
 
     let result = fixture
         .store
-        .student_result(fixture.course_id, fixture.actor_id, run.id)
+        .student_result(
+            fixture.project_id,
+            Some(fixture.course_id),
+            fixture.actor_id,
+            run.id,
+        )
         .await?;
     assert_eq!(result.awarded_score, Some(7));
     assert_eq!(result.steps.len(), 1);
@@ -255,14 +287,24 @@ async fn terminal_student_results_are_owner_scoped_and_survive_release_withdrawa
     assert!(matches!(
         fixture
             .store
-            .student_result(fixture.course_id, ActorId::new(), run.id)
+            .student_result(
+                fixture.project_id,
+                Some(fixture.course_id),
+                ActorId::new(),
+                run.id,
+            )
             .await,
         Err(EvaluationControlStoreError::RunNotFound)
     ));
     assert!(matches!(
         fixture
             .store
-            .student_result(CourseId::new(), fixture.actor_id, run.id)
+            .student_result(
+                fixture.project_id,
+                Some(CourseId::new()),
+                fixture.actor_id,
+                run.id,
+            )
             .await,
         Err(EvaluationControlStoreError::RunNotFound)
     ));
@@ -273,7 +315,8 @@ async fn terminal_student_results_are_owner_scoped_and_survive_release_withdrawa
         .withdraw_release(
             release.id,
             &InternalWithdrawEvaluationReleaseRequest {
-                course_id: fixture.course_id,
+                project_id: fixture.project_id,
+                course_id: Some(fixture.course_id),
                 expected_revision: release.revision,
                 withdrawn_by: fixture.actor_id,
                 reason_code: DiagnosticCode::registered("LW_EVALUATION_RELEASE_WITHDRAWN"),
@@ -286,7 +329,12 @@ async fn terminal_student_results_are_owner_scoped_and_survive_release_withdrawa
     assert_eq!(
         fixture
             .store
-            .student_result(fixture.course_id, fixture.actor_id, run.id)
+            .student_result(
+                fixture.project_id,
+                Some(fixture.course_id),
+                fixture.actor_id,
+                run.id,
+            )
             .await?
             .awarded_score,
         Some(7),
@@ -319,7 +367,8 @@ async fn failed_and_cancelled_student_results_never_expose_partial_scores()
     let failed_result = failed_fixture
         .store
         .student_result(
-            failed_fixture.course_id,
+            failed_fixture.project_id,
+            Some(failed_fixture.course_id),
             failed_fixture.actor_id,
             failed_run.id,
         )
@@ -342,6 +391,7 @@ async fn failed_and_cancelled_student_results_never_expose_partial_scores()
         .request_cancellation(
             cancelled_run.id,
             &mutation(
+                cancelled_fixture.project_id,
                 cancelled_fixture.course_id,
                 cancelled_run.revision,
                 cancelled_fixture.actor_id,
@@ -355,7 +405,8 @@ async fn failed_and_cancelled_student_results_never_expose_partial_scores()
     let cancelled_result = cancelled_fixture
         .store
         .student_result(
-            cancelled_fixture.course_id,
+            cancelled_fixture.project_id,
+            Some(cancelled_fixture.course_id),
             cancelled_fixture.actor_id,
             cancelled_run.id,
         )
@@ -408,7 +459,12 @@ async fn worker_lease_fencing_retry_and_cleanup_are_authoritative()
         .retry_step(
             run.id,
             first.step_run_id,
-            &mutation(fixture.course_id, failed.revision, fixture.actor_id),
+            &mutation(
+                fixture.project_id,
+                fixture.course_id,
+                failed.revision,
+                fixture.actor_id,
+            ),
             &idempotency("retry-step-01")?,
             fixture.now().await?,
             "trace-retry-1",
@@ -438,6 +494,123 @@ async fn worker_lease_fencing_retry_and_cleanup_are_authoritative()
 }
 
 #[tokio::test]
+async fn resource_meter_delivery_requires_exact_step_attempt_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture
+        .create_seeded_run("trace-resource-meter-identity")
+        .await?;
+    let lease = fixture
+        .store
+        .claim_next_step("worker-resource-meter", Duration::from_secs(30))
+        .await?
+        .expect("step must be claimable");
+    let now = fixture.now().await?.get();
+    let measured_from = now - time::Duration::minutes(1);
+
+    sqlx::query(
+        "INSERT INTO evaluation.resource_meter_deliveries
+         (delivery_id,step_run_id,attempt,task_run_id,source_event_id,kind,
+          measured_from,measured_until,request,state,next_attempt_at)
+         VALUES ($1,$2,$3,$4,$5,'compute',$6,$7,$8,'pending',$7)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(lease.step_run_id.as_uuid())
+    .bind(i32::try_from(lease.attempt)?)
+    .bind(lease.task_run_id.as_uuid())
+    .bind(uuid::Uuid::now_v7())
+    .bind(measured_from)
+    .bind(now)
+    .bind(serde_json::json!({"taskRunId": lease.task_run_id}))
+    .execute(&fixture.pool)
+    .await?;
+
+    for (step_run_id, attempt, task_run_id) in [
+        (lease.step_run_id, lease.attempt, TaskRunId::new()),
+        (
+            lease.step_run_id,
+            lease.attempt.saturating_add(1),
+            TaskRunId::new(),
+        ),
+        (EvaluationStepRunId::new(), lease.attempt, TaskRunId::new()),
+    ] {
+        let result = sqlx::query(
+            "INSERT INTO evaluation.resource_meter_deliveries
+             (delivery_id,step_run_id,attempt,task_run_id,source_event_id,kind,
+              measured_from,measured_until,request,state,next_attempt_at)
+             VALUES ($1,$2,$3,$4,$5,'storage',$6,$7,$8,'pending',$7)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(step_run_id.as_uuid())
+        .bind(i32::try_from(attempt)?)
+        .bind(task_run_id.as_uuid())
+        .bind(uuid::Uuid::now_v7())
+        .bind(measured_from)
+        .bind(now)
+        .bind(serde_json::json!({"taskRunId": task_run_id}))
+        .execute(&fixture.pool)
+        .await;
+        assert!(result.is_err(), "mismatched delivery identity was accepted");
+    }
+
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM evaluation.resource_meter_deliveries
+         WHERE step_run_id=$1 AND attempt=$2 AND task_run_id=$3",
+    )
+    .bind(lease.step_run_id.as_uuid())
+    .bind(i32::try_from(lease.attempt)?)
+    .bind(lease.task_run_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(persisted, 1);
+    assert_eq!(run.project_id, fixture.project_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lease_renewal_uses_database_fences_and_reports_cancellation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-renew-cancel").await?;
+    let lease = fixture
+        .store
+        .claim_next_step("worker-renew", Duration::from_secs(30))
+        .await?
+        .expect("step must be claimable");
+
+    fixture
+        .store
+        .renew_step_lease(&lease, Duration::from_secs(30))
+        .await?;
+
+    let current = fixture.store.load_run(run.id).await?;
+    let cancellation = fixture
+        .store
+        .request_cancellation(
+            run.id,
+            &mutation(
+                fixture.project_id,
+                fixture.course_id,
+                current.revision,
+                fixture.actor_id,
+            ),
+            &idempotency("renew-cancel-request")?,
+            fixture.now().await?,
+            "trace-renew-cancel",
+        )
+        .await?;
+    assert_eq!(cancellation.state, EvaluationRunState::Cancelling);
+    assert!(cancellation.cancellation_requested);
+
+    let cancellation_seen = fixture
+        .store
+        .renew_step_lease(&lease, Duration::from_secs(30))
+        .await?;
+    assert!(cancellation_seen);
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_and_expired_lease_recovery_preserve_cleanup_boundary()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = TestContext::start(single_score_spec()?).await?;
@@ -446,7 +619,12 @@ async fn cancellation_and_expired_lease_recovery_preserve_cleanup_boundary()
         .store
         .request_cancellation(
             cancelled.id,
-            &mutation(fixture.course_id, cancelled.revision, fixture.actor_id),
+            &mutation(
+                fixture.project_id,
+                fixture.course_id,
+                cancelled.revision,
+                fixture.actor_id,
+            ),
             &idempotency("cancel-run-01")?,
             fixture.now().await?,
             "trace-cancel-1",
@@ -463,36 +641,15 @@ async fn cancellation_and_expired_lease_recovery_preserve_cleanup_boundary()
         .await?
         .expect("recovery step must be claimable");
     expire_lease(&fixture.pool, lease.step_run_id).await?;
-    assert_eq!(fixture.store.recover_expired_step_attempts(4).await?, 1);
-    let failed = fixture.store.load_run(recoverable.id).await?;
-    assert_eq!(failed.state, EvaluationRunState::Failed);
-    assert!(!failed.cleanup_verified);
-    assert!(failed.completed_at.is_none());
-    assert_eq!(
-        failed.diagnostic_code.as_ref().map(DiagnosticCode::as_str),
-        Some("LW_EVALUATION_STEP_LEASE_EXPIRED")
-    );
-
-    let cleaned = fixture
+    let reassigned = fixture
         .store
-        .verify_step_cleanup(
-            failed.id,
-            lease.step_run_id,
-            &mutation(fixture.course_id, failed.revision, fixture.actor_id),
-            &idempotency("cleanup-step-1")?,
-            fixture.now().await?,
-            "trace-recover-1",
-        )
-        .await?;
-    assert_eq!(cleaned.state, EvaluationRunState::Failed);
-    assert!(cleaned.cleanup_verified);
-    assert!(cleaned.completed_at.is_some());
-    assert!(attempt_cleanup_verified(&fixture.pool, lease.step_run_id, lease.attempt).await?);
-    assert!(step_cleanup_verified(&fixture.pool, lease.step_run_id).await?);
-    assert!(
-        operator_event_count(&fixture.pool, fixture.actor_id).await? >= 2,
-        "cancel and cleanup events should carry the mutation actor"
-    );
+        .claim_next_step("worker-recover-again", Duration::from_secs(30))
+        .await?
+        .expect("expired attempt must be reassigned with the original TaskRunId");
+    assert_eq!(reassigned.run_id, recoverable.id);
+    assert_eq!(reassigned.step_run_id, lease.step_run_id);
+    assert_eq!(reassigned.attempt, lease.attempt);
+    assert_eq!(reassigned.task_run_id, lease.task_run_id);
     Ok(())
 }
 
@@ -579,6 +736,7 @@ async fn forked_dag_failure_continues_independent_branch_and_retry_restores_succ
             run.id,
             gate.step_run_id,
             &mutation(
+                fixture.project_id,
                 fixture.course_id,
                 after_independent.revision,
                 fixture.actor_id,
@@ -635,7 +793,7 @@ async fn forked_dag_failure_continues_independent_branch_and_retry_restores_succ
 }
 
 #[tokio::test]
-async fn score_continue_failure_allows_dependent_successor_and_does_not_fail_run()
+async fn score_continue_failure_allows_dependent_successor_but_fails_run()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = TestContext::start(score_continue_spec()?).await?;
     let run = fixture.create_seeded_run("trace-score-continue").await?;
@@ -694,8 +852,83 @@ async fn score_continue_failure_allows_dependent_successor_and_does_not_fail_run
         "trace-score-continue",
     )
     .await?;
-    assert_eq!(completed.state, EvaluationRunState::Succeeded);
+    assert_eq!(completed.state, EvaluationRunState::Failed);
     assert_eq!(completed.awarded_score, 6);
+    Ok(())
+}
+
+#[tokio::test]
+async fn score_continue_execution_failure_breaks_run_after_other_branches_finish()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(score_continue_spec()?).await?;
+    let run = fixture
+        .create_seeded_run("trace-score-continue-infra")
+        .await?;
+    let flaky = fixture
+        .store
+        .claim_next_step("worker-flaky-infra", Duration::from_secs(30))
+        .await?
+        .expect("first score must be claimable");
+    assert_eq!(flaky.step_id, "flaky-score");
+
+    let mut infrastructure_failure = failed_completion(true);
+    infrastructure_failure.diagnostic_code =
+        Some(DiagnosticCode::registered("LW_OJ_INFRASTRUCTURE_ERROR"));
+    let after_failure = complete_leased_step(
+        &fixture,
+        run.id,
+        &flaky,
+        &infrastructure_failure,
+        "trace-score-continue-infra",
+    )
+    .await?;
+    assert_eq!(after_failure.state, EvaluationRunState::Running);
+    assert_eq!(
+        after_failure
+            .diagnostic_code
+            .as_ref()
+            .map(DiagnosticCode::as_str),
+        Some("LW_OJ_INFRASTRUCTURE_ERROR")
+    );
+
+    let dependent = fixture
+        .store
+        .claim_next_step("worker-dependent-score-infra", Duration::from_secs(30))
+        .await?
+        .expect("score Continue must leave the dependent branch runnable");
+    assert_eq!(dependent.step_id, "dependent-after-flaky");
+    let after_dependent = complete_leased_step(
+        &fixture,
+        run.id,
+        &dependent,
+        &success_completion(2),
+        "trace-score-continue-infra",
+    )
+    .await?;
+    assert_eq!(after_dependent.state, EvaluationRunState::Running);
+
+    let independent = fixture
+        .store
+        .claim_next_step("worker-independent-score-infra", Duration::from_secs(30))
+        .await?
+        .expect("independent score must remain runnable");
+    assert_eq!(independent.step_id, "independent-score");
+    let completed = complete_leased_step(
+        &fixture,
+        run.id,
+        &independent,
+        &success_completion(4),
+        "trace-score-continue-infra",
+    )
+    .await?;
+    assert_eq!(completed.state, EvaluationRunState::Failed);
+    assert_eq!(
+        completed
+            .diagnostic_code
+            .as_ref()
+            .map(DiagnosticCode::as_str),
+        Some("LW_OJ_INFRASTRUCTURE_ERROR")
+    );
     Ok(())
 }
 
@@ -743,7 +976,12 @@ async fn advisory_failure_follows_declared_cleanup_semantics()
         .verify_step_cleanup(
             run.id,
             advisory.step_run_id,
-            &mutation(fixture.course_id, completed.revision, fixture.actor_id),
+            &mutation(
+                fixture.project_id,
+                fixture.course_id,
+                completed.revision,
+                fixture.actor_id,
+            ),
             &idempotency("cleanup-advisory")?,
             fixture.now().await?,
             "trace-advisory",
@@ -751,6 +989,51 @@ async fn advisory_failure_follows_declared_cleanup_semantics()
         .await?;
     assert_eq!(cleaned.state, EvaluationRunState::Succeeded);
     assert_eq!(cleaned.awarded_score, 6);
+    Ok(())
+}
+
+#[tokio::test]
+async fn advisory_cancellation_does_not_break_deterministic_scoring()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(advisory_then_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-advisory-cancel").await?;
+    let advisory = fixture
+        .store
+        .claim_next_step("worker-advisory-cancel", Duration::from_secs(30))
+        .await?
+        .expect("advisory must be first");
+    assert_eq!(advisory.step_id, "lint-advisory");
+
+    let after_advisory = complete_leased_step(
+        &fixture,
+        run.id,
+        &advisory,
+        &cancelled_completion(true),
+        "trace-advisory-cancel",
+    )
+    .await?;
+    assert_eq!(after_advisory.state, EvaluationRunState::Running);
+    assert!(after_advisory.diagnostic_code.is_none());
+
+    let score = fixture
+        .store
+        .claim_next_step(
+            "worker-score-after-advisory-cancel",
+            Duration::from_secs(30),
+        )
+        .await?
+        .expect("deterministic score must continue after advisory cancellation");
+    assert_eq!(score.step_id, "deterministic-score");
+    let completed = complete_leased_step(
+        &fixture,
+        run.id,
+        &score,
+        &success_completion(6),
+        "trace-advisory-cancel",
+    )
+    .await?;
+    assert_eq!(completed.state, EvaluationRunState::Succeeded);
+    assert_eq!(completed.awarded_score, 6);
     Ok(())
 }
 
@@ -771,7 +1054,12 @@ async fn claim_and_complete_advance_run_revision_and_reject_stale_mutations()
         .store
         .request_cancellation(
             run.id,
-            &mutation(fixture.course_id, original_revision, fixture.actor_id),
+            &mutation(
+                fixture.project_id,
+                fixture.course_id,
+                original_revision,
+                fixture.actor_id,
+            ),
             &idempotency("stale-cancel-after-claim")?,
             fixture.now().await?,
             "trace-revision",
@@ -783,12 +1071,12 @@ async fn claim_and_complete_advance_run_revision_and_reject_stale_mutations()
     let completed = fixture
         .store
         .complete_step(
-            fixture.course_id,
+            fixture.project_id,
+            Some(fixture.course_id),
             run.id,
             lease.step_run_id,
             lease.attempt,
             &lease.worker_id,
-            &lease.worker_san_uri,
             &lease.runtime_identity,
             lease.lease_token(),
             &success_completion(7),
@@ -815,12 +1103,12 @@ async fn expired_completion_loses_to_database_clock_and_recovery_is_single_write
     let completion = fixture
         .store
         .complete_step(
-            fixture.course_id,
+            fixture.project_id,
+            Some(fixture.course_id),
             run.id,
             lease.step_run_id,
             lease.attempt,
             &lease.worker_id,
-            &lease.worker_san_uri,
             &lease.runtime_identity,
             lease.lease_token(),
             &success_completion(7),
@@ -830,10 +1118,15 @@ async fn expired_completion_loses_to_database_clock_and_recovery_is_single_write
         .expect_err("DB clock must reject completion after expiry");
     assert!(matches!(completion, EvaluationControlStoreError::LeaseLost));
 
-    assert_eq!(fixture.store.recover_expired_step_attempts(4).await?, 1);
-    assert_eq!(fixture.store.recover_expired_step_attempts(4).await?, 0);
-    let failed = fixture.store.load_run(run.id).await?;
-    assert_eq!(failed.state, EvaluationRunState::Failed);
+    let reassigned = fixture
+        .store
+        .claim_next_step("worker-expired-again", Duration::from_secs(30))
+        .await?
+        .expect("expired attempt must remain claimable for exact recovery");
+    assert_eq!(reassigned.run_id, run.id);
+    assert_eq!(reassigned.step_run_id, lease.step_run_id);
+    assert_eq!(reassigned.attempt, lease.attempt);
+    assert_eq!(reassigned.task_run_id, lease.task_run_id);
     Ok(())
 }
 
@@ -841,6 +1134,7 @@ struct TestContext {
     _container: testcontainers::ContainerAsync<Postgres>,
     pool: sqlx::PgPool,
     store: PgEvaluationControlStore,
+    project_id: ProjectId,
     course_id: CourseId,
     actor_id: ActorId,
     frozen_submission_id: FrozenSubmissionId,
@@ -860,25 +1154,20 @@ impl TestContext {
             .max_connections(4)
             .connect(&database_url)
             .await?;
-        let migrations = format!(
-            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}\n{}\n{}",
-            include_str!("../../../migrations/evaluation/0001_platform_baseline.sql"),
-            include_str!("../../../migrations/evaluation/0002_evaluation_control_plane.sql"),
-            include_str!(
-                "../../../migrations/evaluation/0003_release_withdrawal_and_student_results.sql"
-            )
-        );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        support::apply_evaluation_migrations(&pool).await?;
         let store = PgEvaluationControlStore::new(pool.clone());
+        let project_id = ProjectId::new();
         let course_id = CourseId::new();
         let actor_id = ActorId::new();
         let publish_request = InternalPublishEvaluationReleaseRequest {
-            course_id,
+            project_id,
+            course_id: Some(course_id),
             candidate_id: CandidateId::new(),
             candidate_revision: Revision::new(2)?,
             approval_id: ApprovalId::new(),
             approval_revision: Revision::new(3)?,
             evaluation_spec: spec,
+            execution_binding: evaluation_execution_binding(project_id, course_id),
             runtime_identity: runtime_identity(),
             published_by: actor_id,
         };
@@ -886,6 +1175,7 @@ impl TestContext {
             _container: container,
             pool,
             store,
+            project_id,
             course_id,
             actor_id,
             frozen_submission_id: FrozenSubmissionId::new(),
@@ -902,13 +1192,14 @@ impl TestContext {
     async fn seed_frozen_submission(&self) -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query(
             "INSERT INTO evaluation.frozen_submissions \
-             (frozen_submission_id,course_id,environment_id,manifest_sha256,content_sha256,\
+             (frozen_submission_id,project_id,course_id,environment_id,manifest_sha256,content_sha256,\
               schema_version,tool_version,contract,frozen_at,idempotency_key,\
-              source_identity_sha256,object_key,object_version) \
-             VALUES ($1,$2,$3,$4,$5,'submission.freeze/v1','control-plane-test',$6,$7,$8,$9,$10,$11) \
+             source_identity_sha256,object_key,object_version) \
+             VALUES ($1,$2,$3,$4,$5,$6,'submission.freeze/v1','control-plane-test',$7,$8,$9,$10,$11,$12) \
              ON CONFLICT (frozen_submission_id) DO NOTHING",
         )
         .bind(self.frozen_submission_id.as_uuid())
+        .bind(self.project_id.as_uuid())
         .bind(self.course_id.as_uuid())
         .bind(EnvironmentId::new().as_uuid())
         .bind(Sha256Digest::of_bytes(b"submission-manifest").to_string())
@@ -935,7 +1226,8 @@ impl TestContext {
         trace_id: &str,
     ) -> Result<InternalCreateEvaluationRunRequest, Box<dyn std::error::Error>> {
         Ok(InternalCreateEvaluationRunRequest {
-            course_id: self.course_id,
+            project_id: self.project_id,
+            course_id: Some(self.course_id),
             release_id: release.id,
             release_revision: release.revision,
             frozen_submission_id: self.frozen_submission_id,
@@ -972,6 +1264,7 @@ impl TestContext {
                 &idempotency(&format!("run-{trace_id}"))?,
                 self.now().await?,
                 trace_id,
+                &admission(&release),
             )
             .await?
         {
@@ -987,12 +1280,14 @@ fn idempotency(value: &str) -> Result<IdempotencyKey, contracts::http::HttpContr
 }
 
 fn mutation(
+    project_id: ProjectId,
     course_id: CourseId,
     expected_revision: Revision,
     actor_id: ActorId,
 ) -> InternalEvaluationRunMutationRequest {
     InternalEvaluationRunMutationRequest {
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         expected_revision,
         actor_id,
     }
@@ -1008,12 +1303,12 @@ async fn complete_leased_step(
     fixture
         .store
         .complete_step(
-            fixture.course_id,
+            fixture.project_id,
+            Some(fixture.course_id),
             run_id,
             lease.step_run_id,
             lease.attempt,
             &lease.worker_id,
-            &lease.worker_san_uri,
             &lease.runtime_identity,
             lease.lease_token(),
             completion,
@@ -1032,10 +1327,61 @@ fn runtime_identity() -> EvaluationRuntimeIdentity {
     }
 }
 
+fn evaluation_execution_binding(
+    project_id: ProjectId,
+    course_id: CourseId,
+) -> EvaluationExecutionBinding {
+    let artifact_id = ArtifactId::new();
+    let package = ProblemPackage {
+        id: ProblemPackageId::new(),
+        project_id,
+        course_id: Some(course_id),
+        revision: Revision::new(1).expect("valid revision"),
+        files: vec![PackageFile {
+            path: "program.json".to_owned(),
+            object: ArtifactRef {
+                artifact_id,
+                store_binding: "test-store".to_owned(),
+                object_version: "v1".to_owned(),
+                size_bytes: 32,
+                media_type: "application/json".to_owned(),
+            },
+        }],
+        retention: RetentionSnapshot {
+            policy_id: PolicyId::new(),
+            policy_revision: Revision::new(1).expect("valid revision"),
+            class: RetentionClass::CourseMaterial,
+            retain_until: "2027-01-01T00:00:00.000Z".parse().expect("valid timestamp"),
+            disposition: RetentionDisposition::Delete,
+        },
+        completed_at: "2026-01-01T00:00:00.000Z".parse().expect("valid timestamp"),
+    };
+    let mut object_locators = std::collections::BTreeMap::new();
+    object_locators.insert(artifact_id, "problem-packages/test/program.json".to_owned());
+    EvaluationExecutionBinding {
+        package,
+        object_locators,
+    }
+}
+
+fn admission(release: &EvaluationRelease) -> AuthoringPublicationAdmissionBinding {
+    AuthoringPublicationAdmissionBinding {
+        approval_id: release.approval_id,
+        approval_revision: release.approval_revision,
+        project_id: release.project_id,
+        course_id: release.course_id,
+        environment_release_id: ReleaseId::new(),
+        environment_release_version: 1,
+        evaluation_release_id: release.id,
+        evaluation_release_revision: release.revision,
+    }
+}
+
 fn success_completion(score: u32) -> EvaluationStepCompletion {
     EvaluationStepCompletion {
         state: EvaluationStepRunState::Succeeded,
         awarded_score: Some(score),
+        review: None,
         diagnostic_code: None,
         cleanup_verified: true,
     }
@@ -1045,6 +1391,7 @@ fn non_score_success_completion() -> EvaluationStepCompletion {
     EvaluationStepCompletion {
         state: EvaluationStepRunState::Succeeded,
         awarded_score: None,
+        review: None,
         diagnostic_code: None,
         cleanup_verified: true,
     }
@@ -1054,9 +1401,20 @@ fn failed_completion(cleanup_verified: bool) -> EvaluationStepCompletion {
     EvaluationStepCompletion {
         state: EvaluationStepRunState::Failed,
         awarded_score: None,
+        review: None,
         diagnostic_code: Some(DiagnosticCode::registered(
             "LW_EVALUATION_DEPENDENCY_FAILED",
         )),
+        cleanup_verified,
+    }
+}
+
+fn cancelled_completion(cleanup_verified: bool) -> EvaluationStepCompletion {
+    EvaluationStepCompletion {
+        state: EvaluationStepRunState::Cancelled,
+        awarded_score: None,
+        review: None,
+        diagnostic_code: Some(DiagnosticCode::registered("LW_EVALUATION_CANCELLED")),
         cleanup_verified,
     }
 }
@@ -1112,12 +1470,12 @@ async fn assert_completion_attempt_fences(
     let fenced = fixture
         .store
         .complete_step(
-            fixture.course_id,
+            fixture.project_id,
+            Some(fixture.course_id),
             run_id,
             lease.step_run_id,
             lease.attempt,
             &lease.worker_id,
-            &lease.worker_san_uri,
             &lease.runtime_identity,
             uuid::Uuid::now_v7(),
             &success_completion(lease.max_score),
@@ -1135,12 +1493,12 @@ async fn assert_completion_attempt_fences(
     let identity_mismatch = fixture
         .store
         .complete_step(
-            fixture.course_id,
+            fixture.project_id,
+            Some(fixture.course_id),
             run_id,
             lease.step_run_id,
             lease.attempt,
             &lease.worker_id,
-            &lease.worker_san_uri,
             &wrong_runtime_identity,
             lease.lease_token(),
             &success_completion(lease.max_score),
@@ -1167,7 +1525,7 @@ async fn assert_completion_attempt_fences(
     );
     assert_eq!(
         attempt_identity.runtime_artifact_sha256,
-        Sha256Digest::of_bytes(b"runtime-artifact").to_string()
+        Sha256Digest::of_bytes(b"runner-image").to_string()
     );
     assert_eq!(
         attempt_identity.runtime_identity_sha256,
@@ -1398,43 +1756,6 @@ async fn expire_lease(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-async fn attempt_cleanup_verified(
-    pool: &sqlx::PgPool,
-    step_run_id: EvaluationStepRunId,
-    attempt: u32,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    Ok(sqlx::query_scalar(
-        "SELECT cleanup_verified FROM evaluation.evaluation_step_attempts \
-         WHERE step_run_id=$1 AND attempt=$2",
-    )
-    .bind(step_run_id.as_uuid())
-    .bind(i32::try_from(attempt)?)
-    .fetch_one(pool)
-    .await?)
-}
-
-async fn step_cleanup_verified(
-    pool: &sqlx::PgPool,
-    step_run_id: EvaluationStepRunId,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT cleanup_verified FROM evaluation.evaluation_step_runs WHERE step_run_id=$1",
-    )
-    .bind(step_run_id.as_uuid())
-    .fetch_one(pool)
-    .await
-}
-
-async fn operator_event_count(pool: &sqlx::PgPool, actor_id: ActorId) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM evaluation.outbox_events \
-         WHERE payload #>> '{data,operatorActorId}' = $1",
-    )
-    .bind(actor_id.to_string())
-    .fetch_one(pool)
-    .await
 }
 
 async fn duplicate_step_revision_events(pool: &sqlx::PgPool) -> Result<i64, sqlx::Error> {

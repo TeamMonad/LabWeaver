@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Append-only release withdrawal fact.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "reasonCode": {
+      "type": "string"
+    },
+    "releaseId": {
+      "$ref": "#/$defs/ReleaseId"
+    },
+    "releaseVersion": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "withdrawnAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "releaseId",
+    "releaseVersion",
+    "actorId",
+    "reasonCode",
+    "withdrawnAt"
+  ],
+  "title": "ReleaseWithdrawal",
+  "type": "object"
+}

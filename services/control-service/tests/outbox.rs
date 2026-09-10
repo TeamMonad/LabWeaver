@@ -5,13 +5,18 @@ use std::time::Duration;
 use contracts::events::{
     CloudEvent, DATA_SCHEMA_BASE, LabReleaseApproved, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
-use contracts::{ActorId, CourseId, EventId, ReleaseId, Revision, Sequence, UtcTimestamp};
+use contracts::{
+    ActorId, CourseId, EventId, ProjectId, ReleaseId, Revision, Sequence, UtcTimestamp,
+};
 use control_service::messaging::ControlOutboxDispatcher;
-use persistence_sqlx::Sha256Digest;
+use persistence_sqlx::{Domain, Sha256Digest};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+mod support;
+use support::apply_domain_migrations;
 
 #[tokio::test]
 async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
@@ -25,11 +30,7 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         .max_connections(4)
         .connect(&database_url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}",
-        include_str!("../../../migrations/control/0001_platform_baseline.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
 
     let nats = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
@@ -45,6 +46,7 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
     let dispatcher =
         ControlOutboxDispatcher::new(pool.clone(), client.clone(), Duration::from_secs(5))?;
     let course_id = CourseId::new();
+    let project_id = ProjectId::new();
     let release_id = ReleaseId::new();
     let published_id = EventId::new();
     let withdrawn_id = EventId::new();
@@ -61,7 +63,8 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         dataschema: format!(
             "{DATA_SCHEMA_BASE}/environment-template-release-published.schema.json"
         ),
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         aggregate_revision: Revision::new(1)?,
         aggregate_sequence: Sequence(1),
         trace_id: "issue-48-control-outbox".to_owned(),
@@ -81,7 +84,8 @@ async fn release_and_withdrawal_are_marked_published_only_after_jetstream_ack()
         dataschema: format!(
             "{DATA_SCHEMA_BASE}/environment-template-release-withdrawn.schema.json"
         ),
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         aggregate_revision: Revision::new(1)?,
         aggregate_sequence: Sequence(2),
         trace_id: "issue-48-control-outbox".to_owned(),

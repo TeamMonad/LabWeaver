@@ -302,6 +302,9 @@ pub struct AnsibleProbeExecutionRequest {
     pub read_only: bool,
     pub assertions: Vec<FactAssertion>,
     pub target: AnsibleProbeTarget,
+    /// Identity of the Environment source used to resolve this target.  It is
+    /// persisted with the attempt so recovery never rebinds to a newer VM.
+    pub source_identity: String,
     pub ssh_identity: AnsibleProbeSshIdentity,
     pub limits: AnsibleProbeExecutionLimits,
     pub evaluation_spec_sha256: Sha256Digest,
@@ -336,6 +339,7 @@ impl AnsibleProbeExecutionRequest {
         if self.playbook_profile.trim().is_empty()
             || self.playbook_profile.len() > MAX_PROFILE_BYTES
             || self.playbook_profile.chars().any(char::is_control)
+            || contracts::validate_relative_path(&self.playbook_profile).is_err()
         {
             return Err(AnsibleProbeError::ProfileInvalid);
         }
@@ -365,6 +369,12 @@ impl AnsibleProbeExecutionRequest {
         }
         validate_limits(&self.limits, self.assertions.len())?;
         validate_target(&self.target)?;
+        if self.source_identity.is_empty()
+            || self.source_identity.len() > 256
+            || self.source_identity.chars().any(char::is_control)
+        {
+            return Err(AnsibleProbeError::IdentityInvalid);
+        }
         if !is_secret_name(&self.ssh_identity.private_key_secret)
             || !is_secret_name(&self.ssh_identity.certificate_secret)
         {

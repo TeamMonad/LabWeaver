@@ -1,0 +1,122 @@
+{
+  "$defs": {
+    "FixedDecimal": {
+      "description": "Canonical signed decimal with exactly six fractional digits.\n\nDecimal values cross the API as strings so JavaScript clients and SQL\ndrivers cannot round monetary values through binary floating point. The\ninternal scaled representation is available to Resource arithmetic without\nintroducing a database-specific decimal dependency into the contracts crate.",
+      "format": "fixed-decimal-6",
+      "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
+      "type": "string"
+    },
+    "GpuAllocationMode": {
+      "description": "Allocation mode selected by the Resource GPU catalog.\n\nCallers submit only a catalog class and count. The mode is resolved from the\nactive catalog entry and is never accepted as an untrusted request override.",
+      "enum": [
+        "exclusive",
+        "container_time_slice",
+        "vm_vgpu"
+      ],
+      "type": "string"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "A fixed-precision amount with an explicit ISO-4217-like currency code.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "ResourceBillingUnit": {
+      "description": "Resource dimension used by a versioned rate card.",
+      "enum": [
+        "cpu_millicore_second",
+        "memory_byte_second",
+        "storage_byte_second",
+        "gpu_unit_second"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable versioned unit price. A later rate never mutates a prior charge.",
+  "properties": {
+    "effectiveFrom": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "effectiveUntil": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "gpuClass": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "gpuMode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocationMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "$ref": "#/$defs/RateId"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "unit": {
+      "$ref": "#/$defs/ResourceBillingUnit"
+    },
+    "unitPrice": {
+      "$ref": "#/$defs/Money"
+    },
+    "unitQuantity": {
+      "description": "Number of base units represented by `unit_price`.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id",
+    "revision",
+    "unit",
+    "unitQuantity",
+    "unitPrice",
+    "effectiveFrom"
+  ],
+  "title": "ResourceRate",
+  "type": "object"
+}

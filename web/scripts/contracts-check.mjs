@@ -27,6 +27,10 @@ try {
     '-o', temporary,
     '--silent',
   ], { cwd: webRoot })
+  await promisify(execFile)(process.execPath, [
+    join(webRoot, 'scripts/normalize-generated-options.mjs'),
+    temporary,
+  ], { cwd: webRoot })
   const expected = await files(checkedIn)
   const actual = await files(temporary)
   if (JSON.stringify(expected) !== JSON.stringify(actual)) {

@@ -3,6 +3,10 @@
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10,11 +14,21 @@
   "description": "Scope and immutable identity required to read one Agent-owned build status.",
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     }
   },
   "required": [
-    "courseId"
+    "projectId"
   ],
   "title": "InternalAgentBuildStatusQuery",
   "type": "object"

@@ -70,7 +70,14 @@
       ]
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "cursor": {
       "type": [
@@ -108,14 +115,7 @@
       ]
     },
     "projectId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ProjectId"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/ProjectId"
     },
     "releaseId": {
       "anyOf": [
@@ -139,7 +139,7 @@
     }
   },
   "required": [
-    "courseId"
+    "projectId"
   ],
   "title": "EnvironmentInventoryQuery",
   "type": "object"

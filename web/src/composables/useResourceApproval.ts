@@ -16,6 +16,7 @@ import type {
   ResourceRequestSchema,
   WorkloadResources,
 } from '@/generated/contracts'
+import { apiClient } from '@/api/client'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
@@ -39,9 +40,46 @@ export interface ActionOutcome {
   diagnostic: DiagnosticViewModel
 }
 
+export interface ResourceProviderOption {
+  providerBinding: string
+  catalogEntryCount: number
+  gpuClasses: string[]
+}
+
+function parseProviderOptions(value: unknown): ResourceProviderOption[] {
+  if (!Array.isArray(value)) throw new Error('GPU catalog response must be an array')
+  const providers = new Map<string, { count: number; classes: Set<string> }>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object') throw new Error('GPU catalog entry must be an object')
+    const entry = item as Record<string, unknown>
+    if (
+      typeof entry.providerBinding !== 'string' ||
+      !entry.providerBinding.trim() ||
+      typeof entry.class !== 'string' ||
+      !entry.class.trim() ||
+      typeof entry.active !== 'boolean' ||
+      entry.active !== true ||
+      !Number.isSafeInteger(entry.capacityUnits) ||
+      Number(entry.capacityUnits) <= 0
+    ) {
+      throw new Error('GPU catalog entry is invalid')
+    }
+    const current = providers.get(entry.providerBinding) ?? { count: 0, classes: new Set<string>() }
+    current.count += 1
+    current.classes.add(entry.class)
+    providers.set(entry.providerBinding, current)
+  }
+  return Array.from(providers, ([providerBinding, value]) => ({
+    providerBinding,
+    catalogEntryCount: value.count,
+    gpuClasses: Array.from(value.classes).sort(),
+  })).sort((left, right) => left.providerBinding.localeCompare(right.providerBinding))
+}
+
 export function useResourceApproval() {
   const requests = ref<AsyncState<ResourceRequestSchema[]>>({ kind: 'idle' })
   const leases = ref<AsyncState<ResourceLeaseSchema[]>>({ kind: 'idle' })
+  const providerOptions = ref<AsyncState<ResourceProviderOption[]>>({ kind: 'idle' })
   const selectedRequestId = ref<string | null>(null)
   const selectedLeaseId = ref<string | null>(null)
   const acting = ref<string | null>(null)
@@ -50,9 +88,11 @@ export function useResourceApproval() {
   async function load() {
     requests.value = { kind: 'loading', message: '加载资源申请…' }
     leases.value = { kind: 'loading', message: '加载 Lease…' }
-    const [requestResult, leaseResult] = await Promise.all([
+    providerOptions.value = { kind: 'loading', message: '加载 Resource 容量目录…' }
+    const [requestResult, leaseResult, providerResult] = await Promise.all([
       listResourceRequests({}),
       listResourceLeases({}),
+      apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/gpu-catalog' }),
     ])
     if (requestResult.error) {
       requests.value = { kind: 'error', diagnostic: errorDiagnostic(requestResult.error, 'RESOURCE_REQUEST_LIST_FAILED', '加载资源申请失败') }
@@ -67,6 +107,16 @@ export function useResourceApproval() {
       leases.value = { kind: 'empty' }
     } else {
       leases.value = { kind: 'success', data: leaseResult.data }
+    }
+    if (providerResult.error) {
+      providerOptions.value = { kind: 'error', diagnostic: errorDiagnostic(providerResult.error, 'GPU_CATALOG_LOAD_FAILED', '加载 Resource 容量目录失败') }
+    } else {
+      try {
+        const options = parseProviderOptions(providerResult.data)
+        providerOptions.value = options.length > 0 ? { kind: 'success', data: options } : { kind: 'empty' }
+      } catch (error) {
+        providerOptions.value = { kind: 'error', diagnostic: makeDiagnostic('GPU_CATALOG_INVALID', error instanceof Error ? error.message : 'Resource 返回了无法识别的容量目录。', false) }
+      }
     }
   }
 
@@ -251,12 +301,21 @@ export function useResourceApproval() {
   }
 
   async function refreshSilently() {
-    const [requestResult, leaseResult] = await Promise.all([
+    const [requestResult, leaseResult, providerResult] = await Promise.all([
       listResourceRequests({}),
       listResourceLeases({}),
+      apiClient.get<unknown[], unknown>({ url: '/api/v1/resource/gpu-catalog' }),
     ])
     if (!requestResult.error) requests.value = { kind: 'success', data: requestResult.data }
     if (!leaseResult.error) leases.value = { kind: 'success', data: leaseResult.data }
+    if (!providerResult.error) {
+      try {
+        const options = parseProviderOptions(providerResult.data)
+        providerOptions.value = options.length > 0 ? { kind: 'success', data: options } : { kind: 'empty' }
+      } catch (error) {
+        providerOptions.value = { kind: 'error', diagnostic: makeDiagnostic('GPU_CATALOG_INVALID', error instanceof Error ? error.message : 'Resource 返回了无法识别的容量目录。', false) }
+      }
+    }
     schedulePoll()
   }
 
@@ -297,6 +356,7 @@ export function useResourceApproval() {
   return reactive({
     requests,
     leases,
+    providerOptions,
     selectedRequestId,
     selectedLeaseId,
     selectedRequest,

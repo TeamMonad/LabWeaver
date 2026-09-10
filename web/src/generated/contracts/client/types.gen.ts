@@ -161,9 +161,22 @@ export interface TDataShape {
 
 type OmitKeys<T, K> = Pick<T, Exclude<keyof T, K>>;
 
+type BrowserRequestHeaders<T> = T extends Record<string, unknown>
+  ? Omit<T, 'Origin' | 'X-CSRF-Token'> &
+      Partial<Pick<T, Extract<keyof T, 'Origin' | 'X-CSRF-Token'>>>
+  : T;
+
+type BrowserRequestData<TData extends TDataShape> = [TData] extends [never]
+  ? unknown
+  : Omit<TData, 'url' | 'headers'> &
+      ('headers' extends keyof TData
+        ? { headers: BrowserRequestHeaders<NonNullable<TData['headers']>> }
+        : unknown);
+
 export type Options<
   TData extends TDataShape = TDataShape,
   ThrowOnError extends boolean = boolean,
   TResponse = unknown,
-> = OmitKeys<RequestOptions<TResponse, ThrowOnError>, 'body' | 'path' | 'query' | 'url'> &
-  ([TData] extends [never] ? unknown : Omit<TData, 'url'>);
+> = OmitKeys<RequestOptions<TResponse, ThrowOnError>, 'body' | 'path' | 'query' | 'url' | 'headers'> &
+  Pick<RequestOptions<TResponse, ThrowOnError>, 'headers'> &
+  BrowserRequestData<TData>;

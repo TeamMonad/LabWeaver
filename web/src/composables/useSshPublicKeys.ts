@@ -1,8 +1,12 @@
 import { reactive, ref } from 'vue'
 import { listSshPublicKeys, createSshPublicKey, deleteSshPublicKey } from '@/generated/contracts'
 import type { SshPublicKeySchema } from '@/generated/contracts'
-import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
+import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
+
+type KeyMutationResult =
+  | { ok: true }
+  | { ok: false; diagnostic: DiagnosticViewModel }
 
 export function useSshPublicKeys() {
   const keys = ref<AsyncState<SshPublicKeySchema[]>>({ kind: 'idle' })
@@ -28,7 +32,7 @@ export function useSshPublicKeys() {
     keys.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
   }
 
-  async function add(publicKeyOpenssh: string) {
+  async function add(publicKeyOpenssh: string): Promise<KeyMutationResult> {
     creating.value = true
     try {
       const result = await createSshPublicKey({
@@ -53,7 +57,7 @@ export function useSshPublicKeys() {
     }
   }
 
-  async function remove(key: SshPublicKeySchema) {
+  async function remove(key: SshPublicKeySchema): Promise<KeyMutationResult> {
     deleting.value.add(key.id)
     try {
       const result = await deleteSshPublicKey({

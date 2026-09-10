@@ -11,7 +11,8 @@ use std::time::Duration;
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, SPEC_VERSION, SubmissionFrozen, subjects};
 use contracts::submission::FrozenSubmission;
 use contracts::{
-    CourseId, EnvironmentId, EventId, FrozenSubmissionId, Revision, Sequence, UtcTimestamp,
+    CourseId, EnvironmentId, EventId, FrozenSubmissionId, ProjectId, Revision, Sequence,
+    UtcTimestamp,
 };
 use persistence_sqlx::{Domain, OutboxStore};
 use serde_json::Value;
@@ -23,7 +24,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq)]
 pub enum BeginFreeze {
     /// This worker owns the fenced attempt.
-    Acquired(FreezeLease),
+    Acquired(Box<FreezeLease>),
     /// The exact request completed previously.
     Replay(Box<FrozenSubmission>),
     /// The same idempotency key was used for a different request.
@@ -36,7 +37,8 @@ pub enum BeginFreeze {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FreezeLease {
     pub frozen_submission_id: FrozenSubmissionId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub idempotency_key: String,
     pub request_sha256: Sha256Digest,
@@ -82,13 +84,18 @@ impl PgFreezeStore {
     pub async fn load_completed(
         &self,
         frozen_submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         actor_id: contracts::ActorId,
     ) -> Result<FrozenSubmission, FreezeStoreError> {
         let value: Value = sqlx::query_scalar(
             "SELECT contract FROM evaluation.frozen_submissions \
-             WHERE frozen_submission_id=$1 AND contract->>'actorId'=$2",
+             WHERE frozen_submission_id=$1 AND project_id=$2 \
+             AND course_id IS NOT DISTINCT FROM $3 AND contract->>'actorId'=$4",
         )
         .bind(frozen_submission_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(contracts::CourseId::as_uuid))
         .bind(actor_id.to_string())
         .fetch_optional(&self.pool)
         .await?
@@ -99,6 +106,47 @@ impl PgFreezeStore {
             .validate()
             .map_err(|_| FreezeStoreError::ContractInvalid)?;
         Ok(submission)
+    }
+
+    /// Returns the immutable object key recorded for a completed submission.
+    ///
+    /// Object keys are persistence locators and therefore do not belong in the
+    /// public `FrozenSubmission` contract.  Evaluation workers use this method
+    /// only after loading and validating that same owner-scoped contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` when the completed submission or object key is
+    /// absent, and a contract or persistence error when the stored value is
+    /// invalid or cannot be queried.
+    pub async fn load_completed_object_key(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        actor_id: contracts::ActorId,
+    ) -> Result<String, FreezeStoreError> {
+        let object_key: String = sqlx::query_scalar(
+            "SELECT object_key FROM evaluation.frozen_submissions \
+             WHERE frozen_submission_id=$1 AND project_id=$2 \
+             AND course_id IS NOT DISTINCT FROM $3 AND contract->>'actorId'=$4 \
+             AND object_key IS NOT NULL",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(contracts::CourseId::as_uuid))
+        .bind(actor_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(FreezeStoreError::NotFound)?;
+        if object_key.trim().is_empty()
+            || object_key.len() > 1024
+            || object_key.chars().any(char::is_control)
+            || object_key.contains("..")
+        {
+            return Err(FreezeStoreError::ContractInvalid);
+        }
+        Ok(object_key)
     }
 
     /// Acquires a new attempt, reclaims an expired attempt, or returns the durable replay.
@@ -114,7 +162,8 @@ impl PgFreezeStore {
     pub async fn begin(
         &self,
         frozen_submission_id: FrozenSubmissionId,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         environment_id: EnvironmentId,
         idempotency_key: &str,
         request_sha256: Sha256Digest,
@@ -136,11 +185,12 @@ impl PgFreezeStore {
         let lease_expires_at = authority_now + time::Duration::seconds(lease_seconds);
         let inserted = sqlx::query(
             "INSERT INTO evaluation.submission_freeze_requests \
-             (frozen_submission_id,course_id,environment_id,idempotency_key,request_sha256,source_identity_sha256,state,current_attempt) \
-             VALUES ($1,$2,$3,$4,$5,$6,'active',1) ON CONFLICT (course_id,idempotency_key) DO NOTHING",
+             (frozen_submission_id,project_id,course_id,environment_id,idempotency_key,request_sha256,source_identity_sha256,state,current_attempt) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'active',1) ON CONFLICT (project_id,idempotency_key) DO NOTHING",
         )
         .bind(frozen_submission_id.as_uuid())
-        .bind(course_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(contracts::CourseId::as_uuid))
         .bind(environment_id.as_uuid())
         .bind(idempotency_key)
         .bind(request_sha256.to_string())
@@ -159,8 +209,9 @@ impl PgFreezeStore {
             )
             .await?;
             transaction.commit().await?;
-            return Ok(BeginFreeze::Acquired(FreezeLease {
+            return Ok(BeginFreeze::Acquired(Box::new(FreezeLease {
                 frozen_submission_id,
+                project_id,
                 course_id,
                 environment_id,
                 idempotency_key: idempotency_key.to_owned(),
@@ -170,14 +221,15 @@ impl PgFreezeStore {
                 authority_now: timestamp(authority_now)?,
                 worker_id: worker_id.to_owned(),
                 lease_token,
-            }));
+            })));
         }
 
         let request = sqlx::query(
             "SELECT frozen_submission_id,environment_id,request_sha256,source_identity_sha256,state,current_attempt,contract \
-             FROM evaluation.submission_freeze_requests WHERE course_id=$1 AND idempotency_key=$2 FOR UPDATE",
+             FROM evaluation.submission_freeze_requests WHERE project_id=$1 \
+             AND idempotency_key=$2 FOR UPDATE",
         )
-        .bind(course_id.as_uuid())
+        .bind(project_id.as_uuid())
         .bind(idempotency_key)
         .fetch_one(&mut *transaction)
         .await?;
@@ -214,6 +266,7 @@ impl PgFreezeStore {
                 .validate()
                 .map_err(|_| FreezeStoreError::ContractInvalid)?;
             if submission.id != persisted_id
+                || submission.project_id != project_id
                 || submission.course_id != course_id
                 || submission.environment.environment_id != environment_id
             {
@@ -275,8 +328,9 @@ impl PgFreezeStore {
         )
         .await?;
         transaction.commit().await?;
-        Ok(BeginFreeze::Acquired(FreezeLease {
+        Ok(BeginFreeze::Acquired(Box::new(FreezeLease {
             frozen_submission_id: persisted_id,
+            project_id,
             course_id,
             environment_id,
             idempotency_key: idempotency_key.to_owned(),
@@ -286,7 +340,7 @@ impl PgFreezeStore {
             authority_now: timestamp(authority_now)?,
             worker_id: worker_id.to_owned(),
             lease_token,
-        }))
+        })))
     }
 
     /// Moves an owned reservation into the preflight phase.
@@ -322,8 +376,10 @@ impl PgFreezeStore {
     pub async fn complete(
         &self,
         lease: &FreezeLease,
+        project_id: ProjectId,
         object_key: &str,
         submission: &FrozenSubmission,
+        submission_manifest_sha256: Sha256Digest,
         trace_id: &str,
     ) -> Result<(), FreezeStoreError> {
         validate_object_key(object_key)?;
@@ -332,6 +388,8 @@ impl PgFreezeStore {
             .validate()
             .map_err(|_| FreezeStoreError::ContractInvalid)?;
         if submission.id != lease.frozen_submission_id
+            || submission.project_id != lease.project_id
+            || project_id != lease.project_id
             || submission.course_id != lease.course_id
             || submission.environment.environment_id != lease.environment_id
             || submission.attempt != lease.attempt
@@ -355,7 +413,7 @@ impl PgFreezeStore {
         .bind(&lease.worker_id)
         .bind(lease.lease_token)
         .bind(&submission.object.object_version)
-        .bind(persistence_sqlx::Sha256Digest::of_bytes(b"object").to_string())
+        .bind(&submission.content_sha256)
         .bind(object_key)
         .execute(&mut *transaction)
         .await?;
@@ -365,15 +423,16 @@ impl PgFreezeStore {
         }
         sqlx::query(
             "INSERT INTO evaluation.frozen_submissions \
-             (frozen_submission_id,course_id,environment_id,manifest_sha256,content_sha256,schema_version,tool_version,contract,frozen_at, \
+            (frozen_submission_id,project_id,course_id,environment_id,manifest_sha256,content_sha256,schema_version,tool_version,contract,frozen_at, \
               idempotency_key,source_identity_sha256,object_key,object_version) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
         )
         .bind(submission.id.as_uuid())
-        .bind(submission.course_id.as_uuid())
+        .bind(submission.project_id.as_uuid())
+        .bind(submission.course_id.map(contracts::CourseId::as_uuid))
         .bind(submission.environment.environment_id.as_uuid())
-        .bind(persistence_sqlx::Sha256Digest::of_bytes(b"manifest").to_string())
-        .bind(persistence_sqlx::Sha256Digest::of_bytes(b"object").to_string())
+        .bind(submission_manifest_sha256.to_string())
+        .bind(&submission.content_sha256)
         .bind("evaluation.labweaver.io/frozen-submission/v1")
         .bind(env!("CARGO_PKG_VERSION"))
         .bind(&contract)
@@ -398,7 +457,7 @@ impl PgFreezeStore {
             transaction.rollback().await?;
             return Err(FreezeStoreError::FenceLost);
         }
-        enqueue_frozen_event(&mut transaction, lease, submission, trace_id).await?;
+        enqueue_frozen_event(&mut transaction, lease, project_id, submission, trace_id).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -502,6 +561,7 @@ async fn insert_attempt(
 async fn enqueue_frozen_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     _lease: &FreezeLease,
+    project_id: ProjectId,
     submission: &FrozenSubmission,
     trace_id: &str,
 ) -> Result<(), FreezeStoreError> {
@@ -525,6 +585,7 @@ async fn enqueue_frozen_event(
         time: submission.frozen_at,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
+        project_id,
         course_id: submission.course_id,
         // The request event is the first event for this aggregate.  The frozen
         // result must advance the same stream instead of colliding with the

@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WorkConfigurationPlanId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only metadata for one Agent-owned persisted VM execution intent.\n\nThe contract intentionally excludes scripts, private keys, certificates, and provider\ncredentials. Agent remains the source of truth for the full private execution request.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "executionId": {
+      "type": "string"
+    },
+    "planId": {
+      "$ref": "#/$defs/WorkConfigurationPlanId"
+    },
+    "planRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "runId": {
+      "$ref": "#/$defs/AgentRunId"
+    },
+    "runRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "scriptSha256": {
+      "type": "string"
+    },
+    "sourceIdentity": {
+      "type": "string"
+    },
+    "verificationScriptSha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "executionId",
+    "runId",
+    "runRevision",
+    "projectId",
+    "environmentId",
+    "environmentRevision",
+    "actorId",
+    "planId",
+    "planRevision",
+    "sourceIdentity",
+    "scriptSha256"
+  ],
+  "title": "AgentWorkExecutionIntentMetadata",
+  "type": "object"
+}

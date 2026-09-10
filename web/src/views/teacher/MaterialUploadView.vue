@@ -2,30 +2,23 @@
   <div class="material-upload">
     <header class="page-header">
       <h2>材料上传与 AgentRun</h2>
-      <p class="page-subtitle">上传题面、Starter 和样例，确认 LLM 出站策略后启动 AgentRun。</p>
+      <p class="page-subtitle">上传题面、Starter 和样例，确认项目 LLM 出站策略后启动 AgentRun。</p>
     </header>
 
     <DiagnosticBanner
-      v-if="isContextMissing"
-      code="COURSE_CONTEXT_MISSING"
-      message="课程上下文未绑定，无法加载 LLM 出站策略与材料上传。请通过课程选择器选择课程或联系管理员完成 #47。"
+      v-if="!projectId"
+      code="PROJECT_CONTEXT_MISSING"
+      message="请先在顶部项目选择器中选择一个项目。"
       :retryable="false"
       severity="error"
-    />
-    <DiagnosticBanner
-      v-else-if="isContextFromEnv"
-      code="COURSE_CONTEXT_FROM_ENV"
-      message="当前使用部署配置中的默认课程上下文；真实课程选择待 #47 接入。"
-      :retryable="false"
-      severity="warning"
     />
 
     <section class="policy-section" aria-labelledby="policy-heading">
       <h3 id="policy-heading" class="section-title">
         <SvgIcon name="policy" size="sm" aria-hidden="true" />
-        课程 LLM 出站策略
+        项目 LLM 出站策略
       </h3>
-      <AsyncStateView v-if="!isContextMissing" :state="policy.state" @retry="policy.load">
+      <AsyncStateView v-if="projectId" :state="policy.state" @retry="policy.load">
         <template #success="{ data }">
           <div class="policy-card md-card">
             <div class="policy-row">
@@ -37,12 +30,8 @@
               <span class="policy-value">{{ data.binding.claudeCodeVersion }}</span>
             </div>
             <div class="policy-row">
-              <span class="policy-label">Worker 镜像摘要</span>
-              <code class="policy-value">{{ truncateSha256(data.binding.workerImageSha256) }}</code>
-            </div>
-            <div class="policy-row">
-              <span class="policy-label">运行时配置摘要</span>
-              <code class="policy-value">{{ truncateSha256(data.binding.runtimeConfigSha256) }}</code>
+              <span class="policy-label">运行时配置</span>
+              <code class="policy-value">{{ data.binding.runtimeBinding }}</code>
             </div>
             <div class="policy-row">
               <span class="policy-label">硬拒绝分类</span>
@@ -163,20 +152,6 @@
         启动 AgentRun
       </h3>
 
-      <div class="runtime-field">
-        <span class="field-label">目标 Runtime</span>
-        <div class="runtime-options">
-          <label class="radio-option">
-            <input v-model="requestedRuntime" type="radio" value="container" />
-            <span>Container</span>
-          </label>
-          <label class="radio-option">
-            <input v-model="requestedRuntime" type="radio" value="virtual_machine" />
-            <span>Virtual Machine</span>
-          </label>
-        </div>
-      </div>
-
       <button
         type="button"
         class="filled-button"
@@ -189,9 +164,8 @@
       <AsyncStateView v-if="agent.run.kind !== 'idle'" :state="agent.run" @retry="retryCurrentRun">
         <template #success="{ data }">
           <div class="run-card md-card">
-            <div class="run-header">
-              <span class="run-id">{{ data.id }}</span>
-              <span v-if="agent.elapsedSeconds !== null" class="run-elapsed">已耗时 {{ agent.elapsedSeconds }} 秒</span>
+          <div class="run-header">
+            <span class="run-id">{{ data.id }}</span>
               <GcpStatusPill :state="data.state" domain="agent" />
             </div>
             <div v-if="data.tracks.length > 0" class="run-tracks">
@@ -237,7 +211,7 @@
               <RouterLink
                 v-if="data.state === 'succeeded' || data.state === 'partially_succeeded'"
                 class="filled-button approval-link"
-                :to="`/teacher/approvals?runId=${data.id}`"
+                :to="{ path: '/teacher/approvals', query: { projectId: projectId ?? undefined, runId: data.id } }"
               >
                 进入候选审批
               </RouterLink>
@@ -249,93 +223,44 @@
         </template>
       </AsyncStateView>
 
-      <div v-if="agent.pollError" class="poll-error">
-        <DiagnosticBanner
-          :code="agent.pollError.code"
-          :message="agent.pollError.message"
-          :retryable="agent.pollError.retryable"
-          severity="warning"
-          @retry="agent.resumePolling"
-        />
-      </div>
-
-      <p v-if="agent.run.kind === 'success'" class="stream-state" role="status">
-        事件流：{{ streamStateText }}
-      </p>
-
-      <div v-if="agent.run.kind === 'success'" class="timeline-section">
-        <h4 class="section-subtitle">课程事件（当前 AgentRun 运行期间）</h4>
-        <EventTimeline v-if="events.length > 0" :events="events" aria-label="课程事件时间线" />
-        <p v-else-if="streamState !== 'error'" class="stream-empty" role="status">
-          {{ streamState === 'open' ? '已连接事件流，等待新的课程事件…' : '事件流连接中…' }}
-        </p>
-        <div v-if="streamError" class="poll-error">
-          <DiagnosticBanner
-            :code="streamError.code"
-            :message="streamError.message"
-            :retryable="streamError.retryable"
-            severity="warning"
-            @retry="() => { clearStreamError(); connectEvents() }"
-          />
-        </div>
-      </div>
+      <DiagnosticBanner
+        v-if="agent.outcome"
+        :code="agent.outcome.code"
+        :message="agent.outcome.message"
+        :retryable="agent.outcome.retryable"
+        severity="info"
+      />
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import { useCourseContext } from '@/composables/useCourseContext'
-import { useActiveCourseLlmPolicy } from '@/composables/useActiveCourseLlmPolicy'
-import { useProblemPackageUpload } from '@/composables/useProblemPackageUpload'
-import { useAgentRun } from '@/composables/useAgentRun'
-import { useCourseEventStream } from '@/composables/useCourseEventStream'
+import { useProjects } from '@/composables/useProjects'
+import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
+import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
+import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import DataTable from '@/components/common/DataTable.vue'
-import EventTimeline from '@/components/common/EventTimeline.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { truncateSha256, shortId } from '@/utils/format'
-import { agentRunStateLabel, agentAttemptStateLabel, agentTrackKindLabel } from '@/utils/stateLabels'
+import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import type { UploadFile } from '@/composables/useProblemPackageUpload'
+import type { UploadFile } from '@/composables/useProjectProblemPackageUpload'
 
-const course = useCourseContext()
-const courseId = course.courseId
-const isContextMissing = computed(() => course.context.value === null)
-const isContextFromEnv = computed(() => course.context.value?.source === 'env')
-
-const policy = useActiveCourseLlmPolicy(courseId)
+const projects = useProjects()
+const projectId = computed(() => projects.selectedProjectId)
+const courseId = computed(() => projects.selectedProject?.courseId ?? null)
+const policy = useActiveProjectLlmPolicy(projectId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
-const upload = useProblemPackageUpload(courseId, policyRevision)
-const agent = useAgentRun(courseId)
-const currentRunId = computed(() => (agent.run.kind === 'success' ? agent.run.data.id : undefined))
-const { events, state: streamState, errorDiagnostic: streamError, clearError: clearStreamError, connect: connectEvents, disconnect: disconnectEvents } = useCourseEventStream(
-  courseId,
-  currentRunId,
-)
-
-const streamStateText = computed(() => {
-  switch (streamState.value) {
-    case 'connecting':
-      return '连接中…'
-    case 'open':
-      return '已连接'
-    case 'error':
-      return '连接错误'
-    case 'closed':
-      return '已断开'
-    default:
-      return '未连接'
-  }
-})
+const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+const agent = useProjectAgentRun(projectId)
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
-const requestedRuntime = ref<'container' | 'virtual_machine'>('container')
-
 const fileColumns: DataTableColumn<UploadFile>[] = [
   { key: 'path', title: '路径' },
   { key: 'sizeBytes', title: '大小' },
@@ -353,7 +278,7 @@ const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.state.package : null))
 
 const canStartRun = computed(() => {
-  return packageDone.value && uploadedPackage.value && policy.state.kind === 'success' && !agent.polling
+  return packageDone.value && uploadedPackage.value && policy.state.kind === 'success' && !agent.acting
 })
 
 function onFileInput(event: Event) {
@@ -378,33 +303,23 @@ async function startRun() {
   await agent.start({
     packageId: pkg.id,
     packageRevision: pkg.revision,
-    packageSha256: pkg.manifestSha256,
     policyId: policyData.id,
     policyRevision: policyData.revision,
-    requestedRuntime: requestedRuntime.value,
+    environmentClass: 'experiment',
   })
 }
 
 async function retryCurrentRun() {
   const current = agent.run.kind === 'success' ? agent.run.data : undefined
   if (current) {
-    agent.beginPolling(current.id)
+    await agent.load(current.id)
   }
 }
-
-watch(() => agent.run.kind, (kind, oldKind) => {
-  if (kind === 'success' && oldKind !== 'success') {
-    connectEvents()
-  } else if (kind !== 'success') {
-    disconnectEvents()
-  }
-})
 
 // Release background work when leaving the page: stop the AgentRun poll
 // timer and close the SSE stream so neither outlives the view.
 onUnmounted(() => {
   agent.stopPolling()
-  disconnectEvents()
 })
 </script>
 

@@ -1,8 +1,9 @@
 //! Environment owner process and deployment-owned runtime executor entry point.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
+use auth::{ServiceAuthConfig, ServiceAuthError, ServiceTokenVerifier, TransportSecurityMode};
 use environment_service::{
     FencedContainerExecutor, FencedKubeVirtExecutor, KubeVirtConsoleExecutorServerConfig,
     KubeVirtConsoleKubernetesConfiguration, KubernetesContainerExecutor,
@@ -88,10 +89,12 @@ async fn run_kubevirt_console_executor() -> Result<(), MainError> {
     if !schema_ready {
         return Err(MainError::SchemaUnavailable);
     }
+    let service_verifier = discover_service_verifier().await?;
     let server = environment_service::KubeVirtConsoleExecutorServer::new(
         &deployment.server,
         &deployment.kubernetes,
         pool,
+        service_verifier,
     )
     .await?;
     tokio::try_join!(
@@ -133,6 +136,10 @@ async fn run_environment_service() -> Result<(), MainError> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "executor startup keeps dependency and server bindings visible together"
+)]
 async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
     let deployment = load_runtime_executor_deployment()?;
     if deployment.database_max_connections == 0 || deployment.database_max_connections > 32 {
@@ -176,6 +183,11 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
         deployment.nats.credentials_file.into(),
     )
     .await?;
+    let service_verifier = if matches!(kind, RuntimeKind::Container) {
+        Some(discover_service_verifier().await?)
+    } else {
+        None
+    };
     let terminal = match kind {
         RuntimeKind::Container => Some(
             environment_service::TerminalExecutorServer::new(
@@ -184,6 +196,7 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                     .as_ref()
                     .ok_or(MainError::Configuration)?,
                 &deployment.executor,
+                service_verifier.clone().ok_or(MainError::Configuration)?,
             )
             .await?,
         ),
@@ -238,6 +251,73 @@ fn load_runtime_executor_deployment() -> Result<RuntimeExecutorDeployment, MainE
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| MainError::Configuration)
 }
 
+async fn discover_service_verifier() -> Result<Arc<ServiceTokenVerifier>, MainError> {
+    let issuer = required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?;
+    let audience = required_env("LABWEAVER_SERVICE_AUDIENCE")?;
+    let allowed_client_ids = required_set("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS")?;
+    let algorithms = required_set("LABWEAVER_SERVICE_JWT_ALGORITHMS")?;
+    let jwks_refresh_seconds = required_u64("LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS")?;
+    let jwks_retry_seconds = required_u64("LABWEAVER_SERVICE_JWKS_RETRY_SECONDS")?;
+    let ca_path = required_path("LABWEAVER_SERVICE_OIDC_CA")?;
+    let ca = std::fs::read(ca_path)?;
+    let http = auth::no_redirect_http_client(Some(&ca), TransportSecurityMode::Strict)
+        .map_err(|_| MainError::ServiceAuth(ServiceAuthError::HttpClient))?;
+    let config = ServiceAuthConfig::new(
+        &issuer,
+        audience,
+        allowed_client_ids,
+        BTreeSet::new(),
+        algorithms,
+        jwks_refresh_seconds,
+        jwks_retry_seconds,
+        TransportSecurityMode::Strict,
+    )
+    .map_err(|_| MainError::ServiceAuth(ServiceAuthError::InvalidConfig))?;
+    ServiceTokenVerifier::discover(config, http)
+        .await
+        .map(Arc::new)
+        .map_err(MainError::ServiceAuth)
+}
+
+fn required_env(name: &'static str) -> Result<String, MainError> {
+    let value = std::env::var(name).map_err(|_| MainError::Configuration)?;
+    if value.trim().is_empty() {
+        return Err(MainError::Configuration);
+    }
+    Ok(value)
+}
+
+fn required_path(name: &'static str) -> Result<std::path::PathBuf, MainError> {
+    let path = std::path::PathBuf::from(required_env(name)?);
+    if !path.is_absolute() {
+        return Err(MainError::Configuration);
+    }
+    Ok(path)
+}
+
+fn required_set(name: &'static str) -> Result<BTreeSet<String>, MainError> {
+    let values = required_env(name)?
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if values.is_empty() {
+        return Err(MainError::Configuration);
+    }
+    Ok(values)
+}
+
+fn required_u64(name: &'static str) -> Result<u64, MainError> {
+    let value = required_env(name)?
+        .parse::<u64>()
+        .map_err(|_| MainError::Configuration)?;
+    if value == 0 {
+        return Err(MainError::Configuration);
+    }
+    Ok(value)
+}
+
 fn read_secret(path: &str) -> Result<String, MainError> {
     let value = std::fs::read_to_string(path)?;
     let value = value.trim();
@@ -275,6 +355,8 @@ enum MainError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    ServiceAuth(#[from] ServiceAuthError),
 }
 
 #[cfg(test)]
@@ -301,10 +383,6 @@ mod deployment_contract_tests {
             .expect("KubeVirt console deployment example must deserialize");
 
         assert!(deployment.database_url_file.starts_with('/'));
-        assert_eq!(
-            deployment.server.allowed_caller_san,
-            "spiffe://labweaver/environment-service"
-        );
         assert_eq!(deployment.server.bind_addr, "0.0.0.0:9451");
     }
 }

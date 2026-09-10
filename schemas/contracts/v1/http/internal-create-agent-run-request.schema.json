@@ -1,5 +1,61 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AgentRunPurpose": {
+      "description": "Immutable purpose selected by Control for one Agent run.\n\nThe purpose is authoritative: callers cannot substitute an environment class, target\nenvironment, actor, or runtime through an untyped request field. Authoring creates a new\nEnvironment/Evaluation package, while WorkConfiguration targets one existing Work environment\nand produces one configuration plan.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "environmentClass": {
+              "$ref": "#/$defs/EnvironmentClass"
+            },
+            "kind": {
+              "const": "authoring",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentClass"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actorId": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "environmentRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            },
+            "runtimeKind": {
+              "$ref": "#/$defs/RuntimeKind",
+              "description": "Runtime selected by the authoritative Work environment.\n\nControl resolves this value from the environment instance before dispatching the\nrun. Agent uses it as the immutable execution routing key, so a missing or altered\nruntime cannot silently select a different executor."
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "environmentRevision",
+            "actorId",
+            "runtimeKind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ArtifactId": {
       "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
       "type": "string"
@@ -76,53 +132,22 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
-    "CourseLlmEgressPolicy": {
-      "additionalProperties": false,
-      "description": "Versioned course policy governing all LLM egress.",
-      "properties": {
-        "activatedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "binding": {
-          "$ref": "#/$defs/ClaudeCodeBindingV1"
-        },
-        "budget": {
-          "$ref": "#/$defs/LlmBudget"
-        },
-        "courseId": {
-          "$ref": "#/$defs/CourseId"
-        },
-        "deniedDataClasses": {
-          "items": {
-            "$ref": "#/$defs/DeniedDataClass"
-          },
-          "type": "array"
-        },
-        "id": {
-          "$ref": "#/$defs/PolicyId"
-        },
-        "revision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "studentContentMode": {
-          "$ref": "#/$defs/StudentContentMode"
-        }
-      },
-      "required": [
-        "id",
-        "courseId",
-        "revision",
-        "binding",
-        "budget",
-        "deniedDataClasses",
-        "studentContentMode",
-        "activatedAt"
-      ],
-      "type": "object"
-    },
     "CreateAgentRunRequest": {
       "additionalProperties": false,
       "properties": {
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentClass": {
+          "$ref": "#/$defs/EnvironmentClass"
+        },
         "packageId": {
           "$ref": "#/$defs/ProblemPackageId"
         },
@@ -135,16 +160,84 @@
         "policyRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "requestedRuntime": {
-          "$ref": "#/$defs/RuntimeKind"
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
         }
       },
       "required": [
+        "projectId",
         "packageId",
         "packageRevision",
         "policyId",
         "policyRevision",
-        "requestedRuntime"
+        "environmentClass"
+      ],
+      "type": "object"
+    },
+    "CreateWorkConfigurationRunRequest": {
+      "additionalProperties": false,
+      "description": "Public request for a configuration run against one existing Resource-managed Work environment.",
+      "properties": {
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "packageId": {
+          "$ref": "#/$defs/ProblemPackageId"
+        },
+        "packageRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "preauthorizationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkConfigurationPreauthorizationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preauthorizationRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        }
+      },
+      "required": [
+        "projectId",
+        "packageId",
+        "packageRevision",
+        "policyId",
+        "policyRevision",
+        "environmentId",
+        "environmentRevision"
       ],
       "type": "object"
     },
@@ -166,6 +259,49 @@
         "work"
       ],
       "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "InternalAgentRunRequest": {
+      "description": "Control-to-Agent command carried only over an allowlisted mTLS service identity.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "authoring",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/CreateAgentRunRequest"
+            }
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/CreateWorkConfigurationRunRequest"
+            }
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "LlmBudget": {
       "additionalProperties": false,
@@ -251,7 +387,14 @@
           "$ref": "#/$defs/UtcTimestamp"
         },
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "files": {
           "items": {
@@ -262,6 +405,9 @@
         "id": {
           "$ref": "#/$defs/ProblemPackageId"
         },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
         "retention": {
           "$ref": "#/$defs/RetentionSnapshot"
         },
@@ -271,7 +417,7 @@
       },
       "required": [
         "id",
-        "courseId",
+        "projectId",
         "revision",
         "files",
         "retention",
@@ -282,6 +428,64 @@
     "ProblemPackageId": {
       "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
       "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ProjectLlmEgressPolicy": {
+      "additionalProperties": false,
+      "description": "Versioned project policy governing all LLM egress. A course is optional teaching context.",
+      "properties": {
+        "activatedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "binding": {
+          "$ref": "#/$defs/ClaudeCodeBindingV1"
+        },
+        "budget": {
+          "$ref": "#/$defs/LlmBudget"
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deniedDataClasses": {
+          "items": {
+            "$ref": "#/$defs/DeniedDataClass"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "studentContentMode": {
+          "$ref": "#/$defs/StudentContentMode"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "revision",
+        "binding",
+        "budget",
+        "deniedDataClasses",
+        "studentContentMode",
+        "activatedAt"
+      ],
+      "type": "object"
     },
     "RetentionClass": {
       "description": "Retention classes with distinct privacy and recovery requirements.",
@@ -361,6 +565,73 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "WorkConfigurationPlanId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.",
+      "type": "string"
+    },
+    "WorkConfigurationPreauthorization": {
+      "additionalProperties": false,
+      "description": "Concrete per-Work grant for executing one exact immutable configuration plan.\n\nThe grant binds both script artifacts and the plan revision. It therefore cannot authorize a\nnewly generated script, a changed verification script, or a plan whose restart requirement was\naltered after approval.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkConfigurationPreauthorizationId"
+        },
+        "planId": {
+          "$ref": "#/$defs/WorkConfigurationPlanId"
+        },
+        "planRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "scriptArtifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "verificationScriptArtifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "environmentId",
+        "environmentRevision",
+        "actorId",
+        "planId",
+        "planRevision",
+        "scriptArtifact",
+        "expiresAt",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "WorkConfigurationPreauthorizationId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPreauthorizationId`.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -368,12 +639,14 @@
   "description": "Control-to-Agent command carried only over an allowlisted mTLS service identity.",
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId",
-      "description": "Authoritative route course."
-    },
-    "expectedEnvironmentClass": {
-      "$ref": "#/$defs/EnvironmentClass",
-      "description": "Explicit class that the Environment candidate must retain through Agent execution."
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "objectLocators": {
       "additionalProperties": {
@@ -387,18 +660,37 @@
       "description": "Completed Control-owned package; Agent re-reads and re-hashes every object."
     },
     "policy": {
-      "$ref": "#/$defs/CourseLlmEgressPolicy",
-      "description": "Active immutable course policy."
+      "$ref": "#/$defs/ProjectLlmEgressPolicy",
+      "description": "Active immutable Project policy."
+    },
+    "preauthorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkConfigurationPreauthorization"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional concrete grant for reusing one exact approved Work configuration plan."
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Authoritative Project ownership and optional teaching association."
+    },
+    "purpose": {
+      "$ref": "#/$defs/AgentRunPurpose",
+      "description": "Control-derived immutable purpose. Agent rejects a request whose purpose does not agree\nwith its typed request variant and target identities."
     },
     "request": {
-      "$ref": "#/$defs/CreateAgentRunRequest",
+      "$ref": "#/$defs/InternalAgentRunRequest",
       "description": "Public immutable request whose idempotency key remains an HTTP header."
     }
   },
   "required": [
-    "courseId",
+    "projectId",
     "request",
-    "expectedEnvironmentClass",
+    "purpose",
     "package",
     "objectLocators",
     "policy"

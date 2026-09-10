@@ -11,13 +11,14 @@
     reason = "the public contract and stable diagnostics define this narrow HTTP surface"
 )]
 
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use axum::{
     Extension, Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -26,32 +27,34 @@ use contracts::{
     EvaluationStepRunId, FrozenSubmissionId, OperationId, ProblemDetails, Revision,
     evaluation::{EvaluationRelease, EvaluationRun, StudentEvaluationResult},
     http::{
-        CursorPage, DEFAULT_PAGE_LIMIT, EvaluationReleaseListQuery, FreezeSubmissionRequest,
-        IDEMPOTENCY_KEY_HEADER, IdempotencyKey, InternalCompleteEvaluationStepRequest,
-        InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
-        InternalPublishEvaluationReleaseRequest, InternalWithdrawEvaluationReleaseRequest,
-        OperationAccepted, StrongEtag,
+        AuthoringPublicationAdmissionQuery, CursorPage, DEFAULT_PAGE_LIMIT,
+        EvaluationReleaseListQuery, FreezeSubmissionRequest, IDEMPOTENCY_KEY_HEADER,
+        IdempotencyKey, InternalCompleteEvaluationStepRequest, InternalCreateEvaluationRunRequest,
+        InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
+        InternalWithdrawEvaluationReleaseRequest, OperationAccepted, StrongEtag,
     },
     submission::FrozenSubmission,
 };
 
 use crate::{
-    EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
-    FreezeCommandStoreError, PgFreezeCommandStore, PgFreezeStore, SubmissionFreezeCommand,
-    control_plane::{PgEvaluationControlStore, worker_service_san},
-    freeze_store::FreezeStoreError,
+    AuthoringAdmissionClient, AuthoringAdmissionClientError, EvaluationControlStoreError,
+    EvaluationReleaseReservation, EvaluationRunReservation, FreezeCommandStoreError,
+    PgFreezeCommandStore, PgFreezeStore, SubmissionFreezeCommand,
+    control_plane::PgEvaluationControlStore, freeze_store::FreezeStoreError,
 };
 
-const ACCESS_SERVICE_SAN: &str = "spiffe://labweaver/access-service";
-const CONTROL_SERVICE_SAN: &str = "spiffe://labweaver/control-service";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
+const ACCESS_PERMISSION: &str = "evaluation.api.invoke";
+const CONTROL_PERMISSION: &str = "evaluation.control.invoke";
+const WORKER_PERMISSION: &str = "evaluation.step.complete";
 
 #[derive(Clone)]
 pub struct EvaluationApiState {
     commands: PgFreezeCommandStore,
     submissions: PgFreezeStore,
     control: PgEvaluationControlStore,
+    authoring_admission: Arc<AuthoringAdmissionClient>,
 }
 
 impl EvaluationApiState {
@@ -60,18 +63,15 @@ impl EvaluationApiState {
         commands: PgFreezeCommandStore,
         submissions: PgFreezeStore,
         control: PgEvaluationControlStore,
+        authoring_admission: Arc<AuthoringAdmissionClient>,
     ) -> Self {
         Self {
             commands,
             submissions,
             control,
+            authoring_admission,
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct GatewayPrincipal {
-    san_uri: String,
 }
 
 pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
@@ -129,9 +129,37 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
     telemetry::instrument_http(router, "evaluation-service", "evaluation-api")
 }
 
+/// Applies the service-account JWT boundary to every Evaluation route.
+///
+/// The TLS transport protects the bearer token in transit. The verifier is the
+/// only source of the caller identity; request headers and client certificates
+/// never establish an identity. Individual handlers still require their route
+/// permission so an accepted token cannot cross service boundaries.
+pub fn with_service_auth(router: Router, verifier: Arc<auth::ServiceTokenVerifier>) -> Router {
+    router.layer(middleware::from_fn_with_state(
+        verifier,
+        require_service_token,
+    ))
+}
+
+async fn require_service_token(
+    State(verifier): State<Arc<auth::ServiceTokenVerifier>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    match verifier.authenticate(request.headers()).await {
+        Ok(identity) => {
+            let mut request = request;
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(error) => EvaluationApiError::ServiceAuth(error).into_response(),
+    }
+}
+
 async fn freeze_submission(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(environment_id): Path<EnvironmentId>,
     headers: HeaderMap,
     body: Bytes,
@@ -139,18 +167,24 @@ async fn freeze_submission(
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
+    let project_id = project_header(&headers)?;
+    let course_id = optional_course_header(&headers)?;
     let request = contracts::parse_strict_json::<FreezeSubmissionRequest>(&body)
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
     request
         .manifest
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    if course_id.is_some() && request.course_id != course_id {
+        return Err(EvaluationApiError::RequestInvalid);
+    }
     let environment_revision = if_match(&headers)?;
     let idempotency_key = idempotency_key(&headers)?;
     let command = SubmissionFreezeCommand {
         frozen_submission_id: FrozenSubmissionId::new(),
         operation_id: OperationId::new(),
-        course_id: request.course_id,
+        project_id,
+        course_id: request.course_id.or(course_id),
         environment_id,
         actor_id,
         environment_revision,
@@ -173,7 +207,7 @@ async fn freeze_submission(
 
 async fn publish_evaluation_release(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EvaluationRelease>), EvaluationApiError> {
@@ -193,21 +227,24 @@ async fn publish_evaluation_release(
 
 async fn get_evaluation_release(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(release_id): Path<EvaluationReleaseId>,
 ) -> Result<Json<EvaluationRelease>, EvaluationApiError> {
     require_control(principal)?;
-    Ok(Json(state.control.load_release(release_id).await?))
+    let release = state.control.load_release(release_id).await?;
+    ensure_release_admitted(&state, &release).await?;
+    Ok(Json(release))
 }
 
 async fn list_evaluation_releases(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Query(query): Query<EvaluationReleaseListQuery>,
     headers: HeaderMap,
 ) -> Result<Json<CursorPage<EvaluationRelease>>, EvaluationApiError> {
     require_control(principal)?;
-    let course_id = course_header(&headers)?;
+    let project_id = project_header(&headers)?;
+    let course_id = optional_course_header(&headers)?;
     query
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
@@ -217,17 +254,24 @@ async fn list_evaluation_releases(
         .map(str::parse)
         .transpose()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
-    Ok(Json(
-        state
-            .control
-            .list_releases(course_id, cursor, query.limit.unwrap_or(DEFAULT_PAGE_LIMIT))
-            .await?,
-    ))
+    let page = state
+        .control
+        .list_releases(
+            project_id,
+            course_id,
+            cursor,
+            query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
+        )
+        .await?;
+    for release in &page.items {
+        ensure_release_admitted(&state, release).await?;
+    }
+    Ok(Json(page))
 }
 
 async fn withdraw_evaluation_release(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(release_id): Path<EvaluationReleaseId>,
     headers: HeaderMap,
     body: Bytes,
@@ -255,7 +299,7 @@ async fn withdraw_evaluation_release(
 
 async fn list_student_results(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(course_id): Path<contracts::CourseId>,
     Query(query): Query<EvaluationReleaseListQuery>,
     headers: HeaderMap,
@@ -263,6 +307,7 @@ async fn list_student_results(
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
+    let project_id = project_header(&headers)?;
     query
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
@@ -275,7 +320,8 @@ async fn list_student_results(
     let page = state
         .control
         .student_results(
-            course_id,
+            project_id,
+            Some(course_id),
             actor_id,
             cursor,
             query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
@@ -293,16 +339,17 @@ async fn list_student_results(
 
 async fn get_student_result(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path((course_id, run_id)): Path<(contracts::CourseId, EvaluationRunId)>,
     headers: HeaderMap,
 ) -> Result<Json<StudentEvaluationResult>, EvaluationApiError> {
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
+    let project_id = project_header(&headers)?;
     let result = state
         .control
-        .student_result(course_id, actor_id, run_id)
+        .student_result(project_id, Some(course_id), actor_id, run_id)
         .await?;
     tracing::info!(
         event = "evaluation.student_result.read",
@@ -318,17 +365,34 @@ async fn get_student_result(
 
 async fn create_evaluation_run(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EvaluationRun>), EvaluationApiError> {
     require_control(principal)?;
     let request = contracts::parse_strict_json::<InternalCreateEvaluationRunRequest>(&body)
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
+    // Resolve the release projection before the network call.  The Control admission endpoint is
+    // intentionally outside the Evaluation transaction; the store repeats the exact identity
+    // checks while locking the release so a withdrawal or revision change cannot race admission.
+    let release = state.control.load_release(request.release_id).await?;
+    if release.state != contracts::evaluation::EvaluationReleaseState::Active {
+        return Err(EvaluationApiError::Control(
+            EvaluationControlStoreError::ReleaseWithdrawn,
+        ));
+    }
+    let admission =
+        resolve_release_admission(&state, &release, request.project_id, request.course_id).await?;
     let now = state.control.authority_now().await?;
     match state
         .control
-        .create_run(&request, &idempotency_key(&headers)?, now, &trace_id()?)
+        .create_run(
+            &request,
+            &idempotency_key(&headers)?,
+            now,
+            &trace_id()?,
+            &admission,
+        )
         .await?
     {
         EvaluationRunReservation::Created(run) => Ok((StatusCode::CREATED, Json(run))),
@@ -336,9 +400,42 @@ async fn create_evaluation_run(
     }
 }
 
+async fn resolve_release_admission(
+    state: &EvaluationApiState,
+    release: &EvaluationRelease,
+    project_id: contracts::ProjectId,
+    course_id: Option<contracts::CourseId>,
+) -> Result<contracts::http::AuthoringPublicationAdmissionBinding, EvaluationApiError> {
+    let query = AuthoringPublicationAdmissionQuery {
+        project_id,
+        course_id,
+        approval_revision: release.approval_revision,
+        evaluation_release_id: release.id,
+    };
+    state
+        .authoring_admission
+        .resolve(release.approval_id, &query)
+        .await
+        .map_err(EvaluationApiError::AuthoringAdmission)
+}
+
+async fn ensure_release_admitted(
+    state: &EvaluationApiState,
+    release: &EvaluationRelease,
+) -> Result<(), EvaluationApiError> {
+    if release.state != contracts::evaluation::EvaluationReleaseState::Active {
+        return Err(EvaluationApiError::Control(
+            EvaluationControlStoreError::ReleaseWithdrawn,
+        ));
+    }
+    let _ =
+        resolve_release_admission(state, release, release.project_id, release.course_id).await?;
+    Ok(())
+}
+
 async fn get_evaluation_run(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(run_id): Path<EvaluationRunId>,
 ) -> Result<Json<EvaluationRun>, EvaluationApiError> {
     require_control(principal)?;
@@ -347,7 +444,7 @@ async fn get_evaluation_run(
 
 async fn cancel_evaluation_run(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(run_id): Path<EvaluationRunId>,
     headers: HeaderMap,
     body: Bytes,
@@ -372,7 +469,7 @@ async fn cancel_evaluation_run(
 
 async fn retry_evaluation_step(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path((run_id, step_run_id)): Path<(EvaluationRunId, EvaluationStepRunId)>,
     headers: HeaderMap,
     body: Bytes,
@@ -398,7 +495,7 @@ async fn retry_evaluation_step(
 
 async fn verify_evaluation_step_cleanup(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path((run_id, step_run_id)): Path<(EvaluationRunId, EvaluationStepRunId)>,
     headers: HeaderMap,
     body: Bytes,
@@ -424,7 +521,7 @@ async fn verify_evaluation_step_cleanup(
 
 async fn complete_evaluation_step(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path((run_id, step_run_id)): Path<(EvaluationRunId, EvaluationStepRunId)>,
     _headers: HeaderMap,
     body: Bytes,
@@ -434,7 +531,7 @@ async fn complete_evaluation_step(
     request
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
-    let worker_san_uri = require_worker(principal, &request.worker_id)?;
+    require_worker(principal)?;
     if request.run_id != run_id || request.step_run_id != step_run_id {
         return Err(EvaluationApiError::RequestInvalid);
     }
@@ -444,12 +541,12 @@ async fn complete_evaluation_step(
         state
             .control
             .complete_step(
+                request.project_id,
                 request.course_id,
                 run_id,
                 step_run_id,
                 request.attempt,
                 &request.worker_id,
-                &worker_san_uri,
                 &request.runtime_identity,
                 lease_token,
                 &request.completion,
@@ -461,23 +558,25 @@ async fn complete_evaluation_step(
 
 async fn get_frozen_submission(
     State(state): State<EvaluationApiState>,
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
     Path(submission_id): Path<FrozenSubmissionId>,
     headers: HeaderMap,
 ) -> Result<Json<FrozenSubmission>, EvaluationApiError> {
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
+    let project_id = project_header(&headers)?;
+    let course_id = optional_course_header(&headers)?;
     match state
         .submissions
-        .load_completed(submission_id, actor_id)
+        .load_completed(submission_id, project_id, course_id, actor_id)
         .await
     {
         Ok(submission) => Ok(Json(submission)),
         Err(FreezeStoreError::NotFound) => {
             if let Some(diagnostic) = state
                 .commands
-                .terminal_failure(submission_id, actor_id)
+                .terminal_failure(submission_id, project_id, course_id, actor_id)
                 .await?
             {
                 Err(EvaluationApiError::FreezeFailed(
@@ -492,35 +591,32 @@ async fn get_frozen_submission(
 }
 
 fn require_access(
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
 ) -> Result<(), EvaluationApiError> {
-    // Private single-university deployment: inner hop is plain HTTP behind NetworkPolicy.
-    if principal.is_some() {
-        Ok(())
-    } else {
-        Err(EvaluationApiError::CallerDenied)
-    }
+    require_permission(principal, ACCESS_PERMISSION)
 }
 
 fn require_control(
-    principal: Option<Extension<GatewayPrincipal>>,
+    principal: Option<Extension<auth::ServiceIdentity>>,
 ) -> Result<(), EvaluationApiError> {
-    if principal.is_some() {
-        Ok(())
-    } else {
-        Err(EvaluationApiError::CallerDenied)
-    }
+    require_permission(principal, CONTROL_PERMISSION)
 }
 
 fn require_worker(
-    principal: Option<Extension<GatewayPrincipal>>,
-    worker_id: &str,
-) -> Result<String, EvaluationApiError> {
-    let expected = worker_service_san(worker_id).map_err(EvaluationApiError::Control)?;
-    match principal {
-        Some(Extension(_principal)) => Ok(expected.clone()),
-        _ => Err(EvaluationApiError::CallerDenied),
-    }
+    principal: Option<Extension<auth::ServiceIdentity>>,
+) -> Result<(), EvaluationApiError> {
+    require_permission(principal, WORKER_PERMISSION)?;
+    Ok(())
+}
+
+fn require_permission(
+    principal: Option<Extension<auth::ServiceIdentity>>,
+    permission: &str,
+) -> Result<(), EvaluationApiError> {
+    principal
+        .is_some_and(|Extension(identity)| identity.allows(permission))
+        .then_some(())
+        .ok_or(EvaluationApiError::CallerDenied)
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, EvaluationApiError> {
@@ -545,6 +641,28 @@ fn actor(headers: &HeaderMap) -> Result<ActorId, EvaluationApiError> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| ActorId::from_str(value).ok())
         .ok_or(EvaluationApiError::IdentityInvalid)
+}
+
+fn project_header(headers: &HeaderMap) -> Result<contracts::ProjectId, EvaluationApiError> {
+    headers
+        .get("x-labweaver-project-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| contracts::ProjectId::from_str(value).ok())
+        .ok_or(EvaluationApiError::IdentityInvalid)
+}
+
+fn optional_course_header(
+    headers: &HeaderMap,
+) -> Result<Option<contracts::CourseId>, EvaluationApiError> {
+    let Some(value) = headers.get("x-labweaver-course-id") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| EvaluationApiError::IdentityInvalid)?;
+    let course_id =
+        contracts::CourseId::from_str(value).map_err(|_| EvaluationApiError::IdentityInvalid)?;
+    Ok(Some(course_id))
 }
 
 fn course_header(headers: &HeaderMap) -> Result<contracts::CourseId, EvaluationApiError> {
@@ -576,32 +694,14 @@ fn if_match(headers: &HeaderMap) -> Result<Revision, EvaluationApiError> {
         })
 }
 
-pub async fn serve_evaluation_mtls(
-    listener: tokio::net::TcpListener,
-    router: Router,
-    _mtls: (),
-) -> Result<(), std::io::Error> {
-    serve_evaluation_plain(listener, router).await
-}
-
-pub async fn serve_evaluation_plain(
-    listener: tokio::net::TcpListener,
-    router: Router,
-) -> Result<(), std::io::Error> {
-    let router = router.layer(Extension(GatewayPrincipal {
-        san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
-    }));
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| std::io::Error::from(e))
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum EvaluationApiError {
     #[error("LW_HTTP_REQUEST_CONTEXT_MISSING")]
     CorrelationContextMissing,
     #[error("LW_EVALUATION_GATEWAY_DENIED")]
     CallerDenied,
+    #[error(transparent)]
+    ServiceAuth(#[from] auth::ServiceAuthError),
     #[error("LW_AUTH_SESSION_REJECTED")]
     IdentityInvalid,
     #[error("LW_CONTRACT_DOCUMENT_INVALID")]
@@ -619,6 +719,8 @@ pub enum EvaluationApiError {
     #[error(transparent)]
     Control(#[from] EvaluationControlStoreError),
     #[error(transparent)]
+    AuthoringAdmission(#[from] AuthoringAdmissionClientError),
+    #[error(transparent)]
     Command(#[from] FreezeCommandStoreError),
     #[error(transparent)]
     Submission(#[from] FreezeStoreError),
@@ -631,10 +733,15 @@ impl IntoResponse for EvaluationApiError {
             _ => self.to_string(),
         };
         let status = match &self {
-            Self::CallerDenied | Self::Control(EvaluationControlStoreError::CourseMismatch) => {
-                StatusCode::FORBIDDEN
-            }
-            Self::IdentityInvalid => StatusCode::UNAUTHORIZED,
+            Self::CallerDenied
+            | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied)
+            | Self::Control(EvaluationControlStoreError::CourseMismatch) => StatusCode::FORBIDDEN,
+            Self::IdentityInvalid
+            | Self::ServiceAuth(
+                auth::ServiceAuthError::CredentialsMissing
+                | auth::ServiceAuthError::TokenRejected
+                | auth::ServiceAuthError::TokenExpired,
+            ) => StatusCode::UNAUTHORIZED,
             Self::RequestInvalid | Self::IdempotencyRequired | Self::IdempotencyInvalid => {
                 StatusCode::BAD_REQUEST
             }
@@ -653,6 +760,25 @@ impl IntoResponse for EvaluationApiError {
             Self::Control(EvaluationControlStoreError::RevisionConflict) => {
                 StatusCode::PRECONDITION_FAILED
             }
+            Self::AuthoringAdmission(AuthoringAdmissionClientError::AdmissionMissing) => {
+                StatusCode::NOT_FOUND
+            }
+            Self::AuthoringAdmission(AuthoringAdmissionClientError::Denied) => {
+                StatusCode::FORBIDDEN
+            }
+            Self::AuthoringAdmission(
+                AuthoringAdmissionClientError::Conflict
+                | AuthoringAdmissionClientError::ResponseInvalid
+                | AuthoringAdmissionClientError::RequestInvalid,
+            ) => StatusCode::CONFLICT,
+            Self::AuthoringAdmission(
+                AuthoringAdmissionClientError::Configuration
+                | AuthoringAdmissionClientError::Token(_)
+                | AuthoringAdmissionClientError::Transport
+                | AuthoringAdmissionClientError::ResponseTooLarge
+                | AuthoringAdmissionClientError::Rejected
+                | AuthoringAdmissionClientError::Unavailable,
+            ) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Control(
                 EvaluationControlStoreError::ReleaseNotFound
                 | EvaluationControlStoreError::RunNotFound
@@ -710,10 +836,13 @@ impl IntoResponse for EvaluationApiError {
 mod tests {
     use axum::Extension;
     use axum::response::IntoResponse;
+    use std::collections::BTreeSet;
+    use time::OffsetDateTime;
 
-    use crate::control_plane::{control_service_san, worker_service_san};
-
-    use super::{EvaluationApiError, GatewayPrincipal, require_control, require_worker};
+    use super::{
+        ACCESS_PERMISSION, CONTROL_PERMISSION, EvaluationApiError, WORKER_PERMISSION,
+        require_control, require_worker,
+    };
 
     #[test]
     fn terminal_freeze_failure_is_a_conflict() {
@@ -724,41 +853,25 @@ mod tests {
     }
 
     #[test]
-    fn completion_requires_matching_worker_san_not_control_san() -> Result<(), String> {
-        // With stubbed mTLS, any valid principal is accepted; only absence is denied.
+    fn routes_require_their_declared_service_permission() -> Result<(), String> {
+        let control = principal(CONTROL_PERMISSION);
+        assert!(require_control(Some(control)).is_ok());
+        assert!(require_control(Some(principal(ACCESS_PERMISSION))).is_err());
 
-        // Control gateway accepts any principal
-        assert!(require_control(Some(principal(control_service_san()))).is_ok());
-        let worker_a = worker_service_san("worker-a").map_err(|error| format!("{error:?}"))?;
-        assert!(require_control(Some(principal(&worker_a))).is_ok());
-
-        // Worker gateway accepts any principal, returning expected SAN for the worker id
-        assert_eq!(
-            require_worker(Some(principal(control_service_san())), "worker-a")
-                .map_err(|error| format!("{error:?}"))?,
-            worker_a
-        );
-
-        let worker_b = worker_service_san("worker-b").map_err(|error| format!("{error:?}"))?;
-        assert_eq!(
-            require_worker(Some(principal(&worker_b)), "worker-a")
-                .map_err(|error| format!("{error:?}"))?,
-            worker_a
-        );
-
-        // Absence of principal is denied
+        assert!(require_worker(Some(principal(WORKER_PERMISSION))).is_ok());
         assert!(require_control(None).is_err());
-        assert!(require_worker(None, "worker-a").is_err());
-
-        // Invalid worker id is a control error regardless of principal presence
-        assert!(require_worker(Some(principal(&worker_a)), "bad/worker").is_err());
+        assert!(require_worker(None).is_err());
 
         Ok(())
     }
 
-    fn principal(san_uri: &str) -> Extension<GatewayPrincipal> {
-        Extension(GatewayPrincipal {
-            san_uri: san_uri.to_owned(),
+    fn principal(permission: &str) -> Extension<auth::ServiceIdentity> {
+        Extension(auth::ServiceIdentity {
+            issuer: "https://issuer.example.test".to_owned(),
+            subject: "evaluation-test".to_owned(),
+            client_id: "evaluation-test".to_owned(),
+            expires_at: OffsetDateTime::now_utc(),
+            permissions: BTreeSet::from([permission.to_owned()]),
         })
     }
 }

@@ -17,24 +17,27 @@ use std::{collections::BTreeSet, str::FromStr, time::Duration}; // internal pers
 
 use contracts::{
     ActorId, CourseId, DiagnosticCode, EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId,
-    EventId, Revision, Sequence, UtcTimestamp,
+    EventId, ProjectId, Revision, Sequence, TaskRunId, UtcTimestamp,
     evaluation::{
-        EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION, EvaluationRelease,
-        EvaluationReleaseState, EvaluationRun, EvaluationRunState, EvaluationRuntimeIdentity,
-        EvaluationStepCompletion, EvaluationStepFailurePolicy, EvaluationStepRole,
-        EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult,
+        EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION,
+        EvaluationExecutionBinding, EvaluationRelease, EvaluationReleaseState, EvaluationRun,
+        EvaluationRunState, EvaluationRuntimeIdentity, EvaluationStepCompletion,
+        EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
+        StudentEvaluationResult,
     },
     events::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
         EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,
     },
     http::{
-        CursorPage, IdempotencyKey, InternalCreateEvaluationRunRequest,
-        InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
-        InternalWithdrawEvaluationReleaseRequest,
+        AuthoringPublicationAdmissionBinding, CursorPage, IdempotencyKey,
+        InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
+        InternalPublishEvaluationReleaseRequest, InternalWithdrawEvaluationReleaseRequest,
+        RecordResourceUsageRequest,
     },
 };
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, OutboxStore};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -45,8 +48,6 @@ const CREATE_RUN_OPERATION: &str = "create_evaluation_run_v1";
 const CANCEL_RUN_OPERATION: &str = "cancel_evaluation_run_v1";
 const RETRY_STEP_OPERATION: &str = "retry_evaluation_step_v1";
 const VERIFY_STEP_CLEANUP_OPERATION: &str = "verify_evaluation_step_cleanup_v1";
-const CONTROL_SERVICE_SAN: &str = "spiffe://labweaver/control-service";
-const WORKER_SERVICE_SAN_PREFIX: &str = "spiffe://labweaver/evaluation-worker/";
 
 /// Result of publishing a release through the idempotency ledger.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,15 +66,19 @@ pub enum EvaluationRunReservation {
 /// Fenced `StepRun` lease owned by exactly one worker attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationStepLease {
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub run_id: EvaluationRunId,
     pub step_run_id: EvaluationStepRunId,
+    /// Durable one-shot Resource task identity for this exact step attempt.
+    pub task_run_id: TaskRunId,
     pub step_id: String,
     pub role: EvaluationStepRole,
     pub max_score: u32,
     pub attempt: u32,
     pub worker_id: String,
-    pub worker_san_uri: String,
+    /// Revision of the running `StepRun` held by this lease.
+    pub revision: Revision,
     pub runtime_identity: EvaluationRuntimeIdentity,
     pub trace_id: String,
     lease_token: Uuid,
@@ -84,6 +89,137 @@ impl EvaluationStepLease {
     pub const fn lease_token(&self) -> Uuid {
         self.lease_token
     }
+}
+
+/// Versioned, payload-free description of the Kubernetes objects owned by one execution attempt.
+///
+/// This is deliberately separate from the rendered Job bundle.  The latter contains command
+/// `ConfigMaps` and short-lived signed materializer data and must never be persisted as recovery
+/// state.  Recovery uses these references to read the live object, checks its UID and ownership
+/// labels, and only then performs a deletion.
+pub const EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION: &str =
+    "evaluation.labweaver.io/execution-resources/v1";
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationExecutionKind {
+    Program,
+    AnsibleProbe,
+    LlmReview,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationExecutionObjectRef {
+    pub api_version: String,
+    /// Kubernetes collection name, such as `jobs` or `configmaps`.
+    pub resource: String,
+    pub name: String,
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvaluationExecutionResources {
+    pub schema_version: String,
+    pub run_id: EvaluationRunId,
+    pub step_run_id: EvaluationStepRunId,
+    pub task_run_id: TaskRunId,
+    pub namespace: String,
+    pub kind: EvaluationExecutionKind,
+    /// Immutable, payload-free request consumed by the concrete executor.
+    /// Materializer URLs and SSH private/signed credentials are intentionally
+    /// kept out of this checkpoint and remain Kubernetes Secret data.
+    pub request: serde_json::Value,
+    pub objects: Vec<EvaluationExecutionObjectRef>,
+}
+
+impl EvaluationExecutionResources {
+    /// Validates the bounded recovery references against one leased attempt.
+    pub fn validate_for(
+        &self,
+        run_id: EvaluationRunId,
+        step_run_id: EvaluationStepRunId,
+        task_run_id: TaskRunId,
+    ) -> Result<(), EvaluationControlStoreError> {
+        if self.schema_version != EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION
+            || self.run_id != run_id
+            || self.step_run_id != step_run_id
+            || self.task_run_id != task_run_id
+            || !valid_execution_namespace_value(&self.namespace)
+            || !self.request.is_object()
+            // An empty object list is the durable pre-start intent.  It is
+            // upgraded to the complete UID set immediately after the
+            // executor applies the immutable bundle.
+            || self.objects.len() > 8
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        let mut identities = BTreeSet::new();
+        for object in &self.objects {
+            let expected_api_version = match object.resource.as_str() {
+                "jobs" => "batch/v1",
+                "networkpolicies" => "networking.k8s.io/v1",
+                "configmaps" | "secrets" => "v1",
+                _ => return Err(EvaluationControlStoreError::ContractInvalid),
+            };
+            if object.api_version != expected_api_version
+                || !valid_kubernetes_name(&object.name)
+                || object.uid.is_empty()
+                || object.uid.len() > 128
+                || object.uid.chars().any(char::is_control)
+                || !identities.insert((object.resource.as_str(), object.name.as_str()))
+            {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+        }
+        let encoded =
+            serde_json::to_vec(self).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        if encoded.len() > 64 * 1024 {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        Ok(())
+    }
+}
+
+/// Durable execution checkpoint used to resume observation, billing delivery, and cleanup after
+/// a worker restart.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationExecutionCheckpoint {
+    pub execution_started_at: Option<UtcTimestamp>,
+    pub execution_terminated_at: Option<UtcTimestamp>,
+    pub terminal_completion: Option<EvaluationStepCompletion>,
+    pub execution_resources: Option<EvaluationExecutionResources>,
+}
+
+fn valid_execution_namespace_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+
+fn valid_kubernetes_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
 }
 
 /// Evaluation-owned `PostgreSQL` repository.
@@ -123,6 +259,8 @@ impl PgEvaluationControlStore {
             .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         let runtime_identity_sha256 = Sha256Digest::of_canonical(&request.runtime_identity)
             .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let execution_binding = serde_json::to_value(&request.execution_binding)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         let mut transaction = self.pool.begin().await?;
         match IdempotencyStore::reserve(
             &mut transaction,
@@ -138,7 +276,7 @@ impl PgEvaluationControlStore {
                 transaction.rollback().await?;
                 tracing::info!(
                     event = "evaluation.release.publish_replayed",
-                    course_id = %release.course_id,
+                    course_id = ?release.course_id,
                     candidate_id = %release.candidate_id,
                     approval_id = %release.approval_id,
                     release_id = %release.id,
@@ -161,6 +299,7 @@ impl PgEvaluationControlStore {
         let release = EvaluationRelease {
             schema_version: EVALUATION_RELEASE_SCHEMA_VERSION.to_owned(),
             id: EvaluationReleaseId::new(),
+            project_id: request.project_id,
             course_id: request.course_id,
             candidate_id: request.candidate_id,
             candidate_revision: request.candidate_revision,
@@ -175,28 +314,29 @@ impl PgEvaluationControlStore {
             withdrawn_at: None,
             withdrawal_diagnostic_code: None,
         };
-        let release_identity_sha256 = Sha256Digest::of_canonical(&release)
-            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let release_identity_sha256 =
+            Sha256Digest::of_canonical(&(&release, &request.execution_binding))
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         let contract = serde_json::to_value(&release)
             .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         sqlx::query(
             "INSERT INTO evaluation.evaluation_releases \
-             (release_id,course_id,candidate_id,candidate_revision,candidate_sha256,approval_id,\
-              approval_revision,approval_sha256,evaluation_spec_sha256,runtime_identity_sha256,\
-              release_identity_sha256,state,revision,contract,published_by,published_at,updated_at) \
+            (release_id,project_id,course_id,candidate_id,candidate_revision,approval_id,\
+              approval_revision,evaluation_spec_sha256,runtime_identity_sha256,\
+              release_identity_sha256,execution_binding,state,revision,contract,published_by,published_at,updated_at) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12,$13,$14,$15,$15)",
         )
         .bind(release.id.as_uuid())
-        .bind(release.course_id.as_uuid())
+        .bind(release.project_id.as_uuid())
+        .bind(release.course_id.map(CourseId::as_uuid))
         .bind(release.candidate_id.as_uuid())
         .bind(revision_i64(release.candidate_revision)?)
-        .bind(Sha256Digest::of_bytes(b"candidate").to_string())
         .bind(release.approval_id.as_uuid())
         .bind(revision_i64(release.approval_revision)?)
-        .bind(Sha256Digest::of_bytes(b"approval").to_string())
         .bind(spec_sha256.to_string())
         .bind(runtime_identity_sha256.to_string())
         .bind(release_identity_sha256.to_string())
+        .bind(&execution_binding)
         .bind(revision_i64(release.revision)?)
         .bind(&contract)
         .bind(release.published_by.as_uuid())
@@ -217,7 +357,7 @@ impl PgEvaluationControlStore {
         release.validate()?;
         tracing::info!(
             event = "evaluation.release.published",
-            course_id = %release.course_id,
+            course_id = ?release.course_id,
             candidate_id = %release.candidate_id,
             approval_id = %release.approval_id,
             release_id = %release.id,
@@ -242,9 +382,34 @@ impl PgEvaluationControlStore {
         decode_release(value)
     }
 
+    /// Loads the private package and object locator binding for an immutable release.
+    ///
+    /// The binding is intentionally unavailable through the public release projection, but
+    /// Evaluation-owned materializers must read this persisted value rather than resolving a
+    /// mutable package or object-store listing.
+    pub async fn load_release_execution_binding(
+        &self,
+        release_id: EvaluationReleaseId,
+    ) -> Result<EvaluationExecutionBinding, EvaluationControlStoreError> {
+        let value: Value = sqlx::query_scalar(
+            "SELECT execution_binding FROM evaluation.evaluation_releases WHERE release_id=$1",
+        )
+        .bind(release_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(EvaluationControlStoreError::ReleaseNotFound)?;
+        let binding: EvaluationExecutionBinding = serde_json::from_value(value)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        binding
+            .validate()
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        Ok(binding)
+    }
+
     pub async fn list_releases(
         &self,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         cursor: Option<EvaluationReleaseId>,
         limit: u16,
     ) -> Result<CursorPage<EvaluationRelease>, EvaluationControlStoreError> {
@@ -254,9 +419,11 @@ impl PgEvaluationControlStore {
         if let Some(cursor) = cursor {
             let exists = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_releases \
-                 WHERE course_id=$1 AND release_id=$2)",
+                 WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) \
+                   AND state='active' AND release_id=$3)",
             )
-            .bind(course_id.as_uuid())
+            .bind(project_id.as_uuid())
+            .bind(course_id.map(CourseId::as_uuid))
             .bind(cursor.as_uuid())
             .fetch_one(&self.pool)
             .await?;
@@ -266,12 +433,15 @@ impl PgEvaluationControlStore {
         }
         let values = sqlx::query_scalar::<_, Value>(
             "SELECT contract FROM evaluation.evaluation_releases \
-             WHERE course_id=$1 AND ($2::uuid IS NULL OR (published_at,release_id) < \
+             WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) AND state='active' \
+               AND ($3::uuid IS NULL OR (published_at,release_id) < \
                (SELECT published_at,release_id FROM evaluation.evaluation_releases \
-                WHERE course_id=$1 AND release_id=$2)) \
-             ORDER BY published_at DESC,release_id DESC LIMIT $3",
+                WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) \
+                  AND state='active' AND release_id=$3)) \
+             ORDER BY published_at DESC,release_id DESC LIMIT $4",
         )
-        .bind(course_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(CourseId::as_uuid))
         .bind(cursor.map(contracts::EvaluationReleaseId::as_uuid))
         .bind(i64::from(limit) + 1)
         .fetch_all(&self.pool)
@@ -319,7 +489,8 @@ impl PgEvaluationControlStore {
                 transaction.rollback().await?;
                 tracing::info!(
                     event = "evaluation.release.withdraw_replayed",
-                    course_id = %release.course_id,
+                    project_id = %release.project_id,
+                    course_id = ?release.course_id,
                     release_id = %release.id,
                     revision = release.revision.get(),
                     actor_id = %request.withdrawn_by,
@@ -338,7 +509,7 @@ impl PgEvaluationControlStore {
             IdempotencyDecision::Reserved => {}
         }
         let mut release = load_release_for_update(&mut transaction, release_id).await?;
-        if release.course_id != request.course_id {
+        if release.project_id != request.project_id || release.course_id != request.course_id {
             return Err(EvaluationControlStoreError::CourseMismatch);
         }
         if release.revision != request.expected_revision {
@@ -367,12 +538,13 @@ impl PgEvaluationControlStore {
         .await?;
         sqlx::query(
             "INSERT INTO evaluation.evaluation_release_withdrawals \
-             (release_id,course_id,release_revision,withdrawn_by,reason_code,idempotency_key,\
+            (release_id,project_id,course_id,release_revision,withdrawn_by,reason_code,idempotency_key,\
               request_sha256,trace_id,withdrawn_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         )
         .bind(release.id.as_uuid())
-        .bind(release.course_id.as_uuid())
+        .bind(release.project_id.as_uuid())
+        .bind(release.course_id.map(CourseId::as_uuid))
         .bind(revision_i64(release.revision)?)
         .bind(request.withdrawn_by.as_uuid())
         .bind(request.reason_code.as_str())
@@ -393,7 +565,8 @@ impl PgEvaluationControlStore {
         transaction.commit().await?;
         tracing::info!(
             event = "evaluation.release.withdrawn",
-            course_id = %request.course_id,
+            project_id = %request.project_id,
+            course_id = ?request.course_id,
             release_id = %release.id,
             revision = release.revision.get(),
             actor_id = %request.withdrawn_by,
@@ -410,6 +583,19 @@ impl PgEvaluationControlStore {
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
+        admission: &AuthoringPublicationAdmissionBinding,
+    ) -> Result<EvaluationRunReservation, EvaluationControlStoreError> {
+        self.create_run_inner(request, idempotency_key, now, trace_id, admission)
+            .await
+    }
+
+    async fn create_run_inner(
+        &self,
+        request: &InternalCreateEvaluationRunRequest,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+        trace_id: &str,
+        admission: &AuthoringPublicationAdmissionBinding,
     ) -> Result<EvaluationRunReservation, EvaluationControlStoreError> {
         request
             .validate()
@@ -448,7 +634,8 @@ impl PgEvaluationControlStore {
             IdempotencyDecision::Reserved => {}
         }
         let release = load_release_for_update(&mut transaction, request.release_id).await?;
-        if release.course_id != request.course_id
+        if release.project_id != request.project_id
+            || release.course_id != request.course_id
             || release.revision != request.release_revision
             || release.state != EvaluationReleaseState::Active
         {
@@ -459,6 +646,7 @@ impl PgEvaluationControlStore {
                 Err(EvaluationControlStoreError::ReleaseWithdrawn)
             };
         }
+        verify_authoring_admission(&release, request, admission)?;
         if release.runtime_identity != request.identity.runtime_identity {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::IdentityMismatch);
@@ -470,6 +658,7 @@ impl PgEvaluationControlStore {
         let run = EvaluationRun {
             schema_version: EVALUATION_RUN_SCHEMA_VERSION.to_owned(),
             id: run_id,
+            project_id: request.project_id,
             course_id: request.course_id,
             release_id: release.id,
             release_revision: release.revision,
@@ -493,13 +682,14 @@ impl PgEvaluationControlStore {
             serde_json::to_value(&run).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         sqlx::query(
             "INSERT INTO evaluation.evaluation_runs \
-             (run_id,course_id,release_id,release_revision,frozen_submission_id,actor_id,\
+             (run_id,project_id,course_id,release_id,release_revision,frozen_submission_id,actor_id,\
               idempotency_key,request_sha256,run_identity_sha256,state,revision,max_score,\
               awarded_score,cleanup_verified,contract,created_at,updated_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$11,0,false,$12,$13,$13)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11,$12,0,false,$13,$14,$14)",
         )
         .bind(run.id.as_uuid())
-        .bind(run.course_id.as_uuid())
+        .bind(run.project_id.as_uuid())
+        .bind(run.course_id.map(CourseId::as_uuid))
         .bind(run.release_id.as_uuid())
         .bind(revision_i64(run.release_revision)?)
         .bind(run.frozen_submission_id.as_uuid())
@@ -551,9 +741,552 @@ impl PgEvaluationControlStore {
         decode_run(value)
     }
 
+    /// Loads the payload-free execution checkpoint for one exact attempt.
+    pub async fn load_execution_checkpoint(
+        &self,
+        lease: &EvaluationStepLease,
+    ) -> Result<Option<EvaluationExecutionCheckpoint>, EvaluationControlStoreError> {
+        let row = sqlx::query(
+            "SELECT attempt.execution_started_at,attempt.execution_terminated_at,attempt.terminal_completion,
+                    attempt.execution_resources
+             FROM evaluation.evaluation_step_attempts AS attempt
+             JOIN evaluation.evaluation_step_runs AS step
+               ON step.step_run_id=attempt.step_run_id
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+               AND attempt.worker_id=$4 AND attempt.lease_token=$5
+               AND step.revision=$6",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(EvaluationControlStoreError::LeaseLost)?;
+        let started_at: Option<time::OffsetDateTime> = row.try_get("execution_started_at")?;
+        let terminated_at: Option<time::OffsetDateTime> = row.try_get("execution_terminated_at")?;
+        let terminal_value: Option<Value> = row.try_get("terminal_completion")?;
+        let resources_value: Option<Value> = row.try_get("execution_resources")?;
+        if started_at.is_none()
+            && terminated_at.is_none()
+            && terminal_value.is_none()
+            && resources_value.is_none()
+        {
+            return Ok(None);
+        }
+        let execution_resources = resources_value
+            .map(|value| {
+                serde_json::from_value::<EvaluationExecutionResources>(value)
+                    .map_err(|_| EvaluationControlStoreError::ContractInvalid)
+            })
+            .transpose()?;
+        if let Some(resources) = &execution_resources {
+            resources.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+        }
+        let terminal_completion = terminal_value
+            .map(|value| {
+                serde_json::from_value::<EvaluationStepCompletion>(value)
+                    .map_err(|_| EvaluationControlStoreError::ContractInvalid)
+            })
+            .transpose()?;
+        if started_at.is_some() != terminated_at.is_some()
+            || (started_at.is_some()
+                && execution_resources.as_ref().is_some_and(|resources| {
+                    resources.objects.is_empty()
+                        && resources.kind != EvaluationExecutionKind::LlmReview
+                }))
+            || (terminal_completion.is_some() && execution_resources.is_none())
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        let execution_started_at = started_at
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+        let execution_terminated_at = terminated_at
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+        if let Some((started, terminated)) = execution_started_at.zip(execution_terminated_at)
+            && terminated <= started
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        Ok(Some(EvaluationExecutionCheckpoint {
+            execution_started_at,
+            execution_terminated_at,
+            terminal_completion,
+            execution_resources,
+        }))
+    }
+
+    /// Persists the immutable execution intent before the executor can apply
+    /// any external object.  The request carries the deterministic attempt
+    /// identity; object UIDs are filled by `mark_execution_started` after the
+    /// bundle has been applied.
+    pub async fn persist_execution_intent(
+        &self,
+        lease: &EvaluationStepLease,
+        resources: &EvaluationExecutionResources,
+    ) -> Result<(), EvaluationControlStoreError> {
+        if !resources.objects.is_empty() {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        resources.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+        let resources_value = serde_json::to_value(resources)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT attempt.execution_started_at,attempt.execution_terminated_at,attempt.terminal_completion,
+                    attempt.execution_resources
+             FROM evaluation.evaluation_step_attempts AS attempt
+             JOIN evaluation.evaluation_step_runs AS step
+               ON step.step_run_id=attempt.step_run_id
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+               AND attempt.worker_id=$4 AND attempt.lease_token=$5
+               AND step.revision=$6
+               AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()
+             FOR UPDATE",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(EvaluationControlStoreError::LeaseLost)?;
+        let existing_started: Option<time::OffsetDateTime> = row.try_get("execution_started_at")?;
+        let existing_terminated: Option<time::OffsetDateTime> =
+            row.try_get("execution_terminated_at")?;
+        let existing_terminal: Option<Value> = row.try_get("terminal_completion")?;
+        let existing_resources: Option<Value> = row.try_get("execution_resources")?;
+        if existing_started.is_some()
+            || existing_terminated.is_some()
+            || existing_terminal.is_some()
+        {
+            return Err(EvaluationControlStoreError::IdentityMismatch);
+        }
+        if let Some(existing) = existing_resources {
+            let existing: EvaluationExecutionResources = serde_json::from_value(existing)
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+            existing.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+            if existing != *resources {
+                return Err(EvaluationControlStoreError::IdentityMismatch);
+            }
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let updated = sqlx::query(
+            "UPDATE evaluation.evaluation_step_attempts AS attempt
+             SET execution_resources=$7,updated_at=clock_timestamp()
+             FROM evaluation.evaluation_step_runs AS step
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+               AND attempt.worker_id=$4 AND attempt.lease_token=$5
+               AND step.step_run_id=attempt.step_run_id AND step.revision=$6
+               AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .bind(resources_value)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(EvaluationControlStoreError::LeaseLost);
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Persists the object references immediately after the Kubernetes bundle is applied.
+    ///
+    /// Only the exact live lease owner can create this checkpoint.  The rendered Job documents,
+    /// including signed materializer URLs and command data, never cross this boundary.
+    pub async fn mark_execution_started(
+        &self,
+        lease: &EvaluationStepLease,
+        started_at: Option<UtcTimestamp>,
+        resources: &EvaluationExecutionResources,
+    ) -> Result<(), EvaluationControlStoreError> {
+        resources.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+        let resources_value = serde_json::to_value(resources)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT attempt.execution_started_at,attempt.execution_resources
+             FROM evaluation.evaluation_step_attempts AS attempt
+             JOIN evaluation.evaluation_step_runs AS step
+               ON step.step_run_id=attempt.step_run_id
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+               AND attempt.worker_id=$4 AND attempt.lease_token=$5
+               AND step.revision=$6
+               AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()
+             FOR UPDATE",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(EvaluationControlStoreError::LeaseLost)?;
+        let existing_started: Option<time::OffsetDateTime> = row.try_get("execution_started_at")?;
+        let existing_resources: Option<Value> = row.try_get("execution_resources")?;
+        if let Some(existing) = existing_resources {
+            let existing: EvaluationExecutionResources = serde_json::from_value(existing)
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+            existing.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+            // A pre-start intent has no UIDs yet.  It may be upgraded once,
+            // but its immutable request and attempt identity must match.
+            let intent_matches = existing.objects.is_empty()
+                && existing.schema_version == resources.schema_version
+                && existing.run_id == resources.run_id
+                && existing.step_run_id == resources.step_run_id
+                && existing.task_run_id == resources.task_run_id
+                && existing.namespace == resources.namespace
+                && existing.kind == resources.kind
+                && existing.request == resources.request;
+            if (existing.objects.is_empty() && !intent_matches)
+                || (!existing.objects.is_empty() && existing != *resources)
+                || existing_started
+                    .map(|value| UtcTimestamp::from_utc(value))
+                    .transpose()
+                    .map_err(|_| EvaluationControlStoreError::ClockInvalid)?
+                    != started_at
+            {
+                return Err(EvaluationControlStoreError::IdentityMismatch);
+            }
+            if existing.objects.is_empty() {
+                sqlx::query(
+                    "UPDATE evaluation.evaluation_step_attempts AS attempt
+                     SET execution_started_at=$7,execution_resources=$8,updated_at=clock_timestamp()
+                     FROM evaluation.evaluation_step_runs AS step
+                     WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+                       AND attempt.worker_id=$4 AND attempt.lease_token=$5
+                       AND step.step_run_id=attempt.step_run_id AND step.revision=$6
+                       AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()",
+                )
+                .bind(lease.step_run_id.as_uuid())
+                .bind(
+                    i32::try_from(lease.attempt)
+                        .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+                )
+                .bind(lease.task_run_id.as_uuid())
+                .bind(&lease.worker_id)
+                .bind(lease.lease_token())
+                .bind(revision_i64(lease.revision)?)
+                .bind(started_at.map(UtcTimestamp::get))
+                .bind(resources_value)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            transaction.commit().await?;
+            return Ok(());
+        }
+        if existing_started.is_some() {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        sqlx::query(
+            "UPDATE evaluation.evaluation_step_attempts AS attempt
+             SET execution_started_at=$7,execution_resources=$8,updated_at=clock_timestamp()
+             FROM evaluation.evaluation_step_runs AS step
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+               AND attempt.worker_id=$4 AND attempt.lease_token=$5
+               AND step.step_run_id=attempt.step_run_id AND step.revision=$6
+               AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .bind(started_at.map(UtcTimestamp::get))
+        .bind(resources_value)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Stores the deterministic terminal result and its usage delivery intents atomically.
+    ///
+    /// This is the commit point before any executor cleanup or Resource release.  A retry with
+    /// the same checkpoint is idempotent; a different result or usage intent is rejected.
+    pub async fn checkpoint_execution_terminal(
+        &self,
+        lease: &EvaluationStepLease,
+        execution_started_at: Option<UtcTimestamp>,
+        execution_terminated_at: Option<UtcTimestamp>,
+        completion: &EvaluationStepCompletion,
+        deliveries: &[RecordResourceUsageRequest],
+    ) -> Result<(), EvaluationControlStoreError> {
+        if execution_started_at.is_some() != execution_terminated_at.is_some()
+            || execution_started_at
+                .zip(execution_terminated_at)
+                .is_some_and(|(started, terminated)| terminated <= started)
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        if deliveries.len() > 2 {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        let completion_value = serde_json::to_value(completion)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        if serde_json::to_vec(&completion_value)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?
+            .len()
+            > 16 * 1024
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let step = load_step_for_update(&mut transaction, lease.step_run_id).await?;
+        if step.run_id != lease.run_id
+            || step.current_attempt != lease.attempt
+            || step.state != EvaluationStepRunState::Running
+        {
+            transaction.rollback().await?;
+            return Err(EvaluationControlStoreError::LeaseLost);
+        }
+        completion.validate(step.role, step.max_score)?;
+        let row = sqlx::query(
+            "SELECT attempt.execution_started_at,attempt.execution_terminated_at,attempt.terminal_completion,
+                    attempt.execution_resources
+             FROM evaluation.evaluation_step_attempts AS attempt
+             JOIN evaluation.evaluation_step_runs AS step
+               ON step.step_run_id=attempt.step_run_id
+             WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+               AND attempt.worker_id=$4 AND attempt.lease_token=$5
+               AND step.revision=$6
+               AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()
+             FOR UPDATE",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(EvaluationControlStoreError::LeaseLost)?;
+        let existing_started: Option<time::OffsetDateTime> = row.try_get("execution_started_at")?;
+        let existing_terminated: Option<time::OffsetDateTime> =
+            row.try_get("execution_terminated_at")?;
+        let existing_completion: Option<Value> = row.try_get("terminal_completion")?;
+        let resources_value: Option<Value> = row.try_get("execution_resources")?;
+        let resources_value =
+            resources_value.ok_or(EvaluationControlStoreError::ContractInvalid)?;
+        let resources: EvaluationExecutionResources = serde_json::from_value(resources_value)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        resources.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+        // A failed intent with no created objects is a known pre-start
+        // outcome and needs no UID set.  A successful completion still
+        // requires at least one persisted object identity.
+        if resources.objects.is_empty()
+            && completion.state == EvaluationStepRunState::Succeeded
+            && resources.kind != EvaluationExecutionKind::LlmReview
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        if let Some(existing_completion) = existing_completion {
+            let existing_completion: EvaluationStepCompletion =
+                serde_json::from_value(existing_completion)
+                    .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+            let existing_started = existing_started
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+            let existing_terminated = existing_terminated
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+            if existing_started != execution_started_at
+                || existing_terminated != execution_terminated_at
+                || existing_completion != *completion
+            {
+                return Err(EvaluationControlStoreError::IdentityMismatch);
+            }
+        } else {
+            if existing_started.is_some() != existing_terminated.is_some() {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+            let updated = sqlx::query(
+                "UPDATE evaluation.evaluation_step_attempts AS attempt
+                 SET execution_started_at=$7,execution_terminated_at=$8,
+                     terminal_completion=$9,updated_at=clock_timestamp()
+                 FROM evaluation.evaluation_step_runs AS step
+                 WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 AND attempt.task_run_id=$3
+                   AND attempt.worker_id=$4 AND attempt.lease_token=$5
+                   AND step.step_run_id=attempt.step_run_id AND step.revision=$6
+                   AND attempt.state='running' AND attempt.lease_expires_at > clock_timestamp()",
+            )
+            .bind(lease.step_run_id.as_uuid())
+            .bind(
+                i32::try_from(lease.attempt)
+                    .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+            )
+            .bind(lease.task_run_id.as_uuid())
+            .bind(&lease.worker_id)
+            .bind(lease.lease_token())
+            .bind(revision_i64(lease.revision)?)
+            .bind(execution_started_at.map(UtcTimestamp::get))
+            .bind(execution_terminated_at.map(UtcTimestamp::get))
+            .bind(&completion_value)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                transaction.rollback().await?;
+                return Err(EvaluationControlStoreError::LeaseLost);
+            }
+        }
+        for request in deliveries {
+            enqueue_resource_delivery(&mut transaction, lease, request, execution_terminated_at)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Claims one due usage intent. The attempt counter is advanced before network I/O so a
+    /// process restart leaves a retryable row behind without issuing two HTTP calls in one loop.
+    pub async fn claim_resource_meter_delivery(
+        &self,
+    ) -> Result<Option<PendingResourceMeterDelivery>, EvaluationControlStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT delivery_id,step_run_id,attempt,task_run_id,source_event_id,request,attempts
+             FROM evaluation.resource_meter_deliveries
+             WHERE state='pending' AND next_attempt_at <= clock_timestamp()
+             ORDER BY next_attempt_at,delivery_id
+             FOR UPDATE SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let delivery_id: Uuid = row.try_get("delivery_id")?;
+        let step_run_id = parse_id::<EvaluationStepRunId>(row.try_get("step_run_id")?)?;
+        let attempt_i32: i32 = row.try_get("attempt")?;
+        let attempt =
+            u32::try_from(attempt_i32).map_err(|_| EvaluationControlStoreError::AttemptOverflow)?;
+        let task_run_id = parse_id::<TaskRunId>(row.try_get("task_run_id")?)?;
+        let source_event_id = parse_id::<EventId>(row.try_get("source_event_id")?)?;
+        let request: RecordResourceUsageRequest =
+            serde_json::from_value(row.try_get("request")?)
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+        let attempts: i32 = row.try_get("attempts")?;
+        if attempts < 0 || request.source_event_id != source_event_id {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        let updated = sqlx::query(
+            "UPDATE evaluation.resource_meter_deliveries
+             SET attempts=attempts+1,
+                 next_attempt_at=clock_timestamp()+interval '5 seconds'
+             WHERE delivery_id=$1 AND state='pending'",
+        )
+        .bind(delivery_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(EvaluationControlStoreError::StateConflict);
+        }
+        transaction.commit().await?;
+        Ok(Some(PendingResourceMeterDelivery {
+            delivery_id,
+            step_run_id,
+            attempt,
+            task_run_id,
+            source_event_id,
+            request,
+            attempts,
+        }))
+    }
+
+    /// Marks one exact usage intent delivered after Resource acknowledged its source event.
+    pub async fn mark_resource_meter_delivery_delivered(
+        &self,
+        delivery_id: Uuid,
+        source_event_id: EventId,
+    ) -> Result<(), EvaluationControlStoreError> {
+        let updated = sqlx::query(
+            "UPDATE evaluation.resource_meter_deliveries
+             SET state='delivered',delivered_at=clock_timestamp(),last_diagnostic_code=NULL
+             WHERE delivery_id=$1 AND source_event_id=$2 AND state='pending'",
+        )
+        .bind(delivery_id)
+        .bind(source_event_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(EvaluationControlStoreError::StateConflict);
+        }
+        Ok(())
+    }
+
+    /// Records a payload-free delivery diagnostic while preserving the durable retry row.
+    pub async fn mark_resource_meter_delivery_failed(
+        &self,
+        delivery_id: Uuid,
+        source_event_id: EventId,
+        diagnostic_code: &str,
+    ) -> Result<(), EvaluationControlStoreError> {
+        if diagnostic_code.is_empty()
+            || diagnostic_code.len() > 128
+            || diagnostic_code.chars().any(char::is_control)
+        {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        let updated = sqlx::query(
+            "UPDATE evaluation.resource_meter_deliveries
+             SET last_diagnostic_code=$3
+             WHERE delivery_id=$1 AND source_event_id=$2 AND state='pending'",
+        )
+        .bind(delivery_id)
+        .bind(source_event_id.as_uuid())
+        .bind(diagnostic_code)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(EvaluationControlStoreError::StateConflict);
+        }
+        Ok(())
+    }
+
     pub async fn student_results(
         &self,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         actor_id: ActorId,
         cursor: Option<EvaluationRunId>,
         limit: u16,
@@ -564,10 +1297,11 @@ impl PgEvaluationControlStore {
         if let Some(cursor) = cursor {
             let exists = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM evaluation.evaluation_runs \
-                 WHERE course_id=$1 AND actor_id=$2 AND run_id=$3 \
+                 WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) AND actor_id=$3 AND run_id=$4 \
                    AND state IN ('succeeded','failed','cancelled'))",
             )
-            .bind(course_id.as_uuid())
+            .bind(project_id.as_uuid())
+            .bind(course_id.map(CourseId::as_uuid))
             .bind(actor_id.as_uuid())
             .bind(cursor.as_uuid())
             .fetch_one(&self.pool)
@@ -579,15 +1313,16 @@ impl PgEvaluationControlStore {
         let values = sqlx::query_scalar::<_, Value>(
             "SELECT runs.contract FROM evaluation.evaluation_runs runs \
              JOIN evaluation.evaluation_releases releases ON releases.release_id=runs.release_id \
-             WHERE runs.course_id=$1 AND runs.actor_id=$2 \
+             WHERE runs.project_id=$1 AND ($2::uuid IS NULL OR runs.course_id=$2) AND runs.actor_id=$3 \
                AND runs.state IN ('succeeded','failed','cancelled') \
-               AND ($3::uuid IS NULL OR (runs.updated_at,runs.run_id) < \
+               AND ($4::uuid IS NULL OR (runs.updated_at,runs.run_id) < \
                  (SELECT updated_at,run_id FROM evaluation.evaluation_runs \
-                  WHERE course_id=$1 AND actor_id=$2 AND run_id=$3 \
+                  WHERE project_id=$1 AND ($2::uuid IS NULL OR course_id=$2) AND actor_id=$3 AND run_id=$4 \
                     AND state IN ('succeeded','failed','cancelled'))) \
-             ORDER BY runs.updated_at DESC,runs.run_id DESC LIMIT $4",
+             ORDER BY runs.updated_at DESC,runs.run_id DESC LIMIT $5",
         )
-        .bind(course_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(CourseId::as_uuid))
         .bind(actor_id.as_uuid())
         .bind(cursor.map(EvaluationRunId::as_uuid))
         .bind(i64::from(limit) + 1)
@@ -614,18 +1349,20 @@ impl PgEvaluationControlStore {
 
     pub async fn student_result(
         &self,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         actor_id: ActorId,
         run_id: EvaluationRunId,
     ) -> Result<StudentEvaluationResult, EvaluationControlStoreError> {
         let value = sqlx::query_scalar::<_, Value>(
             "SELECT runs.contract FROM evaluation.evaluation_runs runs \
              JOIN evaluation.evaluation_releases releases ON releases.release_id=runs.release_id \
-             WHERE runs.run_id=$1 AND runs.course_id=$2 AND runs.actor_id=$3 \
+             WHERE runs.run_id=$1 AND runs.project_id=$2 AND ($3::uuid IS NULL OR runs.course_id=$3) AND runs.actor_id=$4 \
                AND runs.state IN ('succeeded','failed','cancelled')",
         )
         .bind(run_id.as_uuid())
-        .bind(course_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(course_id.map(CourseId::as_uuid))
         .bind(actor_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
@@ -743,7 +1480,10 @@ impl PgEvaluationControlStore {
             IdempotencyDecision::Reserved => {}
         }
         let mut run = load_run_for_update(&mut transaction, run_id).await?;
-        if run.course_id != request.course_id || run.revision != request.expected_revision {
+        if run.project_id != request.project_id
+            || run.course_id != request.course_id
+            || run.revision != request.expected_revision
+        {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::StateConflict);
         }
@@ -869,10 +1609,143 @@ impl PgEvaluationControlStore {
         lease_duration: Duration,
     ) -> Result<Option<EvaluationStepLease>, EvaluationControlStoreError> {
         validate_worker(worker_id, lease_duration)?;
-        let worker_san_uri = worker_service_san(worker_id)?;
         let lease_milliseconds = i64::try_from(lease_duration.as_millis())
             .map_err(|_| EvaluationControlStoreError::WorkerIdentityInvalid)?;
         let mut transaction = self.pool.begin().await?;
+        // A scheduler may restart after the Resource request has been created but before the
+        // attempt completes.  Resume the worker's still-valid attempt and its durable TaskRunId
+        // instead of allocating a second attempt (and a second Resource reservation).
+        let active = sqlx::query(
+            "SELECT attempt.step_run_id,step.run_id,attempt.attempt,attempt.task_run_id,
+                    attempt.lease_token
+             FROM evaluation.evaluation_step_attempts attempt
+             JOIN evaluation.evaluation_step_runs step ON step.step_run_id=attempt.step_run_id
+             JOIN evaluation.evaluation_runs run ON run.run_id=step.run_id
+             WHERE attempt.worker_id=$1 AND attempt.state='running'
+               AND attempt.lease_expires_at > clock_timestamp()
+               AND (
+                   (run.state IN ('queued','running') AND run.cancellation_requested=false)
+                   OR
+                   (run.state IN ('cancelling','cancelled') AND run.cancellation_requested=true)
+               )
+             ORDER BY attempt.created_at,attempt.step_run_id
+             FOR UPDATE OF run,step,attempt SKIP LOCKED LIMIT 1",
+        )
+        .bind(worker_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = active {
+            let step_run_id = parse_id::<EvaluationStepRunId>(row.try_get("step_run_id")?)?;
+            let run_id = parse_id::<EvaluationRunId>(row.try_get("run_id")?)?;
+            let task_run_id = parse_id::<TaskRunId>(row.try_get("task_run_id")?)?;
+            let attempt = u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?;
+            let lease_token: Uuid = row
+                .try_get("lease_token")
+                .map_err(|_| EvaluationControlStoreError::LeaseLost)?;
+            let run = load_run_for_update(&mut transaction, run_id).await?;
+            let step = load_step_for_update(&mut transaction, step_run_id).await?;
+            if step.run_id != run_id
+                || step.current_attempt != attempt
+                || step.state != EvaluationStepRunState::Running
+            {
+                transaction.rollback().await?;
+                return Err(EvaluationControlStoreError::LeaseLost);
+            }
+            let lease = EvaluationStepLease {
+                project_id: run.project_id,
+                course_id: run.course_id,
+                run_id,
+                step_run_id,
+                task_run_id,
+                step_id: step.step_id,
+                role: step.role,
+                max_score: step.max_score,
+                attempt,
+                worker_id: worker_id.to_owned(),
+                revision: step.revision,
+                runtime_identity: run.identity.runtime_identity.clone(),
+                trace_id: run.identity.trace_id,
+                lease_token,
+            };
+            transaction.commit().await?;
+            return Ok(Some(lease));
+        }
+        // A worker may have expired at any point after the attempt row was committed: before
+        // Resource creation, after a Reviewing/Allocating reservation, after the Resource
+        // handoff, or after the Kubernetes bundle was applied.  Reassign that exact attempt and
+        // TaskRunId in every case.  The runner's idempotent Resource and Job reconciliation then
+        // closes the phase-specific crash window without creating a second reservation or Job.
+        let recovery = sqlx::query(
+            "SELECT attempt.step_run_id,step.run_id,attempt.attempt,attempt.task_run_id
+             FROM evaluation.evaluation_step_attempts attempt
+             JOIN evaluation.evaluation_step_runs step ON step.step_run_id=attempt.step_run_id
+             JOIN evaluation.evaluation_runs run ON run.run_id=step.run_id
+             WHERE attempt.state='running'
+               AND attempt.lease_expires_at <= clock_timestamp()
+               AND (
+                   (run.state IN ('queued','running') AND run.cancellation_requested=false)
+                   OR
+                   (run.state IN ('cancelling','cancelled') AND run.cancellation_requested=true)
+               )
+               AND step.state='running'
+             ORDER BY attempt.lease_expires_at,attempt.step_run_id
+             FOR UPDATE OF run,step,attempt SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = recovery {
+            let step_run_id = parse_id::<EvaluationStepRunId>(row.try_get("step_run_id")?)?;
+            let run_id = parse_id::<EvaluationRunId>(row.try_get("run_id")?)?;
+            let task_run_id = parse_id::<TaskRunId>(row.try_get("task_run_id")?)?;
+            let attempt = u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?;
+            let now = authority_now(&mut transaction).await?;
+            let lease_expires_at = now.get() + time::Duration::milliseconds(lease_milliseconds);
+            let lease_token = Uuid::now_v7();
+            sqlx::query(
+                "UPDATE evaluation.evaluation_step_attempts
+                 SET worker_id=$4,lease_token=$5,
+                     lease_expires_at=$6,updated_at=$6
+                 WHERE step_run_id=$1 AND attempt=$2 AND task_run_id=$3
+                   AND state='running'",
+            )
+            .bind(step_run_id.as_uuid())
+            .bind(i32::try_from(attempt).map_err(|_| EvaluationControlStoreError::AttemptOverflow)?)
+            .bind(task_run_id.as_uuid())
+            .bind(worker_id)
+            .bind(lease_token)
+            .bind(lease_expires_at)
+            .execute(&mut *transaction)
+            .await?;
+            let run = load_run_for_update(&mut transaction, run_id).await?;
+            let step = load_step_for_update(&mut transaction, step_run_id).await?;
+            if step.run_id != run_id
+                || step.current_attempt != attempt
+                || step.state != EvaluationStepRunState::Running
+            {
+                transaction.rollback().await?;
+                return Err(EvaluationControlStoreError::LeaseLost);
+            }
+            let lease = EvaluationStepLease {
+                project_id: run.project_id,
+                course_id: run.course_id,
+                run_id,
+                step_run_id,
+                task_run_id,
+                step_id: step.step_id,
+                role: step.role,
+                max_score: step.max_score,
+                attempt,
+                worker_id: worker_id.to_owned(),
+                revision: step.revision,
+                runtime_identity: run.identity.runtime_identity.clone(),
+                trace_id: run.identity.trace_id,
+                lease_token,
+            };
+            transaction.commit().await?;
+            return Ok(Some(lease));
+        }
         let row = sqlx::query(
             "SELECT step.step_run_id,step.run_id \
              FROM evaluation.evaluation_step_runs step \
@@ -912,9 +1785,11 @@ impl PgEvaluationControlStore {
             .checked_add(1)
             .ok_or(EvaluationControlStoreError::AttemptOverflow)?;
         let lease_token = Uuid::now_v7();
+        let task_run_id = TaskRunId::new();
         let now = authority_now(&mut transaction).await?;
         let lease_expires_at = now.get() + time::Duration::milliseconds(lease_milliseconds);
         let runtime_identity_sha256 = runtime_identity_sha256(&run.identity.runtime_identity)?;
+        let runtime_artifact_sha256 = runtime_artifact_sha256(&run.identity.runtime_identity)?;
         step.state = EvaluationStepRunState::Running;
         step.revision = next_revision(step.revision)?;
         step.current_attempt = attempt;
@@ -926,18 +1801,18 @@ impl PgEvaluationControlStore {
         save_step(&mut transaction, &step).await?;
         sqlx::query(
             "INSERT INTO evaluation.evaluation_step_attempts \
-             (step_run_id,attempt,state,worker_id,worker_san_uri,provider_binding,runner_image,\
+             (task_run_id,step_run_id,attempt,state,worker_id,provider_binding,runner_image,\
               runtime_artifact_sha256,runtime_identity_sha256,lease_token,lease_expires_at,\
               created_at,updated_at) \
-             VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)",
+             VALUES ($1,$2,$3,'running',$4,$5,$6,$7,$8,$9,$10,$11,$11)",
         )
+        .bind(task_run_id.as_uuid())
         .bind(step_run_id.as_uuid())
         .bind(i32::try_from(attempt).map_err(|_| EvaluationControlStoreError::AttemptOverflow)?)
         .bind(worker_id)
-        .bind(&worker_san_uri)
         .bind(&run.identity.runtime_identity.provider_binding)
         .bind(&run.identity.runtime_identity.runner_image)
-        .bind(Sha256Digest::of_bytes(b"runtime-artifact").to_string())
+        .bind(runtime_artifact_sha256.to_string())
         .bind(runtime_identity_sha256.to_string())
         .bind(lease_token)
         .bind(lease_expires_at)
@@ -953,43 +1828,112 @@ impl PgEvaluationControlStore {
         refresh_and_save_run(&mut transaction, &mut run, now, &[step.id], &trace_id, None).await?;
         transaction.commit().await?;
         Ok(Some(EvaluationStepLease {
+            project_id: run.project_id,
             course_id: run.course_id,
             run_id,
             step_run_id,
+            task_run_id,
             step_id: step.step_id,
             role: step.role,
             max_score: step.max_score,
             attempt,
             worker_id: worker_id.to_owned(),
-            worker_san_uri,
+            revision: step.revision,
             runtime_identity: run.identity.runtime_identity.clone(),
             trace_id: run.identity.trace_id,
             lease_token,
         }))
     }
 
+    /// Extends one still-owned step attempt using the database clock.
+    ///
+    /// The update is conditional on every durable identity fence and on the old
+    /// expiry still being in the future.  A worker that loses this compare-and-
+    /// swap fence must stop the external execution and cannot complete the step.
+    pub async fn renew_step_lease(
+        &self,
+        lease: &EvaluationStepLease,
+        lease_duration: Duration,
+    ) -> Result<bool, EvaluationControlStoreError> {
+        validate_worker(&lease.worker_id, lease_duration)?;
+        let lease_milliseconds = i64::try_from(lease_duration.as_millis())
+            .map_err(|_| EvaluationControlStoreError::WorkerIdentityInvalid)?;
+        let cancellation_requested: Option<bool> = sqlx::query_scalar(
+            r"
+            UPDATE evaluation.evaluation_step_attempts AS attempt
+            SET lease_expires_at = clock_timestamp() + ($7::bigint * interval '1 millisecond'),
+                updated_at = clock_timestamp()
+            FROM evaluation.evaluation_step_runs AS step
+            JOIN evaluation.evaluation_runs AS run ON run.run_id = step.run_id
+            WHERE attempt.step_run_id = $1
+              AND attempt.attempt = $2
+              AND attempt.state = 'running'
+              AND attempt.task_run_id = $3
+              AND attempt.worker_id = $4
+              AND attempt.lease_token = $5
+              AND attempt.lease_expires_at > clock_timestamp()
+              AND step.step_run_id = attempt.step_run_id
+              AND step.current_attempt = $2
+              AND step.revision = $6
+              AND step.state = 'running'
+            RETURNING (
+                SELECT current_run.cancellation_requested
+                FROM evaluation.evaluation_step_runs AS current_step
+                JOIN evaluation.evaluation_runs AS current_run
+                  ON current_run.run_id = current_step.run_id
+                WHERE current_step.step_run_id = attempt.step_run_id
+            )
+            ",
+        )
+        .bind(lease.step_run_id.as_uuid())
+        .bind(
+            i32::try_from(lease.attempt)
+                .map_err(|_| EvaluationControlStoreError::AttemptOverflow)?,
+        )
+        .bind(lease.task_run_id.as_uuid())
+        .bind(&lease.worker_id)
+        .bind(lease.lease_token())
+        .bind(revision_i64(lease.revision)?)
+        .bind(lease_milliseconds)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(_) = cancellation_requested else {
+            return Err(EvaluationControlStoreError::LeaseLost);
+        };
+        // The update intentionally continues while cancellation is requested so the worker keeps
+        // ownership of the cleanup fence. A later heartbeat catches a cancellation that races
+        // the read below.
+        let cancellation_requested: bool = sqlx::query_scalar(
+            "SELECT cancellation_requested FROM evaluation.evaluation_runs WHERE run_id=$1",
+        )
+        .bind(lease.run_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(cancellation_requested)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn complete_step(
         &self,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         run_id: EvaluationRunId,
         step_run_id: EvaluationStepRunId,
         attempt: u32,
         worker_id: &str,
-        worker_san_uri: &str,
         runtime_identity: &EvaluationRuntimeIdentity,
         lease_token: Uuid,
         completion: &EvaluationStepCompletion,
         trace_id: &str,
     ) -> Result<EvaluationRun, EvaluationControlStoreError> {
-        validate_worker_san(worker_id, worker_san_uri)?;
+        validate_worker_id(worker_id)?;
         validate_trace(trace_id)?;
         if attempt == 0 {
             return Err(EvaluationControlStoreError::ContractInvalid);
         }
         let mut transaction = self.pool.begin().await?;
         let mut run = load_run_for_update(&mut transaction, run_id).await?;
-        if run.course_id != course_id {
+        if run.project_id != project_id || run.course_id != course_id {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::CourseMismatch);
         }
@@ -999,6 +1943,7 @@ impl PgEvaluationControlStore {
             return Err(EvaluationControlStoreError::IdentityMismatch);
         }
         let runtime_identity_sha256 = runtime_identity_sha256(runtime_identity)?;
+        let runtime_artifact_sha256 = runtime_artifact_sha256(runtime_identity)?;
         let mut step = load_step_for_update(&mut transaction, step_run_id).await?;
         if step.run_id != run_id || step.current_attempt != attempt {
             transaction.rollback().await?;
@@ -1010,25 +1955,24 @@ impl PgEvaluationControlStore {
         let terminal_state = step_state_name(completion.state);
         let completed_at: Option<time::OffsetDateTime> = sqlx::query_scalar(
             "WITH authority AS ( \
-                 SELECT date_trunc('milliseconds', clock_timestamp()) AS completed_at \
-             ) \
-             UPDATE evaluation.evaluation_step_attempts AS attempt \
-             SET state=$6,lease_token=NULL,lease_expires_at=NULL,\
-                 diagnostic_code=$7,evidence_sha256=$8,cleanup_verified=$9,\
+                  SELECT date_trunc('milliseconds', clock_timestamp()) AS completed_at \
+              ) \
+              UPDATE evaluation.evaluation_step_attempts AS attempt \
+             SET state=$5,lease_token=NULL,lease_expires_at=NULL,\
+                 diagnostic_code=$6,cleanup_verified=$7,\
                  completed_at=authority.completed_at,updated_at=authority.completed_at \
-             FROM authority \
+             FROM authority,evaluation.evaluation_step_runs AS step \
              WHERE attempt.step_run_id=$1 AND attempt.attempt=$2 \
-               AND attempt.worker_id=$3 AND attempt.worker_san_uri=$4 \
-               AND attempt.lease_token=$5 AND attempt.state='running' \
-               AND attempt.provider_binding=$10 AND attempt.runner_image=$11 \
-               AND attempt.runtime_artifact_sha256=$12 AND attempt.runtime_identity_sha256=$13 \
+               AND attempt.worker_id=$3 AND attempt.lease_token=$4 AND attempt.state='running' \
+               AND step.step_run_id=attempt.step_run_id AND step.revision=$12 \
+               AND attempt.provider_binding=$8 AND attempt.runner_image=$9 \
+               AND attempt.runtime_artifact_sha256=$10 AND attempt.runtime_identity_sha256=$11 \
                AND attempt.lease_expires_at > authority.completed_at \
              RETURNING attempt.completed_at",
         )
         .bind(step_run_id.as_uuid())
         .bind(attempt_i32)
         .bind(worker_id)
-        .bind(worker_san_uri)
         .bind(lease_token)
         .bind(terminal_state)
         .bind(
@@ -1037,12 +1981,12 @@ impl PgEvaluationControlStore {
                 .as_ref()
                 .map(DiagnosticCode::as_str),
         )
-        .bind(Sha256Digest::of_bytes(b"evidence").to_string())
         .bind(completion.cleanup_verified)
         .bind(&runtime_identity.provider_binding)
         .bind(&runtime_identity.runner_image)
-        .bind(Sha256Digest::of_bytes(b"runtime-artifact").to_string())
+        .bind(runtime_artifact_sha256.to_string())
         .bind(runtime_identity_sha256.to_string())
+        .bind(revision_i64(step.revision)?)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(completed_at) = completed_at else {
@@ -1054,6 +1998,7 @@ impl PgEvaluationControlStore {
         step.state = completion.state;
         step.revision = next_revision(step.revision)?;
         step.awarded_score = completion.awarded_score;
+        step.review = completion.review.clone();
         step.diagnostic_code.clone_from(&completion.diagnostic_code);
         step.cleanup_verified = completion.cleanup_verified;
         step.completed_at = Some(completed_at);
@@ -1088,92 +2033,6 @@ impl PgEvaluationControlStore {
         transaction.commit().await?;
         Ok(run)
     }
-
-    pub async fn recover_expired_step_attempts(
-        &self,
-        limit: i64,
-    ) -> Result<u64, EvaluationControlStoreError> {
-        if !(1..=64).contains(&limit) {
-            return Err(EvaluationControlStoreError::ContractInvalid);
-        }
-        let mut transaction = self.pool.begin().await?;
-        let rows = sqlx::query(
-            "SELECT attempt.step_run_id,attempt.attempt \
-             FROM evaluation.evaluation_step_attempts attempt \
-             JOIN evaluation.evaluation_step_runs step ON step.step_run_id=attempt.step_run_id \
-             JOIN evaluation.evaluation_runs run ON run.run_id=step.run_id \
-             WHERE attempt.state='running' AND attempt.lease_expires_at <= clock_timestamp() \
-             ORDER BY attempt.lease_expires_at,attempt.step_run_id LIMIT $1 \
-             FOR UPDATE OF run,step,attempt SKIP LOCKED",
-        )
-        .bind(limit)
-        .fetch_all(&mut *transaction)
-        .await?;
-        let now = authority_now(&mut transaction).await?;
-        let mut recovered = 0_u64;
-        let mut affected_runs: Vec<(EvaluationRunId, Vec<EvaluationStepRunId>)> = Vec::new();
-        for row in rows {
-            let step_run_id = parse_id::<EvaluationStepRunId>(row.try_get("step_run_id")?)?;
-            let attempt: i32 = row.try_get("attempt")?;
-            let updated = sqlx::query(
-                "UPDATE evaluation.evaluation_step_attempts \
-                 SET state='failed',lease_token=NULL,lease_expires_at=NULL,\
-                     diagnostic_code='LW_EVALUATION_STEP_LEASE_EXPIRED',\
-                     evidence_sha256=$3,cleanup_verified=false,completed_at=$4,updated_at=$4 \
-                 WHERE step_run_id=$1 AND attempt=$2 AND state='running'",
-            )
-            .bind(step_run_id.as_uuid())
-            .bind(attempt)
-            .bind(Sha256Digest::of_bytes(b"expired-step-lease").to_string())
-            .bind(now.get())
-            .execute(&mut *transaction)
-            .await?;
-            if updated.rows_affected() == 1 {
-                let mut step = load_step_for_update(&mut transaction, step_run_id).await?;
-                let run_id = step.run_id;
-                step.state = EvaluationStepRunState::Failed;
-                step.revision = next_revision(step.revision)?;
-                step.diagnostic_code = Some(DiagnosticCode::registered(
-                    "LW_EVALUATION_STEP_LEASE_EXPIRED",
-                ));
-                step.cleanup_verified = false;
-                step.completed_at = Some(now);
-                save_step(&mut transaction, &step).await?;
-                let mut changed_step_ids = vec![step.id];
-                if failure_stops_dependency_successors(&step) {
-                    changed_step_ids.extend(
-                        skip_dependency_successors(
-                            &mut transaction,
-                            run_id,
-                            step.step_id.as_str(),
-                            now,
-                        )
-                        .await?,
-                    );
-                }
-                push_run_step_changes(&mut affected_runs, run_id, changed_step_ids);
-                recovered = recovered
-                    .checked_add(1)
-                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
-            }
-        }
-        for (run_id, changed_step_ids) in affected_runs {
-            let mut run = load_run_for_update(&mut transaction, run_id).await?;
-            run.revision = next_revision(run.revision)?;
-            let trace_id = run.identity.trace_id.clone();
-            refresh_and_save_run(
-                &mut transaction,
-                &mut run,
-                now,
-                &changed_step_ids,
-                &trace_id,
-                None,
-            )
-            .await?;
-        }
-        transaction.commit().await?;
-        Ok(recovered)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1181,6 +2040,89 @@ enum MutationKind {
     Cancel,
     RetryStep,
     VerifyStepCleanup,
+}
+
+/// One pending usage request claimed by the Evaluation delivery loop.
+#[derive(Clone, Debug)]
+pub struct PendingResourceMeterDelivery {
+    pub delivery_id: Uuid,
+    pub step_run_id: EvaluationStepRunId,
+    pub attempt: u32,
+    pub task_run_id: TaskRunId,
+    pub source_event_id: EventId,
+    pub request: RecordResourceUsageRequest,
+    pub attempts: i32,
+}
+
+async fn enqueue_resource_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    lease: &EvaluationStepLease,
+    request: &RecordResourceUsageRequest,
+    execution_terminated_at: Option<UtcTimestamp>,
+) -> Result<(), EvaluationControlStoreError> {
+    if request.measured_until <= request.measured_from
+        || execution_terminated_at.is_some_and(|until| request.measured_until != until)
+        || request.measurement.validate().is_err()
+    {
+        return Err(EvaluationControlStoreError::ContractInvalid);
+    }
+    let kind = match request.kind {
+        contracts::resource::ResourceUsageKind::Compute => "compute",
+        contracts::resource::ResourceUsageKind::Storage => "storage",
+    };
+    let request_value =
+        serde_json::to_value(request).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+    let attempt =
+        i32::try_from(lease.attempt).map_err(|_| EvaluationControlStoreError::AttemptOverflow)?;
+    let delivery_id = Uuid::now_v7();
+    let inserted = sqlx::query(
+        "INSERT INTO evaluation.resource_meter_deliveries
+         (delivery_id,step_run_id,attempt,task_run_id,source_event_id,kind,
+          measured_from,measured_until,request,state,attempts,next_attempt_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',0,clock_timestamp())
+         ON CONFLICT (task_run_id,kind) DO NOTHING",
+    )
+    .bind(delivery_id)
+    .bind(lease.step_run_id.as_uuid())
+    .bind(attempt)
+    .bind(lease.task_run_id.as_uuid())
+    .bind(request.source_event_id.as_uuid())
+    .bind(kind)
+    .bind(request.measured_from.get())
+    .bind(request.measured_until.get())
+    .bind(&request_value)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_unique)?;
+    if inserted.rows_affected() == 1 {
+        return Ok(());
+    }
+    let row = sqlx::query(
+        "SELECT step_run_id,attempt,task_run_id,source_event_id,request
+         FROM evaluation.resource_meter_deliveries
+         WHERE task_run_id=$1 AND kind=$2 FOR UPDATE",
+    )
+    .bind(lease.task_run_id.as_uuid())
+    .bind(kind)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
+    let existing_step_run_id: Uuid = row.try_get("step_run_id")?;
+    let existing_attempt: i32 = row.try_get("attempt")?;
+    let existing_task_run_id: Uuid = row.try_get("task_run_id")?;
+    let existing_source_event_id: Uuid = row.try_get("source_event_id")?;
+    let existing_request: RecordResourceUsageRequest =
+        serde_json::from_value(row.try_get("request")?)
+            .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+    if existing_step_run_id != lease.step_run_id.as_uuid()
+        || existing_attempt != attempt
+        || existing_task_run_id != lease.task_run_id.as_uuid()
+        || existing_source_event_id != request.source_event_id.as_uuid()
+        || existing_request != *request
+    {
+        return Err(EvaluationControlStoreError::IdentityMismatch);
+    }
+    Ok(())
 }
 
 async fn verify_frozen_submission(
@@ -1195,7 +2137,10 @@ async fn verify_frozen_submission(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(EvaluationControlStoreError::FrozenSubmissionNotFound)?;
-    if row.try_get::<Uuid, _>("course_id")? != request.course_id.as_uuid() {
+    let course_id = request
+        .course_id
+        .ok_or(EvaluationControlStoreError::IdentityMismatch)?;
+    if row.try_get::<Uuid, _>("course_id")? != course_id.as_uuid() {
         return Err(EvaluationControlStoreError::IdentityMismatch);
     }
     Ok(())
@@ -1235,6 +2180,7 @@ fn step_runs_for(
                 current_attempt: 0,
                 max_score: step.score().unwrap_or(0),
                 awarded_score: None,
+                review: None,
                 diagnostic_code: None,
                 cleanup_verified: false,
                 started_at: None,
@@ -1253,11 +2199,17 @@ async fn save_new_step(
     step.validate(step.run_id)?;
     let contract =
         serde_json::to_value(step).map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+    let review_json = step
+        .review
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
     sqlx::query(
         "INSERT INTO evaluation.evaluation_step_runs \
          (step_run_id,run_id,position,step_id,role,failure_policy,depends_on,state,revision,current_attempt,\
-          max_score,cleanup_verified,contract,created_at,updated_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0,$9,false,$10,$11,$11)",
+         max_score,cleanup_verified,review_json,contract,created_at,updated_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0,$9,false,$10,$11,$12,$12)",
     )
     .bind(step.id.as_uuid())
     .bind(step.run_id.as_uuid())
@@ -1268,6 +2220,7 @@ async fn save_new_step(
     .bind(&step.depends_on)
     .bind(revision_i64(step.revision)?)
     .bind(i32::try_from(step.max_score).map_err(|_| EvaluationControlStoreError::ScoreInvalid)?)
+    .bind(review_json)
     .bind(&contract)
     .bind(now.get())
     .execute(&mut **transaction)
@@ -1344,11 +2297,17 @@ async fn save_step(
         .map(i32::try_from)
         .transpose()
         .map_err(|_| EvaluationControlStoreError::ScoreInvalid)?;
+    let review_json = step
+        .review
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
     let updated = sqlx::query(
         "UPDATE evaluation.evaluation_step_runs \
          SET state=$2,revision=$3,current_attempt=$4,awarded_score=$5,diagnostic_code=$6,\
-             evidence_sha256=$7,cleanup_verified=$8,contract=$9,updated_at=clock_timestamp(),\
-             started_at=$10,completed_at=$11 \
+             cleanup_verified=$7,contract=$8,updated_at=clock_timestamp(),\
+             started_at=$9,completed_at=$10,review_json=$11 \
          WHERE step_run_id=$1",
     )
     .bind(step.id.as_uuid())
@@ -1360,11 +2319,11 @@ async fn save_step(
     )
     .bind(awarded_score)
     .bind(step.diagnostic_code.as_ref().map(DiagnosticCode::as_str))
-    .bind(Option::<String>::None)
     .bind(step.cleanup_verified)
     .bind(&contract)
     .bind(step.started_at.map(UtcTimestamp::get))
     .bind(step.completed_at.map(UtcTimestamp::get))
+    .bind(review_json)
     .execute(&mut **transaction)
     .await?;
     if updated.rows_affected() != 1 {
@@ -1688,6 +2647,7 @@ async fn enqueue_release_published(
     };
     let event = event_envelope(
         contract,
+        release.project_id,
         release.course_id,
         release.id.as_uuid(),
         release.revision,
@@ -1723,6 +2683,7 @@ async fn enqueue_run_event(
     data.validate()?;
     let event = event_envelope(
         contract,
+        run.project_id,
         run.course_id,
         run.id.as_uuid(),
         run.revision,
@@ -1761,6 +2722,7 @@ async fn enqueue_step_event(
     data.validate()?;
     let event = event_envelope(
         contract,
+        run.project_id,
         run.course_id,
         step.id.as_uuid(),
         step.revision,
@@ -1775,7 +2737,8 @@ async fn enqueue_step_event(
 #[allow(clippy::too_many_arguments)]
 fn event_envelope<T: serde::Serialize>(
     contract: EventContract,
-    course_id: CourseId,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
     aggregate_id: Uuid,
     revision: Revision,
     sequence: u64,
@@ -1792,6 +2755,7 @@ fn event_envelope<T: serde::Serialize>(
         time: now,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
+        project_id,
         course_id,
         aggregate_revision: revision,
         aggregate_sequence: Sequence(sequence),
@@ -1918,17 +2882,42 @@ fn failure_stops_dependency_successors(step: &EvaluationStepRun) -> bool {
 }
 
 fn failure_breaks_run(step: &EvaluationStepRun, cancellation_requested: bool) -> bool {
-    if step.failure_policy != EvaluationStepFailurePolicy::Stop {
-        return false;
+    match step.state {
+        // A failed deterministic step is always a failed evaluation.  The
+        // score `Continue` policy only allows other runnable branches to
+        // finish collecting their results; it does not turn an execution
+        // failure into a successful run.  Advisory failures remain
+        // informational when their declared policy is `ContinueAdvisory`.
+        EvaluationStepRunState::Failed => step.role != EvaluationStepRole::Advisory,
+        EvaluationStepRunState::Cancelled => {
+            !cancellation_requested && step.role != EvaluationStepRole::Advisory
+        }
+        _ => false,
     }
-    step.state == EvaluationStepRunState::Failed
-        || (step.state == EvaluationStepRunState::Cancelled && !cancellation_requested)
 }
 
 fn runtime_identity_sha256(
     runtime_identity: &EvaluationRuntimeIdentity,
 ) -> Result<Sha256Digest, EvaluationControlStoreError> {
     Sha256Digest::of_canonical(runtime_identity)
+        .map_err(|_| EvaluationControlStoreError::IdentityMismatch)
+}
+
+/// Returns the digest that is already part of the approved runner image.
+///
+/// The attempt table calls this value `runtime_artifact_sha256`; keeping the
+/// value equal to the release's digest-pinned image makes the database fence
+/// meaningful and prevents a worker from completing against a synthetic or
+/// process-local placeholder artifact identity.
+fn runtime_artifact_sha256(
+    runtime_identity: &EvaluationRuntimeIdentity,
+) -> Result<Sha256Digest, EvaluationControlStoreError> {
+    let (_, digest) = runtime_identity
+        .runner_image
+        .rsplit_once("@sha256:")
+        .ok_or(EvaluationControlStoreError::IdentityMismatch)?;
+    digest
+        .parse()
         .map_err(|_| EvaluationControlStoreError::IdentityMismatch)
 }
 
@@ -1979,6 +2968,25 @@ fn validate_trace(trace_id: &str) -> Result<(), EvaluationControlStoreError> {
     Ok(())
 }
 
+fn verify_authoring_admission(
+    release: &EvaluationRelease,
+    request: &InternalCreateEvaluationRunRequest,
+    admission: &AuthoringPublicationAdmissionBinding,
+) -> Result<(), EvaluationControlStoreError> {
+    if admission.approval_id != release.approval_id
+        || admission.approval_revision != release.approval_revision
+        || admission.project_id != request.project_id
+        || admission.course_id != request.course_id
+        || admission.evaluation_release_id != request.release_id
+        || admission.evaluation_release_revision != release.revision
+        || admission.environment_release_id.as_uuid().is_nil()
+        || admission.environment_release_version == 0
+    {
+        return Err(EvaluationControlStoreError::IdentityMismatch);
+    }
+    Ok(())
+}
+
 fn validate_worker(
     worker_id: &str,
     lease_duration: Duration,
@@ -2003,16 +3011,6 @@ fn validate_worker_id(worker_id: &str) -> Result<(), EvaluationControlStoreError
     Ok(())
 }
 
-fn validate_worker_san(
-    worker_id: &str,
-    worker_san_uri: &str,
-) -> Result<(), EvaluationControlStoreError> {
-    if worker_service_san(worker_id)?.as_str() != worker_san_uri {
-        return Err(EvaluationControlStoreError::WorkerIdentityInvalid);
-    }
-    Ok(())
-}
-
 fn map_unique(error: sqlx::Error) -> EvaluationControlStoreError {
     if error
         .as_database_error()
@@ -2022,16 +3020,6 @@ fn map_unique(error: sqlx::Error) -> EvaluationControlStoreError {
     } else {
         EvaluationControlStoreError::Database(error)
     }
-}
-
-#[must_use]
-pub fn control_service_san() -> &'static str {
-    CONTROL_SERVICE_SAN
-}
-
-pub fn worker_service_san(worker_id: &str) -> Result<String, EvaluationControlStoreError> {
-    validate_worker_id(worker_id)?;
-    Ok(format!("{WORKER_SERVICE_SAN_PREFIX}{worker_id}"))
 }
 
 /// Stable payload-free control-plane failures.

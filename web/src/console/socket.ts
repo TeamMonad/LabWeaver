@@ -4,9 +4,8 @@
  * A `ConsoleCapability` hands the browser a one-time `connectionLocator` and a
  * versioned subprotocol; the handoff secret rides in a path-scoped HttpOnly
  * cookie and is never part of the URL or response body. This module owns the
- * real transport; fixture mode injects a deterministic in-memory substitute
- * through the same interface so E1/E2 stays honest without pretending the
- * upstream proxy exists.
+ * real transport. Tests may inject a socket factory through the public
+ * interface when the upstream proxy is unavailable.
  */
 
 export type ConsoleSocketState =

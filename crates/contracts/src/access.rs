@@ -10,7 +10,7 @@ use crate::authoring::EnvironmentClass;
 use crate::environment::{EndpointHealth, EndpointProtocol};
 use crate::{
     AccessGrantId, ActorId, BffSessionId, ConsoleCapabilityId, ConsoleSessionId, CourseId,
-    EndpointGrantId, EndpointId, EnvironmentId, GatewaySessionId, LeaseId, Revision,
+    EndpointGrantId, EndpointId, EnvironmentId, GatewaySessionId, LeaseId, ProjectId, Revision,
     SshPublicKeyId, UtcTimestamp,
 };
 
@@ -170,6 +170,8 @@ pub struct ConsoleLeaseFence {
 pub struct ConsoleCapabilityAvailability {
     pub access_grant_id: AccessGrantId,
     pub access_grant_revision: Revision,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub environment_class: EnvironmentClass,
     pub environment_revision: Revision,
@@ -201,6 +203,8 @@ pub struct ConsoleCapability {
     pub kind: ConsoleKind,
     pub access_grant_id: AccessGrantId,
     pub access_grant_revision: Revision,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub environment_class: EnvironmentClass,
     pub environment_revision: Revision,
@@ -239,6 +243,8 @@ impl ConsoleCapability {
         if !availability.kinds.contains(&self.kind)
             || self.access_grant_id != availability.access_grant_id
             || self.access_grant_revision != availability.access_grant_revision
+            || self.project_id != availability.project_id
+            || self.course_id != availability.course_id
             || self.environment_id != availability.environment_id
             || self.environment_class != availability.environment_class
             || self.environment_revision != availability.environment_revision
@@ -289,6 +295,8 @@ pub struct ConsoleSession {
     pub bff_session_id: BffSessionId,
     pub access_grant_id: AccessGrantId,
     pub access_grant_revision: Revision,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub environment_revision: Revision,
     pub lease_fence: Option<ConsoleLeaseFence>,
@@ -492,13 +500,14 @@ impl EndpointGrant {
     }
 }
 
-/// Parent actor×course×environment grant.
+/// Parent actor×project×environment grant. A course is optional teaching context.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccessGrant {
     pub id: AccessGrantId,
     pub actor_id: ActorId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub environment_revision: Revision,
     pub state: AccessGrantState,
@@ -534,7 +543,14 @@ impl AccessGrant {
             endpoint.validate()?;
         }
         match self.state {
-            AccessGrantState::Denied | AccessGrantState::Revoked => {
+            AccessGrantState::Denied => {
+                if self.revoked_at.is_some()
+                    || self.reason_code.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(AccessError::InvalidGrant);
+                }
+            }
+            AccessGrantState::Revoked => {
                 if self.revoked_at.is_none()
                     || self.reason_code.as_deref().is_none_or(str::is_empty)
                 {
@@ -542,7 +558,7 @@ impl AccessGrant {
                 }
             }
             AccessGrantState::Expired => {
-                if self.reason_code.as_deref() != Some("expired") {
+                if self.revoked_at.is_some() || self.reason_code.as_deref() != Some("expired") {
                     return Err(AccessError::InvalidGrant);
                 }
             }
@@ -578,8 +594,9 @@ impl AccessGrant {
     }
 }
 
-/// Request from `AuthorizedKeysCommand` over mTLS. Target selection happens only after
-/// public-key authentication, through the fixed command grammar.
+/// Request used by the Gateway's `AuthorizedKeysCommand`, authenticated with a service JWT over
+/// the internal TLS transport. Target selection happens only after public-key authentication,
+/// through the fixed command grammar.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SshAuthorizationRequest {
@@ -846,7 +863,8 @@ mod tests {
         let requested = AccessGrant {
             id: AccessGrantId::new(),
             actor_id: ActorId::new(),
-            course_id: CourseId::new(),
+            project_id: crate::ProjectId::new(),
+            course_id: Some(CourseId::new()),
             environment_id: EnvironmentId::new(),
             environment_revision: revision(1),
             state: AccessGrantState::Requested,
@@ -858,9 +876,50 @@ mod tests {
             reason_code: None,
         };
         assert!(requested.validate().is_ok());
-        let mut active = requested;
+        let mut active = requested.clone();
         active.state = AccessGrantState::Active;
         assert!(active.validate().is_err());
+
+        let mut denied = requested.clone();
+        denied.state = AccessGrantState::Denied;
+        denied.reason_code = Some("LW_ACCESS_ENDPOINT_ELIGIBILITY_DENIED".to_owned());
+        assert!(denied.validate().is_ok());
+        denied.revoked_at = Some(timestamp("2026-07-16T00:01:00.000Z"));
+        assert!(denied.validate().is_err());
+        denied.revoked_at = None;
+        denied.reason_code = None;
+        assert!(denied.validate().is_err());
+
+        let mut expired = requested.clone();
+        expired.state = AccessGrantState::Expired;
+        expired.reason_code = Some("expired".to_owned());
+        let expired_endpoint_grant_id = EndpointGrantId::new();
+        expired.endpoint_grants = vec![EndpointGrant {
+            id: expired_endpoint_grant_id,
+            access_grant_id: expired.id,
+            endpoint_id: EndpointId::new(),
+            endpoint_revision: revision(1),
+            protocol: EndpointProtocol::Https,
+            action: EndpointAction::Connect,
+            health: EndpointHealth::Healthy,
+            alias: None,
+            connect_url: Some(format!("/connect/{expired_endpoint_grant_id}/")),
+            ssh_gateway_hostname: None,
+            ssh_gateway_port: None,
+            ssh_gateway_host_key_fingerprint: None,
+            expires_at: expired.expires_at,
+        }];
+        assert!(expired.validate().is_ok());
+        expired.revoked_at = Some(timestamp("2026-07-16T00:01:00.000Z"));
+        assert!(expired.validate().is_err());
+
+        let mut revoked = requested;
+        revoked.state = AccessGrantState::Revoked;
+        revoked.revoked_at = Some(timestamp("2026-07-16T00:01:00.000Z"));
+        revoked.reason_code = Some("LW_ACCESS_GRANT_REVOKED".to_owned());
+        assert!(revoked.validate().is_ok());
+        revoked.revoked_at = None;
+        assert!(revoked.validate().is_err());
     }
 
     #[test]
@@ -958,6 +1017,8 @@ mod tests {
             kind: ConsoleKind::Novnc,
             access_grant_id: AccessGrantId::new(),
             access_grant_revision: revision(2),
+            project_id: crate::ProjectId::new(),
+            course_id: Some(CourseId::new()),
             environment_id: EnvironmentId::new(),
             environment_class: EnvironmentClass::Experiment,
             environment_revision: revision(3),
@@ -1003,6 +1064,8 @@ mod tests {
         let mut availability = ConsoleCapabilityAvailability {
             access_grant_id: capability.access_grant_id,
             access_grant_revision: capability.access_grant_revision,
+            project_id: capability.project_id,
+            course_id: capability.course_id,
             environment_id: capability.environment_id,
             environment_class: EnvironmentClass::Experiment,
             environment_revision: capability.environment_revision,

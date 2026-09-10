@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::authoring::RuntimeKind;
 use crate::{
     ActorId, AgentRunId, ArtifactRef, BuildRequestId, CourseId, EnvironmentId, FrozenSubmissionId,
-    PathRule, ReleaseId, RetentionSnapshot, Revision, UtcTimestamp,
+    PathRule, ProjectId, ReleaseId, RetentionSnapshot, Revision, UtcTimestamp,
 };
 
 /// Source available to a bounded Collector.
@@ -180,7 +180,8 @@ pub struct FrozenEnvironmentIdentity {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentFreezeBindingRequest {
-    pub course_id: CourseId,
+    pub project_id: crate::ProjectId,
+    pub course_id: Option<CourseId>,
     pub actor_id: ActorId,
     pub expected_revision: Revision,
     pub collector_public_key_openssh: Option<String>,
@@ -227,13 +228,16 @@ pub struct EnvironmentFreezeBinding {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrozenSubmission {
     pub id: FrozenSubmissionId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub actor_id: ActorId,
     pub agent_run_id: AgentRunId,
     pub attempt: u32,
     pub manifest_revision: Revision,
     pub files: Vec<FrozenFile>,
     pub object: ArtifactRef,
+    /// SHA-256 of the exact canonical archive bytes addressed by `object`.
+    pub content_sha256: String,
     pub environment: FrozenEnvironmentIdentity,
     pub retention: RetentionSnapshot,
     pub system_facts: BTreeMap<String, String>,
@@ -250,6 +254,7 @@ impl FrozenSubmission {
             || self.object.store_binding.trim().is_empty()
             || self.object.object_version.trim().is_empty()
             || self.object.media_type.trim().is_empty()
+            || !is_sha256(&self.content_sha256)
             || self.environment.release_version == 0
             || self.retention.class != crate::RetentionClass::StudentSubmission
             || self.derived_archive.as_ref().is_some_and(|archive| {
@@ -280,6 +285,13 @@ impl FrozenSubmission {
         }
         Ok(())
     }
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn reject_duplicates(location: &'static str, rules: &[PathRule]) -> Result<(), SubmissionError> {

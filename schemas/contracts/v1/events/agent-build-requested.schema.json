@@ -1,16 +1,9 @@
 {
   "$defs": {
-    "ActorId": {
-      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
-      "type": "string"
-    },
     "AgentBuildRequested": {
       "additionalProperties": false,
       "description": "Complete, approved, immutable command consumed by the Agent build executor.",
       "properties": {
-        "approval": {
-          "$ref": "#/$defs/CandidateApproval"
-        },
         "idempotencyKey": {
           "type": "string"
         },
@@ -20,14 +13,9 @@
       },
       "required": [
         "request",
-        "approval",
         "idempotencyKey"
       ],
       "type": "object"
-    },
-    "ApprovalId": {
-      "description": "Strongly typed UUIDv7 identifier for `ApprovalId`.",
-      "type": "string"
     },
     "ArtifactId": {
       "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
@@ -111,12 +99,6 @@
       "additionalProperties": false,
       "description": "Approved, immutable build request.",
       "properties": {
-        "approvalId": {
-          "$ref": "#/$defs/ApprovalId"
-        },
-        "baseImageDigest": {
-          "type": "string"
-        },
         "builderBinding": {
           "type": "string"
         },
@@ -134,7 +116,14 @@
           "type": "string"
         },
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -165,19 +154,20 @@
         },
         "outputRepository": {
           "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
         }
       },
       "required": [
         "id",
-        "courseId",
+        "projectId",
         "candidateId",
         "candidateRevision",
-        "approvalId",
         "builderBinding",
         "context",
         "contextObjectKey",
         "dockerfilePath",
-        "baseImageDigest",
         "outputRepository",
         "network",
         "maxDurationMilliseconds",
@@ -191,60 +181,6 @@
       "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
       "type": "string"
     },
-    "CandidateApproval": {
-      "additionalProperties": false,
-      "description": "Human decision bound to an exact candidate and dependency identity.",
-      "properties": {
-        "actorId": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "candidateId": {
-          "$ref": "#/$defs/CandidateId"
-        },
-        "candidateRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "decidedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
-        },
-        "decision": {
-          "$ref": "#/$defs/CandidateDecision"
-        },
-        "id": {
-          "$ref": "#/$defs/ApprovalId"
-        },
-        "policyRevision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "reason": {
-          "type": "string"
-        },
-        "trustRevision": {
-          "$ref": "#/$defs/Revision"
-        }
-      },
-      "required": [
-        "id",
-        "candidateId",
-        "candidateRevision",
-        "policyRevision",
-        "trustRevision",
-        "actorId",
-        "decision",
-        "reason",
-        "decidedAt"
-      ],
-      "type": "object"
-    },
-    "CandidateDecision": {
-      "description": "Append-only candidate decision.",
-      "enum": [
-        "approved",
-        "rejected",
-        "withdrawn"
-      ],
-      "type": "string"
-    },
     "CandidateId": {
       "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
       "type": "string"
@@ -255,6 +191,10 @@
     },
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -285,7 +225,15 @@
       "$ref": "#/$defs/Sequence"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent projects omit this field."
     },
     "data": {
       "$ref": "#/$defs/AgentBuildRequested"
@@ -298,6 +246,10 @@
     },
     "id": {
       "$ref": "#/$defs/EventId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope for every platform event, including independent Work events."
     },
     "source": {
       "type": "string"
@@ -327,7 +279,7 @@
     "time",
     "datacontenttype",
     "dataschema",
-    "courseId",
+    "projectId",
     "aggregateRevision",
     "aggregateSequence",
     "traceId",

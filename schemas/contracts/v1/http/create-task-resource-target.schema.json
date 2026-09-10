@@ -1,0 +1,21 @@
+{
+  "$defs": {
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Explicit one-shot task identity allocated by the task owner before capacity is requested.",
+  "properties": {
+    "taskRunId": {
+      "$ref": "#/$defs/TaskRunId"
+    }
+  },
+  "required": [
+    "taskRunId"
+  ],
+  "title": "CreateTaskResourceTarget",
+  "type": "object"
+}

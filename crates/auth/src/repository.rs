@@ -1,7 +1,7 @@
 //! `PostgreSQL` compare-and-consume operations for one-time OIDC state.
 
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -35,7 +35,9 @@ pub struct BffSession {
     pub roles: Vec<PlatformRole>,
     /// Current authorization revision.
     pub authorization_revision: i64,
-    /// Absolute expiration bound to the ID-token expiry.
+    /// Absolute expiration selected by the Access browser-session policy.
+    /// This remains independent of the provider ID-token expiry after the
+    /// callback has verified that token.
     pub expires_at: OffsetDateTime,
     /// Idle expiration managed by the Access authority.
     pub idle_expires_at: OffsetDateTime,
@@ -52,7 +54,8 @@ pub struct CreateBffSession {
     pub roles: Vec<PlatformRole>,
     /// Current effective authorization revision.
     pub authorization_revision: i64,
-    /// Absolute session expiry.
+    /// Absolute session expiry selected by Access from configured
+    /// `session_ttl_seconds`, independent of the provider ID-token expiry.
     pub expires_at: OffsetDateTime,
     /// Idle timeout configured by deployment.
     pub idle_ttl: time::Duration,
@@ -60,6 +63,44 @@ pub struct CreateBffSession {
     pub oidc_sid: Option<String>,
     /// Signed ID-token logout hint to encrypt server-side.
     pub logout_hint: String,
+}
+
+/// Computes the absolute local BFF session expiry from the configured Access
+/// lifetime. The provider ID-token expiry is intentionally not an input: it is
+/// validated during callback authentication, while this value governs the
+/// local session after that event.
+pub fn configured_session_expiry(
+    issued_at: OffsetDateTime,
+    session_ttl: time::Duration,
+) -> Result<OffsetDateTime, RepositoryError> {
+    if session_ttl <= time::Duration::ZERO {
+        return Err(RepositoryError::SessionInvalid);
+    }
+    issued_at
+        .checked_add(session_ttl)
+        .filter(|expires_at| *expires_at > issued_at)
+        .ok_or(RepositoryError::SessionInvalid)
+}
+
+/// Bounds an idle renewal by the already-selected absolute session expiry.
+/// Renewals can move the idle deadline forward, but never extend the session's
+/// absolute lifetime.
+pub fn bounded_idle_expiry(
+    now: OffsetDateTime,
+    absolute_expiry: OffsetDateTime,
+    idle_ttl: time::Duration,
+) -> Result<OffsetDateTime, RepositoryError> {
+    if absolute_expiry <= now || idle_ttl <= time::Duration::ZERO {
+        return Err(RepositoryError::SessionInvalid);
+    }
+    let candidate = now
+        .checked_add(idle_ttl)
+        .ok_or(RepositoryError::SessionInvalid)?;
+    let idle_expiry = std::cmp::min(candidate, absolute_expiry);
+    if idle_expiry <= now {
+        return Err(RepositoryError::SessionInvalid);
+    }
+    Ok(idle_expiry)
 }
 
 /// Authoritative memberships read for a single authorization decision.
@@ -133,24 +174,6 @@ pub async fn cleanup_expired_auth_state(
     })
 }
 
-/// Ensures the mTLS principal is a currently active, non-expired registered service.
-pub async fn require_service_identity(
-    pool: &PgPool,
-    san_uri: &str,
-    now: OffsetDateTime,
-) -> Result<(), RepositoryError> {
-    let present: Option<bool> = sqlx::query_scalar(
-        "SELECT true FROM access.service_identities \
-         WHERE san_uri = $1 AND state = 'active' AND (expires_at IS NULL OR expires_at > $2)",
-    )
-    .bind(san_uri)
-    .bind(now)
-    .fetch_optional(pool)
-    .await?;
-    present.ok_or(RepositoryError::ServiceIdentityDenied)?;
-    Ok(())
-}
-
 /// Loads the complete membership truth for an actor without using an
 /// authorization-extending cache.
 pub async fn load_membership_snapshot(
@@ -189,6 +212,69 @@ pub async fn load_membership_snapshot(
     })
 }
 
+/// Inserts the initial active Project membership for a newly-created project.
+///
+/// Control calls this Access-owned helper while its project row is held in the
+/// same Postgres transaction. The database grant for the Control runtime is
+/// intentionally limited to this table; the helper therefore does not expose
+/// a generic membership mutation surface.
+pub async fn insert_project_owner_membership(
+    transaction: &mut Transaction<'_, Postgres>,
+    project_id: ProjectId,
+    actor_id: ActorId,
+    course_id: Option<CourseId>,
+    role: PlatformRole,
+) -> Result<ProjectMembership, RepositoryError> {
+    let revision = Revision::new(1).map_err(|_| RepositoryError::MembershipInvalid)?;
+    sqlx::query(
+        "INSERT INTO access.project_memberships \
+         (course_id, project_id, actor_id, role, state, revision, expires_at) \
+         VALUES ($1,$2,$3,$4,'active',1,NULL)",
+    )
+    .bind(course_id.map(CourseId::as_uuid))
+    .bind(project_id.as_uuid())
+    .bind(actor_id.as_uuid())
+    .bind(role_name(role))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(ProjectMembership {
+        course_id,
+        project_id,
+        actor_id,
+        role,
+        state: MembershipState::Active,
+        revision,
+        expires_at: None,
+    })
+}
+
+/// Verifies that an actor has a live course membership with the role used to
+/// associate a newly-created project. The check runs on the caller's
+/// transaction so project creation cannot commit an unvalidated association.
+pub async fn require_course_membership(
+    transaction: &mut Transaction<'_, Postgres>,
+    course_id: CourseId,
+    actor_id: ActorId,
+    role: PlatformRole,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM access.course_memberships \
+         WHERE course_id=$1 AND actor_id=$2 AND role=$3 AND state='active' \
+           AND (expires_at IS NULL OR expires_at > $4))",
+    )
+    .bind(course_id.as_uuid())
+    .bind(actor_id.as_uuid())
+    .bind(role_name(role))
+    .bind(now)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !exists {
+        return Err(RepositoryError::MembershipInvalid);
+    }
+    Ok(())
+}
+
 fn course_membership_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<CourseMembership, RepositoryError> {
@@ -206,7 +292,10 @@ fn project_membership_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ProjectMembership, RepositoryError> {
     Ok(ProjectMembership {
-        course_id: course_id(row.try_get("course_id")?)?,
+        course_id: row
+            .try_get::<Option<Uuid>, _>("course_id")?
+            .map(course_id)
+            .transpose()?,
         project_id: project_id(row.try_get("project_id")?)?,
         actor_id: actor_id(row.try_get("actor_id")?)?,
         role: parse_role(row.try_get::<String, _>("role")?.as_str())?,
@@ -289,16 +378,12 @@ pub async fn create_bff_session(
     input: CreateBffSession,
     now: OffsetDateTime,
 ) -> Result<BffSession, RepositoryError> {
+    let idle_expires_at = bounded_idle_expiry(now, input.expires_at, input.idle_ttl)?;
     let session_id = Uuid::now_v7();
     let csrf_token = CsrfToken::generate().map_err(|_| RepositoryError::CsrfGeneration)?;
     let csrf = key_ring.encrypt(csrf_token.expose().as_bytes(), session_id.as_bytes())?;
     let logout_hint = key_ring.encrypt(input.logout_hint.as_bytes(), session_id.as_bytes())?;
-    let idle_expires_at = std::cmp::min(now + input.idle_ttl, input.expires_at);
-    if input.expires_at <= now
-        || idle_expires_at <= now
-        || input.authorization_revision <= 0
-        || input.roles.is_empty()
-    {
+    if input.authorization_revision <= 0 || input.roles.is_empty() {
         return Err(RepositoryError::SessionInvalid);
     }
     let oidc_sid_sha256 = input
@@ -356,7 +441,7 @@ pub async fn load_bff_session(
     .await?
     .ok_or(RepositoryError::SessionRejected)?;
     let expires_at: OffsetDateTime = row.try_get("expires_at")?;
-    let idle_expires_at = std::cmp::min(now + idle_ttl, expires_at);
+    let idle_expires_at = bounded_idle_expiry(now, expires_at, idle_ttl)?;
     sqlx::query("UPDATE access.bff_sessions SET idle_expires_at = $2 WHERE session_id = $1")
         .bind(session_id)
         .bind(idle_expires_at)
@@ -579,4 +664,47 @@ pub enum RepositoryError {
     /// Authoritative membership data contained an invalid value.
     #[error("LW_AUTH_MEMBERSHIP_UNAVAILABLE")]
     MembershipInvalid,
+}
+
+#[cfg(test)]
+mod tests {
+    use time::{Duration, OffsetDateTime};
+
+    use super::{RepositoryError, bounded_idle_expiry, configured_session_expiry};
+
+    #[test]
+    fn configured_session_expiry_is_independent_of_id_token_expiry() {
+        let issued_at = OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_000);
+        let id_token_expiry = issued_at + Duration::seconds(5);
+        assert!(matches!(
+            configured_session_expiry(issued_at, Duration::seconds(900)),
+            Ok(session_expiry)
+                if session_expiry == issued_at + Duration::seconds(900)
+                    && session_expiry > id_token_expiry
+        ));
+    }
+
+    #[test]
+    fn idle_renewal_never_extends_absolute_expiry() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_050);
+        let absolute_expiry = OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_060);
+
+        assert!(matches!(
+            bounded_idle_expiry(now, absolute_expiry, Duration::seconds(300)),
+            Ok(idle_expiry) if idle_expiry == absolute_expiry
+        ));
+    }
+
+    #[test]
+    fn invalid_session_lifetime_is_rejected() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_000);
+        assert!(matches!(
+            configured_session_expiry(now, Duration::ZERO),
+            Err(RepositoryError::SessionInvalid)
+        ));
+        assert!(matches!(
+            bounded_idle_expiry(now, now, Duration::seconds(1)),
+            Err(RepositoryError::SessionInvalid)
+        ));
+    }
 }

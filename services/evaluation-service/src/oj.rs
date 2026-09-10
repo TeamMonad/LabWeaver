@@ -15,7 +15,6 @@ pub const OJ_EXECUTION_SCHEMA_VERSION: &str = "evaluation.labweaver.io/oj-execut
 pub const OJ_EVIDENCE_SCHEMA_VERSION: &str = "evaluation.labweaver.io/oj-evidence/v1";
 pub const OJ_EVIDENCE_RECEIPT_SCHEMA_VERSION: &str =
     "evaluation.labweaver.io/oj-evidence-receipt/v1";
-pub const APPROVED_CPP17_PROFILE: &str = "cpp17-approved-v1";
 pub const MAX_OJ_CASES: usize = 64;
 pub const MAX_COMPILE_WALL_MILLISECONDS: u64 = 120_000;
 pub const MAX_RUN_WALL_MILLISECONDS: u64 = 30_000;
@@ -108,8 +107,8 @@ impl OjExecutionRequest {
         {
             return Err(OjError::IdentityInvalid);
         }
-        if self.toolchain_profile != APPROVED_CPP17_PROFILE {
-            return Err(OjError::ToolchainUnapproved);
+        if !is_safe_relative_path(&self.toolchain_profile) {
+            return Err(OjError::ToolchainProfileInvalid);
         }
         if !is_sha256_digest(&self.toolchain_image_digest) {
             return Err(OjError::ImageIdentityInvalid);
@@ -119,7 +118,7 @@ impl OjExecutionRequest {
             OjExecutionPhase::Compile
                 if self.checker.is_some()
                     || !self.cases.is_empty()
-                    || self.evaluator_identity.is_some()
+                    || self.evaluator_identity.is_none()
                     || self.score_max_points != 0 =>
             {
                 return Err(OjError::ExecutionPlanInvalid);
@@ -607,8 +606,8 @@ pub enum OjError {
     SchemaVersionInvalid,
     #[error("OJ execution identity must use UUIDv7")]
     IdentityInvalid,
-    #[error("OJ toolchain profile is not approved")]
-    ToolchainUnapproved,
+    #[error("OJ toolchain profile path is invalid")]
+    ToolchainProfileInvalid,
     #[error("OJ worker image is not digest-pinned")]
     ImageIdentityInvalid,
     #[error("OJ path is unsafe")]
@@ -633,7 +632,7 @@ impl OjError {
         match self {
             Self::SchemaVersionInvalid => "LW_OJ_SCHEMA_VERSION_INVALID",
             Self::IdentityInvalid => "LW_OJ_IDENTITY_INVALID",
-            Self::ToolchainUnapproved => "LW_OJ_TOOLCHAIN_UNAPPROVED",
+            Self::ToolchainProfileInvalid => "LW_OJ_TOOLCHAIN_PROFILE_INVALID",
             Self::ImageIdentityInvalid => "LW_OJ_IMAGE_IDENTITY_INVALID",
             Self::PathUnsafe => "LW_OJ_PATH_UNSAFE",
             Self::FileBindingInvalid => "LW_OJ_FILE_BINDING_INVALID",

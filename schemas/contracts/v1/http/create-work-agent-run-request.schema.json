@@ -1,11 +1,19 @@
 {
   "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "PolicyId": {
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
       "type": "string"
     },
     "ProblemPackageId": {
       "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -27,6 +35,16 @@
   "additionalProperties": false,
   "description": "Public request for an AgentRun whose Environment candidate is explicitly a Resource-managed\nWork environment. This is deliberately separate from [`CreateAgentRunRequest`]: the legacy\nroute always requests an Experiment candidate and must never gain an implicit class default.",
   "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "packageId": {
       "$ref": "#/$defs/ProblemPackageId"
     },
@@ -39,11 +57,15 @@
     "policyRevision": {
       "$ref": "#/$defs/Revision"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "requestedRuntime": {
       "$ref": "#/$defs/RuntimeKind"
     }
   },
   "required": [
+    "projectId",
     "packageId",
     "packageRevision",
     "policyId",

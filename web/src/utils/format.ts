@@ -24,6 +24,20 @@ export function idempotencyKey(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+/** Generate a UUIDv7 for a client-created aggregate identity. */
+export function newUuidV7(): string {
+  const timestamp = Date.now().toString(16).padStart(12, '0')
+  // 18 hex digits leave room for the UUID version and variant nibbles.
+  const random = new Uint8Array(9)
+  const cryptoApi = typeof globalThis.crypto?.getRandomValues === 'function' ? globalThis.crypto : null
+  if (cryptoApi) cryptoApi.getRandomValues(random)
+  else {
+    for (let index = 0; index < random.length; index += 1) random[index] = Math.floor(Math.random() * 256)
+  }
+  const randomHex = Array.from(random, (value) => value.toString(16).padStart(2, '0')).join('')
+  return `${timestamp.slice(0, 8)}-${timestamp.slice(8)}-7${randomHex.slice(0, 3)}-8${randomHex.slice(3, 6)}-${randomHex.slice(6)}`
+}
+
 /**
  * Build the If-Match header value for a revision.
  *

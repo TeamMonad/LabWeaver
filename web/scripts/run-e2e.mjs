@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process'
-import { readFile, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { validateConfiguration, buildReport, writeReport } from './verify-config.mjs'
+import { validateConfiguration } from './verify-config.mjs'
 
 const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REQUIRED_VALUES = Object.freeze([
@@ -10,33 +10,23 @@ const REQUIRED_VALUES = Object.freeze([
   'LABWEAVER_TEACHER_PASSWORD_FILE',
   'LABWEAVER_STUDENT_USERNAME',
   'LABWEAVER_STUDENT_PASSWORD_FILE',
-  'LABWEAVER_E2E_AGENT_RUN_ID',
-  'LABWEAVER_E2E_CONTAINER_ENVIRONMENT_ID',
-  'LABWEAVER_E2E_VM_ENVIRONMENT_ID',
-  'LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE',
-  'LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE',
-  'LABWEAVER_E2E_CONTROL_CHANNEL_COORDINATION_DIR',
+  'LABWEAVER_PLATFORM_ADMIN_USERNAME',
+  'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE',
 ])
 const PASSWORD_FILES = Object.freeze([
   'LABWEAVER_TEACHER_PASSWORD_FILE',
   'LABWEAVER_STUDENT_PASSWORD_FILE',
+  'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE',
 ])
-const CONSOLE_CASE_FILES = Object.freeze([
-  'LABWEAVER_E2E_CONTAINER_CONSOLE_CASES_FILE',
-  'LABWEAVER_E2E_KUBEVIRT_CONSOLE_CASES_FILE',
-])
-const REQUIRED_CONSOLE_CASES = Object.freeze([
-  'positive', 'revoke', 'expiry', 'stop', 'delete', 'control-channel-loss',
-])
-export const LIVE_PROJECTS = Object.freeze(['setup', 'teacher', 'student'])
+export const RUNTIME_PROJECTS = Object.freeze(['setup', 'teacher', 'student', 'platform-admin'])
 
-export function livePlaywrightArguments() {
+export function playwrightArguments() {
   return [
     'node_modules/@playwright/test/cli.js',
     'test',
     '--config=playwright.config.mjs',
     '--workers=1',
-    ...LIVE_PROJECTS.flatMap((project) => ['--project', project]),
+    ...RUNTIME_PROJECTS.flatMap((project) => ['--project', project]),
   ]
 }
 
@@ -69,43 +59,13 @@ async function validateRuntimeInputs(environment, diagnostics) {
       fail(`PW_AUTH_PASSWORD_FILE_INVALID:${name}`, diagnostics)
     }
   }
-  for (const name of CONSOLE_CASE_FILES) {
-    const fileName = environment[name]?.trim()
-    if (!fileName) continue
-    try {
-      const metadata = await stat(fileName)
-      if (!metadata.isFile() || metadata.size < 1 || metadata.size > 16_384) {
-        fail(`PW_CONSOLE_CASE_FILE_INVALID:${name}`, diagnostics)
-        continue
-      }
-      const cases = JSON.parse(await readFile(fileName, 'utf8'))
-      if (
-        !cases || typeof cases !== 'object' || Array.isArray(cases)
-        || Object.keys(cases).sort().join(',') !== [...REQUIRED_CONSOLE_CASES].sort().join(',')
-        || Object.values(cases).some((id) => typeof id !== 'string' || !id.trim())
-        || new Set(Object.values(cases)).size !== REQUIRED_CONSOLE_CASES.length
-      ) fail(`PW_CONSOLE_CASE_FILE_INVALID:${name}`, diagnostics)
-    } catch {
-      fail(`PW_CONSOLE_CASE_FILE_INVALID:${name}`, diagnostics)
-    }
-  }
-  const coordinationDirectory = environment.LABWEAVER_E2E_CONTROL_CHANNEL_COORDINATION_DIR?.trim()
-  if (coordinationDirectory) {
-    try {
-      if (!(await stat(coordinationDirectory)).isDirectory()) {
-        fail('PW_CONTROL_CHANNEL_COORDINATION_DIR_INVALID', diagnostics)
-      }
-    } catch {
-      fail('PW_CONTROL_CHANNEL_COORDINATION_DIR_INVALID', diagnostics)
-    }
-  }
 }
 
 function executePlaywright(environment) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      livePlaywrightArguments(),
+      playwrightArguments(),
       { cwd: WEB_ROOT, env: environment, stdio: 'inherit' },
     )
     child.once('error', (error) => resolve({ exitCode: 1, error: error.message }))
@@ -117,52 +77,28 @@ function executePlaywright(environment) {
 }
 
 export async function runE2e({ environment = process.env, execute = executePlaywright } = {}) {
-  const { diagnostics } = await validateConfiguration({
-    requirementsBaselineHead: environment.PW_REQUIREMENTS_BASELINE_HEAD,
-  })
+  const { diagnostics } = await validateConfiguration()
   const baseUrl = environment.LABWEAVER_BASE_URL
   if (!baseUrl) fail('PW_BASE_URL_REQUIRED', diagnostics)
   else if (!isHttpUrl(baseUrl)) fail('PW_BASE_URL_INVALID', diagnostics)
   if (diagnostics.length === 0) await validateRuntimeInputs(environment, diagnostics)
 
   if (diagnostics.length > 0) {
-    const report = buildReport({ diagnostics, overall: 'blocked' })
-    await writeReport(report, {
-      reportPath: environment.LABWEAVER_E2E_REPORT_PATH
-        ? path.resolve(environment.LABWEAVER_E2E_REPORT_PATH)
-        : undefined,
-    })
-    return { exitCode: 2, report }
+    return { exitCode: 2, diagnostics }
   }
 
-  const execution = await execute({ ...environment, LABWEAVER_DATA_MODE: 'live' })
+  const execution = await execute(environment)
   const passed = execution.exitCode === 0
-  const runtimeDiagnostics = passed ? [] : ['PW_RUNTIME_E2E_FAILED']
-  const report = buildReport({
-    diagnostics: runtimeDiagnostics,
-    overall: passed ? 'passed' : 'failed',
-    checks: {
-      playwright: {
-        status: passed ? 'passed' : 'failed',
-        exitCode: execution.exitCode,
-        ...(execution.error ? { error: execution.error } : {}),
-        ...(execution.signal ? { signal: execution.signal } : {}),
-      },
-    },
-    runtimeE2e: 'executed',
-    evidenceLevel: 'E3',
-  })
-  await writeReport(report, {
-    reportPath: environment.LABWEAVER_E2E_REPORT_PATH
-      ? path.resolve(environment.LABWEAVER_E2E_REPORT_PATH)
-      : undefined,
-  })
-  return { exitCode: passed ? 0 : 1, report }
+  return {
+    exitCode: passed ? 0 : 1,
+    diagnostics: passed ? [] : ['PW_RUNTIME_E2E_FAILED'],
+    execution,
+  }
 }
 
 async function main() {
   const result = await runE2e()
-  for (const code of result.report.diagnostics) console.error(code)
+  for (const code of result.diagnostics) console.error(code)
   process.exitCode = result.exitCode
 }
 

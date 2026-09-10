@@ -835,7 +835,6 @@ fn verify_rust_toolchain_inputs(
         .collect::<Vec<_>>();
     let builder_marker = format!("rust:{rust_toolchain}-");
     let toolchain_argument = format!("ARG RUST_TOOLCHAIN={rust_toolchain}");
-    let controller_toolchain = format!("{rust_toolchain}-x86_64-unknown-linux-gnu");
     let build_inputs = [
         ("containers/Containerfile.rust", toolchain_argument.as_str()),
         ("access-gateway/Dockerfile", toolchain_argument.as_str()),
@@ -846,10 +845,6 @@ fn verify_rust_toolchain_inputs(
         (
             "containers/Containerfile.oj-cpp17",
             toolchain_argument.as_str(),
-        ),
-        (
-            "containers/Containerfile.controller",
-            controller_toolchain.as_str(),
         ),
         ("tools/xtask-container.sh", rust_toolchain),
     ];

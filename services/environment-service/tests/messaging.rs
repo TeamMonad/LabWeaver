@@ -14,6 +14,7 @@ use contracts::environment::{
     EnvironmentLifecycleCommandData, EnvironmentOperationKind,
 };
 use contracts::events::{DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
+use contracts::resource::WorkloadResources;
 use contracts::{ActorId, EventId, Sequence};
 use environment_service::{
     EnvironmentProvider, JetStreamCommandConsumer, JetStreamEventPublisher, LifecycleCommand,
@@ -40,11 +41,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         .max_connections(4)
         .connect(&database_url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    support::apply_environment_migrations(&pool).await?;
 
     let nats = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
@@ -108,6 +105,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         time: timestamp("2026-07-14T00:00:00.000Z"),
         datacontenttype: "application/json".to_owned(),
         dataschema: format!("{DATA_SCHEMA_BASE}/environment-lifecycle-requested.schema.json"),
+        project_id: instance.project_id,
         course_id: instance.course_id,
         aggregate_revision: revision(1),
         aggregate_sequence: Sequence(1),
@@ -128,6 +126,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                 reset_target: None,
             },
             create: Some(EnvironmentCreateSpec {
+                project_id: instance.project_id,
                 course_id: instance.course_id,
                 owner_actor_id: instance.owner_id,
                 display_label: instance.display_label.clone(),
@@ -182,6 +181,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
         time: timestamp("2026-07-14T00:01:00.000Z"),
         datacontenttype: "application/json".to_owned(),
         dataschema: format!("{DATA_SCHEMA_BASE}/environment-lifecycle-requested.schema.json"),
+        project_id: instance.project_id,
         course_id: instance.course_id,
         aggregate_revision: instance.revision,
         aggregate_sequence: Sequence(2),
@@ -239,12 +239,21 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                 version: 1,
                 state: EnvironmentLeaseState::Active,
                 authorization: Some(EnvironmentLeaseAuthorization {
+                    resource_request_id: contracts::ResourceRequestId::new(),
                     lease_id: request.lease_id,
                     lease_revision: revision(4),
                     environment_id: request.environment_id,
+                    project_id: request.project_id,
                     course_id: request.course_id,
                     owner_actor_id: request.owner_actor_id,
                     capacity_binding: request.capacity_binding,
+                    approved_resources: WorkloadResources {
+                        cpu_millicores: 1000,
+                        memory_bytes: 1_073_741_824,
+                        storage_bytes: 1_073_741_824,
+                        gpu: None,
+                    },
+                    gpu_allocation: None,
                     active_from: timestamp("2026-01-01T00:00:00.000Z"),
                     expires_at,
                 }),
@@ -257,11 +266,13 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     });
 
     let work_environment_id = contracts::EnvironmentId::new();
-    let work_course_id = contracts::CourseId::new();
+    let work_project_id = contracts::ProjectId::new();
+    let work_course_id = Some(contracts::CourseId::new());
     let work_owner_id = contracts::ActorId::new();
     let work_lease_id = contracts::LeaseId::new();
     let mut work_create = create_command.clone();
     work_create.id = EventId::new();
+    work_create.project_id = work_project_id;
     work_create.course_id = work_course_id;
     work_create.trace_id = "trace-work-create-jetstream".to_owned();
     work_create.data.idempotency_key = "create-work-key-jetstream".to_owned();
@@ -269,6 +280,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     work_create.data.command.actor_id = work_owner_id;
     work_create.data.command.trace_id = work_create.trace_id.clone();
     work_create.data.create = Some(EnvironmentCreateSpec {
+        project_id: work_project_id,
         course_id: work_course_id,
         owner_actor_id: work_owner_id,
         display_label: "Work environment".to_owned(),

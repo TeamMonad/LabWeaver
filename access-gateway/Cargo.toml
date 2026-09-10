@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+auth = { path = "../crates/auth" }
 contracts = { path = "../crates/contracts" }
 telemetry = { path = "../crates/telemetry" }
 reqwest.workspace = true

@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "ProblemPackageId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact scope used when an internal caller resolves one Agent-owned generated artifact.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "packageId": {
+      "$ref": "#/$defs/ProblemPackageId"
+    },
+    "packageRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "projectId",
+    "packageId",
+    "packageRevision"
+  ],
+  "title": "GeneratedArtifactQuery",
+  "type": "object"
+}

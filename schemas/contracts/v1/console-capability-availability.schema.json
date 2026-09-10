@@ -33,6 +33,10 @@
       ],
       "type": "object"
     },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "EnvironmentClass": {
       "description": "Environment business class retained from the v2.1 architecture.",
       "enum": [
@@ -47,6 +51,10 @@
     },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -69,6 +77,16 @@
     },
     "accessGrantRevision": {
       "$ref": "#/$defs/Revision"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "environmentClass": {
       "$ref": "#/$defs/EnvironmentClass"
@@ -97,11 +115,15 @@
           "type": "null"
         }
       ]
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     }
   },
   "required": [
     "accessGrantId",
     "accessGrantRevision",
+    "projectId",
     "environmentId",
     "environmentClass",
     "environmentRevision",

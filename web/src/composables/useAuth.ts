@@ -2,14 +2,13 @@ import { ref, computed } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
-import { IS_FIXTURE } from '@/config/dataMode'
 
 interface BffUser {
   expired: boolean
   profile: {
     actor_id: string
     roles: string[]
-    course_id?: string
+    course_id?: string | null
   }
 }
 
@@ -76,10 +75,6 @@ export function useAuth() {
       error.value = new Error('OIDC is not configured')
       return
     }
-    if (__IS_FIXTURE__ && IS_FIXTURE) {
-      window.location.assign('/')
-      return
-    }
     isLoading.value = true
     error.value = null
     try {
@@ -127,11 +122,6 @@ export function useAuth() {
         user.value = null
         window.location.assign('/')
       } else if (userManager) {
-        if (__IS_FIXTURE__ && IS_FIXTURE) {
-          const { signOutFixtureDemo } = await import('@/fixture/devAuth')
-          signOutFixtureDemo()
-          return
-        }
         await userManager.signoutRedirect()
         user.value = null
       }

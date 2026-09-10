@@ -1,7 +1,19 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "EnvironmentId": {
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
     "ObservedEnvironmentState": {
@@ -22,6 +34,10 @@
       ],
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -33,8 +49,21 @@
   "additionalProperties": false,
   "description": "Minimal Resource-visible cleanup readback. Provider handles, endpoints and\nuser content never cross this boundary.",
   "properties": {
+    "capacityBinding": {
+      "type": "string"
+    },
     "cleanupComplete": {
       "type": "boolean"
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "diagnosticCode": {
       "type": [
@@ -45,8 +74,20 @@
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
     },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision"
+    },
     "observedState": {
       "$ref": "#/$defs/ObservedEnvironmentState"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "revision": {
       "$ref": "#/$defs/Revision"
@@ -61,6 +102,11 @@
   "required": [
     "version",
     "environmentId",
+    "projectId",
+    "ownerActorId",
+    "leaseId",
+    "leaseRevision",
+    "capacityBinding",
     "revision",
     "observedState",
     "cleanupComplete"

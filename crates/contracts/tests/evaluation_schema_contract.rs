@@ -1,14 +1,19 @@
 //! Contract and negative tests for `EvaluationSpec` v1.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use contracts::authoring::{PackageFile, ProblemPackage};
 use contracts::evaluation::{
-    AggregationKind, CheckerSpec, CollectorSpec, DeterministicRunnerSpec, EvaluationSpec,
+    APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION, AggregationKind, ApprovedProgramProfile, CheckerSpec,
+    CollectorSpec, DeterministicRunnerSpec, EvaluationExecutionBinding, EvaluationSpec,
     EvaluationSpecError, EvaluationStep, GoalReview, ProgramPhase, evaluation_spec_schema,
     goal_review_schema,
 };
+use contracts::foundation::{ArtifactRef, RetentionClass, RetentionDisposition, RetentionSnapshot};
+use contracts::{ArtifactId, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision};
 
 const OJ_FIXTURE: &str = include_str!("fixtures/evaluation/oj/evaluation.yaml");
 const LINUX_FIXTURE: &str = include_str!("fixtures/evaluation/linux/evaluation.yaml");
@@ -19,6 +24,135 @@ fn oj_fixture() -> String {
 
 fn linux_fixture() -> String {
     LINUX_FIXTURE.replace("\r\n", "\n")
+}
+
+fn execution_binding() -> Result<EvaluationExecutionBinding, Box<dyn Error>> {
+    let artifact_id = ArtifactId::new();
+    let project_id = ProjectId::new();
+    let course_id = CourseId::new();
+    let package = ProblemPackage {
+        id: ProblemPackageId::new(),
+        project_id,
+        course_id: Some(course_id),
+        revision: Revision::new(1)?,
+        files: vec![PackageFile {
+            path: "program.json".to_owned(),
+            object: ArtifactRef {
+                artifact_id,
+                store_binding: "test-store".to_owned(),
+                object_version: "v1".to_owned(),
+                size_bytes: 32,
+                media_type: "application/json".to_owned(),
+            },
+        }],
+        retention: RetentionSnapshot {
+            policy_id: PolicyId::new(),
+            policy_revision: Revision::new(1)?,
+            class: RetentionClass::CourseMaterial,
+            retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+            disposition: RetentionDisposition::Delete,
+        },
+        completed_at: "2026-01-01T00:00:00.000Z".parse()?,
+    };
+    let mut object_locators = BTreeMap::new();
+    object_locators.insert(artifact_id, "problem-packages/test/program.json".to_owned());
+    Ok(EvaluationExecutionBinding {
+        package,
+        object_locators,
+    })
+}
+
+#[test]
+fn execution_binding_requires_exact_package_artifact_coverage() -> Result<(), Box<dyn Error>> {
+    let mut binding = execution_binding()?;
+    binding.validate()?;
+    binding
+        .object_locators
+        .insert(ArtifactId::new(), "problem-packages/test/extra".to_owned());
+    assert!(binding.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn approved_program_profile_validates_direct_exec_tokens_by_phase() -> Result<(), Box<dyn Error>> {
+    let profile = ApprovedProgramProfile {
+        schema_version: APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION.to_owned(),
+        compile_argv: Some(vec![
+            "cc".to_owned(),
+            "{source}".to_owned(),
+            "-o".to_owned(),
+            "{binary}".to_owned(),
+        ]),
+        run_argv: vec!["{binary}".to_owned()],
+        support_files: vec!["grader/helpers.py".to_owned()],
+    };
+    profile.validate_for_phase(ProgramPhase::Compile)?;
+    profile.validate_for_phase(ProgramPhase::Test)?;
+
+    let invalid = ApprovedProgramProfile {
+        schema_version: APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION.to_owned(),
+        compile_argv: None,
+        run_argv: vec!["{arbitrary_path}".to_owned()],
+        support_files: Vec::new(),
+    };
+    assert!(invalid.validate_for_phase(ProgramPhase::Test).is_err());
+    let no_compile = ApprovedProgramProfile {
+        schema_version: APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION.to_owned(),
+        compile_argv: None,
+        run_argv: vec!["{binary}".to_owned()],
+        support_files: Vec::new(),
+    };
+    assert!(
+        no_compile
+            .validate_for_phase(ProgramPhase::Compile)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn approved_program_profile_support_files_are_explicit_bounded_and_relative()
+-> Result<(), Box<dyn Error>> {
+    let mut profile = ApprovedProgramProfile {
+        schema_version: APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION.to_owned(),
+        compile_argv: None,
+        run_argv: vec!["{binary}".to_owned()],
+        support_files: vec!["grader/helpers.py".to_owned()],
+    };
+    profile.validate()?;
+
+    profile.support_files.push("grader/helpers.py".to_owned());
+    assert!(
+        profile.validate().is_err(),
+        "duplicate support files must fail"
+    );
+
+    profile.support_files = vec!["../private/tests.py".to_owned()];
+    assert!(
+        profile.validate().is_err(),
+        "escaping the package must fail"
+    );
+
+    profile.support_files = (0..=128)
+        .map(|index| format!("grader/helper-{index}.py"))
+        .collect();
+    assert!(
+        profile.validate().is_err(),
+        "support file count must be bounded"
+    );
+    Ok(())
+}
+
+#[test]
+fn approved_program_profile_missing_support_files_means_no_extra_authorization()
+-> Result<(), Box<dyn Error>> {
+    let profile: ApprovedProgramProfile = serde_json::from_value(serde_json::json!({
+        "schemaVersion": APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION,
+        "runArgv": ["{binary}"]
+    }))?;
+    assert!(profile.support_files.is_empty());
+    profile.validate()?;
+    Ok(())
 }
 
 #[test]

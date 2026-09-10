@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
@@ -13,13 +17,23 @@
   "additionalProperties": false,
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "displayLabel": {
       "type": [
         "string",
         "null"
       ]
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "releaseId": {
       "$ref": "#/$defs/ReleaseId"
@@ -31,7 +45,7 @@
     }
   },
   "required": [
-    "courseId",
+    "projectId",
     "releaseId",
     "releaseVersion"
   ],

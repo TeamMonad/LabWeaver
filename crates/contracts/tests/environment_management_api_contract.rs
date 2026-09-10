@@ -3,15 +3,15 @@
 use std::str::FromStr;
 
 use contracts::environment::{
-    EnvironmentOperationKind, EnvironmentOperationSnapshot, EnvironmentOperationStatus,
-    PublicEnvironmentOperationPhase,
+    EnvironmentOperationKind, EnvironmentOperationSnapshot, OperationState,
 };
 use contracts::http::{
     CreateEnvironmentRequest, EnvironmentInventoryQuery, EnvironmentOperationListQuery,
     EventStreamQuery, MAX_PAGE_LIMIT,
 };
 use contracts::{
-    CourseId, EnvironmentId, OperationId, ReleaseId, Revision, StreamSequence, UtcTimestamp,
+    CourseId, EnvironmentId, OperationId, ProjectId, ReleaseId, Revision, StreamSequence,
+    UtcTimestamp,
 };
 use serde_json::Value;
 
@@ -67,9 +67,10 @@ fn stream_sequence_is_lossless_and_canonical_on_every_public_resume_surface()
 fn inventory_and_operation_queries_enforce_bounded_opaque_pagination()
 -> Result<(), Box<dyn std::error::Error>> {
     let course_id = CourseId::from_str("01900000-0000-7000-8000-000000000001")?;
+    let project_id = ProjectId::new();
     let query = EnvironmentInventoryQuery {
-        course_id,
-        project_id: None,
+        project_id,
+        course_id: Some(course_id),
         runtime_kind: None,
         class: None,
         desired_state: None,
@@ -97,7 +98,8 @@ fn inventory_and_operation_queries_enforce_bounded_opaque_pagination()
     assert!(invalid_cursor.validate().is_err());
 
     let create = CreateEnvironmentRequest {
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         release_id: ReleaseId::from_str("01900000-0000-7000-8000-000000000002")?,
         release_version: 1,
         display_label: Some("Linux systems lab".to_owned()),
@@ -115,18 +117,12 @@ fn operation_snapshot_requires_consistent_terminal_facts() -> Result<(), Box<dyn
         environment_id: EnvironmentId::from_str("01900000-0000-7000-8000-000000000001")?,
         operation_id: OperationId::from_str("01900000-0000-7000-8000-000000000002")?,
         kind: EnvironmentOperationKind::Start,
-        state: EnvironmentOperationStatus::TimedOut,
+        state: OperationState::Failed,
         accepted_revision: Revision::new(4)?,
-        current_revision: Revision::new(5)?,
         accepted_at,
-        started_at: Some(accepted_at),
-        updated_at: terminal_at,
         terminal_at: Some(terminal_at),
         deadline_at: terminal_at,
-        timed_out_at: Some(terminal_at),
         cleanup_started_at: None,
-        cleanup_deadline_at: None,
-        provider_phase: Some(PublicEnvironmentOperationPhase::Provisioning),
         attempt: 3,
         max_attempts: 3,
         retry_eligible: false,
@@ -134,12 +130,8 @@ fn operation_snapshot_requires_consistent_terminal_facts() -> Result<(), Box<dyn
         diagnostic_code: Some(contracts::DiagnosticCode::parse(
             "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
         )?),
-        request_id: "request-81".to_owned(),
         trace_id: "trace-81".to_owned(),
-        last_changed_stream_sequence: StreamSequence(9),
     };
-    assert!(snapshot.validate().is_ok());
-    snapshot.retry_eligible = true;
     assert!(snapshot.validate().is_ok());
     snapshot.cancel_eligible = true;
     assert!(snapshot.validate().is_err());
@@ -176,7 +168,12 @@ fn generated_openapi_closes_inventory_operation_and_grant_discovery_gaps()
     assert!(
         parameters
             .iter()
-            .any(|parameter| { parameter["name"] == "courseId" && parameter["required"] == true })
+            .any(|parameter| { parameter["name"] == "projectId" && parameter["required"] == true })
+    );
+    assert_eq!(inventory["x-labweaver-scope"], "project");
+    assert_eq!(
+        paths["/api/v1/environments"]["post"]["x-labweaver-scope"],
+        "project"
     );
     assert!(inventory["responses"].get("410").is_some());
     assert!(inventory["responses"].get("409").is_some());
@@ -204,7 +201,7 @@ fn generated_openapi_closes_inventory_operation_and_grant_discovery_gaps()
         "../contracts/v1/http/environment-operation-accepted.schema.json"
     );
 
-    let stream = &paths["/api/v1/events"]["get"];
+    let stream = &paths["/api/v1/projects/{projectId}/events"]["get"];
     assert!(
         stream["responses"]["200"]["content"]
             .get("text/event-stream")

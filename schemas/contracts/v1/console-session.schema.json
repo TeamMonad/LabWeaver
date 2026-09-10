@@ -56,12 +56,20 @@
       ],
       "type": "string"
     },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "EnvironmentId": {
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
     },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -104,6 +112,16 @@
         }
       ]
     },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "diagnosticCode": {
       "type": [
         "string",
@@ -134,6 +152,9 @@
     },
     "openedAt": {
       "$ref": "#/$defs/UtcTimestamp"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "revision": {
       "$ref": "#/$defs/Revision"
@@ -169,6 +190,7 @@
     "bffSessionId",
     "accessGrantId",
     "accessGrantRevision",
+    "projectId",
     "environmentId",
     "environmentRevision",
     "revision",

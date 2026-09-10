@@ -24,6 +24,7 @@ RUN --mount=type=cache,id=labweaver-gateway-cargo-registry,target=/usr/local/car
 RUN --network=none \
     --mount=type=cache,id=labweaver-gateway-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=labweaver-gateway-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=labweaver-gateway-cargo-target,target=/tmp/labweaver-gateway-target,sharing=locked \
     test -n "${SOURCE_COMMIT}" && test -n "${SOURCE_DATE_EPOCH}" && \
     CARGO_TARGET_DIR=/tmp/labweaver-gateway-target \
       cargo build --release --locked --offline --package access-gateway && \

@@ -163,14 +163,21 @@ impl ReconcileWorker {
         let Some(lease) = self.store.claim_due(worker_id, self.lease_duration).await? else {
             return Ok(ReconcileWorkerOutcome::Idle);
         };
-        self.store.heartbeat(&lease, self.lease_duration).await?;
+        if let Err(error) = self.store.heartbeat(&lease, self.lease_duration).await {
+            if is_ownership_loss(&error) {
+                return Ok(ReconcileWorkerOutcome::LeaseLost);
+            }
+            return Err(error.into());
+        }
         if now > lease.instance.operation.deadline_at
             && lease.instance.operation.cleanup_started_at.is_none()
         {
             let cleanup_deadline =
                 self.cleanup_deadline(now, lease.instance.operation.max_attempts)?;
             let updated = begin_timeout_cleanup(&lease.instance, now, cleanup_deadline)?;
-            self.store.save_reconciled(&lease, &updated).await?;
+            if !self.persist_reconciled(&lease, &updated).await? {
+                return Ok(ReconcileWorkerOutcome::LeaseLost);
+            }
             return Ok(ReconcileWorkerOutcome::Advanced {
                 state: updated.observed_state,
                 terminal: false,
@@ -178,6 +185,7 @@ impl ReconcileWorker {
         }
         match self.reconciler.execute_once(&lease.instance, now).await {
             Ok(observation) => {
+                let returned_observation = (observation.next_state, observation.operation_complete);
                 let updated = match apply_provider_observation(
                     &lease.instance,
                     lease.instance.operation.id,
@@ -185,12 +193,15 @@ impl ReconcileWorker {
                 ) {
                     Ok(updated) => updated,
                     Err(crate::LifecycleError::ProviderObservationInvalid) => {
+                        log_invalid_provider_observation(&lease.instance, returned_observation);
                         let updated = apply_provider_failure(
                             &lease.instance,
                             lease.instance.operation.id,
                             "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
                         )?;
-                        self.store.save_reconciled(&lease, &updated).await?;
+                        if !self.persist_reconciled(&lease, &updated).await? {
+                            return Ok(ReconcileWorkerOutcome::LeaseLost);
+                        }
                         return Ok(ReconcileWorkerOutcome::Failed {
                             diagnostic_code: "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
                         });
@@ -204,7 +215,9 @@ impl ReconcileWorker {
                 // same observation, inflates the public revision, and starves the cluster.
                 let updated =
                     Self::defer_non_terminal_observation(&updated, now, self.retry_delay)?;
-                self.store.save_reconciled(&lease, &updated).await?;
+                if !self.persist_reconciled(&lease, &updated).await? {
+                    return Ok(ReconcileWorkerOutcome::LeaseLost);
+                }
                 Ok(ReconcileWorkerOutcome::Advanced {
                     state: updated.observed_state,
                     terminal: matches!(
@@ -228,7 +241,9 @@ impl ReconcileWorker {
                             diagnostic_code,
                             retry_at,
                         )?;
-                        self.store.save_reconciled(&lease, &updated).await?;
+                        if !self.persist_reconciled(&lease, &updated).await? {
+                            return Ok(ReconcileWorkerOutcome::LeaseLost);
+                        }
                         return Ok(ReconcileWorkerOutcome::RetryScheduled {
                             attempt: updated.operation.attempt,
                         });
@@ -239,9 +254,28 @@ impl ReconcileWorker {
                     lease.instance.operation.id,
                     diagnostic_code,
                 )?;
-                self.store.save_reconciled(&lease, &updated).await?;
+                if !self.persist_reconciled(&lease, &updated).await? {
+                    return Ok(ReconcileWorkerOutcome::LeaseLost);
+                }
                 Ok(ReconcileWorkerOutcome::Failed { diagnostic_code })
             }
+        }
+    }
+
+    /// Persists only while this worker still owns the aggregate and operation lease.
+    ///
+    /// A concurrent lifecycle command or another reconciler may legitimately win the
+    /// revision/lease fence after Provider I/O.  That result is an expected stale-worker
+    /// outcome; all other store failures remain fatal to the reconcile loop.
+    async fn persist_reconciled(
+        &self,
+        lease: &crate::LeasedEnvironment,
+        updated: &EnvironmentInstance,
+    ) -> Result<bool, ReconcileWorkerError> {
+        match self.store.save_reconciled(lease, updated).await {
+            Ok(()) => Ok(true),
+            Err(error) if is_ownership_loss(&error) => Ok(false),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -290,6 +324,8 @@ impl ReconcileWorker {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReconcileWorkerOutcome {
     Idle,
+    /// The aggregate revision or operation lease changed while this worker was reconciling.
+    LeaseLost,
     Advanced {
         state: ObservedEnvironmentState,
         terminal: bool,
@@ -300,6 +336,30 @@ pub enum ReconcileWorkerOutcome {
     Failed {
         diagnostic_code: &'static str,
     },
+}
+
+fn is_ownership_loss(error: &EnvironmentStoreError) -> bool {
+    matches!(
+        error,
+        EnvironmentStoreError::RevisionConflict | EnvironmentStoreError::LeaseLost
+    )
+}
+
+fn log_invalid_provider_observation(
+    instance: &EnvironmentInstance,
+    returned_observation: (ObservedEnvironmentState, bool),
+) {
+    tracing::error!(
+        event = "environment.reconcile.provider_observation_invalid",
+        environment_id = %instance.id,
+        operation_id = %instance.operation.id,
+        operation_kind = ?instance.operation.kind,
+        current_observed_state = ?instance.observed_state,
+        desired_state = ?instance.desired_state,
+        returned_next_state = ?returned_observation.0,
+        returned_operation_complete = returned_observation.1,
+        diagnostic_code = "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID"
+    );
 }
 
 impl Reconciler {
@@ -377,7 +437,13 @@ pub fn next_action(
         (Operation::Restart, State::Provisioning) => Ok(ReconcileAction::Restart),
         (Operation::Reset, State::Provisioning) => Ok(ReconcileAction::Reset),
         (Operation::Retry | Operation::Recover, State::Updating) => Ok(ReconcileAction::Configure),
-        (Operation::Expire, State::Stopped) | (_, State::Deleting) => Ok(ReconcileAction::Cleanup),
+        (Operation::Expire | Operation::Retry | Operation::Recover, State::Stopped)
+            if instance.desired_state
+                == contracts::environment::DesiredEnvironmentState::Deleted =>
+        {
+            Ok(ReconcileAction::Cleanup)
+        }
+        (_, State::Deleting) => Ok(ReconcileAction::Cleanup),
         (_, State::Provisioning | State::Updating) => Ok(ReconcileAction::Observe),
         _ => Err(ReconcileError::NoAction),
     }
@@ -466,7 +532,7 @@ mod tests {
         ObservedEnvironmentState, OperationState,
     };
     use contracts::{
-        ActorId, CourseId, EnvironmentId, OperationId, ReleaseId, Revision, UtcTimestamp,
+        ActorId, CourseId, EnvironmentId, OperationId, ProjectId, ReleaseId, Revision, UtcTimestamp,
     };
     use std::str::FromStr;
 
@@ -482,7 +548,8 @@ mod tests {
         EnvironmentInstance {
             id: EnvironmentId::new(),
             display_label: "reconcile test".to_owned(),
-            course_id: CourseId::new(),
+            project_id: ProjectId::new(),
+            course_id: Some(CourseId::new()),
             owner_id: ActorId::new(),
             class: EnvironmentClass::Experiment,
             runtime_kind: RuntimeKind::Container,

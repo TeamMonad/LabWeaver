@@ -18,95 +18,36 @@ use contracts::environment::{
 use contracts::http::StrongEtag;
 use contracts::{DiagnosticCode, EnvironmentId, EventId, ProblemDetails, UtcTimestamp};
 
+use auth::ServiceIdentity;
+
 use crate::{
     ContainerReleaseResolver, EnvironmentStoreError, PgEnvironmentStore, PgReleaseProjectionStore,
     ReleaseProjectionError,
 };
 
-/// Peer identity produced only after the serving TLS layer verifies the client certificate.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedCallerIdentity {
-    sans: BTreeSet<String>,
-}
-
-impl VerifiedCallerIdentity {
-    /// Constructs the identity passed by the mTLS acceptor after certificate verification.
-    pub(crate) fn from_mtls_peer_sans<I, S>(sans: I) -> Result<Self, OwnerResolverError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let sans = sans.into_iter().map(Into::into).collect::<BTreeSet<_>>();
-        if sans.is_empty() || sans.iter().any(|san| !valid_san(san)) {
-            return Err(OwnerResolverError::CallerUntrusted);
-        }
-        Ok(Self { sans })
-    }
-
-    /// Returns whether the verified peer certificate carried one exact URI SAN.
-    #[must_use]
-    pub fn contains_san(&self, san: &str) -> bool {
-        self.sans.contains(san)
-    }
-}
-
-/// Exact caller SAN policy; wildcard and empty policies are not supported.
-#[derive(Clone, Debug)]
-pub struct OwnerResolverPolicy {
-    allowed_caller_sans: BTreeSet<String>,
-}
-
-impl OwnerResolverPolicy {
-    pub fn new<I, S>(allowed_caller_sans: I) -> Result<Self, OwnerResolverError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let allowed_caller_sans = allowed_caller_sans
-            .into_iter()
-            .map(Into::into)
-            .collect::<BTreeSet<_>>();
-        if allowed_caller_sans.is_empty() || allowed_caller_sans.iter().any(|san| !valid_san(san)) {
-            return Err(OwnerResolverError::PolicyInvalid);
-        }
-        Ok(Self {
-            allowed_caller_sans,
-        })
-    }
-
-    fn allows(&self, caller: &VerifiedCallerIdentity) -> bool {
-        !self.allowed_caller_sans.is_disjoint(&caller.sans)
-    }
-}
+const OWNER_RESOLUTION_PERMISSION: &str = "environment.owner.resolve";
+const ENDPOINT_ELIGIBILITY_PERMISSION: &str = "environment.endpoint.resolve";
+const CONSOLE_ELIGIBILITY_PERMISSION: &str = "environment.console.resolve";
 
 /// Environment-owned resolver backed only by the Environment runtime database role.
 #[derive(Clone)]
 pub struct OwnerResolver {
     store: PgEnvironmentStore,
     releases: PgReleaseProjectionStore,
-    policy: OwnerResolverPolicy,
 }
 
 impl OwnerResolver {
     #[must_use]
-    pub fn new(
-        store: PgEnvironmentStore,
-        releases: PgReleaseProjectionStore,
-        policy: OwnerResolverPolicy,
-    ) -> Self {
-        Self {
-            store,
-            releases,
-            policy,
-        }
+    pub fn new(store: PgEnvironmentStore, releases: PgReleaseProjectionStore) -> Self {
+        Self { store, releases }
     }
 
     pub async fn resolve(
         &self,
-        caller: &VerifiedCallerIdentity,
+        caller: &ServiceIdentity,
         request: &EnvironmentOwnerResolutionRequest,
     ) -> Result<EnvironmentOwnerResolution, OwnerResolverError> {
-        if !self.policy.allows(caller) {
+        if !caller.allows(OWNER_RESOLUTION_PERMISSION) {
             return Err(OwnerResolverError::CallerUntrusted);
         }
         let (instance, authority_now) = self
@@ -122,10 +63,10 @@ impl OwnerResolver {
 
     pub async fn resolve_endpoint_eligibility(
         &self,
-        caller: &VerifiedCallerIdentity,
+        caller: &ServiceIdentity,
         request: &EnvironmentEndpointEligibilityRequest,
     ) -> Result<EnvironmentEndpointEligibility, OwnerResolverError> {
-        if !self.policy.allows(caller) {
+        if !caller.allows(ENDPOINT_ELIGIBILITY_PERMISSION) {
             return Err(OwnerResolverError::CallerUntrusted);
         }
         let (instance, authority_now) = self
@@ -141,10 +82,10 @@ impl OwnerResolver {
 
     pub async fn resolve_console_eligibility(
         &self,
-        caller: &VerifiedCallerIdentity,
+        caller: &ServiceIdentity,
         request: &EnvironmentConsoleEligibilityRequest,
     ) -> Result<EnvironmentConsoleEligibility, OwnerResolverError> {
-        if !self.policy.allows(caller) {
+        if !caller.allows(CONSOLE_ELIGIBILITY_PERMISSION) {
             return Err(OwnerResolverError::CallerUntrusted);
         }
         let (instance, authority_now) = self
@@ -162,6 +103,7 @@ impl OwnerResolver {
             .await
             .map_err(OwnerResolverError::ReleaseUnavailable)?;
         if release.withdrawn_at.is_some()
+            || release.projection.release.project_id != instance.project_id
             || release.projection.release.course_id != instance.course_id
             || release.projection.release.runtime_kind != instance.runtime_kind
             || release.projection.environment_spec.class != instance.class
@@ -209,6 +151,7 @@ impl OwnerResolver {
             });
         let resolution = EnvironmentConsoleEligibility {
             environment_id: instance.id,
+            project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
             environment_class: instance.class,
@@ -233,6 +176,7 @@ fn authorize_console_instance(
     now: UtcTimestamp,
 ) -> Result<(), OwnerResolverError> {
     if instance.id != request.environment_id
+        || instance.project_id != request.project_id
         || instance.course_id != request.course_id
         || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
             && instance.owner_id != request.actor_id)
@@ -256,6 +200,7 @@ pub fn authorize_owner_resolution(
     now: UtcTimestamp,
 ) -> Result<EnvironmentOwnerResolution, OwnerResolverError> {
     if instance.id != request.environment_id
+        || instance.project_id != request.project_id
         || instance.course_id != request.course_id
         || instance.owner_id != request.owner_actor_id
         || instance.revision != request.expected_revision
@@ -274,6 +219,7 @@ pub fn authorize_owner_resolution(
     }
     Ok(EnvironmentOwnerResolution {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         owner_actor_id: instance.owner_id,
         environment_revision: instance.revision,
@@ -288,6 +234,7 @@ pub fn authorize_endpoint_eligibility(
     now: UtcTimestamp,
 ) -> Result<EnvironmentEndpointEligibility, OwnerResolverError> {
     if instance.id != request.environment_id
+        || instance.project_id != request.project_id
         || instance.course_id != request.course_id
         || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
             && instance.owner_id != request.actor_id)
@@ -324,6 +271,7 @@ pub fn authorize_endpoint_eligibility(
     }
     Ok(EnvironmentEndpointEligibility {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         owner_actor_id: instance.owner_id,
         environment_revision: instance.revision,
@@ -332,7 +280,7 @@ pub fn authorize_endpoint_eligibility(
     })
 }
 
-/// Builds the internal route. A TLS acceptor must inject `VerifiedCallerIdentity`.
+/// Builds the internal route. Service JWT middleware must inject `ServiceIdentity`.
 pub fn owner_resolver_router(resolver: OwnerResolver) -> Router {
     Router::new()
         .route(
@@ -353,7 +301,7 @@ pub fn owner_resolver_router(resolver: OwnerResolver) -> Router {
 async fn resolve_console_eligibility(
     State(resolver): State<OwnerResolver>,
     path: Result<Path<EnvironmentId>, PathRejection>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<ServiceIdentity>>,
     body: Bytes,
 ) -> Result<Response, OwnerResolverError> {
     let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
@@ -381,7 +329,7 @@ async fn resolve_console_eligibility(
 async fn resolve_endpoint_eligibility(
     State(resolver): State<OwnerResolver>,
     path: Result<Path<EnvironmentId>, PathRejection>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<ServiceIdentity>>,
     body: Bytes,
 ) -> Result<Response, OwnerResolverError> {
     let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
@@ -409,7 +357,7 @@ async fn resolve_endpoint_eligibility(
 async fn resolve_owner(
     State(resolver): State<OwnerResolver>,
     path: Result<Path<EnvironmentId>, PathRejection>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<ServiceIdentity>>,
     body: Bytes,
 ) -> Result<Response, OwnerResolverError> {
     let Path(environment_id) = path.map_err(|_| OwnerResolverError::RequestInvalid)?;
@@ -432,49 +380,12 @@ async fn resolve_owner(
     Ok(response)
 }
 
-fn valid_san(san: &str) -> bool {
-    if san.is_empty() || san.len() > 253 || san.contains('*') {
-        return false;
-    }
-    if san.starts_with("spiffe://") {
-        return url::Url::parse(san).is_ok_and(|uri| {
-            uri.scheme() == "spiffe"
-                && uri.host_str().is_some()
-                && uri.username().is_empty()
-                && uri.password().is_none()
-                && uri.port().is_none()
-                && uri.path() != "/"
-                && uri.query().is_none()
-                && uri.fragment().is_none()
-        });
-    }
-    san.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
-}
-
-#[cfg(test)]
-mod san_tests {
-    use super::valid_san;
-
-    #[test]
-    fn accepts_exact_dns_and_spiffe_sans_but_rejects_ambiguous_uris() {
-        assert!(valid_san("access-service.internal"));
-        assert!(valid_san("spiffe://labweaver/access-service"));
-        assert!(!valid_san("spiffe://labweaver/"));
-        assert!(!valid_san("spiffe://user@labweaver/access-service"));
-        assert!(!valid_san("spiffe://labweaver/access-*"));
-        assert!(!valid_san("https://labweaver/access-service"));
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerResolverError {
     #[error("LW_CONTRACT_DOCUMENT_INVALID")]
     RequestInvalid,
     #[error("LW_ENV_OWNER_CALLER_UNTRUSTED")]
     CallerUntrusted,
-    #[error("LW_ENV_OWNER_POLICY_INVALID")]
-    PolicyInvalid,
     #[error("LW_ENV_OWNER_SCOPE_MISMATCH")]
     ScopeMismatch,
     #[error("LW_ENV_OWNER_UNAVAILABLE")]
@@ -500,11 +411,6 @@ impl OwnerResolverError {
             Self::CallerUntrusted => (
                 StatusCode::FORBIDDEN,
                 "LW_ENV_OWNER_CALLER_UNTRUSTED",
-                false,
-            ),
-            Self::PolicyInvalid => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LW_ENV_OWNER_POLICY_INVALID",
                 false,
             ),
             Self::ScopeMismatch => (StatusCode::FORBIDDEN, "LW_ENV_OWNER_SCOPE_MISMATCH", false),

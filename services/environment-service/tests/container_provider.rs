@@ -14,7 +14,9 @@ use async_trait::async_trait;
 use contracts::authoring::{
     CandidateApproval, CandidateDecision, EnvironmentSpec, NetworkPolicySpec, RuntimeKind,
 };
-use contracts::environment::{DesiredEnvironmentState, EndpointProtocol, ObservedEnvironmentState};
+use contracts::environment::{
+    DesiredEnvironmentState, EndpointProtocol, EnvironmentOperationKind, ObservedEnvironmentState,
+};
 use contracts::events::ReleasePublished;
 use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
@@ -218,6 +220,28 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .document
             .pointer("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name"),
         Some(&json!("access-service"))
+    );
+}
+
+#[test]
+fn plan_uses_configured_workspace_access_mode() {
+    let projection = projection();
+    let instance = instance_for(&projection);
+    let provider = provider_with_access_mode(
+        projection.clone(),
+        Arc::new(FixtureBackend::default()),
+        "ReadWriteOnce",
+    );
+
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("RWO workspace configuration is valid");
+
+    assert_eq!(
+        resource(&plan, "PersistentVolumeClaim")
+            .document
+            .pointer("/spec/accessModes/0"),
+        Some(&json!("ReadWriteOnce"))
     );
 }
 
@@ -444,11 +468,21 @@ async fn provision_returns_one_stable_healthy_endpoint() {
 async fn cleanup_deletes_the_namespace_and_requires_evidence() {
     let projection = projection();
     let mut instance = instance_for(&projection);
-    instance.observed_state = ObservedEnvironmentState::Deleting;
+    instance.observed_state = ObservedEnvironmentState::Stopped;
     instance.desired_state = DesiredEnvironmentState::Deleted;
+    instance.operation.kind = EnvironmentOperationKind::Expire;
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider(projection, backend.clone());
 
+    let checkpoint = provider
+        .execute(ReconcileAction::Cleanup, &instance)
+        .await
+        .expect("cleanup enters deleting state");
+    assert_eq!(checkpoint.next_state, ObservedEnvironmentState::Deleting);
+    assert!(!checkpoint.operation_complete);
+    assert!(checkpoint.cleanup_evidence.is_none());
+
+    instance.observed_state = ObservedEnvironmentState::Deleting;
     let observation = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
@@ -540,6 +574,34 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
     );
 }
 
+#[tokio::test]
+async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
+    let projection = projection();
+    let mut instance = instance_for(&projection);
+    instance.observed_state = ObservedEnvironmentState::Expiring;
+    instance.desired_state = DesiredEnvironmentState::Deleted;
+    instance.operation.kind = EnvironmentOperationKind::Expire;
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider(projection, backend.clone());
+
+    let observation = provider
+        .execute(ReconcileAction::Stop, &instance)
+        .await
+        .expect("expire stop succeeds");
+
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert!(!observation.operation_complete);
+    assert!(observation.endpoints.is_empty());
+    assert_eq!(
+        backend
+            .operations
+            .lock()
+            .expect("operations lock")
+            .as_slice(),
+        ["scale:0"]
+    );
+}
+
 fn provider(
     projection: ReleasePublished,
     backend: Arc<FixtureBackend>,
@@ -556,6 +618,24 @@ fn provider(
     )
 }
 
+fn provider_with_access_mode(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+    workspace_access_mode: &str,
+) -> ContainerProvider<FixtureBackend, FixtureResolver> {
+    let trust_revision = projection.release.approval.trust_revision;
+    provider_with_state_and_access_mode(
+        projection,
+        backend,
+        timestamp("2026-07-16T08:30:00.000Z"),
+        None,
+        PolicyId::new(),
+        revision(2),
+        trust_revision,
+        workspace_access_mode,
+    )
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "negative tests vary each trust authority independently"
@@ -568,6 +648,32 @@ fn provider_with_state(
     image_policy_id: PolicyId,
     image_policy_revision: Revision,
     trust_revision: Revision,
+) -> ContainerProvider<FixtureBackend, FixtureResolver> {
+    provider_with_state_and_access_mode(
+        projection,
+        backend,
+        authority_now,
+        withdrawn_at,
+        image_policy_id,
+        image_policy_revision,
+        trust_revision,
+        "ReadWriteMany",
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "negative tests vary each trust authority independently"
+)]
+fn provider_with_state_and_access_mode(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+    authority_now: UtcTimestamp,
+    withdrawn_at: Option<UtcTimestamp>,
+    image_policy_id: PolicyId,
+    image_policy_revision: Revision,
+    trust_revision: Revision,
+    workspace_access_mode: &str,
 ) -> ContainerProvider<FixtureBackend, FixtureResolver> {
     ContainerProvider::new(
         "container-primary-v1".to_owned(),
@@ -585,6 +691,7 @@ fn provider_with_state(
             "access-service".to_owned(),
             "harbor-course-pull".to_owned(),
             "nfs-rwx".to_owned(),
+            workspace_access_mode,
         )
         .expect("container configuration"),
     )
@@ -611,6 +718,7 @@ fn resource<'a>(
 
 fn instance_for(projection: &ReleasePublished) -> contracts::environment::EnvironmentInstance {
     let mut instance = support::requested_instance();
+    instance.project_id = projection.release.project_id;
     instance.course_id = projection.release.course_id;
     instance.release_id = projection.release.id;
     instance.release_version = projection.release.version;
@@ -642,7 +750,6 @@ fn projection() -> ReleasePublished {
             "kind":"container",
             "provider_binding":"container-primary-v1",
             "build_context":artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
-            "base_image_digest":format!("sha256:{}", "b".repeat(64)),
             "service_port":8080
         },
         "retention":{
@@ -652,12 +759,14 @@ fn projection() -> ReleasePublished {
     }))
     .expect("valid EnvironmentSpec");
     let artifact_id = ImageArtifactId::new();
-    let course_id = contracts::CourseId::new();
+    let project_id = contracts::ProjectId::new();
+    let course_id = Some(contracts::CourseId::new());
     let candidate_id = CandidateId::new();
     let published_at = timestamp("2026-07-16T08:00:00.000Z");
     let artifact_sha256 = Sha256Digest::of_bytes(b"container-image");
     let release = EnvironmentTemplateRelease {
         id: ReleaseId::new(),
+        project_id,
         course_id,
         version: 1,
         candidate_id,
@@ -679,7 +788,7 @@ fn projection() -> ReleasePublished {
             id: artifact_id,
             build_request_id: BuildRequestId::new(),
             repository: format!(
-                "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
+                "harbor.internal/labweaver-system/project-{project_id}-{candidate_id}"
             ),
             digest: format!("sha256:{artifact_sha256}"),
         },

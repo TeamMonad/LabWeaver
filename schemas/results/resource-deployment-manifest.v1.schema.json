@@ -4,10 +4,9 @@
   "title": "ResourceDeploymentManifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "sourceCommit", "runId", "packageManifestSha256", "configurationBundleSha256", "image"],
+  "required": ["schemaVersion", "runId", "packageManifestSha256", "configurationBundleSha256", "image"],
   "properties": {
     "schemaVersion": {"const": "resource-deployment-manifest.v1"},
-    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "runId": {"type": "string", "format": "uuid"},
     "packageManifestSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "configurationBundleSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
