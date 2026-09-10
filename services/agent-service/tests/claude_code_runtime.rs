@@ -3061,22 +3061,39 @@ async fn tokio_process_cancellation_kills_and_reaps_the_provider_process()
     let policy = valid_policy()?;
     let runtime = ClaudeCodeRuntime::new(policy.clone(), process)?;
     let cancellation = RunCancellation::new();
+    let request_input = input(&policy).await?;
     let request = runtime.generate(
         AgentTrackKind::Environment,
-        input(&policy).await?,
+        request_input,
         cancellation.clone(),
     );
-    while !pid_file.exists() {
-        tokio::time::sleep(Duration::from_millis(1)).await;
+    tokio::pin!(request);
+    let readiness = async {
+        while !pid_file.exists() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::pin!(readiness);
+    tokio::select! {
+        result = &mut request => {
+            return match result {
+                Ok(_) => Err("provider completed before cancellation readiness".into()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        _ = &mut readiness => {}
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            cancellation.cancel();
+            let _ = request.await;
+            return Err("provider process did not become ready".into());
+        }
     }
     cancellation.cancel();
     let failure = request
         .await
         .expect_err("provider cancellation must fail closed");
-    assert_eq!(
-        failure.error,
-        agent_service::claude_code::ClaudeCodeRuntimeError::Cancelled
-    );
+    assert_eq!(failure.diagnostic_code(), "LW_CONFLICT");
+    assert_eq!(failure.audit().outcome, RuntimeAuditOutcome::Cancelled);
 
     let pid = std::fs::read_to_string(&pid_file)?.trim().parse::<i32>()?;
     for _ in 0..50 {
