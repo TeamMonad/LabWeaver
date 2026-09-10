@@ -7,7 +7,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Request from `AuthorizedKeysCommand` over mTLS. Target selection happens only after\npublic-key authentication, through the fixed command grammar.",
+  "description": "Request used by the Gateway's `AuthorizedKeysCommand`, authenticated with a service JWT over\nthe internal TLS transport. Target selection happens only after public-key authentication,\nthrough the fixed command grammar.",
   "properties": {
     "connectionId": {
       "type": "string"
