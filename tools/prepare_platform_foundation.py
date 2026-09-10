@@ -76,6 +76,10 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
             "$JS.ACK.>",
             "labweaver.evaluation.submission.freeze_requested.v1",
             "labweaver.evaluation.submission.frozen.v1",
+            "labweaver.evaluation.release.published.v1",
+            "labweaver.evaluation.run.requested.v1",
+            "labweaver.evaluation.run.state_changed.v1",
+            "labweaver.evaluation.step_run.state_changed.v1",
         ),
         ("_INBOX.>", "labweaver.evaluation.submission.freeze_requested.v1"),
         False,
@@ -90,6 +94,14 @@ NATS_USERS: dict[str, tuple[tuple[str, ...], tuple[str, ...], bool]] = {
             "$JS.ACK.>",
             "labweaver.resource.request.submitted.v1",
             "labweaver.resource.request.approved.v1",
+            "labweaver.resource.request.rejected.v1",
+            "labweaver.resource.request.cancelled.v1",
+            "labweaver.resource.request.state_changed.v1",
+            "labweaver.resource.lease.activated.v1",
+            "labweaver.resource.lease.renewed.v1",
+            "labweaver.resource.lease.revoked.v1",
+            "labweaver.resource.lease.expiring.v1",
+            "labweaver.resource.lease.expired.v1",
         ),
         ("_INBOX.>", "labweaver.resource.lease.verify.v1"),
         True,
@@ -208,13 +220,56 @@ def _trusted_binary(path: Path, expected_name: str) -> Path:
     return resolved
 
 
-def _run(binary: Path, arguments: list[str], private_home: Path) -> None:
+def _child_environment(private_home: Path) -> dict[str, str]:
+    """Return the minimal portable environment required by the authoring tools."""
+
     environment = {
         "HOME": str(private_home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PATH": os.environ.get("PATH") or os.defpath,
     }
+    # Native binaries need the OS runtime and temporary-directory bindings,
+    # while OpenSSL also needs its configured provider/module paths. Keep this
+    # allowlist explicit so credentials and unrelated process settings never
+    # cross into foundation authoring children.
+    for name in (
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "PROGRAMDATA",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+    ):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
+def _safe_child_stderr(value: object, private_home: Path) -> str:
+    """Keep a bounded, path- and secret-free diagnostic from a failed child."""
+
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    elif isinstance(value, str):
+        text = value
+    else:
+        return ""
+    text = text.replace(str(private_home), "<private>")
+    text = re.sub(r"(?i)(?:[A-Za-z]:[\\/]|/)[^\s]+", "<path>", text)
+    text = re.sub(
+        r"(?i)\b(password|secret|token|private[_ -]?key)=\S+",
+        r"\1=<redacted>",
+        text,
+    )
+    text = "".join(character if ord(character) >= 0x20 and character != "\x7f" else " " for character in text)
+    return text.strip()[-1024:]
+
+
+def _run(binary: Path, arguments: list[str], private_home: Path) -> None:
+    environment = _child_environment(private_home)
     try:
         subprocess.run(
             [str(binary), *arguments],
@@ -232,7 +287,11 @@ def _run(binary: Path, arguments: list[str], private_home: Path) -> None:
             if token and len(token) <= 32 and token.replace("-", "").isalnum()
         )
         suffix = f":{binary.name}:{operation}" if operation else f":{binary.name}"
-        raise FoundationError(f"LW_PLATFORM_FOUNDATION_TOOL_FAILED{suffix}") from error
+        detail = _safe_child_stderr(getattr(error, "stderr", None), private_home)
+        diagnostic = f"LW_PLATFORM_FOUNDATION_TOOL_FAILED{suffix}"
+        if detail:
+            diagnostic = f"{diagnostic}:{detail}"
+        raise FoundationError(diagnostic) from error
 
 
 def _write(path: Path, payload: bytes, mode: int = 0o600) -> None:
@@ -266,6 +325,8 @@ def _certificate(
             "keyUsage=critical,digitalSignature,keyEncipherment\n"
             f"extendedKeyUsage={usage}\n"
             f"subjectAltName={','.join(sans)}\n"
+            "subjectKeyIdentifier=hash\n"
+            "authorityKeyIdentifier=keyid,issuer\n"
         ).encode(),
     )
     _run(openssl, ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:3072", "-out", str(key)], private_home)
@@ -285,6 +346,31 @@ def _certificate(
     os.chmod(output / "key", 0o600)
     os.chmod(output / "certificate", 0o600)
     return key, certificate
+
+
+def _self_signed_ca(
+    openssl: Path,
+    private_home: Path,
+    key: Path,
+    certificate: Path,
+    common_name: str,
+    days: int,
+) -> None:
+    """Create a CA certificate with an explicit, host-config-independent profile."""
+
+    _run(
+        openssl,
+        [
+            "req", "-x509", "-new", "-key", str(key), "-sha256", "-days", str(days),
+            "-subj", f"/CN={common_name}",
+            "-addext", "basicConstraints=critical,CA:true",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext", "subjectKeyIdentifier=hash",
+            "-addext", "authorityKeyIdentifier=keyid:always,issuer",
+            "-out", str(certificate),
+        ],
+        private_home,
+    )
 
 
 def _copy(source: Path, destination: Path) -> None:
@@ -351,14 +437,7 @@ def prepare(
     ca_key = authority / "ca.key"
     ca_certificate = authority / "ca.crt"
     _run(openssl, ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(ca_key)], private_home)
-    _run(
-        openssl,
-        [
-            "req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", str(days),
-            "-subj", "/CN=LabWeaver Sprint 2 Internal CA", "-out", str(ca_certificate),
-        ],
-        private_home,
-    )
+    _self_signed_ca(openssl, private_home, ca_key, ca_certificate, "LabWeaver Internal CA", days)
 
     platform_ca_key = platform_authority / "ca.key"
     platform_ca_certificate = platform_authority / "ca.crt"
@@ -367,13 +446,13 @@ def prepare(
         ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(platform_ca_key)],
         private_home,
     )
-    _run(
+    _self_signed_ca(
         openssl,
-        [
-            "req", "-x509", "-new", "-key", str(platform_ca_key), "-sha256", "-days", str(days),
-            "-subj", "/CN=LabWeaver Sprint 2 Platform CA", "-out", str(platform_ca_certificate),
-        ],
         private_home,
+        platform_ca_key,
+        platform_ca_certificate,
+        "LabWeaver Platform CA",
+        days,
     )
     for name, (sans, usage) in PLATFORM_IDENTITIES.items():
         material = platform_authority / f"issued-{name}"

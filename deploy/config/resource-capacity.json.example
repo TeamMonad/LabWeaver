@@ -1,0 +1,10 @@
+{
+  "pollIntervalMilliseconds": 1000,
+  "environmentHandoff": {
+    "baseUri": "https://environment-service:9446/",
+    "caFile": "/etc/labweaver/secrets/mtls-ca.pem",
+    "timeoutMilliseconds": 5000,
+    "systemActorId": "00000000-0000-7000-8000-000000000001"
+  },
+  "gpuObservers": []
+}

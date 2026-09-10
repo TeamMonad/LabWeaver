@@ -18,7 +18,7 @@
   become: true
   loop: "{{ groups['k8s_cluster'] }}"
 
-- name: Restart the adopted PostgreSQL port-forward
+- name: Restart the retained PostgreSQL port-forward
   ansible.builtin.systemd_service:
     name: "{{ platform_application_postgres_forward_service_name }}"
     enabled: true
@@ -26,7 +26,7 @@
     daemon_reload: true
   become: true
 
-- name: Restart the adopted NATS port-forward
+- name: Restart the retained NATS port-forward
   ansible.builtin.systemd_service:
     name: "{{ platform_application_nats_forward_service_name }}"
     enabled: true
@@ -34,7 +34,7 @@
     daemon_reload: true
   become: true
 
-- name: Restart the adopted MinIO port-forward
+- name: Restart the retained MinIO port-forward
   ansible.builtin.systemd_service:
     name: "{{ platform_application_minio_forward_service_name }}"
     enabled: true

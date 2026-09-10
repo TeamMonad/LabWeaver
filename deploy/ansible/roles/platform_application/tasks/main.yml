@@ -1,5 +1,5 @@
 ---
-- name: Load the immutable Sprint 2 application identities
+- name: Load the immutable application identities
   ansible.builtin.set_fact:
     platform_application_lock: >-
       {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
@@ -22,7 +22,6 @@
   ansible.builtin.assert:
     that:
       - platform_application_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
-      - platform_application_source_commit is match('^[0-9a-f]{40,64}$')
       - platform_application_package_manifest | length > 0
       - platform_application_postgres_service_file | length > 0
       - platform_application_postgres_client_certificate_file | length > 0
@@ -144,14 +143,14 @@
     owner: root
     group: root
     mode: "0644"
-  notify: Restart the adopted PostgreSQL port-forward
+  notify: Restart the retained PostgreSQL port-forward
   when: platform_application_postgres_forward_enabled | bool
 
-- name: Apply the PostgreSQL port-forward before database adoption
+- name: Apply the PostgreSQL port-forward before database reconciliation
   ansible.builtin.meta: flush_handlers
   when: platform_application_postgres_forward_enabled | bool
 
-- name: Require the adopted PostgreSQL port-forward endpoint
+- name: Require the retained PostgreSQL port-forward endpoint
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: "{{ platform_application_postgres_forward_port }}"
@@ -181,14 +180,14 @@
     owner: root
     group: root
     mode: "0644"
-  notify: Restart the adopted NATS port-forward
+  notify: Restart the retained NATS port-forward
   when: platform_application_nats_forward_enabled | bool
 
-- name: Apply the NATS port-forward before JetStream adoption
+- name: Apply the NATS port-forward before JetStream reconciliation
   ansible.builtin.meta: flush_handlers
   when: platform_application_nats_forward_enabled | bool
 
-- name: Require the adopted NATS port-forward endpoint
+- name: Require the retained NATS port-forward endpoint
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: "{{ platform_application_nats_forward_port }}"
@@ -218,14 +217,14 @@
     owner: root
     group: root
     mode: "0644"
-  notify: Restart the adopted MinIO port-forward
+  notify: Restart the retained MinIO port-forward
   when: platform_application_minio_forward_enabled | bool
 
-- name: Apply the MinIO port-forward before bucket adoption
+- name: Apply the MinIO port-forward before bucket reconciliation
   ansible.builtin.meta: flush_handlers
   when: platform_application_minio_forward_enabled | bool
 
-- name: Require the adopted MinIO port-forward endpoint
+- name: Require the retained MinIO port-forward endpoint
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: "{{ platform_application_minio_forward_port }}"
@@ -339,12 +338,11 @@
     fail_msg: PLATFORM_APPLICATION_CONFIGURATION_BINDING_INVALID
   no_log: true
 
-- name: Validate immutable package identity
+- name: Validate immutable package contents
   ansible.builtin.assert:
     that:
       - platform_application_package.schema_version == 'platform-image-package-manifest.v2'
       - platform_application_package.profile | default('platform') == 'platform'
-      - platform_application_package.source_commit == platform_application_source_commit
       - platform_application_package.images | length > 0
       - platform_application_package.images | map(attribute='component') | unique | list | length == platform_application_package.images | length
       - platform_application_package.images | map(attribute='component') | difference(platform_application_components) | list | length == 0
@@ -456,6 +454,24 @@
     fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_IDENTITY_MISMATCH
   no_log: true
 
+- name: Require explicit Container workspace storage configuration
+  ansible.builtin.assert:
+    that:
+      - >-
+        (platform_application_environment_providers
+         | selectattr('providerKind', 'equalto', 'container')
+         | first).workspaceStorageClassName is defined
+      - >-
+        (platform_application_environment_providers
+         | selectattr('providerKind', 'equalto', 'container')
+         | first).workspaceAccessMode is defined
+      - >-
+        (platform_application_environment_providers
+         | selectattr('providerKind', 'equalto', 'container')
+         | first).workspaceAccessMode in ['ReadWriteOnce', 'ReadWriteMany']
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_WORKSPACE_STORAGE_CONFIGURATION_INVALID
+  no_log: true
+
 - name: Bind the Control event configuration for retained stream validation
   ansible.builtin.set_fact:
     platform_application_control_configuration: >-
@@ -472,6 +488,8 @@
       - platform_application_control_configuration.nats.quarantine_subject is match('^labweaver\.agent\.')
       - platform_application_control_configuration.nats.build_quarantine_subject is match('^labweaver\.agent\.')
       - platform_application_control_configuration.nats.quarantine_subject != platform_application_control_configuration.nats.build_quarantine_subject
+      - platform_application_control_configuration.nats.authoring_stream_name == 'LABWEAVER_CONTROL_EVENTS'
+      - platform_application_control_configuration.nats.authoring_quarantine_subject is match('^labweaver\.control\.quarantine\.')
     fail_msg: PLATFORM_APPLICATION_CONTROL_QUARANTINE_STREAM_MISMATCH
   no_log: true
 
@@ -493,6 +511,8 @@
       - "{{ platform_application_control_configuration.nats.quarantine_subject }}"
       - --allow-pub
       - "{{ platform_application_control_configuration.nats.build_quarantine_subject }}"
+      - --allow-pub
+      - "{{ platform_application_control_configuration.nats.authoring_quarantine_subject }}"
     stdin: "{{ platform_application_control_nats_credentials }}"
     stdin_add_newline: false
   delegate_to: localhost
@@ -529,24 +549,9 @@
   loop: "{{ platform_application_access_seed.courseMemberships }}"
   no_log: true
 
-- name: Read target cluster UID
-  ansible.builtin.command:
-    argv:
-      - "{{ platform_application_kubectl }}"
-      - --kubeconfig
-      - "{{ platform_application_kubeconfig }}"
-      - get
-      - namespace
-      - kube-system
-      - -o
-      - jsonpath={.metadata.uid}
-  register: platform_application_cluster_uid
-  check_mode: false
-  changed_when: false
-
-- name: Create bounded application report directory
+- name: Create application work directory
   ansible.builtin.file:
-    path: "{{ platform_application_report_root }}/{{ platform_application_run_id }}"
+    path: "{{ platform_application_work_root }}/{{ platform_application_run_id }}"
     state: directory
     owner: root
     group: root
@@ -581,7 +586,7 @@
         == platform_application_data_services | length
     fail_msg: PLATFORM_APPLICATION_DATA_ENDPOINT_INVALID
 
-- name: Canonicalize adopted data-service host mappings
+- name: Canonicalize retained data-service host mappings
   ansible.builtin.replace:
     path: /etc/hosts
     regexp: '^[0-9.]+\s+(?:postgres|nats|minio)\.labweaver-data\.svc\s*$\n?'
@@ -590,7 +595,7 @@
 - name: Bind controller tools to retained service identities
   ansible.builtin.blockinfile:
     path: /etc/hosts
-    marker: "# {mark} LABWEAVER PLATFORM ADOPTED SERVICES"
+    marker: "# {mark} LABWEAVER PLATFORM SERVICES"
     block: |
       {% for result in platform_application_data_endpoints.results %}
       {{ result.stdout }} {{ result.item }}.{{ platform_application_data_namespace }}.svc
@@ -637,7 +642,7 @@
 
 - name: Create isolated MinIO administration configuration
   ansible.builtin.file:
-    path: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
+    path: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     state: directory
     owner: root
     group: root
@@ -649,7 +654,7 @@
   # whose secret key begins with '-' (generated credentials may do so). Pre-seed
   # the isolated mc config instead of passing the key through the CLI.
   ansible.builtin.copy:
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc/config.json"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc/config.json"
     owner: root
     group: root
     mode: "0600"
@@ -672,9 +677,9 @@
 - name: Bind effective PostgreSQL service identity
   ansible.builtin.set_fact:
     platform_application_postgres_effective_service_file: >-
-      {{ platform_application_report_root }}/{{ platform_application_run_id }}/postgres-service.conf
+      {{ platform_application_work_root }}/{{ platform_application_run_id }}/postgres-service.conf
 
-- name: Bind PostgreSQL service through the adopted controller forward
+- name: Bind PostgreSQL service through the retained controller forward
   ansible.builtin.copy:
     dest: "{{ platform_application_postgres_effective_service_file }}"
     owner: root
@@ -715,16 +720,16 @@
   until: platform_application_postgres_identity.rc == 0
   no_log: true
 
-- name: Require the exact Sprint 2 PostgreSQL database
+- name: Require the exact configured PostgreSQL database
   ansible.builtin.assert:
     that:
       - platform_application_postgres_identity.stdout | trim == platform_application_postgres_database
     fail_msg: PLATFORM_APPLICATION_POSTGRES_DATABASE_IDENTITY_MISMATCH
 
-- name: Render non-destructive six-domain baseline adoption
+- name: Render six-domain baseline reconciliation
   ansible.builtin.template:
-    src: baseline-adopt.sql.j2
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/baseline-adopt.sql"
+    src: baseline-reconcile.sql.j2
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/baseline-reconcile.sql"
     owner: root
     group: root
     mode: "0600"
@@ -742,7 +747,7 @@
       - "--set=lw_evaluation_password={{ platform_application_runtime_passwords.evaluation }}"
       - "--set=lw_resource_password={{ platform_application_runtime_passwords.resource }}"
       - --file
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/baseline-adopt.sql"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/baseline-reconcile.sql"
   environment:
     PGSERVICEFILE: "{{ platform_application_postgres_effective_service_file }}"
     PGSSLCERT: "{{ platform_application_postgres_client_certificate_file }}"
@@ -754,10 +759,10 @@
   until: platform_application_baseline_apply.rc == 0
   no_log: true
 
-- name: Render conflict-detecting Access seed adoption
+- name: Render conflict-detecting Access seed reconciliation
   ansible.builtin.template:
-    src: access-seed-adopt.sql.j2
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/access-seed-adopt.sql"
+    src: access-seed-reconcile.sql.j2
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/access-seed-reconcile.sql"
     owner: root
     group: root
     mode: "0600"
@@ -770,7 +775,7 @@
       - "service={{ platform_application_postgres_service }}"
       - --no-psqlrc
       - --file
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/access-seed-adopt.sql"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/access-seed-reconcile.sql"
   environment:
     PGSERVICEFILE: "{{ platform_application_postgres_effective_service_file }}"
     PGSSLCERT: "{{ platform_application_postgres_client_certificate_file }}"
@@ -780,6 +785,24 @@
   retries: 6
   delay: 2
   until: platform_application_access_seed_apply.rc == 0
+  no_log: true
+
+- name: Remove temporary database reconciliation material
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/baseline-reconcile.sql"
+    - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/access-seed-reconcile.sql"
+  check_mode: false
+  no_log: true
+
+- name: Remove the temporary PostgreSQL service binding
+  ansible.builtin.file:
+    path: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/postgres-service.conf"
+    state: absent
+  when: platform_application_postgres_forward_enabled | bool
+  check_mode: false
   no_log: true
 
 - name: Bind controller NATS probe endpoint
@@ -809,7 +832,7 @@
   check_mode: false
   changed_when: false
 
-- name: Inspect exact Sprint 2 streams without mutation
+- name: Inspect exact configured streams without mutation
   ansible.builtin.command:
     argv:
       - "{{ platform_application_nats }}"
@@ -833,7 +856,7 @@
   failed_when: false
   changed_when: false
 
-- name: Create only missing Sprint 2 streams
+- name: Create only missing configured streams
   ansible.builtin.command:
     argv:
       - "{{ platform_application_nats }}"
@@ -865,7 +888,7 @@
   when: item.rc != 0
   changed_when: true
 
-- name: Expand only the explicitly adopted Environment lifecycle stream
+- name: Expand only the explicitly retained Environment lifecycle stream
   ansible.builtin.command:
     argv:
       - "{{ platform_application_nats }}"
@@ -888,11 +911,11 @@
   loop: "{{ platform_application_stream_info_before.results }}"
   when:
     - item.rc == 0
-    - item.item.adopted_subjects is defined
-    - ((item.stdout | from_json).config.subjects | sort) == (item.item.adopted_subjects | sort)
+    - item.item.retained_subjects is defined
+    - ((item.stdout | from_json).config.subjects | sort) == (item.item.retained_subjects | sort)
   changed_when: true
 
-- name: Read back exact Sprint 2 streams
+- name: Read back exact configured streams
   ansible.builtin.command:
     argv:
       - "{{ platform_application_nats }}"
@@ -916,7 +939,7 @@
   failed_when: false
   changed_when: false
 
-- name: Reject failed Sprint 2 stream readback outside check mode
+- name: Reject failed configured stream readback outside check mode
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: PLATFORM_APPLICATION_STREAM_READBACK_FAILED
@@ -937,7 +960,7 @@
   when: item.rc == 0
   no_log: true
 
-- name: Inspect exact Sprint 2 durable consumers without mutation
+- name: Inspect exact configured durable consumers without mutation
   ansible.builtin.command:
     argv:
       - "{{ platform_application_nats }}"
@@ -962,7 +985,30 @@
   failed_when: false
   changed_when: false
 
-- name: Create only missing Sprint 2 durable consumers
+- name: Materialize structured NATS consumer configurations
+  ansible.builtin.copy:
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/nats-consumer-{{ item.name }}.json"
+    content: >-
+      {{ {
+        'ack_policy': 'explicit',
+        'ack_wait': 30000000000,
+        'deliver_policy': 'all',
+        'durable_name': item.name,
+        'name': item.name,
+        'filter_subjects': item.filters,
+        'max_ack_pending': 1000,
+        'max_deliver': 10,
+        'max_waiting': 512,
+        'replay_policy': 'instant',
+        'num_replicas': 0,
+        'pause_until': '0001-01-01T00:00:00Z'
+      } | to_json }}
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ platform_application_nats_consumers }}"
+
+- name: Create only missing configured durable consumers
   ansible.builtin.command:
     argv: >-
       {{ [platform_application_nats,
@@ -971,15 +1017,46 @@
           '--tlsca', platform_application_nats_ca_file,
           '--tlscert', platform_application_nats_client_certificate_file,
           '--tlskey', platform_application_nats_client_private_key_file,
-          'consumer', 'add', item.item.stream, item.item.name]
-         + (item.item.filters | map('regex_replace', '^', '--filter=') | list)
-         + ['--ack', 'explicit', '--deliver', 'all', '--pull',
-            '--replay', 'instant', '--max-deliver', '10', '--defaults'] }}
+          'consumer', 'add', item.item.stream,
+          '--config=' + platform_application_work_root + '/' + platform_application_run_id
+             + '/nats-consumer-' + item.item.name + '.json',
+          '--defaults'] }}
   loop: "{{ platform_application_consumer_info_before.results }}"
   when: item.rc != 0
   changed_when: true
 
-- name: Read back exact Sprint 2 durable consumers
+- name: Update existing durable consumers to structured filter subjects
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_nats }}"
+      - --server
+      - "{{ platform_application_nats_probe_server }}"
+      - --creds
+      - "{{ platform_application_nats_credentials_file }}"
+      - --tlsca
+      - "{{ platform_application_nats_ca_file }}"
+      - --tlscert
+      - "{{ platform_application_nats_client_certificate_file }}"
+      - --tlskey
+      - "{{ platform_application_nats_client_private_key_file }}"
+      - consumer
+      - edit
+      - "{{ item.item.stream }}"
+      - "{{ item.item.name }}"
+      - "--config={{ platform_application_work_root }}/{{ platform_application_run_id }}/nats-consumer-{{ item.item.name }}.json"
+      - --force
+  loop: "{{ platform_application_consumer_info_before.results }}"
+  when:
+    - item.rc == 0
+    - >-
+      (item.stdout | from_json).config.filter_subject | default('') | length > 0
+      or
+      ((item.stdout | from_json).config.filter_subjects | default([]) | sort)
+      != (item.item.filters | sort)
+  changed_when: true
+  no_log: true
+
+- name: Read back exact configured durable consumers
   ansible.builtin.command:
     argv:
       - "{{ platform_application_nats }}"
@@ -1004,7 +1081,7 @@
   failed_when: false
   changed_when: false
 
-- name: Reject failed Sprint 2 consumer readback outside check mode
+- name: Reject failed configured consumer readback outside check mode
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: PLATFORM_APPLICATION_CONSUMER_READBACK_FAILED
@@ -1019,11 +1096,8 @@
       - (item.stdout | from_json).stream_name == item.item.stream
       - (item.stdout | from_json).config.durable_name == item.item.name
       - (item.stdout | from_json).config.ack_policy == 'explicit'
-      - >-
-        (((item.stdout | from_json).config.filter_subjects | default([]))
-          + ([((item.stdout | from_json).config.filter_subject)]
-             if ((item.stdout | from_json).config.filter_subject | default('') | length > 0)
-             else [])) | sort == item.item.filters | sort
+      - (item.stdout | from_json).config.filter_subject | default('') | length == 0
+      - ((item.stdout | from_json).config.filter_subjects | default([]) | sort) == (item.item.filters | sort)
     fail_msg: PLATFORM_APPLICATION_CONSUMER_CONFLICT
   loop: "{{ platform_application_consumer_info_after.results }}"
   when: item.rc == 0
@@ -1040,7 +1114,7 @@
   changed_when: false
   failed_when: false
   environment:
-    MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
+    MC_CONFIG_DIR: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
     HTTP_PROXY: ""
     HTTPS_PROXY: ""
@@ -1061,7 +1135,7 @@
   register: platform_application_minio_bucket_create
   when: platform_application_minio_bucket_before.rc != 0
   environment:
-    MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
+    MC_CONFIG_DIR: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
     HTTP_PROXY: ""
     HTTPS_PROXY: ""
@@ -1080,7 +1154,7 @@
       - "{{ platform_application_minio_alias }}/{{ platform_application_minio_bucket }}"
   changed_when: false
   environment:
-    MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
+    MC_CONFIG_DIR: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
     HTTP_PROXY: ""
     HTTPS_PROXY: ""
@@ -1101,7 +1175,7 @@
   register: platform_application_minio_version
   check_mode: false
   environment:
-    MC_CONFIG_DIR: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/mc"
+    MC_CONFIG_DIR: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
     HTTP_PROXY: ""
     HTTPS_PROXY: ""
@@ -1114,6 +1188,13 @@
     platform_application_minio_version.rc != 0 or
     (platform_application_minio_version.stdout | from_json).status != 'success' or
     (platform_application_minio_version.stdout | from_json).versioning.status != 'Enabled'
+
+- name: Remove the temporary MinIO administration material
+  ansible.builtin.file:
+    path: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
+    state: absent
+  check_mode: false
+  no_log: true
 
 - name: Load the retained Harbor project-admin credential locator
   ansible.builtin.slurp:
@@ -1129,7 +1210,7 @@
       - platform_application_harbor_admin_password_raw.content | length > 0
     fail_msg: LW_HARBOR_PROJECT_ADMIN_CREDENTIAL_MISSING
 
-- name: Inspect the adopted Harbor project without mutation
+- name: Inspect the retained Harbor project without mutation
   ansible.builtin.uri:
     url: "{{ platform_application_harbor_api }}/api/v2.0/projects?name={{ platform_application_harbor_project | urlencode }}"
     user: "{{ platform_application_harbor_admin_username }}"
@@ -1143,7 +1224,7 @@
   failed_when: platform_application_harbor_project_info.status != 200 or platform_application_harbor_project_info.json | length > 1
   no_log: true
 
-- name: Create the adopted Harbor project only when missing
+- name: Create the retained Harbor project only when missing
   ansible.builtin.uri:
     url: "{{ platform_application_harbor_api }}/api/v2.0/projects"
     method: POST
@@ -1160,7 +1241,7 @@
   when: platform_application_harbor_project_info.json | length == 0
   no_log: true
 
-- name: Verify adopted private Harbor project identity
+- name: Verify retained private Harbor project identity
   ansible.builtin.uri:
     url: "{{ platform_application_harbor_api }}/api/v2.0/projects?name={{ platform_application_harbor_project | urlencode }}"
     user: "{{ platform_application_harbor_admin_username }}"
@@ -1177,7 +1258,7 @@
     platform_application_harbor_project_verified.json[0].name != platform_application_harbor_project
   no_log: true
 
-- name: Load the adopted Harbor CA for Kubernetes nodes
+- name: Load the retained Harbor CA for Kubernetes nodes
   ansible.builtin.slurp:
     src: "{{ platform_application_harbor_ca_file }}"
   register: platform_application_harbor_ca_bundle
@@ -1245,7 +1326,7 @@
   delegate_to: "{{ item }}"
   loop: "{{ groups['k8s_cluster'] }}"
 
-- name: Install the adopted Harbor CA in every Kubernetes node system trust
+- name: Install the retained Harbor CA in every Kubernetes node system trust
   ansible.builtin.copy:
     dest: "{{ hostvars[item].platform_application_node_ca_trust_anchors_dir }}/labweaver-harbor.crt"
     owner: root
@@ -1257,7 +1338,7 @@
   notify: Refresh Kubernetes node Harbor trust
   no_log: true
 
-- name: Install the adopted Harbor CA for every Kubernetes container runtime
+- name: Install the retained Harbor CA for every Kubernetes container runtime
   ansible.builtin.copy:
     dest: "/etc/containers/certs.d/{{ platform_application_harbor_registry }}/ca.crt"
     owner: root
@@ -1273,7 +1354,7 @@
 
 - name: Bind the reviewed Keycloak hostname to its retained Gateway address
   ansible.builtin.copy:
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
     mode: "0600"
     content: |
       {{ platform_application_keycloak_endpoint_address }} {{ platform_application_keycloak_hostname }}
@@ -1282,7 +1363,7 @@
 - name: Stage the reviewed Keycloak realm on the execution host
   ansible.builtin.copy:
     src: "{{ platform_application_keycloak_realm_file }}"
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
     owner: root
     group: root
     mode: "0600"
@@ -1302,7 +1383,7 @@
       - -file
       - "{{ platform_application_keycloak_ca_file }}"
       - -keystore
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
       - -storepass
       - "{{ platform_application_keycloak_truststore_password }}"
   check_mode: false
@@ -1314,8 +1395,8 @@
     argv:
       - /usr/bin/mv
       - -f
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
   check_mode: false
   changed_when: true
   no_log: true
@@ -1326,7 +1407,7 @@
       - "{{ platform_application_kcadm }}"
       - config
       - truststore
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
       - --trustpass
       - "{{ platform_application_keycloak_truststore_password }}"
       - --config
@@ -1352,7 +1433,7 @@
       - --config
       - "{{ platform_application_keycloak_config }}"
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_authentication
   check_mode: false
   changed_when: false
@@ -1405,7 +1486,7 @@
       - --config
       - "{{ platform_application_keycloak_config }}"
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_authorization
   check_mode: false
   changed_when: false
@@ -1414,7 +1495,7 @@
     platform_application_keycloak_authorization.stderr is search('HTTP [45][0-9][0-9]')
   no_log: true
 
-- name: Inspect retained Sprint 2 Keycloak realm
+- name: Inspect retained configured Keycloak realm
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kcadm }}"
@@ -1426,7 +1507,7 @@
       - "{{ platform_application_keycloak_config }}"
   register: platform_application_keycloak_realm_before
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   failed_when: false
   check_mode: false
   changed_when: false
@@ -1443,14 +1524,14 @@
       - --config
       - "{{ platform_application_keycloak_config }}"
       - --file
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
   when: platform_application_keycloak_realm_before.rc != 0
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   changed_when: true
   no_log: true
 
-- name: Add missing reviewed Sprint 2 identities without replacing the realm
+- name: Add missing reviewed configured identities without replacing the realm
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kcadm }}"
@@ -1465,21 +1546,21 @@
       - --config
       - "{{ platform_application_keycloak_config }}"
       - --file
-      - "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
+      - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
   when: platform_application_keycloak_realm_before.rc == 0
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   changed_when: true
   no_log: true
 
-- name: Load the reviewed Sprint 2 identity seed
+- name: Load the reviewed identity seed
   ansible.builtin.slurp:
-    src: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
+    src: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
   register: platform_application_keycloak_seed_file
   changed_when: false
   no_log: true
 
-- name: Bind the reviewed Sprint 2 identity seed
+- name: Bind the reviewed identity seed
   ansible.builtin.set_fact:
     platform_application_keycloak_seed: >-
       {{ platform_application_keycloak_seed_file.content | b64decode | from_json }}
@@ -1524,7 +1605,7 @@
   loop: "{{ platform_application_keycloak_required_users }}"
   no_log: true
 
-- name: Read back Sprint 2 Keycloak realm
+- name: Read back configured Keycloak realm
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kcadm }}"
@@ -1536,7 +1617,7 @@
       - "{{ platform_application_keycloak_config }}"
   register: platform_application_keycloak_realm_after
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   check_mode: false
   changed_when: false
   no_log: true
@@ -1550,7 +1631,7 @@
     fail_msg: PLATFORM_APPLICATION_KEYCLOAK_REALM_INVALID
   no_log: true
 
-- name: Read back Sprint 2 Keycloak client
+- name: Read back configured Keycloak client
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kcadm }}"
@@ -1568,12 +1649,12 @@
       - "{{ platform_application_keycloak_config }}"
   register: platform_application_keycloak_client
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   check_mode: false
   changed_when: false
   no_log: true
 
-- name: Read back Sprint 2 Keycloak roles
+- name: Read back configured Keycloak roles
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kcadm }}"
@@ -1589,12 +1670,12 @@
       - "{{ platform_application_keycloak_config }}"
   register: platform_application_keycloak_roles
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   check_mode: false
   changed_when: false
   no_log: true
 
-- name: Read back Sprint 2 Keycloak users
+- name: Read back configured Keycloak users
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kcadm }}"
@@ -1610,7 +1691,7 @@
       - "{{ platform_application_keycloak_config }}"
   register: platform_application_keycloak_users
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   check_mode: false
   changed_when: false
   no_log: true
@@ -1632,7 +1713,7 @@
       - --config
       - "{{ platform_application_keycloak_config }}"
   environment:
-    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_report_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
   register: platform_application_keycloak_refresh
   check_mode: false
   changed_when: false
@@ -1668,7 +1749,7 @@
     fail_msg: PLATFORM_APPLICATION_KEYCLOAK_REFRESHED_TOKEN_INVALID
   no_log: true
 
-- name: Reconcile the managed Sprint 2 OIDC client without replacing the realm
+- name: Reconcile the managed configured OIDC client without replacing the realm
   ansible.builtin.uri:
     url: >-
       {{ platform_application_keycloak_server }}/admin/realms/{{ platform_application_keycloak_realm
@@ -1686,7 +1767,7 @@
     return_content: false
   no_log: true
 
-- name: Reconcile managed Sprint 2 demo credentials without replacing the realm
+- name: Reconcile managed configured demo credentials without replacing the realm
   ansible.builtin.uri:
     url: >-
       {{ platform_application_keycloak_server }}/admin/realms/{{ platform_application_keycloak_realm
@@ -1715,7 +1796,7 @@
     label: "{{ item.username }}"
   no_log: true
 
-- name: Reconcile managed Sprint 2 demo profiles without replacing the realm
+- name: Reconcile managed configured demo profiles without replacing the realm
   ansible.builtin.uri:
     url: >-
       {{ platform_application_keycloak_server }}/admin/realms/{{ platform_application_keycloak_realm
@@ -1756,7 +1837,7 @@
     label: "{{ item.username }}"
   no_log: true
 
-- name: Require the reviewed Sprint 2 identity surface
+- name: Require the reviewed identity surface
   ansible.builtin.assert:
     that:
       - platform_application_keycloak_client.stdout | from_json | length == 1
@@ -1775,6 +1856,18 @@
     fail_msg: PLATFORM_APPLICATION_KEYCLOAK_SURFACE_INVALID
   no_log: true
 
+- name: Remove temporary Keycloak administration material
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
+    - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-realm.json"
+    - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12"
+    - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
+  check_mode: false
+  no_log: true
+
 - name: Reconcile application namespace without deleting retained state
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -1791,7 +1884,7 @@
           pod-security.kubernetes.io/audit: restricted
           pod-security.kubernetes.io/warn: restricted
 
-- name: Read the immutable Sprint 2 VM base DataVolume
+- name: Read the immutable VM base DataVolume
   kubernetes.core.k8s_info:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: cdi.kubevirt.io/v1beta1
@@ -1800,7 +1893,7 @@
     name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
   register: platform_application_vm_base_dv
 
-- name: Reject a conflicting Sprint 2 VM base DataVolume
+- name: Reject a conflicting immutable VM base DataVolume
   ansible.builtin.assert:
     that:
       - platform_application_vm_base_dv.resources | length <= 1
@@ -1818,7 +1911,7 @@
         platform_application_lock.platform_vm_base.disk_sha256
     fail_msg: PLATFORM_VM_BASE_DATAVOLUME_CONFLICT
 
-- name: Import the immutable Sprint 2 VM base disk when absent
+- name: Import the immutable VM base disk when absent
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
@@ -1830,7 +1923,6 @@
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
-          labweaver.io/sprint: platform
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
           labweaver.io/source-release: "{{ platform_application_lock.platform_vm_base.release }}"
@@ -1849,7 +1941,7 @@
               storage: "{{ platform_application_lock.platform_vm_base.storage_request }}"
   when: platform_application_vm_base_dv.resources | length == 0
 
-- name: Reconcile immediate binding for the immutable Sprint 2 VM base
+- name: Reconcile immediate binding for the immutable VM base
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
@@ -1862,7 +1954,7 @@
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
 
-- name: Wait for the immutable Sprint 2 VM base claim
+- name: Wait for the immutable VM base claim
   kubernetes.core.k8s_info:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: v1
@@ -1874,7 +1966,7 @@
   retries: 30
   delay: 2
 
-- name: Reconcile immediate binding on the immutable Sprint 2 VM base claim
+- name: Reconcile immediate binding on the immutable VM base claim
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
@@ -1887,7 +1979,7 @@
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
 
-- name: Wait for the immutable Sprint 2 VM base import
+- name: Wait for the immutable VM base import
   kubernetes.core.k8s_info:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: cdi.kubevirt.io/v1beta1
@@ -1901,7 +1993,7 @@
   retries: 120
   delay: 5
 
-- name: Read the immutable Sprint 2 VM base DataSource
+- name: Read the immutable VM base DataSource
   kubernetes.core.k8s_info:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: cdi.kubevirt.io/v1beta1
@@ -1910,7 +2002,7 @@
     name: "{{ platform_application_lock.platform_vm_base.data_source_name }}"
   register: platform_application_vm_base_source
 
-- name: Reject a conflicting Sprint 2 VM base DataSource
+- name: Reject a conflicting immutable VM base DataSource
   ansible.builtin.assert:
     that:
       - platform_application_vm_base_source.resources | length <= 1
@@ -1922,7 +2014,7 @@
          platform_application_namespace)
     fail_msg: PLATFORM_VM_BASE_DATASOURCE_CONFLICT
 
-- name: Publish the immutable Sprint 2 VM base DataSource when absent
+- name: Publish the immutable VM base DataSource when absent
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
@@ -1934,7 +2026,6 @@
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
-          labweaver.io/sprint: platform
         annotations:
           labweaver.io/source-release: "{{ platform_application_lock.platform_vm_base.release }}"
           labweaver.io/source-registry: "{{ platform_application_lock.platform_vm_base.registry_url }}"
@@ -1946,7 +2037,7 @@
             namespace: "{{ platform_application_namespace }}"
   when: platform_application_vm_base_source.resources | length == 0
 
-- name: Read back the immutable Sprint 2 VM base DataSource
+- name: Read back the immutable VM base DataSource
   kubernetes.core.k8s_info:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: cdi.kubevirt.io/v1beta1
@@ -1955,7 +2046,7 @@
     name: "{{ platform_application_lock.platform_vm_base.data_source_name }}"
   register: platform_application_vm_base_source_readback
 
-- name: Require the immutable Sprint 2 VM base identity
+- name: Require the immutable VM base identity
   ansible.builtin.assert:
     that:
       - platform_application_vm_base_source_readback.resources | length == 1
@@ -1984,7 +2075,6 @@
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
-          labweaver.io/sprint: platform
       type: kubernetes.io/dockerconfigjson
       data:
         .dockerconfigjson: >-
@@ -2008,7 +2098,6 @@
         namespace: "{{ platform_application_portal_route_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
-          labweaver.io/sprint: platform
       type: kubernetes.io/tls
       data:
         tls.crt: "{{ lookup('ansible.builtin.file', platform_application_portal_tls_certificate_file) | b64encode }}"
@@ -2016,7 +2105,7 @@
   when: platform_application_portal_route_name | length > 0
   no_log: true
 
-- name: Install the Sprint 2 portal authority on the retained router
+- name: Install the portal authority on the retained router
   ansible.builtin.copy:
     src: "{{ platform_application_portal_tls_ca_file }}"
     dest: >-
@@ -2065,7 +2154,7 @@
     fail_msg: PLATFORM_APPLICATION_PORTAL_GATEWAY_MISSING
   when: platform_application_portal_route_name | length > 0
 
-- name: Select an existing Sprint 2 HTTPS listener
+- name: Select an existing bounded HTTPS listener
   ansible.builtin.set_fact:
     platform_application_portal_gateway_listener: >-
       {{ platform_application_portal_gateway.resources[0].spec.listeners
@@ -2073,7 +2162,7 @@
          | list }}
   when: platform_application_portal_route_name | length > 0
 
-- name: Add the bounded Sprint 2 HTTPS listener when absent
+- name: Add the bounded HTTPS listener when absent
   kubernetes.core.k8s_json_patch:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: gateway.networking.k8s.io/v1
@@ -2104,7 +2193,7 @@
     - platform_application_portal_route_name | length > 0
     - platform_application_portal_gateway_listener | length == 0
 
-- name: Read back the retained application Gateway after listener adoption
+- name: Read back the retained application Gateway after listener reconciliation
   kubernetes.core.k8s_info:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     api_version: gateway.networking.k8s.io/v1
@@ -2114,7 +2203,7 @@
   register: platform_application_portal_gateway_after
   when: platform_application_portal_route_name | length > 0
 
-- name: Require the exact bounded Sprint 2 HTTPS listener
+- name: Require the exact bounded HTTPS listener
   ansible.builtin.assert:
     that:
       - platform_application_portal_gateway_listener_after | length == 1
@@ -2271,7 +2360,6 @@
         labels:
           app.kubernetes.io/part-of: labweaver
           app.kubernetes.io/managed-by: ansible
-          labweaver.io/sprint: platform
       spec:
         podSelector: {}
         policyTypes: [Ingress, Egress]
@@ -2318,7 +2406,6 @@
         labels:
           app.kubernetes.io/part-of: labweaver
           app.kubernetes.io/managed-by: ansible
-          labweaver.io/sprint: platform
       spec:
         podSelector: {}
         policyTypes: [Ingress, Egress]
@@ -2372,7 +2459,6 @@
         labels:
           app.kubernetes.io/part-of: labweaver
           app.kubernetes.io/managed-by: ansible
-          labweaver.io/sprint: platform
       type: kubernetes.io/dockerconfigjson
       data:
         .dockerconfigjson: >-
@@ -2383,7 +2469,7 @@
                  | b64encode}}} | to_json | b64encode }}
   no_log: true
 
-- name: Reconcile the retained MinIO transport policy for Sprint 2 platform clients
+- name: Reconcile the retained MinIO transport policy for platform clients
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
@@ -2396,7 +2482,6 @@
         namespace: "{{ platform_application_data_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
-          labweaver.io/sprint: platform
       spec:
         endpointSelector:
           matchExpressions:
@@ -2507,7 +2592,7 @@
         == {'cdi.kubevirt.io': 'cdi-upload-server'}
     fail_msg: PLATFORM_APPLICATION_CDI_CLONE_SOURCE_POLICY_CONFLICT
 
-- name: Adopt the exact retained CDI clone source network policy into the Helm release
+- name: Reconcile the exact CDI clone source network policy before the Helm release
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
@@ -2525,10 +2610,10 @@
           meta.helm.sh/release-namespace: "{{ platform_application_namespace }}"
   when: platform_application_cdi_clone_source_policy.resources | length == 1
 
-- name: Copy reviewed Sprint 2 Helm chart
+- name: Copy reviewed Helm chart
   ansible.builtin.copy:
     src: "{{ platform_application_chart_source }}/"
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/chart/"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
     owner: root
     group: root
     mode: preserve
@@ -2536,7 +2621,7 @@
 - name: Copy reviewed private values files
   ansible.builtin.copy:
     src: "{{ item }}"
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
     owner: root
     group: root
     mode: "0600"
@@ -2549,7 +2634,7 @@
       {%- set values = [] -%}
       {%- for values_file in platform_application_values_files -%}
       {%- set _ = values.append(
-        '--values=' + platform_application_report_root + '/' + platform_application_run_id
+        '--values=' + platform_application_work_root + '/' + platform_application_run_id
         + '/' + (values_file | basename)) -%}
       {%- endfor -%}
       {{ values }}
@@ -2598,12 +2683,12 @@
       {%- endif -%}
       {{ values }}
 
-- name: Atomically deploy the immutable Sprint 2 profile
+- name: Atomically deploy the immutable configured platform profile
   ansible.builtin.command:
     argv: >-
       {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
           'upgrade', '--install', platform_application_release_name,
-          platform_application_report_root + '/' + platform_application_run_id + '/chart',
+          platform_application_work_root + '/' + platform_application_run_id + '/chart',
           '--namespace', platform_application_namespace, '--take-ownership', '--atomic', '--wait',
           '--timeout', platform_application_rollout_timeout]
           + platform_application_values_argv + platform_application_image_argv
@@ -2615,14 +2700,14 @@
     argv: >-
       {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
           'upgrade', '--install', platform_application_release_name,
-          platform_application_report_root + '/' + platform_application_run_id + '/chart',
+          platform_application_work_root + '/' + platform_application_run_id + '/chart',
           '--namespace', platform_application_namespace, '--take-ownership', '--atomic', '--wait',
           '--timeout', platform_application_rollout_timeout]
           + platform_application_values_argv + platform_application_image_argv
           + platform_application_route_argv }}
   changed_when: true
 
-- name: Verify every Sprint 2 workload rollout
+- name: Verify every workload rollout
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kubectl }}"
@@ -2672,7 +2757,7 @@
     fail_msg: PLATFORM_APPLICATION_DEPLOYMENT_READBACK_INVALID
   when: not ansible_check_mode
 
-- name: Read back the adopted portal route
+- name: Read back the retained portal route
   ansible.builtin.command:
     argv:
       - "{{ platform_application_kubectl }}"
@@ -2691,7 +2776,7 @@
   check_mode: false
   changed_when: false
 
-- name: Require the adopted portal route accepted and resolved
+- name: Require the retained portal route accepted and resolved
   ansible.builtin.assert:
     that:
       - >-
@@ -2770,41 +2855,8 @@
     - platform_application_ssh_load_balancer_ip | length > 0
     - not ansible_check_mode
 
-- name: Read final Helm revision
-  ansible.builtin.command:
-    argv:
-      - "{{ platform_application_helm }}"
-      - --kubeconfig
-      - "{{ platform_application_kubeconfig }}"
-      - history
-      - "{{ platform_application_release_name }}"
-      - --namespace
-      - "{{ platform_application_namespace }}"
-      - --max
-      - "1"
-      - --output
-      - json
-  register: platform_application_helm_history
+- name: Remove temporary application work material
+  ansible.builtin.file:
+    path: "{{ platform_application_work_root }}/{{ platform_application_run_id }}"
+    state: absent
   check_mode: false
-  changed_when: false
-
-- name: Hash application identity inputs
-  ansible.builtin.stat:
-    path: "{{ item }}"
-    checksum_algorithm: sha256
-  loop:
-    - "{{ platform_application_package_manifest }}"
-    - "{{ platform_application_migration_catalog }}"
-    - "{{ platform_application_configuration_manifest }}"
-    - "{{ platform_application_configuration_bundle }}"
-  register: platform_application_identity_inputs
-  delegate_to: localhost
-  become: false
-
-- name: Write sanitized non-destructive adoption report
-  ansible.builtin.template:
-    src: application-report.json.j2
-    dest: "{{ platform_application_report_root }}/{{ platform_application_run_id }}/application-report.json"
-    owner: root
-    group: root
-    mode: "0600"

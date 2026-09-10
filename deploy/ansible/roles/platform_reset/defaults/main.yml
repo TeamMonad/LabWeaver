@@ -1,7 +1,6 @@
 ---
 platform_reset_confirmation: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PLATFORM_RESET_CONFIRMATION') }}"
 platform_reset_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
-platform_reset_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
 platform_reset_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
 platform_reset_kubeconfig: /etc/kubernetes/admin.conf
 platform_reset_kubectl: /usr/bin/kubectl
@@ -34,10 +33,15 @@ platform_reset_nats_streams:
     subjects: labweaver.environment.instance.lifecycle_requested.v1
     max_age: 24h
   - name: LABWEAVER_RELEASES
-    subjects: labweaver.control.environment_template_release.>
+    subjects: labweaver.control.environment_template_release.>,labweaver.evaluation.release.published.v1
     max_age: 168h
   - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
-  - {name: LABWEAVER_SUBMISSION, subjects: "labweaver.evaluation.submission.>", max_age: 168h}
+  - name: LABWEAVER_SUBMISSION
+    subjects: labweaver.evaluation.submission.>,labweaver.evaluation.run.requested.v1,labweaver.evaluation.run.state_changed.v1,labweaver.evaluation.step_run.state_changed.v1
+    max_age: 168h
+  - name: LABWEAVER_RESOURCE_EVENTS
+    subjects: labweaver.resource.request.submitted.v1,labweaver.resource.request.approved.v1,labweaver.resource.request.rejected.v1,labweaver.resource.request.cancelled.v1,labweaver.resource.request.state_changed.v1,labweaver.resource.lease.activated.v1,labweaver.resource.lease.renewed.v1,labweaver.resource.lease.revoked.v1,labweaver.resource.lease.expiring.v1,labweaver.resource.lease.expired.v1
+    max_age: 168h
 platform_reset_minio_alias: ""
 platform_reset_minio_bucket: labweaver-artifacts
 platform_reset_buildkit_address: ""

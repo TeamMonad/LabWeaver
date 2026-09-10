@@ -1,7 +1,7 @@
-# Sprint 2 deployment bundle
+# Deployment configuration bundle
 
 `platform-bundle-manifest.json` is the exact ConfigMap and Secret input contract for the
-non-destructive Sprint 2 application adoption. Prepare values only under an ignored private
+application deployment. Prepare values only under an ignored private
 directory using this layout:
 
 ```text
@@ -24,10 +24,16 @@ count, and never logs Secret values. Both paths must be inside a `.private` dire
 command refuses to overwrite an existing bundle. The application role validates the resulting
 object and key set before server-side applying only those application-owned objects. It does not
 delete a namespace, database schema, NATS stream, MinIO bucket, Harbor project, Keycloak realm, or
-retained infrastructure component.
+existing infrastructure component.
 
 The checked-in `*.example` files document non-secret runtime configuration fields. They are not a
 deployable bundle and must not contain credentials.
+
+The Container provider entry must set both `workspaceStorageClassName` and
+`workspaceAccessMode`. The access mode is passed through to the workspace PVC and accepts only
+the Kubernetes values `ReadWriteOnce` and `ReadWriteMany`; the production NFS example uses
+`ReadWriteMany`, while the local Kind example uses `ReadWriteOnce` so the runtime and freeze
+workers can share their single node.
 
 Copy and specialize the examples as follows:
 
@@ -40,16 +46,20 @@ Copy and specialize the examples as follows:
 - `environment-providers.json.example` → `environment-service-config/providers.json`
 - `runtime-executor.yaml.example` → both runtime executor `config.yaml` files
 - `evaluation-service.yaml.example` → `evaluation-service-config/config.yaml`
-- `resource-service.yaml.example` → `resource-service-config/mtls.yaml`
+- `resource-service.yaml.example` → `resource-service-config/http.yaml`
+- `resource-capacity.json.example` → `resource-service-config/capacity.json`
 - `web-deployment.json.example` → `web-config/deployment.json`
 
-The Resource API is exposed only on its mTLS listener. The Access and Resource private bundles
+The Resource API is exposed over its server TLS listener. Access calls use a short-lived Keycloak
+service JWT with the `resource.api.invoke` permission and the configured Access client ID, then
+carry a short-lived signed user delegation for user scope. The Access and Resource private bundles
 must contain the same generated `resource-delegation-key` under their respective Secret objects;
 the key is a root-owned `0600` input and is never written to this repository, a report or a log.
-Resource accepts only the CA-verified Access SPIFFE URI SAN and a short-lived signed delegation;
-actor and role HTTP headers are not an identity mechanism.
+Actor and role HTTP headers are not an identity mechanism. Internal Resource routes require a
+service JWT with the route permission; Task resource routes additionally require the configured
+Evaluation client ID.
 
-Sprint 2 binds the pinned Claude Code CLI to the reviewed Anthropic-compatible endpoint using
+The deployment binds the pinned Claude Code CLI to the reviewed Anthropic-compatible endpoint using
 only the three generic provider fields. Put the operator-provided auth token value in
 `secrets/agent-service-secrets/anthropic-auth-token` with mode `0600`; never put it in YAML, a
 command argument, a log or a report. The Agent process receives exactly
@@ -58,23 +68,23 @@ files. Operator-specific variable names are not read, and there is no compatibil
 ambient credential fallback or alternate provider route; startup fails closed when the
 mounted set differs from these three fields.
 
-Environment-specific Helm values must explicitly bind adopted infrastructure names and VIPs. This
+Environment-specific Helm values must explicitly bind existing infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under
 `network.externalServiceEndpoints`, an opt-in `portalRoute`, and the reviewed shared MetalLB VIP
 for `sshGatewayService`. The portal route creates only the application HTTPRoute and
-ReferenceGrant; it does not replace the retained Gateway. OpenSSH uses a dedicated TCP/2222
-`LoadBalancer` Service on the same reviewed VIP because the adopted Cilium Gateway API controller
+ReferenceGrant; it does not replace the existing Gateway. OpenSSH uses a dedicated TCP/2222
+`LoadBalancer` Service on the same reviewed VIP because the Cilium Gateway API controller
 does not reconcile TCPRoute. `platform-application` fails unless the HTTPRoute is `Accepted` and
 `ResolvedRefs` and the OpenSSH Service owns the exact shared VIP and port.
-The portal authority is installed only in the retained router system trust so controller-side
+The portal authority is installed only in the router system trust so controller-side
 verification never disables TLS validation.
 When browser uploads are enabled, `objectStoreRoute` adds the bucket path to the same HTTPS
 origin. The existing Web Nginx workload preserves the signed Host and path, disables request
 buffering, and validates MinIO TLS with the reviewed internal CA. This avoids depending on
-`BackendTLSPolicy`, which the adopted Cilium Gateway controller does not reconcile. In that
+`BackendTLSPolicy`, which the Cilium Gateway controller does not reconcile. In that
 profile, only Control signs the portal origin; workers continue to use the cluster-internal MinIO
 endpoint. The mounted proxy configuration is an additive application object and does not replace
-or reconfigure the retained MinIO service.
+or reconfigure the existing MinIO service.
 The HTTPS listener accepts routes only from namespaces labeled
 `labweaver.io/gateway-routes=allowed`; the role adds that label to the reviewed portal namespace,
 and the Container provider adds it to Environment-owned namespaces as part of the immutable plan.
@@ -85,11 +95,11 @@ the runtime ServiceAccount and Deployment. The credential is not included in an 
 NATS message, database row, report, or log. Missing, oversized, empty, or malformed Docker config
 blocks the apply operation.
 
-The private Keycloak representation is imported when the realm is absent. For a retained realm,
+The private Keycloak representation is imported when the realm is absent. For an existing realm,
 the role uses `partialImport` with `ifResourceExists=SKIP`, then reads back the required client,
 roles and users. Existing identities are not overwritten or deleted.
 
-The controller resolves retained headless PostgreSQL, NATS and MinIO endpoints from EndpointSlice
+The controller resolves existing headless PostgreSQL, NATS and MinIO endpoints from EndpointSlice
 objects on every run and owns one bounded `/etc/hosts` block for those service DNS names plus the
 reviewed Harbor and Keycloak VIPs. Administrative clients use explicit CA files and isolated
 configuration directories; they do not disable TLS verification or depend on ambient credentials.

@@ -48,6 +48,22 @@ RUN test -n "${CLAUDE_CODE_VERSION}" && test -n "${CLAUDE_CODE_LINUX_X64_SHA512}
     test -x package/claude && \
     install -D -m 0555 package/claude /out/claude
 
+# The local Kind stack is intentionally offline from Anthropic.  This stage is
+# an explicit, disposable test boundary: it compiles the checked-in stream-json
+# fixture and accepts only the pinned production version/hash inputs that the
+# local builder already passes to the agent image build.  It is never reachable
+# from the production `agent-runtime` target.
+FROM ${RUST_BUILDER} AS claude-tools-fixture
+ARG CLAUDE_CODE_VERSION
+ARG CLAUDE_CODE_LINUX_X64_SHA512
+WORKDIR /tmp/claude-fixture
+COPY tools/claude-fixture/claude.c ./claude.c
+RUN test "${CLAUDE_CODE_VERSION}" = "2.1.215" && \
+    test "${CLAUDE_CODE_LINUX_X64_SHA512}" = "cf00de4e2b500f7bf4fc6c57de19753d3639e23ee2177fe103d40614cf79ca29ddf61064bcbcafe9a53d59d1fbd3cf6cdc02027c8ea167be00157b41469e9bcd" && \
+    mkdir -p /out && \
+    cc -std=c11 -O2 -Wall -Wextra -Werror claude.c -o /out/claude && \
+    chmod 0555 /out/claude
+
 FROM ${RUST_RUNTIME} AS runtime-base
 ARG SERVICE
 ARG SOURCE_COMMIT
@@ -63,5 +79,10 @@ FROM runtime-base AS agent-runtime
 COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
 COPY --from=trivy-tools /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=claude-tools --chown=65532:65532 /out/claude /usr/local/bin/claude
+
+FROM runtime-base AS agent-runtime-fixture
+COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
+COPY --from=trivy-tools /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=claude-tools-fixture --chown=65532:65532 /out/claude /usr/local/bin/claude
 
 FROM runtime-base AS runtime

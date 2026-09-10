@@ -39,27 +39,14 @@ secrets:
   access_runtime_url_file: "/etc/labweaver/secrets/database-url"
   file_bindings:
     "secret://environment-owner-resolver/ca": "/etc/labweaver/secrets/mtls-ca.pem"
-    "secret://access-service/owner-resolver-client-cert": "/etc/labweaver/secrets/tls.crt"
-    "secret://access-service/owner-resolver-client-key": "/etc/labweaver/secrets/tls.key"
     "secret://control-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
-    "secret://access-service/control-client-cert": "/etc/labweaver/secrets/tls.crt"
-    "secret://access-service/control-client-key": "/etc/labweaver/secrets/tls.key"
     "secret://evaluation-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
-    "secret://access-service/evaluation-client-cert": "/etc/labweaver/secrets/tls.crt"
-    "secret://access-service/evaluation-client-key": "/etc/labweaver/secrets/tls.key"
     "secret://resource-gateway/ca": "/etc/labweaver/secrets/mtls-ca.pem"
-    "secret://access-service/resource-client-cert": "/etc/labweaver/secrets/tls.crt"
-    "secret://access-service/resource-client-key": "/etc/labweaver/secrets/tls.key"
     "secret://resource-gateway/delegation-key": "/etc/labweaver/secrets/resource-delegation-key"
-internal_mtls:
+internal_tls:
   bind_addr: "0.0.0.0:9443"
   server_certificate_file: "/etc/labweaver/secrets/tls.crt"
   server_key_file: "/etc/labweaver/secrets/tls.key"
-  client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  allowed_san_uris:
-    - "spiffe://labweaver/control-service"
-    - "spiffe://labweaver/openssh-gateway"
-  required_eku: "clientAuth"
 environment_owner_resolver:
   # Recommended production starting point: a 2 s call timeout, one bounded
   # retry after 100 ms, and a 5 s maximum Gateway decision cache horizon.
@@ -67,9 +54,6 @@ environment_owner_resolver:
   # limits; no compiled fallback is used.
   resolver_uri: "https://environment-service:9446"
   ca_certificate_locator: "secret://environment-owner-resolver/ca"
-  client_certificate_locator: "secret://access-service/owner-resolver-client-cert"
-  client_private_key_locator: "secret://access-service/owner-resolver-client-key"
-  allowed_server_sans: ["environment-owner-resolver.example.invalid"]
   timeout_milliseconds: 2000
   max_retries: 1
   retry_backoff_milliseconds: 100
@@ -77,8 +61,6 @@ environment_owner_resolver:
 control_gateway:
   base_uri: "https://control-service:9444/"
   ca_certificate_locator: "secret://control-gateway/ca"
-  client_certificate_locator: "secret://access-service/control-client-cert"
-  client_private_key_locator: "secret://access-service/control-client-key"
   allowed_server_sans: ["control-service"]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
@@ -86,8 +68,6 @@ control_gateway:
 environment_gateway:
   base_uri: "https://environment-service:9446/"
   ca_certificate_locator: "secret://control-gateway/ca"
-  client_certificate_locator: "secret://access-service/control-client-cert"
-  client_private_key_locator: "secret://access-service/control-client-key"
   allowed_server_sans: ["environment-service"]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
@@ -95,8 +75,6 @@ environment_gateway:
 evaluation_gateway:
   base_uri: "https://evaluation-service:9447/"
   ca_certificate_locator: "secret://evaluation-gateway/ca"
-  client_certificate_locator: "secret://access-service/evaluation-client-cert"
-  client_private_key_locator: "secret://access-service/evaluation-client-key"
   allowed_server_sans: ["evaluation-service"]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
@@ -104,16 +82,12 @@ evaluation_gateway:
 resource_gateway:
   base_uri: "https://resource-service:9448/"
   ca_certificate_locator: "secret://resource-gateway/ca"
-  client_certificate_locator: "secret://access-service/resource-client-cert"
-  client_private_key_locator: "secret://access-service/resource-client-key"
   delegation_key_locator: "secret://resource-gateway/delegation-key"
   allowed_server_sans: ["resource-service"]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608
 grants:
-  gateway_san_uris:
-    - spiffe://labweaver/openssh-gateway
   public_ssh_gateway_hostname: demo.lab.lan
   public_ssh_gateway_port: 2222
   public_ssh_gateway_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA

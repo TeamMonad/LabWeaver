@@ -3,7 +3,6 @@
   ansible.builtin.assert:
     that:
       - resource_application_run_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
-      - resource_application_source_commit is match('^[0-9a-f]{40,64}$')
       - resource_application_package_manifest | length > 0
       - resource_application_configuration_bundle | length > 0
       - resource_application_acceptance_profile_file | length > 0
@@ -238,7 +237,6 @@
     that:
       - resource_application_package.schema_version == 'platform-image-package-manifest.v2'
       - resource_application_package.profile | default('platform') == 'resource'
-      - resource_application_package.source_commit == resource_application_expected_source_commit
       - resource_application_package.images | length == 1
       - resource_application_package.images[0].component == 'resource-service'
       - resource_application_package.images[0].reference is match('^[^@]+@sha256:[0-9a-f]{64}$')
@@ -247,7 +245,7 @@
       - resource_application_bundle_objects | length == 2
       - resource_application_bundle_objects | map(attribute='metadata.name') | sort == ['resource-service-config', 'resource-service-secrets']
       - resource_application_bundle_objects | map(attribute='metadata.namespace') | unique | list == [resource_application_namespace]
-    fail_msg: RESOURCE_APPLICATION_IDENTITY_INVALID
+    fail_msg: RESOURCE_APPLICATION_CONFIGURATION_INVALID
   no_log: true
 
 - name: Apply only the independently reviewed Resource configuration
@@ -304,7 +302,7 @@
       - "--timeout={{ resource_application_rollout_timeout }}"
   changed_when: false
 
-- name: Publish identity-bound Resource deployment manifest
+- name: Publish the Resource deployment manifest
   ansible.builtin.copy:
     dest: "{{ resource_application_report_root }}/{{ resource_application_run_id }}/resource-deployment-manifest.json"
     owner: root
@@ -313,7 +311,6 @@
     content: >-
       {{ {
         'schemaVersion': 'resource-deployment-manifest.v1',
-        'sourceCommit': resource_application_package.source_commit,
         'runId': resource_application_run_id,
         'packageManifestSha256': 'sha256:' ~ resource_application_inputs.results[0].stat.checksum,
         'configurationBundleSha256': resource_application_bundle_sha256,

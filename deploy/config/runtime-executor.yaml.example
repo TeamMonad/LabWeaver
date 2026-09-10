@@ -32,7 +32,5 @@ executor:
   registryPullSecretName: "harbor-course-pull"
 terminal:
   bindAddr: "0.0.0.0:9450"
-  clientCaFile: "/etc/labweaver/secrets/mtls-ca.pem"
   serverCertificateFile: "/etc/labweaver/secrets/tls.crt"
   serverPrivateKeyFile: "/etc/labweaver/secrets/tls.key"
-  allowedCallerSan: "spiffe://labweaver/environment-service"

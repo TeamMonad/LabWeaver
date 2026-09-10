@@ -133,14 +133,13 @@ score payloads.
 | `LW_EVAL_LLM_EVIDENCE_PATH_NOT_ALLOWED` | Evidence is outside the current Advisory Step include              |
 | `LW_EVAL_LLM_EVIDENCE_RANGE_INVALID` | Evidence uses zero or reversed line bounds                            |
 
-## Open P1 contract decisions
+## Runtime constraints
 
-- The v1 Ansible module allowlist does not prove HTTP behavior for the Linux golden path.
-  Adding modules such as `uri`/`wait_for` or defining offline-verified immutable playbook bundles
-  requires an architecture and security decision; the Linux fixture currently claims neither.
-- `TestGroup.weight` remains a relative input without a frozen normalization, rounding, remainder or
-  partial-case formula. It must not be used for production scoring until A approves one deterministic
-  definition (or replaces it with per-group `maxPoints`).
+- An Ansible profile can use only the configured module allowlist. A package that needs HTTP
+  assertions must supply a supported, approved profile; package and service facts alone do not
+  establish HTTP behavior.
+- Each test group declares `maxPoints`. The deterministic runner computes case results and points;
+  an advisory model cannot replace those results or supply the numeric total.
 
 ## Artifacts and verification
 
@@ -153,9 +152,10 @@ score payloads.
 
 ```sh
 cargo xtask contracts generate
-cargo xtask test --suite contract
+cargo test -p contracts --locked
 cargo clippy -p contracts --all-targets --all-features -- -D warnings
 ```
 
-This is E1 contract evidence. It does not prove a Runner, Kubernetes Job, VM, database, message path,
-approval path or production evaluation run.
+These checks validate the document and public contract. Execution, persistence, approval and
+cleanup behavior require the corresponding service tests. Cluster and guest behavior must be
+tested on the configured Kubernetes/KubeVirt backend.

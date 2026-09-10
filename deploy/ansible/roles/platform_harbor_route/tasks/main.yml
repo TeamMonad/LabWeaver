@@ -1,5 +1,5 @@
 ---
-- name: Validate the bounded Harbor route adoption inputs
+- name: Validate Harbor route configuration
   ansible.builtin.assert:
     that:
       - harbor_namespace == 'harbor'
@@ -49,22 +49,35 @@
     name: "{{ harbor_gateway_name }}"
   register: platform_harbor_gateway_read
 
-- name: Read the existing Harbor HTTPRoute
+- name: Read the existing Harbor HTTP route
   kubernetes.core.k8s_info:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
     api_version: gateway.networking.k8s.io/v1
     kind: HTTPRoute
     namespace: "{{ harbor_namespace }}"
     name: harbor
-  register: platform_harbor_route_read
+  register: platform_harbor_http_route_read
 
-- name: Bind existing Harbor adoption objects
+- name: Read the existing Harbor TLS route
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: gateway.networking.k8s.io/v1alpha2
+    kind: TLSRoute
+    namespace: "{{ harbor_namespace }}"
+    name: harbor
+  register: platform_harbor_tls_route_read
+
+- name: Bind the Harbor installation objects
   ansible.builtin.set_fact:
     platform_harbor_namespace_object: "{{ platform_harbor_namespace_read.resources | first | default({}) }}"
     platform_harbor_service_object: "{{ platform_harbor_service_read.resources | first | default({}) }}"
     platform_harbor_endpoint_slices: "{{ platform_harbor_endpoint_slice_read.resources }}"
+
+- name: Bind the existing Harbor route objects
+  ansible.builtin.set_fact:
     platform_harbor_gateway_object: "{{ platform_harbor_gateway_read.resources | first | default({}) }}"
-    platform_harbor_route_object: "{{ platform_harbor_route_read.resources | first | default({}) }}"
+    platform_harbor_http_route_object: "{{ platform_harbor_http_route_read.resources | first | default({}) }}"
+    platform_harbor_tls_route_object: "{{ platform_harbor_tls_route_read.resources | first | default({}) }}"
 
 - name: Reject an incomplete or unmanaged Harbor installation
   ansible.builtin.assert:
@@ -78,9 +91,27 @@
         platform_harbor_endpoint_slices | map(attribute='endpoints') | flatten |
         selectattr('conditions.ready', 'defined') |
         selectattr('conditions.ready', 'equalto', true) | list | length > 0
-      - platform_harbor_gateway_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
-      - platform_harbor_route_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
-    fail_msg: PLATFORM_HARBOR_ADOPTION_BOUNDARY_INVALID
+    fail_msg: PLATFORM_HARBOR_INSTALLATION_INVALID
+
+- name: Reject foreign Harbor route objects before mutation
+  ansible.builtin.assert:
+    that:
+      - platform_harbor_gateway_read.resources | length <= 1
+      - platform_harbor_http_route_read.resources | length <= 1
+      - platform_harbor_tls_route_read.resources | length <= 1
+      - >-
+        platform_harbor_gateway_read.resources | length == 0 or
+        (platform_harbor_gateway_object.metadata.labels['app.kubernetes.io/part-of'] | default(''))
+        == 'labweaver-infrastructure'
+      - >-
+        platform_harbor_http_route_read.resources | length == 0 or
+        (platform_harbor_http_route_object.metadata.labels['app.kubernetes.io/part-of'] | default(''))
+        == 'labweaver-infrastructure'
+      - >-
+        platform_harbor_tls_route_read.resources | length == 0 or
+        (platform_harbor_tls_route_object.metadata.labels['app.kubernetes.io/part-of'] | default(''))
+        == 'labweaver-infrastructure'
+    fail_msg: PLATFORM_HARBOR_ROUTE_OWNERSHIP_INVALID
 
 - name: Read the existing Harbor nginx public CA
   kubernetes.core.k8s_info:
@@ -120,7 +151,7 @@
   delegate_to: "{{ groups['routers'][0] }}"
   become: true
 
-- name: Publish the adopted Harbor public CA for controlled clients
+- name: Publish the Harbor public CA for controlled clients
   ansible.builtin.copy:
     dest: "{{ harbor_public_ca_path }}"
     owner: root
@@ -131,7 +162,7 @@
   become: true
   no_log: true
 
-- name: Install the adopted Harbor CA in the control-plane system trust
+- name: Install the Harbor CA in the control-plane system trust
   ansible.builtin.copy:
     dest: "{{ platform_harbor_route_ca_trust_anchors_dir }}/labweaver-harbor-nginx.crt"
     owner: root
@@ -142,7 +173,7 @@
   notify: Refresh control-plane system trust after a Harbor CA change
   no_log: true
 
-- name: Install the adopted Harbor CA in the router system trust
+- name: Install the Harbor CA in the router system trust
   ansible.builtin.copy:
     dest: "{{ platform_harbor_route_ca_trust_anchors_dir }}/labweaver-harbor-nginx.crt"
     owner: root
@@ -164,7 +195,7 @@
     group: root
     mode: '0755'
 
-- name: Install the adopted Harbor CA for container clients
+- name: Install the Harbor CA for container clients
   ansible.builtin.copy:
     dest: "/etc/containers/certs.d/{{ harbor_hostname }}/ca.crt"
     owner: root
@@ -173,37 +204,41 @@
     content: "{{ platform_harbor_nginx_secret_read.resources[0].data['ca.crt'] | b64decode }}"
   no_log: true
 
-- name: Bind the retained Harbor endpoint on the router controller
+- name: Bind the Harbor endpoint on the router controller
   ansible.builtin.blockinfile:
     path: /etc/hosts
     marker: "# {mark} LABWEAVER PLATFORM HARBOR"
     block: "{{ harbor_gateway_vip }} {{ harbor_hostname }}"
   delegate_to: "{{ groups['routers'][0] }}"
 
-- name: Resolve the retained Harbor endpoint from the router controller
+- name: Resolve the Harbor endpoint from the router controller
   ansible.builtin.command:
     argv: [getent, ahostsv4, "{{ harbor_hostname }}"]
   delegate_to: "{{ groups['routers'][0] }}"
   changed_when: false
   register: platform_harbor_router_resolution
 
-- name: Reject a router Harbor binding that does not target the retained VIP
+- name: Reject a router Harbor binding that does not target the configured VIP
   ansible.builtin.assert:
     that:
       - platform_harbor_router_resolution.stdout_lines | length > 0
       - platform_harbor_router_resolution.stdout_lines[0].split()[0] == harbor_gateway_vip
     fail_msg: PLATFORM_HARBOR_ROUTER_RESOLUTION_INVALID
 
-- name: Adopt the existing Harbor Gateway as TLS passthrough
+- name: Remove the obsolete Harbor HTTP route
+  kubernetes.core.k8s:
+    kubeconfig: "{{ harbor_kubeconfig_path }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    namespace: "{{ harbor_namespace }}"
+    name: harbor
+    state: absent
+  when: platform_harbor_http_route_read.resources | length == 1
+
+- name: Reconcile the Harbor Gateway as TLS passthrough
   kubernetes.core.k8s:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
     state: present
-    apply: true
-    server_side_apply:
-      field_manager: labweaver-platform-adoption
-      # The retained Gateway was created by kubectl client-side apply. Ownership
-      # transfer is bounded by the managed-object and ready-backend checks above.
-      force_conflicts: true
     definition:
       apiVersion: gateway.networking.k8s.io/v1
       kind: Gateway
@@ -224,8 +259,6 @@
             hostname: "{{ harbor_hostname }}"
             tls:
               mode: Passthrough
-              # Explicitly clear the retained termination certificate. An
-              # omitted field remains owned by the previous field manager.
               certificateRefs: []
             allowedRoutes:
               namespaces:
@@ -234,14 +267,10 @@
                 - group: gateway.networking.k8s.io
                   kind: TLSRoute
 
-- name: Route Harbor TLS directly to the retained nginx HTTPS service
+- name: Reconcile the Harbor TLS route to the nginx HTTPS service
   kubernetes.core.k8s:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
     state: present
-    apply: true
-    server_side_apply:
-      field_manager: labweaver-platform-adoption
-      force_conflicts: false
     definition:
       # TLSRoute is still v1alpha2/v1alpha3 in Gateway API v1.4.1
       # experimental (no v1 yet); Cilium 1.19 consumes v1alpha2.
@@ -263,7 +292,7 @@
               - name: "{{ harbor_release_name }}"
                 port: 443
 
-- name: Read adopted Harbor TLSRoute status
+- name: Read the Harbor TLS route status
   kubernetes.core.k8s_info:
     kubeconfig: "{{ harbor_kubeconfig_path }}"
     api_version: gateway.networking.k8s.io/v1alpha2
@@ -271,8 +300,22 @@
     namespace: "{{ harbor_namespace }}"
     name: harbor
   register: platform_harbor_route_readback
+  until:
+    - platform_harbor_route_readback.resources | length == 1
+    - >-
+      platform_harbor_route_readback.resources[0].status.parents | default([]) |
+      map(attribute='conditions') | flatten |
+      selectattr('type', 'equalto', 'Accepted') |
+      selectattr('status', 'equalto', 'True') | list | length > 0
+    - >-
+      platform_harbor_route_readback.resources[0].status.parents | default([]) |
+      map(attribute='conditions') | flatten |
+      selectattr('type', 'equalto', 'ResolvedRefs') |
+      selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: 30
+  delay: 2
 
-- name: Require the Gateway controller to accept and resolve the adopted TLS route
+- name: Require the Gateway controller to accept and resolve the Harbor TLS route
   ansible.builtin.assert:
     that:
       - platform_harbor_route_readback.resources | length == 1
@@ -290,7 +333,7 @@
         selectattr('status', 'equalto', 'True') | list | length > 0
     fail_msg: PLATFORM_HARBOR_ROUTE_NOT_READY
 
-- name: Verify the adopted Docker Registry endpoint contract
+- name: Verify the Docker Registry endpoint contract
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/v2/"
     method: GET
@@ -323,7 +366,7 @@
          | regex_findall('(?m)^HARBOR_ADMIN_PASSWORD=(.+)$') | first }}
   no_log: true
 
-- name: Read the retained Harbor Sprint 2 project policy
+- name: Read the Harbor project policy
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
     method: GET
@@ -336,7 +379,7 @@
   register: platform_harbor_project_read
   no_log: true
 
-- name: Create the adopted Harbor project only when missing
+- name: Create the Harbor project only when missing
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects"
     method: POST
@@ -352,7 +395,7 @@
   when: platform_harbor_project_read.json | length == 0
   no_log: true
 
-- name: Re-read the retained Harbor project after adoption
+- name: Re-read the Harbor project after reconciliation
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
     method: GET
@@ -365,7 +408,7 @@
   register: platform_harbor_project_read
   no_log: true
 
-- name: Reject a missing or ambiguous Harbor Sprint 2 project
+- name: Reject a missing or ambiguous Harbor project
   ansible.builtin.assert:
     that:
       - platform_harbor_project_read.json | length == 1
@@ -374,7 +417,7 @@
     fail_msg: PLATFORM_HARBOR_PROJECT_INVALID
   no_log: true
 
-- name: Align the retained project with the Sprint 2 scan-only policy
+- name: Align the project with the scan-only policy
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects/{{ platform_harbor_project_read.json[0].project_id }}"
     method: PUT
@@ -396,7 +439,7 @@
     platform_harbor_project_read.json[0].metadata.severity | default('') != 'critical'
   no_log: true
 
-- name: Read back the adopted Harbor Sprint 2 project policy
+- name: Read back the Harbor project policy
   ansible.builtin.uri:
     url: "https://{{ harbor_hostname }}/api/v2.0/projects?name={{ harbor_project_name | urlencode }}"
     method: GET
@@ -418,4 +461,11 @@
       - platform_harbor_project_readback.json[0].metadata.prevent_vul | default('') == 'false'
       - platform_harbor_project_readback.json[0].metadata.severity | default('') == 'critical'
     fail_msg: PLATFORM_HARBOR_PROJECT_POLICY_DRIFT
+  no_log: true
+
+- name: Remove the temporary Harbor probe CA
+  ansible.builtin.file:
+    path: /var/tmp/labweaver-harbor-nginx-ca.crt
+    state: absent
+  check_mode: false
   no_log: true

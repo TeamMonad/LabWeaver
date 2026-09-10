@@ -1,0 +1,38 @@
+# Playwright 1.61.1 is the version locked by web/pnpm-lock.yaml.  The
+# amd64 child manifest was resolved from the official tag before this image
+# was added; pinning the child digest keeps the browser/runtime pair stable.
+FROM mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6
+
+ARG PNPM_VERSION=9.15.4
+ARG SOURCE_COMMIT
+ARG SOURCE_DATE_EPOCH
+
+USER root
+ENV CI=true \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# certutil creates the NSS database used by Chromium.  The CA itself is
+# supplied only by the run-owned Kubernetes Secret at container start.
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates libnss3-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/web
+RUN corepack enable \
+    && corepack prepare "pnpm@${PNPM_VERSION}" --activate
+
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN --mount=type=cache,id=labweaver-playwright-pnpm,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile
+
+COPY web/ ./
+COPY tools/local-dev/playwright-entrypoint.sh /usr/local/bin/labweaver-playwright-entrypoint
+RUN chmod 0555 /usr/local/bin/labweaver-playwright-entrypoint
+
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="playwright-e2e"
+
+ENTRYPOINT ["/usr/local/bin/labweaver-playwright-entrypoint"]
+CMD ["node", "node_modules/@playwright/test/cli.js", "test", "--config=playwright.config.mjs", "--workers=1", "--project", "setup", "--project", "teacher", "--project", "student", "--project", "platform-admin"]

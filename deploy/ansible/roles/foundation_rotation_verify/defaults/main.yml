@@ -4,7 +4,6 @@
 # sanitized new-credential registry in the remote root-only registry, and
 # emits a non-release clean-rebuild report.
 foundation_rotation_verify_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
-foundation_rotation_verify_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
 foundation_rotation_verify_kubeconfig: /etc/kubernetes/admin.conf
 foundation_rotation_verify_kubectl: /usr/bin/kubectl
 foundation_rotation_verify_psql: /usr/bin/psql

@@ -12,6 +12,9 @@
 !vendor/**
 !web/**
 !xtask/**
+!tools/claude-fixture/**
+!tools/local-dev/
+!tools/local-dev/playwright-entrypoint.sh
 web/node_modules
 web/dist
 web/.auth

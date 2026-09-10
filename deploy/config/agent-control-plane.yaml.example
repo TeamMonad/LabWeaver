@@ -1,13 +1,10 @@
-# Non-secret Agent authority and durable worker configuration for Issue #48.
+# Non-secret Agent authority and durable worker configuration.
 database_url_file: "/etc/labweaver/secrets/database-url"
 database_max_connections: 20
-control_mtls:
+control_tls:
   bind_addr: "0.0.0.0:9445"
   server_certificate_file: "/etc/labweaver/secrets/tls.crt"
   server_key_file: "/etc/labweaver/secrets/tls.key"
-  client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  allowed_san_uris: ["spiffe://labweaver/control-service"]
-  required_eku: "clientAuth"
 object_store:
   binding: "problem-package-minio-v1"
   endpoint: "https://minio.labweaver-data.svc:9000/"
@@ -36,9 +33,16 @@ worker_environment_files:
   ANTHROPIC_BASE_URL: "/etc/labweaver/config/anthropic-base-url"
   ANTHROPIC_AUTH_TOKEN: "/etc/labweaver/secrets/anthropic-auth-token"
   ANTHROPIC_MODEL: "/etc/labweaver/config/anthropic-model"
+work_execution:
+  environment_base_uri: "https://environment-service:9446/"
+  environment_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
+  environment_audience: "labweaver-environment"
+  environment_scopes:
+    - "environment.work.configure"
+    - "environment:resolve_work_execution_binding"
 build:
   # Served by the deployment-owned executor binding immutable ArtifactRef inputs
-  # to restricted BuildKit and private Harbor (Trivy thinned for private deployment).
+  # to restricted BuildKit and private Harbor.
   provider_subject: "labweaver.provider.container_build.execute.v1"
   builder_binding: "buildkit-primary-v1"
   registry_binding: "harbor-primary-v1"

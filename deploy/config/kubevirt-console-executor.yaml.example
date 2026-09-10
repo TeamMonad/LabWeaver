@@ -7,7 +7,5 @@ kubernetes:
   requestTimeoutMilliseconds: 30000
 server:
   bindAddr: "0.0.0.0:9451"
-  clientCaFile: "/etc/labweaver/secrets/mtls-ca.pem"
   serverCertificateFile: "/etc/labweaver/secrets/tls.crt"
   serverPrivateKeyFile: "/etc/labweaver/secrets/tls.key"
-  allowedCallerSan: "spiffe://labweaver/environment-service"

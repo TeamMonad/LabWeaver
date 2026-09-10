@@ -53,13 +53,31 @@ def _write(path: Path, payload: bytes, mode: int = 0o600) -> None:
         os.fsync(handle.fileno())
 
 
-def _run(openssl: Path, arguments: list[str], private_home: Path) -> None:
+def _child_environment(private_home: Path) -> dict[str, str]:
+    """Return the portable runtime bindings required by the authoring tool."""
+
     environment = {
         "HOME": str(private_home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH") or os.defpath,
     }
+    for name in (
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "PROGRAMDATA",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+    ):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
+def _run(openssl: Path, arguments: list[str], private_home: Path) -> None:
     try:
         subprocess.run(
             [str(openssl), *arguments],
@@ -67,7 +85,7 @@ def _run(openssl: Path, arguments: list[str], private_home: Path) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            env=environment,
+            env=_child_environment(private_home),
             timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as error:
@@ -76,6 +94,31 @@ def _run(openssl: Path, arguments: list[str], private_home: Path) -> None:
 
 def _copy(source: Path, destination: Path) -> None:
     _write(destination, source.read_bytes())
+
+
+def _self_signed_ca(
+    openssl: Path,
+    home: Path,
+    key: Path,
+    certificate: Path,
+    common_name: str,
+    days: int,
+) -> None:
+    """Create a CA certificate with an explicit, host-config-independent profile."""
+
+    _run(
+        openssl,
+        [
+            "req", "-x509", "-new", "-key", str(key), "-sha256", "-days", str(days),
+            "-subj", f"/CN={common_name}",
+            "-addext", "basicConstraints=critical,CA:true",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext", "subjectKeyIdentifier=hash",
+            "-addext", "authorityKeyIdentifier=keyid:always,issuer",
+            "-out", str(certificate),
+        ],
+        home,
+    )
 
 
 def _issue(
@@ -99,6 +142,8 @@ def _issue(
             "keyUsage=critical,digitalSignature,keyEncipherment\n"
             f"extendedKeyUsage={extended_usage}\n"
             f"subjectAltName={subject_alt_name}\n"
+            "subjectKeyIdentifier=hash\n"
+            "authorityKeyIdentifier=keyid,issuer\n"
         ).encode(),
     )
     _run(openssl, ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:3072", "-out", str(key)], home)
@@ -148,14 +193,7 @@ def prepare(
     ca_key = authority / "ca.key"
     ca_certificate = authority / "ca.crt"
     _run(openssl, ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(ca_key)], home)
-    _run(
-        openssl,
-        [
-            "req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", str(days),
-            "-subj", "/CN=LabWeaver Sprint 2 BuildKit CA", "-out", str(ca_certificate),
-        ],
-        home,
-    )
+    _self_signed_ca(openssl, home, ca_key, ca_certificate, "LabWeaver BuildKit CA", days)
 
     server_key, server_certificate = _issue(
         openssl,

@@ -3,11 +3,10 @@
 ## Scope
 
 `crates/contracts/src/events.rs` and the generated
-`schemas/contracts/v1/events/` files are the semantic source of truth. Sprint 2
-has one event version only. It carries Agent, Build, Environment lifecycle,
-Access expiry/revocation/session, release publication and Submission freeze
-messages. Evaluation execution/scoring and Resource approval events are not in
-the active catalog.
+`schemas/contracts/v1/events/` files are the semantic source of truth. The
+current catalog has one event version and carries Agent, Build, Environment
+lifecycle, Access expiry/revocation/session, release publication, Submission
+freeze, Evaluation execution, and Resource request/lease messages.
 
 Ordinary queries, authorization decisions, candidate validation and owner
 lookups use direct APIs. They do not create event projections merely to cross a
@@ -57,6 +56,7 @@ messages carry only their locator, hash, type, size and safe summary.
 | `labweaver.access.session.*.v1` | termination request, close receipt and overdue failure |
 | `labweaver.access.console_session.state_changed.v1` | metadata-only console open, active, termination, overdue and close lifecycle |
 | `labweaver.evaluation.submission.*.v1` | freeze request and immutable FrozenSubmission fact; no evaluation is scheduled |
+| `labweaver.resource.request.*.v1` and `labweaver.resource.lease.*.v1` | Resource request decisions and lease lifecycle facts |
 
 The exact subjects and schemas are generated from `EVENT_CONTRACTS`; this table
 is explanatory and must not be extended independently.

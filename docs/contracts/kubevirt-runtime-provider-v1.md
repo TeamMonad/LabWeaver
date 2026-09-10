@@ -1,7 +1,7 @@
 # KubeVirt Runtime Provider v1
 
-Status: implemented locally for Issue #53; A+B security review, D Verify and a
-connected KubeVirt/CDI E3 replay are required before acceptance.
+This document describes the Environment-owned KubeVirt implementation. Changes follow the
+normal owner review process; local tests do not establish behavior on a real KubeVirt/CDI cluster.
 
 ## Scope and ownership
 
@@ -78,19 +78,21 @@ exactly one of each owned runtime object unless noted:
 | --- | --- |
 | Namespace | Deterministic name, Environment/course labels and controlled cleanup finalizer. |
 | ResourceQuota | Guest resources plus explicit VMI-memory and CDI-importer request/limit budgets, one CDI scratch PVC, at most two PVCs and two transient/runtime pods. The VM memory limit is guest memory plus the reviewed VMI overhead, so KubeVirt's derived request cannot exceed the limit when the observed overhead remains within the binding. |
-| NetworkPolicy | Default-deny ingress and egress; one additional SSH ingress rule from the exact Gateway namespace and pod label; optional reviewed restricted-egress rule. |
+| NetworkPolicy | Default-deny ingress and egress; one additional SSH ingress rule from the exact Gateway, freeze collector, and (when configured) Evaluation runner namespace and pod selectors; optional reviewed restricted-egress rule. |
 | Secret | Fixed base64 `data.userdata` cloud-init with public user CA only; locked non-root user; no password, root login, forwarding, tunnel, X11, private key or `authorized_keys`. |
 | DataVolume | Exact configured CDI `DataSource` and `StorageClass`, RWO root disk, immutable release/object/hash annotations. |
 | VirtualMachine | `runStrategy: Always`, hardware-KVM node selector, no graphics, virtio root PVC and cloud-init disk, pod network and SSH readiness probe. |
 | Service | ClusterIP only, port 22, deterministic selector and access-controlled annotation. |
 
-The guest principal file admits `labweaver-gateway` and
-`labweaver-collector`. The Collector principal is usable only with a
-single-Environment user certificate that expires within five minutes and has
-critical `force-command = internal-sftp -R`; Evaluation pins the observed host
-key and exposes only SFTP reads. Principal enrollment is not credential
-issuance. A deployment-owned short-lived issuer and ephemeral Secret cleanup
-remain mandatory for VM Collector E3.
+The guest principal file admits `labweaver-gateway`, `labweaver-collector`,
+`labweaver-evaluation`, and `labweaver-agent`. The Collector principal is
+usable only with a single-Environment user certificate that expires within
+five minutes and has critical `force-command = internal-sftp -R`; Evaluation
+and Agent execution bindings use their own short-lived user certificates
+without a force command. Evaluation pins the observed host key and source
+identity before connecting. Principal enrollment is not credential issuance.
+A deployment-owned short-lived issuer and ephemeral Secret cleanup remain
+mandatory for VM Collector and execution flows.
 
 The executor uses server-side apply with deterministic field ownership. Before
 creating or starting the VM it verifies that the CDI source and resulting PVC
@@ -165,14 +167,13 @@ replacement or late work after deletion is rejected. `Observe` may recover an
 unrecorded current VM only when every readiness and release identity check
 succeeds.
 
-## Evidence boundary
+## Testing
 
-Local tests prove deterministic plans, private networking, safe cloud-init,
+Local tests cover deterministic plans, private networking configuration, cloud-init generation,
 readiness gating, stable endpoint identity, duplicate request fencing,
 stop-start identity preservation, cleanup evidence and PostgreSQL tombstones.
 They do not prove KubeVirt, CDI, guest boot, SSH or network enforcement.
 
-E3 must use the same commit and deployment identity to prove real CDI import,
-VM/guest/SSH readiness, disk persistence across start-stop-start, no duplicate
-VM/DataVolume, denied non-Gateway network access, failure/cancel/recovery/delete
-cleanup and unusable grants after revocation.
+Cluster integration tests must exercise CDI import, VM/guest/SSH readiness, disk persistence
+across start-stop-start, duplicate request handling, denied non-Gateway network access,
+failure/cancel/recovery/delete cleanup and rejected connections after grant revocation.

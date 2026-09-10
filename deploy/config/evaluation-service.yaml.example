@@ -1,16 +1,11 @@
-# Freeze-only Evaluation owner process. Secret values are mounted files; this
+# Evaluation owner process. Secret values are mounted files; this
 # document contains no credentials and is parsed with deny_unknown_fields.
 databaseUrlFile: /etc/labweaver/secrets/database-url
 databaseMaxConnections: 10
-apiMtls:
+apiTls:
   bind_addr: 0.0.0.0:9447
   server_certificate_file: /etc/labweaver/secrets/tls.crt
   server_key_file: /etc/labweaver/secrets/tls.key
-  client_ca_file: /etc/labweaver/secrets/mtls-ca.pem
-  allowed_san_uris:
-    - spiffe://labweaver/access-service
-    - spiffe://labweaver/control-service
-  required_eku: clientAuth
 nats:
   server: tls://nats.labweaver-data.svc:4222
   caFile: /etc/labweaver/secrets/nats-ca.pem
@@ -26,9 +21,7 @@ coordinator:
   kubernetesCaFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
   environmentServiceBaseUri: https://environment-service:9446/
   environmentCaFile: /etc/labweaver/secrets/mtls-ca.pem
-  environmentClientCertificateFile: /etc/labweaver/secrets/tls.crt
-  environmentClientPrivateKeyFile: /etc/labweaver/secrets/tls.key
-  allowedEnvironmentServerSans: [environment-service]
+  environmentAudience: labweaver-environment
   workerImage: harbor.example.invalid/labweaver/evaluation-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
   workerServiceAccountName: evaluation-freeze-worker
   vmJobNamespace: labweaver-evaluation
@@ -52,3 +45,73 @@ coordinator:
   retentionDays: 90
   jobActiveDeadlineSeconds: 900
   requestTimeoutMilliseconds: 5000
+resource:
+  baseUri: https://resource-service:9448/
+  caFile: /etc/labweaver/secrets/mtls-ca.pem
+  timeoutMilliseconds: 5000
+  maxRequestBytes: 1048576
+  maxResponseBytes: 8388608
+  audience: labweaver-resource
+agent:
+  baseUri: https://agent-service:9445/
+  caFile: /etc/labweaver/secrets/mtls-ca.pem
+  timeoutMilliseconds: 5000
+  maxRequestBytes: 4194304
+  maxResponseBytes: 4194304
+  audience: labweaver-agent
+authoringAdmission:
+  baseUri: https://control-service:9444/
+  caFile: /etc/labweaver/secrets/mtls-ca.pem
+  timeoutMilliseconds: 5000
+  maxRequestBytes: 1048576
+  maxResponseBytes: 1048576
+  audience: labweaver-control
+objectStore:
+  binding: minio-submissions-v1
+  endpoint: https://minio.labweaver-data.svc:9000/
+  bucket: labweaver-frozen-submissions
+  region: us-east-1
+  objectPrefix: frozen-submissions
+  uploadTtlSeconds: 300
+  maxObjectBytes: 100663296
+  forcePathStyle: true
+  caBundleFile: /etc/labweaver/secrets/minio-ca.pem
+objectStoreAccessKeyFile: /etc/labweaver/secrets/minio-access-key
+objectStoreSecretKeyFile: /etc/labweaver/secrets/minio-secret-key
+objectStoreSessionTokenFile: null
+execution:
+  runnerNamespace: labweaver-evaluation
+  workerId: evaluation-worker-01
+  workerLeaseSeconds: 120
+  schedulerPollIntervalMilliseconds: 500
+  ojServiceAccountName: oj-runner
+  ansibleProbeServiceAccountName: ansible-probe
+  imagePullSecretName: harbor-course-pull
+  resourcePollIntervalMilliseconds: 500
+  resourceApprovalTimeoutSeconds: 300
+  executionObservePollIntervalMilliseconds: 500
+  cleanupTimeoutSeconds: 300
+  environment:
+    baseUri: https://environment-service:9446/
+    caFile: /etc/labweaver/secrets/mtls-ca.pem
+    timeoutMilliseconds: 5000
+    maxRequestBytes: 1048576
+    maxResponseBytes: 262144
+    audience: labweaver-environment
+  ansibleProbe:
+    wallTimeSeconds: 300
+    factsMaxBytes: 4194304
+    outputMaxBytes: 1048576
+    maxAssertions: 32
+  oj:
+    kubernetesApiServer: https://kubernetes.default.svc
+    kubernetesBearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetesCaFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    runnerNamespace: labweaver-evaluation
+    requestTimeoutMilliseconds: 5000
+  ansibleProbeExecutor:
+    kubernetesApiServer: https://kubernetes.default.svc
+    kubernetesBearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetesCaFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    runnerNamespace: labweaver-evaluation
+    requestTimeoutMilliseconds: 5000

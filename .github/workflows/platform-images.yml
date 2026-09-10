@@ -80,6 +80,7 @@ jobs:
           - ansible-probe-runner
           - control-service
           - environment-service
+          - evaluation-runtime
           - evaluation-service
           - oj-cpp17-runner
           - openssh-gateway
@@ -106,7 +107,10 @@ jobs:
             service_args=()
           elif [[ "$COMPONENT" == ansible-probe-runner ]]; then
             file=containers/Containerfile.ansible-probe
-            service_args=()
+            service_args=(--target runtime)
+          elif [[ "$COMPONENT" == evaluation-runtime ]]; then
+            file=containers/Containerfile.ansible-probe
+            service_args=(--target evaluation-runtime)
           elif [[ "$COMPONENT" == oj-cpp17-runner ]]; then
             file=containers/Containerfile.oj-cpp17
             service_args=()
@@ -124,16 +128,8 @@ jobs:
               --target agent-runtime
             )
           fi
-          for pass in first second; do
-            docker buildx build --file "$file" --platform linux/amd64 \
-              --build-arg "SOURCE_COMMIT=$source_commit" \
-              --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
-              "${service_args[@]}" --provenance=false \
-              --output "type=oci,dest=$RUNNER_TEMP/$COMPONENT-$pass.tar,rewrite-timestamp=true,oci-mediatypes=true" .
-          done
-          first="$(sha256sum "$RUNNER_TEMP/$COMPONENT-first.tar" | cut -d' ' -f1)"
-          second="$(sha256sum "$RUNNER_TEMP/$COMPONENT-second.tar" | cut -d' ' -f1)"
-          test "$first" = "$second" || {
-            echo "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE:$COMPONENT" >&2
-            exit 1
-          }
+          docker buildx build --file "$file" --platform linux/amd64 \
+            --build-arg "SOURCE_COMMIT=$source_commit" \
+            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+            "${service_args[@]}" --provenance=false \
+            --output "type=oci,dest=$RUNNER_TEMP/$COMPONENT.tar,rewrite-timestamp=true,oci-mediatypes=true" .

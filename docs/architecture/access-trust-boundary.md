@@ -10,9 +10,24 @@ Keycloak 验证用户和服务身份；Access 验证项目、课程、环境、�
 
 每个接收服务使用自己的 audience，调用方按目标获取并缓存令牌；Keycloak 的 audience mapper、角色与 scope 必须显式配置，不能通过让所有服务接受同一个 audience 来省略配置。Access 转发 Resource 用户请求时同时携带服务令牌和短期签名用户委托，两者缺一不可。Environment 与 Evaluation 的用量写入分别限定到各自拥有的环境或任务，具备一般服务身份不代表可以代写另一领域的用量。
 
-接收方从 `resource_access[audience].roles` 读取服务调用权限。Keycloak 签发的角色受到服务账户角色与 scope 角色映射的共同限制；部署必须配置调用方实际请求的 client scopes 和 audience mapper，不能仅创建同名角色或依赖请求参数自动获得目标 audience。配置依据 [Keycloak 服务账户与 audience 文档](https://www.keycloak.org/docs/latest/server_admin/index.html)，不以开启 Full Scope Allowed 代替权限映射。
+接收方从 `resource_access[audience].roles` 读取服务调用权限。Keycloak 签发的角色受到服务账户角色与调用方角色范围映射的共同限制，再由 audience resolve mapper 生成允许访问的目标 audience。client credentials 请求不把业务权限当作 OAuth scope，也不依赖额外的 audience 参数；客户端收到令牌后仍检查目标 audience，接收方再检查调用者及所需角色。配置依据 [Keycloak 服务账户与 audience 文档](https://www.keycloak.org/docs/latest/server_admin/index.html)，不以开启 Full Scope Allowed 代替权限映射。
+
+调用账户自身不会由 audience resolve mapper 自动加入 `aud`。对于 Access 网关、Environment 执行器这类同一领域账户调用本领域服务的路径，依据实际自身目标角色授权配置显式 Audience mapper；其他账户不因此增加目标 audience。
 
 令牌获取与内部 HTTP 使用服务端 TLS；凭据来自 Secret 文件，不写入 URL、命令参数或日志。不保留固定 SPIFFE principal、假 mTLS 参数或关闭验证的生产 fallback。保留 NATS 与 SSH 各自实际需要的认证和加密。
+
+OIDC callback verifies the signed ID token, including its `exp`, before creating a
+local browser session. The BFF session then uses the configured
+`browser.session_ttl_seconds` as its absolute lifetime and
+`browser.session_idle_ttl_seconds` for idle renewal; an ID-token expiry does not
+shorten that already authenticated local session. Back-channel logout and
+explicit local revocation remain authoritative, and every request still loads
+current actor membership and authorization state. This follows the OpenID
+Connect Core requirement that an expired ID token cannot be accepted while
+recognizing that ID-token expiry is unrelated to the OP authenticated-session
+lifetime ([ID Token](https://openid.net/specs/openid-connect-core-1_0.html#IDToken));
+logout-token validation and RP session clearing follow
+[OpenID Connect Back-Channel Logout](https://openid.net/specs/openid-connect-backchannel-1_0.html#BackchannelLogoutValidation).
 
 ## 浏览器与 SSH
 
@@ -23,5 +38,7 @@ Web Terminal、noVNC 和 SSH/SFTP 共享 AccessGrant 的范围、到期和撤销
 ## 不可信执行
 
 用户可以修改自己的实验源码、guest 配置和获授权的软件环境；不能修改共享模板、隐藏测试、其他用户存储或平台凭据。安全实验按明确场景允许 guest root 或实验内网络，控制面与跨用户边界继续保留。
+
+Environment 的 Work 配置执行入口仅需查询 Pod 与调用 `pods/exec`，不因此取得 Namespace 管理权限。kube-rs 使用 WebSocket GET 建立 exec 连接；RBAC 保留 `get` 与 `create`，因为 Kubernetes 1.35 在原有请求授权之外增加了 `create` 检查。参见 [Kubernetes 的 exec 授权变更](https://github.com/kubernetes/kubernetes/pull/134577)。
 
 容器时间片 GPU 目录必须提示共享限制，不能将其描述成具有独占显存或故障隔离。需要更强边界的工作负载选择实际支持的独占或虚拟设备规格；缺少所需后端时拒绝启动。
