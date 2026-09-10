@@ -37,10 +37,15 @@ platform_reset_nats_streams:
     max_age: 168h
   - {name: LABWEAVER_ACCESS, subjects: "labweaver.access.>", max_age: 24h}
   - name: LABWEAVER_SUBMISSION
-    subjects: labweaver.evaluation.submission.>,labweaver.evaluation.run.requested.v1,labweaver.evaluation.run.state_changed.v1,labweaver.evaluation.step_run.state_changed.v1
+    subjects: "labweaver.evaluation.submission.>,labweaver.evaluation.run.requested.v1,\
+      labweaver.evaluation.run.state_changed.v1,labweaver.evaluation.step_run.state_changed.v1"
     max_age: 168h
   - name: LABWEAVER_RESOURCE_EVENTS
-    subjects: labweaver.resource.request.submitted.v1,labweaver.resource.request.approved.v1,labweaver.resource.request.rejected.v1,labweaver.resource.request.cancelled.v1,labweaver.resource.request.state_changed.v1,labweaver.resource.lease.activated.v1,labweaver.resource.lease.renewed.v1,labweaver.resource.lease.revoked.v1,labweaver.resource.lease.expiring.v1,labweaver.resource.lease.expired.v1
+    subjects: "labweaver.resource.request.submitted.v1,labweaver.resource.request.approved.v1,\
+      labweaver.resource.request.rejected.v1,labweaver.resource.request.cancelled.v1,\
+      labweaver.resource.request.state_changed.v1,labweaver.resource.lease.activated.v1,\
+      labweaver.resource.lease.renewed.v1,labweaver.resource.lease.revoked.v1,\
+      labweaver.resource.lease.expiring.v1,labweaver.resource.lease.expired.v1"
     max_age: 168h
 platform_reset_minio_alias: ""
 platform_reset_minio_bucket: labweaver-artifacts

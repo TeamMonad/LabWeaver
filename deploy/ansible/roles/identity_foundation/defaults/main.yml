@@ -85,7 +85,14 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
     roles: [environment.work.configure, environment:resolve_work_execution_binding]
   - caller: labweaver-evaluation
     target: labweaver-resource
-    roles: [resource.task.create, resource.task.read, resource.task.claim, resource.task.ack, resource.task.release, resource.task.cancel, resource.usage.record]
+    roles:
+      - resource.task.create
+      - resource.task.read
+      - resource.task.claim
+      - resource.task.ack
+      - resource.task.release
+      - resource.task.cancel
+      - resource.usage.record
   - caller: labweaver-evaluation
     target: labweaver-agent
     roles: [agent.llm_review.create, agent.llm_review.read, agent.llm_review.cancel]

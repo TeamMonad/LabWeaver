@@ -19,7 +19,10 @@
       - (identity_service_clients | map(attribute='client_id') | list) == (identity_service_clients | map(attribute='audience') | list)
       - identity_service_clients | selectattr('client_id', 'match', '^labweaver-[a-z0-9-]+$') | list | length == (identity_service_clients | length)
       - identity_service_clients | selectattr('audience', 'match', '^labweaver-[a-z0-9-]+$') | list | length == (identity_service_clients | length)
-      - identity_service_clients | selectattr('secret_name', 'match', '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$') | list | length == (identity_service_clients | length)
+      - >-
+        identity_service_clients
+        | selectattr('secret_name', 'match', '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$')
+        | list | length == (identity_service_clients | length)
       - identity_service_clients | selectattr('secret_key', 'match', '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$') | list | length == (identity_service_clients | length)
       - identity_secret_locator | length > 0
       - identity_secret_locator_sha256 is match('^sha256:[0-9a-f]{64}$')
@@ -228,7 +231,7 @@
             ca.crt: "{{ identity_ca_secret.resources[0].data['tls.crt'] | b64decode }}"
       no_log: true
 
-    - name: Install identity credentials from the root-only locator
+    - name: Install identity database and bootstrap credentials from the root-only locator
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
@@ -241,13 +244,26 @@
       loop:
         - {name: "{{ identity_database_secret_name }}", data: {password: "{{ identity_secrets.database_password }}"}}
         - {name: "{{ identity_bootstrap_secret_name }}", data: {username: platform-bootstrap, password: "{{ identity_secrets.bootstrap_admin_password }}"}}
-        {% for client in identity_service_clients %}
-        - name: "{{ client.secret_name }}"
-          data:
-            client-id: "{{ client.client_id }}"
-            client-secret: "{{ identity_secrets.service_client_secrets[client.secret_key] }}"
-            audience: "{{ client.audience }}"
-        {% endfor %}
+      no_log: true
+
+    - name: Install identity service client credentials from the root-only locator
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ item.secret_name }}"
+            namespace: "{{ identity_namespace }}"
+          type: Opaque
+          stringData:
+            client-id: "{{ item.client_id }}"
+            client-secret: "{{ identity_secrets.service_client_secrets[item.secret_key] }}"
+            audience: "{{ item.audience }}"
+      loop: "{{ identity_service_clients }}"
+      loop_control:
+        label: "{{ item.client_id }}"
       no_log: true
 
     - name: Apply PostgreSQL and Keycloak workloads
@@ -459,7 +475,10 @@
         audience = [audience]
     expected_audiences = [
     {% for assignment in identity_service_role_assignments if assignment.caller == client.client_id %}
-        "{{ identity_service_clients | selectattr('client_id', 'equalto', assignment.target) | map(attribute='audience') | first }}"{% if not loop.last %},{% endif %}
+        "{{ identity_service_clients
+           | selectattr('client_id', 'equalto', assignment.target)
+           | map(attribute='audience')
+           | first }}"{% if not loop.last %},{% endif %}
     {% endfor %}
     ]
     expected = {

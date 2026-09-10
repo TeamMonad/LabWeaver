@@ -346,7 +346,11 @@
       - platform_application_package.images | length > 0
       - platform_application_package.images | map(attribute='component') | unique | list | length == platform_application_package.images | length
       - platform_application_package.images | map(attribute='component') | difference(platform_application_components) | list | length == 0
-      - platform_application_package.images | map(attribute='reference') | select('match', '^[^@]+@sha256:[0-9a-f]{64}$') | list | length == platform_application_package.images | length
+      - >-
+        platform_application_package.images
+        | map(attribute='reference')
+        | select('match', '^[^@]+@sha256:[0-9a-f]{64}$')
+        | list | length == platform_application_package.images | length
     fail_msg: PLATFORM_APPLICATION_PACKAGE_INVALID
 
 - name: Bind the evaluation freeze worker to the immutable package image

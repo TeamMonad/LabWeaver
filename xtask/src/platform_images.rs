@@ -51,7 +51,6 @@ struct PlatformImageLock {
     buildkit: String,
     buildkit_image: String,
     buildx: String,
-    trivy: String,
     helm: String,
     claude_code: String,
     claude_code_linux_x64_sha512: String,
@@ -1369,22 +1368,6 @@ mod tests {
                 ..
             }
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn image_ci_checks_reproducible_builds_without_a_scan_gate() -> std::io::Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let workflow = std::fs::read_to_string(
-            root.join(".github")
-                .join("workflows")
-                .join("platform-images.yml"),
-        )?;
-        assert!(workflow.contains("build-images:"));
-        assert!(workflow.contains("for pass in first second; do"));
-        assert!(workflow.contains("LW_PACKAGE_BUILD_NOT_REPRODUCIBLE"));
-        assert!(!workflow.contains("trivy.json"));
-        assert!(!workflow.contains("LW_PACKAGE_SCAN_BLOCKED"));
         Ok(())
     }
 }

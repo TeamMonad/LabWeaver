@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - run: cargo xtask package-validate --manifest tests/fixtures/platform-image-package-manifest.json --mode static
       - run: cargo test -p xtask --locked platform_images
-      - name: Render Sprint 2 chart
+      - name: Render Helm chart
         shell: bash
         run: |
           set -euo pipefail

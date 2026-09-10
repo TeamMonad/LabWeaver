@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sys
 import unittest
+from jinja2 import Environment, StrictUndefined
 import yaml
 
 
@@ -1823,6 +1824,68 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("sigstore-system", operator_rbac)
         self.assertNotIn("resources: [secrets", operator_rbac)
         self.assertNotIn(":latest", workloads)
+
+    def test_identity_client_secrets_use_a_parsed_per_client_task(self) -> None:
+        task_path = ROOT / "deploy/ansible/roles/identity_foundation/tasks/main.yml"
+        defaults_path = ROOT / "deploy/ansible/roles/identity_foundation/defaults/main.yml"
+        tasks = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+        defaults = yaml.safe_load(defaults_path.read_text(encoding="utf-8"))
+
+        self.assertIsInstance(tasks, list)
+        parsed_tasks = [
+            task
+            for parent in tasks
+            for task in parent.get("block", [parent])
+        ]
+        client_tasks = [
+            task
+            for task in parsed_tasks
+            if task.get("loop") == "{{ identity_service_clients }}"
+            and isinstance(task.get("kubernetes.core.k8s"), dict)
+            and task["kubernetes.core.k8s"].get("definition", {}).get("kind") == "Secret"
+        ]
+        self.assertEqual(len(client_tasks), 1)
+        client_task = client_tasks[0]
+        clients = defaults["identity_service_clients"]
+        self.assertGreater(len(clients), 0)
+        self.assertEqual(
+            len({client["secret_name"] for client in clients}),
+            len(clients),
+        )
+        secret_values = {
+            client["secret_key"]: f"fictional-secret-{index}"
+            for index, client in enumerate(clients)
+        }
+        template_environment = Environment(undefined=StrictUndefined)
+        definition = client_task["kubernetes.core.k8s"]["definition"]
+        self.assertEqual(
+            set(definition["stringData"]),
+            {"client-id", "client-secret", "audience"},
+        )
+        for client in clients:
+            render_context = {
+                "item": client,
+                "identity_namespace": "identity-test",
+                "identity_secrets": {"service_client_secrets": secret_values},
+            }
+            rendered_name = template_environment.from_string(
+                definition["metadata"]["name"]
+            ).render(**render_context)
+            rendered_namespace = template_environment.from_string(
+                definition["metadata"]["namespace"]
+            ).render(**render_context)
+            rendered_values = {
+                key: template_environment.from_string(value).render(**render_context)
+                for key, value in definition["stringData"].items()
+            }
+            self.assertEqual(rendered_name, client["secret_name"])
+            self.assertEqual(rendered_namespace, "identity-test")
+            self.assertEqual(rendered_values["client-id"], client["client_id"])
+            self.assertEqual(
+                rendered_values["client-secret"],
+                secret_values[client["secret_key"]],
+            )
+            self.assertEqual(rendered_values["audience"], client["audience"])
 
     def test_testflight_report_requires_deployment_identity_chain(self) -> None:
         schema = json.loads(

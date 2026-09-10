@@ -357,32 +357,6 @@ fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-#[cfg(target_os = "linux")]
-fn git_output<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<String, AppError> {
-    let output = ProcessCommand::new("git")
-        .current_dir(root)
-        .args(arguments)
-        .output()
-        .map_err(|error| AppError::ExternalCommand {
-            role: "read Git package identity",
-            code: None,
-            detail: Some(error.to_string()),
-        })?;
-    if !output.status.success() {
-        return Err(AppError::ExternalCommand {
-            role: "read Git package identity",
-            code: output.status.code(),
-            detail: Some(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
-        });
-    }
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_owned())
-        .map_err(|error| AppError::Io {
-            role: "decode Git package identity",
-            detail: error.to_string(),
-        })
-}
-
 fn package_command(args: &PackageArgs) -> Result<(), AppError> {
     let profile = match args.profile {
         PackageProfile::Platform => "platform",
