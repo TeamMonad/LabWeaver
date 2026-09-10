@@ -1315,6 +1315,7 @@ mod tests {
         executor: OjKubernetesExecutor,
         objects: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
         server: JoinHandle<()>,
+        _token_file: tempfile::NamedTempFile,
     }
 
     impl Drop for FakeExecutor {
@@ -1488,6 +1489,8 @@ mod tests {
     async fn fake_executor(
         objects: BTreeMap<String, serde_json::Value>,
     ) -> Result<FakeExecutor, Box<dyn std::error::Error>> {
+        let token_file = tempfile::NamedTempFile::new()?;
+        fs::write(token_file.path(), b"fake-kubernetes-token")?;
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let address = listener.local_addr()?;
         let objects = Arc::new(Mutex::new(objects));
@@ -1507,7 +1510,7 @@ mod tests {
         let executor = OjKubernetesExecutor {
             configuration: OjExecutorConfiguration {
                 kubernetes_api_server: Url::parse(&format!("http://{address}/"))?,
-                kubernetes_bearer_token_file: PathBuf::from("unused-token"),
+                kubernetes_bearer_token_file: token_file.path().to_owned(),
                 kubernetes_ca_file: PathBuf::from("unused-ca"),
                 runner_namespace: TEST_NAMESPACE.to_owned(),
                 request_timeout_milliseconds: 2_000,
@@ -1518,6 +1521,7 @@ mod tests {
             executor,
             objects,
             server,
+            _token_file: token_file,
         })
     }
 
