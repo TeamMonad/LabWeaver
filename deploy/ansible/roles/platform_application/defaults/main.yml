@@ -1,6 +1,5 @@
 ---
 platform_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
-platform_application_source_commit: "{{ lookup('ansible.builtin.env', 'LABWEAVER_COMMIT_SHA') }}"
 platform_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 platform_application_vars_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_APPLICATION_VARS_FILE') }}"
 platform_application_migration_catalog: "{{ playbook_dir }}/../../../migrations/catalog.yaml"
@@ -12,9 +11,9 @@ platform_application_nats: /usr/local/bin/nats
 platform_application_mc: /usr/local/bin/mc
 platform_application_kcadm: /usr/local/bin/kcadm.sh
 platform_application_keytool: /usr/bin/keytool
-platform_application_report_root: /var/lib/labweaver/platform-application
+platform_application_work_root: /var/lib/labweaver/platform-application-work
 platform_application_domains: [control, access, environment, agent, evaluation, resource]
-# Exact migration-1 identities observed from the retained pre-reset Sprint 2
+# Exact migration-1 identities observed from the retained pre-reset configured
 # database. They are accepted without rewriting history; new installations
 # still record the catalog hash, and every later migration remains exact-only.
 platform_application_retained_baseline_sha256:
@@ -30,9 +29,9 @@ platform_application_postgres_client_certificate_file: "{{ lookup('ansible.built
 platform_application_postgres_client_private_key_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_CLIENT_PRIVATE_KEY_FILE') }}"
 platform_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') | default('platform-admin', true) }}"
 platform_application_postgres_database: labweaver
-# The adopted v1 controller has no route to the Kubernetes Service CIDR.  The
+# The retained v1 controller has no route to the Kubernetes Service CIDR.  The
 # application role owns this reconnectable controller-side forward so database
-# adoption cannot silently fall back to an unreachable in-cluster address.
+# reconciliation cannot silently fall back to an unreachable in-cluster address.
 # Operators with a verified Service-CIDR route may explicitly disable it via
 # LABWEAVER_POSTGRES_FORWARD_ENABLED=false.
 platform_application_postgres_forward_enabled: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_FORWARD_ENABLED') | default('true', true) | bool }}"
@@ -42,7 +41,7 @@ platform_application_postgres_forward_kubernetes_service: postgres
 platform_application_postgres_forward_hostname: postgres.labweaver-data.svc
 platform_application_postgres_forward_port: 15432
 platform_application_nats_server: ""
-# The adopted v1 controller has no route to the Kubernetes Service CIDR.  The
+# The retained v1 controller has no route to the Kubernetes Service CIDR.  The
 # application role owns this reconnectable controller-side forward so NATS
 # administration cannot silently fall back to an unreachable in-cluster
 # address. Operators with an independently verified Service-CIDR route may
@@ -63,22 +62,50 @@ platform_application_nats_client_private_key_file: ""
 platform_application_nats_streams:
   - {name: LABWEAVER_AGENT_EVENTS, subjects: ["labweaver.agent.>"], max_age: 24h}
   - {name: LABWEAVER_CONTROL_COMMANDS, subjects: ["labweaver.control.agent_build.requested.v1"], max_age: 24h}
+  - name: LABWEAVER_CONTROL_EVENTS
+    subjects:
+      - labweaver.control.authoring_approval.>
+      - labweaver.control.quarantine.>
+    max_age: 24h
   - name: LABWEAVER_ENVIRONMENT_COMMANDS
     subjects:
       - labweaver.environment.instance.>
       - labweaver.environment.command.quarantine.v1
-    adopted_subjects:
+    retained_subjects:
       - labweaver.environment.instance.lifecycle_requested.v1
     max_age: 24h
   - name: LABWEAVER_RELEASES
     subjects:
       - labweaver.control.environment_template_release.>
       - labweaver.environment.release.quarantine.v1
-    adopted_subjects:
+      - labweaver.evaluation.release.published.v1
+    retained_subjects:
       - labweaver.control.environment_template_release.>
+      - labweaver.evaluation.release.published.v1
     max_age: 168h
   - {name: LABWEAVER_ACCESS, subjects: ["labweaver.access.>"], max_age: 24h}
-  - {name: LABWEAVER_SUBMISSION, subjects: ["labweaver.evaluation.submission.>"], max_age: 168h}
+  - name: LABWEAVER_SUBMISSION
+    subjects:
+      - labweaver.evaluation.submission.>
+      - labweaver.evaluation.run.requested.v1
+      - labweaver.evaluation.run.state_changed.v1
+      - labweaver.evaluation.step_run.state_changed.v1
+    retained_subjects:
+      - labweaver.evaluation.submission.>
+    max_age: 168h
+  - name: LABWEAVER_RESOURCE_EVENTS
+    subjects:
+      - labweaver.resource.request.submitted.v1
+      - labweaver.resource.request.approved.v1
+      - labweaver.resource.request.rejected.v1
+      - labweaver.resource.request.cancelled.v1
+      - labweaver.resource.request.state_changed.v1
+      - labweaver.resource.lease.activated.v1
+      - labweaver.resource.lease.renewed.v1
+      - labweaver.resource.lease.revoked.v1
+      - labweaver.resource.lease.expiring.v1
+      - labweaver.resource.lease.expired.v1
+    max_age: 168h
 platform_application_nats_consumers:
   - name: control-agent-run-projection-v1
     stream: LABWEAVER_AGENT_EVENTS
@@ -88,6 +115,9 @@ platform_application_nats_consumers:
     filters:
       - labweaver.agent.build.completed.v1
       - labweaver.agent.build.failed.v1
+  - name: control-authoring-publication-v1
+    stream: LABWEAVER_CONTROL_EVENTS
+    filters: [labweaver.control.authoring_approval.completed.v1]
   - name: agent-build-command-v1
     stream: LABWEAVER_CONTROL_COMMANDS
     filters: [labweaver.control.agent_build.requested.v1]
@@ -104,7 +134,7 @@ platform_application_nats_consumers:
       - labweaver.control.environment_template_release.withdrawn.v1
 platform_application_minio_alias: ""
 platform_application_minio_endpoint: ""
-# The adopted v1 controller also has no route to the Kubernetes Service CIDR
+# The retained v1 controller also has no route to the Kubernetes Service CIDR
 # for MinIO.  The application role owns this reconnectable controller-side
 # forward for administrative bucket/versioning probes; workload object-store
 # endpoints remain the reviewed in-cluster value.
@@ -219,5 +249,5 @@ platform_application_components:
   - openssh-gateway
   - web
 
-# CA trust store layout is probed on each retained node because the adopted
+# CA trust store layout is probed on each retained node because the retained
 # cluster may mix RHEL-family and Debian-family hosts.

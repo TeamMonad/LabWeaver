@@ -1,8 +1,14 @@
 //! Authenticated, path-bounded browser forwarding to the Control authority.
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use auth::{ControlGatewayFileConfig, ResourceGatewayFileConfig, TransportSecurityMode};
+use auth::{
+    ControlGatewayFileConfig, ResourceGatewayFileConfig, ServiceTokenClient, TransportSecurityMode,
+};
 use axum::{
     body::{Body, Bytes},
     extract::{Query, State},
@@ -10,22 +16,26 @@ use axum::{
     response::Response,
 };
 use futures_util::TryStreamExt;
-use reqwest::{Certificate, Client, Identity, Url};
+use reqwest::{Certificate, Client, Url};
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
 
-use super::{ApiError, AppState, authenticated_session, require_browser_origin};
+use super::{
+    ApiError, AppState, ServiceTokenTarget, authenticated_session, require_browser_origin,
+};
 
 const RESOURCE_DELEGATION_HEADER: &str = "x-labweaver-resource-delegation";
 const ACTOR_HEADER: &str = "x-labweaver-actor-id";
 const SESSION_HEADER: &str = "x-labweaver-session-id";
 
-/// A fixed-origin mTLS client; callers cannot select an upstream host.
+/// A fixed-origin TLS client; callers cannot select an upstream host.
 #[derive(Clone)]
 pub(super) struct ControlGatewayProxy {
     client: Client,
     base_uri: Url,
+    service_token_client: Arc<ServiceTokenClient>,
+    service_token_target: ServiceTokenTarget,
     max_request_bytes: usize,
     max_response_bytes: usize,
 }
@@ -44,19 +54,30 @@ pub(super) struct RuntimeGatewayProxy {
 pub(super) struct ResourceGatewayProxy {
     client: Client,
     base_uri: Url,
+    service_token_client: Arc<ServiceTokenClient>,
+    service_token_target: ServiceTokenTarget,
     delegation_key: Vec<u8>,
     max_request_bytes: usize,
     max_response_bytes: usize,
+}
+
+struct ForwardRequest {
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    valid_path: fn(&str) -> bool,
+    scope: Option<EnvironmentFreezeScope>,
 }
 
 impl ResourceGatewayProxy {
     pub(super) fn new(
         config: &ResourceGatewayFileConfig,
         ca_certificate_pem: &[u8],
-        client_certificate_pem: &[u8],
-        client_private_key_pem: &[u8],
         delegation_key: &[u8],
         transport_security: TransportSecurityMode,
+        service_token_client: Arc<ServiceTokenClient>,
+        service_token_target: ServiceTokenTarget,
     ) -> Result<Self, ControlGatewayError> {
         let base_uri = Url::parse(&config.base_uri).map_err(|_| ControlGatewayError::Config)?;
         let host = base_uri.host_str().ok_or(ControlGatewayError::Config)?;
@@ -90,6 +111,8 @@ impl ResourceGatewayProxy {
             return Ok(Self {
                 client,
                 base_uri,
+                service_token_client,
+                service_token_target,
                 delegation_key: delegation_key.to_vec(),
                 max_request_bytes: config.max_request_bytes,
                 max_response_bytes: config.max_response_bytes,
@@ -100,18 +123,10 @@ impl ResourceGatewayProxy {
         if roots.is_empty() {
             return Err(ControlGatewayError::Certificate);
         }
-        let mut identity_pem =
-            Vec::with_capacity(client_certificate_pem.len() + client_private_key_pem.len() + 1);
-        identity_pem.extend_from_slice(client_certificate_pem);
-        identity_pem.push(b'\n');
-        identity_pem.extend_from_slice(client_private_key_pem);
-        let identity =
-            Identity::from_pem(&identity_pem).map_err(|_| ControlGatewayError::Certificate)?;
         let mut builder = Client::builder()
             .https_only(true)
             .tls_built_in_root_certs(false)
             .redirect(reqwest::redirect::Policy::none())
-            .identity(identity)
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_millis(config.timeout_milliseconds));
         if transport_security == TransportSecurityMode::InsecureTestOnly {
@@ -125,6 +140,8 @@ impl ResourceGatewayProxy {
                 .build()
                 .map_err(|_| ControlGatewayError::Certificate)?,
             base_uri,
+            service_token_client,
+            service_token_target,
             delegation_key: delegation_key.to_vec(),
             max_request_bytes: config.max_request_bytes,
             max_response_bytes: config.max_response_bytes,
@@ -151,9 +168,9 @@ impl ControlGatewayProxy {
     pub(super) fn new(
         config: &ControlGatewayFileConfig,
         ca_certificate_pem: &[u8],
-        client_certificate_pem: &[u8],
-        client_private_key_pem: &[u8],
         transport_security: TransportSecurityMode,
+        service_token_client: Arc<ServiceTokenClient>,
+        service_token_target: ServiceTokenTarget,
     ) -> Result<Self, ControlGatewayError> {
         let base_uri = Url::parse(&config.base_uri).map_err(|_| ControlGatewayError::Config)?;
         let host = base_uri.host_str().ok_or(ControlGatewayError::Config)?;
@@ -173,7 +190,7 @@ impl ControlGatewayProxy {
         {
             return Err(ControlGatewayError::Config);
         }
-        // Private single-university: plain HTTP without client certs is permitted.
+        // Loopback HTTP is only available under the explicit test transport mode.
         if base_uri.scheme() == "http" {
             let client = Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -183,6 +200,8 @@ impl ControlGatewayProxy {
             return Ok(Self {
                 client,
                 base_uri,
+                service_token_client,
+                service_token_target,
                 max_request_bytes: config.max_request_bytes,
                 max_response_bytes: config.max_response_bytes,
             });
@@ -192,18 +211,10 @@ impl ControlGatewayProxy {
         if roots.is_empty() {
             return Err(ControlGatewayError::Certificate);
         }
-        let mut identity_pem =
-            Vec::with_capacity(client_certificate_pem.len() + client_private_key_pem.len() + 1);
-        identity_pem.extend_from_slice(client_certificate_pem);
-        identity_pem.push(b'\n');
-        identity_pem.extend_from_slice(client_private_key_pem);
-        let identity =
-            Identity::from_pem(&identity_pem).map_err(|_| ControlGatewayError::Certificate)?;
         let mut builder = Client::builder()
             .https_only(true)
             .tls_built_in_root_certs(false)
             .redirect(reqwest::redirect::Policy::none())
-            .identity(identity)
             .timeout(Duration::from_millis(config.timeout_milliseconds));
         if transport_security == TransportSecurityMode::InsecureTestOnly {
             builder = builder.danger_accept_invalid_certs(true);
@@ -216,6 +227,8 @@ impl ControlGatewayProxy {
                 .build()
                 .map_err(|_| ControlGatewayError::Certificate)?,
             base_uri,
+            service_token_client,
+            service_token_target,
             max_request_bytes: config.max_request_bytes,
             max_response_bytes: config.max_response_bytes,
         })
@@ -233,11 +246,14 @@ pub(super) async fn forward_control(
     forward(
         &state,
         &state.control_proxy,
-        method,
-        uri,
-        headers,
-        body,
-        valid_control_path,
+        ForwardRequest {
+            method,
+            uri,
+            headers,
+            body,
+            valid_path: valid_control_path,
+            scope: None,
+        },
     )
     .await
 }
@@ -306,16 +322,20 @@ pub(super) async fn forward_environment(
         query
             .validate()
             .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-        authorize_environment_course(&state, &headers, query.course_id, "listEnvironments").await?;
+        authorize_environment_project(&state, &headers, query.project_id, "listEnvironments")
+            .await?;
     }
     forward(
         &state,
         &state.environment_proxy,
-        method,
-        uri,
-        headers,
-        body,
-        valid_environment_path,
+        ForwardRequest {
+            method,
+            uri,
+            headers,
+            body,
+            valid_path: valid_environment_path,
+            scope: None,
+        },
     )
     .await
 }
@@ -324,10 +344,20 @@ pub(super) async fn forward_evaluation(
     State(state): State<std::sync::Arc<AppState>>,
     method: Method,
     uri: Uri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    let mut scope = None;
     if method == Method::POST {
+        let environment_id = uri
+            .path()
+            .split('/')
+            .collect::<Vec<_>>()
+            .as_slice()
+            .get(4)
+            .ok_or_else(|| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?
+            .parse()
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
         let request =
             contracts::parse_strict_json::<contracts::http::FreezeSubmissionRequest>(&body)
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
@@ -335,8 +365,37 @@ pub(super) async fn forward_evaluation(
             .manifest
             .validate()
             .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-        authorize_environment_course(&state, &headers, request.course_id, "freezeSubmission")
-            .await?;
+        let resolved_scope = authorize_environment_freeze(
+            &state,
+            &headers,
+            environment_id,
+            request.course_id,
+            "freezeSubmission",
+        )
+        .await?;
+        // Evaluation is a separate service and cannot infer project ownership
+        // from the browser session.  Only the scope resolved from the active
+        // Access grant is forwarded; caller-supplied values are never trusted.
+        headers.insert(
+            "x-labweaver-project-id",
+            resolved_scope
+                .project_id
+                .to_string()
+                .parse()
+                .map_err(|_| ApiError::internal("LW_ACCESS_SCOPE_INVALID"))?,
+        );
+        if let Some(course_id) = resolved_scope.course_id {
+            headers.insert(
+                "x-labweaver-course-id",
+                course_id
+                    .to_string()
+                    .parse()
+                    .map_err(|_| ApiError::internal("LW_ACCESS_SCOPE_INVALID"))?,
+            );
+        } else {
+            headers.remove("x-labweaver-course-id");
+        }
+        scope = Some(resolved_scope);
     } else if method == Method::GET {
         let segments = uri.path().split('/').collect::<Vec<_>>();
         if let [
@@ -364,11 +423,14 @@ pub(super) async fn forward_evaluation(
     forward(
         &state,
         &state.evaluation_proxy,
-        method,
-        uri,
-        headers,
-        body,
-        valid_evaluation_path,
+        ForwardRequest {
+            method,
+            uri,
+            headers,
+            body,
+            valid_path: valid_evaluation_path,
+            scope,
+        },
     )
     .await
 }
@@ -380,7 +442,9 @@ pub(super) async fn forward_resource(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if !matches!(method, Method::GET | Method::POST) || !valid_resource_path(uri.path()) {
+    if !matches!(method, Method::GET | Method::POST | Method::PUT)
+        || !valid_resource_path(uri.path())
+    {
         return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED"));
     }
     if body.len() > state.resource_proxy.max_request_bytes {
@@ -410,23 +474,41 @@ pub(super) async fn forward_resource(
         .request(method.clone(), upstream)
         .header(RESOURCE_DELEGATION_HEADER, delegation)
         .body(body);
-    let response = copy_request_headers(request, &headers)
-        .send()
-        .await
-        .map_err(|_error| {
-            tracing::warn!(
-                event = "auth.resource_gateway.unavailable",
-                diagnostic_code = "LW_AUTH_RESOURCE_UNAVAILABLE",
-                operation_id,
-                error_kind = "upstream_transport",
-                failure_stage = "resource_request",
-                retryable = true
-            );
-            ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE")
-        })?;
+    let request = copy_request_headers(request, &headers);
+    let request = attach_service_token(
+        request,
+        &state.resource_proxy.service_token_client,
+        &state.resource_proxy.service_token_target,
+    )
+    .await?;
+    let response = request.send().await.map_err(|_error| {
+        tracing::warn!(
+            event = "auth.resource_gateway.unavailable",
+            diagnostic_code = "LW_AUTH_RESOURCE_UNAVAILABLE",
+            operation_id,
+            error_kind = "upstream_transport",
+            failure_stage = "resource_request",
+            retryable = true
+        );
+        ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE")
+    })?;
     bounded_resource_response(&state.resource_proxy, response, operation_id).await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectResourceListQuery {
+    course_id: Option<contracts::CourseId>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyResourceListQuery {}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "resource authorization keeps every public path, body identity, and scope fence together"
+)]
 async fn authorize_resource_request(
     state: &AppState,
     session: &auth::BffSession,
@@ -435,14 +517,217 @@ async fn authorize_resource_request(
     body: &Bytes,
 ) -> Result<&'static str, ApiError> {
     let path = uri.path();
+    let segments = path.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["", "api", "v1", "projects", project_id, "resource-requests"] => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            match *method {
+                Method::GET => {
+                    let Query(query) = Query::<ProjectResourceListQuery>::try_from_uri(uri)
+                        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+                    let _ = query.course_id;
+                    authorize_resource_scope(
+                        state,
+                        session,
+                        contracts::AuthorizationScope::Project { project_id },
+                        "listProjectResourceRequests",
+                    )
+                    .await?;
+                    return Ok("listProjectResourceRequests");
+                }
+                Method::POST => {
+                    let request = contracts::parse_strict_json::<
+                        contracts::http::CreateResourceRequest,
+                    >(body)
+                    .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+                    if request.project_id != project_id {
+                        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+                    }
+                    authorize_resource_scope(
+                        state,
+                        session,
+                        contracts::AuthorizationScope::Project { project_id },
+                        "createProjectResourceRequest",
+                    )
+                    .await?;
+                    return Ok("createProjectResourceRequest");
+                }
+                _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+            }
+        }
+        ["", "api", "v1", "projects", project_id, "resource-leases"] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let Query(query) = Query::<ProjectResourceListQuery>::try_from_uri(uri)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let _ = query.course_id;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "listProjectResourceLeases",
+            )
+            .await?;
+            return Ok("listProjectResourceLeases");
+        }
+        ["", "api", "v1", "resource", "gpu-catalog"] => match *method {
+            Method::GET => {
+                authorize_resource_scope(
+                    state,
+                    session,
+                    contracts::AuthorizationScope::Global,
+                    "listResourceGpuCatalog",
+                )
+                .await?;
+                return Ok("listResourceGpuCatalog");
+            }
+            Method::POST => {
+                let _entry =
+                    contracts::parse_strict_json::<contracts::resource::GpuCatalogEntry>(body)
+                        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+                authorize_resource_scope(
+                    state,
+                    session,
+                    contracts::AuthorizationScope::Global,
+                    "createResourceGpuCatalogEntry",
+                )
+                .await?;
+                return Ok("createResourceGpuCatalogEntry");
+            }
+            _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+        },
+        ["", "api", "v1", "resource", "rates"] => match *method {
+            Method::GET => {
+                authorize_resource_scope(
+                    state,
+                    session,
+                    contracts::AuthorizationScope::Global,
+                    "listResourceRates",
+                )
+                .await?;
+                return Ok("listResourceRates");
+            }
+            Method::POST => {
+                let _rate = contracts::parse_strict_json::<
+                    contracts::http::CreateResourceRateRequest,
+                >(body)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+                authorize_resource_scope(
+                    state,
+                    session,
+                    contracts::AuthorizationScope::Global,
+                    "createResourceRate",
+                )
+                .await?;
+                return Ok("createResourceRate");
+            }
+            _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+        },
+        ["", "api", "v1", "resource", "usage"] if *method == Method::POST => {
+            let usage =
+                contracts::parse_strict_json::<contracts::http::RecordResourceUsageRequest>(body)
+                    .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project {
+                    project_id: usage.project_id,
+                },
+                "recordResourceUsage",
+            )
+            .await?;
+            return Ok("recordResourceUsage");
+        }
+        ["", "api", "v1", "projects", project_id, "resource-budget"] => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            match *method {
+                Method::GET => {
+                    authorize_resource_scope(
+                        state,
+                        session,
+                        contracts::AuthorizationScope::Project { project_id },
+                        "getProjectResourceBudget",
+                    )
+                    .await?;
+                    return Ok("getProjectResourceBudget");
+                }
+                Method::PUT => {
+                    let budget = contracts::parse_strict_json::<
+                        contracts::http::UpsertResourceBudgetRequest,
+                    >(body)
+                    .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+                    if budget.project_id != project_id {
+                        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+                    }
+                    authorize_resource_scope(
+                        state,
+                        session,
+                        contracts::AuthorizationScope::Project { project_id },
+                        "upsertProjectResourceBudget",
+                    )
+                    .await?;
+                    return Ok("upsertProjectResourceBudget");
+                }
+                _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
+            }
+        }
+        ["", "api", "v1", "projects", project_id, "charges"] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "listProjectResourceCharges",
+            )
+            .await?;
+            return Ok("listProjectResourceCharges");
+        }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "charges",
+            charge_id,
+            "adjustments",
+        ] if *method == Method::POST => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let _charge_id = charge_id
+                .parse::<contracts::ChargeId>()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let _adjustment = contracts::parse_strict_json::<
+                contracts::http::CreateResourceAdjustmentRequest,
+            >(body)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "createProjectResourceChargeAdjustment",
+            )
+            .await?;
+            return Ok("createProjectResourceChargeAdjustment");
+        }
+        _ => {}
+    }
     if *method == Method::POST && path == "/api/v1/resource-requests" {
         let request = contracts::parse_strict_json::<contracts::http::CreateResourceRequest>(body)
             .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
         authorize_resource_scope(
             state,
             session,
-            contracts::AuthorizationScope::Course {
-                course_id: request.course_id,
+            contracts::AuthorizationScope::Project {
+                project_id: request.project_id,
             },
             "createResourceRequest",
         )
@@ -455,11 +740,7 @@ async fn authorize_resource_request(
             "/api/v1/resource-requests" | "/api/v1/resource-leases"
         )
     {
-        #[derive(serde::Deserialize)]
-        struct ResourceQuery {
-            course_id: contracts::CourseId,
-        }
-        let Query(query) = Query::<ResourceQuery>::try_from_uri(uri)
+        let Query(_query) = Query::<EmptyResourceListQuery>::try_from_uri(uri)
             .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
         let operation = if path.ends_with("leases") {
             "listResourceLeases"
@@ -469,23 +750,18 @@ async fn authorize_resource_request(
         authorize_resource_scope(
             state,
             session,
-            contracts::AuthorizationScope::Course {
-                course_id: query.course_id,
-            },
+            contracts::AuthorizationScope::Global,
             operation,
         )
         .await?;
         return Ok(operation);
     }
     let (request, operation) = resource_target_request(state, session, method, path).await?;
-    if request.project_id.is_none() {
-        return Err(ApiError::forbidden("LW_AUTH_PROJECT_SCOPE_DENIED"));
-    }
     authorize_resource_scope(
         state,
         session,
-        contracts::AuthorizationScope::Course {
-            course_id: request.course_id,
+        contracts::AuthorizationScope::Project {
+            project_id: request.project_id,
         },
         operation,
     )
@@ -584,19 +860,22 @@ async fn fetch_resource_json<T: serde::de::DeserializeOwned>(
 ) -> Result<T, ApiError> {
     let mut upstream = state.resource_proxy.base_uri.clone();
     upstream.set_path(path);
-    let response = state
-        .resource_proxy
-        .client
-        .get(upstream)
-        .header(
-            RESOURCE_DELEGATION_HEADER,
-            auth::encode_resource_delegation(
-                &state.resource_proxy.delegation_key,
-                session,
-                OffsetDateTime::now_utc(),
-            )
-            .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_DELEGATION_INVALID"))?,
+    let request = state.resource_proxy.client.get(upstream).header(
+        RESOURCE_DELEGATION_HEADER,
+        auth::encode_resource_delegation(
+            &state.resource_proxy.delegation_key,
+            session,
+            OffsetDateTime::now_utc(),
         )
+        .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_DELEGATION_INVALID"))?,
+    );
+    let request = attach_service_token(
+        request,
+        &state.resource_proxy.service_token_client,
+        &state.resource_proxy.service_token_target,
+    )
+    .await?;
+    let response = request
         .send()
         .await
         .map_err(|_| ApiError::unavailable("LW_AUTH_RESOURCE_UNAVAILABLE"))?;
@@ -631,18 +910,50 @@ async fn authorize_resource_scope(
         .map_err(ApiError::from)?;
     let policy = contracts::operation_contract(operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+    authorize_resource_actor(actor, memberships, scope, policy, OffsetDateTime::now_utc())
+        .map_err(ApiError::from)?;
+    Ok(())
+}
+
+fn authorize_resource_actor(
+    actor: contracts::AuthenticatedActor,
+    memberships: auth::MembershipSnapshot,
+    scope: contracts::AuthorizationScope,
+    policy: &contracts::http::OperationContract,
+    now: OffsetDateTime,
+) -> Result<(), auth::AuthorizationError> {
+    let scope = resource_authorization_scope(&actor, scope, policy);
     auth::authorize(
         &auth::AuthorizationContext {
             actor,
             course_memberships: memberships.course_memberships,
             project_memberships: memberships.project_memberships,
-            now: OffsetDateTime::now_utc(),
+            now,
         },
         scope,
         &policy.allowed_roles.iter().copied().collect(),
     )
-    .map_err(ApiError::from)?;
-    Ok(())
+    .map(|_| ())
+}
+
+fn resource_authorization_scope(
+    actor: &contracts::AuthenticatedActor,
+    scope: contracts::AuthorizationScope,
+    policy: &contracts::http::OperationContract,
+) -> contracts::AuthorizationScope {
+    if policy.scope == contracts::OperationScopeKind::Project
+        && matches!(scope, contracts::AuthorizationScope::Project { .. })
+        && actor
+            .roles
+            .contains(&contracts::PlatformRole::PlatformAdmin)
+        && policy
+            .allowed_roles
+            .contains(&contracts::PlatformRole::PlatformAdmin)
+    {
+        contracts::AuthorizationScope::Global
+    } else {
+        scope
+    }
 }
 
 async fn bounded_resource_response(
@@ -809,6 +1120,10 @@ struct RuntimeTarget {
     environment_id: contracts::EnvironmentId,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "runtime authorization keeps grant, environment, and endpoint fences together"
+)]
 async fn authorize_runtime(
     state: &AppState,
     actor_id: uuid::Uuid,
@@ -816,17 +1131,20 @@ async fn authorize_runtime(
 ) -> Result<RuntimeTarget, ApiError> {
     let now = OffsetDateTime::now_utc();
     let row = sqlx::query(
-        "SELECT g.course_id,g.environment_id,g.environment_revision,g.contract,\
+        "SELECT g.project_id,g.course_id,g.environment_id,g.environment_revision,g.contract,\
                 eg.endpoint_id,eg.endpoint_revision,eg.protocol,eg.expires_at,\
-                cm.expires_at AS membership_expires_at \
+                pm.expires_at AS project_membership_expires_at,cm.expires_at AS course_membership_expires_at \
          FROM access.endpoint_grants eg JOIN access.access_grants g ON g.grant_id=eg.grant_id \
-         JOIN access.course_memberships cm ON cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+         JOIN access.project_memberships pm ON pm.project_id=g.project_id AND pm.actor_id=g.actor_id \
+         LEFT JOIN access.course_memberships cm ON g.course_id IS NOT NULL AND cm.course_id=g.course_id AND cm.actor_id=g.actor_id \
+           AND cm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
          WHERE eg.endpoint_grant_id=$1 AND g.actor_id=$2 AND g.state='active' \
-           AND g.not_before<=$3 AND g.expires_at>$3 AND eg.expires_at>$3 \
-           AND eg.protocol IN ('http','https') AND eg.health='healthy' \
-           AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$3) \
-           AND cm.role=CASE g.contract->>'subjectKind' \
-             WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END",
+            AND g.not_before<=$3 AND g.expires_at>$3 AND eg.expires_at>$3 \
+            AND eg.protocol IN ('http','https') AND eg.health='healthy' \
+            AND pm.state='active' AND (pm.expires_at IS NULL OR pm.expires_at>$3) \
+            AND pm.role=CASE g.contract->>'subjectKind' \
+              WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
+            AND (g.course_id IS NULL OR (cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$3)))",
     )
     .bind(endpoint_grant_id.as_uuid())
     .bind(actor_id)
@@ -840,11 +1158,20 @@ async fn authorize_runtime(
         .to_string()
         .parse()
         .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
-    let course_id = row
-        .get::<uuid::Uuid, _>("course_id")
+    let project_id = row
+        .get::<uuid::Uuid, _>("project_id")
         .to_string()
         .parse()
         .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    let course_id = row
+        .get::<Option<uuid::Uuid>, _>("course_id")
+        .map(|value| {
+            value
+                .to_string()
+                .parse()
+                .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
+        })
+        .transpose()?;
     let endpoint_id = row
         .get::<uuid::Uuid, _>("endpoint_id")
         .to_string()
@@ -877,6 +1204,7 @@ async fn authorize_runtime(
         .resolve_endpoint_eligibility(
             &contracts::environment::EnvironmentEndpointEligibilityRequest {
                 environment_id,
+                project_id,
                 course_id,
                 actor_id,
                 subject_kind,
@@ -915,13 +1243,20 @@ async fn authorize_runtime(
 async fn forward(
     state: &AppState,
     proxy: &ControlGatewayProxy,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-    valid_path: fn(&str) -> bool,
+    request: ForwardRequest,
 ) -> Result<Response, ApiError> {
-    if !matches!(method, Method::GET | Method::POST | Method::DELETE) {
+    let ForwardRequest {
+        method,
+        uri,
+        headers,
+        body,
+        valid_path,
+        scope,
+    } = request;
+    if !matches!(
+        method,
+        Method::GET | Method::POST | Method::DELETE | Method::PATCH
+    ) {
         return Err(ApiError::bad_request("LW_AUTH_CONTROL_METHOD_REJECTED"));
     }
     let path = uri.path();
@@ -950,16 +1285,42 @@ async fn forward(
         .header(SESSION_HEADER, session.session_id.to_string())
         .body(body);
     let request = copy_request_headers(request, &headers);
-    let response = request.send().await.map_err(|_error| {
+    let request = if let Some(scope) = scope {
+        let request = request.header("x-labweaver-project-id", scope.project_id.to_string());
+        match scope.course_id {
+            Some(course_id) => request.header("x-labweaver-course-id", course_id.to_string()),
+            None => request,
+        }
+    } else {
+        request
+    };
+    let request = attach_service_token(
+        request,
+        &proxy.service_token_client,
+        &proxy.service_token_target,
+    )
+    .await?;
+    let started = Instant::now();
+    let response = request.send().await.map_err(|error| {
         tracing::warn!(
             event = "auth.control_gateway.unavailable",
             diagnostic_code = "LW_AUTH_CONTROL_UNAVAILABLE",
-            error_kind = "upstream_transport",
+            error_kind = reqwest_error_kind(&error),
             failure_stage = "control_request",
-            retryable = true
+            retryable = error.is_timeout() || error.is_connect(),
+            duration_ms = elapsed_millis(started),
+            safe_detail = "redacted_unclassified",
         );
         ApiError::unavailable("LW_AUTH_CONTROL_UNAVAILABLE")
     })?;
+    forward_control_response(proxy, &method, response).await
+}
+
+async fn forward_control_response(
+    proxy: &ControlGatewayProxy,
+    method: &Method,
+    response: reqwest::Response,
+) -> Result<Response, ApiError> {
     let status = response.status();
     let content_length = response.content_length();
     if content_length
@@ -1007,6 +1368,45 @@ async fn forward(
         .map_err(|_| ApiError::internal("LW_AUTH_CONTROL_RESPONSE_INVALID"))
 }
 
+async fn attach_service_token(
+    request: reqwest::RequestBuilder,
+    service_token_client: &ServiceTokenClient,
+    service_token_target: &ServiceTokenTarget,
+) -> Result<reqwest::RequestBuilder, ApiError> {
+    let mut headers = HeaderMap::new();
+    service_token_client
+        .bearer_auth_for(
+            &mut headers,
+            &service_token_target.audience,
+            &service_token_target.scopes,
+        )
+        .await
+        .map_err(|_| ApiError::unavailable("LW_AUTH_SERVICE_TOKEN_UNAVAILABLE"))?;
+    Ok(request.headers(headers))
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_builder() {
+        "builder"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "transport"
+    }
+}
+
 async fn authorize_environment_create(
     state: &AppState,
     headers: &HeaderMap,
@@ -1014,7 +1414,105 @@ async fn authorize_environment_create(
 ) -> Result<(), ApiError> {
     let request = contracts::parse_strict_json::<contracts::http::CreateEnvironmentRequest>(body)
         .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-    authorize_environment_course(state, headers, request.course_id, "createEnvironment").await
+    authorize_environment_project(state, headers, request.project_id, "createEnvironment").await
+}
+
+async fn authorize_environment_project(
+    state: &AppState,
+    headers: &HeaderMap,
+    project_id: contracts::ProjectId,
+    operation_id: &'static str,
+) -> Result<(), ApiError> {
+    let session = authenticated_session(state, headers).await?;
+    let actor = super::actor_from_session(&session)?;
+    let memberships = auth::load_membership_snapshot(&state.pool, session.actor_id)
+        .await
+        .map_err(ApiError::from)?;
+    let policy = contracts::operation_contract(operation_id)
+        .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+    auth::authorize(
+        &auth::AuthorizationContext {
+            actor,
+            course_memberships: memberships.course_memberships,
+            project_memberships: memberships.project_memberships,
+            now: time::OffsetDateTime::now_utc(),
+        },
+        contracts::AuthorizationScope::Project { project_id },
+        &policy.allowed_roles.iter().copied().collect(),
+    )
+    .map_err(ApiError::from)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EnvironmentFreezeScope {
+    project_id: contracts::ProjectId,
+    course_id: Option<contracts::CourseId>,
+}
+
+/// Authorizes a freeze against the project recorded by the active Access
+/// grant for this exact environment.  A course is an optional association;
+/// when present it must agree with the grant and its membership is checked in
+/// addition to the project membership.
+async fn authorize_environment_freeze(
+    state: &AppState,
+    headers: &HeaderMap,
+    environment_id: contracts::EnvironmentId,
+    requested_course_id: Option<contracts::CourseId>,
+    operation_id: &'static str,
+) -> Result<EnvironmentFreezeScope, ApiError> {
+    let session = authenticated_session(state, headers).await?;
+    let now = OffsetDateTime::now_utc();
+    let rows = sqlx::query(
+        "SELECT DISTINCT project_id,course_id FROM access.access_grants \
+         WHERE actor_id=$1 AND environment_id=$2 AND state='active' \
+           AND not_before <= $3 AND expires_at > $3",
+    )
+    .bind(session.actor_id)
+    .bind(environment_id.as_uuid())
+    .bind(now)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    if rows.is_empty() {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+
+    let mut scope = None;
+    for row in rows {
+        let project_id = row
+            .get::<uuid::Uuid, _>("project_id")
+            .to_string()
+            .parse()
+            .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+        let course_id = row
+            .get::<Option<uuid::Uuid>, _>("course_id")
+            .map(|value| {
+                value
+                    .to_string()
+                    .parse()
+                    .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))
+            })
+            .transpose()?;
+        if requested_course_id.is_some() && requested_course_id != course_id {
+            continue;
+        }
+        let candidate = EnvironmentFreezeScope {
+            project_id,
+            course_id,
+        };
+        if scope.is_some_and(|existing| existing != candidate) {
+            return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+        }
+        scope = Some(candidate);
+    }
+    let scope = scope.ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+
+    authorize_environment_project(state, headers, scope.project_id, operation_id).await?;
+    if let Some(course_id) = scope.course_id {
+        authorize_environment_course(state, headers, course_id, operation_id).await?;
+    }
+    Ok(scope)
 }
 
 async fn authorize_environment_course(
@@ -1124,7 +1622,9 @@ fn rewrite_runtime_location(
 
 fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
-    path.starts_with("/api/v1/courses/")
+    (path.starts_with("/api/v1/courses/")
+        || path == "/api/v1/projects"
+        || path.starts_with("/api/v1/projects/"))
         && !path.contains("//")
         && !path.contains('\\')
         && !lowercase.contains("%2f")
@@ -1154,6 +1654,10 @@ fn valid_evaluation_path(path: &str) -> bool {
         ))
 }
 
+#[allow(
+    clippy::unnested_or_patterns,
+    reason = "the route whitelist groups related resource paths for direct review"
+)]
 fn valid_resource_path(path: &str) -> bool {
     if !safe_path(path) {
         return false;
@@ -1163,6 +1667,13 @@ fn valid_resource_path(path: &str) -> bool {
         segments.as_slice(),
         ["", "api", "v1", "resource-requests" | "resource-leases"]
             | ["", "api", "v1", "resource-requests" | "resource-leases", _]
+            | ["", "api", "v1", "projects", _, "resource-requests"]
+            | ["", "api", "v1", "projects", _, "resource-leases"]
+            | ["", "api", "v1", "resource", "gpu-catalog"]
+            | ["", "api", "v1", "resource", "rates"]
+            | ["", "api", "v1", "resource", "usage"]
+            | ["", "api", "v1", "projects", _, "resource-budget"]
+            | ["", "api", "v1", "projects", _, "charges"]
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-requests", _, action]
@@ -1171,6 +1682,9 @@ fn valid_resource_path(path: &str) -> bool {
         segments.as_slice(),
         ["", "api", "v1", "resource-leases", _, action]
             if matches!(*action, "renew" | "revoke")
+    ) || matches!(
+        segments.as_slice(),
+        ["", "api", "v1", "projects", _, "charges", _, "adjustments"]
     )
 }
 
@@ -1198,17 +1712,87 @@ pub(super) enum ControlGatewayError {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use contracts::{
+        ActorId, AuthenticatedActor, MembershipState, PlatformRole, ProjectId, ProjectMembership,
+        Revision, UtcTimestamp,
+    };
+    use time::OffsetDateTime;
+
     use super::{
-        parse_runtime_path, valid_control_path, valid_evaluation_path, valid_resource_path,
+        authorize_resource_actor, parse_runtime_path, valid_control_path, valid_evaluation_path,
+        valid_resource_path,
     };
 
+    fn timestamp(value: &str) -> UtcTimestamp {
+        UtcTimestamp::from_str(value)
+            .unwrap_or_else(|error| unreachable!("test timestamp must be valid: {error}"))
+    }
+
+    fn decision_time(value: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|error| unreachable!("test decision time must be valid: {error}"))
+    }
+
+    fn actor(actor_id: ActorId, roles: Vec<PlatformRole>, expires_at: &str) -> AuthenticatedActor {
+        AuthenticatedActor {
+            actor_id,
+            roles,
+            expires_at: timestamp(expires_at),
+        }
+    }
+
+    fn project_membership(
+        actor_id: ActorId,
+        project_id: ProjectId,
+        role: PlatformRole,
+    ) -> ProjectMembership {
+        ProjectMembership {
+            course_id: None,
+            project_id,
+            actor_id,
+            role,
+            state: MembershipState::Active,
+            revision: Revision::new(1)
+                .unwrap_or_else(|error| unreachable!("test revision must be nonzero: {error}")),
+            expires_at: None,
+        }
+    }
+
+    fn authorize_resource_operation(
+        actor: AuthenticatedActor,
+        project_id: ProjectId,
+        project_memberships: Vec<ProjectMembership>,
+        operation_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), auth::AuthorizationError> {
+        let policy = contracts::operation_contract(operation_id).unwrap_or_else(|| {
+            unreachable!("resource operation must exist in the contract catalog")
+        });
+        authorize_resource_actor(
+            actor,
+            auth::MembershipSnapshot {
+                course_memberships: Vec::new(),
+                project_memberships,
+            },
+            contracts::AuthorizationScope::Project { project_id },
+            policy,
+            now,
+        )
+    }
+
     #[test]
-    fn control_paths_are_bounded_to_the_course_api() {
+    fn control_paths_are_bounded_to_course_and_project_apis() {
         assert!(valid_control_path("/api/v1/courses/course-1/agent-runs"));
+        assert!(valid_control_path("/api/v1/projects/project-1/events"));
+        assert!(valid_control_path("/api/v1/projects"));
         assert!(!valid_control_path("/internal/v1/auth/decision"));
         assert!(!valid_control_path("/api/v1/courses/../internal"));
         assert!(!valid_control_path("/api/v1/courses/a%2Finternal"));
         assert!(!valid_control_path("/api/v1/courses//agent-runs"));
+        assert!(!valid_control_path("/api/v1/projects/../internal"));
+        assert!(!valid_control_path("/api/v1/projects/a%2Finternal"));
     }
 
     #[test]
@@ -1253,6 +1837,24 @@ mod tests {
     fn resource_paths_are_exact_and_injection_safe() {
         assert!(valid_resource_path("/api/v1/resource-requests"));
         assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-requests"
+        ));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-leases"
+        ));
+        assert!(valid_resource_path("/api/v1/resource/gpu-catalog"));
+        assert!(valid_resource_path("/api/v1/resource/rates"));
+        assert!(valid_resource_path("/api/v1/resource/usage"));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-budget"
+        ));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/charges"
+        ));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/charges/01900000-0000-7000-8000-000000000002/adjustments"
+        ));
+        assert!(valid_resource_path(
             "/api/v1/resource-requests/01900000-0000-7000-8000-000000000001/approve"
         ));
         assert!(valid_resource_path(
@@ -1264,5 +1866,98 @@ mod tests {
         assert!(!valid_resource_path(
             "/api/v1/resource-requests/../internal"
         ));
+        assert!(!valid_resource_path(
+            "/api/v1/resource/gpu-catalog/internal"
+        ));
+        assert!(!valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/charges//adjustments"
+        ));
+        assert!(!valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-budget/extra"
+        ));
+    }
+
+    #[test]
+    fn platform_admin_can_read_and_approve_without_project_membership() {
+        let actor_id = ActorId::new();
+        let actor = actor(
+            actor_id,
+            vec![PlatformRole::PlatformAdmin],
+            "2026-07-15T00:00:00.000Z",
+        );
+        let project_id = ProjectId::new();
+        let now = decision_time("2026-07-14T00:00:00Z");
+
+        for operation_id in ["getResourceRequest", "approveResourceRequest"] {
+            assert_eq!(
+                authorize_resource_operation(
+                    actor.clone(),
+                    project_id,
+                    Vec::new(),
+                    operation_id,
+                    now,
+                ),
+                Ok(()),
+                "PlatformAdmin must use global authorization for {operation_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_actor_cannot_read_a_cross_project_resource_request() {
+        let actor_id = ActorId::new();
+        let member_project_id = ProjectId::new();
+        let requested_project_id = ProjectId::new();
+        let result = authorize_resource_operation(
+            actor(
+                actor_id,
+                vec![PlatformRole::Student],
+                "2026-07-15T00:00:00.000Z",
+            ),
+            requested_project_id,
+            vec![project_membership(
+                actor_id,
+                member_project_id,
+                PlatformRole::Student,
+            )],
+            "getResourceRequest",
+            decision_time("2026-07-14T00:00:00Z"),
+        );
+
+        assert_eq!(result, Err(auth::AuthorizationError::ProjectScopeDenied));
+    }
+
+    #[test]
+    fn expired_platform_admin_is_rejected_by_global_resource_authorization() {
+        let result = authorize_resource_operation(
+            actor(
+                ActorId::new(),
+                vec![PlatformRole::PlatformAdmin],
+                "2026-07-13T00:00:00.000Z",
+            ),
+            ProjectId::new(),
+            Vec::new(),
+            "approveResourceRequest",
+            decision_time("2026-07-14T00:00:00Z"),
+        );
+
+        assert_eq!(result, Err(auth::AuthorizationError::IdentityExpired));
+    }
+
+    #[test]
+    fn admin_role_does_not_bypass_operations_that_exclude_platform_admin() {
+        let result = authorize_resource_operation(
+            actor(
+                ActorId::new(),
+                vec![PlatformRole::PlatformAdmin, PlatformRole::Student],
+                "2026-07-15T00:00:00.000Z",
+            ),
+            ProjectId::new(),
+            Vec::new(),
+            "cancelResourceRequest",
+            decision_time("2026-07-14T00:00:00Z"),
+        );
+
+        assert_eq!(result, Err(auth::AuthorizationError::ProjectScopeDenied));
     }
 }

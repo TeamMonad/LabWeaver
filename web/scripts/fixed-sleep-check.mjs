@@ -7,12 +7,17 @@ const SCAN_ROOTS = ['e2e', 'scripts', 'playwright.config.mjs']
 const IGNORED_PATH_PARTS = new Set(['node_modules', 'artifacts', 'test-results', 'playwright-report', '.auth'])
 const SELF_PATH = 'scripts/fixed-sleep-check.mjs'
 const FIXED_SLEEP_PATTERNS = [
-  new RegExp(`page\\.waitFor${'Timeout'}\\s*\\(`),
-  new RegExp(`set${'Timeout'}\\s*\\(`),
+  /\bpage\.waitForTimeout\s*\(/,
+  /(?:^|[^\w.$])setTimeout\s*\(/,
+  /\b(?:globalThis|window)\s*\.\s*setTimeout\s*\(/,
   /\bsleep\s*\(/,
   /\bStart-Sleep\b/,
   /\bThread\.sleep\s*\(/,
 ]
+
+export function isFixedSleepLine(line) {
+  return FIXED_SLEEP_PATTERNS.some((pattern) => pattern.test(line))
+}
 
 async function collectFiles(target) {
   const absolute = path.join(WEB_ROOT, target)
@@ -36,7 +41,7 @@ export async function findFixedSleeps() {
     if (normalized === SELF_PATH) continue
     const contents = await readFile(path.join(WEB_ROOT, relative), 'utf8').catch(() => '')
     for (const [index, line] of contents.split(/\r?\n/).entries()) {
-      if (FIXED_SLEEP_PATTERNS.some((pattern) => pattern.test(line))) {
+      if (isFixedSleepLine(line)) {
         findings.push(`${normalized}:${index + 1}`)
       }
     }

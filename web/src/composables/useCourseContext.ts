@@ -1,41 +1,33 @@
 import { computed } from 'vue'
 import { useCourseStore } from '@/stores/course'
-import { useAuth } from '@/composables/useAuth'
 
 export interface CourseContext {
-  courseId: string
-  source: 'store' | 'profile' | 'env'
+  projectId: string
+  courseId?: string
+  source: 'store'
 }
 
 /**
- * Resolve the current course context for course-scoped Public API calls.
- *
- * Resolution order:
- * 1. Bound course store context.
- * 2. OIDC profile `course_id` claim.
- * 3. Deployment-specific `VITE_DEFAULT_COURSE_ID` env variable.
+ * Resolve the selected server-owned project context.  Course is an optional
+ * association on a project and is never selected from profile claims or a
+ * deployment default.
  */
 export function useCourseContext() {
   const courseStore = useCourseStore()
-  const auth = useAuth()
 
   const context = computed<CourseContext | null>(() => {
-    if (courseStore.currentContext?.courseId) {
-      return { courseId: courseStore.currentContext.courseId, source: 'store' }
+    const selected = courseStore.currentContext
+    if (!selected) return null
+    return {
+      projectId: selected.projectId,
+      ...(selected.courseId ? { courseId: selected.courseId } : {}),
+      source: 'store',
     }
-    const profileCourseId = auth.user.value?.profile?.course_id
-    if (typeof profileCourseId === 'string' && profileCourseId) {
-      return { courseId: profileCourseId, source: 'profile' }
-    }
-    const envCourseId = import.meta.env.VITE_DEFAULT_COURSE_ID as string | undefined
-    if (envCourseId) {
-      return { courseId: envCourseId, source: 'env' }
-    }
-    return null
   })
 
+  const projectId = computed(() => context.value?.projectId)
   const courseId = computed(() => context.value?.courseId)
-  const isFromEnv = computed(() => context.value?.source === 'env')
+  const isFromEnv = computed(() => false)
 
-  return { context, courseId, isFromEnv }
+  return { context, projectId, courseId, isFromEnv }
 }

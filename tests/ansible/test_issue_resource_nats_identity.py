@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -63,8 +64,60 @@ class ResourceIdentityIssuanceTests(unittest.TestCase):
                 "$JS.ACK.>",
                 "labweaver.resource.request.submitted.v1",
                 "labweaver.resource.request.approved.v1",
+                "labweaver.resource.request.rejected.v1",
+                "labweaver.resource.request.cancelled.v1",
+                "labweaver.resource.request.state_changed.v1",
+                "labweaver.resource.lease.activated.v1",
+                "labweaver.resource.lease.renewed.v1",
+                "labweaver.resource.lease.revoked.v1",
+                "labweaver.resource.lease.expiring.v1",
+                "labweaver.resource.lease.expired.v1",
             ),
         )
+        self.assertEqual(
+            MODULE.SUBSCRIBE_SUBJECTS,
+            ("_INBOX.>", "labweaver.resource.lease.verify.v1"),
+        )
+        self.assertTrue(MODULE.RESPONSE_PERMISSION)
+
+    def test_response_inbox_is_restored_before_credentials_are_generated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / ".private"
+            private.mkdir()
+            store = private / "store"
+            store.mkdir()
+            output = private / "identity"
+            calls: list[list[str]] = []
+
+            def fake_run_nsc(_nsc: Path, _store: Path, arguments: list[str], home: Path) -> None:
+                calls.append(arguments)
+                if arguments[:2] == ["generate", "creds"]:
+                    (home.parent / "resource-service.nats.creds").write_text(
+                        "test-only", encoding="utf-8"
+                    )
+
+            with patch.object(MODULE, "run_nsc", side_effect=fake_run_nsc):
+                MODULE.issue(store, Path("nsc"), output, 365)
+
+            self.assertEqual(calls[0][:2], ["add", "user"])
+            self.assertIn(
+                ["--allow-pub", "labweaver.resource.lease.expired.v1"],
+                [calls[0][index : index + 2] for index in range(len(calls[0]) - 1)],
+            )
+            self.assertEqual(
+                calls[1],
+                [
+                    "edit",
+                    "user",
+                    "--account",
+                    "WORKLOADS",
+                    "--name",
+                    "resource-service",
+                    "--allow-sub",
+                    "_INBOX.>",
+                ],
+            )
+            self.assertEqual(calls[2][:3], ["generate", "creds", "--account"])
 
 
 if __name__ == "__main__":

@@ -5,9 +5,11 @@ from __future__ import annotations
 import importlib.util
 import inspect
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,50 @@ SPEC.loader.exec_module(FOUNDATION)
 
 
 class FoundationAuthoringTests(unittest.TestCase):
+    def test_child_environment_keeps_runtime_bindings_without_ambient_secrets(self) -> None:
+        with patch.dict(
+            FOUNDATION.os.environ,
+            {
+                "PATH": "fixture-path",
+                "SystemRoot": "C:\\Windows",
+                "WINDIR": "C:\\Windows",
+                "TEMP": "C:\\Temp",
+                "TMP": "C:\\Temp",
+                "PROGRAMDATA": "C:\\ProgramData",
+                "OPENSSL_CONF": "C:\\OpenSSL\\openssl.cnf",
+                "OPENSSL_MODULES": "C:\\OpenSSL\\modules",
+                "LABWEAVER_FIXTURE_SECRET": "must-not-cross-process-boundary",
+            },
+            clear=True,
+        ):
+            environment = FOUNDATION._child_environment(Path("C:/private-home"))
+        self.assertEqual(environment["PATH"], "fixture-path")
+        self.assertEqual(environment["SystemRoot"], "C:\\Windows")
+        self.assertEqual(environment["WINDIR"], "C:\\Windows")
+        self.assertEqual(environment["TEMP"], "C:\\Temp")
+        self.assertEqual(environment["TMP"], "C:\\Temp")
+        self.assertEqual(environment["PROGRAMDATA"], "C:\\ProgramData")
+        self.assertEqual(environment["OPENSSL_CONF"], "C:\\OpenSSL\\openssl.cnf")
+        self.assertEqual(environment["OPENSSL_MODULES"], "C:\\OpenSSL\\modules")
+        self.assertNotIn("LABWEAVER_FIXTURE_SECRET", environment)
+
+    def test_failed_tool_keeps_bounded_safe_stderr(self) -> None:
+        private_home = Path("C:/private-home")
+        failure = subprocess.CalledProcessError(
+            1,
+            ["openssl"],
+            stderr=("password=top-secret C:/private-home/secret.key\x01\n" * 100).encode(),
+        )
+        with patch.object(FOUNDATION.subprocess, "run", side_effect=failure):
+            with self.assertRaises(FOUNDATION.FoundationError) as raised:
+                FOUNDATION._run(Path("C:/tools/openssl"), ["genpkey"], private_home)
+        diagnostic = str(raised.exception)
+        self.assertIn("LW_PLATFORM_FOUNDATION_TOOL_FAILED:openssl:genpkey", diagnostic)
+        self.assertNotIn("top-secret", diagnostic)
+        self.assertNotIn("C:/private-home", diagnostic)
+        self.assertNotIn("\x01", diagnostic)
+        self.assertLessEqual(len(diagnostic.rsplit(":", maxsplit=1)[-1]), 1024)
+
     def test_output_must_be_new_and_private(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -88,6 +134,28 @@ class FoundationAuthoringTests(unittest.TestCase):
         self.assertIn("labweaver.service.access.revoke.v1", environment_publish)
         self.assertIn("labweaver.resource.lease.verify.v1", environment_publish)
 
+        evaluation_publish, evaluation_subscribe, evaluation_response = FOUNDATION.NATS_USERS[
+            "evaluation-service"
+        ]
+        self.assertEqual(
+            evaluation_publish,
+            (
+                "$JS.API.>",
+                "$JS.ACK.>",
+                "labweaver.evaluation.submission.freeze_requested.v1",
+                "labweaver.evaluation.submission.frozen.v1",
+                "labweaver.evaluation.release.published.v1",
+                "labweaver.evaluation.run.requested.v1",
+                "labweaver.evaluation.run.state_changed.v1",
+                "labweaver.evaluation.step_run.state_changed.v1",
+            ),
+        )
+        self.assertEqual(
+            evaluation_subscribe,
+            ("_INBOX.>", "labweaver.evaluation.submission.freeze_requested.v1"),
+        )
+        self.assertFalse(evaluation_response)
+
         for consumer in (
             "control-service",
             "agent-service",
@@ -114,6 +182,14 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "$JS.ACK.>",
                 "labweaver.resource.request.submitted.v1",
                 "labweaver.resource.request.approved.v1",
+                "labweaver.resource.request.rejected.v1",
+                "labweaver.resource.request.cancelled.v1",
+                "labweaver.resource.request.state_changed.v1",
+                "labweaver.resource.lease.activated.v1",
+                "labweaver.resource.lease.renewed.v1",
+                "labweaver.resource.lease.revoked.v1",
+                "labweaver.resource.lease.expiring.v1",
+                "labweaver.resource.lease.expired.v1",
             ),
         )
         self.assertEqual(resource_subscribe, ("_INBOX.>", "labweaver.resource.lease.verify.v1"))

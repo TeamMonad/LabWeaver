@@ -6,11 +6,13 @@ mod spec;
 mod validation;
 
 pub use control::{
+    APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION, ApprovedProgramProfile,
     EVALUATION_RELEASE_SCHEMA_VERSION, EVALUATION_RUN_SCHEMA_VERSION,
-    EvaluationControlContractError, EvaluationRelease, EvaluationReleaseState, EvaluationRun,
-    EvaluationRunIdentity, EvaluationRunState, EvaluationRuntimeIdentity, EvaluationStepCompletion,
-    EvaluationStepFailurePolicy, EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState,
-    StudentEvaluationResult, StudentEvaluationResultState, StudentEvaluationStepResult,
+    EvaluationControlContractError, EvaluationExecutionBinding, EvaluationRelease,
+    EvaluationReleaseState, EvaluationRun, EvaluationRunIdentity, EvaluationRunState,
+    EvaluationRuntimeIdentity, EvaluationStepCompletion, EvaluationStepFailurePolicy,
+    EvaluationStepRole, EvaluationStepRun, EvaluationStepRunState, StudentEvaluationResult,
+    StudentEvaluationResultState, StudentEvaluationStepResult,
 };
 pub use review::{
     EvidenceLocation, FindingResult, GoalAssessment, GoalFinding, GoalReview, GoalReviewError,

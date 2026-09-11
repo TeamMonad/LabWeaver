@@ -13,14 +13,16 @@ use tokio::sync::watch;
 
 use crate::{
     ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
-    EnvironmentStoreError, FreezeBindingConfiguration, FreezeBindingService,
-    JetStreamCommandConsumer, JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtProvider,
+    ContainerWorkExecutionService, ContainerWorkspaceAccessMode, EnvironmentStoreError,
+    FreezeBindingConfiguration, FreezeBindingService, JetStreamCommandConsumer,
+    JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtProvider,
     KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtSshBootstrap,
-    KubeVirtStorageBinding, LifecycleCommand, NatsAccessRevoker, NatsContainerProviderBackend,
-    NatsEnvironmentProvider, NatsKubeVirtProviderBackend, NatsMessagingError,
-    NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore,
-    PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry, ReconcileError,
-    ReconcileWorker, ReconcileWorkerError, Reconciler, connect_nats_mtls,
+    KubeVirtStorageBinding, KubernetesWorkExecutionBackend, LifecycleCommand, NatsAccessRevoker,
+    NatsContainerProviderBackend, NatsEnvironmentProvider, NatsKubeVirtProviderBackend,
+    NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher,
+    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry,
+    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler,
+    VmFreezeBindingConfiguration, WorkAdmissionClient, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -69,6 +71,8 @@ pub struct EnvironmentProcessRuntime {
     readiness: Arc<AtomicBool>,
     expiry_ready: Arc<AtomicBool>,
     freeze_bindings: FreezeBindingService,
+    resource_usage_client: crate::metering::ResourceUsageClient,
+    work_executions: ContainerWorkExecutionService,
 }
 
 impl EnvironmentProcessRuntime {
@@ -85,6 +89,43 @@ impl EnvironmentProcessRuntime {
             .await?;
         require_schema(&pool).await?;
         let store = PgEnvironmentStore::new(pool.clone());
+        let resource_usage_client = crate::metering::ResourceUsageClient::from_env()
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    event = "environment.resource_meter.client_startup_failed",
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "configuration",
+                    retryable = false,
+                );
+                EnvironmentProcessRuntimeError::ResourceUsage
+            })?;
+        let work_admission = WorkAdmissionClient::from_env().await.map_err(|error| {
+            tracing::error!(
+                event = "environment.work_admission.client_startup_failed",
+                error = %error,
+                error_kind = "configuration",
+                retryable = false,
+            );
+            EnvironmentProcessRuntimeError::WorkAdmission
+        })?;
+        let work_backend = KubernetesWorkExecutionBackend::from_default()
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    event = "environment.work_execution.backend_startup_failed",
+                    error = %error,
+                    error_kind = "configuration",
+                    retryable = false,
+                );
+                EnvironmentProcessRuntimeError::WorkExecution(error)
+            })?;
+        let work_executions = ContainerWorkExecutionService::new(
+            store.clone(),
+            pool.clone(),
+            work_admission.clone(),
+            Arc::new(work_backend),
+        );
 
         let nats = connect_nats_mtls(
             &required(NATS_SERVER)?,
@@ -111,35 +152,12 @@ impl EnvironmentProcessRuntime {
         .await?;
 
         let provider_bindings = load_provider_bindings(&required_path(PROVIDER_BINDINGS_PATH)?)?;
-        let container_freeze_configuration =
-            single_provider_configuration(&provider_bindings, "container")?;
-        let vm_freeze_configuration =
-            single_provider_configuration(&provider_bindings, "kubevirt")?;
+        let freeze_configuration = freeze_binding_configuration(&provider_bindings)?;
         let freeze_bindings = FreezeBindingService::new(
             pool.clone(),
             release_store.clone(),
-            FreezeBindingConfiguration {
-                container_workspace_storage_class: container_freeze_configuration
-                    .workspace_storage_class_name
-                    .clone()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                vm_username: vm_freeze_configuration
-                    .guest_user
-                    .clone()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                vm_workspace_root: vm_freeze_configuration
-                    .collector_workspace_root
-                    .clone()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                ssh_user_ca_public_key: vm_freeze_configuration
-                    .ssh_user_ca_public_key
-                    .clone()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                ssh_user_ca_private_key_path: vm_freeze_configuration
-                    .ssh_user_ca_private_key_path
-                    .clone()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-            },
+            freeze_configuration,
+            work_admission,
         )?;
         let mut registry = ProviderRegistry::default();
         for configuration in provider_bindings {
@@ -190,6 +208,10 @@ impl EnvironmentProcessRuntime {
                             configuration
                                 .workspace_storage_class_name
                                 .clone()
+                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            configuration
+                                .workspace_access_mode
+                                .as_deref()
                                 .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                         )?,
                     )?;
@@ -259,6 +281,16 @@ impl EnvironmentProcessRuntime {
                                     .ssh_user_ca_public_key
                                     .as_deref()
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                            )?
+                            .with_evaluation_ingress(
+                                configuration
+                                    .evaluation_namespace
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                                configuration
+                                    .evaluation_pod_label
+                                    .clone()
+                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             )?,
                             KubeVirtResourceBudget::new(
                                 configuration
@@ -327,6 +359,8 @@ impl EnvironmentProcessRuntime {
             readiness: Arc::new(AtomicBool::new(true)),
             expiry_ready: Arc::new(AtomicBool::new(true)),
             freeze_bindings,
+            resource_usage_client,
+            work_executions,
         })
     }
 
@@ -345,6 +379,7 @@ impl EnvironmentProcessRuntime {
             self.lease_verifier.clone(),
             self.freeze_bindings.clone(),
         )
+        .with_work_executions(self.work_executions.clone())
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.
@@ -364,6 +399,8 @@ impl EnvironmentProcessRuntime {
             readiness,
             expiry_ready,
             freeze_bindings: _,
+            resource_usage_client,
+            work_executions,
         } = self;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         tokio::try_join!(
@@ -377,6 +414,8 @@ impl EnvironmentProcessRuntime {
             release_loop(release_store, &mut release_consumer, shutdown_rx.clone()),
             reconcile_loop(store.clone(), worker, worker_id, shutdown_rx.clone()),
             outbox_loop(outbox, shutdown_rx.clone()),
+            resource_usage_loop(store.clone(), resource_usage_client, shutdown_rx.clone(),),
+            work_execution_recovery_loop(work_executions, shutdown_rx.clone()),
             expiry_loop(
                 store.clone(),
                 access_revoker,
@@ -397,6 +436,39 @@ impl EnvironmentProcessRuntime {
             .map_err(|_| EnvironmentProcessRuntimeError::NatsDrain)?;
         Ok(())
     }
+}
+
+async fn work_execution_recovery_loop(
+    service: crate::ContainerWorkExecutionService,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), EnvironmentProcessRuntimeError> {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
+                return Ok(());
+            }
+            _ = interval.tick() => {
+                for run_id in service.running_ids().await.map_err(EnvironmentProcessRuntimeError::WorkExecution)? {
+                    if let Err(error) = service.recover_once(run_id).await {
+                        tracing::error!(event = "environment.work_execution.recovery_failed", run_id = %run_id, error = %error, error_kind = "recovery", retryable = true);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn resource_usage_loop(
+    store: PgEnvironmentStore,
+    client: crate::metering::ResourceUsageClient,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), EnvironmentProcessRuntimeError> {
+    crate::metering::delivery_loop(store, client, shutdown)
+        .await
+        .map_err(EnvironmentProcessRuntimeError::Store)
 }
 
 async fn release_loop(
@@ -457,6 +529,7 @@ async fn reconcile_loop(
                 let outcome = worker.run_once(&worker_id, now).await?;
                 match outcome {
                     crate::reconciler::ReconcileWorkerOutcome::Idle => { tracing::debug!(event = "environment.reconcile.idle", outcome = "idle"); }
+                    crate::reconciler::ReconcileWorkerOutcome::LeaseLost => { tracing::warn!(event = "environment.reconcile.lease_lost", outcome = "ownership_lost", failure_stage = "reconcile", error_kind = "concurrency", retryable = false); }
                     crate::reconciler::ReconcileWorkerOutcome::Advanced { terminal, .. } => { tracing::info!(event = "environment.reconcile.advanced", outcome = if terminal { "terminal" } else { "advanced" }); }
                     crate::reconciler::ReconcileWorkerOutcome::RetryScheduled { attempt } => { tracing::warn!(event = "environment.reconcile.retry_scheduled", outcome = "retry_scheduled", attempt, failure_stage = "reconcile", error_kind = "provider", retryable = true); }
                     crate::reconciler::ReconcileWorkerOutcome::Failed { diagnostic_code } => { tracing::error!(event = "environment.reconcile.failed", outcome = "failed", diagnostic_code, failure_stage = "reconcile", error_kind = "provider", retryable = false); }
@@ -660,7 +733,10 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRun
          AND to_regclass('environment.outbox_events') IS NOT NULL \
          AND to_regclass('environment.inbox_events') IS NOT NULL \
          AND to_regclass('environment.release_projections') IS NOT NULL \
-         AND to_regclass('environment.kubevirt_runtime_observations') IS NOT NULL",
+         AND to_regclass('environment.kubevirt_runtime_observations') IS NOT NULL \
+         AND to_regclass('environment.resource_metering_state') IS NOT NULL \
+         AND to_regclass('environment.resource_meter_deliveries') IS NOT NULL \
+         AND to_regclass('environment.work_configuration_executions') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -713,6 +789,7 @@ struct ProviderBindingConfiguration {
     image_pull_secret_name: Option<String>,
     image_repository_prefix: Option<String>,
     workspace_storage_class_name: Option<String>,
+    workspace_access_mode: Option<String>,
     active_image_policy_id: Option<String>,
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
@@ -723,6 +800,8 @@ struct ProviderBindingConfiguration {
     gateway_pod_label: Option<String>,
     collector_namespace: Option<String>,
     collector_pod_label: Option<String>,
+    evaluation_namespace: Option<String>,
+    evaluation_pod_label: Option<String>,
     guest_user: Option<String>,
     ssh_user_ca_public_key: Option<String>,
     ssh_user_ca_private_key_path: Option<PathBuf>,
@@ -774,6 +853,7 @@ impl ProviderBindingConfiguration {
             || self.image_pull_secret_name.is_some()
             || self.image_repository_prefix.is_some()
             || self.workspace_storage_class_name.is_some()
+            || self.workspace_access_mode.is_some()
     }
 
     fn has_complete_container_fields(&self) -> bool {
@@ -784,6 +864,7 @@ impl ProviderBindingConfiguration {
             && self.image_pull_secret_name.is_some()
             && self.image_repository_prefix.is_some()
             && self.workspace_storage_class_name.is_some()
+            && self.workspace_access_mode.is_some()
             && self.active_image_policy_id.is_some()
             && self.active_image_policy_revision.is_some()
             && self.active_trust_revision.is_some()
@@ -797,6 +878,8 @@ impl ProviderBindingConfiguration {
             || self.gateway_pod_label.is_some()
             || self.collector_namespace.is_some()
             || self.collector_pod_label.is_some()
+            || self.evaluation_namespace.is_some()
+            || self.evaluation_pod_label.is_some()
             || self.guest_user.is_some()
             || self.ssh_user_ca_public_key.is_some()
             || self.ssh_user_ca_private_key_path.is_some()
@@ -818,6 +901,8 @@ impl ProviderBindingConfiguration {
             && self.gateway_pod_label.is_some()
             && self.collector_namespace.is_some()
             && self.collector_pod_label.is_some()
+            && self.evaluation_namespace.is_some()
+            && self.evaluation_pod_label.is_some()
             && self.guest_user.is_some()
             && self.ssh_user_ca_public_key.is_some()
             && self.ssh_user_ca_private_key_path.is_some()
@@ -871,10 +956,74 @@ fn single_provider_configuration<'a>(
     }
 }
 
+fn optional_provider_configuration<'a>(
+    bindings: &'a [ProviderBindingConfiguration],
+    provider_kind: &str,
+) -> Result<Option<&'a ProviderBindingConfiguration>, EnvironmentProcessRuntimeError> {
+    let matches = bindings
+        .iter()
+        .filter(|binding| binding.provider_kind.as_deref() == Some(provider_kind))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [configuration] => Ok(Some(configuration)),
+        _ => Err(EnvironmentProcessRuntimeError::ConfigParse),
+    }
+}
+
+fn freeze_binding_configuration(
+    bindings: &[ProviderBindingConfiguration],
+) -> Result<FreezeBindingConfiguration, EnvironmentProcessRuntimeError> {
+    let container = single_provider_configuration(bindings, "container")?;
+    let workspace_access_mode = container
+        .workspace_access_mode
+        .as_deref()
+        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?;
+    ContainerWorkspaceAccessMode::parse(workspace_access_mode)
+        .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?;
+    let vm = optional_provider_configuration(bindings, "kubevirt")?
+        .map(|configuration| {
+            if configuration.has_container_only_fields()
+                || !configuration.has_complete_kubevirt_fields()
+            {
+                return Err(EnvironmentProcessRuntimeError::ConfigParse);
+            }
+            Ok(VmFreezeBindingConfiguration {
+                username: configuration
+                    .guest_user
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                workspace_root: configuration
+                    .collector_workspace_root
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                ssh_user_ca_public_key: configuration
+                    .ssh_user_ca_public_key
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                ssh_user_ca_private_key_path: configuration
+                    .ssh_user_ca_private_key_path
+                    .clone()
+                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            })
+        })
+        .transpose()?;
+    Ok(FreezeBindingConfiguration {
+        container_workspace_storage_class: container
+            .workspace_storage_class_name
+            .clone()
+            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+        vm,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
-    use super::ProviderBindingConfiguration;
+    use super::{
+        ContainerWorkspaceAccessMode, EnvironmentProcessRuntimeError, ProviderBindingConfiguration,
+        freeze_binding_configuration,
+    };
 
     #[test]
     fn checked_in_platform_provider_example_has_no_legacy_contract() {
@@ -890,6 +1039,84 @@ mod deployment_contract_tests {
         );
         assert!(!example.contains(".v2"));
         assert!(!example.contains("activeTrustBundleSha256"));
+    }
+
+    #[test]
+    fn local_hostpath_provider_is_container_only_and_builds_freeze_configuration() {
+        let example = include_str!(
+            "../../../deploy/config/environment-providers.local-hostpath.example.json"
+        );
+        let bindings: Vec<ProviderBindingConfiguration> =
+            serde_json::from_str(example).expect("local provider example must deserialize");
+
+        let configuration =
+            freeze_binding_configuration(&bindings).expect("container-only provider is valid");
+        assert_eq!(configuration.container_workspace_storage_class, "standard");
+        assert!(configuration.vm.is_none());
+    }
+
+    #[test]
+    fn container_workspace_access_mode_is_required_and_limited_to_kubernetes_modes() {
+        let example = include_str!(
+            "../../../deploy/config/environment-providers.local-hostpath.example.json"
+        );
+        let mut bindings: Vec<ProviderBindingConfiguration> =
+            serde_json::from_str(example).expect("local provider example must deserialize");
+
+        assert_eq!(
+            ContainerWorkspaceAccessMode::parse(
+                bindings[0]
+                    .workspace_access_mode
+                    .as_deref()
+                    .expect("local example declares workspace access mode")
+            ),
+            Some(ContainerWorkspaceAccessMode::ReadWriteOnce)
+        );
+
+        bindings[0].workspace_access_mode = None;
+        assert!(matches!(
+            freeze_binding_configuration(&bindings),
+            Err(EnvironmentProcessRuntimeError::ConfigParse)
+        ));
+
+        bindings[0].workspace_access_mode = Some("ReadWriteOncePod".to_owned());
+        assert!(matches!(
+            freeze_binding_configuration(&bindings),
+            Err(EnvironmentProcessRuntimeError::ConfigParse)
+        ));
+    }
+
+    #[test]
+    fn configured_incomplete_kubevirt_provider_fails_closed() {
+        let bindings: Vec<ProviderBindingConfiguration> =
+            serde_json::from_value(serde_json::json!([
+                {
+                    "binding": "kubernetes-work-local-hostpath",
+                    "subject": "labweaver.provider.kubernetes.container.v1",
+                    "providerKind": "container",
+                    "accessNamespace": "labweaver-system",
+                    "accessPodLabel": "access-service",
+                    "imageRepositoryPrefix": "localhost/labweaver/local",
+                    "imagePullSecretName": "harbor-course-pull",
+                    "workspaceStorageClassName": "standard",
+                    "workspaceAccessMode": "ReadWriteOnce",
+                    "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",
+                    "activeImagePolicyRevision": 1,
+                    "activeTrustRevision": 1
+                },
+                {
+                    "binding": "kubevirt-primary-v1",
+                    "subject": "labweaver.provider.kubevirt.vm.v1",
+                    "providerKind": "kubevirt",
+                    "guestUser": "lab"
+                }
+            ]))
+            .expect("provider fixture must deserialize");
+
+        assert!(matches!(
+            freeze_binding_configuration(&bindings),
+            Err(EnvironmentProcessRuntimeError::ConfigParse)
+        ));
     }
 }
 
@@ -923,6 +1150,12 @@ pub enum EnvironmentProcessRuntimeError {
     ShutdownChannel,
     #[error("LW_ENVIRONMENT_RUNTIME_NATS_DRAIN_FAILED")]
     NatsDrain,
+    #[error("LW_ENVIRONMENT_RUNTIME_RESOURCE_USAGE_CLIENT_FAILED")]
+    ResourceUsage,
+    #[error("LW_ENVIRONMENT_RUNTIME_WORK_ADMISSION_CLIENT_FAILED")]
+    WorkAdmission,
+    #[error("LW_ENVIRONMENT_RUNTIME_WORK_EXECUTION_FAILED")]
+    WorkExecution(#[source] crate::WorkExecutionError),
     #[error("LW_ENVIRONMENT_RUNTIME_DATABASE_FAILED")]
     Database(#[from] sqlx::Error),
     #[error(transparent)]

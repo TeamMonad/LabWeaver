@@ -152,3 +152,39 @@ pub enum ResourceOutboxError {
     #[error("LW_RESOURCE_OUTBOX_DATABASE_FAILED")]
     Database(#[from] sqlx::Error),
 }
+
+impl ResourceOutboxError {
+    pub(crate) fn error_kind(&self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::Identity => "identity",
+            Self::Contract => "contract",
+            Self::Timeout => "timeout",
+            Self::Publish => "transport",
+            Self::FenceLost => "concurrency",
+            Self::Database(_) => "database",
+        }
+    }
+
+    pub(crate) fn failure_stage(&self) -> &'static str {
+        match self {
+            Self::Configuration => "outbox.configuration",
+            Self::Identity | Self::Contract => "outbox.validate",
+            Self::Timeout | Self::Publish => "outbox.publish",
+            Self::FenceLost => "outbox.mark_published",
+            Self::Database(_) => "outbox.database",
+        }
+    }
+
+    pub(crate) fn safe_detail(&self) -> String {
+        match self {
+            Self::Configuration => "configuration_invalid".to_owned(),
+            Self::Identity => "identity_invalid".to_owned(),
+            Self::Contract => "contract_invalid".to_owned(),
+            Self::Timeout => "publish_timeout".to_owned(),
+            Self::Publish => "publish_failed".to_owned(),
+            Self::FenceLost => "fence_lost".to_owned(),
+            Self::Database(error) => crate::store::safe_sqlstate_detail(error),
+        }
+    }
+}

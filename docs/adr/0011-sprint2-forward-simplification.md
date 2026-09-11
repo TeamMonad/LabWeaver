@@ -1,6 +1,6 @@
 # ADR 0011: Sprint 2 Forward Simplification
 
-Status: Accepted
+Status: historical; Sprint dates, adoption commands, and release gates are superseded by [ADR 0015](0015-v3-project-work-resource-platform.md).
 
 Date: 2026-07-19
 

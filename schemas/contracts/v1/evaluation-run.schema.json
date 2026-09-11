@@ -148,6 +148,17 @@
           "minimum": 1,
           "type": "integer"
         },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GoalReview"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional advisory review. Only a successful Advisory step may carry a review.\n\nThe review is an informational projection and never contributes to `awarded_score`."
+        },
         "revision": {
           "$ref": "#/$defs/Revision"
         },
@@ -207,8 +218,165 @@
       ],
       "type": "string"
     },
+    "EvidenceLocation": {
+      "additionalProperties": false,
+      "description": "Bounded source location cited by an advisory finding.",
+      "properties": {
+        "end_line": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line"
+      ],
+      "type": "object"
+    },
+    "FindingResult": {
+      "description": "Advisory result for one rubric criterion.",
+      "oneOf": [
+        {
+          "const": "met",
+          "description": "The criterion is met.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "The criterion is partially met.",
+          "type": "string"
+        },
+        {
+          "const": "missing",
+          "description": "Required evidence or work is missing.",
+          "type": "string"
+        },
+        {
+          "const": "unclear",
+          "description": "Available evidence is unclear.",
+          "type": "string"
+        }
+      ]
+    },
     "FrozenSubmissionId": {
       "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
+      "type": "string"
+    },
+    "GoalAssessment": {
+      "description": "Overall advisory assessment of a submitted goal.",
+      "oneOf": [
+        {
+          "const": "met",
+          "description": "The goal is fully met according to the advisory rubric.",
+          "type": "string"
+        },
+        {
+          "const": "partially_met",
+          "description": "The goal is only partially met.",
+          "type": "string"
+        },
+        {
+          "const": "not_met",
+          "description": "The goal is not met.",
+          "type": "string"
+        },
+        {
+          "const": "insufficient_evidence",
+          "description": "Evidence is insufficient for an advisory assessment.",
+          "type": "string"
+        }
+      ]
+    },
+    "GoalFinding": {
+      "additionalProperties": false,
+      "description": "One advisory finding with bounded evidence locations.",
+      "properties": {
+        "criterion": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceLocation"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/$defs/FindingResult"
+        },
+        "suggestion": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion",
+        "result",
+        "evidence",
+        "suggestion"
+      ],
+      "type": "object"
+    },
+    "GoalReview": {
+      "additionalProperties": false,
+      "description": "Advisory-only review produced by an LLM backend.\n\nThis contract deliberately has no score or verdict field. Unknown fields are rejected during\ndeserialization so an LLM cannot smuggle protected scoring data into the review channel.",
+      "properties": {
+        "assessment": {
+          "$ref": "#/$defs/GoalAssessment"
+        },
+        "confidence": {
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/GoalFinding"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "requires_teacher_attention": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/GoalReviewSchemaVersion"
+        }
+      },
+      "required": [
+        "schema_version",
+        "assessment",
+        "confidence",
+        "findings",
+        "requires_teacher_attention"
+      ],
+      "type": "object"
+    },
+    "GoalReviewSchemaVersion": {
+      "enum": [
+        "goal-review/v1"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "Revision": {
@@ -251,7 +419,14 @@
       ]
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "createdAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -279,6 +454,9 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "releaseId": {
       "$ref": "#/$defs/EvaluationReleaseId"
@@ -308,7 +486,7 @@
   "required": [
     "schemaVersion",
     "id",
-    "courseId",
+    "projectId",
     "releaseId",
     "releaseRevision",
     "frozenSubmissionId",

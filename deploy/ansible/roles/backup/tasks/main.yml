@@ -1,19 +1,13 @@
 ---
-- name: Bind the backup to the current infrastructure reconciliation identity
+- name: Bind the backup to the current infrastructure run
   ansible.builtin.set_fact:
     backup_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
-    backup_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') }}"
-    backup_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
-    backup_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
 
-- name: Require a complete backup identity before snapshot creation
+- name: Require a run identifier before snapshot creation
   ansible.builtin.assert:
     that:
       - backup_run_id is match('^infra-[a-z0-9-]+$')
-      - backup_commit_sha is match('^[0-9a-f]{40,64}$')
-      - backup_inventory_hash is match('^sha256:[0-9a-f]{64}$')
-      - backup_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
-    fail_msg: BACKUP_EXECUTION_IDENTITY_INVALID
+    fail_msg: BACKUP_RUN_ID_INVALID
 
 - name: Read the adopted cluster identity before backup creation
   ansible.builtin.command:
@@ -91,13 +85,10 @@
     that:
       - (backup_harbor_data_raw.content | b64decode | from_json).schema_version == 'harbor-data-backup.v1'
       - (backup_harbor_data_raw.content | b64decode | from_json).cluster_uid == backup_cluster_uid.stdout
-      - (backup_harbor_data_raw.content | b64decode | from_json).commit_sha == backup_commit_sha
-      - (backup_harbor_data_raw.content | b64decode | from_json).inventory_hash == backup_inventory_hash
-      - (backup_harbor_data_raw.content | b64decode | from_json).component_lock_hash == backup_component_lock_hash
       - (backup_harbor_data_raw.content | b64decode | from_json).target == 'harbor-reconcile'
       - (backup_harbor_data_raw.content | b64decode | from_json).database.sha256 is match('^sha256:[0-9a-f]{64}$')
       - (backup_harbor_data_raw.content | b64decode | from_json).registry.sha256 is match('^sha256:[0-9a-f]{64}$')
-    fail_msg: HARBOR_DATA_BACKUP_IDENTITY_INVALID
+    fail_msg: HARBOR_DATA_BACKUP_INVALID
   no_log: true
   when: backup_existing_harbor | bool
 
@@ -162,8 +153,7 @@
     mode: '0600'
     content: >-
       {{ {'schema_version': 1, 'event': 'etcd_snapshot_complete', 'overall': 'passed',
-      'run_id': backup_run_id, 'commit_sha': backup_commit_sha,
-      'inventory_hash': backup_inventory_hash, 'component_lock_hash': backup_component_lock_hash,
+      'run_id': backup_run_id,
       'cluster_uid': backup_cluster_uid.stdout, 'target': 'harbor-reconcile',
       'harbor_data_backup': {'status': ('captured' if backup_existing_harbor | bool else 'not_required'),
       'locator': (backup_harbor_data_locator if backup_existing_harbor | bool else None),

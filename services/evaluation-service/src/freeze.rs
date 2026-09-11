@@ -15,7 +15,8 @@ use contracts::submission::{
     FrozenEnvironmentIdentity, FrozenSubmission, SubmissionManifest, SubmissionSource,
 };
 use contracts::{
-    ActorId, AgentRunId, CourseId, FrozenSubmissionId, RetentionClass, RetentionSnapshot, Revision,
+    ActorId, AgentRunId, CourseId, FrozenSubmissionId, ProjectId, RetentionClass,
+    RetentionSnapshot, Revision,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +30,8 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_mins(15);
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FreezeRequest {
     pub frozen_submission_id: FrozenSubmissionId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub actor_id: ActorId,
     pub agent_run_id: AgentRunId,
     pub manifest_revision: Revision,
@@ -119,6 +121,7 @@ impl FreezeService {
             .store
             .begin(
                 request.frozen_submission_id,
+                request.project_id,
                 request.course_id,
                 request.environment.environment_id,
                 &request.idempotency_key,
@@ -139,7 +142,7 @@ impl FreezeService {
                     trace_id = request.trace_id,
                     run_id = %request.agent_run_id,
                     environment_id = %request.environment.environment_id,
-                    course_id = %request.course_id,
+                    course_id = ?request.course_id,
                     resource_id = %request.frozen_submission_id,
                     attempt = lease.attempt,
                     worker = self.worker_id,
@@ -156,7 +159,7 @@ impl FreezeService {
                     trace_id = request.trace_id,
                     run_id = %request.agent_run_id,
                     environment_id = %request.environment.environment_id,
-                    course_id = %request.course_id,
+                    course_id = ?request.course_id,
                     resource_id = %request.frozen_submission_id,
                 );
                 return Ok(*submission);
@@ -281,6 +284,7 @@ impl FreezeService {
         let frozen_at = self.store.authority_now().await?;
         let submission = FrozenSubmission {
             id: lease.frozen_submission_id,
+            project_id: request.project_id,
             course_id: request.course_id,
             actor_id: request.actor_id,
             agent_run_id: request.agent_run_id,
@@ -288,6 +292,7 @@ impl FreezeService {
             manifest_revision: request.manifest_revision,
             files: archive.files,
             object: verified.reference,
+            content_sha256: archive.sha256.to_string(),
             environment: request.environment.clone(),
             retention: request.retention.clone(),
             system_facts: BTreeMap::new(),
@@ -301,7 +306,14 @@ impl FreezeService {
         }
         if let Err(error) = self
             .store
-            .complete(&lease, &object_key, &submission, &request.trace_id)
+            .complete(
+                &lease,
+                request.project_id,
+                &object_key,
+                &submission,
+                submission_manifest_sha256,
+                &request.trace_id,
+            )
             .await
         {
             tracing::error!(
@@ -332,7 +344,7 @@ impl FreezeService {
             trace_id = request.trace_id,
             run_id = %request.agent_run_id,
             environment_id = %request.environment.environment_id,
-            course_id = %request.course_id,
+            course_id = ?request.course_id,
             resource_id = %request.frozen_submission_id,
             attempt = lease.attempt,
         );
@@ -409,7 +421,8 @@ fn request_hash(
     #[serde(rename_all = "camelCase")]
     struct RequestIdentity<'a> {
         frozen_submission_id: FrozenSubmissionId,
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         actor_id: ActorId,
         agent_run_id: AgentRunId,
         manifest_revision: Revision,
@@ -425,6 +438,7 @@ fn request_hash(
     };
     Sha256Digest::of_canonical(&RequestIdentity {
         frozen_submission_id: request.frozen_submission_id,
+        project_id: request.project_id,
         course_id: request.course_id,
         actor_id: request.actor_id,
         agent_run_id: request.agent_run_id,

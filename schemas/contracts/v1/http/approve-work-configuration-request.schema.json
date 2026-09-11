@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public command for approving one exact generated Work configuration plan.\n\nControl resolves the actor, project, run, plan, and bound artifacts from its authoritative\nstate. The request therefore carries only the revision fences and the approval decision; it\ncannot substitute a plan, artifact, environment, or caller identity.",
+  "properties": {
+    "environmentRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expectedPlanRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expectedRunRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "restartConfirmed": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "expectedRunRevision",
+    "expectedPlanRevision",
+    "environmentRevision",
+    "expiresAt",
+    "reason",
+    "restartConfirmed"
+  ],
+  "title": "ApproveWorkConfigurationRequest",
+  "type": "object"
+}

@@ -1,8 +1,7 @@
-//! Environment-authoritative console validation and mTLS executor forwarding.
+//! Environment-authoritative console validation and JWT-authenticated executor forwarding.
 
-use crate::{
-    ContainerReleaseResolver, EnvironmentApiState, EnvironmentStoreError, VerifiedCallerIdentity,
-};
+use crate::{ContainerReleaseResolver, EnvironmentApiState, EnvironmentStoreError};
+use auth::{ServiceIdentity, ServiceTokenClient};
 use axum::{
     Router,
     extract::{
@@ -14,7 +13,7 @@ use axum::{
     routing::get,
 };
 use contracts::{
-    AccessGrantId, ConsoleSessionId, EnvironmentId, LeaseId, ReleaseId, Revision,
+    AccessGrantId, ConsoleSessionId, EnvironmentId, LeaseId, ProjectId, ReleaseId, Revision,
     access::{ConsoleClientControl, ConsoleKind},
     authoring::{EnvironmentClass, EnvironmentRuntimeSpec, RuntimeKind},
     environment::{DesiredEnvironmentState, ObservedEnvironmentState},
@@ -28,7 +27,7 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, protocol::Message as UpstreamMessage},
 };
 
-const ACCESS_SERVICE_SAN: &str = "spiffe://labweaver/access-service";
+const ACCESS_CONSOLE_PERMISSION: &str = "access.environment.console";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -36,6 +35,7 @@ pub struct TerminalExecutorGateway {
     container_uri: url::Url,
     kubevirt_uri: url::Url,
     connector: Connector,
+    service_token_client: Arc<ServiceTokenClient>,
 }
 #[derive(Clone)]
 struct BridgeState {
@@ -46,7 +46,8 @@ struct BridgeState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalExecutorRequest {
     environment_id: EnvironmentId,
-    course_id: contracts::CourseId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
     release_id: ReleaseId,
     release_version: u64,
     terminal: contracts::authoring::TerminalSpec,
@@ -57,7 +58,8 @@ struct TerminalExecutorRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VncExecutorRequest {
     environment_id: EnvironmentId,
-    course_id: contracts::CourseId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
     release_id: ReleaseId,
     release_version: u64,
     environment_revision: Revision,
@@ -69,7 +71,8 @@ enum BridgeTarget {
 
 struct BridgeRequest {
     environment_id: EnvironmentId,
-    course_id: contracts::CourseId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
     release_id: ReleaseId,
     release_version: u64,
     environment_revision: Revision,
@@ -84,7 +87,9 @@ struct Identity {
 }
 
 impl TerminalExecutorGateway {
-    pub fn from_env() -> Result<Self, TerminalBridgeError> {
+    pub fn from_env(
+        service_token_client: Arc<ServiceTokenClient>,
+    ) -> Result<Self, TerminalBridgeError> {
         let container_uri =
             url::Url::parse(&required("LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_URI")?)
                 .map_err(|_| TerminalBridgeError::Configuration)?;
@@ -102,8 +107,6 @@ impl TerminalExecutorGateway {
             return Err(TerminalBridgeError::Configuration);
         }
         let ca = std::fs::read(required("LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CA_PATH")?)?;
-        let cert = std::fs::read(required("LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CERT_PATH")?)?;
-        let key = std::fs::read(required("LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_KEY_PATH")?)?;
         let mut roots = RootCertStore::empty();
         for certificate in rustls_pemfile::certs(&mut Cursor::new(ca)) {
             roots
@@ -113,20 +116,14 @@ impl TerminalExecutorGateway {
         if roots.is_empty() {
             return Err(TerminalBridgeError::Certificate);
         }
-        let certificates = rustls_pemfile::certs(&mut Cursor::new(cert))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| TerminalBridgeError::Certificate)?;
-        let key = rustls_pemfile::private_key(&mut Cursor::new(key))
-            .map_err(|_| TerminalBridgeError::Certificate)?
-            .ok_or(TerminalBridgeError::Certificate)?;
         let tls = ClientConfig::builder()
             .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .map_err(|_| TerminalBridgeError::Certificate)?;
+            .with_no_client_auth();
         Ok(Self {
             container_uri,
             kubevirt_uri,
             connector: Connector::Rustls(Arc::new(tls)),
+            service_token_client,
         })
     }
 
@@ -152,12 +149,12 @@ pub fn terminal_bridge_router(
 
 async fn upgrade(
     State(state): State<BridgeState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    caller: Option<Extension<ServiceIdentity>>,
     Path(environment_id): Path<EnvironmentId>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, TerminalBridgeError> {
-    if !caller.is_some_and(|Extension(identity)| identity.contains_san(ACCESS_SERVICE_SAN)) {
+    if !caller.is_some_and(|Extension(identity)| identity.allows(ACCESS_CONSOLE_PERMISSION)) {
         return Err(TerminalBridgeError::CallerDenied);
     }
     let kind = requested_console_kind(&headers)?;
@@ -201,6 +198,7 @@ async fn upgrade(
         .await
         .map_err(|_| TerminalBridgeError::AuthorityUnavailable)?;
     if release.withdrawn_at.is_some()
+        || release.projection.release.project_id != instance.project_id
         || release.projection.release.course_id != instance.course_id
         || release.projection.release.runtime_kind != instance.runtime_kind
     {
@@ -225,6 +223,7 @@ async fn upgrade(
     Ok(upgrade.protocols([protocol]).max_frame_size(MAX_FRAME_BYTES).on_upgrade(move |browser| async move {
         let request = BridgeRequest {
             environment_id,
+            project_id: instance.project_id,
             course_id: instance.course_id,
             release_id: instance.release_id,
             release_version: instance.release_version,
@@ -255,6 +254,11 @@ async fn bridge(
             .parse()
             .map_err(|_| "LW_ENV_CONSOLE_EXECUTOR_CONFIG_INVALID")?,
     );
+    gateway
+        .service_token_client
+        .bearer_auth(websocket_request.headers_mut())
+        .await
+        .map_err(|_| "LW_ENV_CONSOLE_EXECUTOR_AUTH_FAILED")?;
     let (upstream, response) =
         connect_async_tls_with_config(websocket_request, None, true, Some(gateway.connector))
             .await
@@ -271,6 +275,7 @@ async fn bridge(
     let request = match authority.target {
         BridgeTarget::Xterm(terminal) => serde_json::to_string(&TerminalExecutorRequest {
             environment_id: authority.environment_id,
+            project_id: authority.project_id,
             course_id: authority.course_id,
             release_id: authority.release_id,
             release_version: authority.release_version,
@@ -281,6 +286,7 @@ async fn bridge(
         .map_err(|_| "LW_ENV_CONSOLE_EXECUTOR_REQUEST_INVALID")?,
         BridgeTarget::Novnc => serde_json::to_string(&VncExecutorRequest {
             environment_id: authority.environment_id,
+            project_id: authority.project_id,
             course_id: authority.course_id,
             release_id: authority.release_id,
             release_version: authority.release_version,

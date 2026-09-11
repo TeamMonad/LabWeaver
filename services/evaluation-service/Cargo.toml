@@ -16,11 +16,14 @@ base64.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
 contracts = { path = "../../crates/contracts" }
+futures-util.workspace = true
 hyper-util = { version = "0.1.20", features = ["server", "service", "tokio"] }
 nix.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+rustls.workspace = true
+rustls-pemfile.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true
 serde.workspace = true
@@ -32,9 +35,11 @@ telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
@@ -44,6 +49,7 @@ seccompiler.workspace = true
 tempfile.workspace = true
 testcontainers = "=0.25.0"
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+rcgen.workspace = true
 
 [lints]
 workspace = true

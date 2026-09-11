@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, type Options as Options2, type RequestResult, type ServerSentEventsResult, type TDataShape, urlSearchParamsBodySerializer } from './client';
 import { client } from './client.gen';
-import type { AppendEnvironmentCandidateDecisionData, AppendEnvironmentCandidateDecisionErrors, AppendEnvironmentCandidateDecisionResponses, AppendEvaluationCandidateDecisionData, AppendEvaluationCandidateDecisionErrors, AppendEvaluationCandidateDecisionResponses, ApproveResourceRequestData, ApproveResourceRequestErrors, ApproveResourceRequestResponses, BeginOidcLoginData, BeginOidcLoginErrors, CancelAgentRunData, CancelAgentRunErrors, CancelAgentRunResponses, CancelEnvironmentOperationData, CancelEnvironmentOperationErrors, CancelEnvironmentOperationResponses, CancelResourceRequestData, CancelResourceRequestErrors, CancelResourceRequestResponses, CompleteOidcLoginData, CompleteOidcLoginErrors, CompleteProblemPackageUploadData, CompleteProblemPackageUploadErrors, CompleteProblemPackageUploadResponses, ConsumeOidcBackchannelLogoutData, ConsumeOidcBackchannelLogoutErrors, ConsumeOidcBackchannelLogoutResponses, CreateAccessGrantData, CreateAccessGrantErrors, CreateAccessGrantResponses, CreateAgentRunData, CreateAgentRunErrors, CreateAgentRunResponses, CreateCourseLlmPolicyData, CreateCourseLlmPolicyErrors, CreateCourseLlmPolicyResponses, CreateEnvironmentData, CreateEnvironmentErrors, CreateEnvironmentResponses, CreateEnvironmentTemplateReleaseData, CreateEnvironmentTemplateReleaseErrors, CreateEnvironmentTemplateReleaseResponses, CreateEvaluationReleaseData, CreateEvaluationReleaseErrors, CreateEvaluationReleaseResponses, CreateProblemPackageUploadData, CreateProblemPackageUploadErrors, CreateProblemPackageUploadResponses, CreateResourceRequestData, CreateResourceRequestErrors, CreateResourceRequestResponses, CreateSshPublicKeyData, CreateSshPublicKeyErrors, CreateSshPublicKeyResponses, CreateWorkAgentRunData, CreateWorkAgentRunErrors, CreateWorkAgentRunResponses, DeleteEnvironmentData, DeleteEnvironmentErrors, DeleteEnvironmentResponses, DeleteSshPublicKeyData, DeleteSshPublicKeyErrors, DeleteSshPublicKeyResponses, FreezeSubmissionData, FreezeSubmissionErrors, FreezeSubmissionResponses, GetAccessGrantData, GetAccessGrantErrors, GetAccessGrantResponses, GetActiveCourseLlmPolicyData, GetActiveCourseLlmPolicyErrors, GetActiveCourseLlmPolicyResponses, GetAgentRunData, GetAgentRunErrors, GetAgentRunResponses, GetAuthSessionData, GetAuthSessionErrors, GetAuthSessionResponses, GetEnvironmentCandidateData, GetEnvironmentCandidateErrors, GetEnvironmentCandidateResponses, GetEnvironmentData, GetEnvironmentErrors, GetEnvironmentOperationData, GetEnvironmentOperationErrors, GetEnvironmentOperationResponses, GetEnvironmentResponses, GetEnvironmentTemplateReleaseData, GetEnvironmentTemplateReleaseErrors, GetEnvironmentTemplateReleaseResponses, GetEvaluationCandidateData, GetEvaluationCandidateErrors, GetEvaluationCandidateResponses, GetEvaluationReleaseData, GetEvaluationReleaseErrors, GetEvaluationReleaseResponses, GetFrozenSubmissionData, GetFrozenSubmissionErrors, GetFrozenSubmissionResponses, GetOwnEvaluationResultData, GetOwnEvaluationResultErrors, GetOwnEvaluationResultResponses, GetProblemPackageData, GetProblemPackageErrors, GetProblemPackageResponses, GetResourceLeaseData, GetResourceLeaseErrors, GetResourceLeaseResponses, GetResourceRequestData, GetResourceRequestErrors, GetResourceRequestResponses, IssueConsoleCapabilityData, IssueConsoleCapabilityErrors, IssueConsoleCapabilityResponses, IssueCsrfTokenData, IssueCsrfTokenErrors, IssueCsrfTokenResponses, ListConsoleCapabilitiesData, ListConsoleCapabilitiesErrors, ListConsoleCapabilitiesResponses, ListEnvironmentAccessGrantsData, ListEnvironmentAccessGrantsErrors, ListEnvironmentAccessGrantsResponses, ListEnvironmentEndpointsData, ListEnvironmentEndpointsErrors, ListEnvironmentEndpointsResponses, ListEnvironmentOperationsData, ListEnvironmentOperationsErrors, ListEnvironmentOperationsResponses, ListEnvironmentsData, ListEnvironmentsErrors, ListEnvironmentsResponses, ListEnvironmentTemplateReleasesData, ListEnvironmentTemplateReleasesErrors, ListEnvironmentTemplateReleasesResponses, ListEvaluationReleasesData, ListEvaluationReleasesErrors, ListEvaluationReleasesResponses, ListOwnEvaluationResultsData, ListOwnEvaluationResultsErrors, ListOwnEvaluationResultsResponses, ListResourceLeasesData, ListResourceLeasesErrors, ListResourceLeasesResponses, ListResourceRequestsData, ListResourceRequestsErrors, ListResourceRequestsResponses, ListSshPublicKeysData, ListSshPublicKeysErrors, ListSshPublicKeysResponses, LogoutBrowserSessionData, LogoutBrowserSessionErrors, RecoverEnvironmentData, RecoverEnvironmentErrors, RecoverEnvironmentResponses, RejectResourceRequestData, RejectResourceRequestErrors, RejectResourceRequestResponses, RenewAccessGrantData, RenewAccessGrantErrors, RenewAccessGrantResponses, RenewResourceLeaseData, RenewResourceLeaseErrors, RenewResourceLeaseResponses, ResetEnvironmentData, ResetEnvironmentErrors, ResetEnvironmentResponses, ResizeAndApproveResourceRequestData, ResizeAndApproveResourceRequestErrors, ResizeAndApproveResourceRequestResponses, RestartEnvironmentData, RestartEnvironmentErrors, RestartEnvironmentResponses, RetryAgentRunTrackData, RetryAgentRunTrackErrors, RetryAgentRunTrackResponses, RetryEnvironmentData, RetryEnvironmentErrors, RetryEnvironmentResponses, RetryResourceRequestData, RetryResourceRequestErrors, RetryResourceRequestResponses, RevokeAccessGrantData, RevokeAccessGrantErrors, RevokeAccessGrantResponses, RevokeResourceLeaseData, RevokeResourceLeaseErrors, RevokeResourceLeaseResponses, StartEnvironmentData, StartEnvironmentErrors, StartEnvironmentResponses, StopEnvironmentData, StopEnvironmentErrors, StopEnvironmentResponses, StreamCourseEventsData, StreamCourseEventsErrors, StreamCourseEventsResponse, StreamCourseEventsResponses, WithdrawEnvironmentTemplateReleaseData, WithdrawEnvironmentTemplateReleaseErrors, WithdrawEnvironmentTemplateReleaseResponses, WithdrawEvaluationReleaseData, WithdrawEvaluationReleaseErrors, WithdrawEvaluationReleaseResponses } from './types.gen';
+import type { AddProjectMembershipData, AddProjectMembershipErrors, AddProjectMembershipResponses, AppendProjectEnvironmentCandidateDecisionData, AppendProjectEnvironmentCandidateDecisionErrors, AppendProjectEnvironmentCandidateDecisionResponses, AppendProjectEvaluationCandidateDecisionData, AppendProjectEvaluationCandidateDecisionErrors, AppendProjectEvaluationCandidateDecisionResponses, ApproveProjectWorkConfigurationRunData, ApproveProjectWorkConfigurationRunErrors, ApproveProjectWorkConfigurationRunResponses, ApproveResourceRequestData, ApproveResourceRequestErrors, ApproveResourceRequestResponses, ArchiveProjectData, ArchiveProjectErrors, ArchiveProjectResponses, BeginOidcLoginData, BeginOidcLoginErrors, CancelEnvironmentOperationData, CancelEnvironmentOperationErrors, CancelEnvironmentOperationResponses, CancelProjectAgentRunData, CancelProjectAgentRunErrors, CancelProjectAgentRunResponses, CancelResourceRequestData, CancelResourceRequestErrors, CancelResourceRequestResponses, CompleteOidcLoginData, CompleteOidcLoginErrors, CompleteProjectAuthoringApprovalData, CompleteProjectAuthoringApprovalErrors, CompleteProjectAuthoringApprovalResponses, CompleteProjectProblemPackageUploadData, CompleteProjectProblemPackageUploadErrors, CompleteProjectProblemPackageUploadResponses, ConsumeOidcBackchannelLogoutData, ConsumeOidcBackchannelLogoutErrors, ConsumeOidcBackchannelLogoutResponses, CreateAccessGrantData, CreateAccessGrantErrors, CreateAccessGrantResponses, CreateEnvironmentData, CreateEnvironmentErrors, CreateEnvironmentResponses, CreateEnvironmentTemplateReleaseData, CreateEnvironmentTemplateReleaseErrors, CreateEnvironmentTemplateReleaseResponses, CreateEvaluationReleaseData, CreateEvaluationReleaseErrors, CreateEvaluationReleaseResponses, CreateProjectAgentRunData, CreateProjectAgentRunErrors, CreateProjectAgentRunResponses, CreateProjectData, CreateProjectErrors, CreateProjectLlmPolicyData, CreateProjectLlmPolicyErrors, CreateProjectLlmPolicyResponses, CreateProjectProblemPackageUploadData, CreateProjectProblemPackageUploadErrors, CreateProjectProblemPackageUploadResponses, CreateProjectResourceChargeAdjustmentData, CreateProjectResourceChargeAdjustmentErrors, CreateProjectResourceChargeAdjustmentResponses, CreateProjectResourceRequestData, CreateProjectResourceRequestErrors, CreateProjectResourceRequestResponses, CreateProjectResponses, CreateProjectWorkConfigurationRunData, CreateProjectWorkConfigurationRunErrors, CreateProjectWorkConfigurationRunResponses, CreateResourceGpuCatalogEntryData, CreateResourceGpuCatalogEntryErrors, CreateResourceGpuCatalogEntryResponses, CreateResourceRateData, CreateResourceRateErrors, CreateResourceRateResponses, CreateResourceRequestData, CreateResourceRequestErrors, CreateResourceRequestResponses, CreateSshPublicKeyData, CreateSshPublicKeyErrors, CreateSshPublicKeyResponses, DeleteEnvironmentData, DeleteEnvironmentErrors, DeleteEnvironmentResponses, DeleteSshPublicKeyData, DeleteSshPublicKeyErrors, DeleteSshPublicKeyResponses, FreezeSubmissionData, FreezeSubmissionErrors, FreezeSubmissionResponses, GetAccessGrantData, GetAccessGrantErrors, GetAccessGrantResponses, GetActiveProjectLlmPolicyData, GetActiveProjectLlmPolicyErrors, GetActiveProjectLlmPolicyResponses, GetAuthSessionData, GetAuthSessionErrors, GetAuthSessionResponses, GetEnvironmentData, GetEnvironmentErrors, GetEnvironmentOperationData, GetEnvironmentOperationErrors, GetEnvironmentOperationResponses, GetEnvironmentResponses, GetEnvironmentTemplateReleaseData, GetEnvironmentTemplateReleaseErrors, GetEnvironmentTemplateReleaseResponses, GetEvaluationReleaseData, GetEvaluationReleaseErrors, GetEvaluationReleaseResponses, GetFrozenSubmissionData, GetFrozenSubmissionErrors, GetFrozenSubmissionResponses, GetOwnEvaluationResultData, GetOwnEvaluationResultErrors, GetOwnEvaluationResultResponses, GetOwnProjectEvaluationResultData, GetOwnProjectEvaluationResultErrors, GetOwnProjectEvaluationResultResponses, GetProjectAgentRunData, GetProjectAgentRunErrors, GetProjectAgentRunResponses, GetProjectAuthoringApprovalData, GetProjectAuthoringApprovalErrors, GetProjectAuthoringApprovalResponses, GetProjectData, GetProjectEnvironmentCandidateData, GetProjectEnvironmentCandidateErrors, GetProjectEnvironmentCandidateResponses, GetProjectErrors, GetProjectEvaluationCandidateData, GetProjectEvaluationCandidateErrors, GetProjectEvaluationCandidateResponses, GetProjectProblemPackageData, GetProjectProblemPackageErrors, GetProjectProblemPackageResponses, GetProjectResourceBudgetData, GetProjectResourceBudgetErrors, GetProjectResourceBudgetResponses, GetProjectResponses, GetProjectWorkConfigurationPlanData, GetProjectWorkConfigurationPlanErrors, GetProjectWorkConfigurationPlanResponses, GetResourceLeaseData, GetResourceLeaseErrors, GetResourceLeaseResponses, GetResourceRequestData, GetResourceRequestErrors, GetResourceRequestResponses, IssueConsoleCapabilityData, IssueConsoleCapabilityErrors, IssueConsoleCapabilityResponses, IssueCsrfTokenData, IssueCsrfTokenErrors, IssueCsrfTokenResponses, ListConsoleCapabilitiesData, ListConsoleCapabilitiesErrors, ListConsoleCapabilitiesResponses, ListEnvironmentAccessGrantsData, ListEnvironmentAccessGrantsErrors, ListEnvironmentAccessGrantsResponses, ListEnvironmentEndpointsData, ListEnvironmentEndpointsErrors, ListEnvironmentEndpointsResponses, ListEnvironmentOperationsData, ListEnvironmentOperationsErrors, ListEnvironmentOperationsResponses, ListEnvironmentsData, ListEnvironmentsErrors, ListEnvironmentsResponses, ListEnvironmentTemplateReleasesData, ListEnvironmentTemplateReleasesErrors, ListEnvironmentTemplateReleasesResponses, ListEvaluationReleasesData, ListEvaluationReleasesErrors, ListEvaluationReleasesResponses, ListOwnEvaluationResultsData, ListOwnEvaluationResultsErrors, ListOwnEvaluationResultsResponses, ListOwnProjectEvaluationResultsData, ListOwnProjectEvaluationResultsErrors, ListOwnProjectEvaluationResultsResponses, ListProjectMembershipsData, ListProjectMembershipsErrors, ListProjectMembershipsResponses, ListProjectResourceChargesData, ListProjectResourceChargesErrors, ListProjectResourceChargesResponses, ListProjectResourceLeasesData, ListProjectResourceLeasesErrors, ListProjectResourceLeasesResponses, ListProjectResourceRequestsData, ListProjectResourceRequestsErrors, ListProjectResourceRequestsResponses, ListProjectsData, ListProjectsErrors, ListProjectsResponses, ListResourceGpuCatalogData, ListResourceGpuCatalogErrors, ListResourceGpuCatalogResponses, ListResourceLeasesData, ListResourceLeasesErrors, ListResourceLeasesResponses, ListResourceRatesData, ListResourceRatesErrors, ListResourceRatesResponses, ListResourceRequestsData, ListResourceRequestsErrors, ListResourceRequestsResponses, ListSshPublicKeysData, ListSshPublicKeysErrors, ListSshPublicKeysResponses, LogoutBrowserSessionData, LogoutBrowserSessionErrors, RecordResourceUsageData, RecordResourceUsageErrors, RecordResourceUsageResponses, RecoverEnvironmentData, RecoverEnvironmentErrors, RecoverEnvironmentResponses, RejectResourceRequestData, RejectResourceRequestErrors, RejectResourceRequestResponses, RemoveProjectMembershipData, RemoveProjectMembershipErrors, RemoveProjectMembershipResponses, RenewAccessGrantData, RenewAccessGrantErrors, RenewAccessGrantResponses, RenewResourceLeaseData, RenewResourceLeaseErrors, RenewResourceLeaseResponses, ResetEnvironmentData, ResetEnvironmentErrors, ResetEnvironmentResponses, ResizeAndApproveResourceRequestData, ResizeAndApproveResourceRequestErrors, ResizeAndApproveResourceRequestResponses, RestartEnvironmentData, RestartEnvironmentErrors, RestartEnvironmentResponses, RetryEnvironmentData, RetryEnvironmentErrors, RetryEnvironmentResponses, RetryProjectAgentRunTrackData, RetryProjectAgentRunTrackErrors, RetryProjectAgentRunTrackResponses, RetryResourceRequestData, RetryResourceRequestErrors, RetryResourceRequestResponses, RevokeAccessGrantData, RevokeAccessGrantErrors, RevokeAccessGrantResponses, RevokeResourceLeaseData, RevokeResourceLeaseErrors, RevokeResourceLeaseResponses, StartEnvironmentData, StartEnvironmentErrors, StartEnvironmentResponses, StopEnvironmentData, StopEnvironmentErrors, StopEnvironmentResponses, StreamProjectEventsData, StreamProjectEventsErrors, StreamProjectEventsResponse, StreamProjectEventsResponses, UpdateProjectData, UpdateProjectErrors, UpdateProjectResponses, UpsertProjectResourceBudgetData, UpsertProjectResourceBudgetErrors, UpsertProjectResourceBudgetResponses, WithdrawEnvironmentTemplateReleaseData, WithdrawEnvironmentTemplateReleaseErrors, WithdrawEnvironmentTemplateReleaseResponses, WithdrawEvaluationReleaseData, WithdrawEvaluationReleaseErrors, WithdrawEvaluationReleaseResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -143,217 +143,6 @@ export const getAuthSession = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * createAgentRun
- *
- * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const createAgentRun = <ThrowOnError extends boolean = false>(options: Options<CreateAgentRunData, ThrowOnError>): RequestResult<CreateAgentRunResponses, CreateAgentRunErrors, ThrowOnError> => (options.client ?? client).post<CreateAgentRunResponses, CreateAgentRunErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/agent-runs',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * getAgentRun
- *
- * Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const getAgentRun = <ThrowOnError extends boolean = false>(options: Options<GetAgentRunData, ThrowOnError>): RequestResult<GetAgentRunResponses, GetAgentRunErrors, ThrowOnError> => (options.client ?? client).get<GetAgentRunResponses, GetAgentRunErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/agent-runs/{runId}',
-    ...options
-});
-
-/**
- * cancelAgentRun
- *
- * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const cancelAgentRun = <ThrowOnError extends boolean = false>(options: Options<CancelAgentRunData, ThrowOnError>): RequestResult<CancelAgentRunResponses, CancelAgentRunErrors, ThrowOnError> => (options.client ?? client).post<CancelAgentRunResponses, CancelAgentRunErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/agent-runs/{runId}/cancel',
-    ...options
-});
-
-/**
- * retryAgentRunTrack
- *
- * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const retryAgentRunTrack = <ThrowOnError extends boolean = false>(options: Options<RetryAgentRunTrackData, ThrowOnError>): RequestResult<RetryAgentRunTrackResponses, RetryAgentRunTrackErrors, ThrowOnError> => (options.client ?? client).post<RetryAgentRunTrackResponses, RetryAgentRunTrackErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/agent-runs/{runId}/tracks/{track}/retry',
-    ...options
-});
-
-/**
- * getEnvironmentCandidate
- *
- * Permission: candidate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const getEnvironmentCandidate = <ThrowOnError extends boolean = false>(options: Options<GetEnvironmentCandidateData, ThrowOnError>): RequestResult<GetEnvironmentCandidateResponses, GetEnvironmentCandidateErrors, ThrowOnError> => (options.client ?? client).get<GetEnvironmentCandidateResponses, GetEnvironmentCandidateErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/environment-candidates/{candidateId}',
-    ...options
-});
-
-/**
- * appendEnvironmentCandidateDecision
- *
- * Permission: candidate:approve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
- */
-export const appendEnvironmentCandidateDecision = <ThrowOnError extends boolean = false>(options: Options<AppendEnvironmentCandidateDecisionData, ThrowOnError>): RequestResult<AppendEnvironmentCandidateDecisionResponses, AppendEnvironmentCandidateDecisionErrors, ThrowOnError> => (options.client ?? client).post<AppendEnvironmentCandidateDecisionResponses, AppendEnvironmentCandidateDecisionErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/environment-candidates/{candidateId}/decisions',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * listEnvironmentTemplateReleases
- *
- * Permission: release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const listEnvironmentTemplateReleases = <ThrowOnError extends boolean = false>(options: Options<ListEnvironmentTemplateReleasesData, ThrowOnError>): RequestResult<ListEnvironmentTemplateReleasesResponses, ListEnvironmentTemplateReleasesErrors, ThrowOnError> => (options.client ?? client).get<ListEnvironmentTemplateReleasesResponses, ListEnvironmentTemplateReleasesErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/environment-template-releases',
-    ...options
-});
-
-/**
- * createEnvironmentTemplateRelease
- *
- * Permission: release:publish. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const createEnvironmentTemplateRelease = <ThrowOnError extends boolean = false>(options: Options<CreateEnvironmentTemplateReleaseData, ThrowOnError>): RequestResult<CreateEnvironmentTemplateReleaseResponses, CreateEnvironmentTemplateReleaseErrors, ThrowOnError> => (options.client ?? client).post<CreateEnvironmentTemplateReleaseResponses, CreateEnvironmentTemplateReleaseErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/environment-template-releases',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * getEnvironmentTemplateRelease
- *
- * Permission: release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const getEnvironmentTemplateRelease = <ThrowOnError extends boolean = false>(options: Options<GetEnvironmentTemplateReleaseData, ThrowOnError>): RequestResult<GetEnvironmentTemplateReleaseResponses, GetEnvironmentTemplateReleaseErrors, ThrowOnError> => (options.client ?? client).get<GetEnvironmentTemplateReleaseResponses, GetEnvironmentTemplateReleaseErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/environment-template-releases/{releaseId}',
-    ...options
-});
-
-/**
- * withdrawEnvironmentTemplateRelease
- *
- * Permission: release:withdraw. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
- */
-export const withdrawEnvironmentTemplateRelease = <ThrowOnError extends boolean = false>(options: Options<WithdrawEnvironmentTemplateReleaseData, ThrowOnError>): RequestResult<WithdrawEnvironmentTemplateReleaseResponses, WithdrawEnvironmentTemplateReleaseErrors, ThrowOnError> => (options.client ?? client).post<WithdrawEnvironmentTemplateReleaseResponses, WithdrawEnvironmentTemplateReleaseErrors, ThrowOnError>({
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/environment-template-releases/{releaseId}/withdraw',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * getEvaluationCandidate
- *
- * Permission: candidate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const getEvaluationCandidate = <ThrowOnError extends boolean = false>(options: Options<GetEvaluationCandidateData, ThrowOnError>): RequestResult<GetEvaluationCandidateResponses, GetEvaluationCandidateErrors, ThrowOnError> => (options.client ?? client).get<GetEvaluationCandidateResponses, GetEvaluationCandidateErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/evaluation-candidates/{candidateId}',
-    ...options
-});
-
-/**
- * appendEvaluationCandidateDecision
- *
- * Permission: candidate:approve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
- */
-export const appendEvaluationCandidateDecision = <ThrowOnError extends boolean = false>(options: Options<AppendEvaluationCandidateDecisionData, ThrowOnError>): RequestResult<AppendEvaluationCandidateDecisionResponses, AppendEvaluationCandidateDecisionErrors, ThrowOnError> => (options.client ?? client).post<AppendEvaluationCandidateDecisionResponses, AppendEvaluationCandidateDecisionErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/evaluation-candidates/{candidateId}/decisions',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
  * listEvaluationReleases
  *
  * Permission: evaluation_release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
@@ -426,42 +215,6 @@ export const withdrawEvaluationRelease = <ThrowOnError extends boolean = false>(
 });
 
 /**
- * createCourseLlmPolicy
- *
- * Permission: llm_policy:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const createCourseLlmPolicy = <ThrowOnError extends boolean = false>(options: Options<CreateCourseLlmPolicyData, ThrowOnError>): RequestResult<CreateCourseLlmPolicyResponses, CreateCourseLlmPolicyErrors, ThrowOnError> => (options.client ?? client).post<CreateCourseLlmPolicyResponses, CreateCourseLlmPolicyErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/llm-egress-policies',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * getActiveCourseLlmPolicy
- *
- * Permission: llm_policy:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const getActiveCourseLlmPolicy = <ThrowOnError extends boolean = false>(options: Options<GetActiveCourseLlmPolicyData, ThrowOnError>): RequestResult<GetActiveCourseLlmPolicyResponses, GetActiveCourseLlmPolicyErrors, ThrowOnError> => (options.client ?? client).get<GetActiveCourseLlmPolicyResponses, GetActiveCourseLlmPolicyErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/llm-egress-policies/active',
-    ...options
-});
-
-/**
  * listOwnEvaluationResults
  *
  * Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
@@ -491,82 +244,6 @@ export const getOwnEvaluationResult = <ThrowOnError extends boolean = false>(opt
         }],
     url: '/api/v1/courses/{courseId}/me/evaluation-results/{runId}',
     ...options
-});
-
-/**
- * createProblemPackageUpload
- *
- * Permission: problem_package:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const createProblemPackageUpload = <ThrowOnError extends boolean = false>(options: Options<CreateProblemPackageUploadData, ThrowOnError>): RequestResult<CreateProblemPackageUploadResponses, CreateProblemPackageUploadErrors, ThrowOnError> => (options.client ?? client).post<CreateProblemPackageUploadResponses, CreateProblemPackageUploadErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/problem-package-uploads',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * completeProblemPackageUpload
- *
- * Permission: problem_package:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const completeProblemPackageUpload = <ThrowOnError extends boolean = false>(options: Options<CompleteProblemPackageUploadData, ThrowOnError>): RequestResult<CompleteProblemPackageUploadResponses, CompleteProblemPackageUploadErrors, ThrowOnError> => (options.client ?? client).post<CompleteProblemPackageUploadResponses, CompleteProblemPackageUploadErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/problem-package-uploads/{uploadId}/complete',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * getProblemPackage
- *
- * Permission: problem_package:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const getProblemPackage = <ThrowOnError extends boolean = false>(options: Options<GetProblemPackageData, ThrowOnError>): RequestResult<GetProblemPackageResponses, GetProblemPackageErrors, ThrowOnError> => (options.client ?? client).get<GetProblemPackageResponses, GetProblemPackageErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/problem-packages/{packageId}',
-    ...options
-});
-
-/**
- * createWorkAgentRun
- *
- * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const createWorkAgentRun = <ThrowOnError extends boolean = false>(options: Options<CreateWorkAgentRunData, ThrowOnError>): RequestResult<CreateWorkAgentRunResponses, CreateWorkAgentRunErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkAgentRunResponses, CreateWorkAgentRunErrors, ThrowOnError>({
-    responseType: 'json',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/courses/{courseId}/work-agent-runs',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
 });
 
 /**
@@ -786,7 +463,11 @@ export const resetEnvironment = <ThrowOnError extends boolean = false>(options: 
             type: 'http'
         }],
     url: '/api/v1/environments/{environmentId}/reset',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -850,22 +531,6 @@ export const stopEnvironment = <ThrowOnError extends boolean = false>(options: O
             type: 'http'
         }],
     url: '/api/v1/environments/{environmentId}/stop',
-    ...options
-});
-
-/**
- * streamCourseEvents
- *
- * Permission: events:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
- */
-export const streamCourseEvents = <ThrowOnError extends boolean = false>(options: Options<StreamCourseEventsData, ThrowOnError, StreamCourseEventsResponse>): Promise<ServerSentEventsResult<StreamCourseEventsResponses>> => (options.client ?? client).sse.get<StreamCourseEventsResponses, StreamCourseEventsErrors, ThrowOnError>({
-    responseType: 'text',
-    security: [{
-            key: 'oidc',
-            scheme: 'bearer',
-            type: 'http'
-        }],
-    url: '/api/v1/events',
     ...options
 });
 
@@ -937,11 +602,723 @@ export const deleteSshPublicKey = <ThrowOnError extends boolean = false>(options
 });
 
 /**
+ * listProjects
+ *
+ * Permission: project:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listProjects = <ThrowOnError extends boolean = false>(options?: Options<ListProjectsData, ThrowOnError>): RequestResult<ListProjectsResponses, ListProjectsErrors, ThrowOnError> => (options?.client ?? client).get<ListProjectsResponses, ListProjectsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects',
+    ...options
+});
+
+/**
+ * createProject
+ *
+ * Permission: project:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProject = <ThrowOnError extends boolean = false>(options: Options<CreateProjectData, ThrowOnError>): RequestResult<CreateProjectResponses, CreateProjectErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectResponses, CreateProjectErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProject
+ *
+ * Permission: project:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProject = <ThrowOnError extends boolean = false>(options: Options<GetProjectData, ThrowOnError>): RequestResult<GetProjectResponses, GetProjectErrors, ThrowOnError> => (options.client ?? client).get<GetProjectResponses, GetProjectErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}',
+    ...options
+});
+
+/**
+ * updateProject
+ *
+ * Permission: project:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const updateProject = <ThrowOnError extends boolean = false>(options: Options<UpdateProjectData, ThrowOnError>): RequestResult<UpdateProjectResponses, UpdateProjectErrors, ThrowOnError> => (options.client ?? client).patch<UpdateProjectResponses, UpdateProjectErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * createProjectAgentRun
+ *
+ * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProjectAgentRun = <ThrowOnError extends boolean = false>(options: Options<CreateProjectAgentRunData, ThrowOnError>): RequestResult<CreateProjectAgentRunResponses, CreateProjectAgentRunErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectAgentRunResponses, CreateProjectAgentRunErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProjectAgentRun
+ *
+ * Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectAgentRun = <ThrowOnError extends boolean = false>(options: Options<GetProjectAgentRunData, ThrowOnError>): RequestResult<GetProjectAgentRunResponses, GetProjectAgentRunErrors, ThrowOnError> => (options.client ?? client).get<GetProjectAgentRunResponses, GetProjectAgentRunErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}',
+    ...options
+});
+
+/**
+ * cancelProjectAgentRun
+ *
+ * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const cancelProjectAgentRun = <ThrowOnError extends boolean = false>(options: Options<CancelProjectAgentRunData, ThrowOnError>): RequestResult<CancelProjectAgentRunResponses, CancelProjectAgentRunErrors, ThrowOnError> => (options.client ?? client).post<CancelProjectAgentRunResponses, CancelProjectAgentRunErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/cancel',
+    ...options
+});
+
+/**
+ * retryProjectAgentRunTrack
+ *
+ * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const retryProjectAgentRunTrack = <ThrowOnError extends boolean = false>(options: Options<RetryProjectAgentRunTrackData, ThrowOnError>): RequestResult<RetryProjectAgentRunTrackResponses, RetryProjectAgentRunTrackErrors, ThrowOnError> => (options.client ?? client).post<RetryProjectAgentRunTrackResponses, RetryProjectAgentRunTrackErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/tracks/{track}/retry',
+    ...options
+});
+
+/**
+ * approveProjectWorkConfigurationRun
+ *
+ * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const approveProjectWorkConfigurationRun = <ThrowOnError extends boolean = false>(options: Options<ApproveProjectWorkConfigurationRunData, ThrowOnError>): RequestResult<ApproveProjectWorkConfigurationRunResponses, ApproveProjectWorkConfigurationRunErrors, ThrowOnError> => (options.client ?? client).post<ApproveProjectWorkConfigurationRunResponses, ApproveProjectWorkConfigurationRunErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/work-configuration/approve',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProjectWorkConfigurationPlan
+ *
+ * Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectWorkConfigurationPlan = <ThrowOnError extends boolean = false>(options: Options<GetProjectWorkConfigurationPlanData, ThrowOnError>): RequestResult<GetProjectWorkConfigurationPlanResponses, GetProjectWorkConfigurationPlanErrors, ThrowOnError> => (options.client ?? client).get<GetProjectWorkConfigurationPlanResponses, GetProjectWorkConfigurationPlanErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/agent-runs/{runId}/work-configuration/plan',
+    ...options
+});
+
+/**
+ * archiveProject
+ *
+ * Permission: project:archive. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const archiveProject = <ThrowOnError extends boolean = false>(options: Options<ArchiveProjectData, ThrowOnError>): RequestResult<ArchiveProjectResponses, ArchiveProjectErrors, ThrowOnError> => (options.client ?? client).post<ArchiveProjectResponses, ArchiveProjectErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/archive',
+    ...options
+});
+
+/**
+ * completeProjectAuthoringApproval
+ *
+ * Permission: authoring:approve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
+ */
+export const completeProjectAuthoringApproval = <ThrowOnError extends boolean = false>(options: Options<CompleteProjectAuthoringApprovalData, ThrowOnError>): RequestResult<CompleteProjectAuthoringApprovalResponses, CompleteProjectAuthoringApprovalErrors, ThrowOnError> => (options.client ?? client).post<CompleteProjectAuthoringApprovalResponses, CompleteProjectAuthoringApprovalErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/authoring-approvals',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProjectAuthoringApproval
+ *
+ * Permission: authoring:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectAuthoringApproval = <ThrowOnError extends boolean = false>(options: Options<GetProjectAuthoringApprovalData, ThrowOnError>): RequestResult<GetProjectAuthoringApprovalResponses, GetProjectAuthoringApprovalErrors, ThrowOnError> => (options.client ?? client).get<GetProjectAuthoringApprovalResponses, GetProjectAuthoringApprovalErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/authoring-approvals/{approvalId}',
+    ...options
+});
+
+/**
+ * listProjectResourceCharges
+ *
+ * Permission: resource_charge:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listProjectResourceCharges = <ThrowOnError extends boolean = false>(options: Options<ListProjectResourceChargesData, ThrowOnError>): RequestResult<ListProjectResourceChargesResponses, ListProjectResourceChargesErrors, ThrowOnError> => (options.client ?? client).get<ListProjectResourceChargesResponses, ListProjectResourceChargesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/charges',
+    ...options
+});
+
+/**
+ * createProjectResourceChargeAdjustment
+ *
+ * Permission: resource_charge:adjust. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProjectResourceChargeAdjustment = <ThrowOnError extends boolean = false>(options: Options<CreateProjectResourceChargeAdjustmentData, ThrowOnError>): RequestResult<CreateProjectResourceChargeAdjustmentResponses, CreateProjectResourceChargeAdjustmentErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectResourceChargeAdjustmentResponses, CreateProjectResourceChargeAdjustmentErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/charges/{chargeId}/adjustments',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProjectEnvironmentCandidate
+ *
+ * Permission: candidate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectEnvironmentCandidate = <ThrowOnError extends boolean = false>(options: Options<GetProjectEnvironmentCandidateData, ThrowOnError>): RequestResult<GetProjectEnvironmentCandidateResponses, GetProjectEnvironmentCandidateErrors, ThrowOnError> => (options.client ?? client).get<GetProjectEnvironmentCandidateResponses, GetProjectEnvironmentCandidateErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/environment-candidates/{candidateId}',
+    ...options
+});
+
+/**
+ * appendProjectEnvironmentCandidateDecision
+ *
+ * Permission: candidate:approve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
+ */
+export const appendProjectEnvironmentCandidateDecision = <ThrowOnError extends boolean = false>(options: Options<AppendProjectEnvironmentCandidateDecisionData, ThrowOnError>): RequestResult<AppendProjectEnvironmentCandidateDecisionResponses, AppendProjectEnvironmentCandidateDecisionErrors, ThrowOnError> => (options.client ?? client).post<AppendProjectEnvironmentCandidateDecisionResponses, AppendProjectEnvironmentCandidateDecisionErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/environment-candidates/{candidateId}/decisions',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * listEnvironmentTemplateReleases
+ *
+ * Permission: release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listEnvironmentTemplateReleases = <ThrowOnError extends boolean = false>(options: Options<ListEnvironmentTemplateReleasesData, ThrowOnError>): RequestResult<ListEnvironmentTemplateReleasesResponses, ListEnvironmentTemplateReleasesErrors, ThrowOnError> => (options.client ?? client).get<ListEnvironmentTemplateReleasesResponses, ListEnvironmentTemplateReleasesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/environment-template-releases',
+    ...options
+});
+
+/**
+ * createEnvironmentTemplateRelease
+ *
+ * Permission: release:publish. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createEnvironmentTemplateRelease = <ThrowOnError extends boolean = false>(options: Options<CreateEnvironmentTemplateReleaseData, ThrowOnError>): RequestResult<CreateEnvironmentTemplateReleaseResponses, CreateEnvironmentTemplateReleaseErrors, ThrowOnError> => (options.client ?? client).post<CreateEnvironmentTemplateReleaseResponses, CreateEnvironmentTemplateReleaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/environment-template-releases',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getEnvironmentTemplateRelease
+ *
+ * Permission: release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getEnvironmentTemplateRelease = <ThrowOnError extends boolean = false>(options: Options<GetEnvironmentTemplateReleaseData, ThrowOnError>): RequestResult<GetEnvironmentTemplateReleaseResponses, GetEnvironmentTemplateReleaseErrors, ThrowOnError> => (options.client ?? client).get<GetEnvironmentTemplateReleaseResponses, GetEnvironmentTemplateReleaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/environment-template-releases/{releaseId}',
+    ...options
+});
+
+/**
+ * withdrawEnvironmentTemplateRelease
+ *
+ * Permission: release:withdraw. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
+ */
+export const withdrawEnvironmentTemplateRelease = <ThrowOnError extends boolean = false>(options: Options<WithdrawEnvironmentTemplateReleaseData, ThrowOnError>): RequestResult<WithdrawEnvironmentTemplateReleaseResponses, WithdrawEnvironmentTemplateReleaseErrors, ThrowOnError> => (options.client ?? client).post<WithdrawEnvironmentTemplateReleaseResponses, WithdrawEnvironmentTemplateReleaseErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/environment-template-releases/{releaseId}/withdraw',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProjectEvaluationCandidate
+ *
+ * Permission: candidate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectEvaluationCandidate = <ThrowOnError extends boolean = false>(options: Options<GetProjectEvaluationCandidateData, ThrowOnError>): RequestResult<GetProjectEvaluationCandidateResponses, GetProjectEvaluationCandidateErrors, ThrowOnError> => (options.client ?? client).get<GetProjectEvaluationCandidateResponses, GetProjectEvaluationCandidateErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/evaluation-candidates/{candidateId}',
+    ...options
+});
+
+/**
+ * appendProjectEvaluationCandidateDecision
+ *
+ * Permission: candidate:approve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.
+ */
+export const appendProjectEvaluationCandidateDecision = <ThrowOnError extends boolean = false>(options: Options<AppendProjectEvaluationCandidateDecisionData, ThrowOnError>): RequestResult<AppendProjectEvaluationCandidateDecisionResponses, AppendProjectEvaluationCandidateDecisionErrors, ThrowOnError> => (options.client ?? client).post<AppendProjectEvaluationCandidateDecisionResponses, AppendProjectEvaluationCandidateDecisionErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/evaluation-candidates/{candidateId}/decisions',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * streamProjectEvents
+ *
+ * Permission: events:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const streamProjectEvents = <ThrowOnError extends boolean = false>(options: Options<StreamProjectEventsData, ThrowOnError, StreamProjectEventsResponse>): Promise<ServerSentEventsResult<StreamProjectEventsResponses>> => (options.client ?? client).sse.get<StreamProjectEventsResponses, StreamProjectEventsErrors, ThrowOnError>({
+    responseType: 'text',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/events',
+    ...options
+});
+
+/**
+ * createProjectLlmPolicy
+ *
+ * Permission: llm_policy:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProjectLlmPolicy = <ThrowOnError extends boolean = false>(options: Options<CreateProjectLlmPolicyData, ThrowOnError>): RequestResult<CreateProjectLlmPolicyResponses, CreateProjectLlmPolicyErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectLlmPolicyResponses, CreateProjectLlmPolicyErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/llm-egress-policies',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getActiveProjectLlmPolicy
+ *
+ * Permission: llm_policy:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getActiveProjectLlmPolicy = <ThrowOnError extends boolean = false>(options: Options<GetActiveProjectLlmPolicyData, ThrowOnError>): RequestResult<GetActiveProjectLlmPolicyResponses, GetActiveProjectLlmPolicyErrors, ThrowOnError> => (options.client ?? client).get<GetActiveProjectLlmPolicyResponses, GetActiveProjectLlmPolicyErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/llm-egress-policies/active',
+    ...options
+});
+
+/**
+ * listOwnProjectEvaluationResults
+ *
+ * Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listOwnProjectEvaluationResults = <ThrowOnError extends boolean = false>(options: Options<ListOwnProjectEvaluationResultsData, ThrowOnError>): RequestResult<ListOwnProjectEvaluationResultsResponses, ListOwnProjectEvaluationResultsErrors, ThrowOnError> => (options.client ?? client).get<ListOwnProjectEvaluationResultsResponses, ListOwnProjectEvaluationResultsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/me/evaluation-results',
+    ...options
+});
+
+/**
+ * getOwnProjectEvaluationResult
+ *
+ * Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getOwnProjectEvaluationResult = <ThrowOnError extends boolean = false>(options: Options<GetOwnProjectEvaluationResultData, ThrowOnError>): RequestResult<GetOwnProjectEvaluationResultResponses, GetOwnProjectEvaluationResultErrors, ThrowOnError> => (options.client ?? client).get<GetOwnProjectEvaluationResultResponses, GetOwnProjectEvaluationResultErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/me/evaluation-results/{runId}',
+    ...options
+});
+
+/**
+ * listProjectMemberships
+ *
+ * Permission: project_membership:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listProjectMemberships = <ThrowOnError extends boolean = false>(options: Options<ListProjectMembershipsData, ThrowOnError>): RequestResult<ListProjectMembershipsResponses, ListProjectMembershipsErrors, ThrowOnError> => (options.client ?? client).get<ListProjectMembershipsResponses, ListProjectMembershipsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/members',
+    ...options
+});
+
+/**
+ * addProjectMembership
+ *
+ * Permission: project_membership:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const addProjectMembership = <ThrowOnError extends boolean = false>(options: Options<AddProjectMembershipData, ThrowOnError>): RequestResult<AddProjectMembershipResponses, AddProjectMembershipErrors, ThrowOnError> => (options.client ?? client).post<AddProjectMembershipResponses, AddProjectMembershipErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/members',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * removeProjectMembership
+ *
+ * Permission: project_membership:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const removeProjectMembership = <ThrowOnError extends boolean = false>(options: Options<RemoveProjectMembershipData, ThrowOnError>): RequestResult<RemoveProjectMembershipResponses, RemoveProjectMembershipErrors, ThrowOnError> => (options.client ?? client).delete<RemoveProjectMembershipResponses, RemoveProjectMembershipErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/members/{actorId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * createProjectProblemPackageUpload
+ *
+ * Permission: problem_package:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProjectProblemPackageUpload = <ThrowOnError extends boolean = false>(options: Options<CreateProjectProblemPackageUploadData, ThrowOnError>): RequestResult<CreateProjectProblemPackageUploadResponses, CreateProjectProblemPackageUploadErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectProblemPackageUploadResponses, CreateProjectProblemPackageUploadErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/problem-package-uploads',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * completeProjectProblemPackageUpload
+ *
+ * Permission: problem_package:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const completeProjectProblemPackageUpload = <ThrowOnError extends boolean = false>(options: Options<CompleteProjectProblemPackageUploadData, ThrowOnError>): RequestResult<CompleteProjectProblemPackageUploadResponses, CompleteProjectProblemPackageUploadErrors, ThrowOnError> => (options.client ?? client).post<CompleteProjectProblemPackageUploadResponses, CompleteProjectProblemPackageUploadErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/problem-package-uploads/{uploadId}/complete',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * getProjectProblemPackage
+ *
+ * Permission: problem_package:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectProblemPackage = <ThrowOnError extends boolean = false>(options: Options<GetProjectProblemPackageData, ThrowOnError>): RequestResult<GetProjectProblemPackageResponses, GetProjectProblemPackageErrors, ThrowOnError> => (options.client ?? client).get<GetProjectProblemPackageResponses, GetProjectProblemPackageErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/problem-packages/{packageId}',
+    ...options
+});
+
+/**
+ * getProjectResourceBudget
+ *
+ * Permission: resource_budget:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const getProjectResourceBudget = <ThrowOnError extends boolean = false>(options: Options<GetProjectResourceBudgetData, ThrowOnError>): RequestResult<GetProjectResourceBudgetResponses, GetProjectResourceBudgetErrors, ThrowOnError> => (options.client ?? client).get<GetProjectResourceBudgetResponses, GetProjectResourceBudgetErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/resource-budget',
+    ...options
+});
+
+/**
+ * upsertProjectResourceBudget
+ *
+ * Permission: resource_budget:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const upsertProjectResourceBudget = <ThrowOnError extends boolean = false>(options: Options<UpsertProjectResourceBudgetData, ThrowOnError>): RequestResult<UpsertProjectResourceBudgetResponses, UpsertProjectResourceBudgetErrors, ThrowOnError> => (options.client ?? client).put<UpsertProjectResourceBudgetResponses, UpsertProjectResourceBudgetErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/resource-budget',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * listProjectResourceLeases
+ *
+ * Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listProjectResourceLeases = <ThrowOnError extends boolean = false>(options: Options<ListProjectResourceLeasesData, ThrowOnError>): RequestResult<ListProjectResourceLeasesResponses, ListProjectResourceLeasesErrors, ThrowOnError> => (options.client ?? client).get<ListProjectResourceLeasesResponses, ListProjectResourceLeasesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/resource-leases',
+    ...options
+});
+
+/**
+ * listProjectResourceRequests
+ *
+ * Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listProjectResourceRequests = <ThrowOnError extends boolean = false>(options: Options<ListProjectResourceRequestsData, ThrowOnError>): RequestResult<ListProjectResourceRequestsResponses, ListProjectResourceRequestsErrors, ThrowOnError> => (options.client ?? client).get<ListProjectResourceRequestsResponses, ListProjectResourceRequestsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/resource-requests',
+    ...options
+});
+
+/**
+ * createProjectResourceRequest
+ *
+ * Permission: resource_request:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProjectResourceRequest = <ThrowOnError extends boolean = false>(options: Options<CreateProjectResourceRequestData, ThrowOnError>): RequestResult<CreateProjectResourceRequestResponses, CreateProjectResourceRequestErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectResourceRequestResponses, CreateProjectResourceRequestErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/projects/{projectId}/resource-requests',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * createProjectWorkConfigurationRun
+ *
+ * Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createProjectWorkConfigurationRun = <ThrowOnError extends boolean = false>(options: Options<CreateProjectWorkConfigurationRunData, ThrowOnError>): RequestResult<CreateProjectWorkConfigurationRunResponses, CreateProjectWorkConfigurationRunErrors, ThrowOnError> => (options.client ?? client).post<CreateProjectWorkConfigurationRunResponses, CreateProjectWorkConfigurationRunErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            key: 'oidc',
+            scheme: 'bearer',
+            type: 'http'
+        }],
+    url: '/api/v1/projects/{projectId}/work-configuration-runs',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * listResourceLeases
  *
  * Permission: resource_lease:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
-export const listResourceLeases = <ThrowOnError extends boolean = false>(options: Options<ListResourceLeasesData, ThrowOnError>): RequestResult<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError> => (options.client ?? client).get<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError>({
+export const listResourceLeases = <ThrowOnError extends boolean = false>(options?: Options<ListResourceLeasesData, ThrowOnError>): RequestResult<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError> => (options?.client ?? client).get<ListResourceLeasesResponses, ListResourceLeasesErrors, ThrowOnError>({
     responseType: 'json',
     security: [{
             in: 'cookie',
@@ -1013,7 +1390,7 @@ export const revokeResourceLease = <ThrowOnError extends boolean = false>(option
  *
  * Permission: resource_request:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
-export const listResourceRequests = <ThrowOnError extends boolean = false>(options: Options<ListResourceRequestsData, ThrowOnError>): RequestResult<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError> => (options.client ?? client).get<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError>({
+export const listResourceRequests = <ThrowOnError extends boolean = false>(options?: Options<ListResourceRequestsData, ThrowOnError>): RequestResult<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError> => (options?.client ?? client).get<ListResourceRequestsResponses, ListResourceRequestsErrors, ThrowOnError>({
     responseType: 'json',
     security: [{
             in: 'cookie',
@@ -1153,6 +1530,98 @@ export const retryResourceRequest = <ThrowOnError extends boolean = false>(optio
             type: 'apiKey'
         }],
     url: '/api/v1/resource-requests/{requestId}/retry',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * listResourceGpuCatalog
+ *
+ * Permission: resource_gpu_catalog:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listResourceGpuCatalog = <ThrowOnError extends boolean = false>(options?: Options<ListResourceGpuCatalogData, ThrowOnError>): RequestResult<ListResourceGpuCatalogResponses, ListResourceGpuCatalogErrors, ThrowOnError> => (options?.client ?? client).get<ListResourceGpuCatalogResponses, ListResourceGpuCatalogErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource/gpu-catalog',
+    ...options
+});
+
+/**
+ * createResourceGpuCatalogEntry
+ *
+ * Permission: resource_gpu_catalog:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createResourceGpuCatalogEntry = <ThrowOnError extends boolean = false>(options: Options<CreateResourceGpuCatalogEntryData, ThrowOnError>): RequestResult<CreateResourceGpuCatalogEntryResponses, CreateResourceGpuCatalogEntryErrors, ThrowOnError> => (options.client ?? client).post<CreateResourceGpuCatalogEntryResponses, CreateResourceGpuCatalogEntryErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource/gpu-catalog',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * listResourceRates
+ *
+ * Permission: resource_rate:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const listResourceRates = <ThrowOnError extends boolean = false>(options?: Options<ListResourceRatesData, ThrowOnError>): RequestResult<ListResourceRatesResponses, ListResourceRatesErrors, ThrowOnError> => (options?.client ?? client).get<ListResourceRatesResponses, ListResourceRatesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource/rates',
+    ...options
+});
+
+/**
+ * createResourceRate
+ *
+ * Permission: resource_rate:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const createResourceRate = <ThrowOnError extends boolean = false>(options: Options<CreateResourceRateData, ThrowOnError>): RequestResult<CreateResourceRateResponses, CreateResourceRateErrors, ThrowOnError> => (options.client ?? client).post<CreateResourceRateResponses, CreateResourceRateErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource/rates',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * recordResourceUsage
+ *
+ * Permission: resource:usage_record. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
+ */
+export const recordResourceUsage = <ThrowOnError extends boolean = false>(options: Options<RecordResourceUsageData, ThrowOnError>): RequestResult<RecordResourceUsageResponses, RecordResourceUsageErrors, ThrowOnError> => (options.client ?? client).post<RecordResourceUsageResponses, RecordResourceUsageErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{
+            in: 'cookie',
+            name: '__Host-labweaver_session',
+            type: 'apiKey'
+        }],
+    url: '/api/v1/resource/usage',
     ...options,
     headers: {
         'Content-Type': 'application/json',

@@ -74,6 +74,8 @@ macro_rules! typed_id {
 typed_id!(AccessGrantId);
 typed_id!(ActorId);
 typed_id!(AgentRunId);
+typed_id!(WorkConfigurationPlanId);
+typed_id!(WorkConfigurationPreauthorizationId);
 typed_id!(ApprovalId);
 typed_id!(ArtifactId);
 typed_id!(BuildRequestId);
@@ -101,6 +103,12 @@ typed_id!(ReleaseId);
 typed_id!(ResourceApprovalId);
 typed_id!(ResourceRequestId);
 typed_id!(CapacityClaimId);
+typed_id!(TaskRunId);
+typed_id!(GpuCatalogEntryId);
+typed_id!(RateId);
+typed_id!(UsageRecordId);
+typed_id!(ChargeId);
+typed_id!(BudgetId);
 typed_id!(SshPublicKeyId);
 typed_id!(UploadSessionId);
 

@@ -1,20 +1,25 @@
 # Submission Collector v1
 
-Status: implemented locally for Issue #54 and PR #121; A+B security review, D
-Verify and connected dual-runtime evidence remain required.
+This document describes the collector contract. Current implementation and test
+status are maintained in the related pull request.
 
 ## Accepted input and identity
 
 The internal freeze command must come from an authenticated, approved
 `SubmissionManifest` projection and carries:
 
-- course, actor, Agent run and non-zero manifest revision;
+- required project, optional course, actor, Agent run and non-zero manifest revision;
 - canonical `submissionManifestSha256`;
 - exact Environment ID/revision, release ID/version, runtime kind, runtime
   artifact SHA-256 and optional Container build request;
 - StudentSubmission retention policy identity/revision/deadline;
 - one idempotency key and trace ID;
 - one Environment-owned source identity.
+
+The project is the authorization and idempotency scope even when no course is
+associated. A nullable course must not weaken the database uniqueness constraint.
+Distinct freeze requests may legitimately produce identical content hashes;
+content identity does not replace request identity.
 
 The current collector accepts `source: workspace`. It does not execute an
 `EvaluationSpec`, Runner or Checker and cannot produce a score. Container
@@ -56,11 +61,11 @@ timeout have distinct stable diagnostics.
 The VM image accepts the collector principal through the reviewed public user
 CA. The short-lived certificate issuer and ephemeral Secret cleanup are
 deployment dependencies, not static repository credentials. Their absence
-blocks VM E3.
+blocks VM collection.
 
-Environment Service now owns the internal mTLS binding endpoint. It accepts
-only the exact Evaluation Service URI identity, requires the current owner,
-course and Environment revision, and rejects anything except a running,
+Environment Service owns the internal binding endpoint protected by a
+service-account JWT over TLS. It requires an authorized Evaluation caller,
+the current owner, project, optional course and Environment revision, and rejects anything except a running,
 current-generation, eligible Environment with a healthy endpoint. VM bindings
 are derived from the persisted running KubeVirt observation and receive a
 299-second certificate with principal `labweaver-collector` and critical
@@ -68,7 +73,7 @@ are derived from the persisted running KubeVirt observation and receive a
 public CA embedded in the reviewed VM provider configuration.
 
 Evaluation Service owns the browser-facing freeze command after Access BFF
-authentication and course authorization. The coordinator atomically changes a
+authentication and project authorization. The coordinator atomically changes a
 queued command to `running`, uses only fixed Kubernetes API operations, and
 creates a digest-pinned same-image Job. Container Jobs run in the Environment
 namespace with the exact PVC mounted read-only; VM Jobs run in the dedicated
@@ -108,9 +113,10 @@ Lock. Upload uses one attempt-specific key, exact SHA-256 checksum,
 `If-None-Match: *`, Governance mode and the frozen `retainUntil`. Success
 requires an exact non-null version and verified HEAD plus byte read-back.
 
-`evaluation.submission_freeze_requests` owns one stable ID per course and
-idempotency key. `submission_freeze_attempts` retains every fenced attempt and
-failure diagnostic. A completed attempt, authoritative `frozen_submissions`
+`evaluation.submission_freeze_requests` owns one stable ID per project and
+idempotency key. Course is optional teaching context and does not change that
+identity. `submission_freeze_attempts` retains every fenced attempt and failure
+diagnostic. A completed attempt, authoritative `frozen_submissions`
 row and v2 Outbox event are committed in one transaction. Exact replay returns
 the stored contract; a different request under the same key conflicts.
 

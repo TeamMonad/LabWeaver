@@ -1,12 +1,12 @@
 //! Production Agent Service internal API and recoverable worker process.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_service::api::{AgentApiState, router, serve_plain};
+use agent_service::api::{AgentApiState, router, with_service_auth};
 use agent_service::build_executor::{ProductionBuildExecutor, ProductionBuildExecutorConfig};
 use agent_service::build_pipeline::{BuildPipeline, BuildPipelinePolicy};
 use agent_service::build_provider::NatsBuildSupplyChainProvider;
@@ -14,23 +14,34 @@ use agent_service::build_provider::{
     FencedBuildExecutor, NatsBuildExecutorServer, PgBuildExecutorFenceStore,
 };
 use agent_service::build_store::{BuildWorker, PgBuildStore};
+use agent_service::candidate_materializer::S3EnvironmentCandidateMaterializer;
 use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
-    EgressClassifier, PackageObjectReadError, ProblemPackageEgressGate, ProblemPackageReader,
-    RunCancellation, TokioClaudeCodeProcess,
+    ClaudeCodeProcess, EgressClassifier, PackageObjectReadError, ProblemPackageEgressGate,
+    ProblemPackageReader, RunCancellation, TokioClaudeCodeProcess,
 };
+use agent_service::generated_artifacts::GeneratedArtifactStore;
+use agent_service::llm_review::{LlmReviewStore, LlmReviewWorker};
 use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
-use agent_service::run_store::{AgentRunService, ExecuteAgentRun, PostgresAgentRunStore};
+use agent_service::run_store::{AgentRunService, PostgresAgentRunStore};
+use agent_service::work_execution::{
+    WorkExecutionClient, WorkExecutionConfiguration, WorkExecutionWorker,
+};
 use artifact_store::{ImmutableObjectStore, S3Credential, S3ImmutableObjectStore, S3StoreConfig};
 use async_trait::async_trait;
-use auth::MtlsFileConfig;
+use auth::{
+    ServerTlsFileConfig, ServiceAuthConfig, ServiceAuthError, ServiceTokenClient,
+    ServiceTokenClientConfig, ServiceTokenVerifier, TransportSecurityMode,
+};
 use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
 
+#[path = "../../http_transport.rs"]
+mod http_transport;
 #[path = "../../service_runtime.rs"]
 mod service_runtime;
 
@@ -51,7 +62,7 @@ const REQUIRED_WORKER_ENVIRONMENT: [&str; 3] = [
 struct DeploymentFile {
     database_url_file: String,
     database_max_connections: u32,
-    control_mtls: MtlsFileConfig,
+    control_tls: ServerTlsFileConfig,
     object_store: S3StoreConfig,
     object_store_access_key_file: String,
     object_store_secret_key_file: String,
@@ -63,8 +74,26 @@ struct DeploymentFile {
     track_lease_seconds: u64,
     poll_interval_milliseconds: u64,
     worker_environment_files: BTreeMap<String, String>,
+    work_execution: WorkExecutionFileConfig,
     build: BuildFileConfig,
     nats: NatsFileConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "the file contract keeps the Environment-owned fields explicit"
+)]
+struct WorkExecutionFileConfig {
+    /// Environment Service URL used by the durable Work execution consumer.
+    environment_base_uri: String,
+    /// Mounted CA bundle for the Environment Service mTLS endpoint.
+    environment_ca_file: String,
+    /// Audience expected on tokens sent to the Environment Service.
+    environment_audience: String,
+    /// Environment Service permissions requested by the Agent service account.
+    environment_scopes: BTreeSet<String>,
 }
 
 #[allow(dead_code)]
@@ -143,12 +172,31 @@ async fn run_agent_service() -> Result<(), StartupError> {
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
+    let tls = http_transport::load_server_config(
+        &deployment.control_tls.server_certificate_file,
+        &deployment.control_tls.server_key_file,
+    )?;
+    let (service_verifier, service_token_client) = discover_service_auth().await?;
+    let work_execution_configuration = WorkExecutionConfiguration::defaults(
+        reqwest::Url::parse(&deployment.work_execution.environment_base_uri)
+            .map_err(|_| StartupError::Configuration)?,
+        deployment.work_execution.environment_ca_file.clone().into(),
+        deployment.work_execution.environment_audience.clone(),
+        deployment.work_execution.environment_scopes.clone(),
+    );
+    let environment = WorkExecutionClient::from_configuration(
+        &work_execution_configuration,
+        service_token_client,
+    )
+    .map_err(StartupError::WorkExecutionClient)?;
     let pool = PgPoolOptions::new()
         .max_connections(deployment.database_max_connections)
         .connect(&read_trimmed(&deployment.database_url_file)?)
         .await?;
     verify_schema(&pool).await?;
     let store = PostgresAgentRunStore::new(pool.clone());
+    let generated_artifacts = GeneratedArtifactStore::new(pool.clone());
+    let llm_reviews = LlmReviewStore::new(pool.clone());
     let build_store = PgBuildStore::new(pool);
     let nats = connect_nats_mtls(
         &deployment.nats.server,
@@ -223,26 +271,57 @@ async fn run_agent_service() -> Result<(), StartupError> {
     let process = Arc::new(TokioClaudeCodeProcess::new(read_worker_environment(
         &deployment.worker_environment_files,
     )?));
+    let review_process: Arc<dyn ClaudeCodeProcess> = process.clone();
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
+        generated_artifacts: generated_artifacts.clone(),
+        llm_reviews: llm_reviews.clone(),
     });
-    let bind = SocketAddr::from_str(&deployment.control_mtls.bind_addr)
+    let bind = SocketAddr::from_str(&deployment.control_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let work_execution_store = store.clone();
+    let work_execution_objects = Arc::clone(&objects);
+    let work_execution_artifacts = generated_artifacts.clone();
     let worker = Worker {
         store,
         objects,
-        classifier,
-        process,
-        runtime_identity: deployment.worker_id,
+        generated_artifacts,
+        classifier: Arc::clone(&classifier),
+        process: Arc::clone(&process),
+        runtime_identity: deployment.worker_id.clone(),
         dispatch_lease: Duration::from_secs(deployment.dispatch_lease_seconds),
         track_lease: Duration::from_secs(deployment.track_lease_seconds),
         poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
     };
+    let review_worker = LlmReviewWorker {
+        store: llm_reviews,
+        classifier: Arc::clone(&classifier),
+        process: review_process,
+        worker_id: format!("{}:llm-review", deployment.worker_id),
+        lease_duration: Duration::from_secs(deployment.track_lease_seconds),
+        poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
+    };
+    let work_execution_worker = WorkExecutionWorker::new(
+        work_execution_store,
+        work_execution_objects,
+        work_execution_artifacts,
+        environment,
+        format!("{}:work-execution", deployment.worker_id),
+        Duration::from_secs(deployment.track_lease_seconds),
+        &work_execution_configuration,
+    )
+    .map_err(StartupError::WorkExecution)?;
     tokio::select! {
-        result = serve_plain(listener, router(state)) => result?,
+        result = http_transport::serve_tls(
+            listener,
+            with_service_auth(router(state), service_verifier),
+            tls,
+        ) => result?,
         result = worker.run() => result?,
+        result = review_worker.run() => result?,
+        result = work_execution_worker.run() => result?,
         result = build_command_loop(build_consumer, build_store) => result?,
         result = build_worker_loop(
             build_worker,
@@ -251,6 +330,59 @@ async fn run_agent_service() -> Result<(), StartupError> {
         result = outbox_loop(outbox, outbox_poll) => result?,
     }
     Ok(())
+}
+
+async fn discover_service_auth()
+-> Result<(Arc<ServiceTokenVerifier>, Arc<ServiceTokenClient>), StartupError> {
+    let issuer = required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?;
+    let audience = required_env("LABWEAVER_SERVICE_AUDIENCE")?;
+    let allowed_client_ids = required_set("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS")?;
+    let scopes = required_set("LABWEAVER_SERVICE_SCOPES")?;
+    if !scopes.contains("environment.work.configure")
+        || !scopes.contains("environment:resolve_work_execution_binding")
+    {
+        return Err(StartupError::Configuration);
+    }
+    let algorithms = required_set("LABWEAVER_SERVICE_JWT_ALGORITHMS")?;
+    let jwks_refresh_seconds = required_u64("LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS")?;
+    let jwks_retry_seconds = required_u64("LABWEAVER_SERVICE_JWKS_RETRY_SECONDS")?;
+    let refresh_skew_seconds = required_u64("LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS")?;
+    let client_id = required_env("LABWEAVER_SERVICE_CLIENT_ID")?;
+    let client_secret = read_trimmed(&required_env("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?)?;
+    let oidc_ca = std::fs::read(required_path("LABWEAVER_SERVICE_OIDC_CA")?)?;
+    let transport = TransportSecurityMode::Strict;
+    let http = auth::no_redirect_http_client(Some(&oidc_ca), transport)
+        .map_err(|_| StartupError::ServiceAuth(ServiceAuthError::HttpClient))?;
+    let verifier_config = ServiceAuthConfig::new(
+        &issuer,
+        audience.clone(),
+        allowed_client_ids,
+        BTreeSet::new(),
+        algorithms,
+        jwks_refresh_seconds,
+        jwks_retry_seconds,
+        transport,
+    )
+    .map_err(|_| StartupError::ServiceAuth(ServiceAuthError::InvalidConfig))?;
+    let verifier = ServiceTokenVerifier::discover(verifier_config, http.clone())
+        .await
+        .map(Arc::new)
+        .map_err(StartupError::ServiceAuth)?;
+    let client_config = ServiceTokenClientConfig::new(
+        &issuer,
+        client_id,
+        client_secret,
+        audience,
+        scopes,
+        refresh_skew_seconds,
+        transport,
+    )
+    .map_err(StartupError::ServiceToken)?;
+    let client = ServiceTokenClient::discover(client_config, http)
+        .await
+        .map(Arc::new)
+        .map_err(StartupError::ServiceToken)?;
+    Ok((verifier, client))
 }
 
 async fn run_build_executor() -> Result<(), StartupError> {
@@ -397,6 +529,7 @@ async fn outbox_loop(
 struct Worker {
     store: PostgresAgentRunStore,
     objects: Arc<S3ImmutableObjectStore>,
+    generated_artifacts: GeneratedArtifactStore,
     classifier: Arc<dyn EgressClassifier>,
     process: Arc<TokioClaudeCodeProcess>,
     runtime_identity: String,
@@ -406,6 +539,10 @@ struct Worker {
 }
 
 impl Worker {
+    #[allow(
+        clippy::large_futures,
+        reason = "the dispatch loop owns preparation and execution as one durable boundary"
+    )]
     async fn run(self) -> Result<(), StartupError> {
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -434,9 +571,15 @@ impl Worker {
             self.store
                 .bind_prepared_dispatch(&lease, input.sha256())
                 .await?;
-            let runtime = agent_service::claude_code::ClaudeCodeRuntime::new(
+            let materializer = Arc::new(S3EnvironmentCandidateMaterializer::new(
+                Arc::clone(&self.objects),
+                lease.package.clone(),
+                self.generated_artifacts.clone(),
+            ));
+            let runtime = agent_service::claude_code::ClaudeCodeRuntime::new_with_materializer(
                 lease.policy.clone(),
                 self.process.clone(),
+                materializer,
             )?;
             let service = AgentRunService::new(
                 self.store.clone(),
@@ -445,26 +588,19 @@ impl Worker {
                 self.track_lease,
             )?;
             let outcome = service
-                .execute_reserved(
-                    ExecuteAgentRun {
-                        course_id: lease.run.course_id,
-                        request: &lease.request,
-                        expected_environment_class: lease.expected_environment_class,
-                        idempotency_key: &lease.idempotency_key,
-                        input,
-                        cancellation: RunCancellation::new(),
-                        now,
-                        trace_id: &lease.trace_id,
-                    },
-                    lease.run.clone(),
-                )
+                .execute_reserved_dispatch(lease, input, RunCancellation::new(), now)
                 .await?;
+            let run_id = match &outcome {
+                agent_service::run_store::AgentRunDispatch::Executed(value) => value.run.id,
+                agent_service::run_store::AgentRunDispatch::Replayed(run)
+                | agent_service::run_store::AgentRunDispatch::Progressed(run) => run.id,
+            };
             let dispatch_outcome = match outcome {
                 agent_service::run_store::AgentRunDispatch::Executed(_) => "executed",
                 agent_service::run_store::AgentRunDispatch::Replayed(_) => "replayed",
                 agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
             };
-            tracing::info!(event = "agent.dispatch.completed", run_id = %lease.run.id, outcome = dispatch_outcome);
+            tracing::info!(event = "agent.dispatch.completed", run_id = %run_id, outcome = dispatch_outcome);
         }
     }
 }
@@ -491,12 +627,7 @@ impl ProblemPackageReader for DispatchReader {
             .get(&reference.artifact_id)
             .ok_or(PackageObjectReadError)?;
         self.objects
-            .read_verified(
-                key,
-                &reference.object_version,
-                reference.size_bytes,
-                &reference.media_type,
-            )
+            .read_verified(key, reference)
             .await
             .map(|object| object.bytes)
             .map_err(|_| PackageObjectReadError)
@@ -515,6 +646,45 @@ fn load_build_executor_deployment() -> Result<BuildExecutorDeploymentFile, Start
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
 }
 
+fn required_env(name: &'static str) -> Result<String, StartupError> {
+    let value = std::env::var(name).map_err(|_| StartupError::Configuration)?;
+    if value.trim().is_empty() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(value)
+}
+
+fn required_path(name: &'static str) -> Result<std::path::PathBuf, StartupError> {
+    let path = std::path::PathBuf::from(required_env(name)?);
+    if !path.is_absolute() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(path)
+}
+
+fn required_set(name: &'static str) -> Result<BTreeSet<String>, StartupError> {
+    let values = required_env(name)?
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if values.is_empty() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(values)
+}
+
+fn required_u64(name: &'static str) -> Result<u64, StartupError> {
+    let value = required_env(name)?
+        .parse::<u64>()
+        .map_err(|_| StartupError::Configuration)?;
+    if value == 0 {
+        return Err(StartupError::Configuration);
+    }
+    Ok(value)
+}
+
 fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> {
     if deployment.database_max_connections == 0
         || deployment.database_max_connections > 100
@@ -529,6 +699,14 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
         || deployment.build.retry_delay_milliseconds > 300_000
         || deployment.build.max_attempts == 0
         || deployment.build.max_attempts > 100
+        || !deployment
+            .work_execution
+            .environment_scopes
+            .contains("environment.work.configure")
+        || !deployment
+            .work_execution
+            .environment_scopes
+            .contains("environment:resolve_work_execution_binding")
         || !worker_environment_contract_holds(deployment)
     {
         return Err(StartupError::Configuration);
@@ -576,8 +754,10 @@ fn read_trimmed(path: &str) -> Result<String, StartupError> {
 async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
     let ready: bool = sqlx::query_scalar(
         "SELECT to_regclass('agent.agent_run_dispatches') IS NOT NULL \
-         AND to_regclass('agent.agent_track_work_items') IS NOT NULL \
-         AND to_regclass('agent.build_commands') IS NOT NULL",
+          AND to_regclass('agent.agent_track_work_items') IS NOT NULL \
+          AND to_regclass('agent.build_commands') IS NOT NULL \
+          AND to_regclass('agent.generated_artifacts') IS NOT NULL \
+          AND to_regclass('agent.llm_review_runs') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -604,6 +784,16 @@ enum StartupError {
     #[error("LW_AGENT_CLOCK_INVALID")]
     Clock,
     #[error(transparent)]
+    ServiceAuth(#[from] ServiceAuthError),
+    #[error("LW_AGENT_SERVICE_TOKEN_INVALID")]
+    ServiceToken(#[source] auth::ServiceTokenClientError),
+    #[error("LW_AGENT_WORK_EXECUTION_CLIENT_INVALID")]
+    WorkExecutionClient(#[source] agent_service::work_execution::WorkExecutionClientError),
+    #[error("LW_AGENT_WORK_EXECUTION_WORKER_FAILED")]
+    WorkExecution(#[from] agent_service::work_execution::WorkExecutionWorkerError),
+    #[error(transparent)]
+    HttpTransport(#[from] http_transport::HttpTransportError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
@@ -613,6 +803,8 @@ enum StartupError {
     ObjectStore(#[from] artifact_store::ObjectStoreError),
     #[error(transparent)]
     Store(#[from] agent_service::run_store::AgentRunStoreError),
+    #[error(transparent)]
+    LlmReview(#[from] agent_service::llm_review::LlmReviewStoreError),
     #[error(transparent)]
     BuildStore(#[from] agent_service::build_store::BuildStoreError),
     #[error(transparent)]
@@ -628,7 +820,7 @@ enum StartupError {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{BuildExecutorDeploymentFile, DeploymentFile};
 
@@ -664,6 +856,25 @@ mod deployment_contract_tests {
         assert!(!example.contains(".v2"));
         assert!(!example.contains("ECNU_API_KEY"));
         assert!(super::worker_environment_contract_holds(&deployment));
+        assert_eq!(
+            deployment.work_execution.environment_base_uri,
+            "https://environment-service:9446/"
+        );
+        assert_eq!(
+            deployment.work_execution.environment_ca_file,
+            "/etc/labweaver/secrets/mtls-ca.pem"
+        );
+        assert_eq!(
+            deployment.work_execution.environment_audience,
+            "labweaver-environment"
+        );
+        assert_eq!(
+            deployment.work_execution.environment_scopes,
+            BTreeSet::from([
+                "environment.work.configure".to_owned(),
+                "environment:resolve_work_execution_binding".to_owned(),
+            ])
+        );
     }
 
     fn example_deployment() -> super::DeploymentFile {
@@ -688,6 +899,20 @@ mod deployment_contract_tests {
             "/etc/labweaver/secrets/legacy".to_owned(),
         );
         assert!(!super::worker_environment_contract_holds(&deployment));
+    }
+
+    #[test]
+    fn work_execution_requires_both_environment_permissions() {
+        let mut deployment = example_deployment();
+        deployment
+            .work_execution
+            .environment_scopes
+            .remove("environment:resolve_work_execution_binding");
+
+        assert!(matches!(
+            super::validate_deployment(&deployment),
+            Err(super::StartupError::Configuration)
+        ));
     }
 
     #[test]

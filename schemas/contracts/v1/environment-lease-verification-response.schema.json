@@ -19,17 +19,39 @@
         "activeFrom": {
           "$ref": "#/$defs/UtcTimestamp"
         },
+        "approvedResources": {
+          "$ref": "#/$defs/WorkloadResources",
+          "description": "The exact Resource-approved limits Environment must apply to its workload."
+        },
         "capacityBinding": {
           "type": "string"
         },
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "environmentId": {
           "$ref": "#/$defs/EnvironmentId"
         },
         "expiresAt": {
           "$ref": "#/$defs/UtcTimestamp"
+        },
+        "gpuAllocation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuAllocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Catalog resolution captured by Resource when a GPU was approved."
         },
         "leaseId": {
           "$ref": "#/$defs/LeaseId"
@@ -39,15 +61,24 @@
         },
         "ownerActorId": {
           "$ref": "#/$defs/ActorId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "resourceRequestId": {
+          "$ref": "#/$defs/ResourceRequestId",
+          "description": "The Resource request that owns this lease. Environment meters use this\nidentity when delivering usage back to Resource."
         }
       },
       "required": [
+        "resourceRequestId",
         "leaseId",
         "leaseRevision",
         "environmentId",
-        "courseId",
+        "projectId",
         "ownerActorId",
         "capacityBinding",
+        "approvedResources",
         "activeFrom",
         "expiresAt"
       ],
@@ -63,8 +94,88 @@
       ],
       "type": "string"
     },
+    "GpuAllocation": {
+      "additionalProperties": false,
+      "description": "The catalog resolution captured on an approved capacity claim.",
+      "properties": {
+        "allocationBinding": {
+          "type": "string"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entryId": {
+          "$ref": "#/$defs/GpuCatalogEntryId",
+          "description": "Exact catalog row used to resolve this allocation."
+        },
+        "mode": {
+          "$ref": "#/$defs/GpuAllocationMode"
+        },
+        "providerBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entryId",
+        "class",
+        "count",
+        "mode",
+        "providerBinding",
+        "allocationBinding",
+        "catalogRevision"
+      ],
+      "type": "object"
+    },
+    "GpuAllocationMode": {
+      "description": "Allocation mode selected by the Resource GPU catalog.\n\nCallers submit only a catalog class and count. The mode is resolved from the\nactive catalog entry and is never accepted as an untrusted request override.",
+      "enum": [
+        "exclusive",
+        "container_time_slice",
+        "vm_vgpu"
+      ],
+      "type": "string"
+    },
+    "GpuCatalogEntryId": {
+      "description": "Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
       "type": "string"
     },
     "Revision": {
@@ -76,6 +187,43 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

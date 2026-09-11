@@ -768,8 +768,8 @@ fn run_docker_gate(
     push_phase(report, "dependency-contract-probe", started, true);
 
     let started = Instant::now();
-    run_build_supply_chain(session, report_dir, report)?;
-    push_phase(report, "build-supply-chain", started, true);
+    run_build_canary(session, report_dir, report)?;
+    push_phase(report, "build-canary", started, true);
     Ok(())
 }
 
@@ -957,9 +957,9 @@ fn run_host_contract_probe(root: &Path) -> Result<(), AppError> {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the canary keeps build, push, scan and cleanup identity together"
+    reason = "the canary keeps build, push and cleanup identity together"
 )]
-fn run_build_supply_chain(
+fn run_build_canary(
     session: &DockerSession,
     report_dir: &Path,
     report: &RunReport,
@@ -1027,33 +1027,6 @@ fn run_build_supply_chain(
                 local_image,
             ],
         )?;
-        // Trivy scan stubbed after mono-refactor: write placeholder report without invoking scanner.
-        fs::write(report_dir.join("trivy.json"), b"{\"Results\":[]}")
-            .map_err(|error| integration_io("write Trivy report", error))?;
-        let scan: Value = serde_json::from_slice(
-            &fs::read(report_dir.join("trivy.json"))
-                .map_err(|error| integration_io("read Trivy report", error))?,
-        )
-        .map_err(|error| {
-            integration_error("LW_INTEGRATION_TRIVY_REPORT_INVALID", error.to_string())
-        })?;
-        let critical = count_severity(&scan, "CRITICAL");
-        let secrets = scan
-            .get("Results")
-            .and_then(Value::as_array)
-            .map_or(0, |results| {
-                results
-                    .iter()
-                    .filter_map(|result| result.get("Secrets").and_then(Value::as_array))
-                    .map(Vec::len)
-                    .sum::<usize>()
-            });
-        if critical > 0 || secrets > 0 {
-            return Err(integration_error(
-                "LW_INTEGRATION_SCAN_BLOCKED",
-                format!("critical={critical} secrets={secrets}"),
-            ));
-        }
         Ok(())
     })();
     let cleanup = docker_checked(
@@ -1067,23 +1040,6 @@ fn run_build_supply_chain(
         eprintln!("[LW_INTEGRATION_BUILDER_CLEANUP_FAILED] {error}");
     }
     result
-}
-
-fn count_severity(value: &Value, expected: &str) -> usize {
-    match value {
-        Value::Object(map) => map
-            .iter()
-            .map(|(key, child)| {
-                usize::from(key == "Severity" && child.as_str() == Some(expected))
-                    + count_severity(child, expected)
-            })
-            .sum(),
-        Value::Array(values) => values
-            .iter()
-            .map(|child| count_severity(child, expected))
-            .sum(),
-        _ => 0,
-    }
 }
 
 fn run_kind_gate(

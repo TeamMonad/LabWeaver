@@ -216,9 +216,7 @@ impl ProductionBuildExecutor {
             .objects
             .read_verified(
                 &command.request.context_object_key,
-                &command.request.context.object_version,
-                command.request.context.size_bytes,
-                &command.request.context.media_type,
+                &command.request.context,
             )
             .await
         {

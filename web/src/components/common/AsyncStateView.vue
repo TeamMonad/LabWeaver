@@ -7,10 +7,12 @@
       <span>{{ state.message ?? loadingText }}</span>
     </div>
 
-    <div v-else-if="state.kind === 'empty'" class="state-message" role="status">
-      <SvgIcon name="info" size="lg" aria-hidden="true" />
-      <span>{{ emptyText }}</span>
-    </div>
+    <slot v-else-if="state.kind === 'empty'" name="empty">
+      <div class="state-message" role="status">
+        <SvgIcon name="info" size="lg" aria-hidden="true" />
+        <span>{{ emptyText }}</span>
+      </div>
+    </slot>
 
     <DiagnosticBanner
       v-else-if="state.kind === 'error' || isFailureState(state.kind)"
@@ -23,13 +25,13 @@
   </div>
 </template>
 
-<script setup lang="ts">
+<script setup lang="ts" generic="T">
 import DiagnosticBanner from './DiagnosticBanner.vue'
 import SvgIcon from './SvgIcon.vue'
 import type { AsyncState } from '@/types/async'
 
 interface Props {
-  state: AsyncState<unknown>
+  state: AsyncState<T>
   loadingText?: string
   emptyText?: string
 }

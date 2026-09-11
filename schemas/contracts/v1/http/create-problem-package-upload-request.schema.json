@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "ProblemPackageUploadFile": {
       "additionalProperties": false,
       "properties": {
@@ -22,6 +26,10 @@
       ],
       "type": "object"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -32,17 +40,31 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "files": {
       "items": {
         "$ref": "#/$defs/ProblemPackageUploadFile"
       },
       "type": "array"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "retentionPolicyRevision": {
       "$ref": "#/$defs/Revision"
     }
   },
   "required": [
+    "projectId",
     "files",
     "retentionPolicyRevision"
   ],

@@ -1,4 +1,4 @@
-ARG RUST_BUILDER="docker.io/library/rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+ARG RUST_BUILDER="docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3"
 ARG CPP17_RUNTIME="cgr.dev/chainguard/gcc-glibc@sha256:8c43994421c12e300ea5d227c774822e5d7aa45feaeb8e5721f4b5023d7ebfc5"
 
 FROM ${RUST_BUILDER} AS builder

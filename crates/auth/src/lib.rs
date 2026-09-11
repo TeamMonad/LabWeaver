@@ -19,18 +19,20 @@ pub mod csrf;
 pub mod jwt;
 /// One-time OIDC Authorization Code + PKCE transaction values.
 pub mod oidc;
-/// Environment-authoritative owner resolver mTLS client.
+/// Environment-authoritative owner resolver JWT client.
 pub mod owner_resolver;
 pub mod provider;
 pub mod repository;
 /// Short-lived signed identity delegation from Access to Resource.
 pub mod resource_delegation;
 pub mod roles;
+/// OAuth 2.0 client-credentials and service-token verification.
+pub mod service_auth;
 
 pub use authorization::{AuthorizationContext, AuthorizationError, authorize};
 pub use config::{
     AccessAuthFile, AuthConfig, AuthConfigError, ControlGatewayFileConfig, GrantRuntimeFileConfig,
-    MtlsFileConfig, NatsFileConfig, ResourceGatewayFileConfig, TransportSecurityMode,
+    NatsFileConfig, ResourceGatewayFileConfig, ServerTlsFileConfig, TransportSecurityMode,
 };
 pub use crypto::{CryptoError, EncryptedValue, KeyRing};
 pub use csrf::{CsrfError, CsrfToken, verify_csrf_token};
@@ -45,16 +47,21 @@ pub use provider::{
 };
 pub use repository::{
     AuthCleanupReport, BffSession, CreateBffSession, LocalActor, MembershipSnapshot,
-    RepositoryError, cleanup_expired_auth_state, consume_backchannel_logout,
-    consume_oidc_transaction, create_bff_session, load_bff_session, load_logout_hint,
-    load_membership_snapshot, require_service_identity, revoke_bff_session,
-    revoke_bff_sessions_by_sid, upsert_actor,
+    RepositoryError, bounded_idle_expiry, cleanup_expired_auth_state, configured_session_expiry,
+    consume_backchannel_logout, consume_oidc_transaction, create_bff_session,
+    insert_project_owner_membership, load_bff_session, load_logout_hint, load_membership_snapshot,
+    require_course_membership, revoke_bff_session, revoke_bff_sessions_by_sid, upsert_actor,
 };
 pub use resource_delegation::{
     ResourceDelegation, ResourceDelegationError, decode_resource_delegation,
     encode_resource_delegation,
 };
 pub use roles::{RoleClaimError, RoleMappings, extract_platform_roles};
+pub use service_auth::{
+    ServiceAuthConfig, ServiceAuthConfigError, ServiceAuthError, ServiceIdentity,
+    ServiceTokenClaims, ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenClientError,
+    ServiceTokenVerifier,
+};
 
 /// Typed failure at the authentication/authorization boundary.
 #[derive(Debug, thiserror::Error)]

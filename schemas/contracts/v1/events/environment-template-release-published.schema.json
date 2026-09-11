@@ -177,9 +177,6 @@
         {
           "additionalProperties": false,
           "properties": {
-            "base_image_digest": {
-              "type": "string"
-            },
             "build_context": {
               "$ref": "#/$defs/ArtifactRef"
             },
@@ -211,7 +208,6 @@
             "kind",
             "provider_binding",
             "build_context",
-            "base_image_digest",
             "service_port"
           ],
           "type": "object"
@@ -351,10 +347,20 @@
           "$ref": "#/$defs/Revision"
         },
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "id": {
           "$ref": "#/$defs/ReleaseId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
         },
         "publishedAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -373,7 +379,7 @@
       },
       "required": [
         "id",
-        "courseId",
+        "projectId",
         "version",
         "candidateId",
         "agentRunId",
@@ -509,6 +515,10 @@
       "enum": [
         "deny"
       ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "PublicExposurePolicy": {
@@ -723,7 +733,15 @@
       "$ref": "#/$defs/Sequence"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent projects omit this field."
     },
     "data": {
       "$ref": "#/$defs/ReleasePublished"
@@ -736,6 +754,10 @@
     },
     "id": {
       "$ref": "#/$defs/EventId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope for every platform event, including independent Work events."
     },
     "source": {
       "type": "string"
@@ -765,7 +787,7 @@
     "time",
     "datacontenttype",
     "dataschema",
-    "courseId",
+    "projectId",
     "aggregateRevision",
     "aggregateSequence",
     "traceId",

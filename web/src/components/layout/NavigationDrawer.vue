@@ -71,7 +71,7 @@
         type="button"
         class="rail-toggle"
         :aria-label="isRail ? '展开导航' : '收起导航'"
-        @click="$emit('toggle-rail')"
+        @click="$emit('toggleRail')"
       >
         <SvgIcon :name="isRail ? 'chevron_right' : 'chevron_left'" size="md" aria-hidden="true" />
         <span v-if="!isRail" class="rail-toggle__label">收起</span>
@@ -98,7 +98,7 @@ const props = defineProps<{
   rail?: boolean
 }>()
 
-const emit = defineEmits<{
+defineEmits<{
   close: []
   toggleRail: []
 }>()
@@ -125,16 +125,18 @@ const roleItems = [
 ]
 
 const { user, isAuthenticated } = useAuth()
+const workbenchRoles = new Set(['teacher', 'student', 'admin', 'researcher'])
 // Anonymous visitors keep all entries (they lead to the sign-in flow); a
 // signed-in user only sees workbenches their OIDC roles authorize, so no
 // dead links to a role_denied error page.
 const visibleRoleItems = computed(() => {
   if (!isAuthenticated.value) return roleItems
   const roles = new Set((user.value?.profile?.roles as string[] | undefined) ?? [])
-  return roleItems.filter((item) => roles.has(item.role))
+  return roleItems.filter((item) => item.role === 'researcher'
+    ? Array.from(roles).some((role) => workbenchRoles.has(role))
+    : roles.has(item.role))
 })
 
-const isActive = computed(() => (path: string) => route.path.startsWith(path))
 const isActiveRole = computed(() => (path: string) => route.path.startsWith(path))
 const isSubActive = computed(() => (path: string) => route.path === path || route.path.startsWith(path + '/'))
 
@@ -185,9 +187,10 @@ const currentRoleSubNav = computed<SubNavGroup[]>(() => {
     return [
       {
         category: '治理与配额 (Governance)',
-        items: [
-          { name: 'approvals', path: '/admin/approvals', label: '资源审批与 Lease', icon: 'admin_panel_settings' },
+          items: [
+          { name: 'approvals', path: '/admin/resource-approval', label: '资源审批与 Lease', icon: 'admin_panel_settings' },
           { name: 'policies', path: '/admin/policies', label: '安全策略', icon: 'policy' },
+          { name: 'finance', path: '/admin/resource-finance', label: '预算与费用', icon: 'payments' },
           { name: 'audit', path: '/admin/audit', label: '审计日志', icon: 'history' },
         ],
       },

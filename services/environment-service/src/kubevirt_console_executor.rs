@@ -1,24 +1,26 @@
-//! mTLS-only adapter from an authoritative Environment identity to `KubeVirt` VMI VNC.
+//! JWT-authenticated adapter from an authoritative Environment identity to `KubeVirt` VMI VNC.
 
-use crate::{MtlsConfig, VerifiedCallerIdentity, serve_owner_resolver_mtls};
+use crate::http_transport;
+use auth::{ServiceIdentity, ServiceTokenVerifier};
 use axum::{
     Router,
     extract::{
-        Extension, State,
+        Extension, Request as AxumRequest, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, Request, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
-use contracts::{CourseId, EnvironmentId, ReleaseId, Revision, access::ConsoleKind};
+use contracts::{CourseId, EnvironmentId, ProjectId, ReleaseId, Revision, access::ConsoleKind};
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use kube::{Client, Config, client::Body};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
-use std::{io::Cursor, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{io::Cursor, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
@@ -28,7 +30,7 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 
-const ENVIRONMENT_SERVICE_SAN: &str = "spiffe://labweaver/environment-service";
+const EXECUTE_PERMISSION: &str = "environment.console.execute";
 const KUBEVIRT_PLAIN_PROTOCOL: &str = "plain.kubevirt.io";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const VMI_NAME: &str = "runtime";
@@ -37,10 +39,8 @@ const VMI_NAME: &str = "runtime";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtConsoleExecutorServerConfig {
     pub bind_addr: String,
-    pub client_ca_file: String,
     pub server_certificate_file: String,
     pub server_private_key_file: String,
-    pub allowed_caller_san: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -55,7 +55,7 @@ pub struct KubeVirtConsoleKubernetesConfiguration {
 pub struct KubeVirtConsoleExecutorServer {
     listener: tokio::net::TcpListener,
     router: Router,
-    tls: MtlsConfig,
+    tls: Arc<rustls::ServerConfig>,
 }
 
 #[derive(Clone)]
@@ -68,7 +68,8 @@ struct ExecutorState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VncRequest {
     environment_id: EnvironmentId,
-    course_id: CourseId,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
     release_id: ReleaseId,
     release_version: u64,
     environment_revision: Revision,
@@ -86,19 +87,16 @@ impl KubeVirtConsoleExecutorServer {
         server: &KubeVirtConsoleExecutorServerConfig,
         kubernetes: &KubeVirtConsoleKubernetesConfiguration,
         pool: PgPool,
+        verifier: Arc<ServiceTokenVerifier>,
     ) -> Result<Self, KubeVirtConsoleExecutorServerError> {
-        if server.allowed_caller_san != ENVIRONMENT_SERVICE_SAN {
-            return Err(KubeVirtConsoleExecutorServerError::Configuration);
-        }
         let listener = tokio::net::TcpListener::bind(
             SocketAddr::from_str(&server.bind_addr)
                 .map_err(|_| KubeVirtConsoleExecutorServerError::Configuration)?,
         )
         .await?;
-        let tls = MtlsConfig::from_pem(
-            &std::fs::read(&server.client_ca_file)?,
-            &std::fs::read(&server.server_certificate_file)?,
-            &std::fs::read(&server.server_private_key_file)?,
+        let tls = http_transport::load_server_config(
+            &server.server_certificate_file,
+            &server.server_private_key_file,
         )?;
         let state = ExecutorState {
             pool,
@@ -106,7 +104,11 @@ impl KubeVirtConsoleExecutorServer {
         };
         let router = Router::new()
             .route("/internal/v1/kubevirt-vnc", get(upgrade))
-            .with_state(state);
+            .with_state(state)
+            .layer(middleware::from_fn_with_state(
+                verifier,
+                require_service_token,
+            ));
         Ok(Self {
             listener,
             router,
@@ -115,14 +117,26 @@ impl KubeVirtConsoleExecutorServer {
     }
 
     pub async fn serve(self) -> Result<(), KubeVirtConsoleExecutorServerError> {
-        serve_owner_resolver_mtls(
-            self.listener,
-            self.router,
-            self.tls,
-            std::future::pending::<Result<(), crate::MtlsServerError>>(),
-        )
-        .await?;
+        http_transport::serve_tls(self.listener, self.router, self.tls).await?;
         Ok(())
+    }
+}
+
+async fn require_service_token(
+    State(verifier): State<Arc<ServiceTokenVerifier>>,
+    request: AxumRequest,
+    next: Next,
+) -> Response {
+    match verifier
+        .authenticate_with_permission(request.headers(), EXECUTE_PERMISSION)
+        .await
+    {
+        Ok(identity) => {
+            let mut request = request;
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(error) => KubeVirtConsoleExecutorServerError::ServiceAuth(error).into_response(),
     }
 }
 
@@ -170,13 +184,10 @@ fn explicit_kube_client(
 
 async fn upgrade(
     State(state): State<ExecutorState>,
-    caller: Option<Extension<VerifiedCallerIdentity>>,
+    _caller: Option<Extension<ServiceIdentity>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, KubeVirtConsoleExecutorServerError> {
-    if !caller.is_some_and(|Extension(identity)| identity.contains_san(ENVIRONMENT_SERVICE_SAN)) {
-        return Err(KubeVirtConsoleExecutorServerError::CallerDenied);
-    }
     let protocol = ConsoleKind::Novnc.websocket_subprotocol();
     if !headers
         .get(header::SEC_WEBSOCKET_PROTOCOL)
@@ -216,7 +227,7 @@ async fn execute(state: ExecutorState, mut browser: WebSocket) -> Result<(), &'s
 
 async fn resolve_target(pool: &PgPool, request: &VncRequest) -> Result<VncTarget, &'static str> {
     let row = sqlx::query(
-        "SELECT i.course_id,i.release_id,i.revision,i.generation,i.observed_generation,\
+        "SELECT i.project_id,i.course_id,i.release_id,i.revision,i.generation,i.observed_generation,\
                 i.desired_state,i.observed_state,(i.contract->>'releaseVersion')::bigint AS release_version,\
                 o.state,o.environment_generation,o.namespace,o.virtual_machine_name,o.vmi_uid \
          FROM environment.environment_instances i \
@@ -236,7 +247,8 @@ async fn resolve_target(pool: &PgPool, request: &VncRequest) -> Result<VncTarget
         .map_err(|_| "LW_KUBEVIRT_CONSOLE_REQUEST_INVALID")?;
     let release_version = i64::try_from(request.release_version)
         .map_err(|_| "LW_KUBEVIRT_CONSOLE_REQUEST_INVALID")?;
-    if row.get::<Uuid, _>("course_id") != request.course_id.as_uuid()
+    if row.get::<Uuid, _>("project_id") != request.project_id.as_uuid()
+        || row.get::<Option<Uuid>, _>("course_id") != request.course_id.map(CourseId::as_uuid)
         || row.get::<Uuid, _>("release_id") != request.release_id.as_uuid()
         || row.get::<i64, _>("revision") != revision
         || row.get::<i64, _>("release_version") != release_version
@@ -301,7 +313,8 @@ fn validate_vmi_document(
         });
     let vmi_uid = target.vmi_uid.to_string();
     let environment_id = request.environment_id.to_string();
-    let course_id = request.course_id.to_string();
+    let project_id = request.project_id.to_string();
+    let course_id = request.course_id.map(|course_id| course_id.to_string());
     let release_id = request.release_id.to_string();
     let release_version = request.release_version.to_string();
     if document.pointer("/metadata/name").and_then(Value::as_str) != Some(target.name.as_str())
@@ -313,7 +326,8 @@ fn validate_vmi_document(
         || document.pointer("/status/phase").and_then(Value::as_str) != Some("Running")
         || !ready
         || label("labweaver.io~1environment-id") != Some(environment_id.as_str())
-        || label("labweaver.io~1course-id") != Some(course_id.as_str())
+        || label("labweaver.io~1project-id") != Some(project_id.as_str())
+        || label("labweaver.io~1course-id") != course_id.as_deref()
         || label("labweaver.io~1release-id") != Some(release_id.as_str())
         || label("labweaver.io~1release-version") != Some(release_version.as_str())
     {
@@ -446,14 +460,23 @@ pub enum KubeVirtConsoleExecutorServerError {
     #[error("LW_KUBEVIRT_CONSOLE_IO_FAILED")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Tls(#[from] crate::MtlsServerError),
+    HttpTransport(#[from] crate::http_transport::HttpTransportError),
+    #[error(transparent)]
+    ServiceAuth(#[from] auth::ServiceAuthError),
 }
 
 impl IntoResponse for KubeVirtConsoleExecutorServerError {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::CallerDenied => StatusCode::FORBIDDEN,
+            Self::CallerDenied | Self::ServiceAuth(auth::ServiceAuthError::PermissionDenied) => {
+                StatusCode::FORBIDDEN
+            }
             Self::SubprotocolRequired => StatusCode::BAD_REQUEST,
+            Self::ServiceAuth(
+                auth::ServiceAuthError::CredentialsMissing
+                | auth::ServiceAuthError::TokenRejected
+                | auth::ServiceAuthError::TokenExpired,
+            ) => StatusCode::UNAUTHORIZED,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
         (status, self.to_string()).into_response()
@@ -468,7 +491,8 @@ mod tests {
     fn request() -> Result<VncRequest, Box<dyn std::error::Error>> {
         Ok(VncRequest {
             environment_id: EnvironmentId::new(),
-            course_id: CourseId::new(),
+            project_id: ProjectId::new(),
+            course_id: Some(CourseId::new()),
             release_id: ReleaseId::new(),
             release_version: 7,
             environment_revision: Revision::new(4)?,
@@ -491,6 +515,7 @@ mod tests {
                 "uid": target.vmi_uid,
                 "labels": {
                     "labweaver.io/environment-id": request.environment_id,
+                    "labweaver.io/project-id": request.project_id,
                     "labweaver.io/course-id": request.course_id,
                     "labweaver.io/release-id": request.release_id,
                     "labweaver.io/release-version": request.release_version.to_string()

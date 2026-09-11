@@ -14,31 +14,21 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const PLATFORM_COMPONENTS: [&str; 7] = [
+const IMAGE_COMPONENTS: [&str; 8] = [
     "access-service",
     "agent-service",
     "control-service",
     "environment-service",
     "evaluation-service",
     "openssh-gateway",
+    "resource-service",
     "web",
 ];
-const RESOURCE_COMPONENTS: [&str; 1] = ["resource-service"];
-const PACKAGE_SCHEMA: &str = "platform-image-package-manifest.v1";
+const PACKAGE_SCHEMA: &str = "platform-image-package-manifest.v2";
 const PLATFORM_PROFILE: &str = "platform";
 const RESOURCE_PROFILE: &str = "resource";
 #[cfg(target_os = "linux")]
 const DEPLOYMENT_SCHEMA: &str = "platform-image-deployment-manifest.v1";
-// Develop iteration mode: the Trivy database pin is optional so the deploy
-// loop does not depend on a specific upstream digest. The placeholder below
-// is schema-valid (format only) and never drives a real scan; the manifest
-// records it so evidence stays auditable and a full pinned package must
-// still be run before any Release Gate.
-#[cfg(any(target_os = "linux", test))]
-const DEVELOP_TRIVY_DATABASE_DIGEST: &str =
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-#[cfg(any(target_os = "linux", test))]
-const DEVELOP_TRIVY_DATABASE_REFERENCE: &str = "docker.io/aquasec/trivy-db@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
@@ -61,7 +51,6 @@ struct PlatformImageLock {
     buildkit: String,
     buildkit_image: String,
     buildx: String,
-    trivy: String,
     helm: String,
     claude_code: String,
     claude_code_linux_x64_sha512: String,
@@ -99,18 +88,24 @@ pub(crate) struct PackageManifest {
     platform: String,
     registry: String,
     builder: BuilderIdentity,
-    images: Vec<ImageEvidence>,
-    overall: String,
+    images: Vec<ImageIdentity>,
 }
 
 fn default_package_profile() -> String {
     PLATFORM_PROFILE.to_owned()
 }
 
-fn components_for_profile(profile: &str) -> Option<&'static [&'static str]> {
+#[cfg(any(target_os = "linux", test))]
+fn package_components(profile: &str) -> Option<Vec<&'static str>> {
     match profile {
-        PLATFORM_PROFILE => Some(&PLATFORM_COMPONENTS),
-        RESOURCE_PROFILE => Some(&RESOURCE_COMPONENTS),
+        PLATFORM_PROFILE => Some(
+            IMAGE_COMPONENTS
+                .iter()
+                .copied()
+                .filter(|component| *component != "resource-service")
+                .collect(),
+        ),
+        RESOURCE_PROFILE => Some(vec!["resource-service"]),
         _ => None,
     }
 }
@@ -122,21 +117,10 @@ struct BuilderIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct ImageEvidence {
+struct ImageIdentity {
     component: String,
     reference: String,
     digest: String,
-    scan: ScanEvidence,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ScanEvidence {
-    scanner: String,
-    database_digest: String,
-    critical: u64,
-    high: u64,
-    report: String,
-    report_sha256: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -169,7 +153,7 @@ pub(crate) fn validate(
 ) -> Result<(), AppError> {
     let manifest = read_manifest(manifest_path)?;
     validate_manifest(&manifest)?;
-    validate_schema_file(root, "platform-image-package-manifest.v1.schema.json")?;
+    validate_schema_file(root, "platform-image-package-manifest.v2.schema.json")?;
     if connected {
         let environment = environment.ok_or(AppError::InvalidArgument {
             role: "connected package validation environment",
@@ -188,7 +172,7 @@ pub(crate) fn validate_profile(
 ) -> Result<(), AppError> {
     let manifest = read_manifest(manifest_path)?;
     validate_manifest(&manifest)?;
-    validate_schema_file(root, "platform-image-package-manifest.v1.schema.json")?;
+    validate_schema_file(root, "platform-image-package-manifest.v2.schema.json")?;
     if manifest.profile != expected_profile {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_PROFILE_MISMATCH",
@@ -210,7 +194,7 @@ pub(crate) fn package(
     }
     validate_environment(environment)?;
     validate_release(release)?;
-    if components_for_profile(profile).is_none() {
+    if !matches!(profile, PLATFORM_PROFILE | RESOURCE_PROFILE) {
         return Err(AppError::InvalidArgument {
             role: "package profile",
         });
@@ -283,20 +267,22 @@ fn read_manifest(path: &Path) -> Result<PackageManifest, AppError> {
 
 fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
     if manifest.schema_version != PACKAGE_SCHEMA
-        || manifest.overall != "passed"
         || manifest.platform != "linux/amd64"
         || !is_commit(&manifest.source_commit)
         || !is_digest(&manifest.component_lock_hash)
     {
         return manifest_invalid("top-level identity is incomplete or incompatible");
     }
-    let Some(components) = components_for_profile(&manifest.profile) else {
+    if !matches!(
+        manifest.profile.as_str(),
+        PLATFORM_PROFILE | RESOURCE_PROFILE
+    ) {
         return manifest_invalid("package profile is unknown");
-    };
+    }
     validate_registry(&manifest.registry)?;
     let mut names = BTreeSet::new();
     for image in &manifest.images {
-        if !components.contains(&image.component.as_str())
+        if !IMAGE_COMPONENTS.contains(&image.component.as_str())
             || !names.insert(image.component.as_str())
         {
             return manifest_invalid("component set contains an unknown or duplicate name");
@@ -305,23 +291,18 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), AppError> {
             "{}/labweaver-system/{}@{}",
             manifest.registry, image.component, image.digest
         );
-        if !is_digest(&image.digest)
-            || image.scan.critical != 0
-            || !is_digest(&image.scan.database_digest)
-            || !is_digest(&image.scan.report_sha256)
-            || image.scan.report.is_empty()
-            || !image.scan.report.starts_with("artifact://")
-        {
-            return manifest_invalid(
-                "image evidence is incomplete, critical, or identity-mismatched",
-            );
+        if !is_digest(&image.digest) {
+            return manifest_invalid("image identity is incomplete");
         }
         if image.reference != expected || image.reference.contains(":latest") {
             return manifest_invalid("image reference is not the expected Harbor digest reference");
         }
     }
-    if names.len() != components.len() || components.iter().any(|name| !names.contains(name)) {
-        return manifest_invalid("manifest component set does not match its package profile");
+    if names.is_empty() {
+        return manifest_invalid("manifest must contain at least one image");
+    }
+    if manifest.profile == RESOURCE_PROFILE && !names.contains("resource-service") {
+        return manifest_invalid("resource package must include resource-service");
     }
     Ok(())
 }
@@ -439,11 +420,6 @@ fn required_env(name: &'static str) -> Result<String, AppError> {
 }
 
 #[cfg(target_os = "linux")]
-fn enabled_env(name: &'static str) -> bool {
-    std::env::var(name).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
-}
-
-#[cfg(target_os = "linux")]
 fn run_checked(command: &mut Command, role: &'static str) -> Result<String, AppError> {
     let output = command
         .output()
@@ -478,13 +454,8 @@ fn package_linux(
     if !is_commit(&source_commit) {
         return manifest_invalid("Git source commit is not a full lowercase SHA-1");
     }
-    // Develop iteration mode: allowed to run against a dirty worktree so
-    // uncommitted changes can be exercised in the deploy loop. Identity is
-    // still bound to HEAD, and the manifest's scan placeholder records the
-    // dirty state so evidence stays auditable.
-    let develop = enabled_env("LABWEAVER_PACKAGE_DEVELOP");
     let dirty = !git_output(root, ["status", "--porcelain"])?.is_empty();
-    if !develop && dirty {
+    if dirty {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_INPUT_DIRTY",
             detail: "package requires a clean tracked and untracked source tree".to_owned(),
@@ -506,41 +477,22 @@ fn package_linux(
     verify_rust_toolchain(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
-    let (database_reference, database_digest) = if develop {
-        develop_trivy_database()
-    } else {
-        verified_trivy_database()?
-    };
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
         .map_err(|error| io_error("create package run directory", error))?;
-    // Develop iteration mode (Owner decision, time-boxed window): skip the
-    // build-context secret scan, the per-image trivy scan and the
-    // reproducibility double build. Scan evidence is an explicit skipped
-    // placeholder and must NOT be used for a formal Release Gate; a full
-    // package must be re-run for acceptance.
-    let iterate = develop;
-    if !iterate {
-        scan_build_context(root, &run_dir)?;
-    }
-    let Some(components) = components_for_profile(profile) else {
+    let Some(components) = package_components(profile) else {
         return manifest_invalid("package profile is not supported");
     };
     let mut images = Vec::with_capacity(components.len());
     for component in components {
-        images.push(build_scan(
+        images.push(build_image_identity(
             root,
-            &run_dir,
             &registry,
             component,
             &source_commit,
             source_date_epoch,
-            &database_reference,
-            &database_digest,
             &lock.platform_images,
-            develop,
-            dirty,
         )?);
     }
     let manifest = PackageManifest {
@@ -558,7 +510,6 @@ fn package_linux(
             buildx: lock.platform_images.buildx,
         },
         images,
-        overall: "passed".to_owned(),
     };
     validate_manifest(&manifest)?;
     let bytes = serde_jcs::to_vec(&manifest).map_err(|error| AppError::Io {
@@ -573,34 +524,18 @@ fn package_linux(
 }
 
 #[cfg(target_os = "linux")]
-fn scan_build_context(_root: &Path, run_dir: &Path) -> Result<(), AppError> {
-    // Trivy removed: stubbed to no-op, writes empty placeholder
-    let report = run_dir.join("trivy-build-context.json");
-    fs::write(&report, b"{\"Results\":[]}")
-        .map_err(|error| io_error("write context scan report", error))?;
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[allow(clippy::too_many_arguments)]
-fn build_scan(
+fn build_image_identity(
     root: &Path,
-    run_dir: &Path,
     registry: &str,
     component: &str,
     source_commit: &str,
     source_date_epoch: u64,
-    database_reference: &str,
-    database_digest: &str,
     lock: &PlatformImageLock,
-    develop: bool,
-    dirty: bool,
-) -> Result<ImageEvidence, AppError> {
+) -> Result<ImageIdentity, AppError> {
     let tag = format!(
         "{registry}/labweaver-system/{component}:git-{}",
         &source_commit[..12]
     );
-    let reproducibility_tag = format!("{tag}-repro");
     build_image(
         root,
         component,
@@ -610,81 +545,13 @@ fn build_scan(
         registry,
         lock,
     )?;
-    if !develop {
-        build_image(
-            root,
-            component,
-            source_commit,
-            source_date_epoch,
-            &reproducibility_tag,
-            registry,
-            lock,
-        )?;
-    }
     let first = inspect_platform_digest(&tag)?;
     let reference = format!("{registry}/labweaver-system/{component}@{first}");
-    let digest = first.clone();
-    if !develop {
-        let second = inspect_platform_digest(&reproducibility_tag)?;
-        if first != second {
-            return Err(AppError::PlatformImage {
-                code: "LW_PACKAGE_BUILD_NOT_REPRODUCIBLE",
-                detail: component.to_owned(),
-            });
-        }
-    }
-    let (scan_bytes, critical, high) = if develop {
-        // Develop placeholder: no trivy image scan was run. This evidence is
-        // explicitly NOT release-grade; acceptance must re-run a full package.
-        let placeholder = serde_json::json!({
-            "schema_version": 1,
-            "scanner": "skipped-develop",
-            "component": component,
-            "reference": reference,
-            "note": format!(
-                "LABWEAVER_PACKAGE_DEVELOP placeholder (dirty worktree={dirty}); full scan required before Release Gate"
-            ),
-        });
-        let placeholder_bytes = serde_json::to_vec(&placeholder).map_err(|error| AppError::Io {
-            role: "serialize skipped-scan placeholder",
-            detail: error.to_string(),
-        })?;
-        (placeholder_bytes, 0u64, 0u64)
-    } else {
-        scan_image(run_dir, component, &reference, database_reference)?
-    };
-    Ok(ImageEvidence {
+    Ok(ImageIdentity {
         component: component.to_owned(),
-        reference: reference.clone(),
-        digest,
-        scan: ScanEvidence {
-            scanner: format!("trivy:{}", lock.trivy),
-            database_digest: database_digest.to_owned(),
-            critical,
-            high,
-            report: format!("artifact://package/{component}/trivy.json"),
-            report_sha256: sha256(&scan_bytes),
-        },
+        reference,
+        digest: first,
     })
-}
-
-#[cfg(target_os = "linux")]
-fn scan_image(
-    run_dir: &Path,
-    component: &str,
-    _reference: &str,
-    _database_reference: &str,
-) -> Result<(Vec<u8>, u64, u64), AppError> {
-    // Trivy removed: return placeholder report with zero vulnerabilities
-    let scan_path = scan_path(run_dir, component);
-    let scan_bytes = b"{\"Results\":[]}".to_vec();
-    fs::write(&scan_path, &scan_bytes).map_err(|error| io_error("write Trivy report", error))?;
-    Ok((scan_bytes, 0, 0))
-}
-
-#[cfg(target_os = "linux")]
-fn scan_path(run_dir: &Path, component: &str) -> PathBuf {
-    run_dir.join(format!("trivy-{component}.json"))
 }
 
 #[cfg(target_os = "linux")]
@@ -902,53 +769,10 @@ fn platform_digest_from_manifest(
 }
 
 #[cfg(target_os = "linux")]
-fn verified_trivy_database() -> Result<(String, String), AppError> {
-    // Trivy removed: return develop placeholder without external registry check
-    Ok(develop_trivy_database())
-}
-
-#[cfg(target_os = "linux")]
-fn develop_trivy_database() -> (String, String) {
-    // Develop iteration mode: the Trivy database pin is optional so the loop
-    // does not depend on a specific upstream digest. If the caller still
-    // supplies a well-formed pin, honor it so the manifest records the
-    // eventual production identity; otherwise emit an explicit placeholder
-    // digest that satisfies the manifest schema (format only). No registry
-    // connectivity check is performed in this mode.
-    let reference = std::env::var("LABWEAVER_TRIVY_DATABASE_REFERENCE")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let expected = std::env::var("LABWEAVER_TRIVY_DATABASE_DIGEST")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    if let (Some(reference), Some(expected)) = (reference, expected)
-        && validate_trivy_database_reference(&reference, &expected).is_ok()
-    {
-        return (reference, expected);
-    }
-    (
-        DEVELOP_TRIVY_DATABASE_REFERENCE.to_owned(),
-        DEVELOP_TRIVY_DATABASE_DIGEST.to_owned(),
-    )
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn validate_trivy_database_reference(reference: &str, expected: &str) -> Result<(), AppError> {
-    if !is_digest(expected) || !reference.ends_with(&format!("@{expected}")) {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_MANIFEST_INVALID",
-            detail: "Trivy database must be an exact OCI digest reference".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
     let platform = &lock.platform_images;
     let checks = [
         ("docker-buildx", vec!["version"], platform.buildx.as_str()),
-        ("trivy", vec!["--version"], platform.trivy.as_str()),
         ("helm", vec!["version", "--short"], platform.helm.as_str()),
     ];
     for (program, arguments, expected) in checks {
@@ -1010,7 +834,6 @@ fn verify_rust_toolchain_inputs(
         .collect::<Vec<_>>();
     let builder_marker = format!("rust:{rust_toolchain}-");
     let toolchain_argument = format!("ARG RUST_TOOLCHAIN={rust_toolchain}");
-    let controller_toolchain = format!("{rust_toolchain}-x86_64-unknown-linux-gnu");
     let build_inputs = [
         ("containers/Containerfile.rust", toolchain_argument.as_str()),
         ("access-gateway/Dockerfile", toolchain_argument.as_str()),
@@ -1021,10 +844,6 @@ fn verify_rust_toolchain_inputs(
         (
             "containers/Containerfile.oj-cpp17",
             toolchain_argument.as_str(),
-        ),
-        (
-            "containers/Containerfile.controller",
-            controller_toolchain.as_str(),
         ),
         ("tools/xtask-container.sh", rust_toolchain),
     ];
@@ -1117,17 +936,6 @@ fn connected_validate(manifest: &PackageManifest, root: &Path) -> Result<(), App
     verify_rust_toolchain(root, &lock.platform_images)?;
     if sha256(&lock_bytes) != manifest.component_lock_hash {
         return manifest_invalid("component lock identity changed");
-    }
-    let (_, database_digest) = verified_trivy_database()?;
-    if manifest
-        .images
-        .iter()
-        .any(|image| image.scan.database_digest != database_digest)
-    {
-        return Err(AppError::PlatformImage {
-            code: "LW_PACKAGE_CONNECTED_IDENTITY_MISMATCH",
-            detail: "scanner database identity differs from package evidence".to_owned(),
-        });
     }
     for image in &manifest.images {
         if inspect_digest(&image.reference)? != image.digest {
@@ -1351,8 +1159,9 @@ mod tests {
                 buildkit: "v0.31.1".to_owned(),
                 buildx: "v0.35.0".to_owned(),
             },
-            images: PLATFORM_COMPONENTS
-                .iter()
+            images: package_components(PLATFORM_PROFILE)
+                .expect("platform profile is declared")
+                .into_iter()
                 .enumerate()
                 .map(|(index, component)| {
                     let digest_char = ['3', '4', '5', '6', '7', '8', '9'][index];
@@ -1360,63 +1169,32 @@ mod tests {
                     let reference = format!(
                         "harbor.internal.example/labweaver-system/{component}@{image_digest}"
                     );
-                    ImageEvidence {
-                        component: (*component).to_owned(),
+                    ImageIdentity {
+                        component: component.to_owned(),
                         reference: reference.clone(),
                         digest: image_digest,
-                        scan: ScanEvidence {
-                            scanner: "trivy:0.72.0".to_owned(),
-                            database_digest: digest('1'),
-                            critical: 0,
-                            high: 2,
-                            report: format!("artifact://package/{component}/trivy.json"),
-                            report_sha256: digest('2'),
-                        },
                     }
                 })
                 .collect(),
-            overall: "passed".to_owned(),
         }
     }
 
     #[test]
-    fn static_manifest_accepts_exact_complete_digest_set() {
+    fn static_manifest_accepts_digest_bound_images() {
         assert!(validate_manifest(&valid_manifest()).is_ok());
-    }
-
-    #[test]
-    fn develop_placeholder_database_identity_is_schema_valid() {
-        assert!(is_digest(DEVELOP_TRIVY_DATABASE_DIGEST));
-        assert!(
-            DEVELOP_TRIVY_DATABASE_REFERENCE
-                .ends_with(&format!("@{DEVELOP_TRIVY_DATABASE_DIGEST}"))
-        );
-        let (reference, digest) = (
-            DEVELOP_TRIVY_DATABASE_REFERENCE,
-            DEVELOP_TRIVY_DATABASE_DIGEST,
-        );
-        assert!(validate_trivy_database_reference(reference, digest).is_ok());
     }
 
     #[test]
     fn resource_profile_accepts_only_the_resource_service_image() {
         let mut manifest = valid_manifest();
         manifest.profile = RESOURCE_PROFILE.to_owned();
-        manifest.images = vec![ImageEvidence {
-            component: RESOURCE_COMPONENTS[0].to_owned(),
+        manifest.images = vec![ImageIdentity {
+            component: "resource-service".to_owned(),
             reference: format!(
                 "harbor.internal.example/labweaver-system/resource-service@{}",
                 digest('3')
             ),
             digest: digest('3'),
-            scan: ScanEvidence {
-                scanner: "trivy:0.72.0".to_owned(),
-                database_digest: digest('1'),
-                critical: 0,
-                high: 0,
-                report: "artifact://package/resource-service/trivy.json".to_owned(),
-                report_sha256: digest('2'),
-            },
         }];
         assert!(validate_manifest(&manifest).is_ok());
 
@@ -1425,10 +1203,10 @@ mod tests {
     }
 
     #[test]
-    fn static_manifest_rejects_missing_duplicate_and_external_images() {
-        let mut missing = valid_manifest();
-        missing.images.pop();
-        assert!(validate_manifest(&missing).is_err());
+    fn static_manifest_rejects_empty_duplicate_and_external_images() {
+        let mut empty = valid_manifest();
+        empty.images.clear();
+        assert!(validate_manifest(&empty).is_err());
 
         let mut duplicate = valid_manifest();
         duplicate.images[1] = duplicate.images[0].clone();
@@ -1440,21 +1218,6 @@ mod tests {
             external.images[0].digest
         );
         assert!(validate_manifest(&external).is_err());
-    }
-
-    #[test]
-    fn static_manifest_rejects_critical_or_invalid_scan_evidence() {
-        let mut critical = valid_manifest();
-        critical.images[0].scan.critical = 1;
-        assert!(validate_manifest(&critical).is_err());
-
-        let mut unpinned_database = valid_manifest();
-        unpinned_database.images[0].scan.database_digest = "latest".to_owned();
-        assert!(validate_manifest(&unpinned_database).is_err());
-
-        let mut unbound_report = valid_manifest();
-        unbound_report.images[0].scan.report = "trivy.json".to_owned();
-        assert!(validate_manifest(&unbound_report).is_err());
     }
 
     #[test]
@@ -1517,29 +1280,6 @@ mod tests {
         );
         assert!(pinned_mirror("harbor.lab.lan", "RUST_BUILDER", "rust:latest").is_err());
         Ok(())
-    }
-
-    #[test]
-    fn trivy_database_reference_requires_the_exact_digest() {
-        let expected = digest('a');
-        assert!(
-            validate_trivy_database_reference(
-                &format!("harbor.lab.lan/cache/trivy-db@{expected}"),
-                &expected,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_trivy_database_reference("harbor.lab.lan/cache/trivy-db:2", &expected,)
-                .is_err()
-        );
-        assert!(
-            validate_trivy_database_reference(
-                &format!("harbor.lab.lan/cache/trivy-db@{}", digest('b')),
-                &expected,
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -1628,20 +1368,6 @@ mod tests {
                 ..
             }
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn image_ci_scans_the_extracted_oci_layout() -> std::io::Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let workflow = std::fs::read_to_string(
-            root.join(".github")
-                .join("workflows")
-                .join("platform-images.yml"),
-        )?;
-        assert!(workflow.contains("tar -xf \"$RUNNER_TEMP/$COMPONENT-first.tar\""));
-        assert!(workflow.contains("image --input \"/evidence/$COMPONENT-oci\""));
-        assert!(workflow.contains("LW_PACKAGE_OCI_LAYOUT_INVALID"));
         Ok(())
     }
 }

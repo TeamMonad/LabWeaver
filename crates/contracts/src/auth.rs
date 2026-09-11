@@ -89,12 +89,12 @@ pub struct CourseMembership {
     pub expires_at: Option<UtcTimestamp>,
 }
 
-/// Project-local scope nested under a course membership.
+/// Project-local scope. A project may optionally be associated with teaching.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectMembership {
-    /// Owning course.
-    pub course_id: CourseId,
+    /// Optional teaching course association.
+    pub course_id: Option<CourseId>,
     /// Project scope.
     pub project_id: ProjectId,
     /// Actor scope.
@@ -118,13 +118,11 @@ pub enum AuthorizationScope {
     /// Course-scoped endpoint.
     Course { course_id: CourseId },
     /// Project-scoped endpoint.
-    Project {
-        course_id: CourseId,
-        project_id: ProjectId,
-    },
+    Project { project_id: ProjectId },
     /// Environment owner resolution is supplied by the owning service.
     Environment {
-        course_id: CourseId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
         environment_id: EnvironmentId,
         /// Exact Environment-authoritative revision resolved for this request.
         environment_revision: Revision,

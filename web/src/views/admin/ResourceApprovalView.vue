@@ -2,7 +2,9 @@
   <div class="resource-approval">
     <header class="page-header">
       <h2>资源审批与 Lease 管理</h2>
-      <p class="page-subtitle">审批平台资源申请，管理已签发的资源 Lease。所有变更均携带 revision fence 与幂等键。</p>
+      <p class="page-subtitle">
+        审批平台资源申请，管理已签发的资源 Lease。所有变更均携带 revision fence 与幂等键。
+      </p>
     </header>
 
     <DiagnosticBanner
@@ -13,17 +15,43 @@
       :severity="approval.outcome.kind === 'success' ? 'info' : 'error'"
     />
 
-    <section class="request-section" aria-labelledby="request-heading">
-      <h3 id="request-heading" class="section-title">
-        <SvgIcon name="admin_panel_settings" size="sm" aria-hidden="true" />
+    <section
+      class="request-section"
+      aria-labelledby="request-heading"
+    >
+      <h3
+        id="request-heading"
+        class="section-title"
+      >
+        <SvgIcon
+          name="admin_panel_settings"
+          size="sm"
+          aria-hidden="true"
+        />
         资源申请
       </h3>
 
       <div class="filter-row">
-        <label class="filter-label" for="course-filter">课程过滤</label>
-        <select id="course-filter" v-model="courseFilter" class="filter-select" aria-label="按课程过滤资源申请">
-          <option value="">全部课程</option>
-          <option v-for="courseId in courseOptions" :key="courseId" :value="courseId">{{ courseId }}</option>
+        <label
+          class="filter-label"
+          for="course-filter"
+        >课程过滤</label>
+        <select
+          id="course-filter"
+          v-model="courseFilter"
+          class="filter-select"
+          aria-label="按课程过滤资源申请"
+        >
+          <option value="">
+            全部课程
+          </option>
+          <option
+            v-for="courseId in courseOptions"
+            :key="courseId"
+            :value="courseId"
+          >
+            {{ courseId }}
+          </option>
         </select>
       </div>
 
@@ -36,6 +64,7 @@
         @retry="approval.load"
       />
 
+      <!-- @vue-generic {RequestRow} -->
       <DataTable
         v-else
         class="request-table"
@@ -48,11 +77,17 @@
         @row-click="(row) => approval.selectRequest((row as unknown as RequestRow).id)"
       >
         <template #state="{ row }">
-          <GcpStatusPill :state="row.state" domain="resource" />
+          <GcpStatusPill
+            :state="row.state"
+            domain="resource"
+          />
         </template>
       </DataTable>
 
-      <div v-if="approval.selectedRequest" class="request-detail md-card">
+      <div
+        v-if="approval.selectedRequest"
+        class="request-detail md-card"
+      >
         <div class="detail-meta">
           <div class="meta-row">
             <span class="meta-label">申请 ID</span>
@@ -71,12 +106,12 @@
             <span class="meta-value">{{ approval.selectedRequest.courseId }} / {{ approval.selectedRequest.projectId ?? '—' }}</span>
           </div>
           <div class="meta-row">
-            <span class="meta-label">目标环境</span>
-            <code class="meta-value">{{ approval.selectedRequest.target.environmentId }}</code>
+            <span class="meta-label">目标</span>
+            <code class="meta-value">{{ targetEnvironment(approval.selectedRequest.target) }}</code>
           </div>
           <div class="meta-row">
             <span class="meta-label">Release</span>
-            <code class="meta-value">{{ approval.selectedRequest.target.releaseId }} · v{{ approval.selectedRequest.target.releaseVersion }} · {{ truncateSha256(approval.selectedRequest.target.releaseSha256) }}</code>
+            <code class="meta-value">{{ targetRelease(approval.selectedRequest.target) }}</code>
           </div>
           <div class="meta-row">
             <span class="meta-label">资源规格</span>
@@ -88,7 +123,10 @@
           </div>
           <div class="meta-row">
             <span class="meta-label">状态</span>
-            <GcpStatusPill :state="approval.selectedRequest.state" domain="resource" />
+            <GcpStatusPill
+              :state="approval.selectedRequest.state"
+              domain="resource"
+            />
           </div>
           <div class="meta-row">
             <span class="meta-label">当前 Revision</span>
@@ -98,7 +136,10 @@
             <span class="meta-label">创建 / 更新</span>
             <span class="meta-value">{{ formatTimestamp(approval.selectedRequest.createdAt) }} / {{ formatTimestamp(approval.selectedRequest.updatedAt) }}</span>
           </div>
-          <div v-if="approval.selectedRequest.diagnosticCode" class="meta-row">
+          <div
+            v-if="approval.selectedRequest.diagnosticCode"
+            class="meta-row"
+          >
             <span class="meta-label">Diagnostic</span>
             <code class="meta-value">{{ approval.selectedRequest.diagnosticCode }}</code>
           </div>
@@ -116,23 +157,72 @@
 
           <template v-if="approval.selectedRequest.state === 'reviewing'">
             <div class="approve-inputs">
-              <label class="input-label" for="provider-binding">Provider Binding</label>
-              <input
-                id="provider-binding"
-                v-model="providerBinding"
-                class="text-input"
-                type="text"
-                list="provider-binding-options"
-                aria-label="Provider Binding"
-                aria-describedby="provider-binding-hint"
-              />
-              <datalist id="provider-binding-options">
-                <option value="mock-capacity-primary">mock-capacity-primary（Mock 容量）</option>
-              </datalist>
-              <p v-if="isMockProviderBinding" id="provider-binding-hint" class="mock-binding-warning" role="note">
-                Mock 容量提供方：仅用于容量模拟与演示，不提供真实算力。
+              <template v-if="requiresGpuProvider">
+                <label
+                  class="input-label"
+                  for="provider-binding"
+                >GPU Provider Binding</label>
+                <select
+                  id="provider-binding"
+                  v-model="providerBinding"
+                  class="text-input"
+                  aria-label="GPU Provider Binding"
+                  :disabled="approval.providerOptions.kind !== 'success' || eligibleProviderOptions.length === 0"
+                  aria-describedby="provider-binding-hint"
+                >
+                  <option value="">
+                    选择 Resource GPU 提供方
+                  </option>
+                  <option
+                    v-for="option in eligibleProviderOptions"
+                    :key="option.providerBinding"
+                    :value="option.providerBinding"
+                  >
+                    {{ option.providerBinding }} · {{ option.gpuClasses.length ? `GPU: ${option.gpuClasses.join('、')}` : '无 GPU 项目' }}
+                  </option>
+                </select>
+              </template>
+              <template v-else>
+                <label
+                  class="input-label"
+                  for="provider-binding"
+                >执行后端绑定（CPU 必填）</label>
+                <input
+                  id="provider-binding"
+                  v-model="providerBinding"
+                  class="text-input"
+                  type="text"
+                  maxlength="120"
+                  placeholder="填写当前 Environment 可用的 provider binding"
+                  aria-label="执行后端绑定"
+                  aria-describedby="provider-binding-hint"
+                >
+              </template>
+              <p
+                id="provider-binding-hint"
+                class="provider-binding-hint"
+                role="note"
+              >
+                <template v-if="approval.providerOptions.kind === 'loading'">
+                  正在读取 Resource 容量目录。
+                </template>
+                <template v-else-if="approval.providerOptions.kind === 'error'">
+                  {{ approval.providerOptions.diagnostic.message }}
+                </template>
+                <template v-else-if="requiresGpuProvider && eligibleProviderOptions.length === 0">
+                  当前 GPU 请求没有匹配的真实容量提供方，无法审批。
+                </template>
+                <template v-else-if="requiresGpuProvider">
+                  GPU 提供方必须来自 Resource 当前 GPU 目录。
+                </template>
+                <template v-else>
+                  CPU-only 请求不依赖 GPU 目录；填写已在 Environment 配置中启用的执行后端绑定。
+                </template>
               </p>
-              <label class="input-label" for="approve-duration">批准时长（秒）</label>
+              <label
+                class="input-label"
+                for="approve-duration"
+              >批准时长（秒）</label>
               <input
                 id="approve-duration"
                 v-model.number="approveDuration"
@@ -140,22 +230,74 @@
                 type="number"
                 min="1"
                 aria-label="批准时长（秒）"
-              />
+              >
             </div>
 
-            <fieldset v-if="resizeMode" class="resize-fieldset">
+            <fieldset
+              v-if="resizeMode"
+              class="resize-fieldset"
+            >
               <legend>调整后资源规格</legend>
               <div class="approve-inputs">
-                <label class="input-label" for="resize-cpu">CPU（millicores）</label>
-                <input id="resize-cpu" v-model.number="resizeCpuMillicores" class="text-input" type="number" min="1" aria-label="调整后 CPU millicores" />
-                <label class="input-label" for="resize-memory">内存（GiB）</label>
-                <input id="resize-memory" v-model.number="resizeMemoryGiB" class="text-input" type="number" min="1" aria-label="调整后内存 GiB" />
-                <label class="input-label" for="resize-storage">存储（GiB）</label>
-                <input id="resize-storage" v-model.number="resizeStorageGiB" class="text-input" type="number" min="1" aria-label="调整后存储 GiB" />
-                <label class="input-label" for="resize-gpu-class">GPU 类别（留空表示无 GPU）</label>
-                <input id="resize-gpu-class" v-model="resizeGpuClass" class="text-input" type="text" aria-label="调整后 GPU 类别" />
-                <label class="input-label" for="resize-gpu-count">GPU 数量</label>
-                <input id="resize-gpu-count" v-model.number="resizeGpuCount" class="text-input" type="number" min="0" aria-label="调整后 GPU 数量" />
+                <label
+                  class="input-label"
+                  for="resize-cpu"
+                >CPU（millicores）</label>
+                <input
+                  id="resize-cpu"
+                  v-model.number="resizeCpuMillicores"
+                  class="text-input"
+                  type="number"
+                  min="1"
+                  aria-label="调整后 CPU millicores"
+                >
+                <label
+                  class="input-label"
+                  for="resize-memory"
+                >内存（GiB）</label>
+                <input
+                  id="resize-memory"
+                  v-model.number="resizeMemoryGiB"
+                  class="text-input"
+                  type="number"
+                  min="1"
+                  aria-label="调整后内存 GiB"
+                >
+                <label
+                  class="input-label"
+                  for="resize-storage"
+                >存储（GiB）</label>
+                <input
+                  id="resize-storage"
+                  v-model.number="resizeStorageGiB"
+                  class="text-input"
+                  type="number"
+                  min="1"
+                  aria-label="调整后存储 GiB"
+                >
+                <label
+                  class="input-label"
+                  for="resize-gpu-class"
+                >GPU 类别（留空表示无 GPU）</label>
+                <input
+                  id="resize-gpu-class"
+                  v-model="resizeGpuClass"
+                  class="text-input"
+                  type="text"
+                  aria-label="调整后 GPU 类别"
+                >
+                <label
+                  class="input-label"
+                  for="resize-gpu-count"
+                >GPU 数量</label>
+                <input
+                  id="resize-gpu-count"
+                  v-model.number="resizeGpuCount"
+                  class="text-input"
+                  type="number"
+                  min="0"
+                  aria-label="调整后 GPU 数量"
+                >
               </div>
             </fieldset>
 
@@ -187,7 +329,10 @@
             </div>
           </template>
 
-          <div v-else class="approval-buttons">
+          <div
+            v-else
+            class="approval-buttons"
+          >
             <button
               v-if="approval.selectedRequest.state === 'allocating'"
               type="button"
@@ -197,18 +342,36 @@
             >
               重试分配
             </button>
-            <p v-else class="state-note">
+            <p
+              v-else
+              class="state-note"
+            >
               当前状态 {{ resourceRequestStateLabel(approval.selectedRequest.state) }} 为只读，无可用管理操作。
             </p>
           </div>
         </div>
       </div>
-      <p v-else class="select-hint">选择一条申请查看详情并执行审批操作。</p>
+      <p
+        v-else
+        class="select-hint"
+      >
+        选择一条申请查看详情并执行审批操作。
+      </p>
     </section>
 
-    <section class="lease-section" aria-labelledby="lease-heading">
-      <h3 id="lease-heading" class="section-title">
-        <SvgIcon name="environment" size="sm" aria-hidden="true" />
+    <section
+      class="lease-section"
+      aria-labelledby="lease-heading"
+    >
+      <h3
+        id="lease-heading"
+        class="section-title"
+      >
+        <SvgIcon
+          name="environment"
+          size="sm"
+          aria-hidden="true"
+        />
         资源 Lease
       </h3>
 
@@ -221,6 +384,7 @@
         @retry="approval.load"
       />
 
+      <!-- @vue-generic {LeaseRow} -->
       <DataTable
         v-else
         class="lease-table"
@@ -233,11 +397,17 @@
         @row-click="(row) => approval.selectLease((row as unknown as LeaseRow).id)"
       >
         <template #state="{ row }">
-          <GcpStatusPill :state="row.state" domain="resource" />
+          <GcpStatusPill
+            :state="row.state"
+            domain="resource"
+          />
         </template>
       </DataTable>
 
-      <div v-if="approval.selectedLease" class="lease-detail md-card">
+      <div
+        v-if="approval.selectedLease"
+        class="lease-detail md-card"
+      >
         <div class="detail-meta">
           <div class="meta-row">
             <span class="meta-label">Lease ID</span>
@@ -253,7 +423,10 @@
           </div>
           <div class="meta-row">
             <span class="meta-label">状态</span>
-            <GcpStatusPill :state="approval.selectedLease.state" domain="resource" />
+            <GcpStatusPill
+              :state="approval.selectedLease.state"
+              domain="resource"
+            />
           </div>
           <div class="meta-row">
             <span class="meta-label">当前 Revision</span>
@@ -267,7 +440,10 @@
             <span class="meta-label">Expires At</span>
             <span class="meta-value">{{ approval.selectedLease.expiresAt ? formatTimestamp(approval.selectedLease.expiresAt) : '—' }}</span>
           </div>
-          <div v-if="approval.selectedLease.revokeReasonCode" class="meta-row">
+          <div
+            v-if="approval.selectedLease.revokeReasonCode"
+            class="meta-row"
+          >
             <span class="meta-label">撤销原因码</span>
             <code class="meta-value">{{ approval.selectedLease.revokeReasonCode }}</code>
           </div>
@@ -275,7 +451,10 @@
 
         <div class="approval-controls">
           <div class="approve-inputs">
-            <label class="input-label" for="renew-duration">续期时长（秒）</label>
+            <label
+              class="input-label"
+              for="renew-duration"
+            >续期时长（秒）</label>
             <input
               id="renew-duration"
               v-model.number="renewDuration"
@@ -283,7 +462,7 @@
               type="number"
               min="1"
               aria-label="续期时长（秒）"
-            />
+            >
           </div>
           <textarea
             v-model="leaseReason"
@@ -312,13 +491,21 @@
             >
               撤销 Lease
             </button>
-            <p v-if="approval.selectedLease.state === 'expired' || approval.selectedLease.state === 'revoked'" class="state-note">
+            <p
+              v-if="approval.selectedLease.state === 'expired' || approval.selectedLease.state === 'revoked'"
+              class="state-note"
+            >
               当前状态 {{ resourceLeaseStateLabel(approval.selectedLease.state) }} 为终态，无可用管理操作。
             </p>
           </div>
         </div>
       </div>
-      <p v-else class="select-hint">选择一条 Lease 执行续期或撤销。</p>
+      <p
+        v-else
+        class="select-hint"
+      >
+        选择一条 Lease 执行续期或撤销。
+      </p>
     </section>
 
     <ConfirmDialog
@@ -351,12 +538,12 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { useResourceApproval, type LeaseActionKind, type RequestActionKind } from '@/composables/useResourceApproval'
-import type { WorkloadResources } from '@/generated/contracts'
-import { formatBytes, formatTimestamp, truncateSha256 } from '@/utils/format'
+import type { ResourceRequestSchemaResourceTarget, WorkloadResources } from '@/generated/contracts'
+import { formatBytes, formatTimestamp } from '@/utils/format'
 import { resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
 
 const GIB = 1024 ** 3
-const DEFAULT_PROVIDER_BINDING = 'mock-capacity-primary'
+const DEFAULT_PROVIDER_BINDING = ''
 
 const approval = useResourceApproval()
 
@@ -394,11 +581,23 @@ function formatDuration(seconds: number): string {
   return `${seconds} 秒`
 }
 
+function targetEnvironment(target: ResourceRequestSchemaResourceTarget): string {
+  return target.kind === 'environment' ? target.environmentId : `TaskRun ${target.taskRunId}`
+}
+
+function targetRelease(target: ResourceRequestSchemaResourceTarget): string {
+  return target.kind === 'environment' ? `${target.releaseId} · v${target.releaseVersion}` : '—'
+}
+
 const courseFilter = ref('')
 
 const courseOptions = computed(() => {
   if (approval.requests.kind !== 'success') return []
-  return Array.from(new Set(approval.requests.data.map((request) => request.courseId))).sort()
+  return Array.from(new Set(
+    approval.requests.data
+      .map((request) => request.courseId)
+      .filter((courseId): courseId is string => typeof courseId === 'string'),
+  )).sort()
 })
 
 const requestColumns: DataTableColumn<RequestRow>[] = [
@@ -419,8 +618,8 @@ const requestRows = computed<RequestRow[]>(() => {
     .map((request) => ({
       id: request.id,
       requestKey: request.requestKey,
-      environmentId: request.target.environmentId,
-      releaseVersion: `v${request.target.releaseVersion}`,
+      environmentId: targetEnvironment(request.target),
+      releaseVersion: request.target.kind === 'environment' ? `v${request.target.releaseVersion}` : '—',
       resources: formatResources(request.requestedResources),
       duration: formatDuration(request.requestedDurationSeconds),
       state: resourceRequestStateLabel(request.state),
@@ -458,7 +657,6 @@ const leaseRows = computed<LeaseRow[]>(() => {
 
 const requestReason = ref('')
 const providerBinding = ref(DEFAULT_PROVIDER_BINDING)
-const isMockProviderBinding = computed(() => /mock/i.test(providerBinding.value.trim()))
 const approveDuration = ref(7200)
 const resizeMode = ref(false)
 const resizeCpuMillicores = ref(2000)
@@ -472,8 +670,27 @@ const validReason = computed(() => {
   return length >= 1 && length <= 500
 })
 
+const requiresGpuProvider = computed(() => {
+  if (!resizeMode.value) return Boolean(approval.selectedRequest?.requestedResources.gpu)
+  return resizeGpuClass.value.trim().length > 0
+})
+
+const validProviderBinding = computed(() => {
+  const binding = providerBinding.value.trim()
+  const hasControlCharacter = Array.from(binding).some((character) => {
+    const code = character.charCodeAt(0)
+    return code < 0x20 || code === 0x7f
+  })
+  if (!binding || binding.length > 120 || hasControlCharacter) return false
+  return requiresGpuProvider.value
+    ? eligibleProviderOptions.value.some((option) => option.providerBinding === binding)
+    : true
+})
+
 const validApproveInputs = computed(
-  () => providerBinding.value.trim().length > 0 && Number.isInteger(approveDuration.value) && approveDuration.value > 0,
+  () => validProviderBinding.value
+    && Number.isInteger(approveDuration.value)
+    && approveDuration.value > 0,
 )
 
 const validResizeInputs = computed(
@@ -488,6 +705,13 @@ const canSubmitRequestAction = computed(
   () => validReason.value && validApproveInputs.value && (!resizeMode.value || validResizeInputs.value),
 )
 
+const eligibleProviderOptions = computed(() => {
+  if (approval.providerOptions.kind !== 'success' || !approval.selectedRequest) return []
+  const resources = resizeMode.value ? resizeResources() : approval.selectedRequest.requestedResources
+  if (!resources.gpu) return approval.providerOptions.data
+  return approval.providerOptions.data.filter((option) => option.gpuClasses.includes(resources.gpu!.class))
+})
+
 function resizeResources(): WorkloadResources {
   const gpuClass = resizeGpuClass.value.trim()
   return {
@@ -499,20 +723,30 @@ function resizeResources(): WorkloadResources {
 }
 
 watch(
-  () => approval.selectedRequest,
-  (request) => {
+  [() => approval.selectedRequest, () => approval.providerOptions],
+  () => {
     requestReason.value = ''
     resizeMode.value = false
     providerBinding.value = DEFAULT_PROVIDER_BINDING
-    if (!request) return
-    approveDuration.value = request.requestedDurationSeconds
-    resizeCpuMillicores.value = request.requestedResources.cpuMillicores
-    resizeMemoryGiB.value = Math.round(request.requestedResources.memoryBytes / GIB)
-    resizeStorageGiB.value = Math.round(request.requestedResources.storageBytes / GIB)
-    resizeGpuClass.value = request.requestedResources.gpu?.class ?? ''
-    resizeGpuCount.value = request.requestedResources.gpu?.count ?? 0
+    const selectedRequest = approval.selectedRequest
+    if (!selectedRequest) return
+    approveDuration.value = selectedRequest.requestedDurationSeconds
+    resizeCpuMillicores.value = selectedRequest.requestedResources.cpuMillicores
+    resizeMemoryGiB.value = Math.round(selectedRequest.requestedResources.memoryBytes / GIB)
+    resizeStorageGiB.value = Math.round(selectedRequest.requestedResources.storageBytes / GIB)
+    resizeGpuClass.value = selectedRequest.requestedResources.gpu?.class ?? ''
+    resizeGpuCount.value = selectedRequest.requestedResources.gpu?.count ?? 0
+    if (requiresGpuProvider.value) providerBinding.value = eligibleProviderOptions.value[0]?.providerBinding ?? ''
   },
+  { immediate: true },
 )
+
+watch(eligibleProviderOptions, (options) => {
+  if (!requiresGpuProvider.value) return
+  if (!options.some((option) => option.providerBinding === providerBinding.value)) {
+    providerBinding.value = options[0]?.providerBinding ?? ''
+  }
+})
 
 const leaseReason = ref('')
 const renewDuration = ref(7200)
@@ -717,7 +951,7 @@ async function onLeaseConfirmed() {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.mock-binding-warning {
+.provider-binding-hint {
   grid-column: 2;
   margin: 0;
   padding: 6px 10px;

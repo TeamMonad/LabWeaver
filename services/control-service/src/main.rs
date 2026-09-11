@@ -1,31 +1,42 @@
 //! Production Control Service process entry point.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use artifact_store::{S3Credential, S3ImmutableObjectStore, S3StoreConfig};
-use auth::MtlsFileConfig;
-use control_service::api::{ApiState, router, serve_plain};
-use control_service::clients::{AccessClient, AgentClient, EvaluationClient, MtlsClientFileConfig};
+use auth::{
+    ServerTlsFileConfig, ServiceAuthConfig, ServiceAuthError, ServiceTokenClient,
+    ServiceTokenClientConfig, ServiceTokenVerifier, TransportSecurityMode,
+};
+use control_service::api::{ApiState, authenticated_router};
+use control_service::clients::{
+    AccessClient, AgentClient, EnvironmentClient, EvaluationClient, ServiceHttpClientConfig,
+};
 use control_service::messaging::{
-    AgentBuildConsumer, AgentRunConsumer, ControlOutboxDispatcher, connect_nats_mtls,
+    AgentBuildConsumer, AgentRunConsumer, AuthoringPublicationConsumer, ControlOutboxDispatcher,
+    connect_nats_mtls,
 };
 use control_service::{ControlConfig, ControlService};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
 
+#[path = "../../http_transport.rs"]
+mod http_transport;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentFile {
     database_url_file: String,
     database_max_connections: u32,
-    gateway_mtls: MtlsFileConfig,
-    access_service: MtlsClientFileConfig,
-    agent_service: MtlsClientFileConfig,
-    evaluation_service: MtlsClientFileConfig,
+    gateway_tls: ServerTlsFileConfig,
+    access_service: ServiceHttpClientConfig,
+    agent_service: ServiceHttpClientConfig,
+    environment_service: ServiceHttpClientConfig,
+    evaluation_service: ServiceHttpClientConfig,
     object_store: S3StoreConfig,
     object_store_access_key_file: String,
     object_store_secret_key_file: String,
@@ -48,15 +59,24 @@ struct NatsFileConfig {
     quarantine_subject: String,
     build_consumer_name: String,
     build_quarantine_subject: String,
+    authoring_stream_name: String,
+    authoring_consumer_name: String,
+    authoring_quarantine_subject: String,
     publish_timeout_milliseconds: u64,
     outbox_poll_milliseconds: u64,
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), StartupError> {
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
+    let tls = http_transport::load_server_config(
+        &deployment.gateway_tls.server_certificate_file,
+        &deployment.gateway_tls.server_key_file,
+    )?;
+    let (service_token_verifier, service_token_client) = discover_service_auth().await?;
     let database_url = read_trimmed(&deployment.database_url_file)?;
     let pool = PgPoolOptions::new()
         .max_connections(deployment.database_max_connections)
@@ -79,16 +99,31 @@ async fn main() -> Result<(), StartupError> {
         .await?,
     );
     let service = ControlService::new(pool.clone(), objects, deployment.control)?;
-    let access = AccessClient::new(deployment.access_service)?;
-    let agent = AgentClient::new(deployment.agent_service)?;
-    let evaluation = EvaluationClient::new(deployment.evaluation_service)?;
+    let access = AccessClient::new_authenticated(
+        deployment.access_service,
+        Arc::clone(&service_token_client),
+    )?;
+    let agent = AgentClient::new_authenticated(
+        deployment.agent_service,
+        Arc::clone(&service_token_client),
+    )?;
+    let environment = EnvironmentClient::new_authenticated(
+        deployment.environment_service,
+        Arc::clone(&service_token_client),
+    )?;
+    let evaluation = EvaluationClient::new_authenticated(
+        deployment.evaluation_service,
+        Arc::clone(&service_token_client),
+    )?;
     let state = Arc::new(ApiState {
         control: service.clone(),
         access,
         agent: agent.clone(),
-        evaluation,
+        environment,
+        evaluation: evaluation.clone(),
+        service_token_verifier: Arc::clone(&service_token_verifier),
     });
-    let bind = SocketAddr::from_str(&deployment.gateway_mtls.bind_addr)
+    let bind = SocketAddr::from_str(&deployment.gateway_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let nats = connect_nats_mtls(
@@ -112,25 +147,89 @@ async fn main() -> Result<(), StartupError> {
     )
     .await?;
     let build_consumer = AgentBuildConsumer::bind(
-        nats,
+        nats.clone(),
         &deployment.nats.stream_name,
         &deployment.nats.build_consumer_name,
         &deployment.nats.build_quarantine_subject,
     )
     .await?;
+    let authoring_consumer = AuthoringPublicationConsumer::bind(
+        nats,
+        &deployment.nats.authoring_stream_name,
+        &deployment.nats.authoring_consumer_name,
+        &deployment.nats.authoring_quarantine_subject,
+    )
+    .await?;
     let consumer_control = state.control.clone();
     let build_consumer_control = state.control.clone();
     let build_consumer_agent = agent.clone();
+    let authoring_consumer_control = state.control.clone();
+    let authoring_consumer_evaluation = evaluation;
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
     tokio::select! {
-        result = serve_plain(listener, router(state)) => result?,
+        result = http_transport::serve_tls(
+            listener,
+            authenticated_router(&state, &service_token_verifier),
+            tls,
+        ) => result?,
         result = cleanup_loop(service, interval) => result?,
         result = consumer_loop(consumer, consumer_control, agent) => result?,
         result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
+        result = authoring_consumer_loop(authoring_consumer, authoring_consumer_control, authoring_consumer_evaluation) => result?,
         result = outbox_loop(outbox, outbox_interval) => result?,
     }
     Ok(())
+}
+
+async fn discover_service_auth()
+-> Result<(Arc<ServiceTokenVerifier>, Arc<ServiceTokenClient>), StartupError> {
+    let issuer = required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?;
+    let audience = required_env("LABWEAVER_SERVICE_AUDIENCE")?;
+    let allowed_client_ids = required_set("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS")?;
+    let scopes = required_set("LABWEAVER_SERVICE_SCOPES")?;
+    let algorithms = required_set("LABWEAVER_SERVICE_JWT_ALGORITHMS")?;
+    let jwks_refresh_seconds = required_u64("LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS")?;
+    let jwks_retry_seconds = required_u64("LABWEAVER_SERVICE_JWKS_RETRY_SECONDS")?;
+    let refresh_skew_seconds = required_u64("LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS")?;
+    let client_id = required_env("LABWEAVER_SERVICE_CLIENT_ID")?;
+    let client_secret = read_trimmed(&required_env("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?)?;
+    let oidc_ca = std::fs::read(required_env("LABWEAVER_SERVICE_OIDC_CA")?)?;
+    let transport = TransportSecurityMode::Strict;
+    let http = auth::no_redirect_http_client(Some(&oidc_ca), transport)
+        .map_err(|_| StartupError::ServiceAuth(ServiceAuthError::HttpClient))?;
+    let verifier_config = ServiceAuthConfig::new(
+        &issuer,
+        audience.clone(),
+        allowed_client_ids,
+        BTreeSet::new(),
+        algorithms,
+        jwks_refresh_seconds,
+        jwks_retry_seconds,
+        transport,
+    )
+    .map_err(|_| StartupError::ServiceAuth(ServiceAuthError::InvalidConfig))?;
+    let verifier = Arc::new(
+        ServiceTokenVerifier::discover(verifier_config, http.clone())
+            .await
+            .map_err(StartupError::ServiceAuth)?,
+    );
+    let client_config = ServiceTokenClientConfig::new(
+        &issuer,
+        client_id,
+        client_secret,
+        audience,
+        scopes,
+        refresh_skew_seconds,
+        transport,
+    )
+    .map_err(StartupError::ServiceToken)?;
+    let client = Arc::new(
+        ServiceTokenClient::discover(client_config, http)
+            .await
+            .map_err(StartupError::ServiceToken)?,
+    );
+    Ok((verifier, client))
 }
 
 async fn build_consumer_loop(
@@ -150,6 +249,16 @@ async fn consumer_loop(
 ) -> Result<(), StartupError> {
     loop {
         consumer.process_next(&control, &agent).await?;
+    }
+}
+
+async fn authoring_consumer_loop(
+    mut consumer: AuthoringPublicationConsumer,
+    control: ControlService,
+    evaluation: EvaluationClient,
+) -> Result<(), StartupError> {
+    loop {
+        consumer.process_next(&control, &evaluation).await?;
     }
 }
 
@@ -192,6 +301,30 @@ fn load_deployment() -> Result<DeploymentFile, StartupError> {
     serde_yaml::from_str(&content).map_err(|_| StartupError::Configuration)
 }
 
+fn required_env(name: &'static str) -> Result<String, StartupError> {
+    std::env::var(name).map_err(|_| StartupError::Configuration)
+}
+
+fn required_u64(name: &'static str) -> Result<u64, StartupError> {
+    required_env(name)?
+        .parse::<u64>()
+        .map_err(|_| StartupError::Configuration)
+}
+
+fn required_set(name: &'static str) -> Result<BTreeSet<String>, StartupError> {
+    let values = required_env(name)?
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if values.is_empty() {
+        Err(StartupError::Configuration)
+    } else {
+        Ok(values)
+    }
+}
+
 fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> {
     if deployment.database_max_connections == 0
         || deployment.database_max_connections > 100
@@ -221,9 +354,13 @@ fn read_trimmed(path: &str) -> Result<String, StartupError> {
 async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
     let ready: bool = sqlx::query_scalar(
         "SELECT to_regclass('control.problem_packages') IS NOT NULL \
+         AND to_regclass('control.projects') IS NOT NULL \
          AND to_regclass('control.sse_course_cursors') IS NOT NULL \
+         AND to_regclass('control.sse_project_cursors') IS NOT NULL \
+         AND to_regclass('control.sse_project_events') IS NOT NULL \
          AND to_regclass('control.image_artifact_projections') IS NOT NULL \
-         AND to_regclass('control.container_build_projections') IS NOT NULL",
+         AND to_regclass('control.container_build_projections') IS NOT NULL \
+         AND to_regclass('control.authoring_approval_publications') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -269,6 +406,12 @@ enum StartupError {
     SchemaUnavailable,
     #[error("LW_CONTROL_CLOCK_INVALID")]
     Clock,
+    #[error("LW_CONTROL_SERVICE_AUTH_INVALID")]
+    ServiceAuth(#[source] ServiceAuthError),
+    #[error("LW_CONTROL_SERVICE_TOKEN_INVALID")]
+    ServiceToken(#[source] auth::ServiceTokenClientError),
+    #[error(transparent)]
+    HttpTransport(#[from] http_transport::HttpTransportError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -299,6 +442,7 @@ mod deployment_contract_tests {
         assert!(deployment.database_url_file.starts_with('/'));
         assert!(deployment.nats.server.starts_with("tls://"));
         assert!(deployment.nats.build_consumer_name.ends_with("-v1"));
+        assert!(deployment.nats.authoring_consumer_name.ends_with("-v1"));
         assert!(
             deployment
                 .nats
@@ -314,6 +458,12 @@ mod deployment_contract_tests {
         assert_ne!(
             deployment.nats.quarantine_subject,
             deployment.nats.build_quarantine_subject
+        );
+        assert!(
+            deployment
+                .nats
+                .authoring_quarantine_subject
+                .starts_with("labweaver.control.quarantine.")
         );
         assert!(!example.contains(".v2"));
     }

@@ -7,7 +7,7 @@ use std::str::FromStr;
 use auth::{
     CreateBffSession, KeyRing, cleanup_expired_auth_state, consume_backchannel_logout,
     create_bff_session, load_bff_session, load_logout_hint, load_membership_snapshot,
-    require_service_identity, revoke_bff_session, upsert_actor,
+    revoke_bff_session, upsert_actor,
 };
 use contracts::PlatformRole;
 use persistence_sqlx::Sha256Digest;
@@ -174,22 +174,6 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
     assert_eq!(memberships.project_memberships.len(), 1);
     assert_eq!(memberships.course_memberships[0].revision.get(), 4);
     assert_eq!(memberships.project_memberships[0].revision.get(), 5);
-    let san_uri = "spiffe://labweaver/gateway";
-    sqlx::query(
-        "INSERT INTO access.service_identities \
-         (service_identity_id, san_uri, service_name, state, revision) \
-         VALUES ($1, $2, 'gateway', 'active', 1)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(san_uri)
-    .execute(access)
-    .await?;
-    require_service_identity(access, san_uri, now).await?;
-    assert!(
-        require_service_identity(access, "spiffe://labweaver/unregistered", now)
-            .await
-            .is_err()
-    );
     let session = create_bff_session(
         access,
         &key_ring,

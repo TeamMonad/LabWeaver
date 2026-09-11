@@ -1,12 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createPlaywrightConfig } from '../../playwright.config.mjs'
-import { PROJECT_NAMES, REQUIREMENTS_BASELINE, ROLE_PROJECTS_BY_NAME } from '../config/role-projects.mjs'
-import { buildReport, validateConfiguration } from '../../scripts/verify-config.mjs'
-
-const dataMode = process.env.LABWEAVER_DATA_MODE || process.env.VITE_DATA_MODE || 'live'
-const isFixture = dataMode === 'fixture'
-const evidenceLabel = isFixture ? 'fixture' : 'live'
+import { PROJECT_NAMES, ROLE_PROJECTS_BY_NAME } from '../config/role-projects.mjs'
+import { validateConfiguration } from '../../scripts/verify-config.mjs'
 
 test('role projects are uniquely derived from the authoritative definition', () => {
   const config = createPlaywrightConfig({ ci: true })
@@ -18,8 +14,7 @@ test('role projects are uniquely derived from the authoritative definition', () 
     assert.deepEqual(project.dependencies, ['setup'])
     assert.equal(project.use.storageState, ROLE_PROJECTS_BY_NAME[name].storageState)
     assert.match(project.use.storageState, /^\.auth\/[a-z-]+\.json$/)
-    assert.equal(project.testIgnore.test(`${name}/example.live.spec.mjs`), isFixture)
-    assert.equal(project.testIgnore.test(`${name}/example.fixture.spec.mjs`), !isFixture)
+    assert.equal(project.testIgnore, undefined)
   }
   for (const name of ['visual-regression', 'a11y']) {
     const project = config.projects.find((candidate) => candidate.name === name)
@@ -31,36 +26,16 @@ test('role projects are uniquely derived from the authoritative definition', () 
   assert.equal(config.projects.some((project) => project.use?.storageState === '.auth/researcher.json'), false)
   assert.equal(ROLE_PROJECTS_BY_NAME['platform-admin'].aliases.includes('admin'), true)
   assert.equal(config.forbidOnly, true)
-  assert.match(config.outputDir, /^\.\/test-results(?:\/(live|fixture))?$/)
-  assert.equal(config.metadata.dataMode, dataMode)
-  assert.equal(config.metadata.evidenceLabel, evidenceLabel)
-  assert.match(config.metadata.sourceCommit, /^[0-9a-f]{40}$/i)
-  if (isFixture) {
-    assert.match(config.metadata.fixtureManifestHash, /^[0-9a-f]{16}$/i)
-    assert.equal(typeof config.metadata.browser, 'string')
-    assert.equal(typeof config.metadata.browserVersion, 'string')
-    assert.deepEqual(config.metadata.viewport, { width: 1440, height: 900 })
-  }
+  assert.equal(config.outputDir, './test-results')
+  assert.equal('ignoreHTTPSErrors' in config.use, false)
+  assert.equal('metadata' in config, false)
 })
 
-test('configuration contract retains failure artifacts and reports E1 only', async () => {
-  const result = await validateConfiguration({ requirementsBaselineHead: REQUIREMENTS_BASELINE.head })
+test('configuration contract retains Playwright debugging on failure', async () => {
+  const result = await validateConfiguration()
   assert.deepEqual(result.diagnostics, [])
   const config = createPlaywrightConfig({ ci: true })
   assert.equal(config.use.trace, 'retain-on-failure')
   assert.equal(config.use.screenshot, 'only-on-failure')
   assert.equal(config.use.video, 'retain-on-failure')
-  const passed = buildReport({ diagnostics: [], overall: 'passed' })
-  const failed = buildReport({ diagnostics: ['PW_FIXED_SLEEP_DETECTED'], overall: 'failed' })
-  const blocked = buildReport({ diagnostics: ['PW_AUTH_SETUP_NOT_IMPLEMENTED'], overall: 'blocked' })
-  assert.equal(passed.event, 'playwright_role_config_verified')
-  assert.equal(failed.event, 'playwright_role_config_failed')
-  assert.equal(blocked.event, 'playwright_role_config_blocked')
-  assert.equal(passed.evidenceLevel, 'E1')
-  assert.equal(passed.runtime_e2e, 'not_executed')
-})
-
-test('a changed provisional baseline is a fail-fast diagnostic', async () => {
-  const result = await validateConfiguration({ requirementsBaselineHead: 'stale-head' })
-  assert.deepEqual(result.diagnostics, ['PW_REQUIREMENTS_BASELINE_CHANGED'])
 })

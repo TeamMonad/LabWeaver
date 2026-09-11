@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+auth = { path = "../../crates/auth" }
 async-trait.workspace = true
 artifact-store = { path = "../../crates/artifact-store" }
 async-nats = { version = "=0.45.0", default-features = false, features = ["ring", "server_2_10", "server_2_11"] }
@@ -43,8 +44,10 @@ x509-parser = "0.18.1"
 workspace = true
 
 [dev-dependencies]
+jsonwebtoken.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3.23.0"
 testcontainers = { version = "=0.25.0", features = ["blocking", "properties-config"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+tower.workspace = true

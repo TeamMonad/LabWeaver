@@ -12,6 +12,7 @@ mod kubevirt_console_executor;
 mod kubevirt_provider;
 mod lifecycle;
 mod messaging;
+mod metering;
 mod outbox;
 mod process;
 mod reconciler;
@@ -21,20 +22,27 @@ mod runtime_executor;
 mod store;
 mod terminal_bridge;
 mod terminal_executor;
-mod tls;
+mod work_admission_client;
+mod work_execution;
 
-pub use api::{EnvironmentApiState, environment_api_router};
+#[path = "../../http_transport.rs"]
+pub mod http_transport;
+
+pub use api::{EnvironmentApiState, environment_api_router, with_service_auth};
 pub use container_provider::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
     ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerExecutorResponseEnvelope,
     ContainerProvider, ContainerProviderBackend, ContainerProviderConfiguration,
     ContainerReleasePolicy, ContainerReleaseResolver, ContainerResource, ContainerResourcePlan,
-    FencedContainerExecutor, NatsContainerExecutorServer, NatsContainerProviderBackend,
-    PgContainerExecutorFenceStore, PgReleaseProjectionStore, ReleaseProjectionDecision,
-    ReleaseProjectionError, ResolvedContainerRelease,
+    ContainerWorkspaceAccessMode, FencedContainerExecutor, NatsContainerExecutorServer,
+    NatsContainerProviderBackend, PgContainerExecutorFenceStore, PgReleaseProjectionStore,
+    ReleaseProjectionDecision, ReleaseProjectionError, ResolvedContainerRelease,
 };
-pub use freeze_binding::{FreezeBindingConfiguration, FreezeBindingError, FreezeBindingService};
+pub use freeze_binding::{
+    FreezeBindingConfiguration, FreezeBindingError, FreezeBindingService,
+    VmFreezeBindingConfiguration,
+};
 pub use kubevirt_console_executor::{
     KubeVirtConsoleExecutorServer, KubeVirtConsoleExecutorServerConfig,
     KubeVirtConsoleExecutorServerError, KubeVirtConsoleKubernetesConfiguration,
@@ -69,17 +77,25 @@ pub use reconciler::{
     ReconcileWorkerOutcome, Reconciler, next_action,
 };
 pub use resolver::{
-    OwnerResolver, OwnerResolverError, OwnerResolverPolicy, VerifiedCallerIdentity,
-    authorize_endpoint_eligibility, authorize_owner_resolution, owner_resolver_router,
+    OwnerResolver, OwnerResolverError, authorize_endpoint_eligibility, authorize_owner_resolution,
+    owner_resolver_router,
 };
 pub use runtime::{OwnerResolverRuntime, OwnerResolverRuntimeError};
 pub use runtime_executor::{KubernetesContainerExecutor, RuntimeExecutorConfiguration};
 pub use store::{
+    EnvironmentInventoryFilter, EnvironmentInventoryPage, EnvironmentOperationPage,
     EnvironmentStoreError, InboundCommandDecision, InboundLifecycleCommand, LeasedEnvironment,
-    PgEnvironmentStore, StoredEnvironmentInventory,
+    PgEnvironmentStore, StoredEnvironmentInventory, StoredEnvironmentOperation,
 };
 pub use terminal_bridge::{TerminalBridgeError, TerminalExecutorGateway, terminal_bridge_router};
 pub use terminal_executor::{
     TerminalExecutorServer, TerminalExecutorServerConfig, TerminalExecutorServerError,
 };
-pub use tls::{MtlsConfig, MtlsServerError, serve_owner_resolver_mtls};
+pub use work_admission_client::{
+    WorkAdmissionClient, WorkAdmissionClientConfiguration, WorkAdmissionClientError,
+    WorkAdmissionResolver, required_scope_for_diagnostics as work_admission_scope_for_diagnostics,
+};
+pub use work_execution::{
+    ContainerWorkExecutionBackend, ContainerWorkExecutionService, ContainerWorkExecutionTarget,
+    KubernetesWorkExecutionBackend, WorkExecutionError, WorkExecutionOutcome,
+};

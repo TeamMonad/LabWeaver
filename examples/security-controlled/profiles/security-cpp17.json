@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "evaluation.labweaver.io/program-profile/v1",
+  "compileArgv": [
+    "/usr/bin/gcc",
+    "-std=c17",
+    "-O2",
+    "-fno-builtin",
+    "{source}",
+    "-o",
+    "{binary}"
+  ],
+  "runArgv": [
+    "{binary}"
+  ],
+  "supportFiles": []
+}

@@ -54,6 +54,17 @@ workloads:
     env:
       LABWEAVER_CONTROL_CONFIG_FILE: /etc/labweaver/config/config.yaml
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-control
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-environment,labweaver-evaluation
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-control
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,evaluation.control.invoke
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: mtls, containerPort: 9444, servicePort: 9444}
     readiness: {type: tcp, port: mtls}
@@ -66,6 +77,25 @@ workloads:
     secret: access-service-secrets
     env:
       LABWEAVER_ACCESS_AUTH_CONFIG_FILE: /etc/labweaver/config/config.yaml
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-access
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-control
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-access
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: access.authorization.decide,access.metrics.read,access.ssh.authorize,access.session.manage
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
+      LABWEAVER_CONTROL_SERVICE_AUDIENCE: labweaver-control
+      LABWEAVER_CONTROL_SERVICE_SCOPES: access.control.forward
+      LABWEAVER_ENVIRONMENT_SERVICE_AUDIENCE: labweaver-environment
+      LABWEAVER_ENVIRONMENT_SERVICE_SCOPES: access.environment.forward,access.environment.console,environment.owner.resolve,environment.endpoint.resolve,environment.console.resolve
+      LABWEAVER_EVALUATION_SERVICE_AUDIENCE: labweaver-evaluation
+      LABWEAVER_EVALUATION_SERVICE_SCOPES: evaluation.api.invoke
+      LABWEAVER_RESOURCE_SERVICE_AUDIENCE: labweaver-resource
+      LABWEAVER_RESOURCE_SERVICE_SCOPES: resource.api.invoke
     ports:
       - {name: browser, containerPort: 8080, servicePort: 8080}
       - {name: mtls, containerPort: 9443, servicePort: 9443}
@@ -82,6 +112,17 @@ workloads:
       # the existing pod-scoped /tmp volume and is removed with the pod.
       LABWEAVER_LLM_OUTPUT_DIR: /tmp
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-agent
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-control,labweaver-evaluation
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-agent
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,environment.work.configure,environment:resolve_work_execution_binding
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: mtls, containerPort: 9445, servicePort: 9445}
     readiness: {type: tcp, port: mtls}
@@ -109,6 +150,8 @@ workloads:
   environment-service:
     enabled: true
     imageKey: environment_service
+    rbacProfile: work-execution
+    kubernetesApi: true
     # The retained Sprint 2 cluster cannot reserve a second environment owner
     # while a one-replica rollout is in progress. Keep this workload-specific:
     # the API becomes briefly unavailable, while unrelated services retain the
@@ -122,10 +165,28 @@ workloads:
     env:
       LABWEAVER_BIND_ADDR: 0.0.0.0:8083
       LABWEAVER_OWNER_RESOLVER_BIND_ADDR: 0.0.0.0:9446
-      LABWEAVER_OWNER_RESOLVER_CLIENT_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_OWNER_RESOLVER_SERVER_CERT_PATH: /etc/labweaver/secrets/tls.crt
       LABWEAVER_OWNER_RESOLVER_SERVER_KEY_PATH: /etc/labweaver/secrets/tls.key
-      LABWEAVER_OWNER_RESOLVER_ALLOWED_CALLER_SANS: spiffe://labweaver/access-service,spiffe://labweaver/evaluation-service,spiffe://labweaver/resource-service
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-environment
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-agent,labweaver-control,labweaver-evaluation,labweaver-resource,labweaver-environment
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-environment
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: control.agent_run.read,environment.console.execute
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
+      LABWEAVER_CONTROL_SERVICE_BASE_URI: https://control-service:9444/
+      LABWEAVER_CONTROL_SERVICE_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_CONTROL_SERVICE_AUDIENCE: labweaver-control
+      LABWEAVER_CONTROL_SERVICE_TIMEOUT_MILLISECONDS: "5000"
+      LABWEAVER_RESOURCE_USAGE_BASE_URI: https://resource-service:9448/
+      LABWEAVER_RESOURCE_USAGE_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_RESOURCE_USAGE_AUDIENCE: labweaver-resource
+      LABWEAVER_RESOURCE_USAGE_SCOPES: resource.usage.record
+      LABWEAVER_RESOURCE_USAGE_TIMEOUT_MILLISECONDS: "5000"
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
       LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key
@@ -142,8 +203,6 @@ workloads:
       LABWEAVER_ENVIRONMENT_WORKER_ID: environment-service-platform
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_URI: wss://container-executor:9450/internal/v1/container-terminal
       LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
-      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_CERT_PATH: /etc/labweaver/secrets/tls.crt
-      LABWEAVER_CONTAINER_TERMINAL_EXECUTOR_KEY_PATH: /etc/labweaver/secrets/tls.key
       LABWEAVER_KUBEVIRT_CONSOLE_EXECUTOR_URI: wss://kubevirt-console-executor:9451/internal/v1/kubevirt-vnc
     secretEnv:
       LABWEAVER_DATABASE_URL: {key: database-url}
@@ -165,9 +224,16 @@ workloads:
       LABWEAVER_RUNTIME_EXECUTOR_CONFIG_FILE: /etc/labweaver/config/config.yaml
       LABWEAVER_BIND_ADDR: 0.0.0.0:8085
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-environment
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-environment
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
     ports:
       - {name: health, containerPort: 8085, servicePort: 8085}
-      - {name: console-mtls, containerPort: 9450, servicePort: 9450}
+      - {name: console, containerPort: 9450, servicePort: 9450}
     readiness: {type: http, port: health, path: /health/ready}
   kubevirt-executor:
     enabled: true
@@ -195,9 +261,16 @@ workloads:
     env:
       LABWEAVER_KUBEVIRT_CONSOLE_CONFIG_FILE: /etc/labweaver/config/config.yaml
       LABWEAVER_BIND_ADDR: 0.0.0.0:8089
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-environment
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-environment
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
     ports:
       - {name: health, containerPort: 8089, servicePort: 8089}
-      - {name: console-mtls, containerPort: 9451, servicePort: 9451}
+      - {name: console, containerPort: 9451, servicePort: 9451}
     readiness: {type: http, port: health, path: /health/ready}
   openssh-gateway:
     enabled: true
@@ -208,9 +281,14 @@ workloads:
     env:
       LABWEAVER_ACCESS_URL: https://access-service:9443
       LABWEAVER_GATEWAY_IDENTITY: spiffe://labweaver/openssh-gateway
-      LABWEAVER_MTLS_CERT: /etc/labweaver/secrets/mtls.crt
-      LABWEAVER_MTLS_KEY: /etc/labweaver/secrets/mtls.key
-      LABWEAVER_MTLS_CA: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_ACCESS_CA_FILE: /etc/labweaver/secrets/mtls-ca.pem
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/service-oidc-ca.pem
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-access
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-access
+      LABWEAVER_SERVICE_SCOPES: access.ssh.authorize,access.session.manage
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: ssh, containerPort: 2222, servicePort: 2222}
     readiness: {type: tcp, port: ssh}
@@ -239,6 +317,17 @@ workloads:
     env:
       LABWEAVER_EVALUATION_CONFIG_FILE: /etc/labweaver/config/config.yaml
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-evaluation
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-control
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-evaluation
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: agent.llm_review.create,agent.llm_review.read,agent.llm_review.cancel,control.authoring.read,control.llm_policy.read,evaluation.environment.freeze,environment:resolve_evaluation_execution_binding,resource.task.create,resource.task.read,resource.task.claim,resource.task.ack,resource.task.release,resource.task.cancel,resource.usage.record
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: mtls, containerPort: 9447, servicePort: 9447}
     readiness: {type: tcp, port: mtls}
@@ -252,8 +341,22 @@ workloads:
     kubernetesApi: true
     env:
       LABWEAVER_BIND_ADDR: 0.0.0.0:8087
-      LABWEAVER_RESOURCE_MTLS_CONFIG_FILE: /etc/labweaver/config/mtls.yaml
+      LABWEAVER_RESOURCE_HTTP_CONFIG_FILE: /etc/labweaver/config/http.yaml
       LABWEAVER_RESOURCE_CAPACITY_CONFIG_FILE: /etc/labweaver/config/capacity.json
+      LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
+      LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
+      LABWEAVER_SERVICE_AUDIENCE: labweaver-resource
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-environment,labweaver-evaluation
+      LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
+      LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
+      LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
+      LABWEAVER_SERVICE_CLIENT_ID: labweaver-resource
+      LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_SERVICE_SCOPES: resource.environment.manage
+      LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
+      LABWEAVER_ACCESS_SERVICE_CLIENT_ID: labweaver-access
+      LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID: labweaver-environment
+      LABWEAVER_EVALUATION_SERVICE_CLIENT_ID: labweaver-evaluation
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
       LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key

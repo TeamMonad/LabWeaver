@@ -7,7 +7,6 @@ const loginMock = vi.fn()
 const loadUserMock = vi.fn()
 
 let mockUser: User | null = null
-const isFixtureMode = import.meta.env.VITE_DATA_MODE === 'fixture'
 
 vi.mock('@/config', () => ({
   OIDC_ENABLED: true,
@@ -59,13 +58,9 @@ describe('route guard', () => {
     expect(router.currentRoute.value.path).toBe('/')
   })
 
-  it(`${isFixtureMode ? 'redirects fixture unauthenticated users to home' : 'triggers OIDC login for unauthenticated users accessing role routes'}`, async () => {
+  it('triggers OIDC login for unauthenticated users accessing role routes', async () => {
     await router.push('/teacher')
-    if (isFixtureMode) {
-      expect(router.currentRoute.value.name).toBe('home')
-    } else {
-      expect(loginMock).toHaveBeenCalled()
-    }
+    expect(loginMock).toHaveBeenCalled()
     // roleRoute redirects to the first child, so the remembered return path is /teacher/overview.
     expect(window.sessionStorage.getItem('auth-return-to')).toBe('/teacher/overview')
   })
@@ -81,5 +76,11 @@ describe('route guard', () => {
     mockUser = makeUser(['teacher'])
     await router.push('/teacher')
     expect(router.currentRoute.value.path).toBe('/teacher/overview')
+  })
+
+  it('allows supported platform roles to use the project-scoped Work workbench', async () => {
+    mockUser = makeUser(['student'])
+    await router.push('/researcher/workspaces')
+    expect(router.currentRoute.value.path).toBe('/researcher/workspaces')
   })
 })

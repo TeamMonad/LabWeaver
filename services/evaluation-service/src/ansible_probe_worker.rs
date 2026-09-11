@@ -10,10 +10,12 @@
 //! fail-closed terminal evidence; infrastructure failures abort with a stable
 //! [`AnsibleProbeWorkerError`] diagnostic.
 //!
-//! Playbook contract (frozen image content): the playbook for
-//! `linux-nginx-probe-v1` runs against one host (the target IPv4) and contains
-//! exactly one task named `labweaver_probe_facts` whose per-host result carries
-//! a flat `labweaver_probe_facts` object of fact name to boolean or string.
+//! Playbook contract (frozen package content): the request's
+//! `playbook_profile` is a normalized package-relative path below
+//! `/input/evaluator`. The selected playbook runs against one host (the target
+//! IPv4) and contains exactly one task named `labweaver_probe_facts` whose
+//! per-host result carries a flat `labweaver_probe_facts` object of fact name
+//! to boolean or string.
 #![allow(
     clippy::needless_pass_by_value,
     clippy::useless_conversion,
@@ -80,8 +82,7 @@ const KNOWN_HOSTS_PATH: &str = "/work/known_hosts";
 const EVIDENCE_PATH: &str = "/evidence/evidence.json";
 const ANSIBLE_PLAYBOOK_PATH: &str = "/opt/labweaver/probe/bin/ansible-playbook";
 const ANSIBLE_CONFIG_PATH: &str = "/opt/labweaver/probe/ansible.cfg";
-const PLAYBOOK_ROOT: &str = "/opt/labweaver/probe";
-const SUPPORTED_PLAYBOOK_PROFILE: &str = "linux-nginx-probe-v1";
+const EVALUATOR_ROOT: &str = "/input/evaluator";
 const FACTS_TASK_NAME: &str = "labweaver_probe_facts";
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
@@ -127,25 +128,19 @@ fn read_request(path: &Path) -> Result<AnsibleProbeExecutionRequest, AnsibleProb
     Ok(request)
 }
 
-/// Only the frozen v1 profile may execute; any other profile fails closed
-/// before a process or network connection is attempted.
+/// Only normalized package-relative paths may execute; the evaluator materializer
+/// supplies the immutable package contents before the worker starts.
 fn require_supported_profile(
     request: &AnsibleProbeExecutionRequest,
 ) -> Result<(), AnsibleProbeWorkerError> {
-    let profile = request.playbook_profile.as_str();
-    let safe_charset = profile
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if !safe_charset || profile != SUPPORTED_PLAYBOOK_PROFILE {
+    if contracts::validate_relative_path(&request.playbook_profile).is_err() {
         return Err(AnsibleProbeWorkerError::ProfileInvalid);
     }
     Ok(())
 }
 
 fn playbook_path(playbook_profile: &str) -> PathBuf {
-    Path::new(PLAYBOOK_ROOT)
-        .join(playbook_profile)
-        .join("playbook.yml")
+    Path::new(EVALUATOR_ROOT).join(playbook_profile)
 }
 
 #[cfg(target_os = "linux")]
@@ -824,9 +819,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANSIBLE_CONFIG_PATH, ANSIBLE_PLAYBOOK_PATH, CERTIFICATE_PATH, KNOWN_HOSTS_PATH,
-        PRIVATE_KEY_PATH, ProbeOutcome, SUPPORTED_PLAYBOOK_PROFILE, build_evidence,
-        build_inventory, extract_facts, playbook_path, receipt_for, require_supported_profile,
+        ANSIBLE_CONFIG_PATH, ANSIBLE_PLAYBOOK_PATH, CERTIFICATE_PATH, EVALUATOR_ROOT,
+        KNOWN_HOSTS_PATH, PRIVATE_KEY_PATH, ProbeOutcome, build_evidence, build_inventory,
+        extract_facts, playbook_path, receipt_for, require_supported_profile,
     };
     use crate::ansible_probe::{
         ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeAssertionStatus,
@@ -849,7 +844,7 @@ mod tests {
             attempt_id: Uuid::now_v7(),
             trace_id: "trace-ansible-probe-worker-test".to_owned(),
             runner_image_digest: format!("labweaver/ansible-probe@sha256:{}", "2".repeat(64)),
-            playbook_profile: SUPPORTED_PLAYBOOK_PROFILE.to_owned(),
+            playbook_profile: "linux-nginx-probe-v1/playbook.yml".to_owned(),
             module_allowlist: vec![
                 "ansible.builtin.package_facts".to_owned(),
                 "ansible.builtin.service_facts".to_owned(),
@@ -869,6 +864,7 @@ mod tests {
                 port: 22,
                 username: "labweaver".to_owned(),
             },
+            source_identity: "source-identity".to_owned(),
             ssh_identity: AnsibleProbeSshIdentity {
                 private_key_secret: "probe-ssh-key".to_owned(),
                 certificate_secret: "probe-ssh-cert".to_owned(),
@@ -1064,7 +1060,9 @@ ansible_ssh_known_hosts_file={KNOWN_HOSTS_PATH} ansible_host_key_checking=True\n
         );
         assert_eq!(
             playbook_path(&expected.playbook_profile),
-            PathBuf::from("/opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml")
+            PathBuf::from(format!(
+                "{EVALUATOR_ROOT}/linux-nginx-probe-v1/playbook.yml"
+            ))
         );
         assert_eq!(
             ANSIBLE_PLAYBOOK_PATH,
@@ -1074,11 +1072,11 @@ ansible_ssh_known_hosts_file={KNOWN_HOSTS_PATH} ansible_host_key_checking=True\n
 
         assert!(require_supported_profile(&expected).is_ok());
         for profile in [
-            "other-profile",
-            "Linux-Nginx-Probe-V1",
+            "../playbook.yml",
             "linux-nginx-probe-v1/../../x",
-            "linux-nginx-probe-v2",
-            "linux nginx probe v1",
+            "linux//playbook.yml",
+            "/input/evaluator/playbook.yml",
+            "\\input\\evaluator\\playbook.yml",
         ] {
             let mut invalid = request();
             invalid.playbook_profile = profile.to_owned();

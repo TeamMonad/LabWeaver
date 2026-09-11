@@ -3,7 +3,6 @@
   ansible.builtin.assert:
     that:
       - platform_reset_run_id is match('^[a-z0-9][a-z0-9-]{2,62}$')
-      - platform_reset_source_commit is match('^[0-9a-f]{40,64}$')
       - platform_reset_postgres_service_file | length > 0
       - platform_reset_nats_server | length > 0
       - platform_reset_nats_credentials_file | length > 0

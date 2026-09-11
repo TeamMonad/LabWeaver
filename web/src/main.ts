@@ -12,8 +12,8 @@ import '@fontsource/roboto/500.css'
 import 'material-symbols/rounded.css'
 
 async function bootstrap() {
-  // Initialize the Public API client and fixture adapter before mounting the
-  // app so that all generated SDK calls use the configured transport.
+  // Initialize the Public API client before mounting so generated SDK calls use
+  // the configured transport from the first render.
   await initializeSdkClient()
 
   const app = createApp(App)

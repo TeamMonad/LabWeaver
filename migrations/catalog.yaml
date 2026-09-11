@@ -8,16 +8,36 @@ domains:
     migrations:
       - id: 1
         file: control/0001_platform_baseline.sql
+      - id: 2
+        file: control/0002_projects.sql
+      - id: 3
+        file: control/0003_project_ownership.sql
+      - id: 4
+        file: control/0004_project_sse.sql
+      - id: 5
+        file: control/0005_authoring_approvals.sql
+      - id: 6
+        file: control/0006_authoring_publication.sql
+      - id: 7
+        file: control/0007_work_configuration_preauthorizations.sql
   - name: access
     migrations:
       - id: 1
         file: access/0001_platform_baseline.sql
       - id: 2
         file: access/0002_console_capabilities_and_sessions.sql
+      - id: 3
+        file: access/0003_independent_project_memberships.sql
   - name: environment
     migrations:
       - id: 1
         file: environment/0001_platform_baseline.sql
+      - id: 2
+        file: environment/0002_project_ownership.sql
+      - id: 3
+        file: environment/0003_resource_usage_deliveries.sql
+      - id: 4
+        file: environment/0004_work_configuration_executions.sql
   - name: agent
     migrations:
       - id: 1
@@ -26,6 +46,20 @@ domains:
         file: agent/0002_allow_content_addressed_image_reuse.sql
       - id: 3
         file: agent/0003_work_agent_run_class.sql
+      - id: 4
+        file: agent/0004_project_ownership.sql
+      - id: 5
+        file: agent/0005_agent_run_purpose.sql
+      - id: 6
+        file: agent/0006_remove_image_policy_evaluation.sql
+      - id: 7
+        file: agent/0007_remove_cancellation_authority_san.sql
+      - id: 8
+        file: agent/0008_work_configuration_and_generated_artifacts.sql
+      - id: 9
+        file: agent/0009_work_execution_intent.sql
+      - id: 10
+        file: agent/0010_llm_review_runs.sql
   - name: evaluation
     migrations:
       - id: 1
@@ -34,6 +68,18 @@ domains:
         file: evaluation/0002_evaluation_control_plane.sql
       - id: 3
         file: evaluation/0003_release_withdrawal_and_student_results.sql
+      - id: 4
+        file: evaluation/0004_project_ownership.sql
+      - id: 5
+        file: evaluation/0005_release_execution_binding.sql
+      - id: 6
+        file: evaluation/0006_task_run_identity.sql
+      - id: 7
+        file: evaluation/0007_evaluation_resource_usage_deliveries.sql
+      - id: 8
+        file: evaluation/0008_execution_checkpoints.sql
+      - id: 9
+        file: evaluation/0009_evaluation_step_reviews.sql
   - name: resource
     migrations:
       - id: 1
@@ -48,3 +94,13 @@ domains:
         file: resource/0005_resource_lease_pending_terminal_states.sql
       - id: 6
         file: resource/0006_resource_lease_reconciliation.sql
+      - id: 7
+        file: resource/0007_resource_outbox_trigger_fix.sql
+      - id: 8
+        file: resource/0008_v3_project_gpu_billing.sql
+      - id: 9
+        file: resource/0009_settlement_retry.sql
+      - id: 10
+        file: resource/0010_task_run_identity.sql
+      - id: 11
+        file: resource/0011_gpu_catalog_pool_uniqueness.sql

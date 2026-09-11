@@ -163,6 +163,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
       "type": "string"
     },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "DiagnosticCode": {
       "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
       "type": "string"
@@ -186,6 +190,16 @@
       "additionalProperties": false,
       "description": "Immutable validated Environment candidate.",
       "properties": {
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
         },
@@ -197,6 +211,9 @@
         },
         "policyRevision": {
           "$ref": "#/$defs/Revision"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
         },
         "revision": {
           "$ref": "#/$defs/Revision"
@@ -211,6 +228,7 @@
       "required": [
         "id",
         "runId",
+        "projectId",
         "revision",
         "spec",
         "policyRevision",
@@ -263,9 +281,6 @@
         {
           "additionalProperties": false,
           "properties": {
-            "base_image_digest": {
-              "type": "string"
-            },
             "build_context": {
               "$ref": "#/$defs/ArtifactRef"
             },
@@ -297,7 +312,6 @@
             "kind",
             "provider_binding",
             "build_context",
-            "base_image_digest",
             "service_port"
           ],
           "type": "object"
@@ -538,6 +552,10 @@
       ],
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "PublicExposurePolicy": {
       "enum": [
         "deny"
@@ -726,6 +744,17 @@
     },
     "candidate": {
       "$ref": "#/$defs/EnvironmentCandidate"
+    },
+    "imageArtifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImageArtifact"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Runtime artifact resolved by Control from authoritative build or VM policy state.\n\nThis is the exact artifact a teacher can approve. It remains null while a\ncontainer build is incomplete or when a candidate does not match the\ndeployment-owned VM base policy."
     },
     "trustRevision": {
       "$ref": "#/$defs/Revision"

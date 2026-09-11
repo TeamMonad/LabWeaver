@@ -139,6 +139,10 @@
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -152,13 +156,20 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Parent actor×course×environment grant.",
+  "description": "Parent actor×project×environment grant. A course is optional teaching context.",
   "properties": {
     "actorId": {
       "$ref": "#/$defs/ActorId"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "endpointGrants": {
       "items": {
@@ -180,6 +191,9 @@
     },
     "issuedAt": {
       "$ref": "#/$defs/UtcTimestamp"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "reasonCode": {
       "type": [
@@ -207,7 +221,7 @@
   "required": [
     "id",
     "actorId",
-    "courseId",
+    "projectId",
     "environmentId",
     "environmentRevision",
     "state",

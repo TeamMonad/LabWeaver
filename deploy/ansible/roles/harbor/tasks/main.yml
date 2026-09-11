@@ -1,17 +1,13 @@
 ---
-- name: Bind verified controller run identity
+- name: Bind the Harbor reconciliation run
   ansible.builtin.set_fact:
     harbor_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') | default(harbor_run_id | default(''), true) }}"
-    harbor_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') | default(harbor_commit_sha | default(''), true) }}"
-    harbor_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
-    harbor_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
-    harbor_controller_id: "{{ lookup('env', 'LABWEAVER_CONTROLLER_ID') }}"
     harbor_chart_archive_sha256: >-
       sha256:{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.chart_archive_sha256 |
       regex_replace('^sha256:', '') }}
     harbor_locked_images: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).harbor.images }}"
 
-- name: Require explicit adopted-cluster Harbor configuration
+- name: Require explicit Harbor configuration
   ansible.builtin.assert:
     that:
       - harbor_enabled | bool
@@ -29,10 +25,6 @@
       - harbor_chart_archive | length > 0
       - harbor_chart_archive_sha256 is match('^sha256:[0-9a-f]{64}$')
       - harbor_run_id is match('^infra-[a-z0-9-]+$')
-      - harbor_commit_sha is match('^[0-9a-f]{40,64}$')
-      - harbor_inventory_hash is match('^sha256:[0-9a-f]{64}$')
-      - harbor_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
-      - (harbor_controller_id | default(harbor_approved_controller_id, true)) == harbor_approved_controller_id
       - harbor_locked_images | dict2items | length == 10
       - harbor_locked_images | dict2items | map(attribute='value') | select('match', '^sha256:[0-9a-f]{64}$') | list | length == 10
       - harbor_component_resources | dict2items | length == 11
@@ -70,9 +62,6 @@
     that:
       - harbor_backup_evidence.overall == 'passed'
       - harbor_backup_evidence.run_id == harbor_run_id
-      - harbor_backup_evidence.commit_sha == harbor_commit_sha
-      - harbor_backup_evidence.inventory_hash == harbor_inventory_hash
-      - harbor_backup_evidence.component_lock_hash == harbor_component_lock_hash
       - harbor_backup_evidence.target == 'harbor-reconcile'
       - harbor_backup_evidence.cluster_uid | length > 0
       - harbor_backup_evidence.snapshot.sha256 is match('^[0-9a-f]{64}$')
@@ -80,7 +69,7 @@
     fail_msg: HARBOR_BACKUP_EVIDENCE_INVALID
   no_log: true
 
-- name: Assert locked adopted-cluster storage classes exist
+- name: Assert configured storage classes exist
   ansible.builtin.command:
     argv:
       - "{{ harbor_kubectl_path }}"
@@ -118,7 +107,7 @@
         ((harbor_namespace_read.stdout | from_json).metadata.labels['app.kubernetes.io/part-of'] | default('')) == 'labweaver-infrastructure'
     fail_msg: HARBOR_NAMESPACE_UNMANAGED
 
-- name: Capture existing demo Gateway identity without modifying it
+- name: Capture the shared demo Gateway identity without modifying it
   ansible.builtin.command:
     argv:
       - "{{ harbor_kubectl_path }}"
@@ -135,12 +124,12 @@
   changed_when: false
   register: harbor_existing_gateway
 
-- name: Reject a changed or unsupported existing demo Gateway
+- name: Reject a changed or unsupported shared demo Gateway
   ansible.builtin.assert:
     that:
       - harbor_existing_gateway.stdout.split()[0] == 'cilium'
       - harbor_existing_gateway.stdout.split()[1] == gateway_vip
-    fail_msg: HARBOR_ADOPTED_GATEWAY_DRIFT
+    fail_msg: HARBOR_SHARED_GATEWAY_DRIFT
 
 - name: Reject a Harbor VIP collision before creating any Harbor resource
   ansible.builtin.command:
@@ -368,10 +357,10 @@
       externalURL: "https://{{ harbor_hostname }}"
       expose:
         type: clusterIP
-        # Harbor nginx terminates client TLS itself. The Sprint 2 Harbor route
-        # adoption switches the Gateway to TLS passthrough and routes directly
-        # to this HTTPS listener; the chart-generated harbor-nginx secret owns
-        # the public registry CA consumed by BuildKit bundles.
+        # Harbor nginx terminates client TLS itself. The platform Harbor route
+        # sends the Gateway TLS passthrough traffic directly to this HTTPS
+        # listener; the chart-generated harbor-nginx secret owns the public
+        # registry CA consumed by BuildKit bundles.
         tls:
           enabled: true
           certSource: auto
@@ -597,24 +586,7 @@
   changed_when: false
   when: not ansible_check_mode
 
-- name: Render the TLS Gateway and route only after the Harbor release exists
-  ansible.builtin.template:
-    src: gateway.yml.j2
-    dest: /var/tmp/labweaver-harbor-gateway.yml
-    mode: '0600'
-
-- name: Apply the isolated Harbor TLS Gateway and route
-  ansible.builtin.command:
-    argv:
-      - "{{ harbor_kubectl_path }}"
-      - --kubeconfig
-      - "{{ harbor_kubeconfig_path }}"
-      - apply
-      - -f
-      - /var/tmp/labweaver-harbor-gateway.yml
-  changed_when: false
-
-- name: Read the adopted cluster identity
+- name: Read the cluster identity
   ansible.builtin.command:
     argv:
       - "{{ harbor_kubectl_path }}"
@@ -661,9 +633,9 @@
   retries: 30
   delay: 10
 
-# The labweaver-system project policy is enforced by the Sprint 2 Harbor route
-# adoption after the Gateway switches to TLS passthrough; with nginx-level TLS
-# enabled the intermediate Terminate form 301-loops and cannot serve the API.
+# The labweaver-system project policy is enforced by the platform Harbor route.
+# With nginx-level TLS enabled, TLS passthrough avoids the redirect loop that
+# occurs when the Gateway terminates TLS before forwarding to Harbor.
 
 - name: Render the sanitized Harbor policy manifest
   ansible.builtin.template:

@@ -1,7 +1,6 @@
 {
   "schema_version": "labweaver.foundation-clean-redeploy-report.v1",
   "run_id": {{ foundation_clean_redeploy_finalize_run_id | to_json }},
-  "source_commit": {{ foundation_clean_redeploy_finalize_source_commit | to_json }},
   "cluster_uid": {{ foundation_clean_redeploy_finalize_cluster_uid.stdout | trim | to_json }},
   "issue": "#152",
   "release_eligible": false,

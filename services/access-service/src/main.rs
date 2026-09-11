@@ -2,21 +2,24 @@
 
 mod console;
 mod grants;
+#[path = "../../http_transport.rs"]
+mod http_transport;
 mod proxy;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
 use auth::{
     AccessAuthFile, AuthConfig, AuthorizationContext, BffSession, EnvironmentOwnerResolverClient,
-    KeyRing, OidcProvider, OidcTransaction, RoleMappings, TransportSecurityMode, authorize,
-    build_backchannel_logout_authorizer, build_bearer_authorizer, cleanup_expired_auth_state,
-    consume_backchannel_logout, consume_oidc_transaction, create_bff_session,
-    extract_platform_roles, load_bff_session, load_logout_hint, load_membership_snapshot,
-    no_redirect_http_client, require_service_identity, revoke_bff_session, upsert_actor,
+    KeyRing, OidcProvider, OidcTransaction, RoleMappings, ServiceAuthConfig, ServiceAuthError,
+    ServiceIdentity, ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenVerifier,
+    TransportSecurityMode, authorize, build_backchannel_logout_authorizer, build_bearer_authorizer,
+    cleanup_expired_auth_state, consume_backchannel_logout, consume_oidc_transaction,
+    create_bff_session, extract_platform_roles, load_bff_session, load_logout_hint,
+    load_membership_snapshot, no_redirect_http_client, revoke_bff_session, upsert_actor,
 };
 use axum::{
     Json, Router,
-    extract::{Extension, Form, Query, State},
+    extract::{Form, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
@@ -41,6 +44,7 @@ struct AppState {
     oidc_http: reqwest::Client,
     bearer_authorizer: Arc<jwt_authorizer::Authorizer<auth::BearerClaims>>,
     backchannel_logout_authorizer: Arc<jwt_authorizer::Authorizer<auth::BackchannelLogoutClaims>>,
+    service_token_verifier: Arc<ServiceTokenVerifier>,
     role_mappings: RoleMappings,
     pool: PgPool,
     key_ring: KeyRing,
@@ -57,9 +61,11 @@ struct AppState {
     nats: async_nats::Client,
 }
 
-#[derive(Clone)]
-struct MtlsPrincipal {
-    san_uri: String,
+/// Explicit audience and permission set for one internal downstream.
+#[derive(Clone, Debug)]
+pub(crate) struct ServiceTokenTarget {
+    pub(crate) audience: String,
+    pub(crate) scopes: BTreeSet<String>,
 }
 
 #[tokio::main]
@@ -69,8 +75,13 @@ async fn main() -> Result<(), StartupError> {
     let deployment = load_deployment()?;
     let bind =
         SocketAddr::from_str(&deployment.browser.bind_addr).map_err(|_| StartupError::Config)?;
-    let internal_bind = SocketAddr::from_str(&deployment.internal_mtls.bind_addr)
+    let internal_bind = SocketAddr::from_str(&deployment.internal_tls.bind_addr)
         .map_err(|_| StartupError::Config)?;
+    let internal_tls = http_transport::load_server_config(
+        &deployment.internal_tls.server_certificate_file,
+        &deployment.internal_tls.server_key_file,
+    )
+    .map_err(StartupError::HttpTransport)?;
     let state = build_app_state(deployment, metrics).await?;
     let router = browser_router(Arc::clone(&state));
     let internal_router = internal_router(Arc::clone(&state));
@@ -78,7 +89,7 @@ async fn main() -> Result<(), StartupError> {
     let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
     let result = tokio::select! {
         result = axum::serve(listener, router) => result.map_err(StartupError::from),
-        result = serve_internal_plain(internal_listener, internal_router) => result,
+        result = serve_internal(internal_listener, internal_router, internal_tls) => result,
         result = auth_cleanup_loop(Arc::clone(&state)) => result,
         result = grants::activation_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
         result = grants::maintenance_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
@@ -240,9 +251,164 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
             "/api/v1/resource-leases/{lease_id}/{action}",
             post(proxy::forward_resource),
         )
+        .route(
+            "/api/v1/projects/{project_id}/resource-requests",
+            get(proxy::forward_resource).post(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/resource-leases",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/resource/gpu-catalog",
+            get(proxy::forward_resource).post(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/resource/rates",
+            get(proxy::forward_resource).post(proxy::forward_resource),
+        )
+        .route("/api/v1/resource/usage", post(proxy::forward_resource))
+        .route(
+            "/api/v1/projects/{project_id}/resource-budget",
+            get(proxy::forward_resource).put(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/charges",
+            get(proxy::forward_resource),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/charges/{charge_id}/adjustments",
+            post(proxy::forward_resource),
+        )
 }
 
 fn control_browser_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .merge(project_browser_router())
+        .merge(course_browser_router())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the browser route table is kept explicit so each public project path is reviewable"
+)]
+fn project_browser_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/v1/projects",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/archive",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/members",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/members/{actor_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/problem-package-uploads/{upload_id}/complete",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/problem-packages/{package_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/llm-egress-policies",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/llm-egress-policies/active",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/work-agent-runs",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/work-configuration-runs",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/work-configuration/approve",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/work-configuration/plan",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/cancel",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/tracks/{track}/retry",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/environment-candidates/{candidate_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/environment-candidates/{candidate_id}/decisions",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/evaluation-candidates/{candidate_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/evaluation-candidates/{candidate_id}/decisions",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/authoring-approvals",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/authoring-approvals/{approval_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/environment-template-releases",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/environment-template-releases/{release_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/environment-template-releases/{release_id}/withdraw",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/events",
+            axum::routing::any(proxy::forward_control),
+        )
+}
+
+fn course_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/api/v1/courses/{course_id}/problem-package-uploads",
@@ -310,18 +476,6 @@ fn control_browser_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/courses/{course_id}/evaluation-releases/{release_id}/withdraw",
-            axum::routing::any(proxy::forward_control),
-        )
-        .route(
-            "/api/v1/courses/{course_id}/environment-template-releases",
-            axum::routing::any(proxy::forward_control),
-        )
-        .route(
-            "/api/v1/courses/{course_id}/environment-template-releases/{release_id}",
-            axum::routing::any(proxy::forward_control),
-        )
-        .route(
-            "/api/v1/courses/{course_id}/environment-template-releases/{release_id}/withdraw",
             axum::routing::any(proxy::forward_control),
         )
         .route(
@@ -413,17 +567,59 @@ async fn build_app_state(
             .await
             .map_err(|_| StartupError::Jwt)?,
     );
+    // The browser audience and the internal service audience are separate
+    // trust domains.  Internal tokens must never be minted for the browser
+    // API audience just because Access also validates browser sessions.
+    let access_target = required_target("LABWEAVER_SERVICE_AUDIENCE", "LABWEAVER_SERVICE_SCOPES")?;
+    let control_target = required_target(
+        "LABWEAVER_CONTROL_SERVICE_AUDIENCE",
+        "LABWEAVER_CONTROL_SERVICE_SCOPES",
+    )?;
+    let environment_target = required_target(
+        "LABWEAVER_ENVIRONMENT_SERVICE_AUDIENCE",
+        "LABWEAVER_ENVIRONMENT_SERVICE_SCOPES",
+    )?;
+    let evaluation_target = required_target(
+        "LABWEAVER_EVALUATION_SERVICE_AUDIENCE",
+        "LABWEAVER_EVALUATION_SERVICE_SCOPES",
+    )?;
+    let resource_target = required_target(
+        "LABWEAVER_RESOURCE_SERVICE_AUDIENCE",
+        "LABWEAVER_RESOURCE_SERVICE_SCOPES",
+    )?;
+    let service_allowed_client_ids = required_service_client_ids()?;
+    let service_auth_config = ServiceAuthConfig::new(
+        &deployment.oidc.issuer,
+        access_target.audience.clone(),
+        service_allowed_client_ids,
+        BTreeSet::new(),
+        deployment.oidc.jwt_algorithms.clone(),
+        deployment.oidc.jwks_refresh_seconds,
+        deployment.oidc.jwks_retry_seconds,
+        deployment.transport_security,
+    )
+    .map_err(|_| StartupError::ServiceAuth(ServiceAuthError::InvalidConfig))?;
+    let service_token_verifier = Arc::new(
+        ServiceTokenVerifier::discover(service_auth_config, oidc_http.clone())
+            .await
+            .map_err(StartupError::ServiceAuth)?,
+    );
+    let service_token_client = build_service_token_client(
+        &deployment,
+        &oidc_http,
+        access_target.audience.clone(),
+        access_target.scopes.clone(),
+    )
+    .await?;
     let role_mappings = RoleMappings::parse(deployment.oidc.role_mappings.clone())?;
     let resolver_config = deployment.environment_owner_resolver.contract();
     let resolver_ca = resolver_secret(&deployment, &resolver_config.ca_certificate_locator)?;
-    let resolver_certificate =
-        resolver_secret(&deployment, &resolver_config.client_certificate_locator)?;
-    let resolver_key = resolver_secret(&deployment, &resolver_config.client_private_key_locator)?;
     let owner_resolver = EnvironmentOwnerResolverClient::new(
         &resolver_config,
         &resolver_ca,
-        &resolver_certificate,
-        &resolver_key,
+        service_token_client.as_ref().clone(),
+        environment_target.audience.clone(),
+        environment_target.scopes.clone(),
         std::time::Duration::from_millis(
             deployment
                 .environment_owner_resolver
@@ -431,27 +627,37 @@ async fn build_app_state(
         ),
         deployment.transport_security,
     )?;
+    let environment_ca = resolver_secret(
+        &deployment,
+        &deployment.environment_gateway.ca_certificate_locator,
+    )?;
     let console_gateway = console::ConsoleGateway::new(
-        &resolver_config.resolver_uri,
-        &resolver_ca,
-        &resolver_certificate,
-        &resolver_key,
+        &deployment.environment_gateway.base_uri,
+        &environment_ca,
+        Arc::clone(&service_token_client),
+        environment_target.clone(),
     )
     .map_err(|_| StartupError::Config)?;
-    let control_proxy = build_control_proxy(&deployment)?;
-    let environment_proxy = build_service_proxy(&deployment, &deployment.environment_gateway)?;
-    let evaluation_proxy = build_service_proxy(&deployment, &deployment.evaluation_gateway)?;
+    let control_proxy = build_control_proxy(
+        &deployment,
+        Arc::clone(&service_token_client),
+        control_target,
+    )?;
+    let environment_proxy = build_service_proxy(
+        &deployment,
+        &deployment.environment_gateway,
+        Arc::clone(&service_token_client),
+        environment_target,
+    )?;
+    let evaluation_proxy = build_service_proxy(
+        &deployment,
+        &deployment.evaluation_gateway,
+        Arc::clone(&service_token_client),
+        evaluation_target,
+    )?;
     let resource_ca = resolver_secret(
         &deployment,
         &deployment.resource_gateway.ca_certificate_locator,
-    )?;
-    let resource_certificate = resolver_secret(
-        &deployment,
-        &deployment.resource_gateway.client_certificate_locator,
-    )?;
-    let resource_key = resolver_secret(
-        &deployment,
-        &deployment.resource_gateway.client_private_key_locator,
     )?;
     let resource_delegation_key = resolver_secret(
         &deployment,
@@ -460,10 +666,10 @@ async fn build_app_state(
     let resource_proxy = proxy::ResourceGatewayProxy::new(
         &deployment.resource_gateway,
         &resource_ca,
-        &resource_certificate,
-        &resource_key,
         &resource_delegation_key,
         deployment.transport_security,
+        Arc::clone(&service_token_client),
+        resource_target,
     )?;
     let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
     let nats = grants::connect_nats(&deployment.nats).await?;
@@ -474,6 +680,7 @@ async fn build_app_state(
         oidc_http,
         bearer_authorizer,
         backchannel_logout_authorizer,
+        service_token_verifier,
         role_mappings,
         pool,
         key_ring,
@@ -493,24 +700,51 @@ async fn build_app_state(
 
 fn build_control_proxy(
     deployment: &AccessAuthFile,
+    service_token_client: Arc<ServiceTokenClient>,
+    service_token_target: ServiceTokenTarget,
 ) -> Result<proxy::ControlGatewayProxy, StartupError> {
-    build_service_proxy(deployment, &deployment.control_gateway)
+    build_service_proxy(
+        deployment,
+        &deployment.control_gateway,
+        service_token_client,
+        service_token_target,
+    )
 }
 
 fn build_service_proxy(
     deployment: &AccessAuthFile,
     config: &auth::ControlGatewayFileConfig,
+    service_token_client: Arc<ServiceTokenClient>,
+    service_token_target: ServiceTokenTarget,
 ) -> Result<proxy::ControlGatewayProxy, StartupError> {
     let ca = resolver_secret(deployment, &config.ca_certificate_locator)?;
-    let certificate = resolver_secret(deployment, &config.client_certificate_locator)?;
-    let key = resolver_secret(deployment, &config.client_private_key_locator)?;
     Ok(proxy::ControlGatewayProxy::new(
         config,
         &ca,
-        &certificate,
-        &key,
         deployment.transport_security,
+        service_token_client,
+        service_token_target,
     )?)
+}
+
+async fn build_service_token_client(
+    deployment: &AccessAuthFile,
+    http: &reqwest::Client,
+    audience: String,
+    scopes: BTreeSet<String>,
+) -> Result<Arc<ServiceTokenClient>, StartupError> {
+    let config = ServiceTokenClientConfig::new(
+        &deployment.oidc.issuer,
+        required("LABWEAVER_SERVICE_CLIENT_ID")?,
+        read_required_secret(&required("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?)?,
+        audience,
+        scopes,
+        required_u64("LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS")?,
+        deployment.transport_security,
+    )?;
+    Ok(Arc::new(
+        ServiceTokenClient::discover(config, http.clone()).await?,
+    ))
 }
 
 async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
@@ -554,16 +788,14 @@ async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
     }
 }
 
-async fn serve_internal_plain(
+async fn serve_internal(
     listener: tokio::net::TcpListener,
     router: Router,
+    tls: std::sync::Arc<rustls::ServerConfig>,
 ) -> Result<(), StartupError> {
-    let router = router.layer(Extension(MtlsPrincipal {
-        san_uri: "spiffe://labweaver/private-single-tenant".to_owned(),
-    }));
-    axum::serve(listener, router)
+    http_transport::serve_tls(listener, router, tls)
         .await
-        .map_err(StartupError::from)
+        .map_err(StartupError::HttpTransport)
 }
 
 fn load_deployment() -> Result<AccessAuthFile, StartupError> {
@@ -650,6 +882,7 @@ async fn callback(
         .exchange_code(code, &transaction, &state.oidc_http)
         .await
         .map_err(ApiError::from)?;
+    identity.validate_expiry_at(now).map_err(ApiError::from)?;
     let roles = extract_platform_roles(
         &identity.claims,
         &state.deployment.oidc.role_claim_path,
@@ -661,10 +894,11 @@ async fn callback(
     let actor = upsert_actor(&state.pool, state.config.issuer.as_str(), &identity.subject)
         .await
         .map_err(ApiError::from)?;
-    let expires_at = std::cmp::min(
-        identity.expires_at,
-        now + deployment_duration(state.config.session_ttl_seconds)?,
-    );
+    let expires_at = auth::configured_session_expiry(
+        now,
+        deployment_duration(state.config.session_ttl_seconds)?,
+    )
+    .map_err(ApiError::from)?;
     let session = create_bff_session(
         &state.pool,
         &state.key_ring,
@@ -738,21 +972,19 @@ async fn backchannel_logout(
 
 async fn authorization_decision(
     State(state): State<Arc<AppState>>,
-    Extension(principal): Extension<MtlsPrincipal>,
+    headers: HeaderMap,
     Json(request): Json<AuthorizationDecisionRequest>,
 ) -> Result<Json<AuthorizationDecision>, ApiError> {
     let started = std::time::Instant::now();
     let now = OffsetDateTime::now_utc();
-    require_service_identity(&state.pool, &principal.san_uri, now)
-        .await
-        .map_err(ApiError::from)?;
+    let service = service_identity(&state, &headers, "access.authorization.decide").await?;
     let policy = operation_contract(&request.operation_id)
         .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
     if !scope_matches_kind(&request.scope, policy.scope) {
         return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
     }
     if let AuthorizationScope::Service { service_id } = &request.scope
-        && service_id != &principal.san_uri
+        && service_id != &service.client_id
     {
         return Err(ApiError::forbidden("LW_AUTH_SERVICE_IDENTITY_DENIED"));
     }
@@ -815,6 +1047,7 @@ async fn resolve_environment_owner(
     now: OffsetDateTime,
 ) -> Result<(), ApiError> {
     let AuthorizationScope::Environment {
+        project_id,
         course_id,
         environment_id,
         environment_revision,
@@ -827,6 +1060,7 @@ async fn resolve_environment_owner(
         .resolve(
             &EnvironmentOwnerResolutionRequest {
                 environment_id: *environment_id,
+                project_id: *project_id,
                 course_id: *course_id,
                 owner_actor_id: decision.actor.actor_id,
                 expected_revision: *environment_revision,
@@ -879,11 +1113,9 @@ fn validate_observed_revisions(
 
 async fn metrics_endpoint(
     State(state): State<Arc<AppState>>,
-    Extension(principal): Extension<MtlsPrincipal>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_service_identity(&state.pool, &principal.san_uri, OffsetDateTime::now_utc())
-        .await
-        .map_err(ApiError::from)?;
+    let _service = service_identity(&state, &headers, "access.metrics.read").await?;
     Ok((
         [(
             header::CONTENT_TYPE,
@@ -983,7 +1215,6 @@ fn effective_session_scopes(
                 expiry = member_expiry;
             }
             scopes.push(AuthorizationScope::Project {
-                course_id: membership.course_id,
                 project_id: membership.project_id,
             });
         }
@@ -1186,6 +1417,73 @@ fn required(name: &'static str) -> Result<String, StartupError> {
     std::env::var(name).map_err(|_| StartupError::Config)
 }
 
+fn required_u64(name: &'static str) -> Result<u64, StartupError> {
+    required(name)?
+        .parse::<u64>()
+        .map_err(|_| StartupError::Config)
+}
+
+fn required_set(name: &'static str) -> Result<BTreeSet<String>, StartupError> {
+    let values = required(name)?
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if values.is_empty() {
+        Err(StartupError::Config)
+    } else {
+        Ok(values)
+    }
+}
+
+fn required_target(
+    audience_name: &'static str,
+    scopes_name: &'static str,
+) -> Result<ServiceTokenTarget, StartupError> {
+    Ok(ServiceTokenTarget {
+        audience: required(audience_name)?,
+        scopes: required_set(scopes_name)?,
+    })
+}
+
+fn read_required_secret(path: &str) -> Result<String, StartupError> {
+    let value = std::fs::read_to_string(path)?;
+    let value = value.trim();
+    if value.is_empty() {
+        Err(StartupError::Config)
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn required_service_client_ids() -> Result<BTreeSet<String>, StartupError> {
+    let value = required("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS")?;
+    let ids = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if ids.is_empty() {
+        Err(StartupError::Config)
+    } else {
+        Ok(ids)
+    }
+}
+
+pub(crate) async fn service_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    permission: &str,
+) -> Result<ServiceIdentity, ApiError> {
+    state
+        .service_token_verifier
+        .authenticate_with_permission(headers, permission)
+        .await
+        .map_err(ApiError::from)
+}
+
 fn deployment_duration(seconds: u64) -> Result<Duration, ApiError> {
     Ok(Duration::seconds(i64::try_from(seconds).map_err(|_| {
         ApiError::internal("LW_AUTH_CONFIG_SESSION_TTL_INVALID")
@@ -1370,10 +1668,26 @@ impl From<auth::OwnerResolverClientError> for ApiError {
             auth::OwnerResolverClientError::ResponseInvalid => {
                 Self::unavailable("LW_AUTH_OWNER_RESPONSE_INVALID")
             }
-            auth::OwnerResolverClientError::Configuration
-            | auth::OwnerResolverClientError::CertificateMaterial => {
+            auth::OwnerResolverClientError::Configuration => {
                 Self::internal("LW_AUTH_CONFIG_BINDING_MISSING")
             }
+        }
+    }
+}
+
+impl From<ServiceAuthError> for ApiError {
+    fn from(error: ServiceAuthError) -> Self {
+        match error {
+            ServiceAuthError::CredentialsMissing
+            | ServiceAuthError::TokenRejected
+            | ServiceAuthError::TokenExpired => Self::unauthorized("LW_AUTH_SERVICE_TOKEN_INVALID"),
+            ServiceAuthError::PermissionDenied => {
+                Self::forbidden("LW_AUTH_SERVICE_PERMISSION_DENIED")
+            }
+            ServiceAuthError::InvalidConfig
+            | ServiceAuthError::JwksUnavailable
+            | ServiceAuthError::EndpointTransport
+            | ServiceAuthError::HttpClient => Self::unavailable("LW_AUTH_SERVICE_UNAVAILABLE"),
         }
     }
 }
@@ -1401,6 +1715,12 @@ enum StartupError {
     #[error("LW_AUTH_STARTUP_FAILED")]
     Jwt,
     #[error("LW_AUTH_STARTUP_FAILED")]
+    ServiceAuth(#[source] ServiceAuthError),
+    #[error("LW_AUTH_STARTUP_FAILED")]
+    ServiceToken(#[from] auth::ServiceTokenClientError),
+    #[error("LW_AUTH_STARTUP_FAILED")]
+    HttpTransport(#[source] http_transport::HttpTransportError),
+    #[error("LW_AUTH_STARTUP_FAILED")]
     Database(#[from] sqlx::Error),
     #[error("LW_AUTH_STARTUP_FAILED")]
     Io(#[from] std::io::Error),
@@ -1408,10 +1728,27 @@ enum StartupError {
 
 #[cfg(test)]
 mod tests {
-    use super::browser_routes;
+    use time::{Duration, OffsetDateTime};
+
+    use super::{browser_routes, deployment_duration};
 
     #[test]
     fn browser_routes_register_without_conflicts() {
         let _router = browser_routes();
+    }
+
+    #[test]
+    fn callback_session_expiry_uses_configured_lifetime_after_token_verification()
+    -> Result<(), String> {
+        let callback_at = OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_000);
+        let id_token_expiry = callback_at + Duration::seconds(5);
+        let session_duration = deployment_duration(900)
+            .map_err(|error| format!("configured duration: {}", error.diagnostic))?;
+        let session_expiry = auth::configured_session_expiry(callback_at, session_duration)
+            .map_err(|error| format!("configured session expiry: {error}"))?;
+
+        assert_eq!(session_expiry, callback_at + Duration::seconds(900));
+        assert!(session_expiry > id_token_expiry);
+        Ok(())
     }
 }

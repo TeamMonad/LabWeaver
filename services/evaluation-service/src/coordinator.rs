@@ -5,8 +5,15 @@
     reason = "the reviewed configuration and stable diagnostics define this internal boundary"
 )]
 
-use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration}; // internal persistence hash, not contract hash
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+}; // internal persistence hash, not contract hash
 
+use auth::{ServiceTokenClient, ServiceTokenClientError};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use contracts::{
     DiagnosticCode, PolicyId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
@@ -16,7 +23,7 @@ use contracts::{
     },
 };
 use rand::random;
-use reqwest::{Certificate, Client, Identity, Method, StatusCode, Url};
+use reqwest::{Certificate, Client, Method, StatusCode, Url, header::HeaderMap};
 use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,6 +34,7 @@ const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
 
 const FIELD_MANAGER: &str = "labweaver-freeze-coordinator";
 const MAX_BOUND_FILE_BYTES: u64 = 1024 * 1024;
+const ENVIRONMENT_FREEZE_SCOPE: &str = "evaluation.environment.freeze";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,9 +44,7 @@ pub struct FreezeCoordinatorConfiguration {
     pub kubernetes_ca_file: PathBuf,
     pub environment_service_base_uri: Url,
     pub environment_ca_file: PathBuf,
-    pub environment_client_certificate_file: PathBuf,
-    pub environment_client_private_key_file: PathBuf,
-    pub allowed_environment_server_sans: Vec<String>,
+    pub environment_audience: String,
     pub worker_image: String,
     pub worker_service_account_name: String,
     pub vm_job_namespace: String,
@@ -62,6 +68,8 @@ pub struct FreezeCoordinator {
     store: PgFreezeCommandStore,
     kubernetes: Client,
     environment: Client,
+    environment_token_client: Arc<ServiceTokenClient>,
+    environment_token_scopes: BTreeSet<String>,
     kubernetes_token: String,
     worker_configuration: String,
     worker_secrets: BTreeMap<String, Vec<u8>>,
@@ -72,8 +80,14 @@ impl FreezeCoordinator {
     pub fn new(
         configuration: FreezeCoordinatorConfiguration,
         store: PgFreezeCommandStore,
+        environment_token_client: Arc<ServiceTokenClient>,
+        available_service_scopes: &BTreeSet<String>,
     ) -> Result<Self, FreezeCoordinatorError> {
         validate_configuration(&configuration)?;
+        if !available_service_scopes.contains(ENVIRONMENT_FREEZE_SCOPE) {
+            return Err(FreezeCoordinatorError::ConfigurationInvalid);
+        }
+        let environment_token_scopes = BTreeSet::from([ENVIRONMENT_FREEZE_SCOPE.to_owned()]);
         let kubernetes_token = read_bound_text(&configuration.kubernetes_bearer_token_file)?;
         let kubernetes_ca =
             Certificate::from_pem(&read_bound_file(&configuration.kubernetes_ca_file)?)?;
@@ -92,16 +106,10 @@ impl FreezeCoordinator {
         if environment_ca.is_empty() {
             return Err(FreezeCoordinatorError::CertificateInvalid);
         }
-        let mut identity = read_bound_file(&configuration.environment_client_certificate_file)?;
-        identity.push(b'\n');
-        identity.extend(read_bound_file(
-            &configuration.environment_client_private_key_file,
-        )?);
         let mut environment_builder = Client::builder()
             .https_only(true)
             .tls_built_in_root_certs(false)
             .redirect(reqwest::redirect::Policy::none())
-            .identity(Identity::from_pem(&identity)?)
             .timeout(Duration::from_millis(
                 configuration.request_timeout_milliseconds,
             ));
@@ -127,6 +135,8 @@ impl FreezeCoordinator {
             store,
             kubernetes,
             environment,
+            environment_token_client,
+            environment_token_scopes,
             kubernetes_token,
             worker_configuration,
             worker_secrets,
@@ -374,6 +384,7 @@ impl FreezeCoordinator {
         let now = self.store.authority_now().await?;
         let request = FreezeRequest {
             frozen_submission_id: command.frozen_submission_id,
+            project_id: command.project_id,
             course_id: command.course_id,
             actor_id: command.actor_id,
             agent_run_id: binding.agent_run_id,
@@ -598,7 +609,9 @@ impl FreezeCoordinator {
         let response = self
             .environment
             .post(uri)
+            .headers(self.environment_headers().await?)
             .json(&EnvironmentFreezeBindingRequest {
+                project_id: command.project_id,
                 course_id: command.course_id,
                 actor_id: command.actor_id,
                 expected_revision: command.environment_revision,
@@ -611,6 +624,19 @@ impl FreezeCoordinator {
         }
         let bytes = response.bytes().await?;
         contracts::parse_strict_json(&bytes).map_err(|_| FreezeCoordinatorError::BindingInvalid)
+    }
+
+    async fn environment_headers(&self) -> Result<HeaderMap, FreezeCoordinatorError> {
+        let mut headers = HeaderMap::new();
+        self.environment_token_client
+            .bearer_auth_for(
+                &mut headers,
+                &self.configuration.environment_audience,
+                &self.environment_token_scopes,
+            )
+            .await
+            .map_err(FreezeCoordinatorError::ServiceToken)?;
+        Ok(headers)
     }
 
     async fn apply(
@@ -780,10 +806,11 @@ fn validate_configuration(
         || configuration.environment_service_base_uri.scheme() != "https"
         || configuration.environment_service_base_uri.path() != "/"
         || environment_host.is_none()
-        || !configuration
-            .allowed_environment_server_sans
-            .iter()
-            .any(|value| Some(value.as_str()) == environment_host)
+        || configuration.environment_audience.trim().is_empty()
+        || configuration
+            .environment_audience
+            .chars()
+            .any(char::is_control)
         || !configuration.worker_image.contains("@sha256:")
         || configuration
             .worker_image
@@ -937,6 +964,8 @@ pub enum FreezeCoordinatorError {
     Io(#[from] std::io::Error),
     #[error("LW_COLLECT_HTTP_FAILED")]
     Http(#[from] reqwest::Error),
+    #[error("LW_COLLECT_SERVICE_TOKEN_FAILED")]
+    ServiceToken(#[from] ServiceTokenClientError),
     #[error("LW_COLLECT_JSON_FAILED")]
     Json(#[from] serde_json::Error),
     #[error("LW_COLLECT_IDENTITY_INVALID")]
@@ -966,6 +995,7 @@ impl FreezeCoordinatorError {
             Self::KubernetesRejected => "LW_COLLECT_KUBERNETES_REJECTED",
             Self::Io(_) => "LW_COLLECT_IO_FAILED",
             Self::Http(_) => "LW_COLLECT_HTTP_FAILED",
+            Self::ServiceToken(_) => "LW_COLLECT_SERVICE_TOKEN_FAILED",
             Self::Json(_) => "LW_COLLECT_JSON_FAILED",
             Self::Ssh(_) => "LW_COLLECT_IDENTITY_INVALID",
             Self::Store(_) => "LW_COLLECT_STORE_FAILED",

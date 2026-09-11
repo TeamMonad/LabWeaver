@@ -5,14 +5,14 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentSpec};
+use crate::authoring::{AuthoringApproval, EnvironmentSpec};
 use crate::resource::{ResourceLease, ResourceRequest};
 use crate::submission::FrozenSubmission;
 use crate::supply_chain::{BuildRequest, EnvironmentTemplateRelease};
 use crate::{
     AccessGrantId, ActorId, AgentRunId, BuildRequestId, ConsoleSessionId, CourseId, EnvironmentId,
     EvaluationReleaseId, EvaluationRunId, EvaluationStepRunId, EventId, FrozenSubmissionId,
-    GatewaySessionId, ReleaseId, Revision, Sequence, SshPublicKeyId, UtcTimestamp,
+    GatewaySessionId, ProjectId, ReleaseId, Revision, Sequence, SshPublicKeyId, UtcTimestamp,
 };
 
 pub const SPEC_VERSION: &str = "1.0";
@@ -62,6 +62,8 @@ pub mod subjects {
         "labweaver.control.environment_template_release.published.v1";
     pub const ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN: &str =
         "labweaver.control.environment_template_release.withdrawn.v1";
+    pub const AUTHORING_APPROVAL_COMPLETED: &str =
+        "labweaver.control.authoring_approval.completed.v1";
     pub const RESOURCE_REQUEST_SUBMITTED: &str = "labweaver.resource.request.submitted.v1";
     pub const RESOURCE_REQUEST_APPROVED: &str = "labweaver.resource.request.approved.v1";
     pub const RESOURCE_REQUEST_REJECTED: &str = "labweaver.resource.request.rejected.v1";
@@ -87,7 +89,11 @@ pub struct CloudEvent<T> {
     pub time: UtcTimestamp,
     pub datacontenttype: String,
     pub dataschema: String,
-    pub course_id: CourseId,
+    /// Required project scope for every platform event, including independent Work events.
+    pub project_id: ProjectId,
+    /// Optional teaching association. Independent projects omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub course_id: Option<CourseId>,
     pub aggregate_revision: Revision,
     pub aggregate_sequence: Sequence,
     pub trace_id: String,
@@ -371,6 +377,11 @@ pub const EVENT_CONTRACTS: &[EventContract] = &[
         event_type: subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,
         schema_name: "environment-template-release-withdrawn",
     },
+    EventContract {
+        subject: subjects::AUTHORING_APPROVAL_COMPLETED,
+        event_type: subjects::AUTHORING_APPROVAL_COMPLETED,
+        schema_name: "authoring-approval-completed",
+    },
 ];
 
 pub fn validate_registry() -> Result<(), EventError> {
@@ -401,7 +412,6 @@ pub struct AgentRunEvent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentBuildRequested {
     pub request: BuildRequest,
-    pub approval: CandidateApproval,
     pub idempotency_key: String,
 }
 
@@ -411,11 +421,7 @@ impl AgentBuildRequested {
         self.request
             .validate()
             .map_err(|_| EventError::PayloadIdentityMismatch)?;
-        if self.approval.decision != CandidateDecision::Approved
-            || self.approval.id != self.request.approval_id
-            || self.approval.candidate_id != self.request.candidate_id
-            || self.approval.candidate_revision != self.request.candidate_revision
-            || self.idempotency_key.len() < 16
+        if self.idempotency_key.len() < 16
             || self.idempotency_key.len() > 128
             || !self
                 .idempotency_key
@@ -425,6 +431,22 @@ impl AgentBuildRequested {
             return Err(EventError::PayloadIdentityMismatch);
         }
         Ok(())
+    }
+}
+
+/// Control-owned terminal fact for one complete authoring approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthoringApprovalCompleted {
+    pub approval: AuthoringApproval,
+}
+
+impl AuthoringApprovalCompleted {
+    /// Validates the immutable approval payload before it is published.
+    pub fn validate(&self) -> Result<(), EventError> {
+        self.approval
+            .validate()
+            .map_err(|_| EventError::PayloadIdentityMismatch)
     }
 }
 
@@ -470,6 +492,8 @@ pub struct EnvironmentEvent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccessGrantChanged {
     pub access_grant_id: AccessGrantId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub revision: Revision,
     pub state: String,
     pub effective_at: UtcTimestamp,
@@ -489,6 +513,8 @@ pub struct GatewaySessionChanged {
     pub gateway_session_id: GatewaySessionId,
     pub access_grant_id: AccessGrantId,
     pub access_grant_revision: Revision,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub state: String,
     pub effective_at: UtcTimestamp,
     pub terminate_by: Option<UtcTimestamp>,
@@ -502,6 +528,8 @@ pub struct ConsoleSessionChanged {
     pub console_session_id: ConsoleSessionId,
     pub access_grant_id: AccessGrantId,
     pub access_grant_revision: Revision,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub environment_id: EnvironmentId,
     pub environment_revision: Revision,
     pub state: crate::access::ConsoleSessionState,

@@ -1,0 +1,168 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "WorkConfigurationPlanId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.",
+      "type": "string"
+    },
+    "WorkConfigurationPreauthorization": {
+      "additionalProperties": false,
+      "description": "Concrete per-Work grant for executing one exact immutable configuration plan.\n\nThe grant binds both script artifacts and the plan revision. It therefore cannot authorize a\nnewly generated script, a changed verification script, or a plan whose restart requirement was\naltered after approval.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkConfigurationPreauthorizationId"
+        },
+        "planId": {
+          "$ref": "#/$defs/WorkConfigurationPlanId"
+        },
+        "planRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "scriptArtifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "verificationScriptArtifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "environmentId",
+        "environmentRevision",
+        "actorId",
+        "planId",
+        "planRevision",
+        "scriptArtifact",
+        "expiresAt",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "WorkConfigurationPreauthorizationId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPreauthorizationId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Control-to-Agent command that binds one exact approved Work configuration grant to an\nAgentRun that is waiting for approval.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expectedRunRevision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "preauthorization": {
+      "$ref": "#/$defs/WorkConfigurationPreauthorization"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "projectId",
+    "expectedRunRevision",
+    "preauthorization"
+  ],
+  "title": "InternalApproveWorkConfigurationRequest",
+  "type": "object"
+}

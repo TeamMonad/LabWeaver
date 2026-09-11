@@ -17,6 +17,59 @@
       ],
       "type": "string"
     },
+    "GpuAllocation": {
+      "additionalProperties": false,
+      "description": "The catalog resolution captured on an approved capacity claim.",
+      "properties": {
+        "allocationBinding": {
+          "type": "string"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entryId": {
+          "$ref": "#/$defs/GpuCatalogEntryId",
+          "description": "Exact catalog row used to resolve this allocation."
+        },
+        "mode": {
+          "$ref": "#/$defs/GpuAllocationMode"
+        },
+        "providerBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entryId",
+        "class",
+        "count",
+        "mode",
+        "providerBinding",
+        "allocationBinding",
+        "catalogRevision"
+      ],
+      "type": "object"
+    },
+    "GpuAllocationMode": {
+      "description": "Allocation mode selected by the Resource GPU catalog.\n\nCallers submit only a catalog class and count. The mode is resolved from the\nactive catalog entry and is never accepted as an untrusted request override.",
+      "enum": [
+        "exclusive",
+        "container_time_slice",
+        "vm_vgpu"
+      ],
+      "type": "string"
+    },
+    "GpuCatalogEntryId": {
+      "description": "Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.",
+      "type": "string"
+    },
     "GpuRequest": {
       "additionalProperties": false,
       "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
@@ -94,6 +147,17 @@
   "properties": {
     "approvalId": {
       "$ref": "#/$defs/ResourceApprovalId"
+    },
+    "gpuAllocation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exact GPU catalog resolution captured before provider side effects."
     },
     "id": {
       "$ref": "#/$defs/CapacityClaimId"

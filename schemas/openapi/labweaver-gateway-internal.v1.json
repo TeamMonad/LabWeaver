@@ -13,8 +13,23 @@
       }
     },
     "schemas": {
+      "AgentLlmReviewQuery": {
+        "$ref": "../contracts/v1/http/agent-llm-review-query.schema.json"
+      },
+      "AgentWorkExecutionIntentMetadata": {
+        "$ref": "../contracts/v1/http/agent-work-execution-intent-metadata.schema.json"
+      },
+      "AgentWorkExecutionIntentQuery": {
+        "$ref": "../contracts/v1/http/agent-work-execution-intent-query.schema.json"
+      },
       "AuthSession": {
         "$ref": "../contracts/v1/auth-session.schema.json"
+      },
+      "AuthoringPublicationAdmissionBinding": {
+        "$ref": "../contracts/v1/http/authoring-publication-admission-binding.schema.json"
+      },
+      "AuthoringPublicationAdmissionQuery": {
+        "$ref": "../contracts/v1/http/authoring-publication-admission-query.schema.json"
       },
       "AuthorizationDecision": {
         "$ref": "../contracts/v1/authorization-decision.schema.json"
@@ -22,14 +37,38 @@
       "AuthorizationDecisionRequest": {
         "$ref": "../contracts/v1/authorization-decision-request.schema.json"
       },
+      "ContainerWorkExecutionQuery": {
+        "$ref": "../contracts/v1/http/container-work-execution-query.schema.json"
+      },
+      "ContainerWorkExecutionReceipt": {
+        "$ref": "../contracts/v1/http/container-work-execution-receipt.schema.json"
+      },
+      "ContainerWorkExecutionRequest": {
+        "$ref": "../contracts/v1/http/container-work-execution-request.schema.json"
+      },
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
+      },
+      "EnvironmentExecutionBinding": {
+        "$ref": "../contracts/v1/internal/environment-execution-binding.schema.json"
+      },
+      "EnvironmentExecutionBindingRequest": {
+        "$ref": "../contracts/v1/internal/environment-execution-binding-request.schema.json"
+      },
+      "EnvironmentWorkConfigurationTarget": {
+        "$ref": "../contracts/v1/environment-work-configuration-target.schema.json"
+      },
+      "EnvironmentWorkConfigurationTargetQuery": {
+        "$ref": "../contracts/v1/http/environment-work-configuration-target-query.schema.json"
       },
       "EvaluationRelease": {
         "$ref": "../contracts/v1/evaluation-release.schema.json"
       },
       "EvaluationRun": {
         "$ref": "../contracts/v1/evaluation-run.schema.json"
+      },
+      "GeneratedArtifactRecord": {
+        "$ref": "../contracts/v1/http/generated-artifact-record.schema.json"
       },
       "InternalAgentBuildCancellationRequest": {
         "$ref": "../contracts/v1/http/internal-agent-build-cancellation-request.schema.json"
@@ -40,11 +79,20 @@
       "InternalAgentBuildStatusQuery": {
         "$ref": "../contracts/v1/http/internal-agent-build-status-query.schema.json"
       },
+      "InternalAgentLlmReviewReceipt": {
+        "$ref": "../contracts/v1/http/internal-agent-llm-review-receipt.schema.json"
+      },
+      "InternalAgentLlmReviewRequest": {
+        "$ref": "../contracts/v1/http/internal-agent-llm-review-request.schema.json"
+      },
       "InternalAgentRunMutationRequest": {
         "$ref": "../contracts/v1/http/internal-agent-run-mutation-request.schema.json"
       },
       "InternalAgentRunOutcome": {
         "$ref": "../contracts/v1/http/internal-agent-run-outcome.schema.json"
+      },
+      "InternalApproveWorkConfigurationRequest": {
+        "$ref": "../contracts/v1/http/internal-approve-work-configuration-request.schema.json"
       },
       "InternalCompleteEvaluationStepRequest": {
         "$ref": "../contracts/v1/http/internal-complete-evaluation-step-request.schema.json"
@@ -163,12 +211,20 @@
       },
       "StudentEvaluationResult": {
         "$ref": "../contracts/v1/student-evaluation-result.schema.json"
+      },
+      "WorkConfigurationAdmissionBinding": {
+        "$ref": "../contracts/v1/http/work-configuration-admission-binding.schema.json"
+      },
+      "WorkConfigurationAdmissionQuery": {
+        "$ref": "../contracts/v1/http/work-configuration-admission-query.schema.json"
       }
     },
     "securitySchemes": {
-      "serviceMtls": {
-        "description": "Deployment-controlled service identity; never exposed to browser clients.",
-        "type": "mutualTLS"
+      "serviceJwt": {
+        "bearerFormat": "JWT",
+        "description": "Short-lived service-account JWT validated against the configured issuer, audience, signature, expiry, and route permission. Service-to-service transport is protected by TLS.",
+        "scheme": "bearer",
+        "type": "http"
       }
     }
   },
@@ -224,7 +280,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_run:create"
+            ]
           }
         ],
         "summary": "Reserve an Agent-owned run from a Control-verified immutable package and policy"
@@ -264,7 +322,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_run:read"
+            ]
           }
         ],
         "summary": "Read the authoritative Agent-owned run"
@@ -324,7 +384,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_run:cancel"
+            ]
           }
         ],
         "summary": "Request cancellation at an exact AgentRun revision"
@@ -364,7 +426,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_run:outcome"
+            ]
           }
         ],
         "summary": "Resolve the authoritative run and retained candidate checkpoints"
@@ -436,10 +500,155 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_run:retry"
+            ]
           }
         ],
         "summary": "Retry one failed AgentRun track at an exact revision"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/work-configuration/approve": {
+      "post": {
+        "operationId": "approveInternalWorkConfigurationRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalApproveWorkConfigurationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./agent-run.schema.json"
+                }
+              }
+            },
+            "description": "AgentRun accepted for Work configuration execution"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent_run:approve"
+            ]
+          }
+        ],
+        "summary": "Bind one exact Work configuration preauthorization to an AgentRun awaiting approval"
+      }
+    },
+    "/internal/v1/agent-runs/{runId}/work-execution-intent": {
+      "get": {
+        "operationId": "getInternalAgentWorkExecutionIntent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "executionId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentWorkExecutionIntentMetadata"
+                }
+              }
+            },
+            "description": "Persisted VM Work execution metadata"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.control.invoke"
+            ]
+          }
+        ],
+        "summary": "Read persisted VM Work execution metadata"
       }
     },
     "/internal/v1/auth/decision": {
@@ -475,10 +684,145 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "authorization:decide"
+            ]
           }
         ],
-        "summary": "Evaluate an actor session and exact resource scope for an mTLS caller"
+        "summary": "Evaluate an actor session and exact resource scope for a service JWT caller"
+      }
+    },
+    "/internal/v1/authoring-publications/{approvalId}/admission": {
+      "get": {
+        "description": "Permission: control.authoring.read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getInternalAuthoringPublicationAdmission",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "approvalId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "approvalRevision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "evaluationReleaseId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/authoring-publication-admission-binding.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.authoring.read"
+            ]
+          }
+        ],
+        "summary": "getInternalAuthoringPublicationAdmission",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "control.authoring.read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
       }
     },
     "/internal/v1/build-requests/{buildRequestId}": {
@@ -527,7 +871,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_build:read"
+            ]
           }
         ],
         "summary": "Read the Agent-owned build state and revision for an exact course"
@@ -593,7 +939,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_build:cancel"
+            ]
           }
         ],
         "summary": "Request one actor-attributed build cancellation at an exact course, state and revision"
@@ -679,7 +1027,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "environment:resolve_endpoint_eligibility"
+            ]
           }
         ],
         "summary": "resolveEndpointEligibility",
@@ -695,6 +1045,214 @@
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-permission": "environment:resolve_endpoint_eligibility",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/environments/{environmentId}/execution-binding/evaluation": {
+      "post": {
+        "description": "Permission: environment:resolve_evaluation_execution_binding. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "resolveEnvironmentEvaluationExecutionBinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/internal/environment-execution-binding-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/internal/environment-execution-binding.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "environment:resolve_evaluation_execution_binding"
+            ]
+          }
+        ],
+        "summary": "resolveEnvironmentEvaluationExecutionBinding",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:resolve_evaluation_execution_binding",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/environments/{environmentId}/execution-binding/work": {
+      "post": {
+        "description": "Permission: environment:resolve_work_execution_binding. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "resolveEnvironmentWorkExecutionBinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/internal/environment-execution-binding-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/internal/environment-execution-binding.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "environment:resolve_work_execution_binding"
+            ]
+          }
+        ],
+        "summary": "resolveEnvironmentWorkExecutionBinding",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment:resolve_work_execution_binding",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
@@ -781,7 +1339,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "environment:resolve_owner"
+            ]
           }
         ],
         "summary": "resolveEnvironmentOwner",
@@ -799,6 +1359,139 @@
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-permission": "environment:resolve_owner",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/environments/{environmentId}/work-configuration-target": {
+      "get": {
+        "description": "Permission: environment.work.read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "resolveEnvironmentWorkConfigurationTarget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environmentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "actorId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expectedRevision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/environment-work-configuration-target.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "environment.work.read"
+            ]
+          }
+        ],
+        "summary": "resolveEnvironmentWorkConfigurationTarget",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "environment.work.read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
@@ -853,7 +1546,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_release:read"
+            ]
           }
         ],
         "summary": "List authoritative Evaluation releases for one course"
@@ -905,7 +1600,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_release:publish"
+            ]
           }
         ],
         "summary": "Publish one Control-approved immutable EvaluationSpec release"
@@ -945,7 +1642,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_release:read_one"
+            ]
           }
         ],
         "summary": "Read one authoritative Evaluation release"
@@ -1016,7 +1715,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_release:withdraw"
+            ]
           }
         ],
         "summary": "Withdraw one Evaluation release at an exact revision"
@@ -1070,7 +1771,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_run:create"
+            ]
           }
         ],
         "summary": "Reserve one EvaluationRun from an active release and immutable FrozenSubmission"
@@ -1110,7 +1813,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_run:read"
+            ]
           }
         ],
         "summary": "Read one authoritative EvaluationRun"
@@ -1173,7 +1878,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_run:cancel"
+            ]
           }
         ],
         "summary": "Request cancellation at an exact EvaluationRun revision"
@@ -1245,7 +1952,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_step:cleanup"
+            ]
           }
         ],
         "summary": "Verify cleanup for one failed or cancelled StepRun at an exact EvaluationRun revision"
@@ -1307,7 +2016,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_step:complete"
+            ]
           }
         ],
         "summary": "Complete one fenced StepRun attempt with hash-only evidence"
@@ -1379,10 +2090,145 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "evaluation_step:retry"
+            ]
           }
         ],
         "summary": "Retry one failed or cancelled StepRun at an exact EvaluationRun revision"
+      }
+    },
+    "/internal/v1/generated-artifacts/{artifactId}": {
+      "get": {
+        "description": "Permission: agent.control.invoke. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getInternalGeneratedArtifact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifactId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "packageId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "packageRevision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/generated-artifact-record.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.control.invoke"
+            ]
+          }
+        ],
+        "summary": "getInternalGeneratedArtifact",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "agent.control.invoke",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
       }
     },
     "/internal/v1/image-artifacts/{artifactId}": {
@@ -1419,10 +2265,401 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "agent_artifact:read"
+            ]
           }
         ],
         "summary": "Resolve one Agent-owned verified artifact identity"
+      }
+    },
+    "/internal/v1/llm-reviews": {
+      "post": {
+        "operationId": "createInternalAgentLlmReview",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalAgentLlmReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalAgentLlmReviewReceipt"
+                }
+              }
+            },
+            "description": "LLM review queued"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.llm_review.create"
+            ]
+          }
+        ],
+        "summary": "Queue one bounded advisory Agent LLM review"
+      }
+    },
+    "/internal/v1/llm-reviews/{taskRunId}": {
+      "get": {
+        "operationId": "getInternalAgentLlmReview",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalAgentLlmReviewReceipt"
+                }
+              }
+            },
+            "description": "LLM review receipt"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.llm_review.read"
+            ]
+          }
+        ],
+        "summary": "Read one Agent LLM review receipt"
+      }
+    },
+    "/internal/v1/llm-reviews/{taskRunId}/cancel": {
+      "post": {
+        "operationId": "cancelInternalAgentLlmReview",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalAgentLlmReviewReceipt"
+                }
+              }
+            },
+            "description": "Updated LLM review receipt"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.llm_review.cancel"
+            ]
+          }
+        ],
+        "summary": "Persist cancellation for one Agent LLM review"
+      }
+    },
+    "/internal/v1/projects/{projectId}/llm-egress-policy": {
+      "get": {
+        "description": "Permission: control.llm_policy.read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getInternalProjectLlmEgressPolicy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/project-llm-egress-policy.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.llm_policy.read"
+            ]
+          }
+        ],
+        "summary": "getInternalProjectLlmEgressPolicy",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "control.llm_policy.read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/resource/usage": {
+      "post": {
+        "description": "Permission: resource.usage.record. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "recordInternalResourceUsage",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/record-resource-usage-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-usage-record.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.usage.record"
+            ]
+          }
+        ],
+        "summary": "recordInternalResourceUsage",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.usage.record",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
       }
     },
     "/internal/v1/sessions": {
@@ -1504,7 +2741,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "gateway:session_write"
+            ]
           }
         ],
         "summary": "createGatewaySession",
@@ -1622,7 +2861,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "gateway:session_write"
+            ]
           }
         ],
         "summary": "closeGatewaySession",
@@ -1740,7 +2981,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "gateway:session_write"
+            ]
           }
         ],
         "summary": "heartbeatGatewaySession",
@@ -1832,7 +3075,9 @@
         },
         "security": [
           {
-            "serviceMtls": []
+            "serviceJwt": [
+              "gateway:ssh_authorize"
+            ]
           }
         ],
         "summary": "authorizeSsh",
@@ -1850,6 +3095,711 @@
         "x-labweaver-permission": "gateway:ssh_authorize",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources": {
+      "post": {
+        "description": "Permission: resource.task.create. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "createTaskResourceRequest",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/internal-create-task-resource-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-request.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.create"
+            ]
+          }
+        ],
+        "summary": "createTaskResourceRequest",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "resource.task.create",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources/{taskRunId}": {
+      "get": {
+        "description": "Permission: resource.task.read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getTaskResource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/task-resource-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.read"
+            ]
+          }
+        ],
+        "summary": "getTaskResource",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.task.read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources/{taskRunId}/ack": {
+      "post": {
+        "description": "Permission: resource.task.ack. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "acknowledgeTaskResource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/acknowledge-task-resource-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/task-resource-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.ack"
+            ]
+          }
+        ],
+        "summary": "acknowledgeTaskResource",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.task.ack",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources/{taskRunId}/cancel": {
+      "post": {
+        "description": "Permission: resource.task.cancel. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "cancelTaskResource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/resource-request-mutation.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-request.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.cancel"
+            ]
+          }
+        ],
+        "summary": "cancelTaskResource",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "resource.task.cancel",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources/{taskRunId}/claim": {
+      "post": {
+        "description": "Permission: resource.task.claim. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "claimTaskResource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/task-resource-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.claim"
+            ]
+          }
+        ],
+        "summary": "claimTaskResource",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.task.claim",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources/{taskRunId}/release": {
+      "post": {
+        "description": "Permission: resource.task.release. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "releaseTaskResource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/release-task-resource-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/task-resource-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.release"
+            ]
+          }
+        ],
+        "summary": "releaseTaskResource",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.task.release",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/task-resources/{taskRunId}/request": {
+      "get": {
+        "description": "Permission: resource.task.read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getTaskResourceRequest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "taskRunId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/resource-request.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.task.read"
+            ]
+          }
+        ],
+        "summary": "getTaskResourceRequest",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "resource.task.read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
         "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }

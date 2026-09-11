@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Scope query for the Agent-owned persisted VM execution intent endpoint.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "executionId": {
+      "type": "string"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "projectId",
+    "executionId"
+  ],
+  "title": "AgentWorkExecutionIntentQuery",
+  "type": "object"
+}

@@ -15,6 +15,7 @@ import RoleLayout from '@/components/layout/RoleLayout.vue'
 const tabs = [
   { path: '/admin/policies', label: '策略' },
   { path: '/admin/resource-approval', label: '资源审批' },
+  { path: '/admin/resource-finance', label: '预算与费用' },
   { path: '/admin/audit', label: '审计' },
 ]
 </script>

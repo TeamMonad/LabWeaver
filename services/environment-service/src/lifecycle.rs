@@ -157,6 +157,15 @@ pub fn plan_command_authorized(
         return Err(LifecycleError::CommandInvalid);
     }
 
+    // Keep the Resource lease fence attached to a Work aggregate while its
+    // lifecycle operation is stopping or deleting the runtime. Resource uses
+    // that persisted fence to ensure cleanup readback cannot release a newer
+    // claim after an older operation completes.
+    let retained_lease_authorization = lease_authorization.or_else(|| {
+        (current.class == contracts::authoring::EnvironmentClass::Work)
+            .then(|| current.operation.lease_authorization.clone())
+            .flatten()
+    });
     let mut planned = current.clone();
     planned.revision = next_revision(current.revision)?;
     planned.desired_state = desired_state(current, command.kind);
@@ -201,7 +210,7 @@ pub fn plan_command_authorized(
         access_revocation_revision: command.access_revocation_revision,
         retry_from_phase,
         reset_target: command.reset_target.clone(),
-        lease_authorization,
+        lease_authorization: retained_lease_authorization,
     };
     planned.validate()?;
     Ok(planned)
@@ -394,12 +403,13 @@ fn validate_provider_observation(
     use EnvironmentOperationKind as Operation;
     use ObservedEnvironmentState as State;
 
+    let transition = (
+        current.operation.kind,
+        current.observed_state,
+        observation.next_state,
+    );
     let transition_matches_operation = matches!(
-        (
-            current.operation.kind,
-            current.observed_state,
-            observation.next_state,
-        ),
+        transition,
         (
             Operation::Create | Operation::Retry | Operation::Recover,
             State::Requested,
@@ -436,14 +446,22 @@ fn validate_provider_observation(
                 State::Expiring,
                 State::Stopped | State::Deleting
             )
-            | (Operation::Expire, State::Stopped, State::Deleting)
             | (
                 Operation::Retry | Operation::Recover,
                 State::Stopping | State::Expiring,
                 State::Stopped | State::Deleting
             )
             | (_, State::Deleting, State::Deleted)
-    );
+    ) || (current.desired_state
+        == DesiredEnvironmentState::Deleted
+        && matches!(
+            transition,
+            (
+                Operation::Expire | Operation::Retry | Operation::Recover,
+                State::Stopped,
+                State::Deleting
+            )
+        ));
     if !transition_matches_operation {
         return Err(LifecycleError::ProviderObservationInvalid);
     }
@@ -453,7 +471,11 @@ fn validate_provider_observation(
         DesiredEnvironmentState::Stopped => observation.next_state == State::Stopped,
         DesiredEnvironmentState::Deleted => observation.next_state == State::Deleted,
     };
-    let is_expire_cleanup_checkpoint = current.operation.kind == Operation::Expire
+    let is_expire_cleanup_checkpoint = matches!(
+        current.operation.kind,
+        Operation::Expire | Operation::Retry | Operation::Recover
+    ) && current.desired_state
+        == DesiredEnvironmentState::Deleted
         && current.observed_state == State::Expiring
         && observation.next_state == State::Stopped
         && !observation.operation_complete;
@@ -576,6 +598,7 @@ fn validate_lease_authorization(
     ))?;
     if Some(authorization.lease_id) != current.lease_id
         || authorization.environment_id != current.id
+        || authorization.project_id != current.project_id
         || authorization.course_id != current.course_id
         || authorization.owner_actor_id != current.owner_id
         || Some(authorization.capacity_binding.as_str()) != current.capacity_binding.as_deref()
@@ -586,5 +609,6 @@ fn validate_lease_authorization(
             EnvironmentError::LeaseAuthorizationInvalid,
         ));
     }
+    authorization.validate()?;
     Ok(())
 }

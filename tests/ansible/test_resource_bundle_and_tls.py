@@ -15,14 +15,11 @@ def _manifest_root(tmp_path: Path) -> Path:
     (root / "configmaps" / "resource-service-config").mkdir(parents=True)
     (root / "secrets" / "resource-service-secrets").mkdir(parents=True)
     (root / "configmaps" / "resource-service-config" / "capacity.json").write_text("{}")
-    (root / "configmaps" / "resource-service-config" / "mtls.yaml").write_text(
+    (root / "configmaps" / "resource-service-config" / "http.yaml").write_text(
         "bind_addr: 0.0.0.0:9448\n"
         "server_certificate_file: /etc/labweaver/secrets/tls.crt\n"
         "server_key_file: /etc/labweaver/secrets/tls.key\n"
-        "client_ca_file: /etc/labweaver/secrets/mtls-ca.pem\n"
         "delegation_key_file: /etc/labweaver/secrets/resource-delegation-key\n"
-        "allowed_san_uris: [spiffe://labweaver/access-service]\n"
-        "required_eku: clientAuth\n"
     )
     for key in json.loads(Path("deploy/config/resource-bundle-manifest.json").read_text())["secrets"]["resource-service-secrets"]:
         (root / "secrets" / "resource-service-secrets" / key).write_bytes(b"x")
@@ -30,6 +27,23 @@ def _manifest_root(tmp_path: Path) -> Path:
 
 
 class ResourceBundleAndTlsTests(unittest.TestCase):
+    def test_bundle_permission_contract_matches_resource_identity(self) -> None:
+        from tools import prepare_platform_foundation as foundation
+
+        expected = foundation.NATS_USERS["resource-service"]
+        self.assertEqual(
+            bundle.RESOURCE_PUBLISH_SUBJECTS,
+            expected[0],
+        )
+        self.assertEqual(
+            bundle.RESOURCE_SUBSCRIBE_SUBJECTS,
+            expected[1],
+        )
+        self.assertEqual(
+            bundle.RESOURCE_RESPONSE_PERMISSION,
+            expected[2],
+        )
+
     def test_resource_manifest_rejects_extra_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _manifest_root(Path(temporary))

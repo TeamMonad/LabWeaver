@@ -51,8 +51,9 @@ pub struct AccessAuthFile {
     pub oidc: OidcFileConfig,
     /// Browser BFF configuration.
     pub browser: BrowserFileConfig,
-    /// Internal mTLS listener configuration.
-    pub internal_mtls: MtlsFileConfig,
+    /// Internal one-way TLS listener configuration. Service identity is
+    /// authenticated by the JWT middleware on the route tree.
+    pub internal_tls: ServerTlsFileConfig,
     /// Environment-authoritative owner resolver client configuration.
     pub environment_owner_resolver: OwnerResolverFileConfig,
     /// Authenticated browser gateway for the Control public API.
@@ -79,7 +80,6 @@ pub struct AccessAuthFile {
 )]
 #[serde(deny_unknown_fields)]
 pub struct GrantRuntimeFileConfig {
-    pub gateway_san_uris: Vec<String>,
     pub public_ssh_gateway_hostname: String,
     pub public_ssh_gateway_port: u16,
     pub public_ssh_gateway_host_key_fingerprint: String,
@@ -153,23 +153,21 @@ pub struct BrowserFileConfig {
     pub csrf_header_name: String,
 }
 
-/// Internal mTLS values supplied by deployment configuration.
+/// One-way TLS listener values supplied by deployment configuration.
+///
+/// Service identity is carried by a service JWT.  This configuration only
+/// describes the server certificate used to protect that token and the
+/// request in transit.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[allow(
     missing_docs,
-    reason = "YAML keys are documented by deploy/config/access-auth.yaml.example"
+    reason = "YAML keys are documented by deploy/config/evaluation-service.yaml.example"
 )]
 #[serde(deny_unknown_fields)]
-pub struct MtlsFileConfig {
+pub struct ServerTlsFileConfig {
     pub bind_addr: String,
     pub server_certificate_file: String,
     pub server_key_file: String,
-    pub client_ca_file: String,
-    pub allowed_san_uris: BTreeSet<String>,
-    pub required_eku: String,
-    /// Optional service-specific delegation key. Only Resource requires it.
-    #[serde(default)]
-    pub delegation_key_file: Option<String>,
 }
 
 /// Secret locators which are resolved only by the deployment runtime.
@@ -198,16 +196,13 @@ pub struct SecretFileConfig {
 pub struct OwnerResolverFileConfig {
     pub resolver_uri: String,
     pub ca_certificate_locator: String,
-    pub client_certificate_locator: String,
-    pub client_private_key_locator: String,
-    pub allowed_server_sans: Vec<String>,
     pub timeout_milliseconds: u64,
     pub max_retries: u8,
     pub retry_backoff_milliseconds: u64,
     pub decision_ttl_seconds: u64,
 }
 
-/// Fail-closed mTLS forwarding boundary from the browser BFF to Control.
+/// Fail-closed TLS forwarding boundary from the browser BFF to Control.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[allow(
     missing_docs,
@@ -217,8 +212,6 @@ pub struct OwnerResolverFileConfig {
 pub struct ControlGatewayFileConfig {
     pub base_uri: String,
     pub ca_certificate_locator: String,
-    pub client_certificate_locator: String,
-    pub client_private_key_locator: String,
     pub allowed_server_sans: Vec<String>,
     pub timeout_milliseconds: u64,
     pub max_request_bytes: usize,
@@ -234,8 +227,6 @@ pub struct ControlGatewayFileConfig {
 pub struct ResourceGatewayFileConfig {
     pub base_uri: String,
     pub ca_certificate_locator: String,
-    pub client_certificate_locator: String,
-    pub client_private_key_locator: String,
     pub delegation_key_locator: String,
     pub allowed_server_sans: Vec<String>,
     pub timeout_milliseconds: u64,
@@ -250,9 +241,6 @@ impl OwnerResolverFileConfig {
         EnvironmentOwnerResolverClientConfig {
             resolver_uri: self.resolver_uri.clone(),
             ca_certificate_locator: self.ca_certificate_locator.clone(),
-            client_certificate_locator: self.client_certificate_locator.clone(),
-            client_private_key_locator: self.client_private_key_locator.clone(),
-            allowed_server_sans: self.allowed_server_sans.clone(),
             timeout_milliseconds: self.timeout_milliseconds,
             max_retries: self.max_retries,
         }
@@ -283,11 +271,7 @@ impl AccessAuthFile {
         {
             return Err(AuthConfigError::InvalidDeploymentFile);
         }
-        let required_resolver_locators = [
-            resolver.ca_certificate_locator.as_str(),
-            resolver.client_certificate_locator.as_str(),
-            resolver.client_private_key_locator.as_str(),
-        ];
+        let required_resolver_locators = [resolver.ca_certificate_locator.as_str()];
         if parsed.oidc.role_claim_path.is_empty()
             || parsed.oidc.role_claim_path.iter().any(|segment| {
                 segment.is_empty()
@@ -326,18 +310,17 @@ impl AccessAuthFile {
                 .bind_addr
                 .parse::<std::net::SocketAddr>()
                 .is_err()
-            || parsed.internal_mtls.allowed_san_uris.is_empty()
             || parsed
-                .internal_mtls
-                .allowed_san_uris
-                .iter()
-                .any(|san| !valid_spiffe_uri(san))
-            || parsed
-                .internal_mtls
+                .internal_tls
                 .bind_addr
                 .parse::<std::net::SocketAddr>()
                 .is_err()
-            || parsed.internal_mtls.required_eku != "clientAuth"
+            || parsed
+                .internal_tls
+                .server_certificate_file
+                .trim()
+                .is_empty()
+            || parsed.internal_tls.server_key_file.trim().is_empty()
             || !(1..=5_000).contains(&parsed.environment_owner_resolver.retry_backoff_milliseconds)
             || !(1..=60).contains(&parsed.environment_owner_resolver.decision_ttl_seconds)
             || !parsed.service_gateway_is_valid(&parsed.control_gateway)
@@ -359,24 +342,12 @@ impl AccessAuthFile {
     }
 
     fn access_runtime_is_valid(&self) -> bool {
-        !self.grants.gateway_san_uris.is_empty()
-            && self.grants.gateway_san_uris.iter().all(|san| {
-                san.starts_with("spiffe://") && self.internal_mtls.allowed_san_uris.contains(san)
-            })
-            && self
-                .grants
-                .gateway_san_uris
-                .iter()
-                .collect::<BTreeSet<_>>()
-                .len()
-                == self.grants.gateway_san_uris.len()
-            && matches!(
-                url::Host::parse(&self.grants.public_ssh_gateway_hostname),
-                Ok(url::Host::Domain(hostname))
-                    if hostname == self.grants.public_ssh_gateway_hostname
-                        && hostname.contains('.')
-            )
-            && self.grants.public_ssh_gateway_port == 2222
+        matches!(
+            url::Host::parse(&self.grants.public_ssh_gateway_hostname),
+            Ok(url::Host::Domain(hostname))
+                if hostname == self.grants.public_ssh_gateway_hostname
+                    && hostname.contains('.')
+        ) && self.grants.public_ssh_gateway_port == 2222
             && self.grants.public_ssh_gateway_host_key_fingerprint.len() == 50
             && self
                 .grants
@@ -417,11 +388,7 @@ impl AccessAuthFile {
         let Ok(uri) = Url::parse(&gateway.base_uri) else {
             return false;
         };
-        let locators = [
-            gateway.ca_certificate_locator.as_str(),
-            gateway.client_certificate_locator.as_str(),
-            gateway.client_private_key_locator.as_str(),
-        ];
+        let locators = [gateway.ca_certificate_locator.as_str()];
         uri.scheme() == "https"
             && uri.host_str().is_some()
             && uri.path() == "/"
@@ -448,8 +415,6 @@ impl AccessAuthFile {
         };
         let locators = [
             self.resource_gateway.ca_certificate_locator.as_str(),
-            self.resource_gateway.client_certificate_locator.as_str(),
-            self.resource_gateway.client_private_key_locator.as_str(),
             self.resource_gateway.delegation_key_locator.as_str(),
         ];
         uri.scheme() == "https"
@@ -475,7 +440,7 @@ impl AccessAuthFile {
 
     fn insecure_mode_is_loopback_only(&self) -> bool {
         let browser_bind = self.browser.bind_addr.parse::<std::net::SocketAddr>();
-        let internal_bind = self.internal_mtls.bind_addr.parse::<std::net::SocketAddr>();
+        let internal_bind = self.internal_tls.bind_addr.parse::<std::net::SocketAddr>();
         let resolver = Url::parse(&self.environment_owner_resolver.resolver_uri);
         let control = Url::parse(&self.control_gateway.base_uri);
         let environment = Url::parse(&self.environment_gateway.base_uri);
@@ -592,19 +557,6 @@ fn url_host_is_loopback(url: &Url) -> bool {
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|address| address.is_loopback())
     })
-}
-
-fn valid_spiffe_uri(value: &str) -> bool {
-    let Ok(url) = Url::parse(value) else {
-        return false;
-    };
-    url.scheme() == "spiffe"
-        && url.host_str().is_some()
-        && !url.path().is_empty()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
 }
 
 fn https_url(role: &'static str, value: &str) -> Result<Url, AuthConfigError> {
@@ -775,28 +727,16 @@ secrets:
   access_runtime_url_file: database-url
   file_bindings:
     "secret://environment-owner-resolver/ca": resolver-ca
-    "secret://access-service/resolver-cert": resolver-cert
-    "secret://access-service/resolver-key": resolver-key
     "secret://control-gateway/ca": control-ca
-    "secret://access-service/control-client-cert": control-cert
-    "secret://access-service/control-client-key": control-key
     "secret://resource-gateway/ca": resource-ca
-    "secret://access-service/resource-client-cert": resource-cert
-    "secret://access-service/resource-client-key": resource-key
     "secret://resource-gateway/delegation-key": resource-delegation-key
-internal_mtls:
+internal_tls:
   bind_addr: 127.0.0.1:9443
   server_certificate_file: server-cert
   server_key_file: server-key
-  client_ca_file: client-ca
-  allowed_san_uris: [spiffe://labweaver/gateway]
-  required_eku: clientAuth
 environment_owner_resolver:
   resolver_uri: https://environment-owner-resolver.example.test:9444
   ca_certificate_locator: secret://environment-owner-resolver/ca
-  client_certificate_locator: secret://access-service/resolver-cert
-  client_private_key_locator: secret://access-service/resolver-key
-  allowed_server_sans: [environment-owner-resolver.example.test]
   timeout_milliseconds: 2000
   max_retries: 1
   retry_backoff_milliseconds: 100
@@ -804,8 +744,6 @@ environment_owner_resolver:
 control_gateway:
   base_uri: https://control-service.example.test:9444/
   ca_certificate_locator: secret://control-gateway/ca
-  client_certificate_locator: secret://access-service/control-client-cert
-  client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [control-service.example.test]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
@@ -813,8 +751,6 @@ control_gateway:
 environment_gateway:
   base_uri: https://environment-service.example.test:9446/
   ca_certificate_locator: secret://control-gateway/ca
-  client_certificate_locator: secret://access-service/control-client-cert
-  client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [environment-service.example.test]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
@@ -822,8 +758,6 @@ environment_gateway:
 evaluation_gateway:
   base_uri: https://evaluation-service.example.test:9447/
   ca_certificate_locator: secret://control-gateway/ca
-  client_certificate_locator: secret://access-service/control-client-cert
-  client_private_key_locator: secret://access-service/control-client-key
   allowed_server_sans: [evaluation-service.example.test]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
@@ -831,15 +765,12 @@ evaluation_gateway:
 resource_gateway:
   base_uri: https://127.0.0.1:9448/
   ca_certificate_locator: secret://resource-gateway/ca
-  client_certificate_locator: secret://access-service/resource-client-cert
-  client_private_key_locator: secret://access-service/resource-client-key
   delegation_key_locator: secret://resource-gateway/delegation-key
   allowed_server_sans: [127.0.0.1]
   timeout_milliseconds: 5000
   max_request_bytes: 1048576
   max_response_bytes: 8388608
 grants:
-  gateway_san_uris: [spiffe://labweaver/gateway]
   public_ssh_gateway_hostname: demo.lab.lan
   public_ssh_gateway_port: 2222
   public_ssh_gateway_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -873,12 +804,6 @@ nats:
                 "https://portal.example.test]",
                 "https://portal.example.test/]"
             ))
-            .is_err()
-        );
-        assert!(
-            AccessAuthFile::parse_yaml(
-                &valid.replace("spiffe://labweaver/gateway", "https://labweaver/gateway")
-            )
             .is_err()
         );
     }

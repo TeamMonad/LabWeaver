@@ -2,32 +2,42 @@
   <div class="environment-entry">
     <header class="page-header">
       <h2>环境控制台</h2>
-      <p class="page-subtitle">选择已发布版本创建环境，管理生命周期并获取 SSH/HTTP 访问授权。</p>
+      <p class="page-subtitle">
+        选择已发布版本创建环境，管理生命周期并获取 SSH/HTTP 访问授权。
+      </p>
     </header>
 
     <DiagnosticBanner
       v-if="isContextMissing"
-      code="COURSE_CONTEXT_MISSING"
-      message="课程上下文未绑定，无法加载环境模板版本。请通过课程选择器选择课程或联系管理员完成 #47。"
+      code="PROJECT_CONTEXT_MISSING"
+      message="项目上下文未绑定，无法加载环境模板版本。请先通过顶栏项目选择器选择有权访问的项目。"
       :retryable="false"
       severity="error"
     />
-    <DiagnosticBanner
-      v-else-if="isContextFromEnv"
-      code="COURSE_CONTEXT_FROM_ENV"
-      message="当前使用部署配置中的默认课程上下文；真实课程选择待 #47 接入。"
-      :retryable="false"
-      severity="warning"
-    />
 
     <section aria-labelledby="releases-heading">
-      <h3 id="releases-heading" class="section-title">
-        <SvgIcon name="deployed_code" size="sm" aria-hidden="true" />
+      <h3
+        id="releases-heading"
+        class="section-title"
+      >
+        <SvgIcon
+          name="deployed_code"
+          size="sm"
+          aria-hidden="true"
+        />
         已发布版本
       </h3>
-      <AsyncStateView v-if="!isContextMissing" :state="releases.releases" @retry="releases.load">
+      <AsyncStateView
+        v-if="!isContextMissing"
+        :state="releases.releases"
+        @retry="releases.load"
+      >
         <template #success="{ data }">
-          <DataTable :columns="releaseColumns" :rows="data" aria-label="已发布环境版本">
+          <DataTable
+            :columns="releaseColumns"
+            :rows="data"
+            aria-label="已发布环境版本"
+          >
             <template #runtimeKind="{ row }">
               {{ row.runtimeKind === 'container' ? '容器' : '虚拟机' }}
             </template>
@@ -48,7 +58,10 @@
         </template>
       </AsyncStateView>
 
-      <div v-if="createDiagnostic" class="create-result">
+      <div
+        v-if="createDiagnostic"
+        class="create-result"
+      >
         <DiagnosticBanner
           :code="createDiagnostic.code"
           :message="createDiagnostic.message"
@@ -57,20 +70,40 @@
           @retry="retryCreate"
         />
       </div>
-      <div v-else-if="lifecycle.lastAccepted" class="create-result create-result--ok">
-        <SvgIcon name="check_circle" size="md" aria-hidden="true" />
+      <div
+        v-else-if="lifecycle.lastAccepted"
+        class="create-result create-result--ok"
+      >
+        <SvgIcon
+          name="check_circle"
+          size="md"
+          aria-hidden="true"
+        />
         <span>
           创建请求已接受：{{ lifecycle.lastAccepted.operationId }}
-          <span v-if="!selectedEnvironmentId" class="create-hint">
+          <span
+            v-if="!selectedEnvironmentId"
+            class="create-hint"
+          >
             （正在加载新建环境…）
           </span>
         </span>
       </div>
     </section>
 
-    <section class="console-section" aria-labelledby="console-heading">
-      <h3 id="console-heading" class="section-title">
-        <SvgIcon name="desktop_windows" size="sm" aria-hidden="true" />
+    <section
+      class="console-section"
+      aria-labelledby="console-heading"
+    >
+      <h3
+        id="console-heading"
+        class="section-title"
+      >
+        <SvgIcon
+          name="desktop_windows"
+          size="sm"
+          aria-hidden="true"
+        />
         环境控制台
       </h3>
 
@@ -82,12 +115,25 @@
           type="text"
           class="text-input"
           placeholder="输入环境 ID 或从创建请求获取"
-        />
-        <button type="button" class="filled-button" @click="applyEnvironmentId">加载</button>
+        >
+        <button
+          type="button"
+          class="filled-button"
+          @click="applyEnvironmentId"
+        >
+          加载
+        </button>
       </div>
 
-      <div v-if="!selectedEnvironmentId" class="placeholder-pane">
-        <SvgIcon name="info" size="lg" aria-hidden="true" />
+      <div
+        v-if="!selectedEnvironmentId"
+        class="placeholder-pane"
+      >
+        <SvgIcon
+          name="info"
+          size="lg"
+          aria-hidden="true"
+        />
         <p>选择版本创建环境，或输入已有环境 ID 开始管理。</p>
       </div>
 
@@ -95,7 +141,12 @@
         <div class="gcp-resource-view">
           <div class="gcp-resource-header">
             <div class="gcp-breadcrumbs">
-              <RouterLink to="/student/labs" class="breadcrumb-link">我的实验</RouterLink>
+              <RouterLink
+                :to="isWorkConnection ? '/researcher/workspaces' : '/student/labs'"
+                class="breadcrumb-link"
+              >
+                {{ isWorkConnection ? '我的 Work' : '我的实验' }}
+              </RouterLink>
               <span class="breadcrumb-sep">/</span>
               <span class="breadcrumb-current">{{ selectedEnvironmentId }}</span>
             </div>
@@ -113,7 +164,11 @@
                 class="text-button small"
                 @click="clearSelectedEnvironment"
               >
-                <SvgIcon name="swap_horiz" size="sm" aria-hidden="true" />
+                <SvgIcon
+                  name="swap_horiz"
+                  size="sm"
+                  aria-hidden="true"
+                />
                 <span>切换其他环境</span>
               </button>
             </div>
@@ -150,7 +205,7 @@
                 重启
               </button>
               <button
-                v-if="env.instance.data.observedState === 'failed'"
+                v-if="retryableOperation"
                 type="button"
                 class="outlined-button"
                 :disabled="retryingEnvironment"
@@ -169,7 +224,10 @@
             </template>
           </GcpActionBar>
 
-          <div v-if="lifecycleDiagnostic" class="lifecycle-result">
+          <div
+            v-if="lifecycleDiagnostic"
+            class="lifecycle-result"
+          >
             <DiagnosticBanner
               :code="lifecycleDiagnostic.code"
               :message="lifecycleDiagnostic.message"
@@ -180,14 +238,21 @@
           </div>
 
           <!-- GCP Detail Tabs -->
-          <nav class="gcp-detail-tabs" aria-label="环境资源详情导航">
+          <nav
+            class="gcp-detail-tabs"
+            aria-label="环境资源详情导航"
+          >
             <button
               type="button"
               class="detail-tab"
               :class="{ 'detail-tab--active': activeTab === 'overview' }"
               @click="activeTab = 'overview'"
             >
-              <SvgIcon name="info" size="sm" aria-hidden="true" />
+              <SvgIcon
+                name="info"
+                size="sm"
+                aria-hidden="true"
+              />
               <span>概览与访问</span>
             </button>
             <button
@@ -196,7 +261,11 @@
               :class="{ 'detail-tab--active': activeTab === 'terminal' }"
               @click="activeTab = 'terminal'"
             >
-              <SvgIcon name="terminal" size="sm" aria-hidden="true" />
+              <SvgIcon
+                name="terminal"
+                size="sm"
+                aria-hidden="true"
+              />
               <span>Web 控制台</span>
             </button>
             <button
@@ -205,24 +274,39 @@
               :class="{ 'detail-tab--active': activeTab === 'operations' }"
               @click="activeTab = 'operations'"
             >
-              <SvgIcon name="history" size="sm" aria-hidden="true" />
+              <SvgIcon
+                name="history"
+                size="sm"
+                aria-hidden="true"
+              />
               <span>异步操作与诊断</span>
             </button>
             <button
+              v-if="!isWorkConnection"
               type="button"
               class="detail-tab"
               :class="{ 'detail-tab--active': activeTab === 'freeze' }"
               @click="activeTab = 'freeze'"
             >
-              <SvgIcon name="lock" size="sm" aria-hidden="true" />
+              <SvgIcon
+                name="lock"
+                size="sm"
+                aria-hidden="true"
+              />
               <span>实验提交与凭据</span>
             </button>
           </nav>
 
-          <AsyncStateView :state="env.instance" @retry="env.load">
+          <AsyncStateView
+            :state="env.instance"
+            @retry="env.load"
+          >
             <template #success="{ data }">
               <!-- TAB 1: Overview & Endpoints -->
-              <div v-show="activeTab === 'overview'" class="tab-pane">
+              <div
+                v-show="activeTab === 'overview'"
+                class="tab-pane"
+              >
                 <div class="env-card md-card">
                   <div class="env-meta-grid">
                     <div class="meta-item">
@@ -245,15 +329,27 @@
                 </div>
 
                 <div class="access-section">
-                  <h4 class="section-subtitle">访问端点与授权 (Access & Endpoints)</h4>
-                  <AsyncStateView :state="access.endpoints" @retry="access.loadEndpoints">
+                  <h4 class="section-subtitle">
+                    访问端点与授权 (Access & Endpoints)
+                  </h4>
+                  <AsyncStateView
+                    :state="access.endpoints"
+                    @retry="access.loadEndpoints"
+                  >
                     <template #success="{ data: eps }">
-                      <DataTable :columns="endpointColumns" :rows="eps" aria-label="环境入口">
+                      <DataTable
+                        :columns="endpointColumns"
+                        :rows="eps"
+                        aria-label="环境入口"
+                      >
                         <template #protocol="{ row }">
                           <span class="tag">{{ row.protocol }}</span>
                         </template>
                         <template #health="{ row }">
-                          <span class="health-dot" :class="`health-dot--${row.health}`" />
+                          <span
+                            class="health-dot"
+                            :class="`health-dot--${row.health}`"
+                          />
                           {{ endpointHealthLabel(row.health) }}
                         </template>
                         <template #observedAt="{ row }">
@@ -281,7 +377,10 @@
                         </button>
                       </div>
 
-                      <div v-if="createGrantDiagnostic" class="grant-result">
+                      <div
+                        v-if="createGrantDiagnostic"
+                        class="grant-result"
+                      >
                         <DiagnosticBanner
                           :code="createGrantDiagnostic.code"
                           :message="createGrantDiagnostic.message"
@@ -291,7 +390,10 @@
                         />
                       </div>
 
-                      <AsyncStateView :state="access.grant" @retry="issueAccessGrant">
+                      <AsyncStateView
+                        :state="access.grant"
+                        @retry="issueAccessGrant"
+                      >
                         <template #success="{ data: g }">
                           <div class="grant-card">
                             <div class="grant-row">
@@ -300,7 +402,10 @@
                             </div>
                             <div class="grant-row">
                               <span>状态</span>
-                              <span class="env-state" :class="`env-state--${g.state}`">{{ accessGrantStateLabel(g.state) }}</span>
+                              <span
+                                class="env-state"
+                                :class="`env-state--${g.state}`"
+                              >{{ accessGrantStateLabel(g.state) }}</span>
                             </div>
                             <div class="grant-row">
                               <span>有效期</span>
@@ -313,20 +418,36 @@
                             <div class="grant-row">
                               <span>入口授权</span>
                               <div class="endpoint-grants">
-                                <span v-for="eg in g.endpointGrants" :key="eg.id" class="tag">
+                                <span
+                                  v-for="eg in g.endpointGrants"
+                                  :key="eg.id"
+                                  class="tag"
+                                >
                                   {{ eg.protocol }} {{ eg.alias ?? eg.endpointId }}
                                 </span>
                               </div>
                             </div>
                           </div>
 
-                          <div v-if="g.state === 'active'" class="runtime-access">
-                            <div v-if="httpsGrant(g)" class="access-card">
+                          <div
+                            v-if="g.state === 'active'"
+                            class="runtime-access"
+                          >
+                            <div
+                              v-if="httpsGrant(g)"
+                              class="access-card"
+                            >
                               <h5 class="access-card__title">
-                                <SvgIcon name="code" size="sm" aria-hidden="true" />
+                                <SvgIcon
+                                  name="code"
+                                  size="sm"
+                                  aria-hidden="true"
+                                />
                                 容器实验入口
                               </h5>
-                              <p class="access-card__desc">通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。</p>
+                              <p class="access-card__desc">
+                                通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。
+                              </p>
                               <button
                                 type="button"
                                 class="filled-button"
@@ -335,24 +456,52 @@
                               >
                                 打开容器实验
                               </button>
-                              <p v-if="!connectUrl(g)" class="access-card__hint">连接地址缺失，无法打开。</p>
+                              <p
+                                v-if="!connectUrl(g)"
+                                class="access-card__hint"
+                              >
+                                连接地址缺失，无法打开。
+                              </p>
                             </div>
 
-                            <div v-if="sshGrant(g)" class="access-card">
+                            <div
+                              v-if="sshGrant(g)"
+                              class="access-card"
+                            >
                               <h5 class="access-card__title">
-                                <SvgIcon name="terminal" size="sm" aria-hidden="true" />
+                                <SvgIcon
+                                  name="terminal"
+                                  size="sm"
+                                  aria-hidden="true"
+                                />
                                 SSH
                               </h5>
-                              <p class="access-card__desc">单行命令到唯一 VM；无需下载配置。</p>
-                              <div v-if="sshCommand(g)" class="ssh-command">
+                              <p class="access-card__desc">
+                                单行命令到唯一 VM；无需下载配置。
+                              </p>
+                              <div
+                                v-if="sshCommand(g)"
+                                class="ssh-command"
+                              >
                                 <code class="ssh-command__text">{{ sshCommand(g) }}</code>
-                                <CopyButton :text="sshCommand(g) ?? ''" aria-label="复制 SSH 命令" />
+                                <CopyButton
+                                  :text="sshCommand(g) ?? ''"
+                                  aria-label="复制 SSH 命令"
+                                />
                               </div>
-                              <div v-if="sshCommand(g)" class="ssh-meta">
+                              <div
+                                v-if="sshCommand(g)"
+                                class="ssh-meta"
+                              >
                                 <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
                                 <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
                               </div>
-                              <p v-else class="access-card__hint">SSH 别名或 Gateway 缺失，无法生成命令。</p>
+                              <p
+                                v-else
+                                class="access-card__hint"
+                              >
+                                SSH 别名或 Gateway 缺失，无法生成命令。
+                              </p>
                             </div>
                           </div>
                         </template>
@@ -363,8 +512,14 @@
               </div>
 
               <!-- TAB 2: Web Terminal -->
-              <div v-show="activeTab === 'terminal'" class="tab-pane">
-                <div v-if="access.grant.kind === 'success' && access.grant.data.state === 'active'" class="console-wrapper">
+              <div
+                v-show="activeTab === 'terminal'"
+                class="tab-pane"
+              >
+                <div
+                  v-if="access.grant.kind === 'success' && access.grant.data.state === 'active'"
+                  class="console-wrapper"
+                >
                   <ConsolePanel
                     v-if="data.runtimeKind === 'container'"
                     kind="xterm"
@@ -378,8 +533,15 @@
                     :environment="data"
                   />
                 </div>
-                <div v-else class="console-unauthorized-pane md-card">
-                  <SvgIcon name="terminal" size="lg" aria-hidden="true" />
+                <div
+                  v-else
+                  class="console-unauthorized-pane md-card"
+                >
+                  <SvgIcon
+                    name="terminal"
+                    size="lg"
+                    aria-hidden="true"
+                  />
                   <h4>终端未连接</h4>
                   <p>连接云终端需要有效的 AccessGrant 访问授权。请点击下方按钮一键签发：</p>
                   <button
@@ -394,37 +556,85 @@
               </div>
 
               <!-- TAB 3: Operations & Timeline -->
-              <div v-show="activeTab === 'operations'" class="tab-pane">
-                <div v-if="showProgression" class="env-progression" role="status">
-                  <ol class="progression-steps">
-                    <li
-                      v-for="(step, index) in PROGRESSION_STEPS"
-                      :key="step"
-                      class="progression-step"
-                      :class="{
-                        'progression-step--done': progressionStepIndex !== null && index < progressionStepIndex,
-                        'progression-step--active': index === progressionStepIndex,
-                      }"
+              <div
+                v-show="activeTab === 'operations'"
+                class="tab-pane"
+              >
+                <div
+                  v-if="activeOperation"
+                  class="operation-current-panel md-card"
+                  role="status"
+                >
+                  <div class="operation-current-header">
+                    <div>
+                      <span class="operation-current-label">当前操作</span>
+                      <strong>{{ operationKindLabel(activeOperation.kind) }}</strong>
+                    </div>
+                    <span
+                      class="env-state"
+                      :class="`env-state--${activeOperation.state}`"
                     >
-                      {{ step }}
-                    </li>
-                  </ol>
-                  <p v-if="activeOperation" class="progression-meta">
-                    尝试 {{ activeOperation.attempt }}/{{ activeOperation.maxAttempts }}
-                    <template v-if="activeOperation.providerPhase"> · 阶段：{{ activeOperation.providerPhase }}</template>
-                    · 截止 {{ formatTimestamp(activeOperation.deadlineAt) }}
+                      {{ operationStateLabel(activeOperation.state) }}
+                    </span>
+                  </div>
+                  <p class="operation-current-description">
+                    {{ operationStatusDescription(activeOperation.state) }}
+                    第 {{ activeOperation.attempt }}/{{ activeOperation.maxAttempts }} 次尝试。
                   </p>
+                  <dl class="operation-current-meta">
+                    <div>
+                      <dt>受理时间</dt>
+                      <dd>{{ formatTimestamp(activeOperation.acceptedAt) }}</dd>
+                    </div>
+                    <div>
+                      <dt>处理截止</dt>
+                      <dd>{{ formatTimestamp(activeOperation.deadlineAt) }}</dd>
+                    </div>
+                    <div v-if="activeOperation.cleanupStartedAt">
+                      <dt>资源清理开始</dt>
+                      <dd>{{ formatTimestamp(activeOperation.cleanupStartedAt) }}</dd>
+                    </div>
+                  </dl>
+                  <div
+                    v-if="activeOperation.cancelEligible"
+                    class="env-failed-actions"
+                  >
+                    <button
+                      type="button"
+                      class="outlined-button"
+                      :disabled="operations.cancelling"
+                      @click="cancelCurrentOperation"
+                    >
+                      {{ operations.cancelling ? '取消中…' : '取消操作' }}
+                    </button>
+                  </div>
                 </div>
 
-                <div v-if="data.observedState === 'failed'" class="env-failed-panel">
+                <div
+                  v-if="operations.cancelDiagnostic"
+                  class="lifecycle-result"
+                >
                   <DiagnosticBanner
-                    code="ENVIRONMENT_FAILED"
-                    :message="`环境进入失败状态${data.failedPhase ? `（阶段：${environmentStateLabel(data.failedPhase)}）` : ''}${data.lastDiagnosticCode ? `，诊断码：${data.lastDiagnosticCode}` : ''}。可尝试重试失败的操作；重试为幂等操作，不会重复创建资源。`"
-                    :retryable="true"
+                    :code="operations.cancelDiagnostic.code"
+                    :message="operations.cancelDiagnostic.message"
+                    :retryable="operations.cancelDiagnostic.retryable"
+                    severity="error"
+                    @retry="cancelCurrentOperation"
+                  />
+                </div>
+
+                <div
+                  v-if="data.observedState === 'failed' || failedOperation"
+                  class="env-failed-panel"
+                >
+                  <DiagnosticBanner
+                    :message="failedEnvironmentMessage(data)"
+                    :retryable="Boolean(retryableOperation)"
                     severity="error"
                   />
                   <div class="env-failed-actions">
                     <button
+                      v-if="retryableOperation"
                       type="button"
                       class="outlined-button"
                       :disabled="retryingEnvironment"
@@ -435,7 +645,10 @@
                   </div>
                 </div>
 
-                <div v-if="retryDiagnostic" class="lifecycle-result">
+                <div
+                  v-if="retryDiagnostic"
+                  class="lifecycle-result"
+                >
                   <DiagnosticBanner
                     :code="retryDiagnostic.code"
                     :message="retryDiagnostic.message"
@@ -445,17 +658,40 @@
                   />
                 </div>
 
-                <div v-if="operations.operations.kind === 'success' && operations.operations.data.length > 0" class="timeline-section">
-                  <h4 class="section-subtitle">操作与诊断时间线</h4>
-                  <EventTimeline :events="operationTimeline" aria-label="环境操作与诊断时间线" />
-                </div>
+                <AsyncStateView
+                  :state="operations.operations"
+                  @retry="operations.load"
+                >
+                  <template #success>
+                    <div
+                      v-if="operationTimeline.length > 0"
+                      class="timeline-section"
+                    >
+                      <h4 class="section-subtitle">
+                        操作与诊断时间线
+                      </h4>
+                      <EventTimeline
+                        :events="operationTimeline"
+                        aria-label="环境操作与诊断时间线"
+                      />
+                    </div>
+                  </template>
+                </AsyncStateView>
               </div>
 
               <!-- TAB 4: Freeze & Submission -->
-              <div v-show="activeTab === 'freeze'" class="tab-pane">
+              <div
+                v-if="!isWorkConnection"
+                v-show="activeTab === 'freeze'"
+                class="tab-pane"
+              >
                 <div class="freeze-section md-card">
-                  <h4 class="section-subtitle">冻结不可变提交</h4>
-                  <p class="freeze-desc">将当前工作区冻结为不可变提交，保留 Collector object version 与 SHA-256。</p>
+                  <h4 class="section-subtitle">
+                    冻结不可变提交
+                  </h4>
+                  <p class="freeze-desc">
+                    将当前工作区冻结为不可变提交，保留 Collector object version 与 SHA-256。
+                  </p>
                   <div class="freeze-action-row">
                     <button
                       type="button"
@@ -467,8 +703,15 @@
                     </button>
                   </div>
 
-                  <div v-if="freezeConfirmVisible" class="freeze-confirm" role="dialog" aria-label="确认冻结清单">
-                    <h5 class="section-subtitle">确认冻结清单（SubmissionManifest）</h5>
+                  <div
+                    v-if="freezeConfirmVisible"
+                    class="freeze-confirm"
+                    role="dialog"
+                    aria-label="确认冻结清单"
+                  >
+                    <h5 class="section-subtitle">
+                      确认冻结清单（SubmissionManifest）
+                    </h5>
                     <pre class="freeze-manifest">{{ freezeManifestText }}</pre>
                     <p class="freeze-confirm-hint">
                       提交前请确认清单覆盖全部必交文件；当前清单为课程默认工作区冻结规则，按提交规范定制清单的能力依赖服务端清单投影。
@@ -482,11 +725,20 @@
                       >
                         确认冻结
                       </button>
-                      <button type="button" class="text-button" @click="freezeConfirmVisible = false">取消</button>
+                      <button
+                        type="button"
+                        class="text-button"
+                        @click="freezeConfirmVisible = false"
+                      >
+                        取消
+                      </button>
                     </div>
                   </div>
 
-                  <div v-if="freezeDiagnostic" class="freeze-result">
+                  <div
+                    v-if="freezeDiagnostic"
+                    class="freeze-result"
+                  >
                     <DiagnosticBanner
                       :code="freezeDiagnostic.code"
                       :message="freezeDiagnostic.message"
@@ -496,7 +748,10 @@
                     />
                   </div>
 
-                  <div v-if="freezeEvidenceFor(data)" class="evidence-card">
+                  <div
+                    v-if="freezeEvidenceFor(data)"
+                    class="evidence-card"
+                  >
                     <div class="grant-row">
                       <span>提交 ID</span>
                       <code>{{ freezeEvidenceFor(data)?.submissionId }}</code>
@@ -507,7 +762,7 @@
                     </div>
                     <div class="grant-row">
                       <span>SHA-256</span>
-                      <code>{{ freezeEvidenceFor(data)?.object.sha256 }}</code>
+                      <code>{{ freezeEvidenceFor(data)?.contentSha256 }}</code>
                     </div>
                     <div class="grant-row">
                       <span>Media Type</span>
@@ -517,7 +772,9 @@
                       <span>大小</span>
                       <code>{{ freezeEvidenceFor(data)?.object.sizeBytes }} B</code>
                     </div>
-                    <p class="evidence-hint">提交凭据将保留显示，可与「评测结果」页对账。</p>
+                    <p class="evidence-hint">
+                      提交凭据将保留显示，可与「评测结果」页对账。
+                    </p>
                   </div>
                 </div>
               </div>
@@ -542,12 +799,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useCourseContext } from '@/composables/useCourseContext'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useEnvironmentAccess } from '@/composables/useEnvironmentAccess'
 import { useEnvironmentOperations } from '@/composables/useEnvironmentOperations'
+import { useProjects } from '@/composables/useProjects'
 import { freezeSubmission, getFrozenSubmission, retryEnvironment } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConsolePanel from '@/components/console/ConsolePanel.vue'
@@ -564,11 +821,11 @@ import { environmentStateLabel, endpointHealthLabel, accessGrantStateLabel } fro
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type {
-  EndpointGrant,
   EnvironmentInstanceSchema,
   EnvironmentOperationSnapshotSchema,
   EnvironmentTemplateReleaseViewSchema,
   OperationAccepted,
+  SubmissionManifest,
 } from '@/generated/contracts'
 import type { TimelineEvent } from '@/components/common/EventTimeline.vue'
 import {
@@ -579,13 +836,9 @@ import {
   type EnvironmentInstanceWithFreeze,
 } from '@/types/access'
 
-const course = useCourseContext()
-const courseId = course.courseId
-const isContextMissing = computed(() => course.context.value === null)
-const isContextFromEnv = computed(() => course.context.value?.source === 'env')
-
 const route = useRoute()
 const router = useRouter()
+const projects = useProjects()
 
 const activeTab = ref<'overview' | 'terminal' | 'operations' | 'freeze'>('overview')
 
@@ -599,9 +852,6 @@ async function refreshAll() {
   await Promise.all([env.load(), access.loadEndpoints(), operations.load()])
 }
 
-const releases = useEnvironmentTemplateReleases(courseId)
-const lifecycle = useEnvironmentLifecycle(courseId)
-
 const selectedEnvironmentId = ref<string | undefined>(
   typeof route.query.environmentId === 'string' ? route.query.environmentId : undefined,
 )
@@ -612,6 +862,26 @@ const deleteEnvironment = ref<EnvironmentInstanceSchema | null>(null)
 const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
 const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
 
+const env = useEnvironmentInstance(selectedEnvironmentId)
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || undefined
+})
+const projectId = computed(() => routeProjectId.value ?? (env.instance.kind === 'success' ? env.instance.data.projectId : undefined) ?? projects.selectedProjectId ?? undefined)
+const selectedProject = computed(() => {
+  const id = projectId.value
+  if (!id || projects.projects.kind !== 'success') return null
+  return projects.projects.data.find((project) => project.id === id) ?? null
+})
+const courseId = computed(() => {
+  if (env.instance.kind === 'success') return env.instance.data.courseId ?? undefined
+  return selectedProject.value?.courseId ?? undefined
+})
+const isContextMissing = computed(() => !projectId.value)
+const isWorkConnection = computed(() => route.path.startsWith('/researcher/') || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const releases = useEnvironmentTemplateReleases(projectId, courseId)
+const lifecycle = useEnvironmentLifecycle(projectId, courseId)
+
 interface LifecycleTarget {
   environmentId: string
   revision: number
@@ -619,10 +889,10 @@ interface LifecycleTarget {
 }
 const lastLifecycleTarget = ref<LifecycleTarget | null>(null)
 
-const env = useEnvironmentInstance(selectedEnvironmentId)
 const access = useEnvironmentAccess(
   selectedEnvironmentId,
   computed(() => (env.instance.kind === 'success' ? env.instance.data.revision : undefined)),
+  projectId,
   courseId,
 )
 const operations = useEnvironmentOperations(selectedEnvironmentId)
@@ -636,8 +906,8 @@ const lastFreezeEnvironmentId = ref<string | null>(null)
 const frozenSubmission = ref<{
   environmentId: string
   submissionId: string
-  object: EnvironmentInstanceSchema['cleanupEvidence']
-  manifestSha256: string
+  object: NonNullable<EnvironmentInstanceSchema['cleanupEvidence']>
+  contentSha256: string
   frozenAt: string
 } | null>(null)
 const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
@@ -647,7 +917,7 @@ const freezeConfirmVisible = ref(false)
 // for the selected release, the freeze manifest is the platform default
 // workspace rule. It is rendered for student confirmation before freezing and
 // is the exact object sent to the freeze endpoint (needs-contract: #178).
-const FREEZE_MANIFEST = {
+const FREEZE_MANIFEST: SubmissionManifest = {
   apiVersion: 'evaluation.labweaver.io/v1',
   kind: 'SubmissionManifest',
   name: 'workspace-freeze',
@@ -659,7 +929,7 @@ const FREEZE_MANIFEST = {
   maxFiles: 1000,
   maxTotalBytes: 10485760,
   source: 'workspace',
-} as const
+}
 // One Idempotency-Key per logical intent, kept across retries until the intent
 // reaches a terminal outcome, so a network timeout + retry cannot mint a
 // duplicate frozen submission or a duplicate environment.
@@ -681,6 +951,7 @@ watch(
     access.resetGrant()
     lifecycleDiagnostic.value = null
     createGrantDiagnostic.value = null
+    retryDiagnostic.value = null
     if (id) void Promise.all([access.loadEndpoints(), access.loadCurrentGrant()])
   },
   { immediate: true },
@@ -716,51 +987,110 @@ const operationTimeline = computed<TimelineEvent[]>(() => {
   if (operations.operations.kind !== 'success') return []
   return operations.operations.data.map((op: EnvironmentOperationSnapshotSchema) => ({
     id: op.operationId,
-    title: `${op.kind} · ${op.state}`,
-    timestamp: op.terminalAt ?? op.startedAt ?? op.acceptedAt,
-    description: op.diagnosticCode
-      ? `diagnostic: ${op.diagnosticCode}, revision: ${op.currentRevision}`
-      : `revision: ${op.currentRevision}`,
+    title: `${operationKindLabel(op.kind)} · ${operationStateLabel(op.state)}`,
+    timestamp: op.terminalAt ?? op.acceptedAt,
+    description: operationTimelineDescription(op),
   }))
 })
-
-const PROGRESSION_STEPS = ['已受理', '校验中', '构建中', '置备中', '运行中'] as const
 
 const activeOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
   if (operations.operations.kind !== 'success') return null
   const items = operations.operations.data
-  const active = items.filter((op) => op.state === 'accepted' || op.state === 'running')
-  const pool = active.length > 0 ? active : items
-  return [...pool].sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
+  return items
+    .filter((op) => op.state === 'accepted' || op.state === 'running' || op.state === 'cancelling')
+    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
 })
 
-const progressionStepIndex = computed(() => {
-  const instance = env.instance.kind === 'success' ? env.instance.data : undefined
-  if (!instance) return null
-  const phase = activeOperation.value?.providerPhase ?? null
-  if (phase === 'validating' || phase === 'building' || phase === 'provisioning') {
-    return { validating: 1, building: 2, provisioning: 3 }[phase]
-  }
-  switch (instance.observedState) {
-    case 'requested':
-      return 0
-    case 'validating':
-      return 1
-    case 'building':
-      return 2
-    case 'provisioning':
-      return 3
-    case 'ready':
-      return 4
+const failedOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
+  if (operations.operations.kind !== 'success') return null
+  return operations.operations.data
+    .filter((op) => op.state === 'failed')
+    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
+})
+
+const retryableOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
+  if (operations.operations.kind !== 'success') return null
+  return operations.operations.data
+    .filter((op) => op.state === 'failed' && op.retryEligible)
+    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))[0] ?? null
+})
+
+const OPERATION_KIND_LABELS: Record<string, string> = {
+  create: '创建环境',
+  start: '启动环境',
+  stop: '停止环境',
+  restart: '重启环境',
+  reset: '重置环境',
+  retry: '重试环境',
+  cancel: '取消操作',
+  recover: '恢复环境',
+  expire: '处理过期环境',
+  delete: '删除环境',
+  cleanup: '清理环境',
+  freeze: '冻结提交',
+}
+
+const OPERATION_STATE_LABELS: Record<string, string> = {
+  accepted: '已受理',
+  running: '处理中',
+  cancelling: '取消中',
+  succeeded: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+}
+
+function operationKindLabel(kind: string): string {
+  return OPERATION_KIND_LABELS[kind] ?? '环境操作'
+}
+
+function operationStateLabel(state: EnvironmentOperationSnapshotSchema['state']): string {
+  return OPERATION_STATE_LABELS[state] ?? '状态未知'
+}
+
+function operationStatusDescription(state: EnvironmentOperationSnapshotSchema['state']): string {
+  switch (state) {
+    case 'accepted':
+      return '操作已受理，平台即将开始处理。'
+    case 'running':
+      return '操作正在处理。'
+    case 'cancelling':
+      return '正在取消操作并清理相关资源。'
+    case 'succeeded':
+      return '操作已完成。'
+    case 'failed':
+      return '操作未能完成。'
+    case 'cancelled':
+      return '操作已取消。'
     default:
-      return null
+      return '当前状态无法识别，请刷新页面。'
   }
-})
+}
 
-const showProgression = computed(() => {
-  const index = progressionStepIndex.value
-  return index !== null && index < PROGRESSION_STEPS.length - 1
-})
+function operationTimelineDescription(op: EnvironmentOperationSnapshotSchema): string {
+  const details = [operationStatusDescription(op.state), `第 ${op.attempt}/${op.maxAttempts} 次尝试`]
+  if (op.diagnosticCode) {
+    details.push(`诊断码：${op.diagnosticCode}。`)
+  }
+  if (op.cleanupStartedAt) {
+    details.push(`资源清理已于 ${formatTimestamp(op.cleanupStartedAt)} 开始。`)
+  }
+  return details.join(' ')
+}
+
+function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
+  const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
+  return `环境${phase}未能完成操作。${retryableOperation.value ? '可以重试失败的操作。' : ''}`
+}
+
+async function cancelCurrentOperation() {
+  const operation = activeOperation.value
+  const instance = env.instance.kind === 'success' ? env.instance.data : undefined
+  if (!operation || !instance || instance.id !== operation.environmentId) return
+  const result = await operations.cancel(instance.id, instance.revision)
+  if (result.ok) {
+    await Promise.all([env.load(), operations.load()])
+  }
+}
 
 function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'https' | 'ssh') {
   return g.endpointGrants.find((eg) => eg.protocol === protocol && eg.health === 'healthy') ?? null
@@ -818,7 +1148,7 @@ async function freeze(data: EnvironmentInstanceSchema) {
     path: { environmentId: data.id },
     headers: { 'Idempotency-Key': intentKey, 'If-Match': ifMatch(data.revision) },
     body: {
-      courseId: data.courseId,
+      ...(data.courseId ? { courseId: data.courseId } : {}),
       manifest: FREEZE_MANIFEST,
     },
   })
@@ -854,14 +1184,14 @@ async function freeze(data: EnvironmentInstanceSchema) {
     freezeIntentKey.value = null
     return
   }
-  let frozenObject: EnvironmentInstanceWithFreeze['freezeEvidence']
-  let frozenManifestSha256: string | null = null
+  let frozenObject: NonNullable<EnvironmentInstanceWithFreeze['freezeEvidence']> | undefined
+  let frozenContentSha256: string | null = null
   let frozenAt: string | null = null
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const frozen = await getFrozenSubmission({ path: { submissionId } })
     if (frozen.data) {
       frozenObject = frozen.data.object
-      frozenManifestSha256 = frozen.data.manifestSha256
+      frozenContentSha256 = frozen.data.contentSha256
       frozenAt = frozen.data.frozenAt
       break
     }
@@ -897,7 +1227,7 @@ async function freeze(data: EnvironmentInstanceSchema) {
     environmentId: data.id,
     submissionId,
     object: frozenObject,
-    manifestSha256: frozenManifestSha256 ?? '',
+    contentSha256: frozenContentSha256 ?? '',
     frozenAt: frozenAt ?? '',
   }
   await env.load()
@@ -952,7 +1282,6 @@ async function createFromRelease(release: EnvironmentTemplateReleaseViewSchema) 
   try {
     const result = await lifecycle.create(
       {
-        courseId: courseId.value ?? '',
         releaseId: release.id,
         releaseVersion: release.version,
       },
@@ -1015,7 +1344,7 @@ async function retryFailedOperation(data: EnvironmentInstanceSchema) {
 async function retryLifecycle() {
   const target = lastLifecycleTarget.value
   if (!target) return
-  const { environmentId, revision, action } = target
+  const { environmentId, action } = target
   if (action === 'delete') {
     const instance = env.instance.kind === 'success' ? env.instance.data : undefined
     if (instance && instance.id === environmentId) {
@@ -1351,15 +1680,20 @@ async function revokeAccessGrant() {
 .env-state--stopping,
 .env-state--updating,
 .env-state--expiring,
-.env-state--deleting {
+.env-state--deleting,
+.env-state--accepted,
+.env-state--running,
+.env-state--cancelling {
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
 }
-.env-state--ready {
+.env-state--ready,
+.env-state--succeeded {
   background: var(--md-sys-color-tertiary-container);
   color: var(--md-sys-color-on-tertiary-container);
 }
-.env-state--stopped {
+.env-state--stopped,
+.env-state--cancelled {
   background: var(--md-sys-color-surface-container-highest);
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -1378,42 +1712,61 @@ async function revokeAccessGrant() {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.env-progression {
+.operation-current-panel {
   margin-bottom: 16px;
 }
 
-.progression-steps {
-  list-style: none;
+.operation-current-header {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 0 0 6px;
-  padding: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.progression-step {
-  position: relative;
-  padding: 4px 12px;
-  border-radius: var(--md-sys-shape-small);
+.operation-current-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.operation-current-label {
   font: var(--md-sys-label-medium);
   color: var(--md-sys-color-on-surface-variant);
-  background: var(--md-sys-color-surface-container-high);
 }
 
-.progression-step--done {
-  background: var(--md-sys-color-tertiary-container);
-  color: var(--md-sys-color-on-tertiary-container);
+.operation-current-header strong {
+  font: var(--md-sys-title-medium);
+  color: var(--md-sys-color-on-surface);
 }
 
-.progression-step--active {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+.operation-current-description {
+  margin: 16px 0;
+  font: var(--md-sys-body-medium);
+  color: var(--md-sys-color-on-surface-variant);
 }
 
-.progression-meta {
+.operation-current-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+}
+
+.operation-current-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.operation-current-meta dt {
+  font: var(--md-sys-label-medium);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.operation-current-meta dd {
   margin: 0;
   font: var(--md-sys-body-small);
-  color: var(--md-sys-color-on-surface-variant);
+  color: var(--md-sys-color-on-surface);
 }
 
 .env-failed-panel {

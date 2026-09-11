@@ -64,6 +64,10 @@
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -80,7 +84,14 @@
   "description": "Environment-authoritative endpoint facts safe for Access Service.\n\nHost, port, credential, provider and network-policy data are deliberately absent.",
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "eligibilityExpiresAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -99,11 +110,14 @@
     },
     "ownerActorId": {
       "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     }
   },
   "required": [
     "environmentId",
-    "courseId",
+    "projectId",
     "ownerActorId",
     "environmentRevision",
     "eligibilityExpiresAt",

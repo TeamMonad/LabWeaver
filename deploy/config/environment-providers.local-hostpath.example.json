@@ -1,18 +1,16 @@
-{
-  "apiVersion": "deploy.labweaver.io/environment-providers/v1",
-  "mode": "local-hostpath",
-  "releaseEligible": false,
-  "singleNode": true,
-  "container": {
+[
+  {
     "binding": "kubernetes-work-local-hostpath",
     "subject": "labweaver.provider.kubernetes.container.v1",
     "providerKind": "container",
-    "workspaceStorageClassName": "hostpath",
+    "accessNamespace": "labweaver-system",
+    "accessPodLabel": "access-service",
+    "imageRepositoryPrefix": "localhost/labweaver/local",
+    "imagePullSecretName": "harbor-course-pull",
+    "workspaceStorageClassName": "standard",
     "workspaceAccessMode": "ReadWriteOnce",
-    "networkMode": "allow_all"
-  },
-  "kubevirt": {
-    "enabled": false,
-    "reason": "Docker Desktop local mode has no KubeVirt or CDI capability"
+    "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",
+    "activeImagePolicyRevision": 1,
+    "activeTrustRevision": 1
   }
-}
+]

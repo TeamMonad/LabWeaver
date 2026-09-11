@@ -5,7 +5,7 @@ mod support;
 use axum::http::header;
 use axum::response::IntoResponse;
 use contracts::{
-    ActorId,
+    ActorId, ProjectId,
     environment::{
         EnvironmentAccessSubjectKind, EnvironmentEndpointEligibilityRequest,
         EnvironmentOwnerResolutionRequest, ObservedEnvironmentState,
@@ -23,6 +23,7 @@ fn exact_authoritative_tuple_resolves_without_endpoint_or_credential_data()
     let instance = ready_instance();
     let request = EnvironmentOwnerResolutionRequest {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         owner_actor_id: instance.owner_id,
         expected_revision: instance.revision,
@@ -43,6 +44,7 @@ fn endpoint_eligibility_returns_only_exact_requested_safe_metadata()
     let endpoint_id = instance.endpoints[0].id;
     let request = EnvironmentEndpointEligibilityRequest {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         actor_id: instance.owner_id,
         subject_kind: EnvironmentAccessSubjectKind::Owner,
@@ -65,6 +67,7 @@ fn endpoint_eligibility_enforces_owner_but_accepts_access_verified_teacher_scope
     let other_actor = ActorId::new();
     let mut request = EnvironmentEndpointEligibilityRequest {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         actor_id: other_actor,
         subject_kind: EnvironmentAccessSubjectKind::Owner,
@@ -99,6 +102,7 @@ fn scope_revision_lifecycle_and_expiry_mismatches_fail_closed() {
     let instance = ready_instance();
     let request = EnvironmentOwnerResolutionRequest {
         environment_id: instance.id,
+        project_id: instance.project_id,
         course_id: instance.course_id,
         owner_actor_id: instance.owner_id,
         expected_revision: revision(instance.revision.get() + 1),
@@ -132,5 +136,43 @@ fn scope_revision_lifecycle_and_expiry_mismatches_fail_closed() {
             timestamp("2026-07-14T02:00:00.000Z")
         ),
         Err(OwnerResolverError::EnvironmentUnavailable)
+    ));
+}
+
+#[test]
+fn project_and_optional_course_are_an_exact_scope_tuple() {
+    let instance = ready_instance();
+    let exact = EnvironmentOwnerResolutionRequest {
+        environment_id: instance.id,
+        project_id: instance.project_id,
+        course_id: instance.course_id,
+        owner_actor_id: instance.owner_id,
+        expected_revision: instance.revision,
+    };
+
+    let independent_context = EnvironmentOwnerResolutionRequest {
+        course_id: None,
+        ..exact.clone()
+    };
+    assert!(matches!(
+        authorize_owner_resolution(
+            &instance,
+            &independent_context,
+            timestamp("2026-07-14T02:00:00.000Z")
+        ),
+        Err(OwnerResolverError::ScopeMismatch)
+    ));
+
+    let cross_project_context = EnvironmentOwnerResolutionRequest {
+        project_id: ProjectId::new(),
+        ..exact
+    };
+    assert!(matches!(
+        authorize_owner_resolution(
+            &instance,
+            &cross_project_context,
+            timestamp("2026-07-14T02:00:00.000Z")
+        ),
+        Err(OwnerResolverError::ScopeMismatch)
     ));
 }

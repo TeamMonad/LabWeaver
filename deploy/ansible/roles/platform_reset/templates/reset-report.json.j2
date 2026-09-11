@@ -1,7 +1,6 @@
 {
   "schema_version": "labweaver.platform-reset-report.v1",
   "run_id": {{ platform_reset_run_id | to_json }},
-  "source_commit": {{ platform_reset_source_commit | to_json }},
   "cluster_uid": {{ platform_reset_cluster_uid.stdout | trim | to_json }},
   "migration_catalog_sha256": {{ ('sha256:' + platform_reset_migration_catalog_stat.stat.checksum) | to_json }},
   "configuration_bundle_sha256": {{ ('sha256:' + platform_reset_configuration_bundle_stat.stat.checksum) | to_json }},

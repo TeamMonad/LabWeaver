@@ -137,13 +137,13 @@ impl KubernetesContainerExecutor {
         {
             self.apply_resource(plan, resource).await?;
         }
-        self.wait_for_workspace_claim(fence, plan).await?;
         let deployment = plan
             .resources
             .iter()
             .find(|resource| resource.kind == "Deployment")
             .ok_or_else(rejected)?;
         self.apply_resource(plan, deployment).await?;
+        self.wait_for_workspace_claim(fence, plan).await?;
         self.observe_plan(plan).await
     }
 
@@ -1439,6 +1439,16 @@ const fn invalid_observation() -> ProviderFailure {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::ReconcileAction;
+    use axum::{
+        Router,
+        body::Body,
+        extract::State,
+        http::{Method, Request, StatusCode},
+        response::{IntoResponse, Response},
+    };
+    use rcgen::generate_simple_self_signed;
+    use tokio::net::TcpListener;
 
     #[test]
     fn executor_timestamp_is_normalized_to_contract_milliseconds() {
@@ -1460,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_claim_must_bind_before_the_runtime_deployment_is_applied() {
+    fn workspace_claim_status_is_only_bound_when_provider_reports_bound() {
         assert!(!workspace_claim_is_bound(None).expect("missing claim remains pending"));
         assert!(
             !workspace_claim_is_bound(Some(&json!({"metadata":{"name":"workspace"}})))
@@ -1476,6 +1486,242 @@ mod tests {
         );
         assert!(workspace_claim_is_bound(Some(&json!({"status":{"phase":"Lost"}}))).is_err());
         assert!(workspace_claim_is_bound(Some(&json!({"status":{"phase":1}}))).is_err());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn apply_waits_for_workspace_claim_after_deployment_apply()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let directory = tempfile::tempdir()?;
+        let token_file = directory.path().join("token");
+        let ca_file = directory.path().join("ca.pem");
+        let registry_file = directory.path().join("registry.json");
+        std::fs::write(&token_file, "test-token\n")?;
+        std::fs::write(&ca_file, mock.ca_pem.as_bytes())?;
+        std::fs::write(
+            &registry_file,
+            br#"{"auths":{"registry.example":{"auth":"opaque"}}}"#,
+        )?;
+
+        let configuration = RuntimeExecutorConfiguration {
+            api_server: mock.endpoint.clone(),
+            bearer_token_file: token_file,
+            cluster_ca_file: ca_file,
+            request_timeout_milliseconds: 2_000,
+            cleanup_poll_milliseconds: 1,
+            cleanup_retention_seconds: 3_600,
+            ssh_handshake_timeout_milliseconds: 1_000,
+            registry_pull_secret_file: registry_file,
+            registry_pull_secret_name: "registry-pull".to_owned(),
+        };
+        let executor = KubernetesContainerExecutor::new(
+            configuration.clone(),
+            Arc::new(
+                S3ImmutableObjectStore::new(
+                    artifact_store::S3StoreConfig {
+                        binding: "test-store".to_owned(),
+                        endpoint: "https://object-store.invalid".parse()?,
+                        bucket: "test-bucket".to_owned(),
+                        region: "test-region".to_owned(),
+                        object_prefix: "test".to_owned(),
+                        upload_ttl_seconds: 60,
+                        max_object_bytes: 1_024,
+                        force_path_style: true,
+                        ca_bundle_file: None,
+                    },
+                    artifact_store::S3Credential {
+                        access_key_id: "test-access".to_owned(),
+                        secret_access_key: "test-secret".to_owned(),
+                        session_token: None,
+                    },
+                )
+                .await?,
+            ),
+        )
+        .map_err(|error| format!("executor configuration rejected: {error:?}"))?;
+
+        let environment_id = contracts::EnvironmentId::new();
+        let namespace = format!("lw-env-{environment_id}");
+        let labels = json!({
+            "labweaver.io/environment-id": environment_id.to_string()
+        });
+        let plan = ContainerResourcePlan {
+            environment_id,
+            namespace: namespace.clone(),
+            image: "registry.example/labweaver/test:latest".to_owned(),
+            resources: vec![
+                ContainerResource {
+                    kind: "Namespace".to_owned(),
+                    namespace: None,
+                    name: namespace.clone(),
+                    document: json!({
+                        "apiVersion":"v1",
+                        "kind":"Namespace",
+                        "metadata":{"name":namespace,"labels":labels}
+                    }),
+                },
+                ContainerResource {
+                    kind: "PersistentVolumeClaim".to_owned(),
+                    namespace: Some(namespace.clone()),
+                    name: "workspace".to_owned(),
+                    document: json!({
+                        "apiVersion":"v1",
+                        "kind":"PersistentVolumeClaim",
+                        "metadata":{"name":"workspace","namespace":namespace,"labels":labels},
+                        "spec":{"resources":{"requests":{"storage":"1Gi"}}}
+                    }),
+                },
+                ContainerResource {
+                    kind: "Deployment".to_owned(),
+                    namespace: Some(namespace.clone()),
+                    name: "runtime".to_owned(),
+                    document: json!({
+                        "apiVersion":"apps/v1",
+                        "kind":"Deployment",
+                        "metadata":{"name":"runtime","namespace":namespace,"labels":labels},
+                        "spec":{"replicas":1}
+                    }),
+                },
+            ],
+            plan_sha256: Sha256Digest::of_bytes(b"runtime-plan"),
+        };
+        let fence = ContainerBackendFence {
+            protocol_version: crate::CONTAINER_BACKEND_PROTOCOL_VERSION,
+            environment_id,
+            operation_id: contracts::OperationId::new(),
+            provider_step: 1,
+            operation_generation: 1,
+            attempt: 1,
+            action: ReconcileAction::Provision,
+            request_id: Sha256Digest::of_bytes(b"runtime-request"),
+            trace_id: "runtime-test".to_owned(),
+            deadline_at: {
+                let now = OffsetDateTime::now_utc();
+                let now = now.replace_nanosecond((now.nanosecond() / 1_000_000) * 1_000_000)?;
+                UtcTimestamp::from_utc(now + time::Duration::seconds(5))?
+            },
+        };
+
+        let observation = executor.apply_plan(&fence, &plan).await;
+        assert!(
+            observation.is_ok(),
+            "apply should complete: {observation:?}"
+        );
+        assert!(observation.expect("apply succeeded").ready);
+
+        let events = mock.events.lock().await.clone();
+        let deployment_path = format!("/apis/apps/v1/namespaces/{namespace}/deployments/runtime");
+        let pvc_path = format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/workspace");
+        let deployment_apply_event = events
+            .iter()
+            .position(|event| event == &format!("PATCH {deployment_path}"))
+            .expect("deployment must be applied");
+        let pvc_read = events
+            .iter()
+            .position(|event| event == &format!("GET {pvc_path} Bound"))
+            .expect("PVC must be observed as bound");
+        assert!(
+            deployment_apply_event < pvc_read,
+            "PVC observation must wait until deployment apply: {events:?}"
+        );
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct MockKubernetesState {
+        deployment_applied: Arc<std::sync::atomic::AtomicBool>,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct MockKubernetes {
+        endpoint: Url,
+        ca_pem: String,
+        events: Arc<Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for MockKubernetes {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn spawn_mock_kubernetes() -> Result<MockKubernetes, Box<dyn std::error::Error>> {
+        let certificate = generate_simple_self_signed(vec!["localhost".to_owned()])?;
+        let ca_pem = certificate.cert.pem();
+        let private_key_pem = certificate.signing_key.serialize_pem();
+        let tls =
+            crate::http_transport::server_config(ca_pem.as_bytes(), private_key_pem.as_bytes())?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint: Url =
+            format!("https://localhost:{}", listener.local_addr()?.port()).parse()?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let state = MockKubernetesState {
+            deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            events: Arc::clone(&events),
+        };
+        let router = Router::new()
+            .fallback(mock_kubernetes_handler)
+            .with_state(state);
+        let task = tokio::spawn(async move {
+            let _ = crate::http_transport::serve_tls(listener, router, tls).await;
+        });
+        Ok(MockKubernetes {
+            endpoint,
+            ca_pem,
+            events,
+            task,
+        })
+    }
+
+    async fn mock_kubernetes_handler(
+        State(state): State<MockKubernetesState>,
+        request: Request<Body>,
+    ) -> Response {
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let is_deployment_patch = method == Method::PATCH && path.ends_with("/deployments/runtime");
+        let is_workspace_claim = path.ends_with("/persistentvolumeclaims/workspace");
+        let event = if method == Method::GET && is_workspace_claim {
+            let phase = if state
+                .deployment_applied
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                "Bound"
+            } else {
+                "Pending"
+            };
+            format!("GET {path} {phase}")
+        } else {
+            format!("{method} {path}")
+        };
+        state.events.lock().await.push(event);
+        if is_deployment_patch {
+            state
+                .deployment_applied
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        if method == Method::GET && is_workspace_claim {
+            let phase = if state
+                .deployment_applied
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                "Bound"
+            } else {
+                "Pending"
+            };
+            return axum::Json(json!({"status":{"phase":phase}})).into_response();
+        }
+        if method == Method::GET && path.ends_with("/deployments/runtime") {
+            return axum::Json(json!({
+                "metadata":{"generation":1},
+                "spec":{"replicas":1},
+                "status":{"observedGeneration":1,"availableReplicas":1,"unavailableReplicas":0}
+            }))
+            .into_response();
+        }
+        StatusCode::OK.into_response()
     }
 
     #[test]

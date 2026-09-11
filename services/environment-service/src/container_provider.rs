@@ -15,6 +15,7 @@ use contracts::environment::{
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, subjects,
 };
+use contracts::resource::{GpuAllocation, GpuAllocationMode};
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
     ArtifactRef, EndpointId, EnvironmentId, OperationId, PolicyId, ReleaseId, Revision,
@@ -970,6 +971,40 @@ pub struct ContainerProviderConfiguration {
     pub access_pod_label: String,
     pub image_pull_secret_name: String,
     pub workspace_storage_class_name: String,
+    pub workspace_access_mode: ContainerWorkspaceAccessMode,
+}
+
+/// Kubernetes access mode used for the mutable Container workspace PVC.
+///
+/// The mode is deliberately limited to the two modes supported by the reviewed
+/// Container provider bindings. `ReadWriteOnce` is suitable for the local Kind
+/// profile, where the runtime and freeze workers share one node; production NFS
+/// bindings use `ReadWriteMany`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContainerWorkspaceAccessMode {
+    ReadWriteOnce,
+    ReadWriteMany,
+}
+
+impl ContainerWorkspaceAccessMode {
+    /// Parses the exact Kubernetes access-mode spelling used in deployment JSON.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ReadWriteOnce" => Some(Self::ReadWriteOnce),
+            "ReadWriteMany" => Some(Self::ReadWriteMany),
+            _ => None,
+        }
+    }
+
+    /// Returns the Kubernetes API spelling for this access mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadWriteOnce => "ReadWriteOnce",
+            Self::ReadWriteMany => "ReadWriteMany",
+        }
+    }
 }
 
 impl ContainerProviderConfiguration {
@@ -980,7 +1015,10 @@ impl ContainerProviderConfiguration {
         access_pod_label: String,
         image_pull_secret_name: String,
         workspace_storage_class_name: String,
+        workspace_access_mode: &str,
     ) -> Result<Self, ReleaseProjectionError> {
+        let workspace_access_mode = ContainerWorkspaceAccessMode::parse(workspace_access_mode)
+            .ok_or(ReleaseProjectionError::ConfigurationInvalid)?;
         if !valid_image_repository_prefix(&image_repository_prefix)
             || !valid_dns_label(&access_namespace)
             || !valid_dns_label(&access_pod_label)
@@ -996,6 +1034,7 @@ impl ContainerProviderConfiguration {
             access_pod_label,
             image_pull_secret_name,
             workspace_storage_class_name,
+            workspace_access_mode,
         })
     }
 }
@@ -1039,6 +1078,7 @@ impl PgReleaseProjectionStore {
             .validate()
             .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
         if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED
+            || event.project_id != event.data.release.project_id
             || event.course_id != event.data.release.course_id
             || event.aggregate_sequence.0 != 1
             || event.aggregate_revision
@@ -1071,11 +1111,12 @@ impl PgReleaseProjectionStore {
                 let projection_sha256 = canonical_hash(&event.data)?;
                 sqlx::query(
                     "INSERT INTO environment.release_projections \
-                     (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,1)",
+                     (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)",
                 )
                 .bind(event.data.release.id.as_uuid())
-                .bind(event.course_id.as_uuid())
+                .bind(event.project_id.as_uuid())
+                .bind(event.course_id.map(contracts::CourseId::as_uuid))
                 .bind(i64::try_from(event.data.release.version).map_err(|_| ReleaseProjectionError::IdentityMismatch)?)
                 .bind(provider_binding)
                 .bind(projection_sha256.to_string())
@@ -1145,13 +1186,14 @@ impl PgReleaseProjectionStore {
             InboxDecision::Accepted => {
                 let result = sqlx::query(
                     "UPDATE environment.release_projections \
-                     SET aggregate_sequence=2,withdrawn_at=$4,withdrawal_reason_code=$5, \
-                         withdrawal_event_id=$6,updated_at=clock_timestamp() \
-                     WHERE release_id=$1 AND course_id=$2 AND release_version=$3 \
+                     SET aggregate_sequence=2,withdrawn_at=$5,withdrawal_reason_code=$6, \
+                         withdrawal_event_id=$7,updated_at=clock_timestamp() \
+                     WHERE release_id=$1 AND project_id=$2 AND course_id IS NOT DISTINCT FROM $3 AND release_version=$4 \
                        AND aggregate_sequence=1 AND withdrawn_at IS NULL",
                 )
                 .bind(event.data.release_id.as_uuid())
-                .bind(event.course_id.as_uuid())
+                .bind(event.project_id.as_uuid())
+                .bind(event.course_id.map(contracts::CourseId::as_uuid))
                 .bind(
                     i64::try_from(event.data.version)
                         .map_err(|_| ReleaseProjectionError::IdentityMismatch)?,
@@ -1234,6 +1276,7 @@ pub struct ContainerProvider<B, R> {
     access_pod_label: String,
     image_pull_secret_name: String,
     workspace_storage_class_name: String,
+    workspace_access_mode: ContainerWorkspaceAccessMode,
 }
 
 impl<B, R> ContainerProvider<B, R>
@@ -1260,6 +1303,7 @@ where
             access_pod_label: configuration.access_pod_label,
             image_pull_secret_name: configuration.image_pull_secret_name,
             workspace_storage_class_name: configuration.workspace_storage_class_name,
+            workspace_access_mode: configuration.workspace_access_mode,
         })
     }
 
@@ -1281,6 +1325,7 @@ where
         if instance.runtime_kind != RuntimeKind::Container
             || instance.release_id != projection.release.id
             || instance.release_version != projection.release.version
+            || instance.project_id != projection.release.project_id
             || instance.course_id != projection.release.course_id
             || instance.provider_binding != self.binding
             || container_provider_binding(projection)? != self.binding
@@ -1300,9 +1345,9 @@ where
             return Err(ReleaseProjectionError::ContractInvalid);
         }
         let expected_repository = format!(
-            "{}/course-{}-{}",
+            "{}/project-{}-{}",
             self.image_repository_prefix,
-            projection.release.course_id,
+            projection.release.project_id,
             projection.release.candidate_id
         );
         if repository != &expected_repository {
@@ -1311,14 +1356,18 @@ where
         let image = format!("{repository}@{digest}");
         let namespace = format!("lw-env-{}", instance.id);
         let app_name = "runtime";
-        let labels = json!({
+        let mut labels = json!({
             "app.kubernetes.io/name": "labweaver-environment",
             "labweaver.io/environment-id": instance.id.to_string(),
-            "labweaver.io/course-id": instance.course_id.to_string(),
+            "labweaver.io/project-id": instance.project_id.to_string(),
             "labweaver.io/managed": "true",
             "labweaver.io/environment": "true",
         });
-        let resources = &projection.environment_spec.resources;
+        if let Some(course_id) = instance.course_id {
+            labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
+        let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
+            approved_resources(instance, projection)?;
         let service_port = match &projection.environment_spec.runtime {
             EnvironmentRuntimeSpec::Container { service_port, .. } => *service_port,
             EnvironmentRuntimeSpec::VirtualMachine { .. } => {
@@ -1336,25 +1385,80 @@ where
         {
             return Err(ReleaseProjectionError::SecurityPostureInvalid);
         }
-        let cpu = format!("{}m", resources.cpu_millicores);
-        let memory = resources.memory_bytes.to_string();
-        let quota_request_cpu = resources
-            .cpu_millicores
+        let cpu = format!("{cpu_millicores}m");
+        let memory = memory_bytes.to_string();
+        let quota_request_cpu = cpu_millicores
             .checked_add(FREEZE_REQUEST_CPU_MILLICORES)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_limit_cpu = resources
-            .cpu_millicores
+        let quota_limit_cpu = cpu_millicores
             .checked_add(FREEZE_LIMIT_CPU_MILLICORES)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_request_memory = resources
-            .memory_bytes
+        let quota_request_memory = memory_bytes
             .checked_add(FREEZE_REQUEST_MEMORY_BYTES)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_limit_memory = resources
-            .memory_bytes
+        let quota_limit_memory = memory_bytes
             .checked_add(FREEZE_LIMIT_MEMORY_BYTES)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let storage = resources.storage_bytes.to_string();
+        let storage = storage_bytes.to_string();
+        let mut quota_hard = serde_json::Map::from_iter([
+            (
+                "requests.cpu".to_owned(),
+                json!(format!("{quota_request_cpu}m")),
+            ),
+            (
+                "limits.cpu".to_owned(),
+                json!(format!("{quota_limit_cpu}m")),
+            ),
+            (
+                "requests.memory".to_owned(),
+                json!(quota_request_memory.to_string()),
+            ),
+            (
+                "limits.memory".to_owned(),
+                json!(quota_limit_memory.to_string()),
+            ),
+            ("requests.storage".to_owned(), json!(storage.clone())),
+            ("persistentvolumeclaims".to_owned(), json!("1")),
+            ("pods".to_owned(), json!("2")),
+        ]);
+        let mut workload_requests = serde_json::Map::from_iter([
+            ("cpu".to_owned(), json!(cpu)),
+            ("memory".to_owned(), json!(memory)),
+        ]);
+        let mut workload_limits = workload_requests.clone();
+        if let Some(allocation) = gpu_allocation {
+            // Resource resolves the catalog mode and binding before this projection. Exclusive
+            // and container-time-slice catalog entries must use distinct extended-resource
+            // bindings; this provider consumes the exact binding and never infers a mode from a
+            // node label or rewrites a shared resource name.
+            if allocation.mode == GpuAllocationMode::VmVgpu
+                || allocation.provider_binding != self.binding
+                || !valid_extended_resource_name(&allocation.allocation_binding)
+            {
+                return Err(ReleaseProjectionError::SecurityPostureInvalid);
+            }
+            let quantity = json!(allocation.count.to_string());
+            workload_requests.insert(allocation.allocation_binding.clone(), quantity.clone());
+            workload_limits.insert(allocation.allocation_binding.clone(), quantity.clone());
+            quota_hard.insert(
+                format!("requests.{}", allocation.allocation_binding),
+                quantity.clone(),
+            );
+            quota_hard.insert(
+                format!("limits.{}", allocation.allocation_binding),
+                quantity,
+            );
+        }
+        let mut pod_labels = json!({
+            "app": app_name,
+            "labweaver.io/environment-id": instance.id.to_string(),
+            "labweaver.io/project-id": instance.project_id.to_string(),
+            "labweaver.io/release-id": projection.release.id.to_string(),
+            "labweaver.io/release-version": projection.release.version.to_string()
+        });
+        if let Some(course_id) = instance.course_id {
+            pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
         let mut documents = vec![
             resource(
                 "Namespace",
@@ -1382,15 +1486,7 @@ where
                             "labweaver.io/freeze-limit-memory-bytes":FREEZE_LIMIT_MEMORY_BYTES.to_string()
                         }
                     },
-                    "spec":{"hard":{
-                        "requests.cpu":format!("{quota_request_cpu}m"),
-                        "limits.cpu":format!("{quota_limit_cpu}m"),
-                        "requests.memory":quota_request_memory.to_string(),
-                        "limits.memory":quota_limit_memory.to_string(),
-                        "requests.storage":storage,
-                        "persistentvolumeclaims":"1",
-                        "pods":"2"
-                    }}
+                     "spec":{"hard":quota_hard}
                 }),
             ),
             resource(
@@ -1421,7 +1517,7 @@ where
                 json!({
                     "apiVersion":"v1","kind":"PersistentVolumeClaim",
                     "metadata":{"name":"workspace","namespace":namespace,"labels":labels},
-                    "spec":{"accessModes":["ReadWriteMany"],"storageClassName":self.workspace_storage_class_name,"resources":{"requests":{"storage":storage}}}
+                    "spec":{"accessModes":[self.workspace_access_mode.as_str()],"storageClassName":self.workspace_storage_class_name,"resources":{"requests":{"storage":storage}}}
                 }),
             ),
             resource(
@@ -1455,13 +1551,7 @@ where
                         "replicas":1,
                         "selector":{"matchLabels":{"app":app_name}},
                         "template":{
-                            "metadata":{"labels":{
-                                "app":app_name,
-                                "labweaver.io/environment-id":instance.id.to_string(),
-                                "labweaver.io/course-id":instance.course_id.to_string(),
-                                "labweaver.io/release-id":projection.release.id.to_string(),
-                                "labweaver.io/release-version":projection.release.version.to_string()
-                            }},
+                            "metadata":{"labels":pod_labels},
                             "spec":{
                                 "serviceAccountName":"runtime","automountServiceAccountToken":false,
                                 // The shared NFS PVC is provisioned with the `nobody` owner.
@@ -1482,7 +1572,7 @@ where
                                 "containers":[{
                                     "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
                                     "ports":[{"name":"service","containerPort":service_port}],
-                                    "resources":{"requests":{"cpu":cpu,"memory":memory},"limits":{"cpu":cpu,"memory":memory}},
+                                     "resources":{"requests":workload_requests,"limits":workload_limits},
                                     "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
                                     "volumeMounts":[
                                         {"name":"workspace","mountPath":WORKSPACE_ROOT},
@@ -1602,6 +1692,12 @@ where
         instance: &EnvironmentInstance,
     ) -> Result<ProviderObservation, ProviderFailure> {
         let fence = ContainerBackendFence::for_action(instance, action)?;
+        let no_endpoints = |next_state, operation_complete| ProviderObservation {
+            next_state,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete,
+        };
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Deleting
         {
@@ -1622,6 +1718,12 @@ where
                 operation_complete: true,
             });
         }
+        if action == ReconcileAction::Cleanup
+            && instance.observed_state == ObservedEnvironmentState::Stopped
+            && instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted
+        {
+            return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+        }
         let resolved = self
             .releases
             .resolve(instance.release_id, instance.release_version)
@@ -1634,12 +1736,6 @@ where
             log_projection_failure(&error, instance, action, "plan");
             projection_failure(&error)
         })?;
-        let no_endpoints = |next_state, operation_complete| ProviderObservation {
-            next_state,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete,
-        };
         match (action, instance.observed_state) {
             (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
                 Ok(no_endpoints(ObservedEnvironmentState::Validating, false))
@@ -1677,7 +1773,11 @@ where
                 ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring,
             ) => {
                 self.backend.scale(&fence, &plan, 0).await?;
-                Ok(no_endpoints(ObservedEnvironmentState::Stopped, true))
+                Ok(no_endpoints(
+                    ObservedEnvironmentState::Stopped,
+                    instance.desired_state
+                        == contracts::environment::DesiredEnvironmentState::Stopped,
+                ))
             }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::Rejected,
@@ -1754,6 +1854,48 @@ fn container_provider_binding(
     }
 }
 
+fn approved_resources(
+    instance: &EnvironmentInstance,
+    projection: &ReleasePublished,
+) -> Result<(u32, u64, u64, Option<GpuAllocation>), ReleaseProjectionError> {
+    match instance.class {
+        contracts::authoring::EnvironmentClass::Experiment => {
+            let resources = &projection.environment_spec.resources;
+            Ok((
+                resources.cpu_millicores,
+                resources.memory_bytes,
+                resources.storage_bytes,
+                None,
+            ))
+        }
+        contracts::authoring::EnvironmentClass::Work => {
+            let authorization = instance
+                .operation
+                .lease_authorization
+                .as_ref()
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            if authorization.project_id != instance.project_id
+                || authorization.course_id != instance.course_id
+                || authorization.owner_actor_id != instance.owner_id
+                || Some(authorization.lease_id) != instance.lease_id
+                || Some(authorization.capacity_binding.as_str())
+                    != instance.capacity_binding.as_deref()
+            {
+                return Err(ReleaseProjectionError::IdentityMismatch);
+            }
+            authorization
+                .validate()
+                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+            Ok((
+                authorization.approved_resources.cpu_millicores,
+                authorization.approved_resources.memory_bytes,
+                authorization.approved_resources.storage_bytes,
+                authorization.gpu_allocation.clone(),
+            ))
+        }
+    }
+}
+
 fn release_provider_binding(runtime: &EnvironmentRuntimeSpec) -> &str {
     match runtime {
         EnvironmentRuntimeSpec::Container {
@@ -1821,16 +1963,88 @@ fn valid_binding(value: &str) -> bool {
 }
 
 fn valid_image_repository_prefix(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 512
+        || value.contains("://")
+        || value.contains('@')
+        || value
+            .chars()
+            .any(|character| character.is_ascii_control() || character.is_whitespace())
+    {
+        return false;
+    }
     let mut parts = value.split('/');
     let registry = parts.next().unwrap_or_default();
-    let project = parts.next().unwrap_or_default();
-    !registry.is_empty()
-        && !registry.contains("//")
-        && !registry.contains(char::is_whitespace)
-        && !registry.contains('@')
-        && !registry.contains(':')
-        && valid_dns_label(project)
-        && parts.next().is_none()
+    let repository_path = parts.collect::<Vec<_>>();
+    valid_registry_reference(registry)
+        && !repository_path.is_empty()
+        && repository_path
+            .iter()
+            .all(|component| valid_repository_component(component))
+}
+
+fn valid_registry_reference(value: &str) -> bool {
+    let host = match value.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.contains(':')
+                || port.is_empty()
+                || !port.bytes().all(|byte| byte.is_ascii_digit())
+                || port.parse::<u16>().ok().is_none_or(|port| port == 0)
+            {
+                return false;
+            }
+            host
+        }
+        None => value,
+    };
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(valid_dns_label)
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+}
+
+/// Validates one Docker/OCI repository name component.
+///
+/// This is the distribution reference grammar's lower-case component subset.  It accepts
+/// separators (`.`, `-`, and `__`) only between alphanumeric runs, which keeps tags, digests,
+/// schemes, and arbitrary image strings out of the configured prefix.
+fn valid_repository_component(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 255
+        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
+        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
+    {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len()
+            && (bytes[index].is_ascii_lowercase() || bytes[index].is_ascii_digit())
+        {
+            index += 1;
+        }
+        if index == bytes.len() {
+            return true;
+        }
+        match bytes[index] {
+            b'.' => index += 1,
+            b'_' if bytes.get(index + 1) == Some(&b'_') => index += 2,
+            b'-' => {
+                while bytes.get(index) == Some(&b'-') {
+                    index += 1;
+                }
+            }
+            _ => return false,
+        }
+        if index == bytes.len()
+            || !(bytes[index].is_ascii_lowercase() || bytes[index].is_ascii_digit())
+        {
+            return false;
+        }
+    }
+    false
 }
 
 fn valid_subject(value: &str) -> bool {
@@ -1856,6 +2070,16 @@ fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_extended_resource_name(value: &str) -> bool {
+    let Some((prefix, name)) = value.rsplit_once('/') else {
+        return valid_dns_label(value);
+    };
+    !prefix.is_empty()
+        && prefix.len() <= 253
+        && prefix.split('.').all(valid_dns_label)
+        && valid_dns_label(name)
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -1905,7 +2129,7 @@ pub enum ReleaseProjectionError {
 
 #[cfg(test)]
 mod tests {
-    use super::release_provider_binding;
+    use super::{release_provider_binding, valid_image_repository_prefix};
     use contracts::authoring::EnvironmentRuntimeSpec;
     use serde_json::json;
 
@@ -1925,10 +2149,6 @@ mod tests {
                     "sizeBytes": 1,
                     "mediaType": "application/vnd.labweaver.build-context.v1+tar"
                 },
-                "base_image_digest": concat!(
-                    "sha256:",
-                    "d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                ),
                 "service_port": 8080
             }),
             "virtual_machine" => json!({
@@ -1957,6 +2177,39 @@ mod tests {
             ("virtual_machine", "kubevirt-primary-v1"),
         ] {
             assert_eq!(release_provider_binding(&runtime(kind)), expected);
+        }
+    }
+
+    #[test]
+    fn image_repository_prefix_accepts_registry_ports_and_nested_paths() {
+        for prefix in [
+            "harbor.internal/labweaver-system",
+            "localhost:5001/labweaver/local",
+            "registry.example:443/labweaver-system/course-images",
+        ] {
+            assert!(
+                valid_image_repository_prefix(prefix),
+                "expected valid image repository prefix: {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_repository_prefix_rejects_complete_image_references() {
+        for prefix in [
+            "https://localhost:5001/labweaver/local",
+            "localhost:5001/labweaver/local image",
+            "localhost:5001/labweaver/local@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "localhost:5001/labweaver/local:latest",
+            "localhost:5001/labweaver/Local",
+            "localhost:5001/labweaver/",
+            "localhost:abc/labweaver/local",
+            "localhost:65536/labweaver/local",
+        ] {
+            assert!(
+                !valid_image_repository_prefix(prefix),
+                "expected invalid image repository prefix: {prefix}"
+            );
         }
     }
 }

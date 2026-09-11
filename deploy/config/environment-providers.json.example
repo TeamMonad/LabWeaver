@@ -8,6 +8,7 @@
     "imageRepositoryPrefix": "harbor.internal/labweaver-system",
     "imagePullSecretName": "harbor-course-pull",
     "workspaceStorageClassName": "nfs-rwx",
+    "workspaceAccessMode": "ReadWriteMany",
     "activeImagePolicyId": "00000000-0000-7000-8000-000000000002",
     "activeImagePolicyRevision": 1,
     "activeTrustRevision": 1
@@ -20,6 +21,8 @@
     "gatewayPodLabel": "openssh-gateway",
     "collectorNamespace": "labweaver-evaluation",
     "collectorPodLabel": "evaluation-freeze-worker",
+    "evaluationNamespace": "labweaver-evaluation-runs",
+    "evaluationPodLabel": "evaluation-ansible-probe-runner",
     "storageClassBinding": "vm-rwo-primary-v1",
     "storageClassName": "local-path",
     "dataSourceNamespace": "labweaver-system",

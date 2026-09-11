@@ -71,6 +71,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "RetentionClass": {
       "description": "Retention classes with distinct privacy and recovery requirements.",
       "enum": [
@@ -144,7 +148,14 @@
       "$ref": "#/$defs/UtcTimestamp"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "files": {
       "items": {
@@ -155,6 +166,9 @@
     "id": {
       "$ref": "#/$defs/ProblemPackageId"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "retention": {
       "$ref": "#/$defs/RetentionSnapshot"
     },
@@ -164,7 +178,7 @@
   },
   "required": [
     "id",
-    "courseId",
+    "projectId",
     "revision",
     "files",
     "retention",

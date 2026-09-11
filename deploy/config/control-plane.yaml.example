@@ -2,30 +2,25 @@
 # file locator; no ambient credential chain, proxy, endpoint, or fallback is consulted.
 database_url_file: "/etc/labweaver/secrets/database-url"
 database_max_connections: 20
-gateway_mtls:
+gateway_tls:
   bind_addr: "0.0.0.0:9444"
   server_certificate_file: "/etc/labweaver/secrets/tls.crt"
   server_key_file: "/etc/labweaver/secrets/tls.key"
-  client_ca_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  allowed_san_uris: ["spiffe://labweaver/access-service"]
-  required_eku: "clientAuth"
 access_service:
   base_url: "https://access-service:9443/"
   ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  client_certificate_file: "/etc/labweaver/secrets/tls.crt"
-  client_private_key_file: "/etc/labweaver/secrets/tls.key"
   timeout_milliseconds: 2000
 agent_service:
   base_url: "https://agent-service:9445/"
   ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  client_certificate_file: "/etc/labweaver/secrets/tls.crt"
-  client_private_key_file: "/etc/labweaver/secrets/tls.key"
+  timeout_milliseconds: 5000
+environment_service:
+  base_url: "https://environment-service:9446/"
+  ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
   timeout_milliseconds: 5000
 evaluation_service:
   base_url: "https://evaluation-service:9447/"
   ca_certificate_file: "/etc/labweaver/secrets/mtls-ca.pem"
-  client_certificate_file: "/etc/labweaver/secrets/tls.crt"
-  client_private_key_file: "/etc/labweaver/secrets/tls.key"
   timeout_milliseconds: 5000
 object_store:
   binding: "problem-package-minio-v1"
@@ -54,7 +49,7 @@ control:
   trustRevision: 1
   imagePolicyId: "00000000-0000-7000-8000-000000000002"
   imagePolicyRevision: 1
-  environmentSchemaSha256: "ec5089a9502a7fbc4166fd4792c78cc19a8211ec382bf4f67ef03d24755b5553"
+  environmentSchemaSha256: "61d13e7b95c7cd2013ecbe7ed6be4206a539134162d2400d5363bfc9a874bae9"
   evaluationSchemaSha256: "e6ccd10b1c34d8aa3024e29ec0884488f07a9be0df9f6b2c47605a1279d62cc7"
   containerBuild:
     builderBinding: "buildkit-primary-v1"
@@ -77,12 +72,8 @@ control:
       capacityBytes: 10737418240
     format: "qcow2"
   evaluationRuntime:
-    sourceSha256: "1111111111111111111111111111111111111111111111111111111111111111"
     providerBinding: "evaluation-kubernetes-primary-v1"
-    configurationSha256: "2222222222222222222222222222222222222222222222222222222222222222"
-    migrationCatalogSha256: "3333333333333333333333333333333333333333333333333333333333333333"
     runnerImage: "harbor.example.invalid/labweaver/evaluation-runner@sha256:4444444444444444444444444444444444444444444444444444444444444444"
-    runtimeArtifactSha256: "5555555555555555555555555555555555555555555555555555555555555555"
 cleanup_interval_seconds: 30
 nats:
   server: "tls://nats.labweaver-data.svc:4222"
@@ -98,5 +89,8 @@ nats:
   # - labweaver.agent.build.failed.v1
   build_consumer_name: "control-agent-build-projection-v1"
   build_quarantine_subject: "labweaver.agent.quarantine.control_agent_build.v1"
+  authoring_stream_name: "LABWEAVER_CONTROL_EVENTS"
+  authoring_consumer_name: "control-authoring-publication-v1"
+  authoring_quarantine_subject: "labweaver.control.quarantine.authoring_publication.v1"
   publish_timeout_milliseconds: 5000
   outbox_poll_milliseconds: 250

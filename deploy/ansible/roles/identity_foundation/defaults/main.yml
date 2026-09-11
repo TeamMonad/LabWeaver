@@ -15,8 +15,105 @@ identity_admin_allowed_cidr: 10.20.0.0/16 # noqa: var-naming[no-role-prefix]
 # demo/minimal deployment; production stacks must include labweaver-system.
 identity_allow_platform_namespaces: [] # noqa: var-naming[no-role-prefix]
 identity_realm: workloads # noqa: var-naming[no-role-prefix]
-identity_workload_client_id: labweaver-buildkit # noqa: var-naming[no-role-prefix]
-identity_workload_audience: labweaver-buildkit # noqa: var-naming[no-role-prefix]
+# Every LabWeaver service has one confidential client.  The client ID is also
+# the audience used by that service's inbound verifier.  Secrets are supplied
+# through the root-only locator and are copied into namespace-local Secrets;
+# this role never invents or logs credentials.
+identity_service_clients: # noqa: var-naming[no-role-prefix]
+  - client_id: labweaver-access
+    audience: labweaver-access
+    secret_name: labweaver-access-client
+    secret_key: access-client-secret
+  - client_id: labweaver-agent
+    audience: labweaver-agent
+    secret_name: labweaver-agent-client
+    secret_key: agent-client-secret
+  - client_id: labweaver-control
+    audience: labweaver-control
+    secret_name: labweaver-control-client
+    secret_key: control-client-secret
+  - client_id: labweaver-environment
+    audience: labweaver-environment
+    secret_name: labweaver-environment-client
+    secret_key: environment-client-secret
+  - client_id: labweaver-evaluation
+    audience: labweaver-evaluation
+    secret_name: labweaver-evaluation-client
+    secret_key: evaluation-client-secret
+  - client_id: labweaver-resource
+    audience: labweaver-resource
+    secret_name: labweaver-resource-client
+    secret_key: resource-client-secret
+# Roles are client roles on the target audience.  Each assignment grants the
+# named caller only the routes it actually invokes.
+identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
+  - caller: labweaver-access
+    target: labweaver-control
+    roles: [access.control.forward]
+  - caller: labweaver-access
+    target: labweaver-environment
+    roles: [access.environment.forward, access.environment.console, environment.owner.resolve, environment.endpoint.resolve, environment.console.resolve]
+  - caller: labweaver-access
+    target: labweaver-evaluation
+    roles: [evaluation.api.invoke]
+  - caller: labweaver-access
+    target: labweaver-resource
+    roles: [resource.api.invoke]
+  - caller: labweaver-control
+    target: labweaver-access
+    roles: [access.authorization.decide]
+  - caller: labweaver-control
+    target: labweaver-agent
+    roles: [agent.control.invoke]
+  - caller: labweaver-control
+    target: labweaver-environment
+    roles: [environment.work.read]
+  - caller: labweaver-control
+    target: labweaver-evaluation
+    roles: [evaluation.control.invoke]
+  - caller: labweaver-environment
+    target: labweaver-control
+    roles: [control.agent_run.read]
+  - caller: labweaver-evaluation
+    target: labweaver-control
+    roles: [control.authoring.read, control.llm_policy.read]
+  - caller: labweaver-evaluation
+    target: labweaver-environment
+    roles: [evaluation.environment.freeze, environment:resolve_evaluation_execution_binding]
+  - caller: labweaver-agent
+    target: labweaver-environment
+    roles: [environment.work.configure, environment:resolve_work_execution_binding]
+  - caller: labweaver-evaluation
+    target: labweaver-resource
+    roles:
+      - resource.task.create
+      - resource.task.read
+      - resource.task.claim
+      - resource.task.ack
+      - resource.task.release
+      - resource.task.cancel
+      - resource.usage.record
+  - caller: labweaver-evaluation
+    target: labweaver-agent
+    roles: [agent.llm_review.create, agent.llm_review.read, agent.llm_review.cancel]
+  - caller: labweaver-resource
+    target: labweaver-environment
+    roles: [resource.environment.manage]
+  - caller: labweaver-environment
+    target: labweaver-resource
+    roles: [resource.usage.record]
+  - caller: labweaver-environment
+    target: labweaver-environment
+    roles: [environment.console.execute]
+  # The gateway is an access ingress workload.  It uses the access client for
+  # the access-only audience and is therefore not an additional Keycloak
+  # client.
+  - caller: labweaver-access
+    target: labweaver-access
+    roles: [access.authorization.decide, access.metrics.read, access.ssh.authorize, access.session.manage]
+  - caller: labweaver-evaluation
+    target: labweaver-evaluation
+    roles: [evaluation.step.complete]
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
 identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
 identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]
@@ -30,7 +127,6 @@ identity_ca_bundle_configmap_name: labweaver-identity-ca-bundle # noqa: var-nami
 identity_tls_secret_name: labweaver-keycloak-tls # noqa: var-naming[no-role-prefix]
 identity_database_secret_name: labweaver-keycloak-database # noqa: var-naming[no-role-prefix]
 identity_bootstrap_secret_name: labweaver-keycloak-bootstrap # noqa: var-naming[no-role-prefix]
-identity_workload_secret_name: labweaver-buildkit-client # noqa: var-naming[no-role-prefix]
 # v1-style controllers have no dnsmasq; the Keycloak endpoint is resolved by
 # Gateway VIP + curl --resolve during verification. RHEL routers keep the
 # fragment-based DNS path enabled.

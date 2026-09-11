@@ -357,7 +357,7 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                     .await);
             }
         };
-        let expected_repository_prefix = match expected_course_repository_prefix(command) {
+        let expected_repository_prefix = match expected_repository_prefix(command) {
             Ok(prefix) => prefix,
             Err(error) => {
                 return Err(self
@@ -562,20 +562,23 @@ fn validate_digest(value: &str) -> Result<Sha256Digest, BuildPipelineError> {
         .map_err(|_| BuildPipelineError::new(BuildFailureCode::BuildIdentityMismatch, false, true))
 }
 
-fn expected_course_repository_prefix(
-    command: &AgentBuildRequested,
-) -> Result<String, BuildPipelineError> {
+fn expected_repository_prefix(command: &AgentBuildRequested) -> Result<String, BuildPipelineError> {
     let mut parts = command.request.output_repository.split('/');
     let registry = parts.next().unwrap_or_default();
     let project = parts.next().unwrap_or_default();
     let repository = parts.next().unwrap_or_default();
+    let expected_repository = command.request.course_id.map_or_else(
+        || {
+            format!(
+                "project-{}-{}",
+                command.request.project_id, command.request.candidate_id
+            )
+        },
+        |course_id| format!("course-{course_id}-{}", command.request.candidate_id),
+    );
     if registry.is_empty()
         || project.is_empty()
-        || repository
-            != format!(
-                "course-{}-{}",
-                command.request.course_id, command.request.candidate_id
-            )
+        || repository != expected_repository
         || parts.next().is_some()
     {
         return Err(BuildPipelineError::new(

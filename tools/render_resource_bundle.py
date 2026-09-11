@@ -12,6 +12,18 @@ DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 DATA_KEY = re.compile(r"^[A-Za-z0-9._-]+$")
 JWT = re.compile(rb"-----BEGIN NATS USER JWT-----\s+([A-Za-z0-9._-]+)")
 
+try:
+    from prepare_platform_foundation import NATS_USERS
+except ModuleNotFoundError as error:
+    if error.name != "prepare_platform_foundation":
+        raise
+    from tools.prepare_platform_foundation import NATS_USERS
+
+
+RESOURCE_PUBLISH_SUBJECTS, RESOURCE_SUBSCRIBE_SUBJECTS, RESOURCE_RESPONSE_PERMISSION = NATS_USERS[
+    "resource-service"
+]
+
 class BundleError(Exception):
     pass
 
@@ -72,14 +84,9 @@ def validate_creds(directory: Path, expected_issuer: str | None) -> None:
         raise BundleError("LW_RESOURCE_NATS_CREDENTIALS_INVALID") from error
     if expected_issuer and issuer != expected_issuer:
         raise BundleError("LW_RESOURCE_NATS_ISSUER_MISMATCH")
-    if sorted(publishes) != [
-        "$JS.ACK.>",
-        "$JS.API.>",
-        "labweaver.resource.request.approved.v1",
-        "labweaver.resource.request.submitted.v1",
-    ] or sorted(subscribes) != ["_INBOX.>", "labweaver.resource.lease.verify.v1"]:
+    if sorted(publishes) != sorted(RESOURCE_PUBLISH_SUBJECTS) or sorted(subscribes) != sorted(RESOURCE_SUBSCRIBE_SUBJECTS):
         raise BundleError("LW_RESOURCE_NATS_PERMISSIONS_INVALID")
-    if responses.get("max") != 1:
+    if RESOURCE_RESPONSE_PERMISSION and responses.get("max") != 1:
         raise BundleError("LW_RESOURCE_NATS_RESPONSE_PERMISSION_INVALID")
 
 def render(manifest_path: Path, input_root: Path, expected_issuer: str | None) -> bytes:

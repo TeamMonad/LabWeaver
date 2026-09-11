@@ -48,6 +48,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
       "type": "string"
     },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "EndpointProtocol": {
       "description": "Supported controlled protocols.",
       "enum": [
@@ -107,9 +111,6 @@
         {
           "additionalProperties": false,
           "properties": {
-            "base_image_digest": {
-              "type": "string"
-            },
             "build_context": {
               "$ref": "#/$defs/ArtifactRef"
             },
@@ -141,7 +142,6 @@
             "kind",
             "provider_binding",
             "build_context",
-            "base_image_digest",
             "service_port"
           ],
           "type": "object"
@@ -319,6 +319,10 @@
       ],
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "PublicExposurePolicy": {
       "enum": [
         "deny"
@@ -481,6 +485,16 @@
   "additionalProperties": false,
   "description": "Immutable validated Environment candidate.",
   "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "createdAt": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -492,6 +506,9 @@
     },
     "policyRevision": {
       "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "revision": {
       "$ref": "#/$defs/Revision"
@@ -506,6 +523,7 @@
   "required": [
     "id",
     "runId",
+    "projectId",
     "revision",
     "spec",
     "policyRevision",

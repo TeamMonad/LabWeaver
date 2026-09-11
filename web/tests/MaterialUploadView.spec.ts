@@ -1,25 +1,33 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import MaterialUploadView from '@/views/teacher/MaterialUploadView.vue'
-import { getActiveCourseLlmPolicy } from '@/generated/contracts'
+import { getActiveProjectLlmPolicy, listProjects } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
-    getActiveCourseLlmPolicy: vi.fn(),
-    createProblemPackageUpload: vi.fn(),
-    completeProblemPackageUpload: vi.fn(),
-    createAgentRun: vi.fn(),
-    getAgentRun: vi.fn(),
-    cancelAgentRun: vi.fn(),
-    retryAgentRunTrack: vi.fn(),
+    getActiveProjectLlmPolicy: vi.fn(),
+    listProjects: vi.fn(),
   }
 })
 
+const mockProject = {
+  id: 'project-1',
+  name: 'Demo project',
+  description: 'Project used by the upload view test',
+  ownerActorId: 'teacher-1',
+  courseId: 'course-1',
+  revision: 1,
+  state: 'active',
+  createdAt: '2026-07-11T00:00:00.000Z',
+  updatedAt: '2026-07-11T00:00:00.000Z',
+}
+
 const mockPolicy = {
   id: 'policy-1',
+  projectId: 'project-1',
   courseId: 'course-1',
   revision: 3,
   activatedAt: '2026-07-11T00:00:00.000Z',
@@ -50,36 +58,29 @@ describe('MaterialUploadView', () => {
     vi.resetAllMocks()
   })
 
-  afterEach(() => {
-    vi.unstubAllEnvs()
+  it('shows a project-context diagnostic when no accessible project is returned', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [], error: undefined as never })
+
+    const wrapper = mount(MaterialUploadView)
+    await vi.waitFor(() => expect(wrapper.text()).toContain('PROJECT_CONTEXT_MISSING'))
+    expect(wrapper.text()).toContain('请先在顶部项目选择器中选择一个项目。')
+    expect(getActiveProjectLlmPolicy).not.toHaveBeenCalled()
   })
 
-  it('shows blocked diagnostic when no course context is available', async () => {
-    vi.mocked(getActiveCourseLlmPolicy).mockResolvedValue({
-      data: undefined as never,
-      error: undefined as never,
-    })
-    const wrapper = mount(MaterialUploadView)
-    await vi.waitFor(() => wrapper.text().includes('课程上下文未绑定'))
-    expect(wrapper.text()).toContain('课程上下文未绑定')
-  })
+  it('loads the active project policy for the selected project', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
 
-  it('shows env fallback banner and loads active LLM policy from env context', async () => {
-    vi.stubEnv('VITE_DEFAULT_COURSE_ID', 'demo-course-1')
-    vi.mocked(getActiveCourseLlmPolicy).mockResolvedValue({
-      data: mockPolicy,
-      error: undefined as never,
-    })
     const wrapper = mount(MaterialUploadView)
-    await vi.waitFor(() => wrapper.text().includes('部署配置中的默认课程上下文'))
-    expect(wrapper.text()).toContain('部署配置中的默认课程上下文')
-    expect(wrapper.text()).toContain('claude-3-5-sonnet')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('claude-3-5-sonnet'))
     expect(wrapper.text()).toContain('secret')
+    expect(wrapper.text()).toContain('rev-3 / policy-1')
+    expect(getActiveProjectLlmPolicy).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
   })
 
-  it('surfaces policy load errors as diagnostic', async () => {
-    vi.stubEnv('VITE_DEFAULT_COURSE_ID', 'demo-course-1')
-    vi.mocked(getActiveCourseLlmPolicy).mockResolvedValue({
+  it('surfaces project policy errors as a diagnostic', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({
       data: undefined as never,
       error: {
         response: {
@@ -91,8 +92,9 @@ describe('MaterialUploadView', () => {
         },
       } as never,
     })
+
     const wrapper = mount(MaterialUploadView)
-    await vi.waitFor(() => wrapper.text().includes('无策略读取权限'))
+    await vi.waitFor(() => expect(wrapper.text()).toContain('无策略读取权限'))
     expect(wrapper.text()).toContain('LW_ACCESS_DENIED')
   })
 })

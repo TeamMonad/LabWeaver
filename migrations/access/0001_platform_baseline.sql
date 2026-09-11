@@ -7,7 +7,7 @@ CREATE TABLE outbox_events (event_id uuid PRIMARY KEY, subject text NOT NULL, ev
 CREATE TABLE inbox_events (consumer text NOT NULL, event_id uuid NOT NULL, aggregate_id uuid NOT NULL, aggregate_sequence bigint NOT NULL CHECK (aggregate_sequence > 0), payload_sha256 text NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'), processed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, event_id), UNIQUE (consumer, aggregate_id, aggregate_sequence));
 CREATE TABLE inbox_watermarks (consumer text NOT NULL, aggregate_id uuid NOT NULL, last_sequence bigint NOT NULL CHECK (last_sequence >= 0), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (consumer, aggregate_id));
 CREATE TABLE access_grants (
-    grant_id uuid PRIMARY KEY, actor_id uuid NOT NULL, course_id uuid NOT NULL, environment_id uuid NOT NULL,
+    grant_id uuid PRIMARY KEY, actor_id uuid NOT NULL, project_id uuid NOT NULL, course_id uuid, environment_id uuid NOT NULL,
     revision bigint NOT NULL CHECK (revision > 0), state text NOT NULL,
     not_before timestamptz NOT NULL, expires_at timestamptz NOT NULL, contract jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz,
@@ -166,7 +166,7 @@ ALTER TABLE access_grants ADD CONSTRAINT access_grants_terminal_facts_v1
     );
 
 CREATE UNIQUE INDEX access_grants_actor_environment_live_idx
-    ON access_grants (actor_id, environment_id)
+    ON access_grants (actor_id, project_id, environment_id)
     WHERE state IN ('requested', 'active');
 CREATE INDEX access_grants_expiry_idx ON access_grants (expires_at, grant_id)
     WHERE state = 'active';

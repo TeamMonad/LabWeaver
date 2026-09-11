@@ -1,7 +1,8 @@
 # Current role
 
-- Developer: A (`@2018wzh`)
-- Scope: architecture, Control/Access/Resource, public contracts, migrations, release-gate decisions, and integration ownership for Issues #124 and #142. For Issue #126, A owns candidate freeze, controlled operation records and connected execution after every recorded blocker is cleared; this does not transfer verification authority from D.
-- Review boundary: B (`@zeyi2`) must review Agent/Environment/Evaluation, console security and Release Gate changes; D (`@Nova-Lciop-J`) independently verifies deployment, private browser artifacts and cluster readback for #126. C (`@yingxvemiao`) reviews frontend changes.
-- Approval boundary: the author does not self-approve, merge, or declare the high-risk PR complete. Human review, connected verification, and release evidence remain separate gates.
-- Data boundary: private credentials and deployment inputs stay in ignored/private or root-owned remote locations; repository evidence records only locators, hashes, counts, and diagnostics.
+- Developer: A (@2018wzh).
+- Scope: Issue #180 whole-repository v3 implementation coordination, architecture, contracts and integration. All code/test/generator changes are delegated to Luna max agents with disjoint ownership.
+- Human ownership: A Control/Access/Resource and architecture; B Agent/Environment/Evaluation; C frontend; D tests/deployment verification.
+- Review: request B, C and D for affected changes. The author does not self-approve, merge or publish.
+- Scope limit: local implementation and validation only; no remote deployment, infrastructure cleanup or payments.
+- Secrets and private inputs never enter Git or normal logs.

@@ -3,10 +3,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::authoring::{CandidateApproval, CandidateDecision, RuntimeKind};
+use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentCandidate, RuntimeKind};
 use crate::{
     ActorId, AgentRunId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ImageArtifactId,
-    ReleaseId, Revision, UtcTimestamp,
+    ProjectId, ReleaseId, Revision, UtcTimestamp,
 };
 
 /// Explicit BuildKit network posture.
@@ -22,16 +22,15 @@ pub enum BuildNetworkPolicy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuildRequest {
     pub id: BuildRequestId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
-    pub approval_id: crate::ApprovalId,
     pub builder_binding: String,
     pub context: ArtifactRef,
     /// Object-store key resolved by Control and bound to the immutable context reference.
     pub context_object_key: String,
     pub dockerfile_path: String,
-    pub base_image_digest: String,
     pub output_repository: String,
     pub network: BuildNetworkPolicy,
     pub max_duration_milliseconds: u64,
@@ -55,7 +54,6 @@ impl BuildRequest {
         }
         crate::validate_relative_path(&self.dockerfile_path)
             .map_err(|_| SupplyChainError::IncompleteBuildRequest)?;
-        validate_oci_digest(&self.base_image_digest)?;
         if let BuildNetworkPolicy::Restricted { allowed_registries } = &self.network
             && (allowed_registries.is_empty()
                 || allowed_registries
@@ -169,7 +167,8 @@ pub enum VirtualMachineDiskFormat {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentTemplateRelease {
     pub id: ReleaseId,
-    pub course_id: CourseId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
     pub version: u64,
     pub candidate_id: CandidateId,
     pub agent_run_id: AgentRunId,
@@ -193,6 +192,34 @@ impl EnvironmentTemplateRelease {
             return Err(SupplyChainError::ApprovalMismatch);
         }
         self.artifact.validate()?;
+        Ok(())
+    }
+
+    /// Verifies that a release is published into the exact project context supplied by Control.
+    pub fn validate_ownership(
+        &self,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+    ) -> Result<(), SupplyChainError> {
+        if self.project_id != project_id || self.course_id != course_id {
+            return Err(SupplyChainError::OwnershipMismatch);
+        }
+        Ok(())
+    }
+
+    /// Verifies the release and candidate share the same immutable identity and project context.
+    pub fn validate_against_candidate(
+        &self,
+        candidate: &EnvironmentCandidate,
+    ) -> Result<(), SupplyChainError> {
+        if self.project_id != candidate.project_id
+            || self.course_id != candidate.course_id
+            || self.candidate_id != candidate.id
+            || self.agent_run_id != candidate.run_id
+            || self.candidate_revision != candidate.revision
+        {
+            return Err(SupplyChainError::OwnershipMismatch);
+        }
         Ok(())
     }
 
@@ -247,4 +274,6 @@ pub enum SupplyChainError {
     DigestMismatch,
     #[error("candidate approval does not bind this exact release")]
     ApprovalMismatch,
+    #[error("project ownership context does not match")]
+    OwnershipMismatch,
 }

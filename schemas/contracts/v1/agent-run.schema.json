@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
     "AgentAttempt": {
       "additionalProperties": false,
       "description": "One append-only attempt in an Agent track.",
@@ -50,6 +54,7 @@
         "pending",
         "running",
         "repairing",
+        "awaiting_approval",
         "succeeded",
         "failed",
         "cancelled"
@@ -60,6 +65,58 @@
       "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
       "type": "string"
     },
+    "AgentRunPurpose": {
+      "description": "Immutable purpose selected by Control for one Agent run.\n\nThe purpose is authoritative: callers cannot substitute an environment class, target\nenvironment, actor, or runtime through an untyped request field. Authoring creates a new\nEnvironment/Evaluation package, while WorkConfiguration targets one existing Work environment\nand produces one configuration plan.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "environmentClass": {
+              "$ref": "#/$defs/EnvironmentClass"
+            },
+            "kind": {
+              "const": "authoring",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentClass"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actorId": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "environmentRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            },
+            "runtimeKind": {
+              "$ref": "#/$defs/RuntimeKind",
+              "description": "Runtime selected by the authoritative Work environment.\n\nControl resolves this value from the environment instance before dispatching the\nrun. Agent uses it as the immutable execution routing key, so a missing or altered\nruntime cannot silently select a different executor."
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "environmentRevision",
+            "actorId",
+            "runtimeKind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AgentRunState": {
       "description": "Aggregate AgentRun state derived from both tracks.",
       "enum": [
@@ -67,6 +124,7 @@
         "running",
         "partially_succeeded",
         "succeeded",
+        "awaiting_approval",
         "failed",
         "cancelling",
         "cancelled"
@@ -107,7 +165,8 @@
       "description": "Independent Agent track.",
       "enum": [
         "environment",
-        "evaluation"
+        "evaluation",
+        "work_configuration"
       ],
       "type": "string"
     },
@@ -159,6 +218,18 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
     "LlmUsage": {
       "additionalProperties": false,
       "description": "Frozen LLM usage for one attempt.",
@@ -200,6 +271,10 @@
       "description": "Strongly typed UUIDv7 identifier for `ProblemPackageId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -213,6 +288,57 @@
         "virtual_machine"
       ],
       "type": "string"
+    },
+    "WorkConfigurationPlan": {
+      "additionalProperties": false,
+      "description": "Immutable generated configuration plan for one existing Work environment.",
+      "properties": {
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkConfigurationPlanId"
+        },
+        "requiresRestart": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "scriptArtifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "verificationScriptArtifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "scriptArtifact",
+        "summary",
+        "requiresRestart",
+        "environmentId",
+        "environmentRevision"
+      ],
+      "type": "object"
+    },
+    "WorkConfigurationPlanId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -220,7 +346,14 @@
   "description": "One idempotent, auditable dual-candidate Agent run.",
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "id": {
       "$ref": "#/$defs/AgentRunId"
@@ -228,14 +361,27 @@
     "packageId": {
       "$ref": "#/$defs/ProblemPackageId"
     },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkConfigurationPlan"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "policyId": {
       "$ref": "#/$defs/PolicyId"
     },
     "policyRevision": {
       "$ref": "#/$defs/Revision"
     },
-    "requestedRuntime": {
-      "$ref": "#/$defs/RuntimeKind"
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "purpose": {
+      "$ref": "#/$defs/AgentRunPurpose"
     },
     "revision": {
       "$ref": "#/$defs/Revision"
@@ -252,11 +398,11 @@
   },
   "required": [
     "id",
-    "courseId",
+    "projectId",
     "packageId",
     "policyId",
     "policyRevision",
-    "requestedRuntime",
+    "purpose",
     "state",
     "revision",
     "tracks"

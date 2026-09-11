@@ -285,6 +285,10 @@
         }
       ]
     },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
     "DeterministicRunnerSpec": {
       "description": "Deterministic Runner configurations frozen for P0 OJ and Linux evaluation.",
       "oneOf": [
@@ -689,6 +693,10 @@
         }
       ]
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "RequiredStatus": {
       "description": "Required deterministic Gate terminal status.",
       "oneOf": [
@@ -808,6 +816,16 @@
   "additionalProperties": false,
   "description": "Immutable validated Evaluation candidate.",
   "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "createdAt": {
       "$ref": "#/$defs/UtcTimestamp"
     },
@@ -819,6 +837,9 @@
     },
     "policyRevision": {
       "$ref": "#/$defs/Revision"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "revision": {
       "$ref": "#/$defs/Revision"
@@ -833,6 +854,7 @@
   "required": [
     "id",
     "runId",
+    "projectId",
     "revision",
     "spec",
     "policyRevision",

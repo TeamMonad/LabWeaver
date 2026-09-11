@@ -80,6 +80,10 @@
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
@@ -135,7 +139,14 @@
       "$ref": "#/$defs/EnvironmentConsoleBinding"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "eligibilityExpiresAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -162,6 +173,9 @@
     "ownerActorId": {
       "$ref": "#/$defs/ActorId"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "releaseId": {
       "$ref": "#/$defs/ReleaseId"
     },
@@ -176,7 +190,7 @@
   },
   "required": [
     "environmentId",
-    "courseId",
+    "projectId",
     "ownerActorId",
     "environmentClass",
     "runtimeKind",

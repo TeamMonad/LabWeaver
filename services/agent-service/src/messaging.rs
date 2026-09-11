@@ -181,9 +181,29 @@ impl AgentBuildCommandConsumer {
             .get_consumer(consumer_name)
             .await
             .map_err(|_| AgentMessagingError::ConsumerUnavailable)?;
-        if consumer.cached_info().config.filter_subject != subjects::AGENT_BUILD_REQUESTED
-            || !consumer.cached_info().config.filter_subjects.is_empty()
-        {
+        let consumer_config = &consumer.cached_info().config;
+        if !valid_build_command_filter(
+            &consumer_config.filter_subject,
+            &consumer_config.filter_subjects,
+        ) {
+            tracing::error!(
+                event = "agent.build_command_consumer.configuration_invalid",
+                component = "build-command-consumer",
+                operation = "nats.consumer.bind",
+                outcome = "failed",
+                failure_stage = "consumer_filter",
+                diagnostic_code = "LW_AGENT_BUILD_CONSUMER_FILTER_INVALID",
+                stream = stream_name,
+                consumer = consumer_name,
+                filter_subject_present = !consumer_config.filter_subject.is_empty(),
+                filter_subject_count = consumer_config.filter_subjects.len(),
+                filter_subjects_contain_expected = consumer_config
+                    .filter_subjects
+                    .iter()
+                    .any(|subject| subject == subjects::AGENT_BUILD_REQUESTED),
+                expected_subject = subjects::AGENT_BUILD_REQUESTED,
+                retryable = false,
+            );
             return Err(AgentMessagingError::Configuration);
         }
         let messages = consumer
@@ -443,6 +463,11 @@ fn valid_subject(value: &str) -> bool {
     valid_token(value) && !value.contains('*') && !value.contains('>')
 }
 
+fn valid_build_command_filter(filter_subject: &str, filter_subjects: &[String]) -> bool {
+    filter_subject.is_empty()
+        && matches!(filter_subjects, [subject] if subject == subjects::AGENT_BUILD_REQUESTED)
+}
+
 fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -479,4 +504,49 @@ pub enum AgentMessagingError {
     Fence,
     #[error("LW_AGENT_OUTBOX_DATABASE_FAILED")]
     Database(#[from] sqlx::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_build_command_filter;
+    use contracts::events::subjects;
+
+    fn filters(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn accepts_one_exact_plural_build_subject() {
+        assert!(valid_build_command_filter(
+            "",
+            &filters(&[subjects::AGENT_BUILD_REQUESTED])
+        ));
+    }
+
+    #[test]
+    fn rejects_legacy_singular_build_subject() {
+        assert!(!valid_build_command_filter(
+            subjects::AGENT_BUILD_REQUESTED,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_plural_build_subject() {
+        assert!(!valid_build_command_filter(
+            "",
+            &filters(&["labweaver.control.agent_build.failed.v1"])
+        ));
+    }
+
+    #[test]
+    fn rejects_additional_plural_build_subject() {
+        assert!(!valid_build_command_filter(
+            "",
+            &filters(&[
+                subjects::AGENT_BUILD_REQUESTED,
+                "labweaver.control.agent_build.failed.v1",
+            ])
+        ));
+    }
 }

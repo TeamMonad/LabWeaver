@@ -18,7 +18,7 @@ use contracts::http::{
 };
 use contracts::supply_chain::ImageArtifact;
 use contracts::{
-    BuildRequestId, CourseId, EventId, ImageArtifactId, Revision, Sequence, UtcTimestamp,
+    BuildRequestId, CourseId, EventId, ImageArtifactId, ProjectId, Revision, Sequence, UtcTimestamp,
 };
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, InboxDecision, InboxStore, OutboxStore,
@@ -32,7 +32,6 @@ use crate::build_pipeline::{
 };
 
 const CANCEL_BUILD_OPERATION: &str = "agent.build.cancel";
-const CONTROL_AUTHORITY_SAN_URI: &str = "spiffe://labweaver/control-service";
 const CANCELLATION_COMMAND_MAX_AGE: time::Duration = time::Duration::minutes(5);
 
 /// Durable Inbox outcome for one Control build command.
@@ -80,6 +79,7 @@ impl PgBuildStore {
             .validate()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         if event.subject != subjects::AGENT_BUILD_REQUESTED
+            || event.project_id != event.data.request.project_id
             || event.course_id != event.data.request.course_id
             || event.aggregate_revision
                 != Revision::new(1).map_err(|_| BuildStoreError::ContractInvalid)?
@@ -104,11 +104,12 @@ impl PgBuildStore {
             InboxDecision::Accepted => {
                 sqlx::query(
                     "INSERT INTO agent.build_commands \
-                     (build_request_id,course_id,command_sha256,idempotency_key,state,command) \
-                     VALUES ($1,$2,$3,$4,'requested',$5)",
+                     (build_request_id,project_id,course_id,command_sha256,idempotency_key,state,command) \
+                     VALUES ($1,$2,$3,$4,$5,'requested',$6)",
                 )
                 .bind(event.data.request.id.as_uuid())
-                .bind(event.course_id.as_uuid())
+                .bind(event.project_id.as_uuid())
+                .bind(event.course_id.map(CourseId::as_uuid))
                 .bind(canonical_hash(&event.data.request)?.to_string())
                 .bind(&event.data.idempotency_key)
                 .bind(
@@ -257,8 +258,6 @@ impl PgBuildStore {
         }
         let artifact_contract =
             serde_json::to_value(&output.artifact).map_err(|_| BuildStoreError::ContractInvalid)?;
-        // Policy evaluation removed: store placeholder empty object for backward-compatible column
-        let evaluation_contract = serde_json::json!({});
         let registry_project_contract = serde_json::to_value(&output.registry_project)
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let artifact_evidence_sha256 = canonical_hash(&artifact_contract)?;
@@ -267,15 +266,14 @@ impl PgBuildStore {
         let authority_now = transaction_time(&mut transaction).await?;
         sqlx::query(
             "INSERT INTO agent.image_artifacts \
-             (image_artifact_id,build_request_id,image_digest,evidence_sha256,state,contract,policy_evaluation,registry_project_evidence) \
-             VALUES ($1,$2,$3,$4,'verified',$5,$6,$7)",
+             (image_artifact_id,build_request_id,image_digest,evidence_sha256,state,contract,registry_project_evidence) \
+             VALUES ($1,$2,$3,$4,'verified',$5,$6)",
         )
         .bind(artifact_id.as_uuid())
         .bind(build_request_id.as_uuid())
         .bind(digest)
         .bind(artifact_evidence_sha256.to_string())
         .bind(artifact_contract)
-        .bind(evaluation_contract)
         .bind(registry_project_contract)
         .execute(&mut *transaction)
         .await?;
@@ -384,9 +382,6 @@ impl PgBuildStore {
         request: &InternalAgentBuildCancellationRequest,
         idempotency_key: &IdempotencyKey,
     ) -> Result<InternalAgentBuildCancellationResult, BuildStoreError> {
-        if request.authority_san_uri != CONTROL_AUTHORITY_SAN_URI {
-            return Err(BuildStoreError::AuthorityMismatch);
-        }
         let request_hash = canonical_hash(request)?;
         let mut transaction = self.pool.begin().await?;
         match IdempotencyStore::reserve(
@@ -418,14 +413,20 @@ impl PgBuildStore {
             return Err(BuildStoreError::RequestExpired);
         }
         let row = sqlx::query(
-            "SELECT course_id,command_sha256,state,revision,cancellation_requested \
+            "SELECT project_id,course_id,command_sha256,state,revision,cancellation_requested \
              FROM agent.build_commands WHERE build_request_id=$1 FOR UPDATE",
         )
         .bind(request.build_request_id.as_uuid())
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(BuildStoreError::NotFound)?;
-        let course_id = CourseId::from_str(&row.try_get::<uuid::Uuid, _>("course_id")?.to_string())
+        let project_id =
+            ProjectId::from_str(&row.try_get::<uuid::Uuid, _>("project_id")?.to_string())
+                .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let course_id = row
+            .try_get::<Option<uuid::Uuid>, _>("course_id")?
+            .map(|value| CourseId::from_str(&value.to_string()))
+            .transpose()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let _command_sha256 = row
             .try_get::<String, _>("command_sha256")?
@@ -433,8 +434,8 @@ impl PgBuildStore {
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let state = parse_build_state(&row.try_get::<String, _>("state")?)?;
         let revision = revision_from_i64(row.try_get("revision")?)?;
-        if course_id != request.course_id {
-            return Err(BuildStoreError::CourseMismatch);
+        if project_id != request.project_id || course_id != request.course_id {
+            return Err(BuildStoreError::IdentityMismatch);
         }
         if state != request.expected_state || revision != request.expected_revision {
             return Err(BuildStoreError::StateConflict);
@@ -454,14 +455,12 @@ impl PgBuildStore {
         .map_err(|_| BuildStoreError::ContractInvalid)?;
         let updated = sqlx::query(
             "UPDATE agent.build_commands SET cancellation_requested=true,cancellation_audit_version=1,revision=$2, \
-                 cancellation_actor_id=$3,cancellation_authority_san_uri=$4, \
-                 cancellation_requested_at=$5,updated_at=clock_timestamp() \
-             WHERE build_request_id=$1 AND revision=$6 AND state=$7",
+                 cancellation_actor_id=$3, cancellation_requested_at=$4,updated_at=clock_timestamp() \
+             WHERE build_request_id=$1 AND revision=$5 AND state=$6",
         )
         .bind(request.build_request_id.as_uuid())
         .bind(i64::try_from(next_revision.get()).map_err(|_| BuildStoreError::ContractInvalid)?)
         .bind(request.actor_id.as_uuid())
-        .bind(&request.authority_san_uri)
         .bind(request.requested_at.get())
         .bind(i64::try_from(revision.get()).map_err(|_| BuildStoreError::ContractInvalid)?)
         .bind(build_state_name(state))
@@ -471,6 +470,7 @@ impl PgBuildStore {
             return Err(BuildStoreError::StateConflict);
         }
         let result = InternalAgentBuildCancellationResult {
+            project_id,
             course_id,
             build_request_id: request.build_request_id,
             state,
@@ -497,23 +497,30 @@ impl PgBuildStore {
         query: &InternalAgentBuildStatusQuery,
     ) -> Result<InternalAgentBuildCancellationResult, BuildStoreError> {
         let row = sqlx::query(
-            "SELECT course_id,command_sha256,state,revision,cancellation_requested \
+            "SELECT project_id,course_id,command_sha256,state,revision,cancellation_requested \
              FROM agent.build_commands WHERE build_request_id=$1",
         )
         .bind(build_request_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
         .ok_or(BuildStoreError::NotFound)?;
-        let course_id = CourseId::from_str(&row.try_get::<uuid::Uuid, _>("course_id")?.to_string())
+        let project_id =
+            ProjectId::from_str(&row.try_get::<uuid::Uuid, _>("project_id")?.to_string())
+                .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let course_id = row
+            .try_get::<Option<uuid::Uuid>, _>("course_id")?
+            .map(|value| CourseId::from_str(&value.to_string()))
+            .transpose()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
         let _command_sha256 = row
             .try_get::<String, _>("command_sha256")?
             .parse::<Sha256Digest>()
             .map_err(|_| BuildStoreError::ContractInvalid)?;
-        if course_id != query.course_id {
-            return Err(BuildStoreError::CourseMismatch);
+        if project_id != query.project_id || course_id != query.course_id {
+            return Err(BuildStoreError::IdentityMismatch);
         }
         Ok(InternalAgentBuildCancellationResult {
+            project_id,
             course_id,
             build_request_id,
             state: parse_build_state(&row.try_get::<String, _>("state")?)?,
@@ -751,6 +758,7 @@ async fn enqueue_terminal_event<T: serde::Serialize>(
         time: now,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
+        project_id: lease.command.request.project_id,
         course_id: lease.command.request.course_id,
         aggregate_revision: Revision::new(1).map_err(|_| BuildStoreError::ContractInvalid)?,
         aggregate_sequence: Sequence(1),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { useConsoleSession } from '@/composables/useConsoleSession'
-import { createFixtureConsoleSocketFactory } from '@/fixture/consoleSocket'
+import { createMockConsoleSocketFactory } from './consoleSocketMock'
 import type { ConsoleCapabilitySchema } from '@/generated/contracts'
 import type { ConsoleSocketHandlers } from '@/console/socket'
 
@@ -36,14 +36,14 @@ function factoryThat(states: Array<[Parameters<ConsoleSocketHandlers['onStateCha
 }
 
 describe('useConsoleSession', () => {
-  it('opens and receives data via the fixture socket', async () => {
+  it('opens and receives data via an injected socket', async () => {
     const session = useConsoleSession()
     const received: string[] = []
     session.onData((d) => { if (typeof d === 'string') received.push(d) })
-    await session.connect(makeCapability(), createFixtureConsoleSocketFactory())
+    await session.connect(makeCapability(), createMockConsoleSocketFactory())
     expect(session.status).toBe('open')
     await new Promise((r) => setTimeout(r, 0))
-    expect(received.join('')).toContain('LabWeaver fixture console')
+    expect(received.join('')).toContain('LabWeaver mock console')
   })
 
   it('maps closed-with-denied to denied status', async () => {
@@ -66,9 +66,9 @@ describe('useConsoleSession', () => {
   })
 })
 
-describe('createFixtureConsoleSocketFactory', () => {
+describe('createMockConsoleSocketFactory', () => {
   it('echoes input like a minimal shell', async () => {
-    const factory = createFixtureConsoleSocketFactory()
+    const factory = createMockConsoleSocketFactory()
     const received: string[] = []
     const socket = factory('/x', 'proto', {
       onStateChange: () => {},
@@ -78,7 +78,7 @@ describe('createFixtureConsoleSocketFactory', () => {
     socket.send('ls')
     socket.send('\r')
     const text = received.join('')
-    expect(text).toContain('LabWeaver fixture console')
+    expect(text).toContain('LabWeaver mock console')
     expect(text).toContain('ls')
     expect(text).toContain('$')
   })

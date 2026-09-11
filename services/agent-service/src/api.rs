@@ -1,28 +1,44 @@
-//! Control-only mTLS API for the Agent authority.
+//! Control-only service API for the Agent authority.
 #![allow(clippy::missing_errors_doc)]
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use contracts::authoring::AgentTrackKind;
 use contracts::http::{
-    IdempotencyKey, InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
-    InternalAgentRunMutationRequest, InternalAgentRunOutcome, InternalCreateAgentRunRequest,
+    AgentLlmReviewQuery, AgentWorkExecutionIntentQuery, GeneratedArtifactQuery, IdempotencyKey,
+    InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
+    InternalAgentLlmReviewRequest, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
+    InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution,
 };
-use contracts::{AgentRunId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp};
+use contracts::{
+    AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp,
+};
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
 
 use crate::build_store::{BuildStoreError, PgBuildStore};
+use crate::generated_artifacts::{GeneratedArtifactStore, GeneratedArtifactStoreError};
+use crate::llm_review::{LlmReviewStore, LlmReviewStoreError};
 use crate::run_store::{
     AgentRunReservation, AgentRunStoreError, PostgresAgentRunStore, StoredCandidate,
 };
+
+/// Permission required for every Control-to-Agent request.
+pub const CONTROL_PERMISSION: &str = "agent.control.invoke";
+/// Evaluation permission for creating an advisory review.
+pub const LLM_REVIEW_CREATE_PERMISSION: &str = "agent.llm_review.create";
+/// Evaluation permission for reading an advisory review.
+pub const LLM_REVIEW_READ_PERMISSION: &str = "agent.llm_review.read";
+/// Evaluation permission for cancelling an advisory review.
+pub const LLM_REVIEW_CANCEL_PERMISSION: &str = "agent.llm_review.cancel";
 
 /// Agent internal API state.
 #[derive(Clone, Debug)]
@@ -31,13 +47,10 @@ pub struct AgentApiState {
     pub store: PostgresAgentRunStore,
     /// Agent-owned build command repository.
     pub build_store: PgBuildStore,
-}
-
-/// Exact allowlisted Control URI SAN.
-#[derive(Clone, Debug)]
-pub struct ControlPrincipal {
-    /// Verified URI SAN value.
-    pub san_uri: String,
+    /// Agent-owned generated object resolutions.
+    pub generated_artifacts: GeneratedArtifactStore,
+    /// Agent-owned advisory review queue and receipt store.
+    pub llm_reviews: LlmReviewStore,
 }
 
 /// Builds all Control-to-Agent routes.
@@ -58,56 +71,78 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
             "/internal/v1/agent-runs/{run_id}/tracks/{track}/retry",
             post(retry_track),
         )
+        .route(
+            "/internal/v1/agent-runs/{run_id}/work-configuration/approve",
+            post(approve_work_configuration),
+        )
         .route("/internal/v1/agent-runs/{run_id}/outcome", get(get_outcome))
         .route(
             "/internal/v1/image-artifacts/{artifact_id}",
             get(get_artifact),
         )
+        .route(
+            "/internal/v1/generated-artifacts/{artifact_id}",
+            get(get_generated_artifact),
+        )
+        .route(
+            "/internal/v1/agent-runs/{run_id}/work-execution-intent",
+            get(get_work_execution_intent),
+        )
+        .route("/internal/v1/llm-reviews", post(create_llm_review))
+        .route(
+            "/internal/v1/llm-reviews/{task_run_id}",
+            get(get_llm_review),
+        )
+        .route(
+            "/internal/v1/llm-reviews/{task_run_id}/cancel",
+            post(cancel_llm_review),
+        )
         .with_state(state);
     telemetry::instrument_http(router, "agent-service", "agent-api")
 }
 
-/// Serves internal Agent routes over plain HTTP for private single-university delivery.
-pub async fn serve_mtls(
-    listener: tokio::net::TcpListener,
-    router: Router,
-    _mtls: (),
-) -> Result<(), std::io::Error> {
-    serve_plain(listener, router).await
+/// Applies the service-account JWT boundary to every Agent route.
+///
+/// The verifier is the only source of caller identity. The TLS transport
+/// protects the bearer token in transit, while the configured permission binds
+/// the route tree to Control's service account capability.
+pub fn with_service_auth(router: Router, verifier: Arc<auth::ServiceTokenVerifier>) -> Router {
+    router.layer(middleware::from_fn_with_state(
+        verifier,
+        require_service_token,
+    ))
 }
 
-pub async fn serve_plain(
-    listener: tokio::net::TcpListener,
-    router: Router,
-) -> Result<(), std::io::Error> {
-    let router = router.layer(Extension(ControlPrincipal {
-        san_uri: "spiffe://labweaver/control-service".to_owned(),
-    }));
-    axum::serve(listener, router).await
+async fn require_service_token(
+    State(verifier): State<Arc<auth::ServiceTokenVerifier>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let permission = request_permission(request.method(), request.uri().path());
+    match verifier
+        .authenticate_with_permission(request.headers(), permission)
+        .await
+    {
+        Ok(identity) => {
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(error) => AgentApiError::service_auth(&error).into_response(),
+    }
 }
 
 async fn create_run(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     headers: HeaderMap,
     Json(request): Json<InternalCreateAgentRunRequest>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     let key = idempotency(&headers)?;
     let trace_id = trace_id(&headers);
     let reservation = state
         .store
-        .reserve_dispatch(
-            request.course_id,
-            &request.request,
-            request.expected_environment_class,
-            &request.package,
-            &request.object_locators,
-            &request.policy,
-            &key,
-            now()?,
-            &trace_id,
-        )
+        .reserve_internal_dispatch(&request, &key, now()?, &trace_id)
         .await?;
     let run = match reservation {
         AgentRunReservation::Created(run) | AgentRunReservation::Replayed(run) => run,
@@ -117,24 +152,25 @@ async fn create_run(
 
 async fn get_run(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(run_id): Path<AgentRunId>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     Ok(Json(state.store.load(run_id).await?).into_response())
 }
 
 async fn cancel_run(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(run_id): Path<AgentRunId>,
     headers: HeaderMap,
     Json(request): Json<InternalAgentRunMutationRequest>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     let run = state
         .store
         .request_cancellation_revisioned(
+            request.project_id,
             request.course_id,
             run_id,
             request.expected_revision,
@@ -147,15 +183,13 @@ async fn cancel_run(
 
 async fn cancel_build(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(build_request_id): Path<contracts::BuildRequestId>,
     headers: HeaderMap,
     Json(request): Json<InternalAgentBuildCancellationRequest>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
-    if request.build_request_id != build_request_id
-        || request.authority_san_uri != principal.san_uri
-    {
+    require_control(caller)?;
+    if request.build_request_id != build_request_id {
         return Err(AgentApiError::denied());
     }
     let result = state
@@ -167,11 +201,11 @@ async fn cancel_build(
 
 async fn get_build(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(build_request_id): Path<contracts::BuildRequestId>,
     Query(query): Query<InternalAgentBuildStatusQuery>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     Ok(Json(
         state
             .build_store
@@ -183,20 +217,22 @@ async fn get_build(
 
 async fn retry_track(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path((run_id, track)): Path<(AgentRunId, String)>,
     headers: HeaderMap,
     Json(request): Json<InternalAgentRunMutationRequest>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     let track = match track.as_str() {
         "environment" => AgentTrackKind::Environment,
         "evaluation" => AgentTrackKind::Evaluation,
+        "work_configuration" => AgentTrackKind::WorkConfiguration,
         _ => return Err(AgentApiError::contract()),
     };
     let run = state
         .store
         .retry_track_revisioned(
+            request.project_id,
             request.course_id,
             run_id,
             track,
@@ -207,12 +243,27 @@ async fn retry_track(
     Ok(Json(run).into_response())
 }
 
+async fn approve_work_configuration(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(run_id): Path<AgentRunId>,
+    headers: HeaderMap,
+    Json(request): Json<InternalApproveWorkConfigurationRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let run = state
+        .store
+        .approve_work_configuration(run_id, &request, &idempotency(&headers)?, now()?)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(run)).into_response())
+}
+
 async fn get_outcome(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(run_id): Path<AgentRunId>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     let run = state.store.load(run_id).await?;
     let checkpoints = state.store.load_checkpoints(run_id).await?;
     let mut environment_candidate = None;
@@ -227,6 +278,7 @@ async fn get_outcome(
         }
     }
     let outcome = InternalAgentRunOutcome {
+        plan: run.plan.clone(),
         run,
         environment_candidate,
         evaluation_candidate,
@@ -237,10 +289,10 @@ async fn get_outcome(
 
 async fn get_artifact(
     State(state): State<Arc<AgentApiState>>,
-    Extension(principal): Extension<ControlPrincipal>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
     Path(artifact_id): Path<ImageArtifactId>,
 ) -> Result<Response, AgentApiError> {
-    require_control(&principal)?;
+    require_control(caller)?;
     let row = sqlx::query("SELECT contract FROM agent.image_artifacts WHERE image_artifact_id=$1 AND state='verified'")
         .bind(artifact_id.as_uuid()).fetch_optional(state.store.pool()).await.map_err(|_| AgentApiError::persistence())?.ok_or_else(AgentApiError::not_found)?;
     let artifact: contracts::supply_chain::ImageArtifact = serde_json::from_value(
@@ -258,11 +310,99 @@ async fn get_artifact(
     Ok(Json(resolution).into_response())
 }
 
-fn require_control(principal: &ControlPrincipal) -> Result<(), AgentApiError> {
-    if principal.san_uri.trim().is_empty() {
-        Err(AgentApiError::denied())
-    } else {
-        Ok(())
+async fn get_generated_artifact(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(artifact_id): Path<ArtifactId>,
+    Query(query): Query<GeneratedArtifactQuery>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    Ok(Json(state.generated_artifacts.get(artifact_id, &query).await?).into_response())
+}
+
+async fn get_work_execution_intent(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(run_id): Path<AgentRunId>,
+    Query(query): Query<AgentWorkExecutionIntentQuery>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    if query.execution_id.is_nil() {
+        return Err(AgentApiError::contract());
+    }
+    let metadata = state
+        .store
+        .work_execution_intent_metadata(run_id, &query)
+        .await?;
+    Ok(Json(metadata).into_response())
+}
+
+async fn create_llm_review(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    headers: HeaderMap,
+    Json(request): Json<InternalAgentLlmReviewRequest>,
+) -> Result<Response, AgentApiError> {
+    require_permission(caller, LLM_REVIEW_CREATE_PERMISSION)?;
+    let receipt = state
+        .llm_reviews
+        .enqueue(&request, &idempotency(&headers)?, now()?)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(receipt)).into_response())
+}
+
+async fn get_llm_review(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(task_run_id): Path<contracts::TaskRunId>,
+    Query(query): Query<AgentLlmReviewQuery>,
+) -> Result<Response, AgentApiError> {
+    require_permission(caller, LLM_REVIEW_READ_PERMISSION)?;
+    let receipt = state.llm_reviews.get(task_run_id, &query).await?;
+    Ok(Json(receipt).into_response())
+}
+
+async fn cancel_llm_review(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(task_run_id): Path<contracts::TaskRunId>,
+    Query(query): Query<AgentLlmReviewQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AgentApiError> {
+    require_permission(caller, LLM_REVIEW_CANCEL_PERMISSION)?;
+    let receipt = state
+        .llm_reviews
+        .cancel(task_run_id, &query, &idempotency(&headers)?, now()?)
+        .await?;
+    Ok(Json(receipt).into_response())
+}
+
+fn require_control(caller: Option<Extension<auth::ServiceIdentity>>) -> Result<(), AgentApiError> {
+    require_permission(caller, CONTROL_PERMISSION)
+}
+
+fn require_permission(
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    permission: &str,
+) -> Result<(), AgentApiError> {
+    match caller {
+        Some(Extension(identity)) if identity.allows(permission) => Ok(()),
+        _ => Err(AgentApiError::denied()),
+    }
+}
+
+fn request_permission(method: &Method, path: &str) -> &'static str {
+    match (method, path) {
+        (&Method::POST, "/internal/v1/llm-reviews") => LLM_REVIEW_CREATE_PERMISSION,
+        (&Method::GET, path) if path.starts_with("/internal/v1/llm-reviews/") => {
+            LLM_REVIEW_READ_PERMISSION
+        }
+        (&Method::POST, path)
+            if path.starts_with("/internal/v1/llm-reviews/") && path.ends_with("/cancel") =>
+        {
+            LLM_REVIEW_CANCEL_PERMISSION
+        }
+        _ => CONTROL_PERMISSION,
     }
 }
 fn idempotency(headers: &HeaderMap) -> Result<IdempotencyKey, AgentApiError> {
@@ -322,7 +462,97 @@ impl AgentApiError {
             retryable: true,
         }
     }
+
+    fn service_auth(error: &auth::ServiceAuthError) -> Self {
+        let (status, diagnostic, retryable) = match error {
+            auth::ServiceAuthError::CredentialsMissing => (
+                StatusCode::UNAUTHORIZED,
+                "LW_AUTH_SERVICE_CREDENTIALS_MISSING",
+                false,
+            ),
+            auth::ServiceAuthError::TokenRejected => (
+                StatusCode::UNAUTHORIZED,
+                "LW_AUTH_SERVICE_TOKEN_REJECTED",
+                false,
+            ),
+            auth::ServiceAuthError::TokenExpired => (
+                StatusCode::UNAUTHORIZED,
+                "LW_AUTH_SERVICE_TOKEN_EXPIRED",
+                false,
+            ),
+            auth::ServiceAuthError::PermissionDenied => (
+                StatusCode::FORBIDDEN,
+                "LW_AUTH_SERVICE_PERMISSION_DENIED",
+                false,
+            ),
+            auth::ServiceAuthError::InvalidConfig => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_AUTH_SERVICE_CONFIG_INVALID",
+                false,
+            ),
+            auth::ServiceAuthError::JwksUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_AUTH_SERVICE_JWKS_UNAVAILABLE",
+                true,
+            ),
+            auth::ServiceAuthError::EndpointTransport => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_AUTH_SERVICE_ENDPOINT_TRANSPORT_REJECTED",
+                false,
+            ),
+            auth::ServiceAuthError::HttpClient => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_AUTH_SERVICE_HTTP_CLIENT_FAILED",
+                false,
+            ),
+        };
+        Self {
+            status,
+            diagnostic,
+            retryable,
+        }
+    }
 }
+
+impl From<GeneratedArtifactStoreError> for AgentApiError {
+    fn from(error: GeneratedArtifactStoreError) -> Self {
+        match error {
+            GeneratedArtifactStoreError::NotFound => Self::not_found(),
+            GeneratedArtifactStoreError::InvalidMetadata
+            | GeneratedArtifactStoreError::IdentityMismatch => Self::contract(),
+            GeneratedArtifactStoreError::Persistence | GeneratedArtifactStoreError::Storage(_) => {
+                Self::persistence()
+            }
+        }
+    }
+}
+
+impl From<LlmReviewStoreError> for AgentApiError {
+    fn from(error: LlmReviewStoreError) -> Self {
+        let status = match error {
+            LlmReviewStoreError::CourseMismatch => StatusCode::FORBIDDEN,
+            LlmReviewStoreError::NotFound => StatusCode::NOT_FOUND,
+            LlmReviewStoreError::IdempotencyConflict
+            | LlmReviewStoreError::InProgress
+            | LlmReviewStoreError::StateConflict
+            | LlmReviewStoreError::LeaseLost => StatusCode::CONFLICT,
+            LlmReviewStoreError::PersistenceFailed => StatusCode::SERVICE_UNAVAILABLE,
+            LlmReviewStoreError::IdentityMismatch
+            | LlmReviewStoreError::WorkerIdentityInvalid
+            | LlmReviewStoreError::InvalidContract
+            | LlmReviewStoreError::ClockInvalid => StatusCode::UNPROCESSABLE_ENTITY,
+        };
+        Self {
+            status,
+            diagnostic: error.diagnostic_code(),
+            retryable: matches!(
+                error,
+                LlmReviewStoreError::InProgress | LlmReviewStoreError::PersistenceFailed
+            ),
+        }
+    }
+}
+
 impl From<AgentRunStoreError> for AgentApiError {
     fn from(error: AgentRunStoreError) -> Self {
         let status = match error {

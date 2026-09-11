@@ -147,51 +147,11 @@ impl NatsResourceLeaseVerifier {
         })
     }
 
-    #[allow(clippy::expect_used)]
     pub(crate) async fn verify(
         &self,
         request: EnvironmentLeaseVerificationRequest,
         authority_now: contracts::UtcTimestamp,
     ) -> Result<EnvironmentLeaseAuthorization, NatsMessagingError> {
-        // Private single-university simplification (ARC-09): Work leases are
-        // long-lived PVC bindings with TTL managed directly; the cross-service
-        // NATS round-trip is unnecessary. When `LABWEAVER_PRIVATE_LEASE_BYPASS=1`
-        // or subject is `private-bypass`, synthesize an Active authorization
-        // from the request itself (direct DB check stub).
-        if self.subject == "private-bypass"
-            || std::env::var("LABWEAVER_PRIVATE_LEASE_BYPASS").as_deref() == Ok("1")
-        {
-            let active_from = authority_now;
-            // 24h window truncated to millisecond precision.
-            let raw_expires = authority_now
-                .get()
-                .saturating_add(time::Duration::hours(24));
-            let truncated = raw_expires
-                .replace_nanosecond((raw_expires.nanosecond() / 1_000_000) * 1_000_000)
-                .unwrap_or(raw_expires);
-            let mut expires_at =
-                contracts::UtcTimestamp::from_utc(truncated).unwrap_or(authority_now);
-            if expires_at.get() <= active_from.get() {
-                let fallback = active_from
-                    .get()
-                    .saturating_add(time::Duration::seconds(3600));
-                let fallback_truncated = fallback
-                    .replace_nanosecond((fallback.nanosecond() / 1_000_000) * 1_000_000)
-                    .unwrap_or(fallback);
-                expires_at =
-                    contracts::UtcTimestamp::from_utc(fallback_truncated).unwrap_or(active_from);
-            }
-            return Ok(EnvironmentLeaseAuthorization {
-                lease_id: request.lease_id,
-                lease_revision: contracts::Revision::new(1).expect("revision 1"),
-                environment_id: request.environment_id,
-                course_id: request.course_id,
-                owner_actor_id: request.owner_actor_id,
-                capacity_binding: request.capacity_binding,
-                active_from,
-                expires_at,
-            });
-        }
         let payload =
             serde_json::to_vec(&request).map_err(|_| NatsMessagingError::Serialization)?;
         let message = tokio::time::timeout(
@@ -214,6 +174,7 @@ impl NatsResourceLeaseVerifier {
             || response.state != EnvironmentLeaseState::Active
             || authorization.lease_id != request.lease_id
             || authorization.environment_id != request.environment_id
+            || authorization.project_id != request.project_id
             || authorization.course_id != request.course_id
             || authorization.owner_actor_id != request.owner_actor_id
             || authorization.capacity_binding != request.capacity_binding
@@ -222,6 +183,9 @@ impl NatsResourceLeaseVerifier {
         {
             return Err(NatsMessagingError::LeaseResponseInvalid);
         }
+        authorization
+            .validate()
+            .map_err(|_| NatsMessagingError::LeaseResponseInvalid)?;
         Ok(authorization)
     }
 }
@@ -260,6 +224,7 @@ impl NatsAccessRevoker {
             reason,
             "environment_stopped"
                 | "environment_restarted"
+                | "environment_reset"
                 | "environment_deleted"
                 | "environment_cancelled"
                 | "environment_expired"
@@ -546,6 +511,7 @@ impl JetStreamCommandConsumer {
         let inbound = InboundLifecycleCommand {
             consumer: self.consumer_name.clone(),
             event_id: command.id,
+            project_id: command.project_id,
             course_id: command.course_id,
             aggregate_revision: command.aggregate_revision,
             aggregate_sequence: command.aggregate_sequence,
@@ -873,6 +839,7 @@ async fn resolve_lease_authorization(
             version: 1,
             lease_id: instance.lease_id.ok_or(LeaseGateFailure::Rejected)?,
             environment_id: instance.id,
+            project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
             capacity_binding: instance
@@ -916,6 +883,7 @@ fn lease_request_from_create(
         version: 1,
         lease_id: spec.lease_id.ok_or(LeaseGateFailure::Rejected)?,
         environment_id,
+        project_id: spec.project_id,
         course_id: spec.course_id,
         owner_actor_id: spec.owner_actor_id,
         capacity_binding: spec

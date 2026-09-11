@@ -86,10 +86,7 @@ CREATE INDEX agent_run_dispatches_due_idx
     WHERE state IN ('pending', 'preparing', 'prepared');
 
 ALTER TABLE image_artifacts
-    ADD COLUMN policy_evaluation jsonb,
-    ADD COLUMN artifact_sha256 text CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
-    ADD CONSTRAINT image_artifacts_policy_evaluation_object
-        CHECK (policy_evaluation IS NULL OR jsonb_typeof(policy_evaluation) = 'object');
+    ADD COLUMN artifact_sha256 text CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$');
 
 -- Folded from 0004_build_pipeline.sql.
 CREATE TABLE build_commands (

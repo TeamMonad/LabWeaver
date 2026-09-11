@@ -1,5 +1,5 @@
 <template>
-  <div class="data-table" role="region" :aria-label="ariaLabel" tabindex="0">
+  <div class="data-table" role="region" :aria-label="ariaLabel ?? (attrs['aria-label'] as string | undefined)" tabindex="0">
     <table>
       <thead>
         <tr>
@@ -47,39 +47,45 @@
 </template>
 
 <script setup lang="ts">
+import { useAttrs } from 'vue'
 import SvgIcon from './SvgIcon.vue'
 
-export interface DataTableColumn<T = Record<string, unknown>> {
+export interface DataTableColumn<T extends object = Record<string, unknown>> {
   key: keyof T & string
   title: string
   width?: string
   minWidth?: string
 }
 
-interface Props<T = Record<string, unknown>> {
-  columns: DataTableColumn<T>[]
-  rows: T[]
+interface Props {
+  // The table renders arbitrary domain rows. Callers keep their row-specific
+  // column type while this SFC accepts all object-shaped rows in templates.
+  columns: DataTableColumn<any>[]
+  rows: any[]
   loading?: boolean
   emptyText?: string
   interactive?: boolean
-  ariaLabel: string
+  ariaLabel?: string
   skeletonRows?: number
 }
 
-const props = withDefaults(defineProps<Props>(), {
+withDefaults(defineProps<Props>(), {
   loading: false,
   emptyText: '暂无数据',
   interactive: false,
   skeletonRows: 3,
 })
 
+const attrs = useAttrs()
+
 defineEmits<{
-  (e: 'row-click', row: Record<string, unknown>): void
+  (e: 'row-click', row: any): void
 }>()
 
-function rowKey(row: Record<string, unknown>, index: number): string {
-  if (row.id !== undefined && row.id !== null) return String(row.id)
-  if (row.key !== undefined && row.key !== null) return String(row.key)
+function rowKey(row: any, index: number): string {
+  const keyedRow = row as { id?: unknown; key?: unknown }
+  if (keyedRow.id !== undefined && keyedRow.id !== null) return String(keyedRow.id)
+  if (keyedRow.key !== undefined && keyedRow.key !== null) return String(keyedRow.key)
   return `row-${index}`
 }
 

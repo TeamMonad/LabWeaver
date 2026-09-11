@@ -1,6 +1,5 @@
 import { computed, reactive, ref } from 'vue'
 import type { ConsoleCapabilitySchema } from '@/generated/contracts'
-import { IS_FIXTURE } from '@/config/dataMode'
 import { createWebSocketConsoleSocket, type ConsoleSocket, type ConsoleSocketFactory } from '@/console/socket'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
@@ -12,16 +11,6 @@ export type ConsoleSessionStatus =
   | 'expired'
   | 'denied'
   | 'error'
-
-async function resolveFactory(): Promise<ConsoleSocketFactory> {
-  if (IS_FIXTURE) {
-    // Deterministic in-memory substitute, loaded only in fixture mode so the
-    // production bundle carries no fixture code.
-    const mod = await import('@/fixture/consoleSocket')
-    return mod.createFixtureConsoleSocketFactory()
-  }
-  return createWebSocketConsoleSocket
-}
 
 export function useConsoleSession() {
   const status = ref<ConsoleSessionStatus>('idle')
@@ -41,7 +30,7 @@ export function useConsoleSession() {
     capability.value = cap
     diagnostic.value = null
     status.value = 'connecting'
-    const factory = injectedFactory ?? (await resolveFactory())
+    const factory = injectedFactory ?? createWebSocketConsoleSocket
     socket = factory(cap.connectionLocator, cap.websocketSubprotocol, {
       onStateChange(state, code) {
         if (state === 'open') {

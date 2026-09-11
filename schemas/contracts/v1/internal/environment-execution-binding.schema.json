@@ -1,0 +1,149 @@
+{
+  "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "EnvironmentExecutionSourceBinding": {
+      "description": "Exact VM target selected by Environment for one execution binding.\n\nThe host, port, account, workspace root, host-key fingerprint and opaque\nsource identity are all resolved from the current Environment instance. A\nconsumer must reject a target whose source identity changes while it is\nexecuting.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "executionCertificateOpenssh": {
+              "type": "string"
+            },
+            "expectedHostKeySha256": {
+              "type": "string"
+            },
+            "expiresAt": {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            "host": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "virtual_machine",
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sourceIdentity": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            },
+            "workspaceRoot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "namespace",
+            "host",
+            "port",
+            "username",
+            "workspaceRoot",
+            "expectedHostKeySha256",
+            "sourceIdentity",
+            "executionCertificateOpenssh",
+            "expiresAt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "FrozenEnvironmentIdentity": {
+      "additionalProperties": false,
+      "description": "Frozen build and runtime identity used to reproduce collection.",
+      "properties": {
+        "buildRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildRequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "releaseId": {
+          "$ref": "#/$defs/ReleaseId"
+        },
+        "releaseVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        }
+      },
+      "required": [
+        "environmentId",
+        "environmentRevision",
+        "releaseId",
+        "releaseVersion",
+        "runtimeKind"
+      ],
+      "type": "object"
+    },
+    "ReleaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment-owned response containing one frozen identity and a fresh VM\nexecution credential. The certificate has no collector/SFTP semantics.",
+  "properties": {
+    "environment": {
+      "$ref": "#/$defs/FrozenEnvironmentIdentity"
+    },
+    "source": {
+      "$ref": "#/$defs/EnvironmentExecutionSourceBinding"
+    }
+  },
+  "required": [
+    "environment",
+    "source"
+  ],
+  "title": "EnvironmentExecutionBinding",
+  "type": "object"
+}

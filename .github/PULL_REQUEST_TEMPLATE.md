@@ -1,52 +1,31 @@
-## Related Issue
+## Related issue
 
-- Relates to #
+- Closes #180
 
 ## Goal and scope
 
 - Goal:
-- Modified modules:
+- Changed areas:
 - Non-goals:
 
-## Contract and data impact
+## Behavior and data impact
 
-- API/Schema/Event/Migration:
+- User or operator behavior:
+- API, schema, event, or migration changes:
 - Authorization and sensitive-data impact:
-- Compatibility:
 
 ## Verification
 
-- [ ] 已 `git fetch origin develop` 并 rebase 到最新 `origin/develop`
-- [ ] 已确认无未说明的 merge commit，且 PR body 使用当前提交/基线
-- [ ] Format and lint
-- [ ] Unit and negative tests
-- [ ] Contract/integration/E2E tests required by the Issue
-- [ ] Documentation and status reconciled
+- Commands run and results:
+- Manual checks (if any):
+- Known unverified areas:
 
-## Evidence and build identity
-
-- Commit/worktree identity:
-- Commands and results:
-- Evidence level:
-- Remaining blockers:
-
-## Risk and rollback
+## Risk and recovery
 
 - Risk:
-- Rollback or forward recovery:
+- Recovery or rollback:
 
-## Review and merge plan
+## Review
 
-- Primary Reviewer (requested with `gh pr edit --add-reviewer`):
-- Acceptance owner:
-- Risk level: `risk:low` / `risk:medium` / `risk:high`
-- High-risk path present (Contract/Schema/Migration/Access/Security/Scoring/Agent Tool/CRD): yes / no
-- Auto-merge: eligible / not eligible
-- If eligible, confirm: target is `develop`; PR is ready; linked Issue has `risk:low`; no high-risk path; matching Code Owner approval, required CI, and resolved threads are required before merge.
-- If not eligible, merge owner and manual-squash plan:
-
-## Codex usage
-
-- Generated or changed by Codex:
-- Human-confirmed decisions:
-- Unresolved uncertainty:
+- Reviewers:
+- Follow-up work:

@@ -99,9 +99,6 @@
         {
           "additionalProperties": false,
           "properties": {
-            "base_image_digest": {
-              "type": "string"
-            },
             "build_context": {
               "$ref": "#/$defs/ArtifactRef"
             },
@@ -133,7 +130,6 @@
             "kind",
             "provider_binding",
             "build_context",
-            "base_image_digest",
             "service_port"
           ],
           "type": "object"

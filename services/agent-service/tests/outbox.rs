@@ -4,12 +4,15 @@ use std::time::Duration;
 
 use agent_service::messaging::AgentOutboxDispatcher;
 use contracts::events::{AgentRunEvent, CloudEvent, DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
-use contracts::{AgentRunId, CourseId, EventId, Revision, Sequence, UtcTimestamp};
+use contracts::{AgentRunId, CourseId, EventId, ProjectId, Revision, Sequence, UtcTimestamp};
 use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+mod support;
+use support::apply_agent_migrations;
 
 #[tokio::test]
 async fn outbox_is_marked_published_only_after_jetstream_ack()
@@ -23,11 +26,7 @@ async fn outbox_is_marked_published_only_after_jetstream_ack()
         .max_connections(4)
         .connect(&database_url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA agent; SET search_path TO agent;\n{}",
-        include_str!("../../../migrations/agent/0001_platform_baseline.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    apply_agent_migrations(&pool).await?;
 
     let nats = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
@@ -53,7 +52,8 @@ async fn outbox_is_marked_published_only_after_jetstream_ack()
         time: "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
         datacontenttype: "application/json".to_owned(),
         dataschema: format!("{DATA_SCHEMA_BASE}/agent-run-requested.schema.json"),
-        course_id: CourseId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
         aggregate_revision: Revision::new(1)?,
         aggregate_sequence: Sequence(1),
         trace_id: "issue-48-outbox-test".to_owned(),

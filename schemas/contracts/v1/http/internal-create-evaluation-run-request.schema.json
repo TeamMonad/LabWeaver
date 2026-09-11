@@ -52,6 +52,10 @@
       "description": "Strongly typed UUIDv7 identifier for `FrozenSubmissionId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -67,13 +71,23 @@
       "$ref": "#/$defs/ActorId"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "frozenSubmissionId": {
       "$ref": "#/$defs/FrozenSubmissionId"
     },
     "identity": {
       "$ref": "#/$defs/EvaluationRunIdentity"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "releaseId": {
       "$ref": "#/$defs/EvaluationReleaseId"
@@ -83,7 +97,7 @@
     }
   },
   "required": [
-    "courseId",
+    "projectId",
     "releaseId",
     "releaseRevision",
     "frozenSubmissionId",

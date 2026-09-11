@@ -732,6 +732,10 @@
         }
       ]
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "RequiredStatus": {
       "description": "Required deterministic Gate terminal status.",
       "oneOf": [
@@ -864,13 +868,23 @@
       "$ref": "#/$defs/Revision"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "evaluationSpec": {
       "$ref": "#/$defs/EvaluationSpec"
     },
     "id": {
       "$ref": "#/$defs/EvaluationReleaseId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "publishedAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -914,7 +928,7 @@
   "required": [
     "schemaVersion",
     "id",
-    "courseId",
+    "projectId",
     "candidateId",
     "candidateRevision",
     "approvalId",

@@ -1,8 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import type { RouteRecordRaw, RouteRecordNormalized } from 'vue-router'
+import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { OIDC_ENABLED } from '@/config'
-import { IS_FIXTURE } from '@/config/dataMode'
 
 export type AppRole = 'teacher' | 'student' | 'researcher' | 'admin'
 
@@ -17,12 +16,19 @@ declare module 'vue-router' {
   interface RouteMeta extends AppRouteMeta {}
 }
 
-function roleRoute(role: AppRole, path: string, title: string, component: () => Promise<unknown>, children: RouteRecordRaw[] = []): RouteRecordRaw {
+function roleRoute(
+  role: AppRole,
+  path: string,
+  title: string,
+  component: () => Promise<unknown>,
+  children: RouteRecordRaw[] = [],
+  requiredRoles: AppRole[] = [role],
+): RouteRecordRaw {
   return {
     path,
     name: role,
     component,
-    meta: { title, navGroup: role, requiredRoles: [role] },
+    meta: { title, navGroup: role, requiredRoles },
     redirect: children.length ? `${path}/${children[0].path}` : undefined,
     children,
   }
@@ -35,19 +41,6 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/HomeView.vue'),
     meta: { title: 'LabWeaver' },
   },
-  // Fixture-only deterministic console layout preview: renders the xterm/noVNC
-  // layouts without creating an environment, issuing a grant, or calling any
-  // backend. It is registered only in fixture builds.
-  ...(IS_FIXTURE
-    ? [
-        {
-          path: '/fixture/console-preview',
-          name: 'fixture-console-preview',
-          component: () => import('@/views/fixture/ConsolePreviewView.vue'),
-          meta: { title: '控制台布局预览' },
-        } satisfies RouteRecordRaw,
-      ]
-    : []),
   {
     path: '/auth/callback',
     name: 'auth-callback',
@@ -75,12 +68,19 @@ const routes: RouteRecordRaw[] = [
     { path: 'results', component: () => import('@/views/student/ResultListView.vue'), meta: { title: '评测结果' } },
     { path: 'results/:runId', component: () => import('@/views/student/ResultDetailView.vue'), meta: { title: '评测详情' } },
   ]),
+  // Work is project-scoped and the platform has no separate researcher
+  // identity role. Any authenticated platform role can use this workbench;
+  // project membership and operation permissions remain server-authoritative.
   roleRoute('researcher', '/researcher', '科研工作台', () => import('@/views/ResearcherView.vue'), [
     { path: 'workspaces', component: () => import('@/views/researcher/WorkspaceListView.vue'), meta: { title: '工作空间' } },
-  ]),
+    { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: 'Work 环境' } },
+    { path: 'software', component: () => import('@/views/researcher/SoftwareConfigView.vue'), meta: { title: '软件配置' } },
+    { path: 'resources', component: () => import('@/views/researcher/ResourceRequestView.vue'), meta: { title: '资源申请' } },
+  ], ['teacher', 'student', 'admin']),
   roleRoute('admin', '/admin', '管理工作台', () => import('@/views/AdminView.vue'), [
     { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
     { path: 'resource-approval', component: () => import('@/views/admin/ResourceApprovalView.vue'), meta: { title: '资源审批' } },
+    { path: 'resource-finance', component: () => import('@/views/admin/ResourceFinanceView.vue'), meta: { title: '预算与费用' } },
     { path: 'audit', component: () => import('@/views/admin/AuditLogView.vue'), meta: { title: '审计' } },
   ]),
   {
@@ -93,7 +93,8 @@ const routes: RouteRecordRaw[] = [
 
 function getUserRoles(user: ReturnType<typeof useAuth>['user']['value']): AppRole[] {
   if (!user || user.expired) return []
-  const roles = user.profile?.roles ?? user.profile?.role
+  const profile = user.profile as Record<string, unknown>
+  const roles = profile.roles ?? profile.role
   if (Array.isArray(roles)) return roles.filter((r): r is AppRole => ['teacher', 'student', 'researcher', 'admin'].includes(r))
   if (typeof roles === 'string') {
     const list = roles.split(',').map((r) => r.trim()).filter(Boolean)
@@ -102,7 +103,7 @@ function getUserRoles(user: ReturnType<typeof useAuth>['user']['value']): AppRol
   return []
 }
 
-function collectRequiredRoles(route: RouteRecordNormalized): AppRole[] {
+function collectRequiredRoles(route: RouteLocationNormalized): AppRole[] {
   const roles = new Set<AppRole>()
   route.matched.forEach((record) => {
     record.meta.requiredRoles?.forEach((r) => roles.add(r))
@@ -135,12 +136,6 @@ router.beforeEach(async (to) => {
       // Remember the originally requested path so the callback view can
       // redirect back after a successful OIDC login.
       window.sessionStorage.setItem('auth-return-to', to.fullPath)
-      if (IS_FIXTURE) {
-        // The fixture OIDC authority cannot complete a redirect; send the
-        // user to the home page where the deterministic fixture sign-in
-        // panel issues a local identity and returns to this path.
-        return { name: 'home' }
-      }
       await auth.login()
       return false
     }

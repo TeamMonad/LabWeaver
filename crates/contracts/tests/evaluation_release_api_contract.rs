@@ -7,6 +7,7 @@ use contracts::http::{
 #[test]
 fn teacher_release_commands_reject_unknown_fields_and_invalid_identities() {
     let valid = serde_json::json!({
+        "projectId": uuid::Uuid::now_v7(),
         "candidateId": uuid::Uuid::now_v7(),
         "candidateRevision": 1,
         "approvalId": uuid::Uuid::now_v7(),

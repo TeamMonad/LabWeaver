@@ -1,115 +1,44 @@
-# Access Trust Boundary
+# 访问与内部身份边界
 
-Status: the current P0 is `ssh gateway@gateway connect <server-alias>`. ADR 0012 supersedes Guacamole for browser consoles and freezes only the ConsoleCapability contract; #131 and #124 own its xterm/noVNC implementations. Current evidence does not prove a deployed browser-console path.
+本文定义 v3 访问设计。已执行的本地验证及尚未接通的路径在 Issue #180 的 PR 中说明。
 
-## Purpose and non-goals
+## 身份与授权
 
-This document defines the P0 trust boundary for external access to LabWeaver environments. It separates authentication, device reachability, business authorization, direct VM transport, browser mediation, and environment-local credentials so that Tailnet reachability never becomes a substitute for Access Service authorization.
+Keycloak 验证用户和服务身份；Access 验证项目、课程、环境、端点和租约范围。网络可达、服务账户身份与用户拥有资源是三种不同判断，不得互相替代。
 
-The versioned contracts define the Access data/API boundary. This document does not define the Gateway image, runtime executor, ConsoleCapability persistence, noVNC UI, KubeVirt bridge or deployment credentials.
+内部服务使用独立 Keycloak 服务账户通过 client credentials 获取短期访问令牌。接收方验证签名、issuer、audience、有效期和调用者权限；不得相信客户端自行填入的 actor、role 或 principal。已有 BFF 会话与受限代理用户上下文仍需 Access 查询当前成员和资源授权。
 
-## Public discovery projection
+每个接收服务使用自己的 audience，调用方按目标获取并缓存令牌；Keycloak 的 audience mapper、角色与 scope 必须显式配置，不能通过让所有服务接受同一个 audience 来省略配置。Access 转发 Resource 用户请求时同时携带服务令牌和短期签名用户委托，两者缺一不可。Environment 与 Evaluation 的用量写入分别限定到各自拥有的环境或任务，具备一般服务身份不代表可以代写另一领域的用量。
 
-`GET /api/v1/environments/{environmentId}/access-grants` returns only grants visible to the current
-actor. The response omits actor identity, endpoint host/port, credentials, Headscale policy, Router
-rules and raw authorization inputs. It exposes grant and endpoint identities/revisions, protocol,
-safe alias, effective state, expiry, and a stable decision reason so the console can explain access
-without becoming an authorization authority. Missing or unavailable ownership fails closed.
+接收方从 `resource_access[audience].roles` 读取服务调用权限。Keycloak 签发的角色受到服务账户角色与调用方角色范围映射的共同限制，再由 audience resolve mapper 生成允许访问的目标 audience。client credentials 请求不把业务权限当作 OAuth scope，也不依赖额外的 audience 参数；客户端收到令牌后仍检查目标 audience，接收方再检查调用者及所需角色。配置依据 [Keycloak 服务账户与 audience 文档](https://www.keycloak.org/docs/latest/server_admin/index.html)，不以开启 Full Scope Allowed 代替权限映射。
 
-## Authority and trust domains
+调用账户自身不会由 audience resolve mapper 自动加入 `aud`。对于 Access 网关、Environment 执行器这类同一领域账户调用本领域服务的路径，依据实际自身目标角色授权配置显式 Audience mapper；其他账户不因此增加目标 audience。
 
-| Domain | Authoritative decision | Explicitly does not decide |
-| --- | --- | --- |
-| Keycloak/OIDC | authenticated subject, issuer, audience, token validity, base role | course, project, environment, lease, or endpoint entitlement |
-| Headscale/Tailscale | enrolled device identity, Tailnet membership, route distribution, coarse Grants enforcement | business entitlement or VM lifecycle |
-| Access Service | AccessGrant, DirectAccessGrant, EndpointGrant, device eligibility, revisions, lifecycle and revocation | identity-provider login or workload scheduling |
-| OpenSSH Gateway (#63) | present a key fingerprint, redeem a one-time token, report session heartbeat/close and execute termination commands | authorization truth, VM endpoint ownership or independent `authorized_keys` policy |
-| Router enforcement | exact device-to-endpoint packet filtering, connection-state removal and enforcement receipt | whether a subject deserves access |
-| Access WebSocket proxy | browser-session mediation after a one-time ConsoleCapability handoff | runtime target selection, Kubernetes credentials or independent authorization truth |
-| Environment Service | endpoint metadata and short-lived SSH/VNC credentials | caller identity, course membership or external network policy |
+令牌获取与内部 HTTP 使用服务端 TLS；凭据来自 Secret 文件，不写入 URL、命令参数或日志。不保留固定 SPIFFE principal、假 mTLS 参数或关闭验证的生产 fallback。保留 NATS 与 SSH 各自实际需要的认证和加密。
 
-PostgreSQL is the planned durable source of truth for Access Service state. JetStream, proxy session state and caches are derived enforcement state; none may independently grant access.
+OIDC callback verifies the signed ID token, including its `exp`, before creating a
+local browser session. The BFF session then uses the configured
+`browser.session_ttl_seconds` as its absolute lifetime and
+`browser.session_idle_ttl_seconds` for idle renewal; an ID-token expiry does not
+shorten that already authenticated local session. Back-channel logout and
+explicit local revocation remain authoritative, and every request still loads
+current actor membership and authorization state. This follows the OpenID
+Connect Core requirement that an expired ID token cannot be accepted while
+recognizing that ID-token expiry is unrelated to the OP authenticated-session
+lifetime ([ID Token](https://openid.net/specs/openid-connect-core-1_0.html#IDToken));
+logout-token validation and RP session clearing follow
+[OpenID Connect Back-Channel Logout](https://openid.net/specs/openid-connect-backchannel-1_0.html#BackchannelLogoutValidation).
 
-## Issue #47 identity and internal service defaults
+## 浏览器与 SSH
 
-All deployment-variable values are in `deploy/config/access-auth.yaml.example`; code must not embed issuer URLs, audiences, claim paths, Keycloak role names, certificate locations, Gateway SANs, listener addresses, cookie names, lifetimes, or runtime-pool sizing. The production configuration manager supplies the corresponding non-secret values and secret-file locators. The example uses the recommended `realm_access.roles` source, maps `teacher`, `student`, and `platform-admin`, uses a host-only `__Host-labweaver_session` cookie and `X-CSRF-Token`, and sets a 15-minute absolute / 5-minute idle session lifetime with a 5-minute OIDC transaction lifetime. These are deployment defaults, not protocol constants: role claim path and Keycloak-to-platform role mapping are explicit configuration and are validated at startup. Every browser mutation must have both a live BFF session and a constant-time synchronizer token, and the request `Origin` must exactly match the configured HTTPS origin allowlist. The browser BFF uses the `spiffe://labweaver/access-service` identity when forwarding to Control and Environment; Access internal routes separately allowlist `spiffe://labweaver/control-service` and `spiffe://labweaver/openssh-gateway`.
+Web Terminal、noVNC 和 SSH/SFTP 共享 AccessGrant 的范围、到期和撤销规则。浏览器保留会话、Origin、CSRF 和一次性 ConsoleCapability 检查；Environment 提供真实端点与运行状态，客户端不能选择任意目标地址。
 
-When the BFF forwards to Resource, the same CA-verified `spiffe://labweaver/access-service` identity is required and a short-lived signed delegation binds the request to the verified BFF session. Resource never treats actor, role or caller SAN HTTP headers as identity; missing or invalid delegation is rejected before a handler runs.
+连接时重新检查授权与环境代次；到期或撤销后禁止新连接，已有连接由服务端撤销流程终止。缓存和页面状态不能延长授权。资源不存在、身份服务或授权存储不可用时拒绝访问，并返回可排查错误。
 
-The same file fixes the bearer-token issuer, API audience, asymmetric signing-algorithm allowlist, and JWKS refresh/retry intervals. The Access runtime validates `exp`, `nbf`, issuer, audience and `azp`, refreshes the JWKS only on an unknown `kid`, and rejects a bearer request when discovery, refresh, signature, claim, or role mapping validation fails. The audited `jwt-authorizer` 0.15.0 patch retains the deployment-configured HTTP client during refresh, merges concurrent refreshes with its mutex and rate-bounds repeated misses by the retry interval, so private-CA rotation cannot silently fall back to a different trust store. No token, cookie, PKCE verifier, or certificate body is permitted in the configuration file or ordinary logs.
+## 不可信执行
 
-Only roles selected by the configured signed-claim path and explicit mapping become `Teacher`, `Student`, or `PlatformAdmin`; absent, malformed, or otherwise unmapped role claims deny authentication. Course and resource access still requires current Access Service membership and owner checks.
+用户可以修改自己的实验源码、guest 配置和获授权的软件环境；不能修改共享模板、隐藏测试、其他用户存储或平台凭据。安全实验按明确场景允许 guest root 或实验内网络，控制面与跨用户边界继续保留。
 
-The approved Gateway mTLS identity is SAN URI `spiffe://labweaver/gateway`. The internal listener trusts only the configured CA locator, requires a currently valid leaf certificate with `clientAuth` EKU and this exact SAN, and fails closed for missing, expired, untrusted, or unregistered identities. Certificate rotation keeps both reviewed CA/key versions only for their explicit overlap window. The `POST /internal/v1/auth/decision` caller must present this mTLS identity, a live opaque BFF session ID and matching actor ID; Access reloads membership truth for that decision and returns a role/scope decision whose `validUntil` is the maximum cache horizon. The caller-provided revision is advisory only and can never extend a permit.
+Environment 的 Work 配置执行入口仅需查询 Pod 与调用 `pods/exec`，不因此取得 Namespace 管理权限。kube-rs 使用 WebSocket GET 建立 exec 连接；RBAC 保留 `get` 与 `create`，因为 Kubernetes 1.35 在原有请求授权之外增加了 `create` 检查。参见 [Kubernetes 的 exec 授权变更](https://github.com/kubernetes/kubernetes/pull/134577)。
 
-Operation role and scope policy is generated from the contracts catalog into both OpenAPI surfaces (`x-labweaver-allowed-roles` and `x-labweaver-scope`). Course and project scopes are evaluated only against Access-owned memberships. After #51 merged, Environment scope calls its owner resolver over configured rustls mTLS and binds the environment, course, actor and exact Environment revision to the strong-ETag response. Resolver denial returns 403; transport, store, expiry, identity, revision or response mismatch fails closed. The recommended deployment defaults are a 2-second timeout, one retry after a 100-millisecond backoff and a 5-second decision cache horizon; all remain explicit startup-validated configuration.
-
-`transport_security: strict` is mandatory for deployments. OIDC Discovery and
-all consumed authorization, token, JWKS and logout endpoints must use HTTPS.
-When an OIDC private CA is configured it replaces, rather than extends, the
-system trust roots; the Owner Resolver always uses only its configured CA.
-Disposable tests may explicitly select `insecure-test-only`, but startup also
-requires `LABWEAVER_ENABLE_INSECURE_AUTH_TEST_MODE=1` and rejects every
-non-loopback issuer, resolver, browser/internal bind and HTTP origin. This mode
-may accept an invalid loopback server certificate and is never a deployment
-fallback.
-
-## P0 access paths
-
-```mermaid
-flowchart LR
-    D["Registered user device"] --> T["Tailscale client"]
-    T --> H["Headscale Grants"]
-    H --> R["Subnet Router firewall"]
-    R --> V["VM private SSH or VNC endpoint"]
-    B["Browser xterm or noVNC"] --> P["Access ConsoleCapability"]
-    P --> A["Access WebSocket proxy"]
-    A --> E["Environment mTLS bridge"]
-    E --> V
-    A --> H
-    A --> R
-```
-
-The current P0 authenticates the fixed `gateway` Unix account, then accepts only `connect <server-alias>` as `SSH_ORIGINAL_COMMAND`. This ordering is required because OpenSSH rejects an unknown Unix account before `AuthorizedKeysCommand` can run. The alias is a strict database lookup key and never contains or derives host/port. The first phase binds a short-lived one-time token to Gateway, connection, actor and key; redemption binds it to the exact grant revision and endpoint after a fresh Environment eligibility decision. Route resolution stays in #53/#63.
-
-The same redemption returns only the selected alias and the digest of the
-Environment-observed host-key fingerprint. The Gateway's local
-`KnownHostsCommand` validates the key offered by the target against that digest
-before OpenSSH can start the terminal. This closes the dynamic VM host-key
-boundary without copying target addresses into Access or maintaining a stale
-cluster-wide `known_hosts` file.
-
-The following `DirectAccessGrant` sections are retained only as a deferred future proposal and are not requirements or completion evidence for browser consoles.
-
-Browser xterm and noVNC use the ADR 0012 ConsoleCapability handoff: discovery and issuance occur on an active AccessGrant; issuance requires BFF, Origin, CSRF, idempotency and exact revision fences. The locator expires after 30 seconds and its single-use secret is a path-scoped Secure HttpOnly cookie, never a URL or response field. The intended Access proxy and Environment mTLS bridge are downstream work, not current runtime evidence.
-
-## DirectAccessGrant lifecycle
-
-`DirectAccessGrant` is a planned Access Service record derived from an approved `AccessGrant`. It contains its immutable ID, subject, endpoint, allowed protocol, endpoint address and port, all Active device IDs and Tailnet addresses for that subject, `not_before`, `expires_at`, authorization revision, Headscale policy revision, Router enforcement revision, lifecycle reason and audit correlation IDs.
-
-Access Service must recalculate a DirectAccessGrant whenever its parent grant, endpoint, device enrollment, device status, membership, lease or policy revision changes. A device added after activation is not implicitly trusted: it receives access only through a new revision that names it. An inactive or revoked device is removed immediately. Endpoint IP reuse requires the prior revision to be withdrawn and its connection state cleared before a new endpoint identity can be activated.
-
-Activation is ordered but atomic from the caller's perspective:
-
-1. Access Service persists an intended revision and emits the controlled enforcement work through its transactional boundary.
-2. Router enforcement applies its default-deny policy and the exact device-to-endpoint permit for that revision, then returns a safe receipt.
-3. Policy Compiler applies the matching default-deny Headscale Grants revision and returns its receipt.
-4. Only matching successful receipts change the grant to `active`; any missing, stale or failed receipt leaves it `pending` or `blocked` and unusable.
-
-KubeVirt noVNC uses a service-side least-privilege identity for the VMI `/vnc` WebSocket subresource; it does not issue a guest VNC password or browser-visible Kubernetes credential. No credential may be stored in grant records, policies, logs or session inventory.
-
-## Revocation and containment
-
-Ordinary expiry or revocation must produce network isolation for that DirectAccessGrant within 60 seconds. Router enforcement first removes the exact permit, blocks the affected device-to-endpoint traffic and clears the associated connection state; the Policy Compiler then withdraws the matching Headscale Grants revision. The completion report includes both enforcement results and the affected device, endpoint and revision, but no credentials or session payload.
-
-This action must not disrupt another active grant to the same VM. A security incident, failed isolation receipt or an endpoint-wide containment decision escalates to `endpoint_isolated`, where the external network boundary blocks all user access to that endpoint. The system may stop the VM only after confirming that no other active grant remains and recording the actor, reason, target state and recovery condition. VM stop is an exceptional resource-level action, not the default result of an individual access revocation.
-
-Kubernetes NetworkPolicy alone is not acceptable evidence for the 60-second condition because its treatment of established connections is implementation-defined. The enforcing Router must provide its own observed isolation receipt and connection-state result.
-
-## Failure, audit and evidence requirements
-
-Console contracts expose stable diagnostics for denied, expired or consumed capability, revision or Lease conflict, environment-not-ready, subprotocol mismatch, upstream unavailable, control-channel loss and authorization end. The final decision boundary logs each result once with structured identity, revision, trace/request ID and safe reason category.
-
-Audit records and machine-readable reports may contain identifiers, timestamps, revisions, decision outcomes, hashes and safe diagnostics. They must not contain bearer tokens, handoff tokens, enrollment keys, SSH/VNC credentials, cookies, full request payloads, terminal streams or session content.
-
-The ConsoleCapability contract is E2 only after generated schema/API/SDK checks and cross-consumer compilation. #131, #124 and #126 respectively own implementation, real shared-cluster E3 and multi-role E4; Fixture, historical PR #138 and mixed-source evidence do not upgrade those conclusions.
+容器时间片 GPU 目录必须提示共享限制，不能将其描述成具有独占显存或故障隔离。需要更强边界的工作负载选择实际支持的独占或虚拟设备规格；缺少所需后端时拒绝启动。

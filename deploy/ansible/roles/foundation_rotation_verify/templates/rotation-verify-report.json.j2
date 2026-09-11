@@ -1,7 +1,6 @@
 {
   "schema_version": "labweaver.foundation-rotation-verify-report.v1",
   "run_id": {{ foundation_rotation_verify_run_id | to_json }},
-  "source_commit": {{ foundation_rotation_verify_source_commit | to_json }},
   "cluster_uid": {{ foundation_rotation_verify_cluster_uid.stdout | trim | to_json }},
   "issue": "#152",
   "release_eligible": false,

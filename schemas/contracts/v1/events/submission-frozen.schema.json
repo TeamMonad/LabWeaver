@@ -143,8 +143,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "contentSha256": {
+          "description": "SHA-256 of the exact canonical archive bytes addressed by `object`.",
+          "type": "string"
+        },
         "courseId": {
-          "$ref": "#/$defs/CourseId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "derivedArchive": {
           "anyOf": [
@@ -177,6 +188,9 @@
         "object": {
           "$ref": "#/$defs/ArtifactRef"
         },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
         "retention": {
           "$ref": "#/$defs/RetentionSnapshot"
         },
@@ -189,13 +203,14 @@
       },
       "required": [
         "id",
-        "courseId",
+        "projectId",
         "actorId",
         "agentRunId",
         "attempt",
         "manifestRevision",
         "files",
         "object",
+        "contentSha256",
         "environment",
         "retention",
         "systemFacts",
@@ -209,6 +224,10 @@
     },
     "PolicyId": {
       "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
     },
     "ReleaseId": {
@@ -319,7 +338,15 @@
       "$ref": "#/$defs/Sequence"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching association. Independent projects omit this field."
     },
     "data": {
       "$ref": "#/$defs/SubmissionFrozen"
@@ -332,6 +359,10 @@
     },
     "id": {
       "$ref": "#/$defs/EventId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Required project scope for every platform event, including independent Work events."
     },
     "source": {
       "type": "string"
@@ -361,7 +392,7 @@
     "time",
     "datacontenttype",
     "dataschema",
-    "courseId",
+    "projectId",
     "aggregateRevision",
     "aggregateSequence",
     "traceId",

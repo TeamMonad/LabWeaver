@@ -14,7 +14,24 @@ RUN --mount=type=cache,id=labweaver-pnpm,target=/root/.local/share/pnpm/store,sh
 COPY web/ ./
 RUN --network=none test -n "${SOURCE_DATE_EPOCH}" && test -n "${SOURCE_COMMIT}" && pnpm build
 
-FROM ${WEB_RUNTIME} AS runtime
+FROM ${WEB_RUNTIME} AS runtime-base
+
+# The local external-fixture build provider copies this image as its immutable
+# source image. Keep it separate from the production Web image while matching
+# the Environment Container seed and runtime security contract.
+FROM runtime-base AS work-runtime-fixture
+USER root
+RUN apk add --no-cache coreutils util-linux \
+    && mkdir -p /opt/labweaver/workspace-seed /workspace /tmp \
+    && printf '%s' 'This workspace seed is provided by the explicit local integration fixture.' > /opt/labweaver/workspace-seed/README.md \
+    && chmod -R a+rX /opt/labweaver/workspace-seed \
+    && chmod 0777 /workspace \
+    && chmod 1777 /tmp
+USER 65534:65534
+WORKDIR /workspace
+EXPOSE 8080
+
+FROM runtime-base AS runtime
 ARG SOURCE_COMMIT
 LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \

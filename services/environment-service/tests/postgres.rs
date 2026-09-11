@@ -16,38 +16,41 @@ use std::{
 
 use async_trait::async_trait;
 use contracts::environment::{
-    EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentOperationKind,
-    ObservedEnvironmentState, OperationState,
+    EndpointHealth, EndpointProtocol, EnvironmentCreateSpec, EnvironmentEndpoint,
+    EnvironmentLeaseAuthorization, EnvironmentOperationKind, ObservedEnvironmentState,
+    OperationState,
 };
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
+use contracts::resource::WorkloadResources;
 use contracts::supply_chain::{VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
-    ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, OperationId,
-    ReleaseId, Revision, Sequence, UtcTimestamp,
+    ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, LeaseId,
+    OperationId, ProjectId, ReleaseId, ResourceRequestId, Revision, Sequence, UtcTimestamp,
 };
 use environment_service::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
     ContainerExecutorBackend, ContainerExecutorFenceError, ContainerExecutorRequest,
     ContainerExecutorRequestEnvelope, ContainerExecutorResponse, ContainerResourcePlan,
-    EnvironmentEventPublisher, EnvironmentProvider, EnvironmentStoreError, FencedContainerExecutor,
-    FencedKubeVirtExecutor, InboundCommandDecision, InboundLifecycleCommand,
-    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtCleanupPlan,
-    KubeVirtExecutorBackend, KubeVirtExecutorFenceError, KubeVirtExecutorRequest,
-    KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtObservationStore,
-    KubeVirtObservationStoreError, KubeVirtResourcePlan, KubeVirtRunningObservation,
-    KubeVirtStoppedObservation, LifecycleCommand, LifecycleError, OutboxDispatchError,
-    OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore, PgEnvironmentStore,
-    PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore, PgReleaseProjectionStore,
-    ProviderFailure, ProviderFailureCode, ProviderObservation, ProviderRegistry, PublishFailure,
-    ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome, Reconciler,
-    ReleaseProjectionDecision, apply_provider_observation,
+    EnvironmentEventPublisher, EnvironmentInventoryFilter, EnvironmentProvider,
+    EnvironmentStoreError, FencedContainerExecutor, FencedKubeVirtExecutor, InboundCommandDecision,
+    InboundLifecycleCommand, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
+    KubeVirtCleanupPlan, KubeVirtExecutorBackend, KubeVirtExecutorFenceError,
+    KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse,
+    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtResourcePlan,
+    KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand, LifecycleError,
+    OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher, PgContainerExecutorFenceStore,
+    PgEnvironmentStore, PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore,
+    PgReleaseProjectionStore, ProviderFailure, ProviderFailureCode, ProviderObservation,
+    ProviderRegistry, PublishFailure, ReconcileAction, ReconcileWorker, ReconcileWorkerOutcome,
+    Reconciler, ReleaseProjectionDecision, apply_provider_observation,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use tokio::sync::Notify;
 
-use support::{requested_instance, timestamp};
+use support::{requested_instance, revision, timestamp};
 
 #[tokio::test]
 async fn durable_command_and_lease_path_is_atomic_and_recoverable()
@@ -61,11 +64,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         .max_connections(4)
         .connect(&url)
         .await?;
-    let baseline = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
-    );
-    sqlx::raw_sql(&baseline).execute(&pool).await?;
+    support::apply_environment_migrations(&pool).await?;
 
     let store = PgEnvironmentStore::new(pool.clone());
 
@@ -105,10 +104,24 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     .bind(instance.id.as_uuid())
     .execute(&pool)
     .await?;
-    let (inventory, _) = store
-        .list_owned(instance.course_id, instance.owner_id, 100)
+    let inventory = store
+        .list_owned(
+            EnvironmentInventoryFilter {
+                project_id: instance.project_id,
+                course_id: instance.course_id,
+                owner_actor_id: instance.owner_id,
+                runtime_kind: None,
+                class: None,
+                desired_state: None,
+                observed_state: None,
+                release_id: None,
+            },
+            None,
+            100,
+        )
         .await?;
     let listed = inventory
+        .records
         .iter()
         .find(|record| record.instance.id == instance.id)
         .ok_or("expected the created environment in owned inventory")?;
@@ -132,7 +145,11 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .fetch_one(&pool)
             .await?;
     assert_eq!(envelope["specversion"], "1.0");
-    assert_eq!(envelope["courseId"], instance.course_id.to_string());
+    assert_eq!(envelope["projectId"], instance.project_id.to_string());
+    assert_eq!(
+        envelope["courseId"],
+        serde_json::to_value(instance.course_id)?
+    );
     assert_eq!(envelope["traceId"], instance.operation.trace_id);
     assert_eq!(envelope["data"]["environmentId"], instance.id.to_string());
 
@@ -170,6 +187,17 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
         .claim_due("environment-worker-a", Duration::from_secs(30))
         .await?
         .ok_or("expected a due create operation")?;
+    let claimed_operation = store
+        .get_operation(instance.id, instance.owner_id, instance.operation.id)
+        .await?;
+    assert_eq!(claimed_operation.snapshot.state, OperationState::Running);
+    let claimed_contract_state: String = sqlx::query_scalar(
+        "SELECT contract->>'state' FROM environment.environment_operations WHERE operation_id=$1",
+    )
+    .bind(instance.operation.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(claimed_contract_state, "running");
     assert!(
         store
             .claim_due("environment-worker-b", Duration::from_secs(30))
@@ -284,6 +312,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let inbound = InboundLifecycleCommand {
         consumer: "environment-lifecycle-v1".to_owned(),
         event_id: EventId::new(),
+        project_id: inbox_target.project_id,
         course_id: inbox_target.course_id,
         aggregate_revision: inbox_target.revision,
         aggregate_sequence: Sequence(1),
@@ -601,6 +630,383 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
 }
 
 #[tokio::test]
+async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool);
+    let instance = requested_instance();
+    store
+        .create("create-key-stale-reconcile", &instance)
+        .await?;
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(BlockingProvider {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    }))?;
+    let worker = ReconcileWorker::new(
+        store.clone(),
+        Reconciler::new(registry, Duration::from_secs(1))?,
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+    )?;
+    let worker_task = tokio::spawn(async move {
+        worker
+            .run_once(
+                "environment-worker-stale-reconcile",
+                timestamp("2026-07-14T00:01:00.000Z"),
+            )
+            .await
+    });
+    entered.notified().await;
+    let accepted_at = store.current_time().await?;
+    let deadline_at = UtcTimestamp::from_utc(
+        accepted_at
+            .get()
+            .checked_add(time::Duration::minutes(10))
+            .ok_or("stale reconcile deadline overflow")?,
+    )?;
+
+    let accepted = store
+        .accept_command(
+            "delete-key-stale-reconcile",
+            &LifecycleCommand {
+                environment_id: instance.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: instance.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-delete-stale-reconcile".to_owned(),
+                accepted_at,
+                deadline_at,
+                access_revocation_revision: Some(revision(9)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    release.notify_one();
+
+    assert_eq!(worker_task.await??, ReconcileWorkerOutcome::LeaseLost);
+    let current = store.load(instance.id).await?;
+    assert_eq!(current.revision, revision(2));
+    assert_eq!(current.operation.id, accepted.operation_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool);
+
+    let mut handoff = requested_instance();
+    handoff.class = contracts::authoring::EnvironmentClass::Work;
+    handoff.lease_id = Some(LeaseId::new());
+    handoff.capacity_binding = Some("work-capacity-regression".to_owned());
+    handoff.eligibility_expires_at = timestamp("2027-07-15T00:00:00.000Z");
+    let lease_id = handoff.lease_id.ok_or("lease id missing")?;
+    let capacity_binding = handoff
+        .capacity_binding
+        .clone()
+        .ok_or("capacity binding missing")?;
+    let authorization = EnvironmentLeaseAuthorization {
+        resource_request_id: ResourceRequestId::new(),
+        lease_id,
+        lease_revision: revision(4),
+        environment_id: handoff.id,
+        project_id: handoff.project_id,
+        course_id: handoff.course_id,
+        owner_actor_id: handoff.owner_id,
+        capacity_binding: capacity_binding.clone(),
+        approved_resources: WorkloadResources {
+            cpu_millicores: 500,
+            memory_bytes: 512 * 1024 * 1024,
+            storage_bytes: 2 * 1024 * 1024 * 1024,
+            gpu: None,
+        },
+        gpu_allocation: None,
+        active_from: timestamp("2026-07-14T00:00:00.000Z"),
+        expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+    };
+    let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
+    let command = LifecycleCommand {
+        environment_id: handoff.id,
+        kind: EnvironmentOperationKind::Create,
+        expected_revision: revision(1),
+        actor_id: handoff.owner_id,
+        trace_id: "trace-api-work-handoff-regression".to_owned(),
+        accepted_at,
+        deadline_at: timestamp("2027-01-14T00:00:00.000Z"),
+        access_revocation_revision: None,
+        preserve_mutable_disk: false,
+        max_attempts: 3,
+        reset_target: None,
+    };
+    let create = EnvironmentCreateSpec {
+        project_id: handoff.project_id,
+        course_id: handoff.course_id,
+        owner_actor_id: handoff.owner_id,
+        display_label: handoff.display_label.clone(),
+        class: handoff.class,
+        runtime_kind: handoff.runtime_kind,
+        release_id: handoff.release_id,
+        release_version: handoff.release_version,
+        provider_binding: handoff.provider_binding.clone(),
+        lease_id: handoff.lease_id,
+        capacity_binding: handoff.capacity_binding.clone(),
+        eligibility_expires_at: handoff.eligibility_expires_at,
+    };
+
+    let accepted = store
+        .accept_api_command(
+            "resource-work-handoff-regression",
+            &command,
+            Some(&create),
+            Some(authorization.clone()),
+            handoff.project_id,
+            handoff.course_id,
+        )
+        .await?;
+    assert_eq!(accepted.environment_id, handoff.id);
+    let loaded = store.load(handoff.id).await?;
+    assert_eq!(
+        loaded.operation.lease_authorization,
+        Some(authorization.clone())
+    );
+    assert_eq!(loaded.lease_id, handoff.lease_id);
+    assert_eq!(
+        loaded.capacity_binding.as_deref(),
+        Some(capacity_binding.as_str())
+    );
+
+    let replay = store
+        .accept_api_command(
+            "resource-work-handoff-regression",
+            &command,
+            Some(&create),
+            Some(authorization),
+            handoff.project_id,
+            handoff.course_id,
+        )
+        .await?;
+    assert_eq!(replay, accepted);
+    assert_eq!(store.load(handoff.id).await?.revision, revision(1));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&url)
+        .await?;
+    let migrations = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
+    );
+    sqlx::raw_sql(&migrations).execute(&pool).await?;
+
+    let store = PgEnvironmentStore::new(pool);
+    let mut work = requested_instance();
+    work.class = contracts::authoring::EnvironmentClass::Work;
+    work.lease_id = Some(LeaseId::new());
+    work.capacity_binding = Some("workspace-v1".to_owned());
+    let initial_expiry = timestamp("2027-07-15T00:00:00.000Z");
+    work.eligibility_expires_at = initial_expiry;
+    work.operation.lease_authorization = Some(EnvironmentLeaseAuthorization {
+        resource_request_id: ResourceRequestId::new(),
+        lease_id: work.lease_id.expect("lease set above"),
+        lease_revision: support::revision(1),
+        environment_id: work.id,
+        project_id: work.project_id,
+        course_id: work.course_id,
+        owner_actor_id: work.owner_id,
+        capacity_binding: work
+            .capacity_binding
+            .clone()
+            .expect("capacity binding set above"),
+        approved_resources: WorkloadResources {
+            cpu_millicores: 500,
+            memory_bytes: 512 * 1024 * 1024,
+            storage_bytes: 2 * 1024 * 1024 * 1024,
+            gpu: None,
+        },
+        gpu_allocation: None,
+        active_from: timestamp("2026-07-14T00:00:00.000Z"),
+        expires_at: initial_expiry,
+    });
+    store.create("create-key-lease-refresh", &work).await?;
+
+    let worker = success_worker(store.clone())?;
+    for index in 0..4 {
+        assert!(matches!(
+            worker
+                .run_once(
+                    &format!("environment-worker-lease-refresh-{index}"),
+                    timestamp("2026-07-14T00:01:00.000Z")
+                )
+                .await?,
+            ReconcileWorkerOutcome::Advanced { .. }
+        ));
+    }
+    let ready = store.load(work.id).await?;
+    assert_eq!(ready.observed_state, ObservedEnvironmentState::Ready);
+    let current_authorization = ready
+        .operation
+        .lease_authorization
+        .clone()
+        .ok_or("expected persisted lease authorization")?;
+
+    let mut renewed_authorization = current_authorization.clone();
+    renewed_authorization.lease_revision = support::revision(2);
+    renewed_authorization.expires_at = timestamp("2027-07-16T00:00:00.000Z");
+    let refreshed = store
+        .refresh_work_lease(work.id, renewed_authorization.clone())
+        .await?;
+    assert_eq!(refreshed.revision, Revision::new(ready.revision.get() + 1)?);
+    assert!(
+        refreshed
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.revision == refreshed.revision)
+    );
+    assert_eq!(
+        refreshed.operation.lease_authorization,
+        Some(renewed_authorization.clone())
+    );
+    let refreshed_operation = store
+        .get_operation(work.id, work.owner_id, refreshed.operation.id)
+        .await?;
+    assert_eq!(
+        refreshed_operation.snapshot.operation_id,
+        refreshed.operation.id
+    );
+    assert_eq!(
+        refreshed_operation.snapshot.state,
+        refreshed.operation.state
+    );
+
+    let mut wrong_scope = renewed_authorization.clone();
+    wrong_scope.project_id = ProjectId::new();
+    assert!(matches!(
+        store.refresh_work_lease(work.id, wrong_scope).await,
+        Err(EnvironmentStoreError::LeaseAuthorizationInvalid)
+    ));
+    assert_eq!(store.load(work.id).await?.revision, refreshed.revision);
+
+    store
+        .accept_command(
+            "stop-key-after-lease-refresh",
+            &LifecycleCommand {
+                environment_id: work.id,
+                kind: EnvironmentOperationKind::Stop,
+                expected_revision: refreshed.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-stop-after-lease-refresh".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:02:00.000Z"),
+                deadline_at: timestamp("2026-07-14T00:07:00.000Z"),
+                access_revocation_revision: Some(support::revision(6)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "environment-worker-stop-after-lease-refresh",
+                timestamp("2026-07-14T00:02:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Stopped,
+            terminal: true
+        }
+    ));
+    let stopped = store.load(work.id).await?;
+    assert_eq!(stopped.operation.kind, EnvironmentOperationKind::Stop);
+    assert_eq!(stopped.operation.state, OperationState::Succeeded);
+    let mut stop_refreshed_authorization = stopped
+        .operation
+        .lease_authorization
+        .clone()
+        .ok_or("expected lease authorization after stop")?;
+    stop_refreshed_authorization.lease_revision = support::revision(3);
+    stop_refreshed_authorization.expires_at = timestamp("2027-07-17T00:00:00.000Z");
+    let stopped_refreshed = store
+        .refresh_work_lease(work.id, stop_refreshed_authorization)
+        .await?;
+    let stopped_operation = store
+        .get_operation(work.id, work.owner_id, stopped.operation.id)
+        .await?;
+    assert_eq!(
+        stopped_operation.snapshot.operation_id,
+        stopped.operation.id
+    );
+    assert_eq!(stopped_operation.snapshot.state, OperationState::Succeeded);
+
+    store
+        .accept_command(
+            "delete-key-after-lease-refresh",
+            &LifecycleCommand {
+                environment_id: work.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: stopped_refreshed.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-delete-after-lease-refresh".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:02:00.000Z"),
+                deadline_at: timestamp("2026-07-14T00:07:00.000Z"),
+                access_revocation_revision: Some(support::revision(7)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let mut refresh_during_delete = renewed_authorization;
+    refresh_during_delete.lease_revision = support::revision(3);
+    refresh_during_delete.expires_at = timestamp("2027-07-17T00:00:00.000Z");
+    assert!(matches!(
+        store
+            .refresh_work_lease(work.id, refresh_during_delete)
+            .await,
+        Err(EnvironmentStoreError::LeaseAuthorizationInvalid)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
 -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
@@ -613,8 +1019,10 @@ async fn persistent_timeout_and_ready_cancel_cleanup_are_bounded()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let store = PgEnvironmentStore::new(pool);
@@ -732,13 +1140,16 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
 
     let consumer = "environment-release-v1";
     let release_id = ReleaseId::new();
+    let project_id = ProjectId::new();
     let course_id = CourseId::new();
     let publication_event_id = EventId::new();
     sqlx::query(
@@ -760,10 +1171,11 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
     .await?;
     sqlx::query(
         "INSERT INTO environment.release_projections \
-         (release_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
-         VALUES ($1,$2,1,'container-primary-v1',$3,'{}'::jsonb,$4)",
+         (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
+         VALUES ($1,$2,$3,1,'container-primary-v1',$4,'{}'::jsonb,$5)",
     )
     .bind(release_id.as_uuid())
+    .bind(project_id.as_uuid())
     .bind(course_id.as_uuid())
     .bind(Sha256Digest::of_bytes(b"projection").to_string())
     .bind(publication_event_id.as_uuid())
@@ -785,7 +1197,8 @@ async fn release_withdrawal_is_projected_in_aggregate_order()
         time: withdrawn_at,
         datacontenttype: "application/json".to_owned(),
         dataschema: contract.data_schema(),
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         aggregate_revision: Revision::new(1)?,
         aggregate_sequence: Sequence(2),
         trace_id: "release-withdrawal-test".to_owned(),
@@ -883,8 +1296,10 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
         .connect(&url)
         .await?;
     let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
     sqlx::raw_sql(&migrations).execute(&pool).await?;
     let authority_now = container_database_now(&pool).await?;
@@ -1160,8 +1575,10 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     ))
     .execute(&pool)
     .await?;
@@ -1319,8 +1736,10 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         .connect(&url)
         .await?;
     let migration = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql")
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
     );
     sqlx::raw_sql(&migration).execute(&pool).await?;
     let store = PgKubeVirtObservationStore::new(pool.clone());
@@ -1538,6 +1957,33 @@ impl EnvironmentEventPublisher for RecordingPublisher {
     }
 }
 
+struct BlockingProvider {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl EnvironmentProvider for BlockingProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+
+    async fn execute(
+        &self,
+        _action: ReconcileAction,
+        _instance: &contracts::environment::EnvironmentInstance,
+    ) -> Result<ProviderObservation, ProviderFailure> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(ProviderObservation {
+            next_state: ObservedEnvironmentState::Validating,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: false,
+        })
+    }
+}
+
 struct CleanupFailureProvider;
 
 struct LifecycleSuccessProvider;
@@ -1629,6 +2075,12 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                     operation_complete: true,
                 }
             }
+            (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => ProviderObservation {
+                next_state: ObservedEnvironmentState::Stopped,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete: true,
+            },
             (ReconcileAction::Cleanup, ObservedEnvironmentState::Deleting) => ProviderObservation {
                 next_state: ObservedEnvironmentState::Deleted,
                 endpoints: Vec::new(),

@@ -18,12 +18,16 @@ from pathlib import Path
 
 IDENTITY = "resource-service"
 SUBJECT = "labweaver.resource.lease.verify.v1"
-PUBLISH_SUBJECTS = (
-    "$JS.API.>",
-    "$JS.ACK.>",
-    "labweaver.resource.request.submitted.v1",
-    "labweaver.resource.request.approved.v1",
-)
+
+try:
+    from prepare_platform_foundation import NATS_USERS
+except ModuleNotFoundError as error:
+    if error.name != "prepare_platform_foundation":
+        raise
+    from tools.prepare_platform_foundation import NATS_USERS
+
+
+PUBLISH_SUBJECTS, SUBSCRIBE_SUBJECTS, RESPONSE_PERMISSION = NATS_USERS[IDENTITY]
 
 
 class IssuanceError(RuntimeError):
@@ -78,8 +82,30 @@ def issue(store: Path, nsc: Path, output: Path, valid_days: int) -> dict[str, ob
         args = ["add", "user", "--account", "WORKLOADS", "--name", IDENTITY, "--expiry", f"{valid_days}d"]
         for subject in PUBLISH_SUBJECTS:
             args.extend(("--allow-pub", subject))
-        args.extend(("--allow-sub", "_INBOX.>", "--allow-sub", SUBJECT, "--allow-pub-response"))
+        for subject in SUBSCRIBE_SUBJECTS:
+            args.extend(("--allow-sub", subject))
+        if RESPONSE_PERMISSION:
+            args.append("--allow-pub-response")
         run_nsc(nsc, store, args, home)
+        # `nsc add user --allow-pub-response` removes an explicit `_INBOX.>`
+        # subscription in the NATS CLI version used by deployment. Restore the
+        # bounded reply inbox before generating credentials.
+        if RESPONSE_PERMISSION and "_INBOX.>" in SUBSCRIBE_SUBJECTS:
+            run_nsc(
+                nsc,
+                store,
+                [
+                    "edit",
+                    "user",
+                    "--account",
+                    "WORKLOADS",
+                    "--name",
+                    IDENTITY,
+                    "--allow-sub",
+                    "_INBOX.>",
+                ],
+                home,
+            )
         run_nsc(nsc, store, ["generate", "creds", "--account", "WORKLOADS", "--name", IDENTITY, "--output-file", str(credentials)], home)
     except Exception:
         if credentials.exists():
@@ -93,7 +119,7 @@ def issue(store: Path, nsc: Path, output: Path, valid_days: int) -> dict[str, ob
                 "status": "issued",
                 "identity": IDENTITY,
                 "account": "WORKLOADS",
-                "subjects": {"publish": list(PUBLISH_SUBJECTS), "subscribe": ["_INBOX.>", SUBJECT], "response": True},
+                "subjects": {"publish": list(PUBLISH_SUBJECTS), "subscribe": list(SUBSCRIBE_SUBJECTS), "response": RESPONSE_PERMISSION},
                 "credential_locator": "resource-service.nats.creds",
                 "credential_mode": "0600",
                 "secret_material_in_record": False,

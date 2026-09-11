@@ -123,10 +123,10 @@ fn request_rejects_unapproved_profiles_unpinned_images_unsafe_paths_and_zero_lim
     let mut value = request(OjCheckerKind::Exact);
     assert!(value.validate().is_ok());
 
-    value.toolchain_profile = "teacher-selected".to_owned();
+    value.toolchain_profile = "../teacher-selected".to_owned();
     assert_eq!(
         error_diagnostic(value.validate())?,
-        "LW_OJ_TOOLCHAIN_UNAPPROVED"
+        "LW_OJ_TOOLCHAIN_PROFILE_INVALID"
     );
 
     let mut value = request(OjCheckerKind::Exact);
@@ -148,7 +148,6 @@ fn request_rejects_unapproved_profiles_unpinned_images_unsafe_paths_and_zero_lim
     compile.phase = OjExecutionPhase::Compile;
     compile.checker = None;
     compile.cases.clear();
-    compile.evaluator_identity = None;
     compile.score_max_points = 0;
     assert!(compile.validate().is_ok());
 
@@ -213,7 +212,6 @@ fn compile_step_evidence_accepts_only_a_matching_process_outcome()
     request.phase = OjExecutionPhase::Compile;
     request.checker = None;
     request.cases.clear();
-    request.evaluator_identity = None;
     request.score_max_points = 0;
     let aggregate = evaluation_service::oj::OjAggregate {
         status: OjTerminalStatus::Accepted,

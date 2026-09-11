@@ -18,16 +18,15 @@
       ],
       "type": "string"
     },
-    "EnvironmentOperationStatus": {
-      "description": "Public operation state used by REST snapshots and SSE projections.\n\nThe runtime aggregate retains its historical `OperationState`; timeout is exposed as a\ndistinct terminal fact instead of forcing clients to infer it from a generic failure code.",
+    "OperationState": {
+      "description": "Persistent operation state.",
       "enum": [
         "accepted",
         "running",
         "cancelling",
         "succeeded",
         "failed",
-        "cancelled",
-        "timed_out"
+        "cancelled"
       ],
       "type": "string"
     }
@@ -63,7 +62,7 @@
     "state": {
       "anyOf": [
         {
-          "$ref": "#/$defs/EnvironmentOperationStatus"
+          "$ref": "#/$defs/OperationState"
         },
         {
           "type": "null"

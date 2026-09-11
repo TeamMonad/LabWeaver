@@ -4,6 +4,8 @@
     reason = "the integration fixture uses fixed valid contract identities"
 )]
 
+mod support;
+
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,8 +15,8 @@ use async_trait::async_trait;
 use contracts::authoring::RuntimeKind;
 use contracts::submission::{FrozenEnvironmentIdentity, SubmissionManifest};
 use contracts::{
-    ActorId, AgentRunId, ArtifactId, ArtifactRef, BuildRequestId, CourseId, PolicyId, ReleaseId,
-    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
+    ActorId, AgentRunId, ArtifactId, ArtifactRef, BuildRequestId, CourseId, PolicyId, ProjectId,
+    ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
     parse_strict_json,
 };
 use evaluation_service::{
@@ -35,6 +37,7 @@ async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
     let command = SubmissionFreezeCommand {
         frozen_submission_id: contracts::FrozenSubmissionId::new(),
         operation_id: contracts::OperationId::new(),
+        project_id: fixture.request.project_id,
         course_id: fixture.request.course_id,
         environment_id: fixture.request.environment.environment_id,
         actor_id: fixture.request.actor_id,
@@ -98,6 +101,88 @@ async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
     Ok(())
 }
 
+#[tokio::test]
+async fn project_idempotency_identity_supports_independent_work_and_rejects_content_dedupe()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let store = PgFreezeStore::new(fixture.pool.clone());
+    let now = store.authority_now().await?;
+    let request_sha256 = Sha256Digest::of_bytes(b"independent-request");
+    let source_identity_sha256 = Sha256Digest::of_bytes(b"independent-source");
+    let first_id = contracts::FrozenSubmissionId::new();
+    let first = store
+        .begin(
+            first_id,
+            fixture.request.project_id,
+            None,
+            fixture.request.environment.environment_id,
+            "independent-freeze-1",
+            request_sha256,
+            source_identity_sha256,
+            "independent-worker",
+            std::time::Duration::from_mins(1),
+        )
+        .await?;
+    assert!(matches!(
+        first,
+        evaluation_service::BeginFreeze::Acquired(_)
+    ));
+
+    let duplicate_request = sqlx::query(
+        "INSERT INTO evaluation.submission_freeze_requests \
+         (frozen_submission_id,project_id,course_id,environment_id,idempotency_key,request_sha256,source_identity_sha256,state,current_attempt) \
+         VALUES ($1,$2,NULL,$3,$4,$5,$6,'active',1)",
+    )
+    .bind(contracts::FrozenSubmissionId::new().as_uuid())
+    .bind(fixture.request.project_id.as_uuid())
+    .bind(fixture.request.environment.environment_id.as_uuid())
+    .bind("independent-freeze-1")
+    .bind(request_sha256.to_string())
+    .bind(source_identity_sha256.to_string())
+    .execute(&fixture.pool)
+    .await;
+    assert!(matches!(
+        duplicate_request,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23505")
+    ));
+
+    let content_sha256 = Sha256Digest::of_bytes(b"same-content").to_string();
+    for (submission_id, idempotency_key, object_key) in [
+        (
+            contracts::FrozenSubmissionId::new(),
+            "independent-submission-1",
+            "frozen/independent-1",
+        ),
+        (
+            contracts::FrozenSubmissionId::new(),
+            "independent-submission-2",
+            "frozen/independent-2",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO evaluation.frozen_submissions \
+             (frozen_submission_id,project_id,course_id,environment_id,manifest_sha256,content_sha256,schema_version,tool_version,contract,frozen_at, \
+              idempotency_key,source_identity_sha256,object_key,object_version) \
+             VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,'{}'::jsonb,$8,$9,$10,$11,$12)",
+        )
+        .bind(submission_id.as_uuid())
+        .bind(fixture.request.project_id.as_uuid())
+        .bind(fixture.request.environment.environment_id.as_uuid())
+        .bind(Sha256Digest::of_bytes(b"same-manifest").to_string())
+        .bind(&content_sha256)
+        .bind("evaluation.labweaver.io/frozen-submission/v1")
+        .bind("test")
+        .bind(now.get())
+        .bind(idempotency_key)
+        .bind(source_identity_sha256.to_string())
+        .bind(object_key)
+        .bind("version")
+        .execute(&fixture.pool)
+        .await?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct LockedStore {
     failures_remaining: AtomicUsize,
@@ -115,6 +200,10 @@ impl LockedStore {
 
 #[async_trait]
 impl ImmutableObjectStore for LockedStore {
+    fn binding(&self) -> &'static str {
+        "minio-submissions-v1"
+    }
+
     async fn presign_upload(
         &self,
         _key: &str,
@@ -128,9 +217,7 @@ impl ImmutableObjectStore for LockedStore {
     async fn read_verified(
         &self,
         _key: &str,
-        _version: &str,
-        _expected_size: u64,
-        _media_type: &str,
+        _expected: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectUnavailable)
     }
@@ -199,6 +286,23 @@ async fn repeated_request_replays_one_database_object_and_event_identity()
         1
     );
     assert_eq!(count(&fixture.pool, "evaluation.outbox_events").await?, 1);
+    let persisted_manifest_sha256: String = sqlx::query_scalar(
+        "SELECT manifest_sha256 FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1",
+    )
+    .bind(first.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        persisted_manifest_sha256,
+        Sha256Digest::of_canonical(&fixture.request.manifest)?.to_string()
+    );
+    let persisted_content_sha256: String = sqlx::query_scalar(
+        "SELECT content_sha256 FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1",
+    )
+    .bind(first.id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(persisted_content_sha256, first.content_sha256);
     let payload: serde_json::Value =
         sqlx::query_scalar("SELECT payload FROM evaluation.outbox_events")
             .fetch_one(&fixture.pool)
@@ -280,11 +384,7 @@ impl TestContext {
             .max_connections(4)
             .connect(&database_url)
             .await?;
-        let migrations = format!(
-            "CREATE SCHEMA evaluation; SET search_path TO evaluation;\n{}",
-            include_str!("../../../migrations/evaluation/0001_platform_baseline.sql")
-        );
-        sqlx::raw_sql(&migrations).execute(&pool).await?;
+        support::apply_evaluation_migrations(&pool).await?;
         let store = PgFreezeStore::new(pool.clone());
         let now = store.authority_now().await?;
         let object_store = Arc::new(LockedStore::new(failures));
@@ -304,7 +404,8 @@ impl TestContext {
         let environment_id = contracts::EnvironmentId::new();
         let request = FreezeRequest {
             frozen_submission_id: contracts::FrozenSubmissionId::new(),
-            course_id,
+            project_id: ProjectId::new(),
+            course_id: Some(course_id),
             actor_id: ActorId::new(),
             agent_run_id: AgentRunId::new(),
             manifest_revision: Revision::new(1)?,

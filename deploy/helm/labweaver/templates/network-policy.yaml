@@ -23,21 +23,32 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     {{- if eq $name "resource-service" }}
-    # Resource accepts the signed Access delegation only over its mTLS API port;
-    # the health port remains exposed for the platform probe path.
+    # Resource accepts Access browser calls and Evaluation/Environment service JWT calls over
+    # the TLS API port; the health port remains exposed for the platform probe path.
     - from:
         - podSelector:
-            matchLabels: {app.kubernetes.io/name: access-service}
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [access-service, environment-service, evaluation-service]
       ports:
         - {protocol: TCP, port: 8087}
         - {protocol: TCP, port: 9448}
+    {{- else if eq $name "control-service" }}
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [access-service, environment-service, evaluation-service]
+      ports: [{protocol: TCP, port: 9444}]
     {{- else if eq $name "environment-service" }}
     - from:
         - podSelector:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [access-service, evaluation-service, resource-service]
+                values: [access-service, agent-service, control-service, evaluation-service, resource-service]
       ports: [{protocol: TCP, port: 9446}]
     - from:
         - podSelector:
@@ -128,9 +139,11 @@ spec:
     # authorities. Identity, secrets, budgets and approval remain service-owned.
     - {}
     {{- end }}
+    {{- if ne $name "environment-service" }}
     - to:
         - podSelector:
             matchLabels: {app.kubernetes.io/part-of: labweaver}
+    {{- end }}
     - to:
         - namespaceSelector:
             {{- toYaml $root.Values.network.infrastructureNamespaceSelector | nindent 12 }}
@@ -203,6 +216,14 @@ spec:
         - {protocol: TCP, port: 9446}
     {{- end }}
     {{- if eq $name "environment-service" }}
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: control-service}
+      ports: [{protocol: TCP, port: 9444}]
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: resource-service}
+      ports: [{protocol: TCP, port: 9448}]
     - to:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: container-executor}

@@ -4,7 +4,6 @@
     :class="{ 'is-rail': drawerRail }"
     :data-theme="themeStore.effectiveTheme"
   >
-    <FixtureBanner v-if="showFixtureBanner" class="fixture-banner" />
     <TopAppBar
       :drawer-open="drawerOpen"
       @toggle-drawer="handleToggleDrawer"
@@ -24,18 +23,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, defineAsyncComponent, nextTick, watch } from 'vue'
+import { ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
 import { useThemeStore } from '@/stores/theme'
 import { useAuth } from '@/composables/useAuth'
-import { IS_FIXTURE } from '@/config/dataMode'
-
-const showFixtureBanner = __FIXTURE_BANNER__
-const FixtureBanner = showFixtureBanner
-  ? defineAsyncComponent(() => import('@/components/fixture/FixtureBanner.vue'))
-  : null
 
 const themeStore = useThemeStore()
 const auth = useAuth()
@@ -82,11 +75,6 @@ onMounted(() => {
   height: 100%;
   overflow-anchor: none;
   background: var(--md-sys-color-background);
-}
-
-.fixture-banner {
-  grid-row: 1;
-  grid-column: 1 / -1;
 }
 
 .top-app-bar {

@@ -1,0 +1,35 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact project scope used to read or cancel one Agent-owned advisory review.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "projectId"
+  ],
+  "title": "AgentLlmReviewQuery",
+  "type": "object"
+}

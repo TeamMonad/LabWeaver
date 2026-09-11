@@ -68,8 +68,28 @@ identity_name: labweaver-keycloak
 identity_hostname: keycloak.labweaver.internal
 identity_gateway_vip: 10.20.0.222
 identity_realm: workloads
-identity_workload_client_id: labweaver-buildkit
-identity_workload_audience: labweaver-buildkit
+identity_service_clients:
+  - {client_id: labweaver-access, audience: labweaver-access, secret_name: labweaver-access-client, secret_key: access-client-secret}
+  - {client_id: labweaver-agent, audience: labweaver-agent, secret_name: labweaver-agent-client, secret_key: agent-client-secret}
+  - {client_id: labweaver-control, audience: labweaver-control, secret_name: labweaver-control-client, secret_key: control-client-secret}
+  - {client_id: labweaver-environment, audience: labweaver-environment, secret_name: labweaver-environment-client, secret_key: environment-client-secret}
+  - {client_id: labweaver-evaluation, audience: labweaver-evaluation, secret_name: labweaver-evaluation-client, secret_key: evaluation-client-secret}
+  - {client_id: labweaver-resource, audience: labweaver-resource, secret_name: labweaver-resource-client, secret_key: resource-client-secret}
+identity_service_role_assignments:
+  - {caller: labweaver-access, target: labweaver-control, roles: [access.control.forward]}
+  - {caller: labweaver-access, target: labweaver-environment, roles: [access.environment.forward, access.environment.console, environment.owner.resolve, environment.endpoint.resolve, environment.console.resolve]}
+  - {caller: labweaver-access, target: labweaver-evaluation, roles: [evaluation.api.invoke]}
+  - {caller: labweaver-access, target: labweaver-resource, roles: [resource.api.invoke]}
+  - {caller: labweaver-control, target: labweaver-agent, roles: [agent.control.invoke]}
+  - {caller: labweaver-control, target: labweaver-evaluation, roles: [evaluation.control.invoke]}
+  - {caller: labweaver-evaluation, target: labweaver-control, roles: [control.authoring.read]}
+  - {caller: labweaver-evaluation, target: labweaver-environment, roles: [evaluation.environment.freeze]}
+  - {caller: labweaver-evaluation, target: labweaver-resource, roles: [resource.task.create, resource.task.read, resource.task.claim, resource.task.ack, resource.task.release, resource.task.cancel, resource.usage.record]}
+  - {caller: labweaver-resource, target: labweaver-environment, roles: [resource.environment.manage]}
+  - {caller: labweaver-environment, target: labweaver-resource, roles: [resource.usage.record]}
+  - {caller: labweaver-environment, target: labweaver-environment, roles: [environment.console.execute]}
+  - {caller: labweaver-access, target: labweaver-access, roles: [access.authorization.decide, access.metrics.read, access.ssh.authorize, access.session.manage]}
+  - {caller: labweaver-evaluation, target: labweaver-evaluation, roles: [evaluation.step.complete]}
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256
 identity_storage_class: local-path
 identity_postgres_storage: 20Gi

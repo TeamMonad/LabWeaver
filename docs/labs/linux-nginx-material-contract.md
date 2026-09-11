@@ -2,11 +2,11 @@
 
 ## Status and boundary
 
-This document and [`examples/linux-nginx`](../../examples/linux-nginx) are E1 material-contract evidence for Issue #11. They do not prove that a KubeVirt VM, SSH/Ansible Probe, Collector, Evaluation Service, teacher approval path, or production EvaluationRun exists.
+This document describes the teaching material in [`examples/linux-nginx`](../../examples/linux-nginx). The package still needs approved VM and Probe artifacts before it can run on a configured backend.
 
 The supported teaching target is an Ubuntu 24.04 LTS VM running Nginx on HTTP port 80. The student modifies the enabled default site at `/etc/nginx/sites-available/default` and configures its document root as `/srv/labweaver-nginx-lab`. The supplied `index.html` is the only accepted page identity: title `Nginx Lab`, heading `Nginx Lab`, and `data-lab-id="linux-nginx-v1"`.
 
-Ubuntu 24.04 is the only version identity fixed in this package. The later E3 run record must bind the VM image identity, observed Nginx package version, template SHA-256, material-manifest SHA-256, approved Probe profile version, and build/deployment identity. A moving package version must never be represented as a fixed one.
+Ubuntu 24.04 is the only OS version fixed in this package. An approved release binds the VM image, template and Probe profile; the Probe reports the installed Nginx version. A moving package version must never be represented as a fixed one.
 
 ## Public and controlled material
 
@@ -35,19 +35,19 @@ The following identifiers are material-contract reservations, not implemented ru
 
 The future approved Probe must be read-only and emit versioned, sanitized facts for host reachability, Nginx installation and observed version, default-site configuration and root, systemd state, TCP/80 listener, HTTP status/body, and the three required HTML markers. It must not restart Nginx, write configuration, repair the VM, invoke shell, or fall back to an unapproved provider.
 
-The current `evaluation-spec/v1` allowlist permits only package facts, service facts, and file stat. It cannot yet observe TCP/80 or the HTTP response needed by this contract. B must approve and implement a versioned, read-only Probe profile, its minimum capability contract, SubmissionManifest runtime Reader, and stable runtime diagnostics before any full Probe or E3 claim. Until then, incomplete capability is an explicit blocker, not a reason to use a Mock or weaken the expected facts.
+The package must use an approved read-only Probe profile that can observe every required fact, including TCP/80 and the HTTP response. Package facts, service facts and file stat alone are insufficient. An unavailable module or observation must fail explicitly; it cannot be replaced with a simulated result or a weaker assertion.
 
-## E1 validation
+## Material validation
 
 Run the following from the repository root:
 
 ```sh
 python examples/linux-nginx/verify_material_contract.py --self-test
-cargo xtask test --suite contract
+cargo test -p contracts --locked
 ```
 
-The Python validator checks public SHA-256 records, HTML identity, candidate submission limits, controlled-material boundary, normal/negative scenario mapping, missing material, altered template, restricted content, and oversized report handling. The Rust test only preserves the existing EvaluationSpec E1 contract; it does not validate the planned Probe behavior.
+The Python validator checks public SHA-256 records, HTML identity, candidate submission limits, controlled-material boundary, normal/negative scenario mapping, missing material, altered template, restricted content, and oversized report handling. Contract tests validate the EvaluationSpec format; they do not exercise the VM or Probe.
 
-## E3 exit condition
+## Backend integration
 
-E3 requires a real KubeVirt VM using the approved Ubuntu image, an approved Probe profile, and same-identity evidence for the normal target state plus both negative cases: stopped/not-listening Nginx and a site/page mismatch. Missing preflight, image binding, Probe capability, access, timeout, malformed fact, or missing evidence must leave the run explicitly blocked or failed with the original diagnostic retained.
+Backend tests use a KubeVirt VM with the approved Ubuntu image and Probe profile. Cover the expected target state and both negative cases: stopped/not-listening Nginx and a site/page mismatch. Missing image bindings, unsupported Probe capabilities, access failures, timeouts and malformed facts must leave the run explicitly blocked or failed with the original diagnostic retained.

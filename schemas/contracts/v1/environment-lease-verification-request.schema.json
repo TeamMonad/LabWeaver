@@ -15,6 +15,10 @@
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -25,7 +29,14 @@
       "type": "string"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
@@ -35,6 +46,9 @@
     },
     "ownerActorId": {
       "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
     },
     "version": {
       "format": "uint8",
@@ -47,7 +61,7 @@
     "version",
     "leaseId",
     "environmentId",
-    "courseId",
+    "projectId",
     "ownerActorId",
     "capacityBinding"
   ],

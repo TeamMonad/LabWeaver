@@ -1,7 +1,8 @@
 //! Ansible probe Kubernetes Job isolation, identity, and cleanup-plan tests.
 
-use std::net::Ipv4Addr;
+use std::{collections::BTreeMap, net::Ipv4Addr, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use contracts::evaluation::FactAssertion;
 use evaluation_service::ansible_probe::{
     ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeExecutionLimits,
@@ -9,6 +10,10 @@ use evaluation_service::ansible_probe::{
 };
 use evaluation_service::ansible_probe_job::{
     AnsibleProbeJobBinding, AnsibleProbeJobError, AnsibleProbeJobResources,
+};
+use evaluation_service::{
+    ARTIFACT_MATERIALIZER_SCHEMA_VERSION, MaterializeArtifact, MaterializeCommand,
+    MaterializeContent, MaterializeDestination,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
@@ -29,7 +34,7 @@ fn request() -> AnsibleProbeExecutionRequest {
         attempt_id: Uuid::now_v7(),
         trace_id: "trace-ansible-probe-job-test".to_owned(),
         runner_image_digest: format!("labweaver/ansible-probe@sha256:{}", "2".repeat(64)),
-        playbook_profile: "linux-nginx-probe-v1".to_owned(),
+        playbook_profile: "linux-nginx-probe-v1/playbook.yml".to_owned(),
         module_allowlist: vec![
             "ansible.builtin.package_facts".to_owned(),
             "ansible.builtin.service_facts".to_owned(),
@@ -45,6 +50,7 @@ fn request() -> AnsibleProbeExecutionRequest {
             port: 22,
             username: "labweaver".to_owned(),
         },
+        source_identity: "source-identity".to_owned(),
         ssh_identity: AnsibleProbeSshIdentity {
             private_key_secret: "probe-ssh-key".to_owned(),
             certificate_secret: "probe-ssh-cert".to_owned(),
@@ -70,6 +76,21 @@ fn binding() -> AnsibleProbeJobBinding {
             "2".repeat(64)
         ),
         request: request(),
+        materializer: MaterializeCommand {
+            schema_version: ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
+            artifacts: vec![MaterializeArtifact {
+                url: "https://objects.example.test/evaluator".to_owned(),
+                required_headers: BTreeMap::new(),
+                expected_sha256: Sha256Digest::of_bytes(b"approved-evaluator"),
+                expected_size_bytes: b"approved-evaluator".len() as u64,
+                media_type: "application/json".to_owned(),
+                destination: MaterializeDestination::Evaluator,
+                content: MaterializeContent::RawFile {
+                    path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
+                },
+            }],
+        },
+        materializer_ca_bundle: Some(Arc::from(b"test-ca-bundle".as_slice())),
     }
 }
 
@@ -163,6 +184,30 @@ fn job_plan_is_non_root_bounded_and_read_only() -> Result<(), Box<dyn std::error
                 .all(|value| value.as_str().is_some_and(|value| value.len() <= 63))
         }));
     }
+    assert_eq!(
+        pointer(job, "/spec/template/spec/initContainers/0/env/1/name"),
+        "LABWEAVER_ARTIFACT_MATERIALIZER_CA_FILE"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/initContainers/0/env/1/value"),
+        "/run/secrets/materializer/ca.crt"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/volumes/1/secret/items/1/key"),
+        "ca.crt"
+    );
+    assert_eq!(
+        pointer(&resources.materializer_secret, "/data/ca.crt"),
+        &Value::String(STANDARD.encode(b"test-ca-bundle"))
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/containers/0/volumeMounts/0/name"),
+        "command"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/containers/0/volumeMounts/1/name"),
+        "evaluator"
+    );
     Ok(())
 }
 
@@ -171,17 +216,17 @@ fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::err
     let resources = AnsibleProbeJobResources::build(&binding())?;
     let policy = &resources.network_policy;
 
-    // The attempt policy denies all ingress and permits only TCP/22 egress to
-    // the exact target IPv4; no DNS or other destination is allowed.
+    // HTTPS is needed by the init materializer; SSH remains scoped to the
+    // exact target IPv4.
     assert_eq!(pointer(policy, "/spec/policyTypes/0"), "Ingress");
     assert_eq!(pointer(policy, "/spec/policyTypes/1"), "Egress");
     assert_eq!(pointer(policy, "/spec/ingress"), &json!([]));
     assert_eq!(
         pointer(policy, "/spec/egress"),
-        &json!([{
-            "to":[{"ipBlock":{"cidr":"192.168.56.10/32"}}],
-            "ports":[{"protocol":"TCP","port":22}],
-        }])
+        &json!([
+            {"ports":[{"protocol":"TCP","port":443}]},
+            {"to":[{"ipBlock":{"cidr":"192.168.56.10/32"}}],"ports":[{"protocol":"TCP","port":22}]},
+        ])
     );
     Ok(())
 }
@@ -196,22 +241,22 @@ fn ssh_identity_volumes_are_read_only_and_bounded() -> Result<(), Box<dyn std::e
     let serialized = serde_json::to_string(&resources.job)?;
     assert!(!serialized.contains("probe-ssh-key-content"));
     assert_eq!(
-        pointer(job, "/spec/template/spec/volumes/1/secret/secretName"),
+        pointer(job, "/spec/template/spec/volumes/3/secret/secretName"),
         "probe-ssh-key"
     );
     assert_eq!(
-        pointer(job, "/spec/template/spec/volumes/1/secret/defaultMode"),
+        pointer(job, "/spec/template/spec/volumes/3/secret/defaultMode"),
         256
     );
     assert_eq!(
-        pointer(job, "/spec/template/spec/volumes/2/secret/secretName"),
+        pointer(job, "/spec/template/spec/volumes/4/secret/secretName"),
         "probe-ssh-cert"
     );
     assert_eq!(
-        pointer(job, "/spec/template/spec/volumes/2/secret/defaultMode"),
+        pointer(job, "/spec/template/spec/volumes/4/secret/defaultMode"),
         256
     );
-    for index in 0..3 {
+    for index in 0..4 {
         assert_eq!(
             pointer(
                 job,
@@ -223,23 +268,23 @@ fn ssh_identity_volumes_are_read_only_and_bounded() -> Result<(), Box<dyn std::e
     assert_eq!(
         pointer(
             job,
-            "/spec/template/spec/containers/0/volumeMounts/1/mountPath"
+            "/spec/template/spec/containers/0/volumeMounts/2/mountPath"
         ),
         "/run/secrets/probe/private-key"
     );
     assert_eq!(
         pointer(
             job,
-            "/spec/template/spec/containers/0/volumeMounts/2/mountPath"
+            "/spec/template/spec/containers/0/volumeMounts/3/mountPath"
         ),
         "/run/secrets/probe/certificate"
     );
     assert_eq!(
-        pointer(job, "/spec/template/spec/volumes/3/emptyDir/sizeLimit"),
+        pointer(job, "/spec/template/spec/volumes/5/emptyDir/sizeLimit"),
         "64Mi"
     );
     assert_eq!(
-        pointer(job, "/spec/template/spec/volumes/4/emptyDir/sizeLimit"),
+        pointer(job, "/spec/template/spec/volumes/6/emptyDir/sizeLimit"),
         "16Mi"
     );
     Ok(())
@@ -269,22 +314,31 @@ fn job_identity_is_attempt_scoped_and_cleanup_never_targets_secrets_or_namespace
     let name = resources.name();
     assert!(name.starts_with("lw-ap-"));
     assert!(name.len() <= 63);
-    for document in [
-        &resources.config_map,
-        &resources.network_policy,
-        &resources.job,
+    for (document, expected_name) in [
+        (&resources.config_map, name),
+        (
+            &resources.materializer_secret,
+            resources.materializer_secret_name(),
+        ),
+        (&resources.network_policy, name),
+        (&resources.job, name),
     ] {
-        assert_eq!(pointer(document, "/metadata/name").as_str(), Some(name));
+        assert_eq!(
+            pointer(document, "/metadata/name").as_str(),
+            Some(expected_name)
+        );
     }
 
     let cleanup = resources.cleanup_plan();
-    assert_eq!(cleanup.len(), 3);
+    assert_eq!(cleanup.len(), 4);
     assert!(
         cleanup
             .iter()
             .all(|target| target.namespace == binding.namespace)
     );
-    assert!(cleanup.iter().all(|target| target.name == name));
+    assert!(cleanup.iter().all(|target| {
+        target.name == name || target.name == resources.materializer_secret_name()
+    }));
     assert!(
         cleanup
             .iter()
@@ -292,7 +346,7 @@ fn job_identity_is_attempt_scoped_and_cleanup_never_targets_secrets_or_namespace
     );
     assert!(cleanup.iter().all(|target| !matches!(
         target.resource.as_str(),
-        "namespaces" | "secrets" | "persistentvolumeclaims"
+        "namespaces" | "persistentvolumeclaims"
     )));
     Ok(())
 }

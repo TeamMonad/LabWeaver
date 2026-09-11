@@ -1,0 +1,205 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ChargeId": {
+      "description": "Strongly typed UUIDv7 identifier for `ChargeId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "FixedDecimal": {
+      "description": "Canonical signed decimal with exactly six fractional digits.\n\nDecimal values cross the API as strings so JavaScript clients and SQL\ndrivers cannot round monetary values through binary floating point. The\ninternal scaled representation is available to Resource arithmetic without\nintroducing a database-specific decimal dependency into the contracts crate.",
+      "format": "fixed-decimal-6",
+      "pattern": "^-?(0|[1-9][0-9]*)[.][0-9]{6}$",
+      "type": "string"
+    },
+    "Money": {
+      "additionalProperties": false,
+      "description": "A fixed-precision amount with an explicit ISO-4217-like currency code.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/FixedDecimal"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "RateId": {
+      "description": "Strongly typed UUIDv7 identifier for `RateId`.",
+      "type": "string"
+    },
+    "ResourceBillingUnit": {
+      "description": "Resource dimension used by a versioned rate card.",
+      "enum": [
+        "cpu_millicore_second",
+        "memory_byte_second",
+        "storage_byte_second",
+        "gpu_unit_second"
+      ],
+      "type": "string"
+    },
+    "ResourceChargeLine": {
+      "additionalProperties": false,
+      "description": "One immutable line in a calculated charge.",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/Money"
+        },
+        "quantity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rateId": {
+          "$ref": "#/$defs/RateId"
+        },
+        "rateRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "unit": {
+          "$ref": "#/$defs/ResourceBillingUnit"
+        },
+        "unitPrice": {
+          "$ref": "#/$defs/Money"
+        },
+        "unitQuantity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rateId",
+        "rateRevision",
+        "unit",
+        "quantity",
+        "unitQuantity",
+        "unitPrice",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UsageRecordId": {
+      "description": "Strongly typed UUIDv7 identifier for `UsageRecordId`.",
+      "type": "string"
+    },
+    "UsageSettlementState": {
+      "description": "Settlement state for one immutable usage observation.",
+      "enum": [
+        "pending",
+        "settled",
+        "unsettled"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Resource-owned charge projection. This is a calculation record, not a payment.",
+  "properties": {
+    "adjustedBy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActorId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Actor that authorized an administrator adjustment."
+    },
+    "adjustmentOf": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChargeId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "adjustmentReason": {
+      "description": "Human supplied reason retained with an administrator adjustment.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "createdAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "diagnosticCode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "$ref": "#/$defs/ChargeId"
+    },
+    "lines": {
+      "items": {
+        "$ref": "#/$defs/ResourceChargeLine"
+      },
+      "type": "array"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "settlement": {
+      "$ref": "#/$defs/UsageSettlementState"
+    },
+    "total": {
+      "$ref": "#/$defs/Money"
+    },
+    "usageRecordId": {
+      "$ref": "#/$defs/UsageRecordId"
+    }
+  },
+  "required": [
+    "id",
+    "usageRecordId",
+    "projectId",
+    "lines",
+    "total",
+    "settlement",
+    "createdAt"
+  ],
+  "title": "ResourceCharge",
+  "type": "object"
+}

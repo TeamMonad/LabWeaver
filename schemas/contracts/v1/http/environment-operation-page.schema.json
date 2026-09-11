@@ -44,16 +44,6 @@
         "cancelEligible": {
           "type": "boolean"
         },
-        "cleanupDeadlineAt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcTimestamp"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "cleanupStartedAt": {
           "anyOf": [
             {
@@ -63,9 +53,6 @@
               "type": "null"
             }
           ]
-        },
-        "currentRevision": {
-          "$ref": "#/$defs/Revision"
         },
         "deadlineAt": {
           "$ref": "#/$defs/UtcTimestamp"
@@ -86,9 +73,6 @@
         "kind": {
           "$ref": "#/$defs/EnvironmentOperationKind"
         },
-        "lastChangedStreamSequence": {
-          "$ref": "#/$defs/StreamSequence"
-        },
         "maxAttempts": {
           "format": "uint32",
           "minimum": 0,
@@ -97,34 +81,11 @@
         "operationId": {
           "$ref": "#/$defs/OperationId"
         },
-        "providerPhase": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PublicEnvironmentOperationPhase"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "requestId": {
-          "type": "string"
-        },
         "retryEligible": {
           "type": "boolean"
         },
-        "startedAt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcTimestamp"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "state": {
-          "$ref": "#/$defs/EnvironmentOperationStatus"
+          "$ref": "#/$defs/OperationState"
         },
         "terminalAt": {
           "anyOf": [
@@ -136,21 +97,8 @@
             }
           ]
         },
-        "timedOutAt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcTimestamp"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "traceId": {
           "type": "string"
-        },
-        "updatedAt": {
-          "$ref": "#/$defs/UtcTimestamp"
         }
       },
       "required": [
@@ -159,47 +107,29 @@
         "kind",
         "state",
         "acceptedRevision",
-        "currentRevision",
         "acceptedAt",
-        "updatedAt",
         "deadlineAt",
         "attempt",
         "maxAttempts",
         "retryEligible",
         "cancelEligible",
-        "requestId",
-        "traceId",
-        "lastChangedStreamSequence"
+        "traceId"
       ],
       "type": "object"
     },
-    "EnvironmentOperationStatus": {
-      "description": "Public operation state used by REST snapshots and SSE projections.\n\nThe runtime aggregate retains its historical `OperationState`; timeout is exposed as a\ndistinct terminal fact instead of forcing clients to infer it from a generic failure code.",
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "OperationState": {
+      "description": "Persistent operation state.",
       "enum": [
         "accepted",
         "running",
         "cancelling",
         "succeeded",
         "failed",
-        "cancelled",
-        "timed_out"
-      ],
-      "type": "string"
-    },
-    "OperationId": {
-      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
-      "type": "string"
-    },
-    "PublicEnvironmentOperationPhase": {
-      "description": "Provider-safe progress phase. Provider names, node identities, and raw payloads stay private.",
-      "enum": [
-        "validating",
-        "building",
-        "provisioning",
-        "stopping",
-        "revoking_access",
-        "cleaning_up",
-        "finalizing"
+        "cancelled"
       ],
       "type": "string"
     },

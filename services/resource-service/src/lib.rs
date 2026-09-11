@@ -39,9 +39,6 @@ pub mod diagnostic {
 pub struct ApprovalPolicy {
     pub min_duration_seconds: u64,
     pub max_duration_seconds: u64,
-    /// Sprint 3 deliberately ships with zero GPU capacity. A non-zero GPU request is a
-    /// capacity denial, not a malformed request and never triggers a provider fallback.
-    pub gpu_capacity: u32,
 }
 
 impl ApprovalPolicy {
@@ -79,14 +76,6 @@ impl ResourceLifecycle {
             || approval.approved_duration_seconds > policy.max_duration_seconds
         {
             return Err(LifecycleError::PolicyInvalid);
-        }
-        if approval
-            .approved_resources
-            .gpu
-            .as_ref()
-            .is_some_and(|gpu| gpu.count > policy.gpu_capacity)
-        {
-            return Err(LifecycleError::CapacityExhausted);
         }
         let mut next = request.clone();
         next.state = ResourceRequestState::Allocating;
@@ -379,14 +368,14 @@ mod tests {
         ResourceTarget, WorkloadResources,
     };
     use contracts::{
-        ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ReleaseId, ResourceApprovalId,
-        ResourceRequestId, Revision, UtcTimestamp,
+        ActorId, CapacityClaimId, CourseId, EnvironmentId, LeaseId, ProjectId, ReleaseId,
+        ResourceApprovalId, ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
     };
 
-    use super::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
+    use super::{ApprovalPolicy, ResourceLifecycle};
 
     #[test]
-    fn zero_gpu_capacity_blocks_a_valid_gpu_request_without_transitioning_state() {
+    fn approval_policy_leaves_gpu_capacity_to_catalog_resolution() {
         let request = request();
         let approval = approval(
             request.id,
@@ -406,12 +395,10 @@ mod tests {
             ApprovalPolicy {
                 min_duration_seconds: 60,
                 max_duration_seconds: 3600,
-                gpu_capacity: 0,
             },
             timestamp("2026-07-30T00:00:00.000Z"),
         );
-        assert!(matches!(result, Err(LifecycleError::CapacityExhausted)));
-        assert_eq!(request.state, ResourceRequestState::Reviewing);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -431,7 +418,6 @@ mod tests {
             ApprovalPolicy {
                 min_duration_seconds: 60,
                 max_duration_seconds: 3600,
-                gpu_capacity: 0,
             },
             timestamp("2026-07-30T00:00:00.000Z"),
         )?;
@@ -459,6 +445,42 @@ mod tests {
             timestamp("2026-07-30T00:00:03.000Z"),
         )?;
         assert_eq!(expired.state, ResourceRequestState::Expired);
+        Ok(())
+    }
+
+    #[test]
+    fn reviewing_task_request_cancel_is_terminal_and_revision_fenced()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut request = request();
+        request.target = ResourceTarget::Task {
+            task_run_id: TaskRunId::new(),
+        };
+        let cancelled = ResourceLifecycle::reject_or_cancel(
+            &request,
+            request.revision,
+            ResourceRequestState::Cancelled,
+            timestamp("2026-07-30T00:00:01.000Z"),
+        )?;
+        assert_eq!(cancelled.state, ResourceRequestState::Cancelled);
+        assert_eq!(cancelled.revision.get(), request.revision.get() + 1);
+        assert!(matches!(
+            ResourceLifecycle::reject_or_cancel(
+                &request,
+                Revision::new(2)?,
+                ResourceRequestState::Cancelled,
+                timestamp("2026-07-30T00:00:01.000Z"),
+            ),
+            Err(super::LifecycleError::StateConflict)
+        ));
+        assert!(matches!(
+            ResourceLifecycle::reject_or_cancel(
+                &cancelled,
+                cancelled.revision,
+                ResourceRequestState::Cancelled,
+                timestamp("2026-07-30T00:00:02.000Z"),
+            ),
+            Err(super::LifecycleError::StateConflict)
+        ));
         Ok(())
     }
 
@@ -520,9 +542,9 @@ mod tests {
             generation: 1,
             request_key: "workbench-1".into(),
             requester_id: ActorId::new(),
-            course_id: CourseId::new(),
-            project_id: None,
-            target: ResourceTarget {
+            course_id: Some(CourseId::new()),
+            project_id: ProjectId::new(),
+            target: ResourceTarget::Environment {
                 environment_id: EnvironmentId::new(),
                 release_id: ReleaseId::new(),
                 release_version: 1,

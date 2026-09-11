@@ -19,8 +19,8 @@ use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::{
-    CollectorLimits, FreezeRequest, FreezeService, PgFreezeStore, PvcSnapshotSource,
-    SnapshotCollector, SnapshotSource, SshSnapshotConfig, SshSnapshotSource,
+    CollectorLimits, FreezeRequest, FreezeService, FreezeServiceError, PgFreezeStore,
+    PvcSnapshotSource, SnapshotCollector, SnapshotSource, SshSnapshotConfig, SshSnapshotSource,
 };
 
 const CONFIG_PATH: &str = "LABWEAVER_EVALUATION_CONFIG_FILE";
@@ -99,6 +99,8 @@ pub async fn run_freeze_worker() -> Result<(), FreezeWorkerError> {
         .await?;
     let store = PgFreezeStore::new(pool);
     let authority_now = store.authority_now().await?;
+    let manifest_sha256 = Sha256Digest::of_canonical(&command.request.manifest)
+        .map_err(|_| FreezeWorkerError::Freeze(FreezeServiceError::ContractInvalid))?;
     let object_store = Arc::new(
         S3ImmutableObjectStore::new(
             configuration.object_store,
@@ -168,8 +170,8 @@ pub async fn run_freeze_worker() -> Result<(), FreezeWorkerError> {
         event = "evaluation.freeze_worker.completed",
         frozen_submission_id = %submission.id,
         environment_id = %submission.environment.environment_id,
-        manifest_sha256 = %Sha256Digest::of_bytes(b"manifest"),
-        object_sha256 = %Sha256Digest::of_bytes(b"object"),
+        manifest_sha256 = %manifest_sha256,
+        object_sha256 = %submission.content_sha256,
     );
     Ok(())
 }

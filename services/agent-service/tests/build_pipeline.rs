@@ -21,11 +21,10 @@ use agent_service::build_pipeline::{
     PublishedImage,
 };
 use async_trait::async_trait;
-use contracts::authoring::{CandidateApproval, CandidateDecision};
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, ImageArtifact};
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, Revision,
+    ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ProjectId, Revision,
     UtcTimestamp,
 };
 use persistence_sqlx::Sha256Digest;
@@ -110,8 +109,8 @@ impl BuildSupplyChainProvider for FakeProvider {
                 String::new()
             } else {
                 format!(
-                    "robot$course-{}+{}",
-                    command.request.course_id, self.robot_name
+                    "robot$project-{}+{}",
+                    command.request.project_id, self.robot_name
                 )
             },
         })
@@ -398,20 +397,19 @@ fn fence_with(
 }
 
 fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
+    let project_id = ProjectId::new();
     let course_id = CourseId::new();
     let candidate_id = CandidateId::new();
-    let approval_id = ApprovalId::new();
     let request = BuildRequest {
         id: BuildRequestId::new(),
-        course_id,
+        project_id,
+        course_id: Some(course_id),
         candidate_id,
         candidate_revision: revision(1),
-        approval_id,
         builder_binding: "buildkit-primary-v1".to_owned(),
         context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
         context_object_key: "build-contexts/context.tar.gz".to_owned(),
         dockerfile_path: "Dockerfile".to_owned(),
-        base_image_digest: format!("sha256:{}", "c".repeat(64)),
         output_repository: format!(
             "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
         ),
@@ -423,21 +421,9 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
         max_memory_bytes: 2_147_483_648,
         created_at: now(),
     };
-    let approval = CandidateApproval {
-        id: approval_id,
-        candidate_id,
-        candidate_revision: revision(1),
-        policy_revision: revision(1),
-        trust_revision: revision(1),
-        actor_id: ActorId::new(),
-        decision: CandidateDecision::Approved,
-        reason: "reviewed".to_owned(),
-        decided_at: now(),
-    };
-    let idempotency_key = format!("approval:{approval_id}");
+    let idempotency_key = format!("build:{}", request.id);
     AgentBuildRequested {
         request,
-        approval,
         idempotency_key,
     }
 }

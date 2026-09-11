@@ -105,7 +105,14 @@
       "$ref": "#/$defs/CapacityClaimId"
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
@@ -123,14 +130,7 @@
       "$ref": "#/$defs/ActorId"
     },
     "projectId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ProjectId"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/ProjectId"
     },
     "providerBinding": {
       "type": "string"
@@ -141,8 +141,8 @@
     "leaseRevision",
     "claimId",
     "environmentId",
-    "courseId",
     "ownerActorId",
+    "projectId",
     "providerBinding",
     "approvedResources",
     "activeFrom",

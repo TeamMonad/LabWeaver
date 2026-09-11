@@ -1,3 +1,0 @@
-# Raw preflight output can contain cluster-local identifiers and must stay local.
-local/
-*.raw.log

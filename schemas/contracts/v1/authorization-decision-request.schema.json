@@ -43,9 +43,6 @@
           "additionalProperties": false,
           "description": "Project-scoped endpoint.",
           "properties": {
-            "course_id": {
-              "$ref": "#/$defs/CourseId"
-            },
             "kind": {
               "const": "project",
               "type": "string"
@@ -56,7 +53,6 @@
           },
           "required": [
             "kind",
-            "course_id",
             "project_id"
           ],
           "type": "object"
@@ -66,7 +62,14 @@
           "description": "Environment owner resolution is supplied by the owning service.",
           "properties": {
             "course_id": {
-              "$ref": "#/$defs/CourseId"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CourseId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "environment_id": {
               "$ref": "#/$defs/EnvironmentId"
@@ -78,11 +81,14 @@
             "kind": {
               "const": "environment",
               "type": "string"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
             }
           },
           "required": [
             "kind",
-            "course_id",
+            "project_id",
             "environment_id",
             "environment_revision"
           ],

@@ -53,6 +53,10 @@
       ],
       "type": "object"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -71,7 +75,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "expiresAt": {
       "$ref": "#/$defs/UtcTimestamp"
@@ -85,6 +96,9 @@
     "id": {
       "$ref": "#/$defs/UploadSessionId"
     },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
     "revision": {
       "$ref": "#/$defs/Revision"
     },
@@ -97,7 +111,7 @@
   },
   "required": [
     "id",
-    "courseId",
+    "projectId",
     "revision",
     "files",
     "uploadTargets",

@@ -9,8 +9,7 @@ describe('BFF browser session', () => {
 
   it('loads the safe actor, role, and course context without browser OIDC configuration', async () => {
     // This spec asserts BFF session semantics itself, so it pins the auth mode
-    // explicitly instead of inheriting the mode from the npm script (the
-    // fixture test script runs with VITE_API_AUTH_MODE=bearer).
+    // explicitly instead of inheriting the mode from the test environment.
     vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       actor: {

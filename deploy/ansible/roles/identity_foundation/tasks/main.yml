@@ -1,10 +1,7 @@
 ---
-- name: Bind identity-foundation execution and component identity
+- name: Bind identity-foundation execution and configuration
   ansible.builtin.set_fact:
     identity_run_id: "{{ lookup('env', 'LABWEAVER_RUN_ID') }}"
-    identity_commit_sha: "{{ lookup('env', 'LABWEAVER_COMMIT_SHA') }}"
-    identity_inventory_hash: "{{ lookup('env', 'LABWEAVER_INVENTORY_HASH') }}"
-    identity_component_lock_hash: "{{ lookup('env', 'LABWEAVER_COMPONENT_LOCK_HASH') }}"
     identity_secret_locator: "{{ lookup('env', 'LABWEAVER_IDENTITY_SECRET_LOCATOR') }}"
     identity_lock: "{{ (lookup('file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).identity_foundation }}"
     identity_run_suffix: "{{ lookup('env', 'LABWEAVER_RUN_ID') | hash('sha256') | truncate(12, true, '') }}"
@@ -14,12 +11,19 @@
     that:
       - identity_foundation_enabled | bool
       - identity_run_id is match('^infra-[a-z0-9-]+$')
-      - identity_commit_sha is match('^[0-9a-f]{40,64}$')
-      - identity_inventory_hash is match('^sha256:[0-9a-f]{64}$')
-      - identity_component_lock_hash is match('^sha256:[0-9a-f]{64}$')
       - identity_hostname == 'keycloak.labweaver.internal'
       - identity_realm == 'workloads'
-      - identity_workload_client_id == identity_workload_audience
+      - identity_service_clients | length == 6
+      - (identity_service_clients | map(attribute='client_id') | list | unique | length) == (identity_service_clients | length)
+      - (identity_service_clients | map(attribute='audience') | list | unique | length) == (identity_service_clients | length)
+      - (identity_service_clients | map(attribute='client_id') | list) == (identity_service_clients | map(attribute='audience') | list)
+      - identity_service_clients | selectattr('client_id', 'match', '^labweaver-[a-z0-9-]+$') | list | length == (identity_service_clients | length)
+      - identity_service_clients | selectattr('audience', 'match', '^labweaver-[a-z0-9-]+$') | list | length == (identity_service_clients | length)
+      - >-
+        identity_service_clients
+        | selectattr('secret_name', 'match', '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$')
+        | list | length == (identity_service_clients | length)
+      - identity_service_clients | selectattr('secret_key', 'match', '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$') | list | length == (identity_service_clients | length)
       - identity_secret_locator | length > 0
       - identity_secret_locator_sha256 is match('^sha256:[0-9a-f]{64}$')
       - identity_lock.keycloak == '26.7.0'
@@ -61,13 +65,39 @@
 - name: Validate bootstrap secret shape without exposing values
   ansible.builtin.assert:
     that:
-      - identity_secrets.schema_version == 'identity-bootstrap.v1'
+      - identity_secrets.schema_version == 'identity-bootstrap.v2'
       - identity_secrets.database_password | length >= 32
       - identity_secrets.bootstrap_admin_password | length >= 32
-      - identity_secrets.workload_client_secret | length >= 32
+      - identity_secrets.service_client_secrets is mapping
+      - >-
+        (identity_service_clients
+        | selectattr('secret_key', 'in', identity_secrets.service_client_secrets.keys() | list)
+        | list | length) == (identity_service_clients | length)
       - identity_secrets.revision is match('^[a-z0-9][a-z0-9.-]{0,63}$')
     fail_msg: IDENTITY_BOOTSTRAP_SECRET_INVALID
   no_log: true
+
+- name: Validate every service client secret without exposing values
+  ansible.builtin.assert:
+    that:
+      - identity_secrets.service_client_secrets[item.secret_key] | length >= 32
+    fail_msg: IDENTITY_BOOTSTRAP_SERVICE_SECRET_INVALID
+  loop: "{{ identity_service_clients }}"
+  loop_control:
+    label: "{{ item.client_id }}"
+  no_log: true
+
+- name: Validate service role assignments before provisioning
+  ansible.builtin.assert:
+    that:
+      - item.caller in (identity_service_clients | map(attribute='client_id') | list)
+      - item.target in (identity_service_clients | map(attribute='client_id') | list)
+      - item.roles | length > 0
+      - item.roles | select('match', '^[A-Za-z0-9_.:-]{1,128}$') | list | length == item.roles | length
+    fail_msg: IDENTITY_SERVICE_ROLE_ASSIGNMENT_INVALID
+  loop: "{{ identity_service_role_assignments }}"
+  loop_control:
+    label: "{{ item.caller }} -> {{ item.target }}"
 
 - name: Read the adopted cluster identity
   ansible.builtin.command:
@@ -201,7 +231,7 @@
             ca.crt: "{{ identity_ca_secret.resources[0].data['tls.crt'] | b64decode }}"
       no_log: true
 
-    - name: Install identity credentials from the root-only locator
+    - name: Install identity database and bootstrap credentials from the root-only locator
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
@@ -214,7 +244,26 @@
       loop:
         - {name: "{{ identity_database_secret_name }}", data: {password: "{{ identity_secrets.database_password }}"}}
         - {name: "{{ identity_bootstrap_secret_name }}", data: {username: platform-bootstrap, password: "{{ identity_secrets.bootstrap_admin_password }}"}}
-        - {name: "{{ identity_workload_secret_name }}", data: {client-secret: "{{ identity_secrets.workload_client_secret }}"}}
+      no_log: true
+
+    - name: Install identity service client credentials from the root-only locator
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ item.secret_name }}"
+            namespace: "{{ identity_namespace }}"
+          type: Opaque
+          stringData:
+            client-id: "{{ item.client_id }}"
+            client-secret: "{{ identity_secrets.service_client_secrets[item.secret_key] }}"
+            audience: "{{ item.audience }}"
+      loop: "{{ identity_service_clients }}"
+      loop_control:
+        label: "{{ item.client_id }}"
       no_log: true
 
     - name: Apply PostgreSQL and Keycloak workloads
@@ -238,7 +287,7 @@
       changed_when: false
       loop: [statefulset/identity-postgres, "deployment/{{ identity_name }}"]
 
-    - name: Provision the workload-only OIDC client
+    - name: Provision the LabWeaver service OIDC clients and roles
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
@@ -383,7 +432,7 @@
   args: {executable: /bin/bash}
   changed_when: false
 
-- name: Verify workload token identity without exposing the credential or token
+- name: Verify every service token identity without exposing credentials or tokens
   ansible.builtin.shell: |
     set -euo pipefail
     work_dir=$(mktemp -d)
@@ -391,26 +440,27 @@
     chmod 0700 "$work_dir"
     {{ identity_kubectl_path }} \
       --kubeconfig {{ identity_kubeconfig_path | quote }} \
-      -n {{ identity_namespace | quote }} get secret {{ identity_workload_secret_name | quote }} \
-      -o jsonpath='{.data.client-secret}' | base64 -d > "$work_dir/client-secret"
-    chmod 0600 "$work_dir/client-secret"
+      -n {{ identity_namespace | quote }} get secret {{ identity_ca_secret_name | quote }} \
+      -o jsonpath='{.data.tls\.crt}' | base64 -d > "$work_dir/ca.crt"
+    {% for client in identity_service_clients %}
+    {{ identity_kubectl_path }} \
+      --kubeconfig {{ identity_kubeconfig_path | quote }} \
+      -n {{ identity_namespace | quote }} get secret {{ client.secret_name | quote }} \
+      -o jsonpath='{.data.client-secret}' | base64 -d > "$work_dir/client-secret-{{ client.client_id }}"
+    chmod 0600 "$work_dir/client-secret-{{ client.client_id }}"
     {
       printf 'url = "https://{{ identity_hostname }}/realms/{{ identity_realm }}/protocol/openid-connect/token"\n'
       printf 'cacert = "%s"\n' "$work_dir/ca.crt"
       printf 'resolve = "{{ identity_hostname }}:443:{{ identity_gateway_vip }}"\n'
       printf 'request = "POST"\n'
       printf 'data = "grant_type=client_credentials"\n'
-      printf 'data = "client_id={{ identity_workload_client_id }}"\n'
-      printf 'data = "client_secret=%s"\n' "$(cat "$work_dir/client-secret")"
+      printf 'data = "client_id={{ client.client_id }}"\n'
+      printf 'data = "client_secret=%s"\n' "$(cat "$work_dir/client-secret-{{ client.client_id }}")"
       printf 'fail\n silent\n show-error\n'
-    } > "$work_dir/curl.conf"
-    chmod 0600 "$work_dir/curl.conf"
-    {{ identity_kubectl_path }} \
-      --kubeconfig {{ identity_kubeconfig_path | quote }} \
-      -n {{ identity_namespace | quote }} get secret {{ identity_ca_secret_name | quote }} \
-      -o jsonpath='{.data.tls\.crt}' | base64 -d > "$work_dir/ca.crt"
-    curl --config "$work_dir/curl.conf" > "$work_dir/token.json"
-    python3 - "$work_dir/token.json" <<'PY'
+    } > "$work_dir/curl-{{ client.client_id }}.conf"
+    chmod 0600 "$work_dir/curl-{{ client.client_id }}.conf"
+    curl --config "$work_dir/curl-{{ client.client_id }}.conf" > "$work_dir/token-{{ client.client_id }}.json"
+    python3 - "$work_dir/token-{{ client.client_id }}.json" <<'PY'
     import base64
     import json
     import pathlib
@@ -423,23 +473,32 @@
     audience = claims.get("aud", [])
     if isinstance(audience, str):
         audience = [audience]
+    expected_audiences = [
+    {% for assignment in identity_service_role_assignments if assignment.caller == client.client_id %}
+        "{{ identity_service_clients
+           | selectattr('client_id', 'equalto', assignment.target)
+           | map(attribute='audience')
+           | first }}"{% if not loop.last %},{% endif %}
+    {% endfor %}
+    ]
     expected = {
         "iss": "https://{{ identity_hostname }}/realms/{{ identity_realm }}",
-        "azp": "{{ identity_workload_client_id }}",
-        "preferred_username": "service-account-{{ identity_workload_client_id }}",
+        "azp": "{{ client.client_id }}",
+        "preferred_username": "service-account-{{ client.client_id }}",
     }
     if any(claims.get(key) != value for key, value in expected.items()):
         raise SystemExit(2)
-    if "{{ identity_workload_audience }}" not in audience:
+    if not expected_audiences or any(expected not in audience for expected in expected_audiences):
         raise SystemExit(3)
     PY
+    {% endfor %}
   args: {executable: /bin/bash}
   register: identity_token_claims_check
   changed_when: false
   failed_when: false
   no_log: true
 
-- name: Reject an invalid workload token identity
+- name: Reject an invalid service token identity
   ansible.builtin.assert:
     that: identity_token_claims_check.rc == 0
     fail_msg: IDENTITY_TOKEN_CLAIMS_INVALID

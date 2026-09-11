@@ -56,6 +56,38 @@ RUN install -d -m 0755 /opt/labweaver/probe/bin \
     && ln -s /opt/labweaver/probe/pylib/bin/ansible-playbook \
        /opt/labweaver/probe/bin/ansible-playbook
 
+# The generic Evaluation runtime keeps the exact compiler and Python toolchain
+# together so one immutable runtime identity can execute both approved runner
+# kinds.  The dedicated runtime below remains the last/default target for the
+# existing Ansible-only image.
+FROM ${ANSIBLE_PROBE_TOOLCHAIN} AS evaluation-runtime
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.title="LabWeaver Evaluation runner" \
+      io.labweaver.toolchain-profile="cpp17-approved-v1" \
+      io.labweaver.playbook-profile="linux-nginx-probe-v1"
+COPY --from=pip-builder /opt/labweaver /opt/labweaver
+COPY --from=pip-builder /usr/lib/locale/C.utf8 /usr/lib/locale/C.utf8
+COPY --from=openssh-builder /opt/openssh/bin/ssh /usr/local/bin/ssh
+COPY --from=builder --chown=65532:65532 /out/labweaver-service /usr/local/bin/labweaver-service
+COPY containers/ansible-probe/linux-nginx-probe-v1/playbook.yml \
+     /opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml
+COPY containers/ansible-probe/ansible.cfg /opt/labweaver/probe/ansible.cfg
+ENV ANSIBLE_NOCOWS=1 \
+    ANSIBLE_LOCALHOST_WARNING=false \
+    ANSIBLE_HOME=/work/ansible \
+    ANSIBLE_LOCAL_TEMP=/work/ansible/tmp \
+    ANSIBLE_REMOTE_TEMP=/work/ansible-remote/tmp \
+    HOME=/work \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8 \
+    PYTHONUTF8=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/labweaver/probe/pylib
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/labweaver-service"]
+
 FROM ${ANSIBLE_PROBE_RUNTIME} AS runtime
 ARG SOURCE_COMMIT
 LABEL org.opencontainers.image.source="https://github.com/TeamMonad/LabWeaver" \
@@ -67,7 +99,8 @@ COPY --from=pip-builder /usr/lib/locale/C.utf8 /usr/lib/locale/C.utf8
 COPY --from=openssh-builder /opt/openssh/bin/ssh /usr/local/bin/ssh
 COPY --from=builder --chown=65532:65532 /out/labweaver-service /usr/local/bin/labweaver-service
 COPY containers/ansible-probe/linux-nginx-probe-v1/playbook.yml \
-     /opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml
+      /opt/labweaver/probe/linux-nginx-probe-v1/playbook.yml
+COPY containers/ansible-probe/ansible.cfg /opt/labweaver/probe/ansible.cfg
 ENV ANSIBLE_NOCOWS=1 \
     ANSIBLE_LOCALHOST_WARNING=false \
     ANSIBLE_HOME=/work/ansible \

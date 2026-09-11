@@ -4,6 +4,10 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
       "format": "uint64",
@@ -16,16 +20,26 @@
   "description": "Revision precondition for Control-to-Agent cancellation and retry mutations.",
   "properties": {
     "courseId": {
-      "$ref": "#/$defs/CourseId",
-      "description": "Exact course authority that owns the target run."
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "expectedRevision": {
       "$ref": "#/$defs/Revision",
       "description": "Exact Agent-owned run revision observed by Control."
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Exact Project authority that owns the target run."
     }
   },
   "required": [
-    "courseId",
+    "projectId",
     "expectedRevision"
   ],
   "title": "InternalAgentRunMutationRequest",

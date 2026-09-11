@@ -65,15 +65,22 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Project-local scope nested under a course membership.",
+  "description": "Project-local scope. A project may optionally be associated with teaching.",
   "properties": {
     "actorId": {
       "$ref": "#/$defs/ActorId",
       "description": "Actor scope."
     },
     "courseId": {
-      "$ref": "#/$defs/CourseId",
-      "description": "Owning course."
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional teaching course association."
     },
     "expiresAt": {
       "anyOf": [
@@ -104,7 +111,6 @@
     }
   },
   "required": [
-    "courseId",
     "projectId",
     "actorId",
     "role",

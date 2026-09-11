@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WorkConfigurationPlan": {
+      "additionalProperties": false,
+      "description": "Immutable generated configuration plan for one existing Work environment.",
+      "properties": {
+        "environmentId": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "environmentRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkConfigurationPlanId"
+        },
+        "requiresRestart": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "scriptArtifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "verificationScriptArtifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "scriptArtifact",
+        "summary",
+        "requiresRestart",
+        "environmentId",
+        "environmentRevision"
+      ],
+      "type": "object"
+    },
+    "WorkConfigurationPlanId": {
+      "description": "Strongly typed UUIDv7 identifier for `WorkConfigurationPlanId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public teacher read model for reviewing one generated Work configuration plan.\n\nControl resolves the exact script artifacts bound to the plan and returns their UTF-8\ncontents alongside the immutable plan metadata. Artifact references remain part of the plan\nfor identity checking, while the content fields make the approval decision reviewable without\nexposing object-store credentials or URLs.",
+  "properties": {
+    "plan": {
+      "$ref": "#/$defs/WorkConfigurationPlan"
+    },
+    "scriptContent": {
+      "type": "string"
+    },
+    "verificationScriptContent": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "plan",
+    "scriptContent"
+  ],
+  "title": "WorkConfigurationPlanView",
+  "type": "object"
+}

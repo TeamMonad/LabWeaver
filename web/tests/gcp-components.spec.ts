@@ -1,15 +1,68 @@
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
+import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import GcpFilterBar from '@/components/common/GcpFilterBar.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
-import { useCourseStore } from '@/stores/course'
+import { createProject, listProjects } from '@/generated/contracts'
+import { useProjects } from '@/composables/useProjects'
+
+const projects = [
+  {
+    id: 'project-cs101',
+    name: 'CS101 Operating Systems',
+    description: 'Course project',
+    ownerActorId: 'teacher-1',
+    courseId: 'cs101-operating-systems',
+    state: 'active' as const,
+    revision: 1,
+    createdAt: '2026-07-11T10:00:00.000Z',
+    updatedAt: '2026-07-11T10:00:00.000Z',
+  },
+  {
+    id: 'project-ai201',
+    name: 'AI201 Model Engineering',
+    description: 'Second project',
+    ownerActorId: 'teacher-1',
+    courseId: 'ai201-model-engineering',
+    state: 'active' as const,
+    revision: 1,
+    createdAt: '2026-07-11T10:00:00.000Z',
+    updatedAt: '2026-07-11T10:00:00.000Z',
+  },
+]
+
+vi.mock('@/generated/contracts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/generated/contracts')>()
+  return { ...actual, createProject: vi.fn(), listProjects: vi.fn() }
+})
+
+const ProjectContextHarness = defineComponent({
+  components: { GcpProjectSelector },
+  setup() {
+    const projects = useProjects()
+    return { projects }
+  },
+  template: `
+    <div>
+      <GcpProjectSelector />
+      <ul data-test="existing-project-list">
+        <li v-for="project in projects.projects.kind === 'success' ? projects.projects.data : []" :key="project.id">{{ project.id }}</li>
+      </ul>
+      <button data-test="reload-projects" type="button" @click="projects.load">reload</button>
+      <button data-test="create-project" type="button" @click="projects.create('New project')">create</button>
+    </div>
+  `,
+})
 
 describe('GCP Console Components', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    vi.resetAllMocks()
+    vi.mocked(listProjects).mockResolvedValue({ data: projects, error: undefined as never })
+    window.localStorage.clear()
   })
 
   describe('GcpStatusPill', () => {
@@ -111,11 +164,10 @@ describe('GCP Console Components', () => {
   })
 
   describe('GcpProjectSelector', () => {
-    it('displays active course ID from store', () => {
-      const store = useCourseStore()
-      store.setContext('cs101-operating-systems')
+    it('displays the selected project and its course association', async () => {
       const wrapper = mount(GcpProjectSelector)
-      expect(wrapper.text()).toContain('cs101-operating-systems')
+      await vi.waitFor(() => expect(wrapper.text()).toContain('CS101 Operating Systems'))
+      expect(wrapper.text()).toContain('project-cs101')
     })
 
     it('opens dropdown when trigger is clicked', async () => {
@@ -125,14 +177,46 @@ describe('GCP Console Components', () => {
       expect(wrapper.find('.selector-menu').exists()).toBe(true)
     })
 
-    it('switches course context on selecting an option from catalog', async () => {
-      const store = useCourseStore()
+    it('switches project context on selecting an option from the catalog', async () => {
       const wrapper = mount(GcpProjectSelector)
       await wrapper.find('.selector-trigger').trigger('click')
-      const items = wrapper.findAll('.course-item')
+      await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+      const items = wrapper.findAll('.project-item')
       expect(items.length).toBeGreaterThan(0)
-      await items[0].trigger('click')
-      expect(store.currentContext?.courseId).toBeDefined()
+      await items[1].trigger('click')
+      expect(wrapper.find('.trigger-primary').text()).toBe('AI201 Model Engineering')
+    })
+
+    it('shares the authoritative catalog with existing project consumers after creation', async () => {
+      let catalog = [...projects]
+      const createdProject = {
+        ...projects[0],
+        id: 'project-created',
+        name: 'New project',
+      }
+      vi.mocked(listProjects).mockImplementation(async () => ({ data: catalog, error: undefined as never }))
+      vi.mocked(createProject).mockImplementation(async () => {
+        catalog = [...catalog, createdProject]
+        return { data: createdProject, error: undefined as never }
+      })
+
+      const wrapper = mount(ProjectContextHarness)
+      try {
+        await wrapper.get('[data-test="reload-projects"]').trigger('click')
+        await vi.waitFor(() => expect(wrapper.get('[data-test="existing-project-list"]').text()).toContain('project-cs101'))
+
+        await wrapper.find('.selector-trigger').trigger('click')
+        await vi.waitFor(() => expect(wrapper.findAll('.selector-menu .project-item')).toHaveLength(2))
+
+        await wrapper.get('[data-test="create-project"]').trigger('click')
+        await vi.waitFor(() => expect(wrapper.get('[data-test="existing-project-list"]').text()).toContain('project-created'))
+
+        if (!wrapper.find('.selector-menu').exists()) await wrapper.find('.selector-trigger').trigger('click')
+        await vi.waitFor(() => expect(wrapper.findAll('.selector-menu .project-item')).toHaveLength(3))
+        expect(wrapper.find('.trigger-primary').text()).toBe('New project')
+      } finally {
+        wrapper.unmount()
+      }
     })
   })
 })

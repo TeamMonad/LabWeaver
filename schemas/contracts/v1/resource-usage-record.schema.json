@@ -1,0 +1,190 @@
+{
+  "$defs": {
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EventId": {
+      "description": "Strongly typed UUIDv7 identifier for `EventId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "ResourceUsageKind": {
+      "description": "Metering scope for one usage interval.\n\nCompute and retained-storage intervals are independent meters and may overlap in time.\nA known record must set non-applicable dimensions to zero so a stored interval cannot be\ninterpreted as both compute and storage usage.",
+      "enum": [
+        "compute",
+        "storage"
+      ],
+      "type": "string"
+    },
+    "ResourceUsageQuantities": {
+      "additionalProperties": false,
+      "description": "Quantities captured from a provider meter. Values are integral base units.",
+      "properties": {
+        "cpuMillicoreSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpuUnitSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryByteSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageByteSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicoreSeconds",
+        "memoryByteSeconds",
+        "storageByteSeconds",
+        "gpuUnitSeconds"
+      ],
+      "type": "object"
+    },
+    "UsageMeasurement": {
+      "description": "Known or explicitly unknown provider measurement.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "quantities": {
+              "$ref": "#/$defs/ResourceUsageQuantities"
+            },
+            "state": {
+              "const": "known",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "quantities"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UsageRecordId": {
+      "description": "Strongly typed UUIDv7 identifier for `UsageRecordId`.",
+      "type": "string"
+    },
+    "UsageSettlementState": {
+      "description": "Settlement state for one immutable usage observation.",
+      "enum": [
+        "pending",
+        "settled",
+        "unsettled"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Provider usage observation bound to a Project and optional teaching Course.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "$ref": "#/$defs/UsageRecordId"
+    },
+    "kind": {
+      "$ref": "#/$defs/ResourceUsageKind"
+    },
+    "leaseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LeaseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "measuredFrom": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "measuredUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "measurement": {
+      "$ref": "#/$defs/UsageMeasurement"
+    },
+    "observedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "requestId": {
+      "$ref": "#/$defs/ResourceRequestId"
+    },
+    "settlement": {
+      "$ref": "#/$defs/UsageSettlementState"
+    },
+    "sourceEventId": {
+      "$ref": "#/$defs/EventId"
+    }
+  },
+  "required": [
+    "id",
+    "projectId",
+    "kind",
+    "requestId",
+    "sourceEventId",
+    "measuredFrom",
+    "measuredUntil",
+    "measurement",
+    "settlement",
+    "observedAt"
+  ],
+  "title": "ResourceUsageRecord",
+  "type": "object"
+}

@@ -26,8 +26,12 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProblemPackage
     );
     document!(
-        "schemas/contracts/v1/course-llm-egress-policy.schema.json",
-        crate::authoring::CourseLlmEgressPolicy
+        "schemas/contracts/v1/project-llm-egress-policy.schema.json",
+        crate::authoring::ProjectLlmEgressPolicy
+    );
+    document!(
+        "schemas/contracts/v1/project.schema.json",
+        crate::project::Project
     );
     document!(
         "schemas/contracts/v1/agent-run.schema.json",
@@ -44,6 +48,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/candidate-approval.schema.json",
         crate::authoring::CandidateApproval
+    );
+    document!(
+        "schemas/contracts/v1/authoring-approval.schema.json",
+        crate::authoring::AuthoringApproval
+    );
+    document!(
+        "schemas/contracts/v1/authoring-approval-publication-status.schema.json",
+        crate::authoring::AuthoringApprovalPublicationStatus
     );
     document!(
         "schemas/contracts/v1/environment-spec.schema.json",
@@ -78,6 +90,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/evaluation-runtime-identity.schema.json",
         crate::evaluation::EvaluationRuntimeIdentity
+    );
+    document!(
+        "schemas/contracts/v1/evaluation-execution-binding.schema.json",
+        crate::evaluation::EvaluationExecutionBinding
+    );
+    document!(
+        "schemas/contracts/v1/approved-program-profile.schema.json",
+        crate::evaluation::ApprovedProgramProfile
     );
     document!(
         "schemas/contracts/v1/evaluation-run-identity.schema.json",
@@ -116,12 +136,24 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::supply_chain::EnvironmentTemplateRelease
     );
     document!(
+        "schemas/contracts/v1/release-withdrawal.schema.json",
+        crate::supply_chain::ReleaseWithdrawal
+    );
+    document!(
         "schemas/contracts/v1/http/environment-template-release-view.schema.json",
         crate::supply_chain::EnvironmentTemplateReleaseView
     );
     document!(
         "schemas/contracts/v1/environment-instance.schema.json",
         crate::environment::EnvironmentInstance
+    );
+    document!(
+        "schemas/contracts/v1/internal/environment-execution-binding-request.schema.json",
+        crate::environment::EnvironmentExecutionBindingRequest
+    );
+    document!(
+        "schemas/contracts/v1/internal/environment-execution-binding.schema.json",
+        crate::environment::EnvironmentExecutionBinding
     );
     document!(
         "schemas/contracts/v1/environment-summary.schema.json",
@@ -146,6 +178,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/environment-reset-target.schema.json",
         crate::environment::EnvironmentResetTarget
+    );
+    document!(
+        "schemas/contracts/v1/http/reset-environment-request.schema.json",
+        crate::http::ResetEnvironmentRequest
     );
     document!(
         "schemas/contracts/v1/environment-lease-verification-request.schema.json",
@@ -192,6 +228,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::ResourceLeaseAuthorization
     );
     document!(
+        "schemas/contracts/v1/gpu-catalog-entry.schema.json",
+        crate::resource::GpuCatalogEntry
+    );
+    document!(
+        "schemas/contracts/v1/resource-rate.schema.json",
+        crate::resource::ResourceRate
+    );
+    document!(
+        "schemas/contracts/v1/resource-usage-record.schema.json",
+        crate::resource::ResourceUsageRecord
+    );
+    document!(
+        "schemas/contracts/v1/resource-charge.schema.json",
+        crate::resource::ResourceCharge
+    );
+    document!(
+        "schemas/contracts/v1/resource-budget.schema.json",
+        crate::resource::ResourceBudget
+    );
+    document!(
         "schemas/contracts/v1/environment-endpoint.schema.json",
         crate::environment::EnvironmentEndpoint
     );
@@ -202,6 +258,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/environment-owner-resolution.schema.json",
         crate::environment::EnvironmentOwnerResolution
+    );
+    document!(
+        "schemas/contracts/v1/http/environment-work-configuration-target-query.schema.json",
+        crate::environment::EnvironmentWorkConfigurationTargetQuery
+    );
+    document!(
+        "schemas/contracts/v1/environment-work-configuration-target.schema.json",
+        crate::environment::EnvironmentWorkConfigurationTarget
     );
     document!(
         "schemas/contracts/v1/http/environment-endpoint-eligibility-request.schema.json",
@@ -324,6 +388,34 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::InternalAgentRunMutationRequest
     );
     document!(
+        "schemas/contracts/v1/http/internal-agent-llm-review-request.schema.json",
+        crate::http::InternalAgentLlmReviewRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-agent-llm-review-receipt.schema.json",
+        crate::http::InternalAgentLlmReviewReceipt
+    );
+    document!(
+        "schemas/contracts/v1/http/agent-llm-review-query.schema.json",
+        crate::http::AgentLlmReviewQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/generated-artifact-query.schema.json",
+        crate::http::GeneratedArtifactQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/generated-artifact-record.schema.json",
+        crate::http::GeneratedArtifactRecord
+    );
+    document!(
+        "schemas/contracts/v1/http/approve-work-configuration-request.schema.json",
+        crate::http::ApproveWorkConfigurationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-approve-work-configuration-request.schema.json",
+        crate::http::InternalApproveWorkConfigurationRequest
+    );
+    document!(
         "schemas/contracts/v1/http/internal-agent-build-cancellation-request.schema.json",
         crate::http::InternalAgentBuildCancellationRequest
     );
@@ -342,6 +434,42 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/internal-image-artifact-resolution.schema.json",
         crate::http::InternalImageArtifactResolution
+    );
+    document!(
+        "schemas/contracts/v1/http/authoring-publication-admission-binding.schema.json",
+        crate::http::AuthoringPublicationAdmissionBinding
+    );
+    document!(
+        "schemas/contracts/v1/http/authoring-publication-admission-query.schema.json",
+        crate::http::AuthoringPublicationAdmissionQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/work-configuration-admission-binding.schema.json",
+        crate::http::WorkConfigurationAdmissionBinding
+    );
+    document!(
+        "schemas/contracts/v1/http/work-configuration-admission-query.schema.json",
+        crate::http::WorkConfigurationAdmissionQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/container-work-execution-request.schema.json",
+        crate::http::ContainerWorkExecutionRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/container-work-execution-query.schema.json",
+        crate::http::ContainerWorkExecutionQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/agent-work-execution-intent-metadata.schema.json",
+        crate::http::AgentWorkExecutionIntentMetadata
+    );
+    document!(
+        "schemas/contracts/v1/http/agent-work-execution-intent-query.schema.json",
+        crate::http::AgentWorkExecutionIntentQuery
+    );
+    document!(
+        "schemas/contracts/v1/http/container-work-execution-receipt.schema.json",
+        crate::http::ContainerWorkExecutionReceipt
     );
     document!(
         "schemas/contracts/v1/http/internal-publish-evaluation-release-request.schema.json",
@@ -392,12 +520,36 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::CreateAgentRunRequest
     );
     document!(
-        "schemas/contracts/v1/http/create-work-agent-run-request.schema.json",
-        crate::http::CreateWorkAgentRunRequest
+        "schemas/contracts/v1/http/create-project-request.schema.json",
+        crate::project::CreateProjectRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/update-project-request.schema.json",
+        crate::project::UpdateProjectRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/add-project-membership-request.schema.json",
+        crate::http::AddProjectMembershipRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/remove-project-membership-request.schema.json",
+        crate::http::RemoveProjectMembershipRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-work-configuration-run-request.schema.json",
+        crate::http::CreateWorkConfigurationRunRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/work-configuration-plan-view.schema.json",
+        crate::http::WorkConfigurationPlanView
     );
     document!(
         "schemas/contracts/v1/http/candidate-decision-request.schema.json",
         crate::http::CandidateDecisionRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/complete-authoring-approval-request.schema.json",
+        crate::http::CompleteAuthoringApprovalRequest
     );
     document!(
         "schemas/contracts/v1/http/environment-candidate-view.schema.json",
@@ -422,6 +574,42 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/http/create-resource-request.schema.json",
         crate::http::CreateResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-task-resource-target.schema.json",
+        crate::http::CreateTaskResourceTarget
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-create-task-resource-request.schema.json",
+        crate::http::InternalCreateTaskResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/record-resource-usage-request.schema.json",
+        crate::http::RecordResourceUsageRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/task-resource-status.schema.json",
+        crate::http::TaskResourceStatus
+    );
+    document!(
+        "schemas/contracts/v1/http/acknowledge-task-resource-request.schema.json",
+        crate::http::AcknowledgeTaskResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/release-task-resource-request.schema.json",
+        crate::http::ReleaseTaskResourceRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-resource-rate-request.schema.json",
+        crate::http::CreateResourceRateRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/upsert-resource-budget-request.schema.json",
+        crate::http::UpsertResourceBudgetRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-resource-adjustment-request.schema.json",
+        crate::http::CreateResourceAdjustmentRequest
     );
     document!(
         "schemas/contracts/v1/http/approve-resource-request.schema.json",
@@ -652,6 +840,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         "schemas/contracts/v1/events/environment-template-release-withdrawn.schema.json",
         CloudEvent<events::ReleaseWithdrawn>
     );
+    document!(
+        "schemas/contracts/v1/events/authoring-approval-completed.schema.json",
+        CloudEvent<events::AuthoringApprovalCompleted>
+    );
 
     output.push(json_artifact(
         "schemas/openapi/labweaver-public.v1.json",
@@ -691,6 +883,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let method = match operation.method {
             Method::Get => "get",
             Method::Post => "post",
+            Method::Put => "put",
+            Method::Patch => "patch",
             Method::Delete => "delete",
         };
         let mut parameters = path_parameters(operation.path);
@@ -699,14 +893,50 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "listEnvironmentTemplateReleases"
                 | "listEvaluationReleases"
                 | "listOwnEvaluationResults"
+                | "listOwnProjectEvaluationResults"
                 | "listSshPublicKeys"
         ) {
             parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":512}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
         }
+        if matches!(
+            operation.operation_id,
+            "listEnvironmentTemplateReleases" | "getEnvironmentTemplateRelease"
+        ) {
+            parameters.push(json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}));
+        }
+        if matches!(
+            operation.operation_id,
+            "listProjectResourceRequests" | "listProjectResourceLeases"
+        ) {
+            parameters.push(json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}));
+        }
+        if operation.operation_id == "getInternalAuthoringPublicationAdmission" {
+            parameters.extend([
+                json!({"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}),
+                json!({"name":"approvalRevision","in":"query","required":true,"schema":{"type":"integer","minimum":1}}),
+                json!({"name":"evaluationReleaseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+            ]);
+        }
+        if operation.operation_id == "getInternalGeneratedArtifact" {
+            parameters.extend([
+                json!({"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}),
+                json!({"name":"packageId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"packageRevision","in":"query","required":true,"schema":{"type":"integer","minimum":1}}),
+            ]);
+        }
+        if operation.operation_id == "resolveEnvironmentWorkConfigurationTarget" {
+            parameters.extend([
+                json!({"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}),
+                json!({"name":"actorId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"expectedRevision","in":"query","required":true,"schema":{"type":"integer","minimum":1}}),
+            ]);
+        }
         parameters.extend(environment_management_parameters(operation.operation_id));
-        if operation.operation_id == "streamCourseEvents" {
-            parameters.push(json!({"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}));
+        if operation.operation_id == "streamProjectEvents" {
             let stream_cursor_schema = json!({
                 "type":"string",
                 "format":"uint64-decimal",
@@ -722,7 +952,13 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.mutation == MutationContract::IdempotentRevisioned {
             parameters.push(header_parameter("If-Match", true));
         }
-        if operation.security == crate::http::Security::BffSession {
+        // The BFF interceptor obtains and attaches these headers for browser
+        // mutations. Read operations authenticate through the session cookie
+        // but do not participate in the CSRF protocol, so keeping the headers
+        // off their generated options prevents callers from fabricating them.
+        if operation.security == crate::http::Security::BffSession
+            && operation.mutation != MutationContract::None
+        {
             parameters.push(json!({"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}}));
             parameters.push(json!({"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}));
         }
@@ -738,7 +974,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "security": [match (surface, operation.security) {
                 (ApiSurface::Public, crate::http::Security::Oidc) => json!({"oidc": [operation.permission]}),
                 (ApiSurface::Public, crate::http::Security::BffSession) => json!({"bffSession": []}),
-                (ApiSurface::GatewayInternal, crate::http::Security::ServiceMtls) => json!({"serviceMtls": []}),
+                (ApiSurface::GatewayInternal, crate::http::Security::ServiceJwt) => json!({"serviceJwt": [operation.permission]}),
                 _ => return Err(GenerationError::Contract("operation surface and security metadata disagree".to_owned())),
             }],
             "parameters": parameters,
@@ -763,7 +999,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if matches!(
             operation.operation_id,
-            "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision"
+            "appendProjectEnvironmentCandidateDecision"
+                | "appendProjectEvaluationCandidateDecision"
         ) {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -815,7 +1052,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             "bearerJwt": {"type":"http","scheme":"bearer","bearerFormat":"JWT"}
         })
     } else {
-        json!({"serviceMtls": {"type":"mutualTLS","description":"Deployment-controlled service identity; never exposed to browser clients."}})
+        json!({"serviceJwt": {"type":"http","scheme":"bearer","bearerFormat":"JWT","description":"Short-lived service-account JWT validated against the configured issuer, audience, signature, expiry, and route permission. Service-to-service transport is protected by TLS."}})
     };
     let value = json!({
         "openapi": "3.1.0",
@@ -837,13 +1074,29 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
-                ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
-                ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
+                ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
+                ,"EnvironmentWorkConfigurationTargetQuery": contract_ref("http/environment-work-configuration-target-query")
+                 ,"InternalCreateAgentRunRequest": contract_ref("http/internal-create-agent-run-request")
+                 ,"InternalAgentRunMutationRequest": contract_ref("http/internal-agent-run-mutation-request")
+                 ,"InternalAgentLlmReviewRequest": contract_ref("http/internal-agent-llm-review-request")
+                 ,"InternalAgentLlmReviewReceipt": contract_ref("http/internal-agent-llm-review-receipt")
+                 ,"AgentLlmReviewQuery": contract_ref("http/agent-llm-review-query")
+                 ,"GeneratedArtifactRecord": contract_ref("http/generated-artifact-record")
+                ,"InternalApproveWorkConfigurationRequest": contract_ref("http/internal-approve-work-configuration-request")
                 ,"InternalAgentBuildCancellationRequest": contract_ref("http/internal-agent-build-cancellation-request")
                 ,"InternalAgentBuildCancellationResult": contract_ref("http/internal-agent-build-cancellation-result")
                 ,"InternalAgentBuildStatusQuery": contract_ref("http/internal-agent-build-status-query")
                 ,"InternalAgentRunOutcome": contract_ref("http/internal-agent-run-outcome")
                 ,"InternalImageArtifactResolution": contract_ref("http/internal-image-artifact-resolution")
+                ,"AuthoringPublicationAdmissionBinding": contract_ref("http/authoring-publication-admission-binding")
+                ,"AuthoringPublicationAdmissionQuery": contract_ref("http/authoring-publication-admission-query")
+                ,"WorkConfigurationAdmissionBinding": contract_ref("http/work-configuration-admission-binding")
+                ,"WorkConfigurationAdmissionQuery": contract_ref("http/work-configuration-admission-query")
+                 ,"ContainerWorkExecutionRequest": contract_ref("http/container-work-execution-request")
+                 ,"ContainerWorkExecutionQuery": contract_ref("http/container-work-execution-query")
+                 ,"ContainerWorkExecutionReceipt": contract_ref("http/container-work-execution-receipt")
+                 ,"AgentWorkExecutionIntentMetadata": contract_ref("http/agent-work-execution-intent-metadata")
+                 ,"AgentWorkExecutionIntentQuery": contract_ref("http/agent-work-execution-intent-query")
                 ,"EvaluationRelease": contract_ref("evaluation-release")
                 ,"EvaluationRun": contract_ref("evaluation-run")
                 ,"StudentEvaluationResult": contract_ref("student-evaluation-result")
@@ -852,6 +1105,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"InternalCreateEvaluationRunRequest": contract_ref("http/internal-create-evaluation-run-request")
                 ,"InternalEvaluationRunMutationRequest": contract_ref("http/internal-evaluation-run-mutation-request")
                 ,"InternalCompleteEvaluationStepRequest": contract_ref("http/internal-complete-evaluation-step-request")
+                ,"EnvironmentExecutionBindingRequest": contract_ref("internal/environment-execution-binding-request")
+                ,"EnvironmentExecutionBinding": contract_ref("internal/environment-execution-binding")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -891,78 +1146,98 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
         ApiSurface::GatewayInternal => {
             paths.insert(
                 "/internal/v1/auth/decision".to_owned(),
-                json!({"post":{"operationId":"decideAuthorization","summary":"Evaluate an actor session and exact resource scope for an mTLS caller","security":[{"serviceMtls":[]}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecisionRequest"}}}},"responses":{"200":{"description":"Expiry-bounded authorization decision","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecision"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"decideAuthorization","summary":"Evaluate an actor session and exact resource scope for a service JWT caller","security": internal_security("authorization:decide"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecisionRequest"}}}},"responses":{"200":{"description":"Expiry-bounded authorization decision","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AuthorizationDecision"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs".to_owned(),
-                json!({"post":{"operationId":"createInternalAgentRun","summary":"Reserve an Agent-owned run from a Control-verified immutable package and policy","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCreateAgentRunRequest"}}}},"responses":{"202":{"description":"AgentRun accepted","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"createInternalAgentRun","summary":"Reserve an Agent-owned run from a Control-verified immutable package and policy","security": internal_security("agent_run:create"),"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCreateAgentRunRequest"}}}},"responses":{"202":{"description":"AgentRun accepted","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/agent-runs/{runId}/work-configuration/approve".to_owned(),
+                json!({"post":{"operationId":"approveInternalWorkConfigurationRun","summary":"Bind one exact Work configuration preauthorization to an AgentRun awaiting approval","security": internal_security("agent_run:approve"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalApproveWorkConfigurationRequest"}}}},"responses":{"202":{"description":"AgentRun accepted for Work configuration execution","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}".to_owned(),
-                json!({"get":{"operationId":"getInternalAgentRun","summary":"Read the authoritative Agent-owned run","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalAgentRun","summary":"Read the authoritative Agent-owned run","security": internal_security("agent_run:read"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/cancel".to_owned(),
-                json!({"post":{"operationId":"cancelInternalAgentRun","summary":"Request cancellation at an exact AgentRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"cancelInternalAgentRun","summary":"Request cancellation at an exact AgentRun revision","security": internal_security("agent_run:cancel"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/build-requests/{buildRequestId}/cancel".to_owned(),
-                json!({"post":{"operationId":"cancelInternalAgentBuild","summary":"Request one actor-attributed build cancellation at an exact course, state and revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationRequest"}}}},"responses":{"202":{"description":"Durable cancellation requested","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"cancelInternalAgentBuild","summary":"Request one actor-attributed build cancellation at an exact course, state and revision","security": internal_security("agent_build:cancel"),"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationRequest"}}}},"responses":{"202":{"description":"Durable cancellation requested","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/llm-reviews".to_owned(),
+                json!({"post":{"operationId":"createInternalAgentLlmReview","summary":"Queue one bounded advisory Agent LLM review","security": internal_security("agent.llm_review.create"),"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentLlmReviewRequest"}}}},"responses":{"202":{"description":"LLM review queued","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentLlmReviewReceipt"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/llm-reviews/{taskRunId}".to_owned(),
+                json!({"get":{"operationId":"getInternalAgentLlmReview","summary":"Read one Agent LLM review receipt","security": internal_security("agent.llm_review.read"),"parameters":[{"name":"taskRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}],"responses":{"200":{"description":"LLM review receipt","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentLlmReviewReceipt"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/llm-reviews/{taskRunId}/cancel".to_owned(),
+                json!({"post":{"operationId":"cancelInternalAgentLlmReview","summary":"Persist cancellation for one Agent LLM review","security": internal_security("agent.llm_review.cancel"),"parameters":[{"name":"taskRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"responses":{"200":{"description":"Updated LLM review receipt","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentLlmReviewReceipt"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/build-requests/{buildRequestId}".to_owned(),
-                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security":[{"serviceMtls":[]}],"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security": internal_security("agent_build:read"),"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/tracks/{track}/retry".to_owned(),
-                json!({"post":{"operationId":"retryInternalAgentRunTrack","summary":"Retry one failed AgentRun track at an exact revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"track","in":"path","required":true,"schema":{"type":"string","enum":["environment","evaluation"]}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"retryInternalAgentRunTrack","summary":"Retry one failed AgentRun track at an exact revision","security": internal_security("agent_run:retry"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"track","in":"path","required":true,"schema":{"type":"string","enum":["environment","evaluation"]}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative AgentRun","content":{"application/json":{"schema":{"$ref":"./agent-run.schema.json"}}}},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/outcome".to_owned(),
-                json!({"get":{"operationId":"getInternalAgentRunOutcome","summary":"Resolve the authoritative run and retained candidate checkpoints","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative outcome","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunOutcome"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalAgentRunOutcome","summary":"Resolve the authoritative run and retained candidate checkpoints","security": internal_security("agent_run:outcome"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative outcome","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentRunOutcome"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+            );
+            paths.insert(
+                "/internal/v1/agent-runs/{runId}/work-execution-intent".to_owned(),
+                json!({"get":{"operationId":"getInternalAgentWorkExecutionIntent","summary":"Read persisted VM Work execution metadata","security": internal_security("agent.control.invoke"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}},{"name":"executionId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Persisted VM Work execution metadata","content":{"application/json":{"schema":{"$ref":"#/components/schemas/AgentWorkExecutionIntentMetadata"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"409":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/image-artifacts/{artifactId}".to_owned(),
-                json!({"get":{"operationId":"resolveInternalImageArtifact","summary":"Resolve one Agent-owned verified artifact identity","security":[{"serviceMtls":[]}],"parameters":[{"name":"artifactId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative artifact resolution","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalImageArtifactResolution"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"resolveInternalImageArtifact","summary":"Resolve one Agent-owned verified artifact identity","security": internal_security("agent_artifact:read"),"parameters":[{"name":"artifactId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative artifact resolution","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalImageArtifactResolution"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-releases".to_owned(),
                 json!({
-                    "post":{"operationId":"publishInternalEvaluationRelease","summary":"Publish one Control-approved immutable EvaluationSpec release","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalPublishEvaluationReleaseRequest"}}}},"responses":{"201":{"description":"EvaluationRelease created","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}},
-                    "get":{"operationId":"listInternalEvaluationReleases","summary":"List authoritative Evaluation releases for one course","security":[{"serviceMtls":[]}],"parameters":[{"name":"x-labweaver-course-id","in":"header","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}],"responses":{"200":{"description":"Evaluation releases","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/EvaluationRelease"}}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}
+                    "post":{"operationId":"publishInternalEvaluationRelease","summary":"Publish one Control-approved immutable EvaluationSpec release","security": internal_security("evaluation_release:publish"),"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalPublishEvaluationReleaseRequest"}}}},"responses":{"201":{"description":"EvaluationRelease created","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}},
+                    "get":{"operationId":"listInternalEvaluationReleases","summary":"List authoritative Evaluation releases for one course","security": internal_security("evaluation_release:read"),"parameters":[{"name":"x-labweaver-course-id","in":"header","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}],"responses":{"200":{"description":"Evaluation releases","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/EvaluationRelease"}}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}
                 }),
             );
             paths.insert(
                 "/internal/v1/evaluation-releases/{releaseId}".to_owned(),
-                json!({"get":{"operationId":"getInternalEvaluationRelease","summary":"Read one authoritative Evaluation release","security":[{"serviceMtls":[]}],"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalEvaluationRelease","summary":"Read one authoritative Evaluation release","security": internal_security("evaluation_release:read_one"),"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-releases/{releaseId}/withdraw".to_owned(),
-                json!({"post":{"operationId":"withdrawInternalEvaluationRelease","summary":"Withdraw one Evaluation release at an exact revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}},{"name":"If-Match","in":"header","required":true,"schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalWithdrawEvaluationReleaseRequest"}}}},"responses":{"200":{"description":"Withdrawn EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"412":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"withdrawInternalEvaluationRelease","summary":"Withdraw one Evaluation release at an exact revision","security": internal_security("evaluation_release:withdraw"),"parameters":[{"name":"releaseId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}},{"name":"If-Match","in":"header","required":true,"schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalWithdrawEvaluationReleaseRequest"}}}},"responses":{"200":{"description":"Withdrawn EvaluationRelease","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRelease"}}}},"409":{"$ref":"#/components/responses/Problem"},"412":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs".to_owned(),
-                json!({"post":{"operationId":"createInternalEvaluationRun","summary":"Reserve one EvaluationRun from an active release and immutable FrozenSubmission","security":[{"serviceMtls":[]}],"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCreateEvaluationRunRequest"}}}},"responses":{"202":{"description":"EvaluationRun accepted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"createInternalEvaluationRun","summary":"Reserve one EvaluationRun from an active release and immutable FrozenSubmission","security": internal_security("evaluation_run:create"),"parameters":[{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCreateEvaluationRunRequest"}}}},"responses":{"202":{"description":"EvaluationRun accepted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs/{runId}".to_owned(),
-                json!({"get":{"operationId":"getInternalEvaluationRun","summary":"Read one authoritative EvaluationRun","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalEvaluationRun","summary":"Read one authoritative EvaluationRun","security": internal_security("evaluation_run:read"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs/{runId}/cancel".to_owned(),
-                json!({"post":{"operationId":"cancelInternalEvaluationRun","summary":"Request cancellation at an exact EvaluationRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"cancelInternalEvaluationRun","summary":"Request cancellation at an exact EvaluationRun revision","security": internal_security("evaluation_run:cancel"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/retry".to_owned(),
-                json!({"post":{"operationId":"retryInternalEvaluationStep","summary":"Retry one failed or cancelled StepRun at an exact EvaluationRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"retryInternalEvaluationStep","summary":"Retry one failed or cancelled StepRun at an exact EvaluationRun revision","security": internal_security("evaluation_step:retry"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/cleanup".to_owned(),
-                json!({"post":{"operationId":"verifyInternalEvaluationStepCleanup","summary":"Verify cleanup for one failed or cancelled StepRun at an exact EvaluationRun revision","security":[{"serviceMtls":[]}],"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"verifyInternalEvaluationStepCleanup","summary":"Verify cleanup for one failed or cancelled StepRun at an exact EvaluationRun revision","security": internal_security("evaluation_step:cleanup"),"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalEvaluationRunMutationRequest"}}}},"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/evaluation-runs/{runId}/steps/{stepRunId}/complete".to_owned(),
-                json!({"post":{"operationId":"completeInternalEvaluationStep","summary":"Complete one fenced StepRun attempt with hash-only evidence","security":[{"serviceMtls":[]}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCompleteEvaluationStepRequest"}}}},"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"completeInternalEvaluationStep","summary":"Complete one fenced StepRun attempt with hash-only evidence","security": internal_security("evaluation_step:complete"),"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalCompleteEvaluationStepRequest"}}}},"parameters":[{"name":"runId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"stepRunId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Updated authoritative EvaluationRun","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationRun"}}}},"409":{"$ref":"#/components/responses/Problem"},"422":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
         }
     }
@@ -988,8 +1263,8 @@ fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
     let limit = || json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}});
     match operation_id {
         "listEnvironments" => vec![
-            json!({"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
-            json!({"name":"projectId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
+            json!({"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+            json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}),
             json!({"name":"runtimeKind","in":"query","required":false,"schema":{"type":"string","enum":["container","virtual_machine"]}}),
             json!({"name":"class","in":"query","required":false,"schema":{"type":"string","enum":["experiment","work"]}}),
             json!({"name":"desiredState","in":"query","required":false,"schema":{"type":"string","enum":["running","stopped","deleted"]}}),
@@ -1000,7 +1275,7 @@ fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
         ],
         "listEnvironmentOperations" => vec![
             json!({"name":"kind","in":"query","required":false,"schema":{"type":"string","enum":["create","start","stop","restart","reset","retry","cancel","recover","expire","delete","cleanup","freeze"]}}),
-            json!({"name":"state","in":"query","required":false,"schema":{"type":"string","enum":["accepted","running","cancelling","succeeded","failed","cancelled","timed_out"]}}),
+            json!({"name":"state","in":"query","required":false,"schema":{"type":"string","enum":["accepted","running","cancelling","succeeded","failed","cancelled"]}}),
             cursor(),
             limit(),
         ],
@@ -1030,7 +1305,7 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
             "LW_HTTP_SERVICE_UNAVAILABLE",
             "LW_HTTP_INTERNAL",
         ],
-        "streamCourseEvents" => vec![
+        "streamProjectEvents" => vec![
             "LW_CONTRACT_DOCUMENT_INVALID",
             "LW_HTTP_UNAUTHENTICATED",
             "LW_ACCESS_DENIED",
@@ -1101,14 +1376,21 @@ fn contract_ref(name: &str) -> Value {
 
 fn request_schema(operation_id: &str) -> Option<Value> {
     let name = match operation_id {
-        "createProblemPackageUpload" => "http/create-problem-package-upload-request",
-        "completeProblemPackageUpload" => "http/complete-problem-package-upload-request",
-        "createCourseLlmPolicy" => "course-llm-egress-policy",
-        "createAgentRun" => "http/create-agent-run-request",
-        "createWorkAgentRun" => "http/create-work-agent-run-request",
-        "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
-            "http/candidate-decision-request"
-        }
+        "createProject" => "http/create-project-request",
+        "updateProject" => "http/update-project-request",
+        "addProjectMembership" => "http/add-project-membership-request",
+        "removeProjectMembership" => "http/remove-project-membership-request",
+        "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
+        "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
+        "createProjectLlmPolicy" => "project-llm-egress-policy",
+        "createProjectAgentRun" => "http/create-agent-run-request",
+        "createInternalAgentLlmReview" => "http/internal-agent-llm-review-request",
+        "createProjectWorkConfigurationRun" => "http/create-work-configuration-run-request",
+        "approveProjectWorkConfigurationRun" => "http/approve-work-configuration-request",
+        "completeProjectAuthoringApproval" => "http/complete-authoring-approval-request",
+        "createTaskResourceRequest" => "http/internal-create-task-resource-request",
+        "appendProjectEnvironmentCandidateDecision"
+        | "appendProjectEvaluationCandidateDecision" => "http/candidate-decision-request",
         "createEnvironmentTemplateRelease" => "http/create-environment-template-release-request",
         "createEvaluationRelease" => "http/create-evaluation-release-request",
         "withdrawEvaluationRelease" => "http/withdraw-evaluation-release-request",
@@ -1116,14 +1398,25 @@ fn request_schema(operation_id: &str) -> Option<Value> {
             "http/withdraw-environment-template-release-request"
         }
         "createEnvironment" => "http/create-environment-request",
-        "createResourceRequest" => "http/create-resource-request",
-        "approveResourceRequest" | "resizeAndApproveResourceRequest" => {
-            "http/approve-resource-request"
+        "resetEnvironment" => "http/reset-environment-request",
+        "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
+        "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
+        "createResourceRate" => "http/create-resource-rate-request",
+        "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
+        "createProjectResourceChargeAdjustment" => "http/create-resource-adjustment-request",
+        "recordResourceUsage" | "recordInternalResourceUsage" => {
+            "http/record-resource-usage-request"
         }
-        "cancelResourceRequest"
+        "acknowledgeTaskResource" => "http/acknowledge-task-resource-request",
+        "releaseTaskResource" => "http/release-task-resource-request",
+        "cancelTaskResource"
+        | "cancelResourceRequest"
         | "rejectResourceRequest"
         | "retryResourceRequest"
         | "revokeResourceLease" => "http/resource-request-mutation",
+        "approveResourceRequest" | "resizeAndApproveResourceRequest" => {
+            "http/approve-resource-request"
+        }
         "renewResourceLease" => "http/renew-resource-lease",
         "freezeSubmission" => "http/freeze-submission-request",
         "createSshPublicKey" => "http/create-ssh-public-key-request",
@@ -1134,6 +1427,10 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "authorizeSsh" => "ssh-authorization-request",
         "resolveEnvironmentOwner" => "http/environment-owner-resolution-request",
         "resolveEndpointEligibility" => "http/environment-endpoint-eligibility-request",
+        "resolveEnvironmentEvaluationExecutionBinding"
+        | "resolveEnvironmentWorkExecutionBinding" => {
+            "internal/environment-execution-binding-request"
+        }
         "createGatewaySession" => "create-gateway-session-request",
         "heartbeatGatewaySession" => "heartbeat-gateway-session-request",
         "closeGatewaySession" => "close-gateway-session-request",
@@ -1144,48 +1441,109 @@ fn request_schema(operation_id: &str) -> Option<Value> {
 
 fn response_schema(operation_id: &str) -> Option<Value> {
     let schema = match operation_id {
-        "createProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
-        "getProblemPackage" | "completeProblemPackageUpload" => contract_ref("problem-package"),
-        "createCourseLlmPolicy" | "getActiveCourseLlmPolicy" => {
-            contract_ref("course-llm-egress-policy")
+        "createProject" | "getProject" | "updateProject" | "archiveProject" => {
+            contract_ref("project")
         }
-        "createAgentRun" | "createWorkAgentRun" | "getAgentRun" | "cancelAgentRun"
-        | "retryAgentRunTrack" => contract_ref("agent-run"),
-        "getEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
-        "getEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
+        "listProjects" => json!({
+            "type":"array",
+            "items":contract_ref("project")
+        }),
+        "listProjectMemberships" => json!({
+            "type":"array",
+            "items":contract_ref("project-membership")
+        }),
+        "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
+        "createProjectProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
+        "getProjectProblemPackage" | "completeProjectProblemPackageUpload" => {
+            contract_ref("problem-package")
+        }
+        "createProjectLlmPolicy"
+        | "getActiveProjectLlmPolicy"
+        | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
+        "createProjectAgentRun"
+        | "createProjectWorkConfigurationRun"
+        | "approveProjectWorkConfigurationRun"
+        | "getProjectAgentRun"
+        | "cancelProjectAgentRun"
+        | "retryProjectAgentRunTrack" => contract_ref("agent-run"),
+        "createInternalAgentLlmReview"
+        | "getInternalAgentLlmReview"
+        | "cancelInternalAgentLlmReview" => contract_ref("http/internal-agent-llm-review-receipt"),
+        "getInternalAgentWorkExecutionIntent" => {
+            contract_ref("http/agent-work-execution-intent-metadata")
+        }
+        "getProjectWorkConfigurationPlan" => contract_ref("http/work-configuration-plan-view"),
+        "completeProjectAuthoringApproval" => contract_ref("authoring-approval"),
+        "getProjectAuthoringApproval" => contract_ref("authoring-approval-publication-status"),
+        "getProjectEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
+        "getProjectEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "createEvaluationRelease" | "getEvaluationRelease" | "withdrawEvaluationRelease" => {
             contract_ref("evaluation-release")
         }
         "listEvaluationReleases" => {
             json!({"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":contract_ref("evaluation-release")} ,"nextCursor":{"type":["string","null"]}}})
         }
-        "getOwnEvaluationResult" => contract_ref("student-evaluation-result"),
-        "listOwnEvaluationResults" => {
+        "getOwnEvaluationResult" | "getOwnProjectEvaluationResult" => {
+            contract_ref("student-evaluation-result")
+        }
+        "listOwnEvaluationResults" | "listOwnProjectEvaluationResults" => {
             json!({"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":contract_ref("student-evaluation-result")} ,"nextCursor":{"type":["string","null"]}}})
         }
-        "appendEnvironmentCandidateDecision" | "appendEvaluationCandidateDecision" => {
-            contract_ref("candidate-approval")
-        }
+        "appendProjectEnvironmentCandidateDecision"
+        | "appendProjectEvaluationCandidateDecision" => contract_ref("candidate-approval"),
         "getEnvironmentTemplateRelease" => contract_ref("http/environment-template-release-view"),
+        "withdrawEnvironmentTemplateRelease" => contract_ref("release-withdrawal"),
         "listEnvironmentTemplateReleases" => {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
         "getEnvironment" => contract_ref("environment-instance"),
-        "getResourceRequest" => contract_ref("resource-request"),
-        "listResourceRequests" => {
+        "getInternalAuthoringPublicationAdmission" => {
+            contract_ref("http/authoring-publication-admission-binding")
+        }
+        "getInternalGeneratedArtifact" => contract_ref("http/generated-artifact-record"),
+        "resolveEnvironmentWorkConfigurationTarget" => {
+            contract_ref("environment-work-configuration-target")
+        }
+        "recordResourceUsage" | "recordInternalResourceUsage" => {
+            contract_ref("resource-usage-record")
+        }
+        "claimTaskResource"
+        | "acknowledgeTaskResource"
+        | "getTaskResource"
+        | "releaseTaskResource" => contract_ref("http/task-resource-status"),
+        "getResourceRequest"
+        | "cancelTaskResource"
+        | "createTaskResourceRequest"
+        | "getTaskResourceRequest" => contract_ref("resource-request"),
+        "listResourceRequests" | "listProjectResourceRequests" => {
             json!({"type":"array","items":contract_ref("resource-request")})
         }
+        "listResourceGpuCatalog" => {
+            json!({"type":"array","items":contract_ref("gpu-catalog-entry")})
+        }
+        "createResourceGpuCatalogEntry" => contract_ref("gpu-catalog-entry"),
+        "listResourceRates" => {
+            json!({"type":"array","items":contract_ref("resource-rate")})
+        }
+        "createResourceRate" => contract_ref("resource-rate"),
+        "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
+            contract_ref("resource-budget")
+        }
+        "listProjectResourceCharges" => {
+            json!({"type":"array","items":contract_ref("resource-charge")})
+        }
+        "createProjectResourceChargeAdjustment" => contract_ref("resource-charge"),
         "getResourceLease" | "renewResourceLease" | "revokeResourceLease" => {
             contract_ref("resource-lease")
         }
-        "listResourceLeases" => {
+        "listResourceLeases" | "listProjectResourceLeases" => {
             json!({"type":"array","items":contract_ref("resource-lease")})
         }
         "listEnvironments" => contract_ref("http/environment-summary-page"),
         "getEnvironmentOperation" => contract_ref("environment-operation-snapshot"),
         "listEnvironmentOperations" => contract_ref("http/environment-operation-page"),
         "listEnvironmentAccessGrants" => contract_ref("http/environment-access-grant-page"),
-        "streamCourseEvents" => contract_ref("http/environment-management-event"),
+        "streamProjectEvents" => contract_ref("http/environment-management-event"),
         "listEnvironmentEndpoints" => {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("environment-endpoint")}}})
         }
@@ -1200,6 +1558,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "authorizeSsh" => contract_ref("ssh-authorization"),
         "resolveEnvironmentOwner" => contract_ref("environment-owner-resolution"),
         "resolveEndpointEligibility" => contract_ref("environment-endpoint-eligibility"),
+        "resolveEnvironmentEvaluationExecutionBinding"
+        | "resolveEnvironmentWorkExecutionBinding" => {
+            contract_ref("internal/environment-execution-binding")
+        }
         "createGatewaySession" | "heartbeatGatewaySession" | "closeGatewaySession" => {
             contract_ref("gateway-session")
         }
@@ -1216,6 +1578,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "deleteEnvironment",
             "freezeSubmission",
             "createResourceRequest",
+            "createProjectResourceRequest",
             "approveResourceRequest",
             "resizeAndApproveResourceRequest",
             "cancelResourceRequest",
@@ -1242,6 +1605,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
                 contract_ref("http/environment-operation-accepted")
             } else if [
                 "createResourceRequest",
+                "createProjectResourceRequest",
                 "approveResourceRequest",
                 "resizeAndApproveResourceRequest",
                 "cancelResourceRequest",
@@ -1260,6 +1624,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
     Some(schema)
 }
 
+fn internal_security(permission: &str) -> Value {
+    json!([{"serviceJwt":[permission]}])
+}
+
 fn operation_responses(
     operation_id: &str,
     success_status: u16,
@@ -1274,7 +1642,7 @@ fn operation_responses(
         });
     }
     if let Some(schema) = response_schema {
-        let media_type = if operation_id == "streamCourseEvents" {
+        let media_type = if operation_id == "streamProjectEvents" {
             "text/event-stream"
         } else {
             "application/json"
@@ -1289,7 +1657,7 @@ fn operation_responses(
             &[400, 401, 403, 409, 410, 422, 429, 500, 503]
         }
         "getEnvironmentOperation" => &[400, 401, 403, 404, 409, 429, 500, 503],
-        "streamCourseEvents" => &[400, 401, 403, 409, 410, 429, 500, 503],
+        "streamProjectEvents" => &[400, 401, 403, 409, 410, 429, 500, 503],
         _ => &[400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 503],
     };
     for code in error_statuses {
@@ -1380,9 +1748,9 @@ mod tests {
             );
         }
         for path in [
-            "/api/v1/courses/{courseId}/agent-runs",
-            "/api/v1/courses/{courseId}/agent-runs/{runId}/cancel",
-            "/api/v1/courses/{courseId}/agent-runs/{runId}/tracks/{track}/retry",
+            "/api/v1/projects/{projectId}/agent-runs",
+            "/api/v1/projects/{projectId}/agent-runs/{runId}/cancel",
+            "/api/v1/projects/{projectId}/agent-runs/{runId}/tracks/{track}/retry",
         ] {
             assert_eq!(
                 public_document.pointer(&format!(
@@ -1395,7 +1763,9 @@ mod tests {
         }
         assert!(internal.contains("/internal/v1/auth/decision"));
         assert!(internal.contains("AuthorizationDecisionRequest"));
-        assert!(internal.contains("mutualTLS"));
+        assert!(internal.contains("serviceJwt"));
+        assert!(!internal.contains("serviceMtls"));
+        assert!(!internal.contains("mutualTLS"));
         let release_view = generated
             .iter()
             .find(|item| {

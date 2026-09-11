@@ -7,23 +7,27 @@ use std::time::Duration;
 use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
 use async_trait::async_trait;
 use contracts::authoring::{
-    AgentAttempt, AgentAttemptState, AgentRun, AgentRunState, AgentTrack, AgentTrackKind, LlmUsage,
-    RuntimeKind,
+    AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
+    AgentTrackKind, EnvironmentClass, LlmUsage,
 };
 use contracts::events::{AgentRunEvent, CloudEvent, DATA_SCHEMA_BASE, SPEC_VERSION, subjects};
-use contracts::http::InternalAgentRunOutcome;
+use contracts::http::{GeneratedArtifactQuery, GeneratedArtifactRecord, InternalAgentRunOutcome};
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::{
-    AgentRunId, CourseId, EventId, PolicyId, ProblemPackageId, Revision, Sequence, UtcTimestamp,
+    AgentRunId, ArtifactRef, CourseId, EventId, PolicyId, ProblemPackageId, ProjectId, Revision,
+    Sequence, UtcTimestamp,
 };
 use control_service::clients::DownstreamError;
 use control_service::messaging::{AgentAuthority, AgentRunConsumer};
 use control_service::{ContainerBuildPolicy, ControlConfig, ControlService};
-use persistence_sqlx::Sha256Digest;
+use persistence_sqlx::{Domain, Sha256Digest};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+
+mod support;
+use support::apply_domain_migrations;
 
 #[tokio::test]
 #[allow(
@@ -40,12 +44,7 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
             postgres.get_host_port_ipv4(5432).await?
         ))
         .await?;
-    sqlx::raw_sql(&format!(
-        "CREATE SCHEMA control; SET search_path TO control;\n{}",
-        include_str!("../../../migrations/control/0001_platform_baseline.sql")
-    ))
-    .execute(&pool)
-    .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
     let service = ControlService::new(pool.clone(), Arc::new(UnusedObjects), config()?)?;
 
     let nats = GenericImage::new("nats", "2.11.8-alpine")
@@ -199,11 +198,14 @@ async fn assert_projection(
 fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
     let run = AgentRun {
         id: AgentRunId::new(),
-        course_id: CourseId::new(),
+        project_id: ProjectId::new(),
+        course_id: Some(CourseId::new()),
         package_id: ProblemPackageId::new(),
         policy_id: PolicyId::new(),
         policy_revision: Revision::new(1)?,
-        requested_runtime: RuntimeKind::Container,
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Experiment,
+        },
         state: AgentRunState::Requested,
         revision: Revision::new(1)?,
         tracks: vec![
@@ -218,6 +220,7 @@ fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
                 candidate_id: None,
             },
         ],
+        plan: None,
     };
     run.validate()?;
     Ok(run)
@@ -249,6 +252,7 @@ fn failed_outcome(
         run,
         environment_candidate: None,
         evaluation_candidate: None,
+        plan: None,
     };
     outcome.validate()?;
     Ok(outcome)
@@ -276,6 +280,7 @@ fn event(
         time: "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
         datacontenttype: "application/json".to_owned(),
         dataschema: format!("{DATA_SCHEMA_BASE}/{schema}.schema.json"),
+        project_id: run.project_id,
         course_id: run.course_id,
         aggregate_revision: run.revision,
         aggregate_sequence: Sequence(sequence),
@@ -312,12 +317,24 @@ impl AgentAuthority for FakeAuthority {
             Ok(self.outcome.clone())
         }
     }
+
+    async fn generated_artifact(
+        &self,
+        _: contracts::ArtifactId,
+        _: &GeneratedArtifactQuery,
+    ) -> Result<GeneratedArtifactRecord, DownstreamError> {
+        Err(DownstreamError::NotFound)
+    }
 }
 
 struct UnusedObjects;
 
 #[async_trait]
 impl ImmutableObjectStore for UnusedObjects {
+    fn binding(&self) -> &'static str {
+        "unused-v1"
+    }
+
     async fn presign_upload(
         &self,
         _: &str,
@@ -331,9 +348,7 @@ impl ImmutableObjectStore for UnusedObjects {
     async fn read_verified(
         &self,
         _: &str,
-        _: &str,
-        _: u64,
-        _: &str,
+        _: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectUnavailable)
     }
@@ -393,12 +408,8 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
         },
         evaluation_runtime: control_service::EvaluationRuntimePolicy {
-            source_sha256: Sha256Digest::of_bytes(b"source"),
             provider_binding: "evaluation-primary-v1".to_owned(),
-            configuration_sha256: Sha256Digest::of_bytes(b"configuration"),
-            migration_catalog_sha256: Sha256Digest::of_bytes(b"migrations"),
             runner_image: format!("runner@sha256:{}", "a".repeat(64)),
-            runtime_artifact_sha256: Sha256Digest::of_bytes(b"runtime"),
         },
     })
 }
