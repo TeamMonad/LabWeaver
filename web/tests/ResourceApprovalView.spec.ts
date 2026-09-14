@@ -175,7 +175,7 @@ describe('ResourceApprovalView provider binding rules', () => {
     const { approval, wrapper } = mountView(taskRequestOne, { kind: 'empty' }, [taskRequestOne, taskRequestTwo, cpuRequest])
     const batchCheckboxes = wrapper.findAll('input[aria-label^="选择任务请求"]')
     expect(batchCheckboxes).toHaveLength(2)
-    expect(wrapper.text()).toContain('当前 API 没有 submission 关联契约')
+    expect(wrapper.text()).toContain('仅处理你勾选的待审批评测任务；每项操作前都会重新校验当前状态，单项失败会保留并单独显示。')
 
     await batchCheckboxes[0].setValue(true)
     await batchCheckboxes[1].setValue(true)

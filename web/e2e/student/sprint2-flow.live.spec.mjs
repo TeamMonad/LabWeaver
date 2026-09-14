@@ -324,7 +324,7 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
   const page = await context.newPage()
   try {
     await page.goto('/admin/resource-approval', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '资源审批与 Lease 管理', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '资源审批与资源使用授权管理', exact: true })).toBeVisible()
     const row = page.locator('tbody tr').filter({ hasText: requestBody.requestKey })
     await expect(row).toHaveCount(1, { timeout: 120_000 })
     await row.click()

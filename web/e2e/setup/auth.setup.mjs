@@ -30,7 +30,7 @@ const actors = Object.freeze([
     destination: path.join(authDir, 'platform-admin.json'),
     landingPath: '/admin/resource-approval',
     entryLabel: '资源审批',
-    heading: '资源审批与 Lease 管理',
+    heading: '资源审批与资源使用授权管理',
   }),
 ])
 
