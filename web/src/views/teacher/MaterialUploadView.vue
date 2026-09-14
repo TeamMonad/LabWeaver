@@ -511,12 +511,8 @@ import type { AgentRunSchema } from '@/generated/contracts'
 import type { UploadFile } from '@/composables/useProjectProblemPackageUpload'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
-// Keep the view renderable in the small, router-less unit mounts used for
-// upload-state tests. The production route/router are always provided by the
-// app shell; the local no-op only protects those isolated mounts from trying
-// to read an absent injection.
-const route = useRoute() ?? ({ query: {} } as ReturnType<typeof useRoute>)
-const router = useRouter() ?? ({ replace: async () => undefined } as unknown as ReturnType<typeof useRouter>)
+const route = useRoute()
+const router = useRouter()
 const projects = useProjects()
 const projectId = computed(() => projects.selectedProjectId)
 const courseId = computed(() => projects.selectedProject?.courseId ?? null)

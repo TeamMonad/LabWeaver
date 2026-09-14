@@ -1,17 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import MaterialUploadView from '@/views/teacher/MaterialUploadView.vue'
 import { getActiveProjectLlmPolicy, listProjects } from '@/generated/contracts'
-
-vi.mock('vue-router', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('vue-router')>()
-  return {
-    ...actual,
-    useRoute: vi.fn(() => ({ query: {} })),
-    useRouter: vi.fn(() => ({ replace: vi.fn() })),
-  }
-})
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -62,6 +54,20 @@ const mockPolicy = {
 }
 
 describe('MaterialUploadView', () => {
+  async function mountView() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/teacher/materials', component: MaterialUploadView }],
+    })
+    await router.push('/teacher/materials')
+    await router.isReady()
+
+    const wrapper = mount(MaterialUploadView, {
+      global: { plugins: [router] },
+    })
+    return { router, wrapper }
+  }
+
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.resetAllMocks()
@@ -70,7 +76,7 @@ describe('MaterialUploadView', () => {
   it('shows a project-context diagnostic when no accessible project is returned', async () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [], error: undefined as never })
 
-    const wrapper = mount(MaterialUploadView)
+    const { wrapper } = await mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('PROJECT_CONTEXT_MISSING'))
     expect(wrapper.text()).toContain('请先在顶部项目选择器中选择一个项目。')
     expect(getActiveProjectLlmPolicy).not.toHaveBeenCalled()
@@ -80,7 +86,7 @@ describe('MaterialUploadView', () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
 
-    const wrapper = mount(MaterialUploadView)
+    const { wrapper } = await mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('claude-3-5-sonnet'))
     expect(wrapper.text()).toContain('secret')
     expect(wrapper.text()).toContain('rev-3 / policy-1')
@@ -102,7 +108,7 @@ describe('MaterialUploadView', () => {
       } as never,
     })
 
-    const wrapper = mount(MaterialUploadView)
+    const { wrapper } = await mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('无策略读取权限'))
     expect(wrapper.text()).toContain('LW_ACCESS_DENIED')
   })
