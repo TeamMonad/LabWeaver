@@ -260,6 +260,21 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('ssh')
   })
 
+  it('disables console lifecycle actions after the server reports deletion', async () => {
+    mockEnvironmentInstance({ desiredState: 'deleted', observedState: 'deleted' })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const lifecycleButtons = wrapper.find('.gcp-action-bar').findAll('button').filter((button) => (
+      ['启动', '停止', '重启', '删除'].includes(button.text())
+    ))
+    expect(lifecycleButtons).toHaveLength(4)
+    expect(lifecycleButtons.every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
+    expect(wrapper.text()).toContain('此项目环境已删除')
+    expect(wrapper.find('.environment-selector').exists()).toBe(false)
+    expect(wrapper.find('button[aria-expanded="false"]').exists()).toBe(true)
+  })
+
   it('renders every public operation state and its optional cleanup and diagnostic details', async () => {
     mockEnvironmentInstance({ observedState: 'failed' })
     const operationItems = (['accepted', 'running', 'cancelling', 'failed', 'cancelled'] as const).map((state) =>
@@ -397,7 +412,7 @@ describe('EnvironmentEntryView', () => {
         desiredState: 'stopped',
         eligibilityExpiresAt: '2026-07-12T10:00:00.000Z',
         endpoints: [],
-        observedState: 'failed',
+        observedState: 'stopped',
         operation: {
           id: 'op-1',
           acceptedAt: '2026-07-11T10:00:00.000Z',

@@ -22,7 +22,8 @@
 
     <div class="top-app-bar__trailing">
       <RouterLink
-        to="/student/environments"
+        v-if="consoleTarget"
+        :to="consoleTarget"
         class="icon-button shell-button"
         title="打开云终端控制台 (Cloud Shell)"
         aria-label="打开云终端控制台"
@@ -67,13 +68,15 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
 import GcpSearchBar from '@/components/layout/GcpSearchBar.vue'
 import { useAuth } from '@/composables/useAuth'
+import { useProjects } from '@/composables/useProjects'
 import { useThemeStore } from '@/stores/theme'
 import { OIDC_ENABLED } from '@/config'
+import { consoleNavigationTarget, rolesFromProfile } from '@/utils/navigation'
 
 defineProps<{
   drawerOpen: boolean
@@ -84,8 +87,16 @@ defineEmits<{
 }>()
 
 const auth = useAuth()
+const projects = useProjects()
 const themeStore = useThemeStore()
 const oidcEnabled = OIDC_ENABLED
+const route = useRoute()
+
+const consoleTarget = computed(() => consoleNavigationTarget(
+  auth.isAuthenticated.value ? rolesFromProfile(auth.user.value?.profile) : [],
+  route.path,
+  projects.selectedProjectId,
+))
 
 const userDisplayName = computed(() => {
   const profile = auth.user.value?.profile
@@ -307,6 +318,25 @@ function cycleTheme() {
 }
 
 @media (max-width: 599px) {
+  .top-app-bar {
+    gap: 4px;
+    padding-right: 8px;
+  }
+
+  .top-app-bar__leading,
+  .top-app-bar__trailing {
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .top-app-bar__leading {
+    flex: 1 1 auto;
+  }
+
+  .top-app-bar__trailing {
+    flex: 0 1 auto;
+  }
+
   .top-app-bar .top-project-selector,
   .top-app-bar .shell-button {
     display: none;
@@ -315,6 +345,35 @@ function cycleTheme() {
   .brand-subtitle,
   .text-button__label,
   .filled-button__label {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .top-app-bar__leading {
+    overflow: hidden;
+  }
+
+  .brand-link,
+  .brand-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .top-app-bar .user-chip,
+  .top-app-bar .text-button,
+  .top-app-bar .filled-button {
+    flex: 0 0 36px;
+    width: 36px;
+    justify-content: center;
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .top-app-bar .user-name,
+  .top-app-bar .login-status {
     display: none;
   }
 }

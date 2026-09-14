@@ -3,7 +3,7 @@
     <header class="page-header">
       <h2>资源审批与 Lease 管理</h2>
       <p class="page-subtitle">
-        审批平台资源申请，管理已签发的资源 Lease。所有变更均携带 revision fence 与幂等键。
+        审核资源申请，管理已签发的 Lease，并在每次操作前确认最新状态。
       </p>
     </header>
 
@@ -98,7 +98,7 @@
       </div>
 
       <p class="filter-hint">
-        筛选只匹配服务端返回的 ID、Request Key、申请人、课程、项目和目标标识；公开请求没有可靠的 submission 关联字段，不按名称推断关联。
+        可按请求 ID、申请人、课程、项目或目标标识筛选。结果只来自服务端返回的真实字段。
       </p>
 
       <DiagnosticBanner
@@ -117,7 +117,7 @@
         :columns="requestColumns"
         :rows="requestRows"
         :loading="approval.requests.kind === 'loading' || approval.requests.kind === 'idle'"
-        empty-text="暂无资源申请"
+        :empty-text="hasFilteredRequestResults ? '当前筛选无匹配的资源申请' : '暂无资源申请'"
         interactive
         aria-label="资源申请列表"
         @row-click="(row) => approval.selectRequest((row as unknown as RequestRow).id)"
@@ -144,6 +144,15 @@
           >—</span>
         </template>
       </DataTable>
+
+      <div
+        v-if="hasFilteredRequestResults"
+        class="filter-empty"
+        role="status"
+      >
+        <span>已加载资源申请，但当前筛选条件没有匹配项。</span>
+        <button type="button" class="outlined-button" @click="clearRequestFilters">清除筛选</button>
+      </div>
 
       <div
         v-if="requestRows.some((row) => row.targetKind === 'task') || approval.batchOutcome"
@@ -819,6 +828,17 @@ const requestRows = computed<RequestRow[]>(() => {
     }))
 })
 
+const hasFilteredRequestResults = computed(() => approval.requests.kind === 'success'
+  && approval.requests.data.length > 0
+  && requestRows.value.length === 0
+  && Boolean(courseFilter.value || requestSearch.value.trim() || requestStateFilter.value))
+
+function clearRequestFilters() {
+  courseFilter.value = ''
+  requestSearch.value = ''
+  requestStateFilter.value = ''
+}
+
 const requestStateOptions = computed<ResourceRequestState[]>(() => {
   if (approval.requests.kind !== 'success') return []
   return Array.from(new Set(approval.requests.data.map((request) => request.state))).sort()
@@ -1278,6 +1298,16 @@ async function onLeaseConfirmed() {
 
 .filter-hint {
   margin: -4px 0 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.filter-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }

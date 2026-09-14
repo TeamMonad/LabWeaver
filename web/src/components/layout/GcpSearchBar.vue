@@ -7,8 +7,8 @@
         v-model="query"
         type="text"
         class="search-input"
-        placeholder="搜索资源、产品或文档 (按 / 聚焦)…"
-        aria-label="全局资源与产品搜索"
+        placeholder="搜索任务或输入环境 ID（按 / 聚焦）…"
+        aria-label="搜索任务或按环境 ID 直达"
         @focus="onFocus"
         @keydown.down.prevent="navigateDown"
         @keydown.up.prevent="navigateUp"
@@ -29,11 +29,11 @@
 
     <!-- Quick Navigation Dropdown -->
     <div
-      v-if="isFocused && (filteredItems.length > 0 || isDirectEnvId)"
+      v-if="isFocused && (filteredItems.length > 0 || directEnvironmentTarget || query.trim())"
       class="search-dropdown"
       role="listbox"
     >
-      <div v-if="isDirectEnvId" class="dropdown-section">
+      <div v-if="directEnvironmentTarget" class="dropdown-section">
         <div class="section-title">直达环境</div>
         <button
           type="button"
@@ -45,7 +45,7 @@
         </button>
       </div>
 
-      <div class="dropdown-section">
+      <div v-if="filteredItems.length > 0" class="dropdown-section">
         <div class="section-title">快捷导航</div>
         <button
           v-for="(item, idx) in filteredItems"
@@ -58,33 +58,45 @@
           <SvgIcon :name="item.icon" size="sm" class="item-icon" aria-hidden="true" />
           <div class="item-content">
             <span class="item-title">{{ item.title }}</span>
-            <span class="item-desc">{{ item.category }} · {{ item.path }}</span>
+            <span class="item-desc">{{ item.category }} · {{ item.description }}</span>
           </div>
         </button>
       </div>
+      <p
+        v-if="filteredItems.length === 0 && !directEnvironmentTarget && query.trim()"
+        class="search-empty"
+        role="status"
+      >
+        没有匹配的任务。
+      </p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, onMounted, onScopeDispose } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import { useAuth } from '@/composables/useAuth'
+import { useProjects } from '@/composables/useProjects'
+import {
+  consoleNavigationTarget,
+  navigationItemsForRoles,
+  navigationTarget,
+  rolesFromProfile,
+} from '@/utils/navigation'
 
 interface SearchItem {
   title: string
   category: string
+  description: string
   path: string
   icon: string
   keywords: string[]
 }
 
-let router: ReturnType<typeof useRouter> | null = null
-try {
-  router = useRouter()
-} catch {
-  // router not provided in isolated unit test stubs
-}
+const router = useRouter()
+const route = useRoute()
 
 const query = ref('')
 const isFocused = ref(false)
@@ -92,67 +104,30 @@ const selectedIndex = ref(0)
 const inputRef = ref<HTMLInputElement | null>(null)
 const containerRef = ref<HTMLElement | null>(null)
 
-const items: SearchItem[] = [
-  {
-    title: '我的实验 (Labs)',
-    category: '计算与环境',
-    path: '/student/labs',
-    icon: 'science',
-    keywords: ['实验', 'labs', '环境列表', 'student'],
-  },
-  {
-    title: '环境控制台 (Console)',
-    category: '计算与环境',
-    path: '/student/environments',
-    icon: 'desktop_windows',
-    keywords: ['控制台', 'ssh', 'terminal', '环境', 'console'],
-  },
-  {
-    title: 'SSH 公钥管理',
-    category: '计算与环境',
-    path: '/student/ssh-keys',
-    icon: 'key',
-    keywords: ['ssh', '公钥', 'keys'],
-  },
-  {
-    title: '评测结果 (Results)',
-    category: '评测与成果',
-    path: '/student/results',
-    icon: 'fact_check',
-    keywords: ['成绩', '评测', '提交', 'results'],
-  },
-  {
-    title: '材料上传与 AgentRun',
-    category: '智能体与构建',
-    path: '/teacher/materials',
-    icon: 'smart_toy',
-    keywords: ['材料', 'agent', 'run', '构建', 'upload'],
-  },
-  {
-    title: '候选审批与发布',
-    category: '智能体与构建',
-    path: '/teacher/approvals',
-    icon: 'rule',
-    keywords: ['审批', '候选', 'candidate', 'approval'],
-  },
-  {
-    title: '资源审批与 Lease',
-    category: '治理与配额',
-    path: '/admin/approvals',
-    icon: 'admin_panel_settings',
-    keywords: ['资源', '审批', 'lease', 'admin'],
-  },
-]
+const auth = useAuth()
+const projects = useProjects()
+const roles = computed(() => auth.isAuthenticated.value ? rolesFromProfile(auth.user.value?.profile) : [])
+const currentPath = computed(() => route.path)
+const items = computed<SearchItem[]>(() => navigationItemsForRoles(roles.value).map((item) => ({
+  title: item.label,
+  category: item.groupLabel,
+  description: item.description,
+  path: navigationTarget(item, projects.selectedProjectId),
+  icon: item.icon,
+  keywords: item.keywords,
+})))
 
-const isDirectEnvId = computed(() => {
+const directEnvironmentTarget = computed(() => {
   const q = query.value.trim()
-  return q.startsWith('env-') || (q.length >= 8 && /^[0-9a-fA-F-]+$/.test(q))
+  const looksLikeEnvironmentId = q.startsWith('env-') || (q.length >= 8 && /^[0-9a-fA-F-]+$/.test(q))
+  if (!looksLikeEnvironmentId) return null
+  return consoleNavigationTarget(roles.value, currentPath.value, projects.selectedProjectId, q)
 })
 
 const filteredItems = computed(() => {
   const q = query.value.trim().toLowerCase()
-  if (!q) return items.slice(0, 5)
-  return items.filter(
+  if (!q) return items.value.slice(0, 5)
+  return items.value.filter(
     (item) =>
       item.title.toLowerCase().includes(q) ||
       item.category.toLowerCase().includes(q) ||
@@ -187,13 +162,13 @@ function navigateUp() {
 }
 
 function selectItem(item: SearchItem) {
-  void router?.push(item.path)
+  void router.push(item.path)
   closeDropdown()
   query.value = ''
 }
 
 function selectCurrent() {
-  if (isDirectEnvId.value) {
+  if (directEnvironmentTarget.value) {
     goToEnvironment(query.value.trim())
     return
   }
@@ -204,7 +179,9 @@ function selectCurrent() {
 }
 
 function goToEnvironment(envId: string) {
-  void router?.push(`/student/environments?environmentId=${envId}`)
+  const target = consoleNavigationTarget(roles.value, currentPath.value, projects.selectedProjectId, envId)
+  if (!target) return
+  void router.push(target)
   closeDropdown()
   query.value = ''
 }
@@ -345,6 +322,13 @@ onScopeDispose(() => {
   color: var(--md-sys-color-on-surface-variant);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.search-empty {
+  padding: 14px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+  text-align: center;
 }
 
 .dropdown-item {

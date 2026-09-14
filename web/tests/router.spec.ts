@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import router, { type AppRole } from '@/router'
+import router from '@/router'
 import type { User } from 'oidc-client-ts'
 
 const loginMock = vi.fn()
@@ -37,7 +37,7 @@ vi.mock('@/composables/useAuth', () => ({
   }),
 }))
 
-function makeUser(roles: AppRole[], expired = false): User {
+function makeUser(roles: unknown, expired = false): User {
   return {
     expired,
     profile: { roles },
@@ -82,5 +82,17 @@ describe('route guard', () => {
     mockUser = makeUser(['student'])
     await router.push('/researcher/workspaces')
     expect(router.currentRoute.value.path).toBe('/researcher/workspaces')
+  })
+
+  it('normalizes the BFF platform_admin claim and opens the usable admin task', async () => {
+    mockUser = makeUser(['platform_admin'])
+    await router.push('/admin')
+    expect(router.currentRoute.value.path).toBe('/admin/resource-approval')
+  })
+
+  it('accepts the legacy comma-separated role claim without inventing a researcher role', async () => {
+    mockUser = makeUser('teacher,student')
+    await router.push('/researcher/environments')
+    expect(router.currentRoute.value.path).toBe('/researcher/environments')
   })
 })

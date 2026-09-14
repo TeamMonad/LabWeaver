@@ -1,9 +1,9 @@
 <template>
   <div class="environment-entry">
     <header class="page-header">
-      <h2>环境控制台</h2>
+      <h2>项目环境控制台</h2>
       <p class="page-subtitle">
-        选择已发布版本创建环境，管理生命周期并获取 SSH/HTTP 访问授权。
+        选择已发布模板创建项目环境，管理生命周期并获取 SSH/HTTP 访问授权。
       </p>
     </header>
 
@@ -15,7 +15,7 @@
       severity="error"
     />
 
-    <section aria-labelledby="releases-heading">
+    <section v-if="!isEnvironmentLoaded || environmentToolsOpen" aria-labelledby="releases-heading">
       <h3
         id="releases-heading"
         class="section-title"
@@ -25,7 +25,7 @@
           size="sm"
           aria-hidden="true"
         />
-        已发布版本
+        已发布环境模板
       </h3>
       <AsyncStateView
         v-if="!isContextMissing"
@@ -107,7 +107,7 @@
         环境控制台
       </h3>
 
-      <div class="environment-selector">
+      <div v-if="!isEnvironmentLoaded || environmentToolsOpen" class="environment-selector">
         <label for="env-id-input">环境 ID</label>
         <input
           id="env-id-input"
@@ -142,10 +142,10 @@
           <div class="gcp-resource-header">
             <div class="gcp-breadcrumbs">
               <RouterLink
-                :to="isWorkConnection ? '/researcher/workspaces' : '/student/labs'"
+                :to="{ path: isWorkConnection ? '/researcher/workspaces' : '/student/labs', query: projectId ? { projectId } : undefined }"
                 class="breadcrumb-link"
               >
-                {{ isWorkConnection ? '我的 Work' : '我的实验' }}
+                {{ isWorkConnection ? 'Work 项目环境' : '课程实验环境' }}
               </RouterLink>
               <span class="breadcrumb-sep">/</span>
               <span class="breadcrumb-current">{{ selectedEnvironmentId }}</span>
@@ -171,6 +171,16 @@
                 />
                 <span>切换其他环境</span>
               </button>
+              <button
+                v-if="isEnvironmentLoaded"
+                type="button"
+                class="text-button small"
+                :aria-expanded="environmentToolsOpen"
+                @click="environmentToolsOpen = !environmentToolsOpen"
+              >
+                <SvgIcon name="tune" size="sm" aria-hidden="true" />
+                <span>{{ environmentToolsOpen ? '收起创建与切换' : '创建或切换环境' }}</span>
+              </button>
             </div>
           </div>
 
@@ -184,6 +194,9 @@
                 type="button"
                 class="filled-button"
                 :disabled="!canStart(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'start')"
+                aria-label="启动"
+                aria-describedby="lifecycle-action-hint"
                 @click="runLifecycle(env.instance.data, 'start')"
               >
                 启动
@@ -192,6 +205,9 @@
                 type="button"
                 class="outlined-button"
                 :disabled="!canStop(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'stop')"
+                aria-label="停止"
+                aria-describedby="lifecycle-action-hint"
                 @click="runLifecycle(env.instance.data, 'stop')"
               >
                 停止
@@ -200,6 +216,9 @@
                 type="button"
                 class="outlined-button"
                 :disabled="!canRestart(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'restart')"
+                aria-label="重启"
+                aria-describedby="lifecycle-action-hint"
                 @click="runLifecycle(env.instance.data, 'restart')"
               >
                 重启
@@ -217,12 +236,24 @@
                 type="button"
                 class="text-button error"
                 :disabled="!canDelete(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'delete')"
+                aria-label="删除"
+                aria-describedby="lifecycle-action-hint"
                 @click="openDelete(env.instance.data)"
               >
                 删除
               </button>
             </template>
           </GcpActionBar>
+
+          <p
+            v-if="env.instance.kind === 'success'"
+            id="lifecycle-action-hint"
+            class="lifecycle-action-hint"
+            role="status"
+          >
+            {{ lifecycleActionHint(env.instance.data) }}
+          </p>
 
           <div
             v-if="lifecycleDiagnostic"
@@ -1021,6 +1052,7 @@ const activeTab = ref<'overview' | 'terminal' | 'operations' | 'freeze'>('overvi
 function clearSelectedEnvironment() {
   selectedEnvironmentId.value = undefined
   environmentIdInput.value = ''
+  environmentToolsOpen.value = true
   void router.replace({ query: { ...route.query, environmentId: undefined } })
 }
 
@@ -1037,8 +1069,10 @@ const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
 const deleteEnvironment = ref<EnvironmentInstanceSchema | null>(null)
 const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
 const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
+const environmentToolsOpen = ref(false)
 
 const env = useEnvironmentInstance(selectedEnvironmentId)
+const isEnvironmentLoaded = computed(() => env.instance.kind === 'success')
 const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || undefined
@@ -1194,6 +1228,7 @@ watch(
   selectedEnvironmentId,
   (id) => {
     access.resetGrant()
+    if (id) environmentToolsOpen.value = false
     lifecycleDiagnostic.value = null
     createGrantDiagnostic.value = null
     retryDiagnostic.value = null
@@ -1567,17 +1602,71 @@ async function retryFreeze() {
   }
 }
 
+function hasActiveLifecycleOperation(data: EnvironmentInstanceSchema): boolean {
+  const current = data.operation.state
+  if (current === 'accepted' || current === 'running' || current === 'cancelling') return true
+  return activeOperation.value?.environmentId === data.id
+}
+
+function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
+  return data.observedState === 'deleting' || data.observedState === 'deleted'
+}
+
 function canStart(data: EnvironmentInstanceSchema) {
-  return data.desiredState !== 'running' && !lifecycle.operating.has(`${data.id}:start`)
+  return !isTerminalEnvironment(data)
+    && !hasActiveLifecycleOperation(data)
+    && data.desiredState !== 'deleted'
+    && data.desiredState !== 'running'
+    && data.observedState === 'stopped'
+    && !lifecycle.operating.has(`${data.id}:start`)
 }
+
 function canStop(data: EnvironmentInstanceSchema) {
-  return data.desiredState !== 'stopped' && !lifecycle.operating.has(`${data.id}:stop`)
+  return !isTerminalEnvironment(data)
+    && !hasActiveLifecycleOperation(data)
+    && data.desiredState !== 'deleted'
+    && data.desiredState !== 'stopped'
+    && data.observedState === 'ready'
+    && !lifecycle.operating.has(`${data.id}:stop`)
 }
+
 function canRestart(data: EnvironmentInstanceSchema) {
-  return !lifecycle.operating.has(`${data.id}:restart`)
+  return !isTerminalEnvironment(data)
+    && !hasActiveLifecycleOperation(data)
+    && data.desiredState !== 'deleted'
+    && (data.observedState === 'ready' || data.observedState === 'stopped' || data.observedState === 'failed')
+    && !lifecycle.operating.has(`${data.id}:restart`)
 }
+
 function canDelete(data: EnvironmentInstanceSchema) {
-  return !lifecycle.operating.has(`${data.id}:delete`)
+  return !isTerminalEnvironment(data)
+    && data.desiredState !== 'deleted'
+    && !(hasActiveLifecycleOperation(data) && data.operation.kind === 'delete')
+    && !lifecycle.operating.has(`${data.id}:delete`)
+}
+
+function lifecycleActionReason(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']): string {
+  if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+  if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
+  if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
+    return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
+  }
+  if (action === 'start' && data.desiredState === 'running') return '环境已经是运行目标状态。'
+  if (action === 'start' && data.observedState !== 'stopped') return `环境当前为${environmentStateLabel(data.observedState)}，只能在已停止状态启动。`
+  if (action === 'stop' && data.desiredState === 'stopped') return '环境已经是停止目标状态。'
+  if (action === 'stop' && data.observedState !== 'ready') return `环境当前为${environmentStateLabel(data.observedState)}，就绪后才能停止。`
+  if (action === 'restart' && !['ready', 'stopped', 'failed'].includes(data.observedState)) return '只有就绪、已停止或失败的环境才能重启。'
+  return `${action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '删除'}环境`
+}
+
+function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
+  if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
+  if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
+  if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
+  if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
+  if (data.observedState === 'stopped') return '环境已停止，启动后才能打开终端。'
+  if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
+  return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
 }
 
 function applyEnvironmentId() {
@@ -1922,6 +2011,12 @@ async function revokeAccessGrant() {
 
 .lifecycle-result {
   margin-top: 16px;
+}
+
+.lifecycle-action-hint {
+  margin: 8px 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 
 .create-hint {

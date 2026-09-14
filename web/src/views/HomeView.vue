@@ -14,35 +14,51 @@
       severity="warning"
     />
 
-    <section v-if="!auth.isLoading.value" class="dashboard" aria-labelledby="role-heading">
-      <h2 id="role-heading" class="section-title">{{ sectionTitle }}</h2>
+    <section v-if="!auth.isLoading.value" class="dashboard" aria-labelledby="task-heading">
+      <h2 id="task-heading" class="section-title">
+        {{ auth.isAuthenticated.value ? '可用任务' : '登录 LabWeaver' }}
+      </h2>
 
-      <div v-if="auth.isAuthenticated.value && visibleCards.length" class="role-grid">
-        <RouterLink
-          v-for="card in visibleCards"
-          :key="card.role"
-          :to="card.path"
-          class="role-card md-card"
+      <div v-if="auth.isAuthenticated.value && visibleGroups.length" class="task-groups">
+        <section
+          v-for="group in visibleGroups"
+          :key="group.id"
+          class="task-group"
+          :data-task-group="group.id"
+          :aria-labelledby="`task-group-${group.id}`"
         >
-          <div class="card-header">
-            <span class="card-icon" :style="{ background: card.tone }">
-              <SvgIcon :name="card.icon" size="lg" />
-            </span>
-            <SvgIcon name="arrow_forward" size="md" aria-hidden="true" />
+          <div class="group-heading">
+            <h3 :id="`task-group-${group.id}`">{{ group.label }}</h3>
+            <span class="group-count">{{ group.items.length }} 项任务</span>
           </div>
-          <h3 class="card-title">{{ card.title }}</h3>
-          <p class="card-desc">{{ card.desc }}</p>
-        </RouterLink>
+          <div class="task-grid">
+            <RouterLink
+              v-for="item in group.items"
+              :key="item.id"
+              :to="navigationTarget(item, projects.selectedProjectId)"
+              class="task-card md-card"
+            >
+              <div class="card-header">
+                <span class="card-icon">
+                  <SvgIcon :name="item.icon" size="lg" aria-hidden="true" />
+                </span>
+                <SvgIcon name="arrow_forward" size="md" aria-hidden="true" />
+              </div>
+              <h4 class="card-title">{{ item.label }}</h4>
+              <p class="card-desc">{{ item.description }}</p>
+            </RouterLink>
+          </div>
+        </section>
       </div>
 
-      <div v-else-if="auth.isAuthenticated.value && !visibleCards.length" class="empty-state">
+      <div v-else-if="auth.isAuthenticated.value" class="empty-state">
         <SvgIcon name="block" size="lg" aria-hidden="true" />
-        <p>当前账号未分配任何角色入口，请联系管理员。</p>
+        <p>当前账号未授予任何可用任务，请联系管理员。</p>
       </div>
 
       <div v-else class="empty-state">
         <SvgIcon name="login" size="lg" aria-hidden="true" />
-        <p>请使用组织账号登录后查看授权的角色入口。</p>
+        <p>请使用组织账号登录后查看可用任务。</p>
         <button v-if="oidcEnabled" type="button" class="filled-button" @click="auth.login()">
           <SvgIcon name="login" size="sm" aria-hidden="true" />
           <span>登录</span>
@@ -50,139 +66,27 @@
         <p v-else class="hint">当前部署未配置 OIDC 登录服务。</p>
       </div>
     </section>
-
-    <section class="status-bar md-card">
-      <div class="status-item">
-        <span
-          class="status-dot"
-          :style="{ background: platformHealthDotColor }"
-          role="img"
-          :aria-label="platformHealthLabel"
-        />
-        <span class="status-label">平台服务</span>
-        <span class="status-value">{{ platformHealthLabel }}</span>
-      </div>
-      <div class="status-divider" />
-      <div class="status-item">
-        <span class="status-label">版本</span>
-        <span class="status-value">{{ APP_TITLE }}</span>
-      </div>
-    </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useAuth } from '@/composables/useAuth'
-import { OIDC_ENABLED, APP_TITLE } from '@/config'
-import { healthCheck } from '@/api/client'
-import type { AppRole } from '@/router'
+import { useProjects } from '@/composables/useProjects'
+import { OIDC_ENABLED } from '@/config'
+import { navigationGroupsForRoles, navigationTarget, rolesFromProfile } from '@/utils/navigation'
 
 const auth = useAuth()
+const projects = useProjects()
 const route = useRoute()
 const oidcEnabled = OIDC_ENABLED
 
-// Real liveness probe: the status bar must reflect the actual backend state
-// instead of a hardcoded "running" claim.
-const platformHealth = ref<'checking' | 'up' | 'down'>('checking')
-
-const platformHealthLabel = computed(() => {
-  if (platformHealth.value === 'up') return '运行中'
-  if (platformHealth.value === 'down') return '不可达'
-  return '检测中…'
-})
-
-const platformHealthDotColor = computed(() => {
-  if (platformHealth.value === 'up') return 'var(--md-sys-color-success)'
-  if (platformHealth.value === 'down') return 'var(--md-sys-color-error)'
-  return 'var(--md-sys-color-on-surface-variant)'
-})
-
-onMounted(async () => {
-  try {
-    const result = await healthCheck({ timeout: 5000 })
-    platformHealth.value = result.ok ? 'up' : 'down'
-  } catch {
-    platformHealth.value = 'down'
-  }
-})
-
-interface RoleCard {
-  role: AppRole
-  path: string
-  title: string
-  desc: string
-  icon: string
-  tone: string
-}
-
-const roleCards: RoleCard[] = [
-  {
-    role: 'teacher',
-    path: '/teacher',
-    title: '教师入口',
-    desc: '创建实验、审核环境、查看结果',
-    icon: 'school',
-    tone: 'var(--md-sys-color-primary-container)',
-  },
-  {
-    role: 'student',
-    path: '/student',
-    title: '学生入口',
-    desc: '启动实验、提交任务、查看反馈',
-    icon: 'person',
-    tone: 'var(--md-sys-color-secondary-container)',
-  },
-  {
-    role: 'researcher',
-    path: '/researcher',
-    title: '科研入口',
-    desc: '申请算力、配置环境、管理数据',
-    icon: 'science',
-    tone: 'var(--md-sys-color-tertiary-container)',
-  },
-  {
-    role: 'admin',
-    path: '/admin',
-    title: '管理入口',
-    desc: '审批资源、维护策略、审计平台',
-    icon: 'admin_panel_settings',
-    tone: 'var(--md-sys-color-surface-container-high)',
-  },
-]
-
-function getUserRoles(): AppRole[] {
-  const user = auth.user.value
-  if (!user || user.expired) return []
-  const profile = user.profile as Record<string, unknown>
-  const roles = profile.roles ?? profile.role
-  if (Array.isArray(roles)) return withWorkRole(roles)
-  if (typeof roles === 'string') {
-    return withWorkRole(
-      roles.split(',').map((r) => r.trim()),
-    )
-  }
-  return []
-}
-
-function withWorkRole(values: unknown[]): AppRole[] {
-  const roles = values.filter((value): value is AppRole => roleCards.some((card) => card.role === value))
-  if (roles.some((role) => role === 'teacher' || role === 'student' || role === 'admin')) roles.push('researcher')
-  return [...new Set(roles)]
-}
-
-const visibleCards = computed(() => {
+const visibleGroups = computed(() => {
   if (!auth.isAuthenticated.value) return []
-  const userRoles = getUserRoles()
-  return roleCards.filter((card) => userRoles.includes(card.role))
-})
-
-const sectionTitle = computed(() => {
-  if (!auth.isAuthenticated.value) return '登录 LabWeaver'
-  return '选择角色入口'
+  return navigationGroupsForRoles(rolesFromProfile(auth.user.value?.profile))
 })
 
 const routeReason = computed(() => {
@@ -215,67 +119,106 @@ const routeReason = computed(() => {
 }
 
 .hero h1 {
-  font: var(--md-sys-headline-large);
-  color: var(--md-sys-color-on-surface);
   margin-bottom: 8px;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-headline-large);
 }
 
 .hero-subtitle {
-  font: var(--md-sys-body-large);
   color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-large);
 }
 
 .section-title {
+  margin-bottom: 20px;
+  color: var(--md-sys-color-on-surface);
   font: var(--md-sys-title-medium);
-  color: var(--md-sys-color-on-surface);
-  margin-bottom: 16px;
 }
 
-.role-grid {
+.task-groups {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 20px;
+  gap: 28px;
 }
 
-.role-card {
+.task-group {
+  display: grid;
+  gap: 12px;
+}
+
+.group-heading {
   display: flex;
-  flex-direction: column;
-  padding: 24px;
-  text-decoration: none;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.group-heading h3 {
+  margin: 0;
   color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-medium);
+}
+
+.group-count {
+  flex-shrink: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-medium);
+}
+
+.task-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.task-card {
+  display: flex;
+  min-height: 154px;
+  flex-direction: column;
+  padding: 20px;
+  color: var(--md-sys-color-on-surface);
+  text-decoration: none;
   transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.role-card:hover {
+.task-card:hover {
   box-shadow: var(--md-sys-elevation-2);
   transform: translateY(-2px);
+}
+
+.task-card:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
 }
 
 .card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
+  color: var(--md-sys-color-on-surface-variant);
 }
 
 .card-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   border-radius: var(--md-sys-shape-medium);
-  color: var(--md-sys-color-on-surface);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
 }
 
 .card-title {
+  margin-bottom: 6px;
+  color: var(--md-sys-color-on-surface);
   font: var(--md-sys-title-medium);
-  margin-bottom: 8px;
 }
 
 .card-desc {
-  font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+  line-height: 1.45;
 }
 
 .empty-state {
@@ -284,9 +227,9 @@ const routeReason = computed(() => {
   align-items: center;
   gap: 16px;
   padding: 48px 24px;
+  border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-large);
   background: var(--md-sys-color-surface-container-high);
-  border: 1px solid var(--md-sys-color-outline-variant);
   color: var(--md-sys-color-on-surface-variant);
   text-align: center;
 }
@@ -309,42 +252,6 @@ const routeReason = computed(() => {
   font: var(--md-sys-body-small);
 }
 
-.status-bar {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 16px 24px;
-  flex-wrap: wrap;
-}
-
-.status-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: var(--md-sys-shape-full);
-}
-
-.status-label {
-  font: var(--md-sys-body-small);
-  color: var(--md-sys-color-on-surface-variant);
-}
-
-.status-value {
-  font: var(--md-sys-label-large);
-  color: var(--md-sys-color-on-surface);
-}
-
-.status-divider {
-  width: 1px;
-  height: 24px;
-  background: var(--md-sys-color-outline-variant);
-}
-
 .dashboard {
   width: 100%;
 }
@@ -362,27 +269,23 @@ const routeReason = computed(() => {
 }
 
 @media (max-width: 599px) {
-  .role-grid {
+  .task-grid {
     grid-template-columns: 1fr;
   }
 
-  .status-bar {
-    flex-direction: column;
+  .group-heading {
     align-items: flex-start;
-    gap: 12px;
-  }
-
-  .status-divider {
-    display: none;
+    flex-direction: column;
+    gap: 4px;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .role-card {
+  .task-card {
     transition: none;
   }
 
-  .role-card:hover {
+  .task-card:hover {
     transform: none;
   }
 }

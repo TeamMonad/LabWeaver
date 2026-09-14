@@ -660,7 +660,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     const releaseSelect = page.getByLabel('已发布版本')
     await expect(releaseSelect.locator(`option[value="${release.id}:${release.version}"]`)).toHaveCount(1, { timeout: 120_000 })
     await releaseSelect.selectOption(`${release.id}:${release.version}`)
-    await page.getByLabel('CPU（millicores）').fill('1000')
+    await page.getByLabel('CPU（m）').fill('1000')
     await page.getByLabel('时长（小时）').fill('1')
     await page.getByLabel('内存（GiB）').fill('2')
     await page.getByLabel('存储（GiB）').fill('10')

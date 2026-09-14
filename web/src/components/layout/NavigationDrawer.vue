@@ -6,6 +6,8 @@
       'navigation-drawer--rail': isRail,
       'navigation-drawer--modal': isModal,
     }"
+    :aria-hidden="isModal && !open ? 'true' : undefined"
+    :inert="isModal && !open"
     aria-label="应用导航"
   >
     <div class="drawer-header">
@@ -15,53 +17,50 @@
         type="button"
         class="icon-button"
         aria-label="关闭导航"
-        @click="$emit('close')"
+        @click="emit('close')"
       >
         <SvgIcon name="close" size="md" aria-label="关闭导航" />
       </button>
     </div>
 
-    <nav class="drawer-nav" aria-label="角色与产品导航">
-      <div class="nav-section-title" v-if="!isRail">工作台角色</div>
-      <RouterLink
-        v-for="item in visibleRoleItems"
-        :key="item.name"
-        :to="item.path"
-        class="drawer-item"
-        :class="{ 'drawer-item--active': isActiveRole(item.path) }"
-        :aria-current="isActiveRole(item.path) ? 'page' : undefined"
-        @click="isModal && $emit('close')"
+    <nav class="drawer-nav" aria-label="任务导航">
+      <section
+        v-for="group in visibleGroups"
+        :key="group.id"
+        class="nav-group"
+        :data-nav-group="group.id"
+        :aria-labelledby="`nav-group-${group.id}`"
       >
-        <SvgIcon :name="item.icon" size="md" :aria-label="item.label" />
-        <span class="drawer-item__label">{{ item.label }}</span>
-      </RouterLink>
-
-      <!-- GCP-style Product / Resource Tree for Active Workbench -->
-      <template v-if="currentRoleSubNav.length > 0">
-        <div class="nav-divider" />
-        <div
-          v-for="group in currentRoleSubNav"
-          :key="group.category"
-          class="sub-nav-group"
+        <h2
+          :id="`nav-group-${group.id}`"
+          class="nav-section-title"
+          :class="{ 'nav-section-title--visually-hidden': isRail }"
         >
-          <div v-if="!isRail" class="nav-section-title">{{ group.category }}</div>
+          {{ group.label }}
+        </h2>
+        <div class="nav-group-items">
           <RouterLink
-            v-for="sub in group.items"
-            :key="sub.path"
-            :to="sub.path"
-            class="sub-nav-item"
-            :class="{ 'sub-nav-item--active': isSubActive(sub.path) }"
-            :title="isRail ? sub.label : undefined"
-            @click="isModal && $emit('close')"
+            v-for="item in group.items"
+            :key="item.id"
+            :to="navigationTarget(item, selectedProjectId)"
+            class="drawer-item"
+            :class="{ 'drawer-item--active': isActive(item.path) }"
+            :aria-current="isActive(item.path) ? 'page' : undefined"
+            :aria-label="isRail ? `${group.label}：${item.label}` : undefined"
+            :title="isRail ? `${group.label}：${item.label}` : undefined"
+            @click="isModal && emit('close')"
           >
-            <SvgIcon :name="sub.icon" size="sm" class="sub-nav-icon" aria-hidden="true" />
-            <span class="sub-nav-item__label">{{ sub.label }}</span>
+            <SvgIcon :name="item.icon" size="md" aria-hidden="true" />
+            <span class="drawer-item__label">{{ item.label }}</span>
           </RouterLink>
         </div>
-      </template>
+      </section>
 
-      <p v-if="isAuthenticated && visibleRoleItems.length === 0" class="drawer-empty" role="note">
-        当前账号未被授予任何工作台角色。
+      <p v-if="!isAuthenticated" class="drawer-empty" role="note">
+        登录后显示可用任务。
+      </p>
+      <p v-else-if="visibleGroups.length === 0" class="drawer-empty" role="note">
+        当前账号未授予任何可用任务。
       </p>
     </nav>
 
@@ -71,7 +70,7 @@
         type="button"
         class="rail-toggle"
         :aria-label="isRail ? '展开导航' : '收起导航'"
-        @click="$emit('toggleRail')"
+        @click="emit('toggleRail')"
       >
         <SvgIcon :name="isRail ? 'chevron_right' : 'chevron_left'" size="md" aria-hidden="true" />
         <span v-if="!isRail" class="rail-toggle__label">收起</span>
@@ -83,201 +82,82 @@
     v-if="isModal && open"
     class="drawer-scrim"
     aria-hidden="true"
-    @click="$emit('close')"
+    @click="emit('close')"
   />
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from 'vue'
+import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useAuth } from '@/composables/useAuth'
+import { useProjects } from '@/composables/useProjects'
+import { navigationGroupsForRoles, navigationTarget, rolesFromProfile } from '@/utils/navigation'
 
 const props = defineProps<{
   open: boolean
   rail?: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   close: []
   toggleRail: []
 }>()
 
 const route = useRoute()
-const isModal = computed(() => window.innerWidth < 840)
-const isRail = computed(() => !isModal.value && props.rail)
+const auth = useAuth()
+const projects = useProjects()
 const closeButton = ref<HTMLButtonElement | null>(null)
+const viewportWidth = ref(typeof window === 'undefined' ? 1280 : window.innerWidth)
+const previouslyFocused = ref<HTMLElement | null>(null)
+
+const isModal = computed(() => viewportWidth.value < 840)
+const isRail = computed(() => !isModal.value && Boolean(props.rail))
+const isAuthenticated = computed(() => auth.isAuthenticated.value)
+const roles = computed(() => rolesFromProfile(auth.user.value?.profile))
+const visibleGroups = computed(() => isAuthenticated.value ? navigationGroupsForRoles(roles.value) : [])
+const selectedProjectId = computed(() => projects.selectedProjectId)
 
 watch(
   () => props.open,
   (open) => {
     if (open && isModal.value) {
+      previouslyFocused.value = document.activeElement instanceof HTMLElement ? document.activeElement : null
       void nextTick(() => closeButton.value?.focus())
+    } else if (!open && isModal.value) {
+      void nextTick(() => previouslyFocused.value?.focus())
+      previouslyFocused.value = null
     }
-  }
+  },
 )
 
-const roleItems = [
-  { name: 'teacher', role: 'teacher', path: '/teacher', label: '教师工作台', icon: 'school' as const },
-  { name: 'student', role: 'student', path: '/student', label: '学生工作台', icon: 'person' as const },
-  { name: 'researcher', role: 'researcher', path: '/researcher', label: '科研工作台', icon: 'science' as const },
-  { name: 'admin', role: 'admin', path: '/admin', label: '管理工作台', icon: 'admin_panel_settings' as const },
-]
-
-const { user, isAuthenticated } = useAuth()
-const workbenchRoles = new Set(['teacher', 'student', 'admin', 'researcher'])
-// Anonymous visitors keep all entries (they lead to the sign-in flow); a
-// signed-in user only sees workbenches their OIDC roles authorize, so no
-// dead links to a role_denied error page.
-const visibleRoleItems = computed(() => {
-  if (!isAuthenticated.value) return roleItems
-  const roles = new Set((user.value?.profile?.roles as string[] | undefined) ?? [])
-  return roleItems.filter((item) => item.role === 'researcher'
-    ? Array.from(roles).some((role) => workbenchRoles.has(role))
-    : roles.has(item.role))
-})
-
-const isActiveRole = computed(() => (path: string) => route.path.startsWith(path))
-const isSubActive = computed(() => (path: string) => route.path === path || route.path.startsWith(path + '/'))
-
-interface SubNavGroup {
-  category: string
-  items: Array<{
-    name: string
-    path: string
-    label: string
-    icon: string
-  }>
+function isActive(path: string) {
+  return route.path === path || route.path.startsWith(`${path}/`)
 }
 
-const currentRoleSubNav = computed<SubNavGroup[]>(() => {
-  const p = route.path
-  if (p.startsWith('/student')) {
-    return [
-      {
-        category: '计算与环境 (Compute)',
-        items: [
-          { name: 'labs', path: '/student/labs', label: '我的实验', icon: 'science' },
-          { name: 'environments', path: '/student/environments', label: '环境控制台', icon: 'desktop_windows' },
-          { name: 'ssh-keys', path: '/student/ssh-keys', label: 'SSH 公钥', icon: 'key' },
-        ],
-      },
-      {
-        category: '评测与成果 (Evaluation)',
-        items: [
-          { name: 'results', path: '/student/results', label: '评测结果', icon: 'fact_check' },
-        ],
-      },
-    ]
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isModal.value && props.open) {
+    event.preventDefault()
+    emit('close')
   }
-  if (p.startsWith('/teacher')) {
-    return [
-      {
-        category: '实验与编排 (Labs & Build)',
-        items: [
-          { name: 'overview', path: '/teacher/overview', label: '实验总览', icon: 'dashboard' },
-          { name: 'labs', path: '/teacher/labs', label: '实验列表', icon: 'menu_book' },
-          { name: 'materials', path: '/teacher/materials', label: '材料与 AgentRun', icon: 'smart_toy' },
-          { name: 'approvals', path: '/teacher/approvals', label: '候选审批与发布', icon: 'rule' },
-        ],
-      },
-    ]
-  }
-  if (p.startsWith('/admin')) {
-    return [
-      {
-        category: '治理与配额 (Governance)',
-          items: [
-          { name: 'approvals', path: '/admin/resource-approval', label: '资源审批与 Lease', icon: 'admin_panel_settings' },
-          { name: 'policies', path: '/admin/policies', label: '安全策略', icon: 'policy' },
-          { name: 'finance', path: '/admin/resource-finance', label: '预算与费用', icon: 'payments' },
-          { name: 'audit', path: '/admin/audit', label: '审计日志', icon: 'history' },
-        ],
-      },
-    ]
-  }
-  if (p.startsWith('/researcher')) {
-    return [
-      {
-        category: '工作空间与计算 (Workspaces)',
-        items: [
-          { name: 'workspaces', path: '/researcher/workspaces', label: '工作空间', icon: 'workspaces' },
-          { name: 'resources', path: '/researcher/resources', label: '资源申请', icon: 'memory' },
-        ],
-      },
-    ]
-  }
-  return []
+}
+
+onMounted(() => {
+  window.addEventListener('resize', updateViewportWidth)
+  document.addEventListener('keydown', handleKeydown)
+})
+
+onScopeDispose(() => {
+  window.removeEventListener('resize', updateViewportWidth)
+  document.removeEventListener('keydown', handleKeydown)
 })
 </script>
 
 <style scoped>
-.nav-section-title {
-  padding: 8px 16px 4px;
-  font: var(--md-sys-label-small);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--md-sys-color-on-surface-variant);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.nav-divider {
-  height: 1px;
-  background: var(--md-sys-color-outline-variant);
-  margin: 8px 12px;
-}
-
-.sub-nav-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sub-nav-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 38px;
-  padding: 0 16px 0 20px;
-  border-radius: var(--md-sys-shape-full);
-  color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-label-medium);
-  text-decoration: none;
-  overflow: hidden;
-  transition: background-color 0.15s;
-}
-
-.sub-nav-item:hover {
-  background: var(--md-sys-color-surface-container-highest);
-  color: var(--md-sys-color-on-surface);
-}
-
-.sub-nav-item--active {
-  background: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
-  font-weight: 600;
-}
-
-.sub-nav-icon {
-  flex-shrink: 0;
-}
-
-.sub-nav-item__label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.navigation-drawer--rail .sub-nav-item {
-  justify-content: center;
-  padding: 0;
-}
-
-.navigation-drawer--rail .sub-nav-item__label,
-.navigation-drawer--rail .nav-section-title {
-  display: none;
-}
 .navigation-drawer {
   position: fixed;
   top: 0;
@@ -311,9 +191,9 @@ const currentRoleSubNav = computed<SubNavGroup[]>(() => {
 }
 
 .drawer-title {
-  font: var(--md-sys-title-large);
-  color: var(--md-sys-color-on-surface);
   overflow: hidden;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-large);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -334,21 +214,45 @@ const currentRoleSubNav = computed<SubNavGroup[]>(() => {
 
 .drawer-nav {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px;
   flex: 1;
   min-height: 0;
+  flex-direction: column;
+  gap: 12px;
   overflow-y: auto;
+  padding: 12px;
+}
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-group + .nav-group {
+  padding-top: 8px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.nav-section-title {
+  padding: 4px 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-small);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.nav-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .drawer-item {
   display: flex;
   align-items: center;
   gap: 16px;
-  height: 48px;
-  min-height: 48px;
-  flex-shrink: 0;
+  min-height: 44px;
   padding: 0 16px;
   border-radius: var(--md-sys-shape-full);
   color: var(--md-sys-color-on-surface-variant);
@@ -360,6 +264,13 @@ const currentRoleSubNav = computed<SubNavGroup[]>(() => {
 .drawer-item:hover {
   background: var(--md-sys-color-surface-container-highest);
   color: var(--md-sys-color-on-surface);
+}
+
+.drawer-item:focus-visible,
+.icon-button:focus-visible,
+.rail-toggle:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
 }
 
 .drawer-item--active {
@@ -389,6 +300,18 @@ const currentRoleSubNav = computed<SubNavGroup[]>(() => {
 
 .navigation-drawer--rail .drawer-item__label {
   display: none;
+}
+
+.nav-section-title--visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .drawer-footer {

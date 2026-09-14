@@ -2,12 +2,16 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { OIDC_ENABLED } from '@/config'
+import { PLATFORM_ROLES, rolesFromProfile, type PlatformRole } from '@/utils/navigation'
 
-export type AppRole = 'teacher' | 'student' | 'researcher' | 'admin'
+/** Roles that come from the authenticated platform identity. Work is project-scoped. */
+export type AppRole = PlatformRole
+
+type WorkbenchRoute = AppRole | 'researcher'
 
 export interface AppRouteMeta {
   title?: string
-  navGroup?: 'teacher' | 'student' | 'researcher' | 'admin'
+  navGroup?: WorkbenchRoute
   requiredRoles?: AppRole[]
   requiredCourseScope?: boolean
 }
@@ -17,12 +21,12 @@ declare module 'vue-router' {
 }
 
 function roleRoute(
-  role: AppRole,
+  role: WorkbenchRoute,
   path: string,
   title: string,
   component: () => Promise<unknown>,
   children: RouteRecordRaw[] = [],
-  requiredRoles: AppRole[] = [role],
+  requiredRoles: AppRole[] = role === 'researcher' ? [...PLATFORM_ROLES] : [role],
 ): RouteRecordRaw {
   return {
     path,
@@ -76,10 +80,10 @@ const routes: RouteRecordRaw[] = [
     { path: 'environments', component: () => import('@/views/student/EnvironmentEntryView.vue'), meta: { title: 'Work 环境' } },
     { path: 'software', component: () => import('@/views/researcher/SoftwareConfigView.vue'), meta: { title: '软件配置' } },
     { path: 'resources', component: () => import('@/views/researcher/ResourceRequestView.vue'), meta: { title: '资源申请' } },
-  ], ['teacher', 'student', 'admin']),
+  ], [...PLATFORM_ROLES]),
   roleRoute('admin', '/admin', '管理工作台', () => import('@/views/AdminView.vue'), [
-    { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
     { path: 'resource-approval', component: () => import('@/views/admin/ResourceApprovalView.vue'), meta: { title: '资源审批' } },
+    { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
     { path: 'resource-finance', component: () => import('@/views/admin/ResourceFinanceView.vue'), meta: { title: '预算与费用' } },
     { path: 'audit', component: () => import('@/views/admin/AuditLogView.vue'), meta: { title: '审计' } },
   ]),
@@ -93,14 +97,7 @@ const routes: RouteRecordRaw[] = [
 
 function getUserRoles(user: ReturnType<typeof useAuth>['user']['value']): AppRole[] {
   if (!user || user.expired) return []
-  const profile = user.profile as Record<string, unknown>
-  const roles = profile.roles ?? profile.role
-  if (Array.isArray(roles)) return roles.filter((r): r is AppRole => ['teacher', 'student', 'researcher', 'admin'].includes(r))
-  if (typeof roles === 'string') {
-    const list = roles.split(',').map((r) => r.trim()).filter(Boolean)
-    return list.filter((r): r is AppRole => ['teacher', 'student', 'researcher', 'admin'].includes(r))
-  }
-  return []
+  return rolesFromProfile(user.profile)
 }
 
 function collectRequiredRoles(route: RouteLocationNormalized): AppRole[] {

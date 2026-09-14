@@ -5,7 +5,7 @@
         <h2>资源申请</h2>
         <p class="page-subtitle">申请会归属于所选项目。审批、分配和回收会在后台完成。</p>
       </div>
-      <RouterLink class="outlined-button" to="/researcher/workspaces">选择项目</RouterLink>
+      <RouterLink class="outlined-button" :to="{ path: '/researcher/workspaces', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">选择项目</RouterLink>
     </header>
 
     <section class="project-strip md-card">
@@ -52,6 +52,14 @@
       @retry="options.load"
     />
 
+    <DiagnosticBanner
+      v-if="routeProjectInvalid"
+      code="PROJECT_CONTEXT_INVALID"
+      message="链接中的项目当前不可访问，请从项目选择器选择可访问的项目。"
+      :retryable="false"
+      severity="error"
+    />
+
     <div class="resource-layout">
       <section class="request-form-card md-card" aria-labelledby="request-heading">
         <h3 id="request-heading">申请 Work 容量</h3>
@@ -69,10 +77,14 @@
                 {{ release.label }} · {{ release.runtimeKind }}
               </option>
             </select>
-            <small v-if="options.releases.kind === 'empty'" class="field-note">没有可用的已发布版本。</small>
+            <small v-if="options.releases.kind === 'empty'" class="field-note">当前项目没有可用的已发布版本。请联系课程教师发布模板，或先生成 Work 模板。</small>
+            <div v-if="options.releases.kind === 'empty'" class="release-empty-next-step">
+              <RouterLink v-if="canPublishEnvironmentTemplates" class="text-button" :to="{ path: '/teacher/materials', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">教师发布模板</RouterLink>
+              <RouterLink class="text-button" :to="{ path: '/researcher/software', query: selectedProjectId ? { projectId: selectedProjectId } : undefined }">生成 Work 模板</RouterLink>
+            </div>
           </label>
           <div class="two-columns">
-            <label><span>CPU（millicores）</span><input v-model.number="cpuMillicores" class="text-input" type="number" min="1" required /></label>
+            <label><span>CPU（m）</span><input v-model.number="cpuMillicores" class="text-input" type="number" min="1" required /><small class="field-note">按 millicores 填写；1000m = 1 核心。</small></label>
             <label><span>时长（小时）</span><input v-model.number="durationHours" class="text-input" type="number" min="1" max="720" required /></label>
           </div>
           <div class="two-columns">
@@ -113,7 +125,7 @@
       <section class="status-card md-card" aria-labelledby="status-heading">
         <div class="section-heading">
           <div>
-            <h3 id="status-heading">申请与 Lease</h3>
+            <h3 id="status-heading">资源申请与使用授权</h3>
             <p>刷新不会重复创建请求；异步状态会在页面可见时自动更新。</p>
           </div>
           <button type="button" class="icon-button" aria-label="刷新资源状态" :disabled="resources.requests.kind === 'loading'" @click="resources.load">
@@ -127,8 +139,8 @@
             <template #success="{ data }">
               <ul class="resource-list">
                 <li v-for="request in data" :key="request.id" class="resource-row">
-                  <div class="resource-row__main"><strong>{{ request.requestKey }}</strong><small>{{ resourceTargetLabel(request) }} · {{ resourceSummary(request.requestedResources) }}</small><small>更新于 {{ formatTimestamp(request.updatedAt) }}</small></div>
-                  <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${request.state}`">{{ requestStateLabel(request.state) }}</span><button v-if="request.state === 'reviewing' || request.state === 'allocating'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="cancelRequest(request.id)">取消</button></div>
+                  <div class="resource-row__main"><strong>资源申请</strong><small>{{ request.requestKey }} · {{ resourceTargetLabel(request) }} · {{ resourceSummary(request.requestedResources) }}</small><small>更新于 {{ formatTimestamp(request.updatedAt) }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>申请 ID：{{ request.id }}</small></details></div>
+                  <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${request.state}`">{{ requestStateLabel(request.state) }}</span><button v-if="request.state === 'reviewing' || request.state === 'allocating'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="openCancelConfirmation(request)">取消</button></div>
                 </li>
               </ul>
             </template>
@@ -136,13 +148,13 @@
         </section>
 
         <section class="status-section" aria-labelledby="leases-heading">
-          <h4 id="leases-heading">资源 Lease</h4>
-          <AsyncStateView :state="resources.leases" empty-text="该项目暂无 Lease。" @retry="resources.load">
+          <h4 id="leases-heading">资源使用授权</h4>
+          <AsyncStateView :state="resources.leases" empty-text="该项目暂无资源使用授权。" @retry="resources.load">
             <template #success="{ data }">
               <ul class="resource-list">
                 <li v-for="lease in data" :key="lease.id" class="resource-row">
-                  <div class="resource-row__main"><strong>{{ lease.id }}</strong><small>申请 {{ lease.requestId }} · {{ lease.expiresAt ? `到期 ${formatTimestamp(lease.expiresAt)}` : '等待分配' }}</small><small v-if="lease.revokeReasonCode">原因：{{ lease.revokeReasonCode }}</small></div>
-                  <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${lease.state}`">{{ leaseStateLabel(lease.state) }}</span><button v-if="lease.state === 'active' || lease.state === 'expiring'" type="button" class="outlined-button small" :disabled="resources.acting !== null" @click="renewLease(lease)">续期</button><button v-if="lease.state === 'active' || lease.state === 'expiring'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="reclaimLease(lease)">回收</button><RouterLink v-if="lease.state === 'active' && requestEnvironmentId(lease.requestId)" class="text-button" :to="{ path: '/researcher/environments', query: { environmentId: requestEnvironmentId(lease.requestId)!, projectId: selectedProjectId ?? undefined } }">连接</RouterLink></div>
+                  <div class="resource-row__main"><strong>资源使用授权</strong><small>{{ lease.expiresAt ? `到期 ${formatTimestamp(lease.expiresAt)}` : '等待分配' }}</small><small v-if="lease.revokeReasonCode">原因：{{ lease.revokeReasonCode }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>Lease ID：{{ lease.id }} · 申请 ID：{{ lease.requestId }}</small></details></div>
+                  <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${lease.state}`">{{ leaseStateLabel(lease.state) }}</span><button v-if="lease.state === 'active' || lease.state === 'expiring'" type="button" class="outlined-button small" :disabled="resources.acting !== null" @click="renewLease(lease)">续期</button><button v-if="lease.state === 'active' || lease.state === 'expiring'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="openReclaimConfirmation(lease)">回收</button><RouterLink v-if="lease.state === 'active' && requestEnvironmentId(lease.requestId)" class="text-button" :to="{ path: '/researcher/environments', query: { environmentId: requestEnvironmentId(lease.requestId)!, projectId: selectedProjectId ?? undefined } }">连接</RouterLink></div>
                 </li>
               </ul>
             </template>
@@ -150,6 +162,16 @@
         </section>
       </section>
     </div>
+
+    <ConfirmDialog
+      :open="resourceConfirmation !== null"
+      :title="resourceConfirmationTitle"
+      :description="resourceConfirmationDescription"
+      confirm-text="确认"
+      severity="error"
+      @cancel="resourceConfirmation = null"
+      @confirm="confirmResourceAction"
+    />
   </div>
 </template>
 
@@ -157,25 +179,44 @@
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResources, resourceSummary } from '@/composables/useProjectResources'
 import { useProjectResourceOptions, type ResourceGpuCatalogOption } from '@/composables/useProjectResourceOptions'
 import { useProjects } from '@/composables/useProjects'
+import { useAuth } from '@/composables/useAuth'
 import type { ResourceLeaseSchema, ResourceRequestSchema } from '@/generated/contracts'
 import { formatTimestamp, idempotencyKey, newUuidV7 } from '@/utils/format'
+import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuth()
 const projects = useProjects()
-const selectedProjectId = ref<string | null>(null)
-const projectIdRef = computed(() => selectedProjectId.value)
-const projectOptions = computed(() => projects.projects.kind === 'success' ? projects.projects.data : [])
-const selectedProject = computed(() => projectOptions.value.find((project) => project.id === selectedProjectId.value) ?? null)
 const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || null
 })
+const selectedProjectId = ref<string | null>(null)
+const projectOptions = computed(() => projects.projects.kind === 'success' ? projects.projects.data : [])
+const routeProjectInvalid = computed(() => Boolean(
+  routeProjectId.value
+  && projects.projects.kind === 'success'
+  && !projectOptions.value.some((project) => project.id === routeProjectId.value),
+))
+const routeProjectPending = computed(() => Boolean(
+  routeProjectId.value
+  && !routeProjectInvalid.value
+  && selectedProjectId.value !== routeProjectId.value,
+))
+const projectContextBlocked = computed(() => projects.projects.kind !== 'success' || routeProjectInvalid.value || routeProjectPending.value)
+const projectIdRef = computed(() => projectContextBlocked.value ? null : selectedProjectId.value)
+const selectedProject = computed(() => projectContextBlocked.value
+  ? null
+  : projectOptions.value.find((project) => project.id === selectedProjectId.value) ?? null)
+const currentRoles = computed(() => rolesFromProfile(auth.user.value?.profile))
+const canPublishEnvironmentTemplates = computed(() => hasAnyRole(currentRoles.value, ['teacher']))
 const resources = useProjectResources(projectIdRef)
 const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
 const options = useProjectResourceOptions(projectIdRef, courseIdRef)
@@ -188,6 +229,10 @@ const durationHours = ref(8)
 const selectedGpuCatalogId = ref('')
 const gpuCount = ref(1)
 const pendingSubmission = ref<{ environmentId: string; idempotencyKey: string } | null>(null)
+type ResourceConfirmation =
+  | { kind: 'cancel'; requestId: string; requestKey: string }
+  | { kind: 'reclaim'; leaseId: string; lease: ResourceLeaseSchema }
+const resourceConfirmation = ref<ResourceConfirmation | null>(null)
 
 const releaseOptions = computed(() => options.releases.kind === 'success' ? options.releases.data : [])
 const gpuCatalogOptions = computed(() => options.catalog.kind === 'success' ? options.catalog.data : [])
@@ -198,10 +243,26 @@ const selectedGpuRateSelection = computed(() => selectedGpu.value
   : { rate: null, ambiguous: false })
 const selectedGpuRate = computed(() => selectedGpuRateSelection.value.rate)
 const selectedGpuRateAmbiguous = computed(() => selectedGpuRateSelection.value.ambiguous)
+const resourceConfirmationTitle = computed(() => resourceConfirmation.value?.kind === 'cancel' ? '取消资源申请' : '回收资源使用授权')
+const resourceConfirmationDescription = computed(() => {
+  const confirmation = resourceConfirmation.value
+  if (!confirmation) return ''
+  return confirmation.kind === 'cancel'
+    ? `确认取消申请 ${confirmation.requestKey}？取消后将停止这次申请的后续处理。`
+    : `确认回收资源使用授权 ${confirmation.leaseId}？回收请求提交后，实际资源释放由后台完成。`
+})
 
 watch(
   () => projectOptions.value,
   (items) => {
+    if (items.length === 0) {
+      selectedProjectId.value = null
+      return
+    }
+    if (routeProjectId.value && !items.some((project) => project.id === routeProjectId.value)) {
+      selectedProjectId.value = null
+      return
+    }
     const preferred = routeProjectId.value ?? projects.selectedProjectId
     const next = preferred && items.some((project) => project.id === preferred) ? preferred : items[0]?.id ?? null
     if (selectedProjectId.value !== next) selectedProjectId.value = next
@@ -211,14 +272,29 @@ watch(
 )
 
 watch(routeProjectId, (id) => {
-  if (!id || !projectOptions.value.some((project) => project.id === id)) return
+  if (!id) {
+    const sharedId = projects.selectedProjectId
+    if (sharedId && projectOptions.value.some((project) => project.id === sharedId)) selectedProjectId.value = sharedId
+    return
+  }
+  if (!projectOptions.value.some((project) => project.id === id)) {
+    selectedProjectId.value = null
+    return
+  }
   if (selectedProjectId.value !== id) selectedProjectId.value = id
   if (projects.selectedProjectId !== id) projects.select(id)
 })
 
+watch(() => projects.selectedProjectId, (id) => {
+  if (!id || routeProjectInvalid.value) return
+  if (projectOptions.value.some((project) => project.id === id) && selectedProjectId.value !== id) selectedProjectId.value = id
+})
+
 watch(selectedProjectId, (id) => {
-  if (!id || route.query.projectId === id) return
-  void router.replace({ query: { ...route.query, projectId: id } })
+  resourceConfirmation.value = null
+  if (!id) return
+  if (projects.selectedProjectId !== id) projects.select(id)
+  if (route.query.projectId !== id) void router.replace({ query: { ...route.query, projectId: id } })
 })
 
 watch(
@@ -294,6 +370,25 @@ async function submitRequest() {
   }
 }
 
+function openCancelConfirmation(request: ResourceRequestSchema) {
+  resourceConfirmation.value = { kind: 'cancel', requestId: request.id, requestKey: request.requestKey }
+}
+
+function openReclaimConfirmation(lease: ResourceLeaseSchema) {
+  resourceConfirmation.value = { kind: 'reclaim', leaseId: lease.id, lease }
+}
+
+async function confirmResourceAction() {
+  const confirmation = resourceConfirmation.value
+  resourceConfirmation.value = null
+  if (!confirmation) return
+  if (confirmation.kind === 'cancel') {
+    await cancelRequest(confirmation.requestId)
+  } else {
+    await reclaimLease(confirmation.lease)
+  }
+}
+
 async function cancelRequest(id: string) { await resources.cancel(id, 'researcher cancelled the pending resource request') }
 async function renewLease(lease: ResourceLeaseSchema) { await resources.renew(lease, durationHours.value * 3600, 'researcher renewed the Work lease') }
 async function reclaimLease(lease: ResourceLeaseSchema) { await resources.reclaim(lease, 'researcher requested Work resource reclaim') }
@@ -323,6 +418,7 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .project-strip { display: flex; align-items: end; gap: 16px; padding: 16px 20px; }
 .project-strip label, .request-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .field-note { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); line-height: 1.4; }
+.release-empty-next-step { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .project-strip label { flex: 1; max-width: 560px; }
 .project-scope { padding-bottom: 10px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .generated-identity { display: grid; gap: 4px; padding: 12px 14px; border: 1px dashed var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
@@ -350,6 +446,9 @@ function leaseStateLabel(state: string) { return ({ allocating: '分配中', act
 .resource-row__main { display: grid; gap: 4px; min-width: 0; }
 .resource-row__main strong { overflow-wrap: anywhere; }
 .resource-row__main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.advanced-details { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.advanced-details summary { cursor: pointer; }
+.advanced-details small { display: block; margin-top: 4px; }
 .resource-row__actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
 .state-chip { display: inline-flex; white-space: nowrap; padding: 3px 8px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
