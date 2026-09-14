@@ -786,7 +786,7 @@
                     <div class="freeze-status-actions">
                       <RouterLink
                         v-if="freezeStatus === 'accepted' || freezeStatus === 'running' || freezeStatus === 'succeeded'"
-                        to="/student/results"
+                        :to="{ path: '/student/results', query: { projectId: data.projectId } }"
                         class="outlined-button"
                       >
                         查看评测结果

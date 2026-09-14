@@ -406,10 +406,14 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     expect(advisory.review.confidence).toBeGreaterThanOrEqual(0)
     expect(advisory.review.confidence).toBeLessThanOrEqual(1)
 
-    const resultsTab = studentPage.locator('.role-tabs .role-tab').filter({ hasText: '\u8bc4\u6d4b\u7ed3\u679c' })
-    await expect(resultsTab).toHaveCount(1)
-    await resultsTab.click()
-    await expect(studentPage).toHaveURL(/\/student\/results(?:\?|$)/)
+    const resultsLink = studentPage
+      .locator('.freeze-status-actions')
+      .getByRole('link', { name: '\u67e5\u770b\u8bc4\u6d4b\u7ed3\u679c', exact: true })
+    await expect(resultsLink).toHaveCount(1, { timeout: 120_000 })
+    await resultsLink.click()
+    await expect(studentPage).toHaveURL(
+      (url) => url.pathname === '/student/results' && url.searchParams.get('projectId') === projectId,
+    )
     await expect(studentPage.getByRole('heading', { name: '\u8bc4\u6d4b\u7ed3\u679c', exact: true })).toBeVisible()
     const afterResultCard = studentPage.locator('.result-card').filter({ hasText: afterResult.runId })
     await expect(afterResultCard).toHaveCount(1, { timeout: 120_000 })
@@ -419,9 +423,16 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     const resultLink = afterResultCard.locator('.result-link')
     await expect(resultLink).toHaveText(afterResult.runId)
     await resultLink.click()
-    await expect(studentPage).toHaveURL(new RegExp(`/student/results/${afterResult.runId}$`))
+    await expect(studentPage).toHaveURL(
+      (url) => url.pathname === `/student/results/${afterResult.runId}`
+        && url.searchParams.get('projectId') === projectId,
+    )
     await expect(studentPage.getByRole('heading', { name: '\u8bc4\u6d4b\u8be6\u60c5', exact: true })).toBeVisible()
     await expect(studentPage.locator('.goal-review')).toBeVisible({ timeout: 120_000 })
+    await studentPage.locator('a.back-link').click()
+    await expect(studentPage).toHaveURL(
+      (url) => url.pathname === '/student/results' && url.searchParams.get('projectId') === projectId,
+    )
     await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
   } catch (error) {
     hasPrimaryError = true

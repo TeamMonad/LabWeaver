@@ -74,6 +74,12 @@ const mockProject = {
   updatedAt: '2026-07-11T10:00:00.000Z',
 }
 
+const mockProjectB = {
+  ...mockProject,
+  id: 'project-2',
+  name: 'Second project',
+}
+
 type OperationFixtureState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
 
 function mockOperation(state: OperationFixtureState, overrides: Record<string, unknown> = {}) {
@@ -443,9 +449,10 @@ describe('EnvironmentEntryView', () => {
   })
 
   it('shows the freeze operation state and explains the temporary console disconnect', async () => {
-    mockEnvironmentInstance()
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    mockEnvironmentInstance({ projectId: 'project-2' })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
-      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      data: { items: [{ ...mockRelease, projectId: 'project-2', submissionManifest: mockSubmissionManifest }] },
       error: undefined as never,
     } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({
@@ -459,7 +466,9 @@ describe('EnvironmentEntryView', () => {
     await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('冻结中'))
     expect(wrapper.text()).toContain('不可变快照')
-    expect(wrapper.find('a[href="/student/results"]').exists()).toBe(true)
+    const resultsLink = wrapper.find('a[href^="/student/results"]')
+    expect(resultsLink.exists()).toBe(true)
+    expect(resultsLink.attributes('href')).toContain('/student/results?projectId=project-2')
 
     await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
     expect(wrapper.text()).toContain('冻结提交处理中，终端已暂时断开')
