@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ref } from 'vue'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
-import { createProjectProblemPackageUpload } from '@/generated/contracts'
+import { completeProjectProblemPackageUpload, createProjectProblemPackageUpload, getProjectProblemPackage } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -9,6 +9,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     ...actual,
     createProjectProblemPackageUpload: vi.fn(),
     completeProjectProblemPackageUpload: vi.fn(),
+    getProjectProblemPackage: vi.fn(),
   }
 })
 
@@ -110,7 +111,7 @@ describe('useProjectProblemPackageUpload', () => {
 
     expect(upload.files.length).toBe(5)
     expect(upload.files.map((f) => f.path).sort()).toEqual(
-      Array.from({ length: 5 }, (_, i) => `materials/file${i}.txt`).sort(),
+      Array.from({ length: 5 }, (_, i) => `file${i}.txt`).sort(),
     )
   })
 
@@ -120,20 +121,139 @@ describe('useProjectProblemPackageUpload', () => {
     const courseId = ref<string | null | undefined>('course-1')
     const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
 
-    const zed = makeFile('zeta.txt', 'z')
-    Object.defineProperty(zed, 'webkitRelativePath', { value: 'materials/zeta.txt' })
-    const alpha = makeFile('alpha.txt', 'a')
-    Object.defineProperty(alpha, 'webkitRelativePath', { value: 'materials/alpha/alpha.txt' })
-    const mid = makeFile('mid.txt', 'm')
-    Object.defineProperty(mid, 'webkitRelativePath', { value: 'materials/mid.txt' })
+    const zed = makeFile('auth.c', 'z')
+    Object.defineProperty(zed, 'webkitRelativePath', { value: 'materials/student/auth.c' })
+    const alpha = makeFile('security.yaml', 'a')
+    Object.defineProperty(alpha, 'webkitRelativePath', { value: 'materials/rubrics/security.yaml' })
+    const mid = makeFile('authentication-bypass.in', 'm')
+    Object.defineProperty(mid, 'webkitRelativePath', { value: 'materials/tests/security-controlled/authentication-bypass.in' })
 
     await upload.addFiles([zed, alpha, mid])
 
     expect(upload.files.map((f) => f.path)).toEqual([
-      'materials/alpha/alpha.txt',
-      'materials/mid.txt',
-      'materials/zeta.txt',
+      'rubrics/security.yaml',
+      'student/auth.c',
+      'tests/security-controlled/authentication-bypass.in',
     ])
+  })
+
+  it('falls back to the file name when a normal file has an empty relative path', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    const file = makeFile('README.md', '# package')
+    Object.defineProperty(file, 'webkitRelativePath', { value: '' })
+
+    await upload.addFiles([file])
+
+    expect(upload.files.map((entry) => entry.path)).toEqual(['README.md'])
+  })
+
+  it('restores a completed package from the project-scoped API after a refresh', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    const packageData = {
+      id: 'package-1',
+      projectId: 'project-1',
+      courseId: 'course-1',
+      revision: 4,
+      files: [],
+      retention: {},
+      completedAt: '2026-07-16T08:00:00.000Z',
+    }
+    vi.mocked(getProjectProblemPackage).mockResolvedValue({ data: packageData as never, error: undefined as never })
+
+    await expect(upload.loadPackage('package-1')).resolves.toBe(true)
+
+    expect(getProjectProblemPackage).toHaveBeenCalledWith({ path: { projectId: 'project-1', packageId: 'package-1' } })
+    expect(upload.state).toEqual({ kind: 'done', package: packageData })
+    expect(upload.files).toHaveLength(0)
+  })
+
+  it('rejects a restored package whose server projection belongs to another project', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    vi.mocked(getProjectProblemPackage).mockResolvedValue({
+      data: {
+        id: 'package-1',
+        projectId: 'project-2',
+        files: [],
+        retention: {},
+        revision: 4,
+        completedAt: '2026-07-16T08:00:00.000Z',
+      } as never,
+      error: undefined as never,
+    })
+
+    await expect(upload.loadPackage('package-1')).resolves.toBe(false)
+    expect(upload.state.kind).toBe('error')
+    if (upload.state.kind === 'error') {
+      expect(upload.state.diagnostic.code).toBe('UPLOAD_PACKAGE_STALE_CONTEXT')
+    }
+  })
+
+  it('does not apply a slow restore response after the project changes', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    let resolvePackage!: (value: unknown) => void
+    vi.mocked(getProjectProblemPackage).mockReturnValueOnce(new Promise((resolve) => {
+      resolvePackage = resolve
+    }) as never)
+
+    const pending = upload.loadPackage('package-1')
+    projectId.value = 'project-2'
+    resolvePackage({
+      data: {
+        id: 'package-1',
+        projectId: 'project-1',
+        files: [],
+        retention: {},
+        revision: 4,
+        completedAt: '2026-07-16T08:00:00.000Z',
+      },
+      error: undefined,
+    })
+
+    await expect(pending).resolves.toBe(false)
+    expect(upload.state.kind).toBe('idle')
+  })
+
+  it('does not complete an upload session after the project changes', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    await upload.addFiles([makeFile('README.md', '# package')])
+    let resolveSession!: (value: unknown) => void
+    vi.mocked(createProjectProblemPackageUpload).mockReturnValueOnce(new Promise((resolve) => {
+      resolveSession = resolve
+    }) as never)
+
+    const pending = upload.createSession()
+    projectId.value = 'project-2'
+    resolveSession({
+      data: {
+        id: 'upload-1',
+        projectId: 'project-1',
+        courseId: 'course-1',
+        expiresAt: '2026-07-16T10:00:00.000Z',
+        revision: 1,
+        files: [{ path: 'README.md', sizeBytes: 9, mediaType: 'text/plain' }],
+        uploadTargets: [],
+      },
+      error: undefined,
+    })
+
+    await pending
+    expect(upload.state.kind).toBe('idle')
+    expect(completeProjectProblemPackageUpload).not.toHaveBeenCalled()
   })
 
   it('marks object upload failure without throwing unhandled rejection', async () => {

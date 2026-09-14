@@ -132,6 +132,10 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
         false
     );
     assert_eq!(
+        pointer(job, "/spec/template/spec/runtimeClassName"),
+        "labweaver-oj"
+    );
+    assert_eq!(
         pointer(job, "/metadata/annotations/labweaver.io~1trace-id"),
         "trace-oj-job-test"
     );
@@ -198,6 +202,27 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
         pointer(
             job,
             "/spec/template/spec/containers/0/volumeMounts/1/readOnly"
+        ),
+        true
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/0/mountPath"
+        ),
+        "/etc/labweaver/oj/command.json"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/0/subPath"
+        ),
+        "command.json"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/0/readOnly"
         ),
         true
     );

@@ -878,6 +878,23 @@ fn execution_timing(status: &Value) -> Result<ExecutionTiming, AnsibleProbeExecu
     if started.is_some() != finished.is_some() {
         return Ok(ExecutionTiming::unknown());
     }
+    if started
+        .zip(finished)
+        .is_some_and(|(started_at, finished_at)| started_at == finished_at)
+    {
+        tracing::warn!(
+            event = "evaluation.executor.timing_precision_insufficient",
+            diagnostic_code = "LW_EVALUATION_EXECUTOR_TIMING_PRECISION_INSUFFICIENT",
+            timestamp_precision = "seconds",
+            started_at = status
+                .pointer("/state/terminated/startedAt")
+                .and_then(serde_json::Value::as_str),
+            finished_at = status
+                .pointer("/state/terminated/finishedAt")
+                .and_then(serde_json::Value::as_str),
+        );
+        return Ok(ExecutionTiming::unknown());
+    }
     let timing = ExecutionTiming {
         started_at: started,
         terminated_at: finished,
@@ -1110,18 +1127,19 @@ fn verify_runner_default_deny(
         && has_policy_type("Ingress")
         && has_policy_type("Egress")
         && policy_types.len() == 2
-        && policy
-            .pointer("/spec/ingress")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
-        && policy
-            .pointer("/spec/egress")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty);
+        && is_missing_or_empty_rule_list(policy, "/spec/ingress")
+        && is_missing_or_empty_rule_list(policy, "/spec/egress");
     if valid {
         Ok(())
     } else {
         Err(AnsibleProbeExecutorError::NetworkIsolationUnavailable)
+    }
+}
+
+fn is_missing_or_empty_rule_list(policy: &Value, path: &str) -> bool {
+    match policy.pointer(path) {
+        None => true,
+        Some(value) => value.as_array().is_some_and(Vec::is_empty),
     }
 }
 
@@ -1302,9 +1320,9 @@ mod tests {
     use super::{
         AnsibleProbeCancellationObservation, AnsibleProbeDeletePreconditions,
         AnsibleProbeExecutorError, attempt_job_name, cancellation_observation,
-        classify_delete_status, delete_options, delete_preconditions, failed_container_diagnostic,
-        read_bound_file, recovery_cleanup_plan, verify_cleanup_owned, verify_owned,
-        verify_runner_default_deny,
+        classify_delete_status, delete_options, delete_preconditions, execution_timing,
+        failed_container_diagnostic, read_bound_file, recovery_cleanup_plan, verify_cleanup_owned,
+        verify_owned, verify_runner_default_deny,
     };
     #[cfg(unix)]
     use super::{AnsibleProbeExecutorConfiguration, AnsibleProbeKubernetesExecutor};
@@ -1315,12 +1333,47 @@ mod tests {
     };
     use crate::ansible_probe_job::AnsibleProbeCleanupTarget;
     use crate::control_plane::{EvaluationExecutionKind, EvaluationExecutionResources};
+    use crate::execution::ExecutionTiming;
 
     fn assertion(fact: &str, expected: &serde_json::Value) -> FactAssertion {
         match serde_json::from_value(json!({ "fact": fact, "expected": expected })) {
             Ok(assertion) => assertion,
             Err(error) => unreachable!("fixture assertion must deserialize: {error}"),
         }
+    }
+
+    #[test]
+    fn execution_timing_handles_second_precision_without_inventing_duration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let equal = json!({
+            "state": {"terminated": {
+                "startedAt": "2026-09-14T06:26:32Z",
+                "finishedAt": "2026-09-14T06:26:32Z"
+            }}
+        });
+        assert_eq!(execution_timing(&equal)?, ExecutionTiming::unknown());
+
+        let reversed = json!({
+            "state": {"terminated": {
+                "startedAt": "2026-09-14T06:26:33Z",
+                "finishedAt": "2026-09-14T06:26:32Z"
+            }}
+        });
+        assert!(matches!(
+            execution_timing(&reversed),
+            Err(AnsibleProbeExecutorError::ObservationInvalid)
+        ));
+
+        let positive = json!({
+            "state": {"terminated": {
+                "startedAt": "2026-09-14T06:26:32Z",
+                "finishedAt": "2026-09-14T06:26:33Z"
+            }}
+        });
+        let timing = execution_timing(&positive)?;
+        assert!(timing.started_at.is_some());
+        assert!(timing.terminated_at.is_some());
+        Ok(())
     }
 
     fn request() -> AnsibleProbeExecutionRequest {
@@ -1632,10 +1685,31 @@ mod tests {
         });
         assert!(verify_runner_default_deny(&policy, "labweaver-evaluation-runs").is_ok());
 
+        let normalized = json!({
+            "apiVersion":"networking.k8s.io/v1",
+            "kind":"NetworkPolicy",
+            "metadata":{
+                "name":"ansible-probe-default-deny",
+                "namespace":"labweaver-evaluation-runs",
+            },
+            "spec":{
+                "podSelector":{},
+                "policyTypes":["Ingress","Egress"],
+            },
+        });
+        assert!(verify_runner_default_deny(&normalized, "labweaver-evaluation-runs").is_ok());
+
         let mut allows_egress = policy.clone();
         allows_egress["spec"]["egress"] = json!([{}]);
         assert!(matches!(
             verify_runner_default_deny(&allows_egress, "labweaver-evaluation-runs"),
+            Err(AnsibleProbeExecutorError::NetworkIsolationUnavailable)
+        ));
+
+        let mut wrong_rule_type = normalized;
+        wrong_rule_type["spec"]["egress"] = json!({});
+        assert!(matches!(
+            verify_runner_default_deny(&wrong_rule_type, "labweaver-evaluation-runs"),
             Err(AnsibleProbeExecutorError::NetworkIsolationUnavailable)
         ));
 

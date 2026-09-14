@@ -20,7 +20,7 @@ pub enum SubmissionSource {
 }
 
 /// Stable SubmissionManifest v1.
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmissionManifest {
     #[serde(rename = "apiVersion")]
@@ -37,6 +37,9 @@ pub struct SubmissionManifest {
     pub max_files: u32,
     pub follow_symlinks: bool,
 }
+
+/// Deployment-wide default file bound used when projecting an evaluation collector.
+pub const DEFAULT_SUBMISSION_MAX_FILES: u32 = 10_000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -83,6 +86,68 @@ impl<'de> Deserialize<'de> for SubmissionManifest {
 }
 
 impl SubmissionManifest {
+    /// Builds the workspace collection manifest from an approved evaluation submission spec.
+    ///
+    /// Evaluation specs intentionally describe explicit relative paths rather than exposing
+    /// collector implementation types. The v1 freeze boundary represents included paths as
+    /// exact entries and preserves exclusion as a directory-tree prefix rule.
+    pub fn from_workspace_spec(
+        name: impl Into<String>,
+        include: &[String],
+        exclude: &[String],
+        llm_readable: &[String],
+        max_total_bytes: u64,
+    ) -> Result<Self, SubmissionError> {
+        let include = include
+            .iter()
+            .cloned()
+            .map(|path| PathRule::ExactFile { path })
+            .collect::<Vec<_>>();
+        let exclude = exclude
+            .iter()
+            .cloned()
+            .map(|path| PathRule::DirectoryTree { path })
+            .collect::<Vec<_>>();
+        let manifest = Self {
+            api_version: SubmissionApiVersion::V1,
+            kind: SubmissionDocumentKind::SubmissionManifest,
+            name: name.into(),
+            source: SubmissionSource::Workspace,
+            required: Vec::new(),
+            include,
+            exclude,
+            llm_readable: llm_readable
+                .iter()
+                .cloned()
+                .map(|path| PathRule::ExactFile { path })
+                .collect(),
+            max_total_bytes,
+            max_files: DEFAULT_SUBMISSION_MAX_FILES,
+            follow_symlinks: false,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Builds the freeze manifest for an approved evaluation spec.
+    pub fn from_evaluation_spec(
+        spec: &crate::evaluation::EvaluationSpec,
+    ) -> Result<Self, SubmissionError> {
+        let submission = spec.body().submission();
+        let include = submission
+            .collector()
+            .included_paths()
+            .ok_or(SubmissionError::SystemFactsUnsupported)?;
+        let exclude = submission.collector().excluded_paths().unwrap_or_default();
+        Self::from_workspace_spec(
+            format!("{}-{}", spec.metadata().name(), spec.metadata().version()),
+            include,
+            exclude,
+            submission.llm_readable(),
+            submission.collector().max_bytes(),
+        )
+    }
+
     /// Validates portable path rules, limits, and LLM subset constraints.
     pub fn validate(&self) -> Result<(), SubmissionError> {
         if self.name.trim().is_empty()
@@ -144,13 +209,13 @@ impl SubmissionManifest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum SubmissionApiVersion {
     #[serde(rename = "evaluation.labweaver.io/v1")]
     V1,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 enum SubmissionDocumentKind {
     SubmissionManifest,
 }
@@ -347,6 +412,8 @@ pub enum SubmissionError {
     HashMismatch,
     #[error("FrozenSubmission is incomplete")]
     IncompleteFreeze,
+    #[error("system-facts evaluations do not support workspace submission freezing")]
+    SystemFactsUnsupported,
 }
 
 #[cfg(test)]

@@ -15,13 +15,14 @@ use async_trait::async_trait;
 use contracts::authoring::RuntimeKind;
 use contracts::submission::{FrozenEnvironmentIdentity, SubmissionManifest};
 use contracts::{
-    ActorId, AgentRunId, ArtifactId, ArtifactRef, BuildRequestId, CourseId, PolicyId, ProjectId,
-    ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
-    parse_strict_json,
+    ActorId, AgentRunId, ArtifactId, ArtifactRef, BuildRequestId, CourseId, FrozenSubmissionId,
+    PolicyId, ProjectId, ReleaseId, RetentionClass, RetentionDisposition, RetentionSnapshot,
+    Revision, UtcTimestamp, parse_strict_json,
 };
 use evaluation_service::{
-    FreezeRequest, FreezeService, FreezeServiceError, PgFreezeCommandStore, PgFreezeStore,
-    PvcSnapshotSource, SnapshotCollector, SubmissionFreezeCommand,
+    FreezeCommandDurableOutcome, FreezeRequest, FreezeService, FreezeServiceError,
+    PgFreezeCommandStore, PgFreezeStore, PvcSnapshotSource, SnapshotCollector,
+    SubmissionFreezeCommand,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
@@ -61,6 +62,13 @@ async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
     assert_eq!(first.frozen_submission_id, replay.frozen_submission_id);
     assert_eq!(first.accepted.operation_id, replay.accepted.operation_id);
     assert_eq!(
+        first.accepted.status_url,
+        format!(
+            "/api/v1/projects/{}/frozen-submissions/{}",
+            command.project_id, command.frozen_submission_id
+        )
+    );
+    assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evaluation.submission_freeze_commands")
             .fetch_one(&fixture.pool)
             .await?,
@@ -98,6 +106,141 @@ async fn public_acceptance_is_atomic_idempotent_and_enqueues_one_command()
         .mark_cleanup_verified(first.frozen_submission_id)
         .await?;
     assert!(store.cleanup_pending(32).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the integration scenario covers durable attempt and command state transitions"
+)]
+async fn durable_outcome_uses_latest_attempt_and_completed_result_wins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let frozen_submission_id = FrozenSubmissionId::new();
+    let freeze_store = PgFreezeStore::new(fixture.pool.clone());
+    let request_sha256 = Sha256Digest::of_bytes(b"coordinator-durable-request");
+    let source_identity_sha256 = Sha256Digest::of_bytes(b"coordinator-durable-source");
+    let first_lease = match freeze_store
+        .begin(
+            frozen_submission_id,
+            fixture.request.project_id,
+            fixture.request.course_id,
+            fixture.request.environment.environment_id,
+            "coordinator-durable",
+            request_sha256,
+            source_identity_sha256,
+            "coordinator-worker-1",
+            std::time::Duration::from_mins(5),
+        )
+        .await?
+    {
+        evaluation_service::BeginFreeze::Acquired(lease) => lease,
+        other => return Err(format!("unexpected first lease outcome: {other:?}").into()),
+    };
+    freeze_store.mark_preflighting(&first_lease).await?;
+    freeze_store
+        .fail(&first_lease, "LW_OBJECT_UPLOAD_FAILED", false)
+        .await?;
+
+    let command_store = PgFreezeCommandStore::new(fixture.pool.clone());
+    let now = freeze_store.authority_now().await?;
+    let command = SubmissionFreezeCommand {
+        frozen_submission_id,
+        operation_id: contracts::OperationId::new(),
+        project_id: fixture.request.project_id,
+        course_id: fixture.request.course_id,
+        environment_id: fixture.request.environment.environment_id,
+        actor_id: fixture.request.actor_id,
+        environment_revision: fixture.request.environment.environment_revision,
+        manifest_revision: fixture.request.manifest_revision,
+        manifest: fixture.request.manifest.clone(),
+        idempotency_key: "coordinator-durable".to_owned(),
+        trace_id: "coordinator-durable-trace".to_owned(),
+        requested_at: now,
+    };
+    command_store.accept(&command).await?;
+    command_store.claim_next().await?;
+    assert!(matches!(
+        command_store.durable_outcome(frozen_submission_id).await?,
+        Some(FreezeCommandDurableOutcome::Failed(diagnostic))
+            if diagnostic.as_str() == "LW_OBJECT_UPLOAD_FAILED"
+    ));
+
+    let second_lease = match freeze_store
+        .begin(
+            frozen_submission_id,
+            fixture.request.project_id,
+            fixture.request.course_id,
+            fixture.request.environment.environment_id,
+            "coordinator-durable",
+            request_sha256,
+            source_identity_sha256,
+            "coordinator-worker-2",
+            std::time::Duration::from_mins(5),
+        )
+        .await?
+    {
+        evaluation_service::BeginFreeze::Acquired(lease) => lease,
+        other => return Err(format!("unexpected second lease outcome: {other:?}").into()),
+    };
+    assert_eq!(second_lease.attempt, 2);
+    assert!(
+        command_store
+            .durable_outcome(frozen_submission_id)
+            .await?
+            .is_none(),
+        "an older failed attempt must not terminate a newer active attempt"
+    );
+
+    command_store
+        .mark_failed_pending_cleanup(frozen_submission_id, "LW_COLLECT_JOB_FAILED")
+        .await?;
+    sqlx::query(
+        "INSERT INTO evaluation.frozen_submissions \
+         (frozen_submission_id,project_id,course_id,environment_id,manifest_sha256,content_sha256,\
+          schema_version,tool_version,contract,frozen_at,idempotency_key,source_identity_sha256,\
+          object_key,object_version) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'{}'::jsonb,$9,$10,$11,$12,$13)",
+    )
+    .bind(frozen_submission_id.as_uuid())
+    .bind(fixture.request.project_id.as_uuid())
+    .bind(fixture.request.course_id.map(CourseId::as_uuid))
+    .bind(fixture.request.environment.environment_id.as_uuid())
+    .bind(Sha256Digest::of_bytes(b"durable-manifest").to_string())
+    .bind(Sha256Digest::of_bytes(b"durable-content").to_string())
+    .bind("evaluation.labweaver.io/frozen-submission/v1")
+    .bind("test")
+    .bind(now.get())
+    .bind("coordinator-durable")
+    .bind(source_identity_sha256.to_string())
+    .bind("frozen/coordinator-durable")
+    .bind("version-1")
+    .execute(&fixture.pool)
+    .await?;
+    assert!(matches!(
+        command_store.durable_outcome(frozen_submission_id).await?,
+        Some(FreezeCommandDurableOutcome::Completed)
+    ));
+    command_store
+        .mark_cleanup_verified(frozen_submission_id)
+        .await?;
+    assert_eq!(
+        command_store.cleanup_pending(32).await?,
+        vec![command.clone()],
+        "a completed result keeps a previously failed command recoverable until state converges"
+    );
+    command_store.mark_completed(frozen_submission_id).await?;
+    assert_eq!(
+        sqlx::query_as::<_, (String, bool, Option<String>)>(
+            "SELECT state,cleanup_verified,diagnostic_code \
+             FROM evaluation.submission_freeze_commands WHERE frozen_submission_id=$1",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+        ("completed".to_owned(), true, None)
+    );
     Ok(())
 }
 
@@ -286,6 +429,24 @@ async fn repeated_request_replays_one_database_object_and_event_identity()
         1
     );
     assert_eq!(count(&fixture.pool, "evaluation.outbox_events").await?, 1);
+    let read_store = PgFreezeStore::new(fixture.pool.clone());
+    let own = read_store
+        .load_completed_for_project_actor(first.id, first.project_id, first.actor_id)
+        .await?;
+    assert_eq!(own, first);
+    assert_eq!(own.course_id, fixture.request.course_id);
+    assert!(matches!(
+        read_store
+            .load_completed_for_project_actor(first.id, ProjectId::new(), first.actor_id)
+            .await,
+        Err(evaluation_service::freeze_store::FreezeStoreError::NotFound)
+    ));
+    assert!(matches!(
+        read_store
+            .load_completed_for_project_actor(first.id, first.project_id, ActorId::new())
+            .await,
+        Err(evaluation_service::freeze_store::FreezeStoreError::NotFound)
+    ));
     let persisted_manifest_sha256: String = sqlx::query_scalar(
         "SELECT manifest_sha256 FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1",
     )
@@ -317,6 +478,44 @@ async fn repeated_request_replays_one_database_object_and_event_identity()
         fixture.service.freeze(&conflicting, &fixture.source).await,
         Err(FreezeServiceError::IdempotencyConflict)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_manifest_mismatch_is_detectable_before_frozen_event_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(0).await?;
+    let event_submission = fixture
+        .service
+        .freeze(&fixture.request, &fixture.source)
+        .await?;
+    let mut persisted_submission = event_submission.clone();
+    persisted_submission.manifest_revision = Revision::new(2)?;
+    let contract = serde_json::to_value(&persisted_submission)?;
+    sqlx::query(
+        "UPDATE evaluation.frozen_submissions
+         SET manifest_sha256=$2, contract=$3
+         WHERE frozen_submission_id=$1",
+    )
+    .bind(event_submission.id.as_uuid())
+    .bind(Sha256Digest::of_bytes(b"different-manifest").to_string())
+    .bind(contract)
+    .execute(&fixture.pool)
+    .await?;
+
+    let persisted = PgFreezeStore::new(fixture.pool.clone())
+        .load_completed(
+            event_submission.id,
+            event_submission.project_id,
+            event_submission.course_id,
+            event_submission.actor_id,
+        )
+        .await?;
+    assert_ne!(
+        persisted, event_submission,
+        "a SUBMISSION_FROZEN payload with a different manifest revision must not be admitted"
+    );
+    assert_eq!(persisted.manifest_revision, Revision::new(2)?);
     Ok(())
 }
 

@@ -68,6 +68,17 @@ pub struct FreezeCommandAccept {
     pub replay: bool,
 }
 
+/// Durable submission outcome observed by the coordinator before it contacts the runtime.
+///
+/// A completed immutable result always wins over an older failed attempt.  The coordinator uses
+/// this ordering while recovering after the environment that supplied the original binding has
+/// already been deleted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FreezeCommandDurableOutcome {
+    Completed,
+    Failed(DiagnosticCode),
+}
+
 /// Evaluation-owned durable command store.
 #[derive(Clone)]
 pub struct PgFreezeCommandStore {
@@ -97,18 +108,15 @@ impl PgFreezeCommandStore {
         &self,
         frozen_submission_id: FrozenSubmissionId,
         project_id: ProjectId,
-        course_id: Option<CourseId>,
         actor_id: ActorId,
     ) -> Result<Option<DiagnosticCode>, FreezeCommandStoreError> {
         let diagnostic: Option<String> = sqlx::query_scalar(
             "SELECT diagnostic_code FROM evaluation.submission_freeze_commands \
-             WHERE frozen_submission_id=$1 AND project_id=$2 \
-             AND course_id IS NOT DISTINCT FROM $3 AND actor_id=$4 AND state='failed' \
+             WHERE frozen_submission_id=$1 AND project_id=$2 AND actor_id=$3 AND state='failed' \
              AND cleanup_verified=true",
         )
         .bind(frozen_submission_id.as_uuid())
         .bind(project_id.as_uuid())
-        .bind(course_id.map(contracts::CourseId::as_uuid))
         .bind(actor_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
@@ -116,6 +124,36 @@ impl PgFreezeCommandStore {
         diagnostic
             .map(|value| {
                 DiagnosticCode::parse(value).map_err(|_| FreezeCommandStoreError::ContractInvalid)
+            })
+            .transpose()
+    }
+
+    /// Reads the immutable result or the latest failed worker attempt for coordinator recovery.
+    ///
+    /// The immutable result is deliberately checked first.  A worker may persist the result just
+    /// before its Kubernetes Job becomes failed, so an older attempt diagnostic must never replace
+    /// a completed submission.
+    pub async fn durable_outcome(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+    ) -> Result<Option<FreezeCommandDurableOutcome>, FreezeCommandStoreError> {
+        let (result_exists, diagnostic): (bool, Option<String>) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1), \
+             (SELECT CASE WHEN state='failed' THEN diagnostic_code ELSE NULL END \
+              FROM evaluation.submission_freeze_attempts \
+              WHERE frozen_submission_id=$1 ORDER BY attempt DESC LIMIT 1)",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        if result_exists {
+            return Ok(Some(FreezeCommandDurableOutcome::Completed));
+        }
+        diagnostic
+            .map(|value| {
+                DiagnosticCode::parse(value)
+                    .map(FreezeCommandDurableOutcome::Failed)
+                    .map_err(|_| FreezeCommandStoreError::ContractInvalid)
             })
             .transpose()
     }
@@ -195,7 +233,9 @@ impl PgFreezeCommandStore {
         }
         let rows = sqlx::query(
             "SELECT contract FROM evaluation.submission_freeze_commands \
-             WHERE state='failed' AND cleanup_verified=false \
+             WHERE state='failed' AND (cleanup_verified=false OR EXISTS (\
+                 SELECT 1 FROM evaluation.frozen_submissions \
+                 WHERE frozen_submission_id=submission_freeze_commands.frozen_submission_id)) \
              ORDER BY updated_at,frozen_submission_id LIMIT $1",
         )
         .bind(limit)
@@ -225,7 +265,19 @@ impl PgFreezeCommandStore {
         if !result_exists {
             return Err(FreezeCommandStoreError::ResultMissing);
         }
-        terminal_update(&self.pool, frozen_submission_id, "completed", None).await
+        let updated = sqlx::query(
+            "UPDATE evaluation.submission_freeze_commands \
+             SET state='completed',diagnostic_code=NULL,cleanup_verified=true,\
+             completed_at=clock_timestamp(),updated_at=clock_timestamp() \
+             WHERE frozen_submission_id=$1 AND state IN ('running','failed')",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(FreezeCommandStoreError::FenceConflict);
+        }
+        Ok(())
     }
 
     /// Records one stable terminal diagnostic after residue cleanup is verified.
@@ -236,7 +288,25 @@ impl PgFreezeCommandStore {
     ) -> Result<(), FreezeCommandStoreError> {
         contracts::DiagnosticCode::parse(diagnostic)
             .map_err(|_| FreezeCommandStoreError::ContractInvalid)?;
-        terminal_update(&self.pool, frozen_submission_id, "failed", Some(diagnostic)).await
+        let updated = sqlx::query(
+            "UPDATE evaluation.submission_freeze_commands \
+             SET state='failed',diagnostic_code=$2,cleanup_verified=true,\
+             completed_at=clock_timestamp(),updated_at=clock_timestamp() \
+             WHERE frozen_submission_id=$1 AND state='running' \
+             AND NOT EXISTS (SELECT 1 FROM evaluation.frozen_submissions \
+                             WHERE frozen_submission_id=$1)",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(diagnostic)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            if completed_result_exists(&self.pool, frozen_submission_id).await? {
+                return Ok(());
+            }
+            return Err(FreezeCommandStoreError::FenceConflict);
+        }
+        Ok(())
     }
 
     /// Fences a failed worker before asynchronous Kubernetes cleanup begins.
@@ -251,13 +321,18 @@ impl PgFreezeCommandStore {
             "UPDATE evaluation.submission_freeze_commands \
              SET state='failed',diagnostic_code=$2,cleanup_verified=false,\
              completed_at=clock_timestamp(),updated_at=clock_timestamp() \
-             WHERE frozen_submission_id=$1 AND state='running'",
+             WHERE frozen_submission_id=$1 AND state='running' \
+             AND NOT EXISTS (SELECT 1 FROM evaluation.frozen_submissions \
+                             WHERE frozen_submission_id=$1)",
         )
         .bind(frozen_submission_id.as_uuid())
         .bind(diagnostic)
         .execute(&self.pool)
         .await?;
         if updated.rows_affected() != 1 {
+            if completed_result_exists(&self.pool, frozen_submission_id).await? {
+                return Ok(());
+            }
             return Err(FreezeCommandStoreError::FenceConflict);
         }
         Ok(())
@@ -312,7 +387,7 @@ impl PgFreezeCommandStore {
             let operation_id = parse_id(row.try_get("operation_id")?)?;
             transaction.commit().await?;
             return Ok(FreezeCommandAccept {
-                accepted: accepted(operation_id, frozen_submission_id)?,
+                accepted: accepted(operation_id, frozen_submission_id, command.project_id)?,
                 frozen_submission_id,
                 replay: true,
             });
@@ -337,32 +412,27 @@ impl PgFreezeCommandStore {
         enqueue_requested(&mut transaction, command, manifest_sha256).await?;
         transaction.commit().await?;
         Ok(FreezeCommandAccept {
-            accepted: accepted(command.operation_id, command.frozen_submission_id)?,
+            accepted: accepted(
+                command.operation_id,
+                command.frozen_submission_id,
+                command.project_id,
+            )?,
             frozen_submission_id: command.frozen_submission_id,
             replay: false,
         })
     }
 }
 
-async fn terminal_update(
+async fn completed_result_exists(
     pool: &PgPool,
     frozen_submission_id: FrozenSubmissionId,
-    state: &'static str,
-    diagnostic: Option<&str>,
-) -> Result<(), FreezeCommandStoreError> {
-    let updated = sqlx::query(
-        "UPDATE evaluation.submission_freeze_commands SET state=$2,diagnostic_code=$3,cleanup_verified=true,\
-         completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE frozen_submission_id=$1 AND state='running'",
+) -> Result<bool, FreezeCommandStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1)",
     )
     .bind(frozen_submission_id.as_uuid())
-    .bind(state)
-    .bind(diagnostic)
-    .execute(pool)
-    .await?;
-    if updated.rows_affected() != 1 {
-        return Err(FreezeCommandStoreError::FenceConflict);
-    }
-    Ok(())
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn enqueue_requested(
@@ -441,11 +511,12 @@ fn request_hash(
 fn accepted(
     operation_id: OperationId,
     submission_id: FrozenSubmissionId,
+    project_id: ProjectId,
 ) -> Result<OperationAccepted, FreezeCommandStoreError> {
     Ok(OperationAccepted {
         operation_id,
         revision: Revision::new(1).map_err(|_| FreezeCommandStoreError::ContractInvalid)?,
-        status_url: format!("/api/v1/frozen-submissions/{submission_id}"),
+        status_url: format!("/api/v1/projects/{project_id}/frozen-submissions/{submission_id}"),
     })
 }
 

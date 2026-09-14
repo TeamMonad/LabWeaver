@@ -11,6 +11,8 @@ import {
   listEnvironmentOperations,
   cancelEnvironmentOperation,
   startEnvironment,
+  freezeSubmission,
+  getFrozenSubmission,
 } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
@@ -25,6 +27,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     listEnvironmentOperations: vi.fn(),
     cancelEnvironmentOperation: vi.fn(),
     startEnvironment: vi.fn(),
+    freezeSubmission: vi.fn(),
+    getFrozenSubmission: vi.fn(),
     stopEnvironment: vi.fn(),
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
@@ -44,6 +48,20 @@ const mockRelease = {
   publishedBy: 'teacher-1',
 }
 
+const mockSubmissionManifest = {
+  apiVersion: 'evaluation.labweaver.io/v1' as const,
+  kind: 'SubmissionManifest' as const,
+  name: 'experiment-workspace',
+  include: [{ kind: 'exactFile' as const, path: 'student/auth.c' }],
+  exclude: [{ kind: 'directoryTree' as const, path: 'student/build' }],
+  required: [{ kind: 'exactFile' as const, path: 'student/auth.c' }],
+  llmReadable: [{ kind: 'exactFile' as const, path: 'student/feedback.md' }],
+  followSymlinks: false,
+  maxFiles: 100,
+  maxTotalBytes: 1048576,
+  source: 'workspace' as const,
+}
+
 const mockProject = {
   id: 'project-1',
   name: 'Course project',
@@ -54,6 +72,12 @@ const mockProject = {
   revision: 1,
   createdAt: '2026-07-11T10:00:00.000Z',
   updatedAt: '2026-07-11T10:00:00.000Z',
+}
+
+const mockProjectB = {
+  ...mockProject,
+  id: 'project-2',
+  name: 'Second project',
 }
 
 type OperationFixtureState = 'accepted' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
@@ -422,5 +446,201 @@ describe('EnvironmentEntryView', () => {
     await startButton!.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('ENVIRONMENT_LIFECYCLE_FAILED'))
     expect(wrapper.text()).toContain('环境 env-1 处于失败状态')
+  })
+
+  it('shows the freeze operation state and explains the temporary console disconnect', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    mockEnvironmentInstance({ projectId: 'project-2' })
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, projectId: 'project-2', submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(listEnvironmentOperations).mockResolvedValue({
+      data: { items: [mockOperation('running', { kind: 'freeze', operationId: 'freeze-running' })] },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('冻结中'))
+    expect(wrapper.text()).toContain('不可变快照')
+    const resultsLink = wrapper.find('a[href^="/student/results"]')
+    expect(resultsLink.exists()).toBe(true)
+    expect(resultsLink.attributes('href')).toContain('/student/results?projectId=project-2')
+
+    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    expect(wrapper.text()).toContain('冻结提交处理中，终端已暂时断开')
+    expect(wrapper.text()).toContain('查看提交状态')
+  })
+
+  it('uses the manifest from the exact environment release and submits it unchanged', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: {
+        items: [
+          { ...mockRelease, version: 2, submissionManifest: { ...mockSubmissionManifest, name: 'wrong-version' } },
+          { ...mockRelease, submissionManifest: mockSubmissionManifest },
+        ],
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(freezeSubmission).mockResolvedValue({
+      data: {
+        environmentId: 'env-1',
+        operationId: 'freeze-op-1',
+        revision: 12,
+        statusUrl: '/api/v1/projects/project-1/frozen-submissions/00000000-0000-7000-8000-000000000001',
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(getFrozenSubmission).mockResolvedValue({
+      data: {
+        object: {
+          artifactId: 'artifact-1',
+          mediaType: 'application/tar',
+          objectVersion: 'object-version-1',
+          sizeBytes: 123,
+          storeBinding: 'evaluation-store',
+        },
+        contentSha256: 'b'.repeat(64),
+        frozenAt: '2026-07-11T10:10:00.000Z',
+      },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+
+    const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
+    await vi.waitFor(() => expect(startButton.attributes('disabled')).toBeUndefined())
+    await startButton.trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.find('.freeze-manifest').text()).toContain('student/auth.c')
+    expect(dialog.find('.freeze-manifest').text()).toContain('student/feedback.md')
+    expect(dialog.find('.freeze-manifest').text()).not.toContain('wrong-version')
+
+    await dialog.findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
+    await vi.waitFor(() => expect(vi.mocked(freezeSubmission)).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(wrapper.find('.evidence-card').exists()).toBe(true))
+
+    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    expect(wrapper.text()).toContain('冻结完成，终端连接已断开')
+    expect(wrapper.text()).toContain('重新签发授权并连接终端')
+
+    const request = vi.mocked(freezeSubmission).mock.calls[0][0] as never as {
+      path: { environmentId: string }
+      headers: { 'Idempotency-Key': string; 'If-Match': string }
+      body: { manifest: typeof mockSubmissionManifest }
+    }
+    expect(request.path).toEqual({ environmentId: 'env-1' })
+    expect(request.headers['If-Match']).toBe('"rev-11"')
+    expect(request.headers['Idempotency-Key']).toEqual(expect.any(String))
+    expect(request.body.manifest).toEqual(mockSubmissionManifest)
+  })
+
+  it('blocks submission when the exact release has no manifest', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: {
+        items: [
+          { ...mockRelease, version: 2, submissionManifest: mockSubmissionManifest },
+          { ...mockRelease },
+        ],
+      },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('此版本未配置提交评测'))
+    const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
+    expect(startButton.attributes('disabled')).toBeDefined()
+    expect(freezeSubmission).not.toHaveBeenCalled()
+  })
+
+  it('blocks submission when the exact release has been withdrawn', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: {
+        items: [{
+          ...mockRelease,
+          submissionManifest: mockSubmissionManifest,
+          withdrawal: {
+            releaseId: 'release-1',
+            releaseVersion: 1,
+            actorId: 'teacher-1',
+            reasonCode: 'teacher_withdrew',
+            withdrawnAt: '2026-07-11T10:30:00.000Z',
+          },
+        }],
+      },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('当前环境所用版本已撤回'))
+    const startButton = wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!
+    expect(startButton.attributes('disabled')).toBeDefined()
+    expect(freezeSubmission).not.toHaveBeenCalled()
+  })
+
+  it('reuses the freeze idempotency key when a retryable submission error is retried', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({
+      data: { items: [{ ...mockRelease, submissionManifest: mockSubmissionManifest }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(freezeSubmission)
+      .mockResolvedValueOnce({
+        data: undefined as never,
+        error: { diagnosticCode: 'FREEZE_TEMPORARY_FAILURE', detail: '暂时无法受理', retryable: true },
+      } as never)
+      .mockResolvedValueOnce({
+        data: {
+          environmentId: 'env-1',
+          operationId: 'freeze-op-2',
+          revision: 12,
+        statusUrl: '/api/v1/projects/project-1/frozen-submissions/00000000-0000-7000-8000-000000000002',
+        },
+        error: undefined as never,
+      } as never)
+    vi.mocked(getFrozenSubmission).mockResolvedValue({
+      data: {
+        object: {
+          artifactId: 'artifact-2',
+          mediaType: 'application/tar',
+          objectVersion: 'object-version-2',
+          sizeBytes: 123,
+          storeBinding: 'evaluation-store',
+        },
+        contentSha256: 'c'.repeat(64),
+        frozenAt: '2026-07-11T10:11:00.000Z',
+      },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('实验提交与凭据'))!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')?.attributes('disabled')).toBeUndefined())
+    await wrapper.findAll('button').find((button) => button.text() === '发起冻结提交')!.trigger('click')
+    await wrapper.get('[role="dialog"]').findAll('button').find((button) => button.text() === '确认冻结')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('FREEZE_TEMPORARY_FAILURE'))
+    await wrapper.findAll('button').find((button) => button.text() === '重试')!.trigger('click')
+    await vi.waitFor(() => expect(vi.mocked(freezeSubmission)).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(wrapper.find('.evidence-card').exists()).toBe(true))
+
+    const firstRequest = vi.mocked(freezeSubmission).mock.calls[0][0] as never as { headers: { 'Idempotency-Key': string } }
+    const secondRequest = vi.mocked(freezeSubmission).mock.calls[1][0] as never as { headers: { 'Idempotency-Key': string } }
+    expect(secondRequest.headers['Idempotency-Key']).toBe(firstRequest.headers['Idempotency-Key'])
   })
 })

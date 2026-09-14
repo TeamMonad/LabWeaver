@@ -108,6 +108,41 @@ impl PgFreezeStore {
         Ok(submission)
     }
 
+    /// Loads a completed immutable submission for its project and owning actor.
+    ///
+    /// The public read path binds the project in the URL and the actor in the authenticated
+    /// Access delegation.  The optional teaching course remains stored metadata and is not a
+    /// second caller-controlled read boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` for absent, incomplete, differently scoped, or differently owned
+    /// submissions and a stable persistence error when the authority cannot be queried.
+    pub async fn load_completed_for_project_actor(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        actor_id: contracts::ActorId,
+    ) -> Result<FrozenSubmission, FreezeStoreError> {
+        let value: Value = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.frozen_submissions \
+             WHERE frozen_submission_id=$1 AND project_id=$2 \
+             AND contract->>'actorId'=$3",
+        )
+        .bind(frozen_submission_id.as_uuid())
+        .bind(project_id.as_uuid())
+        .bind(actor_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(FreezeStoreError::NotFound)?;
+        let submission: FrozenSubmission =
+            serde_json::from_value(value).map_err(|_| FreezeStoreError::ContractInvalid)?;
+        submission
+            .validate()
+            .map_err(|_| FreezeStoreError::ContractInvalid)?;
+        Ok(submission)
+    }
+
     /// Returns the immutable object key recorded for a completed submission.
     ///
     /// Object keys are persistence locators and therefore do not belong in the

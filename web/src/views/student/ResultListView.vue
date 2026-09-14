@@ -1,22 +1,44 @@
 <template>
-  <section class="results-page" aria-labelledby="results-heading">
+  <section
+    class="results-page"
+    aria-labelledby="results-heading"
+  >
     <header>
-      <h2 id="results-heading">评测结果</h2>
+      <h2 id="results-heading">
+        评测结果
+      </h2>
       <p>仅展示当前项目中属于你的终态 EvaluationRun；失败或取消不会显示部分总分。</p>
     </header>
 
-    <AsyncStateView :state="evaluation.results" empty-text="当前课程暂无终态评测结果" @retry="evaluation.load()">
+    <AsyncStateView
+      :state="evaluation.results"
+      empty-text="当前课程暂无终态评测结果"
+      @retry="evaluation.load()"
+    >
       <template #success="{ data: results }">
         <ul class="result-list">
-          <li v-for="result in results" :key="result.runId" class="result-card md-card">
+          <li
+            v-for="result in results"
+            :key="result.runId"
+            class="result-card md-card"
+          >
             <div class="result-main">
-              <span class="state-chip" :class="`state-chip--${result.state}`">{{ stateLabel(result.state) }}</span>
-              <RouterLink class="result-link" :to="`/student/results/${result.runId}`">
+              <span
+                class="state-chip"
+                :class="`state-chip--${result.state}`"
+              >{{ stateLabel(result.state) }}</span>
+              <RouterLink
+                class="result-link"
+                :to="{ path: `/student/results/${result.runId}`, query: { projectId: result.projectId } }"
+              >
                 <code>{{ result.runId }}</code>
               </RouterLink>
               <span class="result-time">完成于 {{ formatTimestamp(result.completedAt) }}</span>
             </div>
-            <strong v-if="result.state === 'succeeded'" class="result-score">
+            <strong
+              v-if="result.state === 'succeeded'"
+              class="result-score"
+            >
               {{ result.awardedScore }} / {{ result.maxScore }}
             </strong>
             <DiagnosticBanner
@@ -37,7 +59,10 @@
         >
           {{ evaluation.loadingMore ? '加载中…' : '加载更多' }}
         </button>
-        <div v-if="evaluation.loadMoreError" class="load-more-error">
+        <div
+          v-if="evaluation.loadMoreError"
+          class="load-more-error"
+        >
           <DiagnosticBanner
             :code="evaluation.loadMoreError.code"
             :message="evaluation.loadMoreError.message"
@@ -53,6 +78,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import { useProjects } from '@/composables/useProjects'
@@ -60,8 +86,13 @@ import { useEvaluationResults } from '@/composables/useEvaluationResults'
 import type { StudentEvaluationResultSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
 
+const route = useRoute()
 const projects = useProjects()
-const projectId = computed(() => projects.selectedProjectId ?? undefined)
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || undefined
+})
+const projectId = computed(() => routeProjectId.value ?? projects.selectedProjectId ?? undefined)
 const evaluation = useEvaluationResults(projectId)
 
 function stateLabel(state: StudentEvaluationResultSchema['state']) {

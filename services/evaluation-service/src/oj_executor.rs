@@ -28,6 +28,7 @@ use crate::{
 const FIELD_MANAGER: &str = "labweaver-oj-executor";
 const MAX_BOUND_FILE_BYTES: u64 = 64 * 1024;
 const RUNNER_DEFAULT_DENY_POLICY: &str = "oj-runner-default-deny";
+const MAX_DELETE_CONFLICT_RETRIES: usize = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -458,7 +459,14 @@ impl OjKubernetesExecutor {
             let Some(current) = current else { continue };
             verify_recovery_owned(&current, object, resources)?;
             let preconditions = delete_preconditions(&current)?;
-            self.delete(&target, &preconditions).await?;
+            self.delete_owned(
+                &target,
+                object.api_version.as_str(),
+                object.uid.as_str(),
+                preconditions,
+                |current| verify_recovery_owned(current, object, resources),
+            )
+            .await?;
         }
         for object in &resources.objects {
             let current = self
@@ -497,7 +505,15 @@ impl OjKubernetesExecutor {
             };
             verify_owned(&current, request)?;
             let preconditions = delete_preconditions(&current)?;
-            self.delete(target, &preconditions).await?;
+            let uid = preconditions.uid.clone();
+            self.delete_owned(
+                target,
+                api_version(target)?,
+                uid.as_str(),
+                preconditions,
+                |current| verify_owned(current, request),
+            )
+            .await?;
         }
         for target in &targets {
             if let Some(current) = self
@@ -550,7 +566,15 @@ impl OjKubernetesExecutor {
                     .ok_or(OjExecutorError::BindingInvalid)?;
                 verify_cleanup_owned(&current, expected)?;
                 let preconditions = delete_preconditions(&current)?;
-                self.delete(&target, &preconditions).await?;
+                let uid = preconditions.uid.clone();
+                self.delete_owned(
+                    &target,
+                    api_version(&target)?,
+                    uid.as_str(),
+                    preconditions,
+                    |current| verify_cleanup_owned(current, expected),
+                )
+                .await?;
             }
         }
         for target in resources.cleanup_plan() {
@@ -621,6 +645,7 @@ impl OjKubernetesExecutor {
         plural: &str,
         name: &str,
     ) -> Result<Option<Value>, OjExecutorError> {
+        let resource_id = format!("{namespace}/{plural}/{name}");
         let response = self
             .authorized(self.client.get(self.resource_url(
                 namespace,
@@ -630,16 +655,51 @@ impl OjKubernetesExecutor {
             )?))?
             .send()
             .await
-            .map_err(|_| OjExecutorError::KubernetesUnavailable)?;
-        if response.status() == StatusCode::NOT_FOUND {
+            .map_err(|error| {
+                tracing::error!(
+                    event = "evaluation.oj.kubernetes.get_failed",
+                    resource_id = %resource_id,
+                    failure_stage = "program.oj.kubernetes.get",
+                    diagnostic_code = "LW_OJ_KUBERNETES_UNAVAILABLE",
+                    error_kind = reqwest_error_kind(&error),
+                    "OJ Kubernetes GET transport failed",
+                );
+                OjExecutorError::KubernetesUnavailable
+            })?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            tracing::info!(
+                event = "evaluation.oj.kubernetes.get_absent",
+                resource_id = %resource_id,
+                failure_stage = "program.oj.kubernetes.get",
+                outcome = "absent",
+                http_status = status.as_u16(),
+                "OJ Kubernetes resource is already absent",
+            );
             Ok(None)
-        } else if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map(Some)
-                .map_err(|_| OjExecutorError::ObservationInvalid)
+        } else if status.is_success() {
+            response.json().await.map(Some).map_err(|error| {
+                tracing::error!(
+                    event = "evaluation.oj.kubernetes.get_decode_failed",
+                    resource_id = %resource_id,
+                    failure_stage = "program.oj.kubernetes.get",
+                    diagnostic_code = "LW_OJ_OBSERVATION_INVALID",
+                    error_kind = reqwest_error_kind(&error),
+                    http_status = status.as_u16(),
+                    "OJ Kubernetes GET response could not be decoded",
+                );
+                OjExecutorError::ObservationInvalid
+            })
         } else {
+            tracing::error!(
+                event = "evaluation.oj.kubernetes.get_rejected",
+                resource_id = %resource_id,
+                failure_stage = "program.oj.kubernetes.get",
+                diagnostic_code = "LW_OJ_KUBERNETES_REJECTED",
+                error_kind = "api_rejected",
+                http_status = status.as_u16(),
+                "OJ Kubernetes GET was rejected",
+            );
             Err(OjExecutorError::KubernetesRejected)
         }
     }
@@ -673,6 +733,7 @@ impl OjKubernetesExecutor {
         target: &OjCleanupTarget,
         preconditions: &OjDeletePreconditions,
     ) -> Result<(), OjExecutorError> {
+        let resource_id = format!("{}/{}/{}", target.namespace, target.resource, target.name);
         let response = self
             .authorized(self.client.delete(self.resource_url(
                 target.namespace.as_str(),
@@ -683,8 +744,153 @@ impl OjKubernetesExecutor {
             .json(&delete_options(target, preconditions))
             .send()
             .await
-            .map_err(|_| OjExecutorError::KubernetesUnavailable)?;
-        classify_delete_status(response.status())
+            .map_err(|error| {
+                tracing::error!(
+                    event = "evaluation.oj.kubernetes.delete_failed",
+                    resource_id = %resource_id,
+                    failure_stage = "program.oj.kubernetes.delete",
+                    diagnostic_code = "LW_OJ_KUBERNETES_UNAVAILABLE",
+                    error_kind = reqwest_error_kind(&error),
+                    "OJ Kubernetes DELETE transport failed",
+                );
+                OjExecutorError::KubernetesUnavailable
+            })?;
+        let status = response.status();
+        let result = classify_delete_status(status);
+        match &result {
+            Ok(()) => {
+                tracing::info!(
+                    event = "evaluation.oj.kubernetes.delete_accepted",
+                    resource_id = %resource_id,
+                    failure_stage = "program.oj.kubernetes.delete",
+                    outcome = if status == StatusCode::NOT_FOUND {
+                        "already_absent"
+                    } else {
+                        "accepted"
+                    },
+                    http_status = status.as_u16(),
+                    "OJ Kubernetes DELETE completed",
+                );
+            }
+            Err(error) => {
+                if status == StatusCode::CONFLICT {
+                    tracing::warn!(
+                        event = "evaluation.oj.kubernetes.delete_precondition_conflict",
+                        resource_id = %resource_id,
+                        failure_stage = "program.oj.kubernetes.delete",
+                        diagnostic_code = error.diagnostic_code(),
+                        error_kind = "precondition_conflict",
+                        http_status = status.as_u16(),
+                        "OJ Kubernetes DELETE precondition conflicted; identity is rechecked before retry",
+                    );
+                } else {
+                    tracing::error!(
+                        event = "evaluation.oj.kubernetes.delete_rejected",
+                        resource_id = %resource_id,
+                        failure_stage = "program.oj.kubernetes.delete",
+                        diagnostic_code = error.diagnostic_code(),
+                        error_kind = "api_rejected",
+                        http_status = status.as_u16(),
+                        "OJ Kubernetes DELETE was rejected",
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    async fn delete_owned<F>(
+        &self,
+        target: &OjCleanupTarget,
+        api_version: &str,
+        expected_uid: &str,
+        mut preconditions: OjDeletePreconditions,
+        verify: F,
+    ) -> Result<(), OjExecutorError>
+    where
+        F: Fn(&Value) -> Result<(), OjExecutorError>,
+    {
+        let mut retry = 0;
+        loop {
+            match self.delete(target, &preconditions).await {
+                Ok(()) => return Ok(()),
+                Err(OjExecutorError::IdentityConflict) if retry < MAX_DELETE_CONFLICT_RETRIES => {
+                    let Some(current) = self
+                        .get(
+                            target.namespace.as_str(),
+                            api_version,
+                            target.resource.as_str(),
+                            target.name.as_str(),
+                        )
+                        .await?
+                    else {
+                        tracing::info!(
+                            event = "evaluation.oj.kubernetes.delete_retry_absent",
+                            resource_id =
+                                format!("{}/{}/{}", target.namespace, target.resource, target.name),
+                            failure_stage = "program.oj.kubernetes.delete.retry",
+                            outcome = "already_absent",
+                            "OJ Kubernetes resource disappeared after delete conflict",
+                        );
+                        return Ok(());
+                    };
+                    if current.pointer("/metadata/uid").and_then(Value::as_str)
+                        != Some(expected_uid)
+                    {
+                        tracing::error!(
+                            event = "evaluation.oj.kubernetes.delete_retry_identity_changed",
+                            resource_id =
+                                format!("{}/{}/{}", target.namespace, target.resource, target.name),
+                            failure_stage = "program.oj.kubernetes.delete.retry",
+                            diagnostic_code = OjExecutorError::IdentityConflict.diagnostic_code(),
+                            error_kind = OjExecutorError::IdentityConflict.error_kind(),
+                            outcome = "uid_changed",
+                            "OJ Kubernetes resource UID changed after delete precondition conflict",
+                        );
+                        return Err(OjExecutorError::IdentityConflict);
+                    }
+                    if let Err(error) = verify(&current) {
+                        tracing::error!(
+                            event = "evaluation.oj.kubernetes.delete_retry_ownership_failed",
+                            resource_id =
+                                format!("{}/{}/{}", target.namespace, target.resource, target.name),
+                            failure_stage = "program.oj.kubernetes.delete.retry",
+                            diagnostic_code = error.diagnostic_code(),
+                            error_kind = error.error_kind(),
+                            outcome = "ownership_rejected",
+                            "OJ Kubernetes resource ownership failed after delete precondition conflict",
+                        );
+                        return Err(error);
+                    }
+                    preconditions = delete_preconditions(&current)?;
+                    tracing::warn!(
+                        event = "evaluation.oj.kubernetes.delete_retry",
+                        resource_id =
+                            format!("{}/{}/{}", target.namespace, target.resource, target.name),
+                        failure_stage = "program.oj.kubernetes.delete.retry",
+                        diagnostic_code = OjExecutorError::IdentityConflict.diagnostic_code(),
+                        error_kind = OjExecutorError::IdentityConflict.error_kind(),
+                        outcome = "same_uid_refresh",
+                        "retrying OJ Kubernetes DELETE after same-UID resource-version conflict",
+                    );
+                    retry += 1;
+                }
+                Err(error @ OjExecutorError::IdentityConflict) => {
+                    tracing::error!(
+                        event = "evaluation.oj.kubernetes.delete_retry_exhausted",
+                        resource_id =
+                            format!("{}/{}/{}", target.namespace, target.resource, target.name),
+                        failure_stage = "program.oj.kubernetes.delete.retry",
+                        diagnostic_code = error.diagnostic_code(),
+                        error_kind = error.error_kind(),
+                        outcome = "retry_exhausted",
+                        "OJ Kubernetes DELETE precondition conflicts exceeded the bounded retry limit",
+                    );
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn authorized(
@@ -740,6 +946,22 @@ fn classify_delete_status(status: StatusCode) -> Result<(), OjExecutorError> {
         Err(OjExecutorError::IdentityConflict)
     } else {
         Err(OjExecutorError::KubernetesRejected)
+    }
+}
+
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "other"
     }
 }
 
@@ -811,6 +1033,23 @@ fn execution_timing(status: &Value) -> Result<ExecutionTiming, OjExecutorError> 
         .map(parse_kubernetes_timestamp)
         .transpose()?;
     if started.is_some() != finished.is_some() {
+        return Ok(ExecutionTiming::unknown());
+    }
+    if started
+        .zip(finished)
+        .is_some_and(|(started_at, finished_at)| started_at == finished_at)
+    {
+        tracing::warn!(
+            event = "evaluation.executor.timing_precision_insufficient",
+            diagnostic_code = "LW_EVALUATION_EXECUTOR_TIMING_PRECISION_INSUFFICIENT",
+            timestamp_precision = "seconds",
+            started_at = status
+                .pointer("/state/terminated/startedAt")
+                .and_then(serde_json::Value::as_str),
+            finished_at = status
+                .pointer("/state/terminated/finishedAt")
+                .and_then(serde_json::Value::as_str),
+        );
         return Ok(ExecutionTiming::unknown());
     }
     let timing = ExecutionTiming {
@@ -1010,18 +1249,19 @@ fn verify_runner_default_deny(
         && has_policy_type("Ingress")
         && has_policy_type("Egress")
         && policy_types.len() == 2
-        && policy
-            .pointer("/spec/ingress")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
-        && policy
-            .pointer("/spec/egress")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty);
+        && is_missing_or_empty_rule_list(policy, "/spec/ingress")
+        && is_missing_or_empty_rule_list(policy, "/spec/egress");
     if valid {
         Ok(())
     } else {
         Err(OjExecutorError::NetworkIsolationUnavailable)
+    }
+}
+
+fn is_missing_or_empty_rule_list(policy: &Value, path: &str) -> bool {
+    match policy.pointer(path) {
+        None => true,
+        Some(value) => value.as_array().is_some_and(Vec::is_empty),
     }
 }
 
@@ -1155,6 +1395,23 @@ pub enum OjExecutorError {
 
 impl OjExecutorError {
     #[must_use]
+    pub const fn error_kind(&self) -> &'static str {
+        match self {
+            Self::ConfigurationUnavailable { .. } => "configuration_unavailable",
+            Self::ConfigurationInvalid => "configuration_invalid",
+            Self::BindingInvalid => "binding_invalid",
+            Self::KubernetesUnavailable => "kubernetes_unavailable",
+            Self::KubernetesRejected => "kubernetes_rejected",
+            Self::NetworkIsolationUnavailable => "network_isolation_unavailable",
+            Self::IdentityConflict => "identity_conflict",
+            Self::CleanupPending => "cleanup_pending",
+            Self::ObservationInvalid => "observation_invalid",
+            Self::ReceiptInvalid => "receipt_invalid",
+            Self::Job(_) => "job",
+        }
+    }
+
+    #[must_use]
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
             Self::ConfigurationUnavailable { .. } => "LW_OJ_EXECUTOR_CONFIG_UNAVAILABLE",
@@ -1185,9 +1442,10 @@ mod tests {
         OjCancellationObservation, OjDeletePreconditions, OjExecutorConfiguration, OjExecutorError,
         OjJobObservation, OjKubernetesExecutor, api_version, attempt_job_name,
         cancellation_observation, classify_delete_status, delete_options, delete_preconditions,
-        failed_container_diagnostic, read_bound_file, recovery_cleanup_plan, verify_cleanup_owned,
-        verify_runner_default_deny,
+        execution_timing, failed_container_diagnostic, read_bound_file, recovery_cleanup_plan,
+        verify_cleanup_owned, verify_runner_default_deny,
     };
+    use crate::execution::ExecutionTiming;
     use crate::oj_job::OjCleanupTarget;
     use crate::{
         EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION,
@@ -1202,7 +1460,7 @@ mod tests {
     use contracts::{EvaluationRunId, EvaluationStepRunId, TaskRunId};
     use persistence_sqlx::Sha256Digest;
     use reqwest::{Client, StatusCode, Url};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -1210,6 +1468,40 @@ mod tests {
     };
 
     const TEST_NAMESPACE: &str = "labweaver-evaluation-runs";
+
+    #[test]
+    fn execution_timing_handles_second_precision_without_inventing_duration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let equal = json!({
+            "state": {"terminated": {
+                "startedAt": "2026-09-14T06:26:32Z",
+                "finishedAt": "2026-09-14T06:26:32Z"
+            }}
+        });
+        assert_eq!(execution_timing(&equal)?, ExecutionTiming::unknown());
+
+        let reversed = json!({
+            "state": {"terminated": {
+                "startedAt": "2026-09-14T06:26:33Z",
+                "finishedAt": "2026-09-14T06:26:32Z"
+            }}
+        });
+        assert!(matches!(
+            execution_timing(&reversed),
+            Err(OjExecutorError::ObservationInvalid)
+        ));
+
+        let positive = json!({
+            "state": {"terminated": {
+                "startedAt": "2026-09-14T06:26:32Z",
+                "finishedAt": "2026-09-14T06:26:33Z"
+            }}
+        });
+        let timing = execution_timing(&positive)?;
+        assert!(timing.started_at.is_some());
+        assert!(timing.terminated_at.is_some());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1314,8 +1606,15 @@ mod tests {
     struct FakeExecutor {
         executor: OjKubernetesExecutor,
         objects: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+        delete_conflict: Arc<Mutex<Option<FakeDeleteConflict>>>,
         server: JoinHandle<()>,
         _token_file: tempfile::NamedTempFile,
+    }
+
+    #[derive(Clone, Debug)]
+    struct FakeDeleteConflict {
+        path: String,
+        replacement_uid: Option<String>,
     }
 
     impl Drop for FakeExecutor {
@@ -1415,6 +1714,7 @@ mod tests {
     async fn fake_connection(
         mut stream: TcpStream,
         objects: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+        delete_conflict: Arc<Mutex<Option<FakeDeleteConflict>>>,
     ) -> std::io::Result<()> {
         let mut request = Vec::new();
         let mut chunk = [0_u8; 4 * 1024];
@@ -1424,14 +1724,45 @@ mod tests {
                 return Ok(());
             }
             request.extend_from_slice(&chunk[..read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-            if request.len() > 64 * 1024 {
+            let Some(header_end) = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| position + 4)
+            else {
+                if request.len() > 64 * 1024 {
+                    return fake_response(&mut stream, 413, &json!({})).await;
+                }
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                })
+                .flatten()
+                .unwrap_or(0);
+            let request_length = header_end.saturating_add(content_length);
+            if request_length > 64 * 1024 {
                 return fake_response(&mut stream, 413, &json!({})).await;
             }
+            if request.len() >= request_length {
+                break;
+            }
         }
-        let Some(line_end) = request.windows(2).position(|window| window == b"\r\n") else {
+        let Some(header_end) = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|position| position + 4)
+        else {
+            return fake_response(&mut stream, 400, &json!({})).await;
+        };
+        let Some(line_end) = request[..header_end]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        else {
             return fake_response(&mut stream, 400, &json!({})).await;
         };
         let line = String::from_utf8_lossy(&request[..line_end]);
@@ -1455,15 +1786,63 @@ mod tests {
                 }
             }
             "DELETE" => {
-                let removed = objects
-                    .lock()
-                    .map_err(|_| std::io::Error::other("fake object state poisoned"))?
-                    .remove(path)
-                    .is_some();
-                if removed {
-                    (200, json!({}))
+                let body = request.get(header_end..).unwrap_or_default();
+                let options = serde_json::from_slice::<serde_json::Value>(body).ok();
+                let conflict = {
+                    let mut configured = delete_conflict.lock().map_err(|_| {
+                        std::io::Error::other("fake delete conflict state poisoned")
+                    })?;
+                    configured
+                        .as_ref()
+                        .is_some_and(|conflict| conflict.path == path)
+                        .then(|| configured.take())
+                        .flatten()
+                };
+                if let Some(conflict) = conflict {
+                    let mut state = objects
+                        .lock()
+                        .map_err(|_| std::io::Error::other("fake object state poisoned"))?;
+                    if let Some(current) = state.get_mut(path) {
+                        current["metadata"]["resourceVersion"] = json!("rv-conflict");
+                        if let Some(replacement_uid) = conflict.replacement_uid {
+                            current["metadata"]["uid"] = json!(replacement_uid);
+                        }
+                        (409, json!({}))
+                    } else {
+                        (404, json!({}))
+                    }
                 } else {
-                    (404, json!({}))
+                    let expected_uid = options
+                        .as_ref()
+                        .and_then(|options| options.pointer("/preconditions/uid"))
+                        .and_then(serde_json::Value::as_str);
+                    let expected_resource_version = options
+                        .as_ref()
+                        .and_then(|options| options.pointer("/preconditions/resourceVersion"))
+                        .and_then(serde_json::Value::as_str);
+                    {
+                        let mut state = objects
+                            .lock()
+                            .map_err(|_| std::io::Error::other("fake object state poisoned"))?;
+                        match state.get(path) {
+                            None => (404, json!({})),
+                            Some(current) => {
+                                let matches =
+                                    current.pointer("/metadata/uid").and_then(Value::as_str)
+                                        == expected_uid
+                                        && current
+                                            .pointer("/metadata/resourceVersion")
+                                            .and_then(Value::as_str)
+                                            == expected_resource_version;
+                                if matches {
+                                    state.remove(path);
+                                    (200, json!({}))
+                                } else {
+                                    (409, json!({}))
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => (405, json!({})),
@@ -1494,15 +1873,19 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let address = listener.local_addr()?;
         let objects = Arc::new(Mutex::new(objects));
+        let delete_conflict = Arc::new(Mutex::new(None));
         let server_objects = Arc::clone(&objects);
+        let server_delete_conflict = Arc::clone(&delete_conflict);
         let server = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
                 let connection_objects = Arc::clone(&server_objects);
+                let connection_delete_conflict = Arc::clone(&server_delete_conflict);
                 tokio::spawn(async move {
-                    let _ = fake_connection(stream, connection_objects).await;
+                    let _ = fake_connection(stream, connection_objects, connection_delete_conflict)
+                        .await;
                 });
             }
         });
@@ -1520,6 +1903,7 @@ mod tests {
         Ok(FakeExecutor {
             executor,
             objects,
+            delete_conflict,
             server,
             _token_file: token_file,
         })
@@ -1641,6 +2025,90 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn cleanup_retries_same_uid_resource_version_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (request, intent) = compile_request()?;
+        let job_name = attempt_job_name(request.attempt_id);
+        let path = resource_path("batch/v1", "jobs", &job_name);
+        let mut objects = BTreeMap::new();
+        objects.insert(
+            path.clone(),
+            object_document(&request, &job_name, "uid-job", "jobs")?,
+        );
+        let fake = fake_executor(objects).await?;
+        *fake
+            .delete_conflict
+            .lock()
+            .map_err(|_| "fake delete conflict state poisoned")? = Some(FakeDeleteConflict {
+            path,
+            replacement_uid: None,
+        });
+        let recovered = hydrated(
+            &intent,
+            vec![(
+                "batch/v1".to_owned(),
+                "jobs".to_owned(),
+                job_name,
+                "uid-job".to_owned(),
+            )],
+        );
+
+        assert!(fake.executor.cleanup_recovery(&recovered).await?);
+        assert!(
+            fake.objects
+                .lock()
+                .map_err(|_| "fake object state poisoned")?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_rejects_uid_replacement_after_resource_version_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (request, intent) = compile_request()?;
+        let job_name = attempt_job_name(request.attempt_id);
+        let path = resource_path("batch/v1", "jobs", &job_name);
+        let mut objects = BTreeMap::new();
+        objects.insert(
+            path.clone(),
+            object_document(&request, &job_name, "uid-job", "jobs")?,
+        );
+        let fake = fake_executor(objects).await?;
+        *fake
+            .delete_conflict
+            .lock()
+            .map_err(|_| "fake delete conflict state poisoned")? = Some(FakeDeleteConflict {
+            path: path.clone(),
+            replacement_uid: Some("uid-replacement".to_owned()),
+        });
+        let recovered = hydrated(
+            &intent,
+            vec![(
+                "batch/v1".to_owned(),
+                "jobs".to_owned(),
+                job_name,
+                "uid-job".to_owned(),
+            )],
+        );
+
+        assert!(matches!(
+            fake.executor.cleanup_recovery(&recovered).await,
+            Err(OjExecutorError::IdentityConflict)
+        ));
+        let objects = fake
+            .objects
+            .lock()
+            .map_err(|_| "fake object state poisoned")?;
+        let current = objects.get(&path).ok_or("replacement object disappeared")?;
+        assert_eq!(
+            current.pointer("/metadata/uid").and_then(Value::as_str),
+            Some("uid-replacement")
+        );
+        Ok(())
+    }
+
     fn resource() -> serde_json::Value {
         json!({
             "apiVersion":"batch/v1",
@@ -1737,10 +2205,31 @@ mod tests {
         });
         assert!(verify_runner_default_deny(&policy, "labweaver-evaluation-runs").is_ok());
 
+        let normalized = json!({
+            "apiVersion":"networking.k8s.io/v1",
+            "kind":"NetworkPolicy",
+            "metadata":{
+                "name":"oj-runner-default-deny",
+                "namespace":"labweaver-evaluation-runs",
+            },
+            "spec":{
+                "podSelector":{},
+                "policyTypes":["Ingress","Egress"],
+            },
+        });
+        assert!(verify_runner_default_deny(&normalized, "labweaver-evaluation-runs").is_ok());
+
         let mut allows_egress = policy.clone();
         allows_egress["spec"]["egress"] = json!([{}]);
         assert!(matches!(
             verify_runner_default_deny(&allows_egress, "labweaver-evaluation-runs"),
+            Err(OjExecutorError::NetworkIsolationUnavailable)
+        ));
+
+        let mut wrong_rule_type = normalized;
+        wrong_rule_type["spec"]["egress"] = json!({});
+        assert!(matches!(
+            verify_runner_default_deny(&wrong_rule_type, "labweaver-evaluation-runs"),
             Err(OjExecutorError::NetworkIsolationUnavailable)
         ));
 

@@ -180,10 +180,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(cancel_task_resource),
         )
         .route("/internal/v1/resource/usage", post(record_internal_usage))
-        .layer(axum::middleware::from_fn(internal_service_auth))
-        .layer(Extension(state.service_verifier.clone()))
-        .layer(Extension(state.environment_service_client_id.clone()))
-        .layer(Extension(state.evaluation_service_client_id.clone()));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            internal_service_auth,
+        ));
     let router = Router::new()
         .merge(public)
         .merge(internal)
@@ -1103,12 +1103,11 @@ async fn public_service_auth(
 /// The verifier is injected by the process runtime. A missing verifier is a deployment error and
 /// returns 503 rather than silently accepting a request through the browser delegation path.
 async fn internal_service_auth(
-    Extension(verifier): Extension<Option<Arc<auth::ServiceTokenVerifier>>>,
-    Extension(evaluation_service_client_id): Extension<Option<String>>,
+    State(state): State<ResourceApiState>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(verifier) = verifier else {
+    let Some(verifier) = state.service_verifier else {
         tracing::error!(
             event = "resource.internal_auth.unconfigured",
             diagnostic_code = "LW_AUTH_SERVICE_CONFIG_INVALID",
@@ -1125,7 +1124,7 @@ async fn internal_service_auth(
     };
     let task_route = permission.starts_with("resource.task.");
     let expected_task_client_id = if task_route {
-        let Some(client_id) = evaluation_service_client_id else {
+        let Some(client_id) = state.evaluation_service_client_id else {
             tracing::error!(
                 event = "resource.internal_auth.unconfigured",
                 permission,

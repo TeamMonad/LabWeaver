@@ -1,8 +1,21 @@
 <template>
-  <section class="result-page" aria-labelledby="result-heading">
-    <RouterLink to="/student/results" class="back-link">← 返回评测结果</RouterLink>
-    <h2 id="result-heading">评测详情</h2>
-    <AsyncStateView :state="evaluation.result" @retry="evaluation.load">
+  <section
+    class="result-page"
+    aria-labelledby="result-heading"
+  >
+    <RouterLink
+      class="back-link"
+      :to="{ path: '/student/results', query: { projectId: routeProjectId } }"
+    >
+      ← 返回评测结果
+    </RouterLink>
+    <h2 id="result-heading">
+      评测详情
+    </h2>
+    <AsyncStateView
+      :state="evaluation.result"
+      @retry="evaluation.load"
+    >
       <template #success="{ data: result }">
         <article class="summary md-card">
           <dl>
@@ -10,7 +23,9 @@
             <dt>状态</dt><dd>{{ stateLabel(result.state) }}</dd>
             <dt>完成时间</dt><dd>{{ formatTimestamp(result.completedAt) }}</dd>
             <template v-if="result.state === 'succeeded'">
-              <dt>最终总分</dt><dd class="score">{{ result.awardedScore }} / {{ result.maxScore }}</dd>
+              <dt>最终总分</dt><dd class="score">
+                {{ result.awardedScore }} / {{ result.maxScore }}
+              </dd>
             </template>
           </dl>
           <DiagnosticBanner
@@ -23,16 +38,26 @@
         </article>
 
         <section aria-labelledby="steps-heading">
-          <h3 id="steps-heading">公开步骤</h3>
+          <h3 id="steps-heading">
+            公开步骤
+          </h3>
           <ol class="step-list">
-            <li v-for="step in result.steps" :key="step.position" class="step-card md-card">
+            <li
+              v-for="step in result.steps"
+              :key="step.position"
+              class="step-card md-card"
+            >
               <span>步骤 {{ step.position + 1 }}</span>
               <span>{{ roleLabel(step.role) }} · {{ step.state }}</span>
               <strong v-if="result.state === 'succeeded' && step.awardedScore !== undefined && step.awardedScore !== null">
                 {{ step.awardedScore }} / {{ step.maxScore }}
               </strong>
               <code v-if="step.diagnosticCode">{{ step.diagnosticCode }}</code>
-              <section v-if="step.review" class="goal-review" aria-label="目标建议">
+              <section
+                v-if="step.review"
+                class="goal-review"
+                aria-label="目标建议"
+              >
                 <div class="goal-review__heading">
                   <h4>GoalReview · 目标建议</h4>
                   <span class="review-assessment">{{ assessmentLabel(step.review.assessment) }}</span>
@@ -43,7 +68,9 @@
                   <span>Schema</span>
                   <code>{{ step.review.schema_version }}</code>
                 </div>
-                <p class="review-disclaimer">这是评测建议，不计入确定性总分。</p>
+                <p class="review-disclaimer">
+                  这是评测建议，不计入确定性总分。
+                </p>
                 <DiagnosticBanner
                   v-if="step.review.requires_teacher_attention"
                   code="GOAL_REVIEW_TEACHER_ATTENTION"
@@ -51,15 +78,25 @@
                   :retryable="false"
                   severity="warning"
                 />
-                <ol v-if="step.review.findings.length > 0" class="finding-list">
-                  <li v-for="(finding, findingIndex) in step.review.findings" :key="`${findingIndex}-${finding.criterion}`" class="finding-item">
+                <ol
+                  v-if="step.review.findings.length > 0"
+                  class="finding-list"
+                >
+                  <li
+                    v-for="(finding, findingIndex) in step.review.findings"
+                    :key="`${findingIndex}-${finding.criterion}`"
+                    class="finding-item"
+                  >
                     <div class="finding-heading">
                       <strong>{{ finding.criterion }}</strong>
                       <span>{{ findingResultLabel(finding.result) }}</span>
                     </div>
                     <p>{{ finding.suggestion }}</p>
                     <ul class="evidence-list">
-                      <li v-for="(location, locationIndex) in finding.evidence" :key="`${locationIndex}-${location.path}:${location.start_line}-${location.end_line}`">
+                      <li
+                        v-for="(location, locationIndex) in finding.evidence"
+                        :key="`${locationIndex}-${location.path}:${location.start_line}-${location.end_line}`"
+                      >
                         证据：<code>{{ location.path }}:{{ location.start_line }}-{{ location.end_line }}</code>
                       </li>
                     </ul>
@@ -86,7 +123,11 @@ import { formatTimestamp } from '@/utils/format'
 
 const route = useRoute()
 const projects = useProjects()
-const projectId = computed(() => projects.selectedProjectId ?? undefined)
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || undefined
+})
+const projectId = computed(() => routeProjectId.value ?? projects.selectedProjectId ?? undefined)
 const runId = computed(() => typeof route.params.runId === 'string' ? route.params.runId : undefined)
 const evaluation = useEvaluationResult(projectId, runId)
 

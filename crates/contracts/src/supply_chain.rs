@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::authoring::{CandidateApproval, CandidateDecision, EnvironmentCandidate, RuntimeKind};
+use crate::submission::SubmissionManifest;
 use crate::{
     ActorId, AgentRunId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ImageArtifactId,
     ProjectId, ReleaseId, Revision, UtcTimestamp,
@@ -248,6 +249,11 @@ pub struct EnvironmentTemplateReleaseView {
     #[serde(flatten)]
     pub release: EnvironmentTemplateRelease,
     pub withdrawal: Option<ReleaseWithdrawal>,
+    /// Workspace submission manifest from the exact ready authoring publication, when present.
+    ///
+    /// Work releases and system-facts evaluations intentionally omit this projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_manifest: Option<SubmissionManifest>,
 }
 
 fn validate_oci_digest(value: &str) -> Result<(), SupplyChainError> {

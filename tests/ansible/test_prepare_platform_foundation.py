@@ -144,6 +144,7 @@ class FoundationAuthoringTests(unittest.TestCase):
                 "$JS.ACK.>",
                 "labweaver.evaluation.submission.freeze_requested.v1",
                 "labweaver.evaluation.submission.frozen.v1",
+                "labweaver.evaluation.submission.quarantine.v1",
                 "labweaver.evaluation.release.published.v1",
                 "labweaver.evaluation.run.requested.v1",
                 "labweaver.evaluation.run.state_changed.v1",
@@ -152,7 +153,11 @@ class FoundationAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(
             evaluation_subscribe,
-            ("_INBOX.>", "labweaver.evaluation.submission.freeze_requested.v1"),
+            (
+                "_INBOX.>",
+                "labweaver.evaluation.submission.freeze_requested.v1",
+                "labweaver.evaluation.submission.frozen.v1",
+            ),
         )
         self.assertFalse(evaluation_response)
 

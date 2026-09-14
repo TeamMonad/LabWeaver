@@ -118,7 +118,8 @@ pub struct MembershipSnapshot {
 pub struct AuthCleanupReport {
     /// Sessions newly marked expired.
     pub sessions_revoked: u64,
-    /// Retained revoked sessions removed after the configured retention.
+    /// Revoked sessions removed after the configured retention when no Access-owned
+    /// console metadata still references them.
     pub sessions_deleted: u64,
     /// Expired OIDC transactions removed.
     pub transactions_deleted: u64,
@@ -127,7 +128,9 @@ pub struct AuthCleanupReport {
 }
 
 /// Cleans bounded ephemeral authentication state while retaining revoked
-/// sessions for the deployment-configured audit window.
+/// sessions for the deployment-configured audit window. Retention is the
+/// deletion eligibility threshold; a session still referenced by console
+/// metadata remains as identity metadata for that lifecycle history.
 pub async fn cleanup_expired_auth_state(
     pool: &PgPool,
     now: OffsetDateTime,
@@ -147,7 +150,16 @@ pub async fn cleanup_expired_auth_state(
     .await?
     .rows_affected();
     let sessions_deleted = sqlx::query(
-        "DELETE FROM access.bff_sessions WHERE revoked_at IS NOT NULL AND revoked_at < $1",
+        "DELETE FROM access.bff_sessions s \
+         WHERE s.revoked_at IS NOT NULL AND s.revoked_at < $1 \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM access.console_capabilities c \
+             WHERE c.bff_session_id = s.session_id \
+         ) \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM access.console_sessions cs \
+             WHERE cs.bff_session_id = s.session_id \
+         )",
     )
     .bind(retention_before)
     .execute(&mut *transaction)

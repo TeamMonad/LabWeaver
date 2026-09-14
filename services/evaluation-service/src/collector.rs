@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 const ARCHIVE_MEDIA_TYPE: &str = "application/vnd.labweaver.frozen-submission.v1+json";
 const DEFAULT_MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 96 * 1024 * 1024;
-const DEFAULT_MAX_FILES: u32 = 10_000;
+const DEFAULT_MAX_FILES: u32 = contracts::submission::DEFAULT_SUBMISSION_MAX_FILES;
 
 /// Runtime transport bound to the immutable Environment identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

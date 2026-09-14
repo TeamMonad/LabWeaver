@@ -29,7 +29,8 @@ use crate::{
     EvaluationExecutionConfiguration, EvaluationOutboxDispatcher, EvaluationOutboxError,
     EvaluationWorker, FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError,
     KubernetesEvaluationRunner, PgEvaluationControlStore, PgFreezeCommandStore, PgFreezeStore,
-    ResourceClient, ResourceClientConfiguration, evaluation_api_router, with_service_auth,
+    ResourceClient, ResourceClientConfiguration, SubmissionConsumerError, SubmissionFrozenConsumer,
+    evaluation_api_router, with_service_auth,
 };
 
 const CONFIG_PATH: &str = "LABWEAVER_EVALUATION_CONFIG_FILE";
@@ -53,6 +54,10 @@ struct EvaluationConfiguration {
     object_store_access_key_file: PathBuf,
     object_store_secret_key_file: PathBuf,
     object_store_session_token_file: Option<PathBuf>,
+    package_object_store: S3StoreConfig,
+    package_object_store_access_key_file: PathBuf,
+    package_object_store_secret_key_file: PathBuf,
+    package_object_store_session_token_file: Option<PathBuf>,
     execution: EvaluationExecutionConfiguration,
 }
 
@@ -64,6 +69,9 @@ struct NatsConfiguration {
     client_certificate_file: PathBuf,
     client_private_key_file: PathBuf,
     credentials_file: PathBuf,
+    submission_stream_name: String,
+    submission_consumer_name: String,
+    submission_quarantine_subject: String,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -105,14 +113,10 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         .await?;
     require_schema(&pool).await?;
     let nats = connect_nats(&configuration.nats).await?;
-    let materializer_ca_bundle = configuration
-        .object_store
-        .ca_bundle_file
-        .as_deref()
-        .map(Path::new)
-        .map(|path| read_mounted_file(path, MAX_CONFIG_BYTES))
-        .transpose()?
-        .map(Arc::<[u8]>::from);
+    let materializer_ca_bundle = load_materializer_ca_bundle([
+        &configuration.object_store,
+        &configuration.package_object_store,
+    ])?;
     let object_store = Arc::new(
         S3ImmutableObjectStore::new(
             configuration.object_store,
@@ -129,12 +133,40 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         .await
         .map_err(EvaluationProcessError::ObjectStore)?,
     );
+    let package_object_store = Arc::new(
+        S3ImmutableObjectStore::new(
+            configuration.package_object_store,
+            S3Credential {
+                access_key_id: read_secret(&configuration.package_object_store_access_key_file)?,
+                secret_access_key: read_secret(
+                    &configuration.package_object_store_secret_key_file,
+                )?,
+                session_token: configuration
+                    .package_object_store_session_token_file
+                    .as_deref()
+                    .map(read_secret)
+                    .transpose()?,
+            },
+        )
+        .await
+        .map_err(EvaluationProcessError::ObjectStore)?,
+    );
     let address = SocketAddr::from_str(&configuration.api_tls.bind_addr)
         .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     let command_store = PgFreezeCommandStore::new(pool.clone());
     let freeze_store = PgFreezeStore::new(pool.clone());
     let control_store = PgEvaluationControlStore::new(pool.clone());
+    let mut submission_consumer = SubmissionFrozenConsumer::bind(
+        nats.clone(),
+        &configuration.nats.submission_stream_name,
+        &configuration.nats.submission_consumer_name,
+        &configuration.nats.submission_quarantine_subject,
+    )
+    .await?;
+    let submission_freeze_store = freeze_store.clone();
+    let submission_control_store = control_store.clone();
+    let submission_authoring_admission = authoring_admission.clone();
     let api = with_service_auth(
         evaluation_api_router(EvaluationApiState::new(
             command_store.clone(),
@@ -149,6 +181,8 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         command_store,
         service_token_client,
         &service_scopes,
+        authoring_admission.clone(),
+        control_store.clone(),
     )?;
     let meter_control = control_store.clone();
     let meter_resource = resource_client.clone();
@@ -166,6 +200,7 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         control_store.clone(),
         freeze_store,
         object_store,
+        package_object_store,
         resource_client,
         agent_client,
         authoring_admission,
@@ -195,6 +230,14 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
             result.map_err(EvaluationProcessError::Execution)?;
         }
         result = resource_meter_loop(meter_control, meter_resource, meter_poll_interval) => {
+            result?;
+        }
+        result = submission_consumer_loop(
+            &mut submission_consumer,
+            submission_freeze_store,
+            submission_control_store,
+            submission_authoring_admission,
+        ) => {
             result?;
         }
         result = shutdown_signal() => {
@@ -269,6 +312,20 @@ async fn resource_meter_loop(
                     .await?;
             }
         }
+    }
+}
+
+async fn submission_consumer_loop(
+    consumer: &mut SubmissionFrozenConsumer,
+    freeze_store: PgFreezeStore,
+    evaluation: PgEvaluationControlStore,
+    authoring: AuthoringAdmissionClient,
+) -> Result<(), EvaluationProcessError> {
+    loop {
+        consumer
+            .process_next(&freeze_store, &evaluation, &authoring)
+            .await
+            .map_err(EvaluationProcessError::SubmissionConsumer)?;
     }
 }
 
@@ -466,8 +523,41 @@ fn validate_configuration(
             .object_store_session_token_file
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
+        || !configuration
+            .package_object_store_access_key_file
+            .is_absolute()
+        || !configuration
+            .package_object_store_secret_key_file
+            .is_absolute()
+        || configuration
+            .package_object_store_session_token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        || configuration.object_store.validate().is_err()
+        || configuration.package_object_store.validate().is_err()
+        || configuration
+            .object_store
+            .ca_bundle_file
+            .as_deref()
+            .is_some_and(|path| !Path::new(path).is_absolute())
+        || configuration
+            .package_object_store
+            .ca_bundle_file
+            .as_deref()
+            .is_some_and(|path| !Path::new(path).is_absolute())
         || configuration.nats.server.trim().is_empty()
         || nats_paths.iter().any(|path| !path.is_absolute())
+        || configuration.nats.submission_stream_name.trim().is_empty()
+        || configuration
+            .nats
+            .submission_consumer_name
+            .trim()
+            .is_empty()
+        || configuration
+            .nats
+            .submission_quarantine_subject
+            .trim()
+            .is_empty()
         || !(100..=30_000).contains(&configuration.outbox_publish_timeout_milliseconds)
         || !(10..=10_000).contains(&configuration.outbox_poll_interval_milliseconds)
         || !(100..=10_000).contains(&configuration.coordinator_poll_interval_milliseconds)
@@ -489,6 +579,34 @@ fn read_secret(path: &Path) -> Result<String, EvaluationProcessError> {
         return Err(EvaluationProcessError::ConfigurationInvalid);
     }
     Ok(value)
+}
+
+fn load_materializer_ca_bundle(
+    stores: [&S3StoreConfig; 2],
+) -> Result<Option<Arc<[u8]>>, EvaluationProcessError> {
+    let mut bundle = Vec::new();
+    for store in stores {
+        if let Some(path) = store.ca_bundle_file.as_deref() {
+            let ca = read_mounted_file(Path::new(path), crate::materializer::MAX_CA_BYTES)?;
+            let separator = u64::from(!bundle.is_empty() && !bundle.ends_with(b"\n"));
+            let bundle_len = u64::try_from(bundle.len())
+                .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?;
+            let ca_len = u64::try_from(ca.len())
+                .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?;
+            let total_len = bundle_len
+                .checked_add(separator)
+                .and_then(|length| length.checked_add(ca_len))
+                .ok_or(EvaluationProcessError::ConfigurationInvalid)?;
+            if total_len > crate::materializer::MAX_CA_BYTES {
+                return Err(EvaluationProcessError::ConfigurationInvalid);
+            }
+            if separator == 1 {
+                bundle.push(b'\n');
+            }
+            bundle.extend(ca);
+        }
+    }
+    Ok((!bundle.is_empty()).then(|| Arc::<[u8]>::from(bundle)))
 }
 
 fn read_mounted_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, EvaluationProcessError> {
@@ -592,6 +710,8 @@ pub enum EvaluationProcessError {
     Coordinator(#[from] FreezeCoordinatorError),
     #[error(transparent)]
     Control(#[from] crate::control_plane::EvaluationControlStoreError),
+    #[error(transparent)]
+    SubmissionConsumer(#[from] SubmissionConsumerError),
 }
 
 #[cfg(test)]
@@ -600,7 +720,26 @@ pub enum EvaluationProcessError {
     reason = "the checked-in deployment example is a static test fixture"
 )]
 mod tests {
-    use super::EvaluationConfiguration;
+    use std::{error::Error, fs};
+
+    use artifact_store::S3StoreConfig;
+    use tempfile::TempDir;
+
+    use super::{EvaluationConfiguration, load_materializer_ca_bundle};
+
+    fn store_config(ca_path: &std::path::Path) -> S3StoreConfig {
+        S3StoreConfig {
+            binding: "test-store".to_owned(),
+            endpoint: "https://minio.example.test/".parse().expect("valid URL"),
+            bucket: "test-bucket".to_owned(),
+            region: "test-region".to_owned(),
+            object_prefix: "test".to_owned(),
+            upload_ttl_seconds: 60,
+            max_object_bytes: 1024,
+            force_path_style: true,
+            ca_bundle_file: Some(ca_path.to_string_lossy().into_owned()),
+        }
+    }
 
     #[test]
     fn checked_in_evaluation_configuration_matches_process_schema() {
@@ -613,6 +752,18 @@ mod tests {
             .object_store
             .validate()
             .expect("evaluation object store binding is valid");
+        configuration
+            .package_object_store
+            .validate()
+            .expect("evaluation package object store binding is valid");
+        assert_ne!(
+            configuration.object_store.binding,
+            configuration.package_object_store.binding
+        );
+        assert_ne!(
+            configuration.object_store.bucket,
+            configuration.package_object_store.bucket
+        );
         assert_eq!(
             configuration.execution.runner_namespace,
             "labweaver-evaluation"
@@ -628,5 +779,30 @@ mod tests {
                 .runner_namespace,
             configuration.execution.runner_namespace
         );
+    }
+
+    #[test]
+    fn materializer_ca_bundle_combines_two_files_and_rejects_oversize() -> Result<(), Box<dyn Error>>
+    {
+        let temp = TempDir::new()?;
+        let first_path = temp.path().join("first-ca.pem");
+        let second_path = temp.path().join("second-ca.pem");
+        fs::write(&first_path, b"first-ca")?;
+        fs::write(&second_path, b"second-ca\n")?;
+        let first = store_config(&first_path);
+        let second = store_config(&second_path);
+        let bundle = load_materializer_ca_bundle([&first, &second])?
+            .ok_or("two configured CA files must produce a bundle")?;
+        assert_eq!(bundle.as_ref(), b"first-ca\nsecond-ca\n");
+
+        let oversized_first_path = temp.path().join("oversized-first-ca.pem");
+        let oversized_second_path = temp.path().join("oversized-second-ca.pem");
+        let oversized = vec![b'x'; 512 * 1024 + 1];
+        fs::write(&oversized_first_path, &oversized)?;
+        fs::write(&oversized_second_path, &oversized)?;
+        let oversized_first = store_config(&oversized_first_path);
+        let oversized_second = store_config(&oversized_second_path);
+        assert!(load_materializer_ca_bundle([&oversized_first, &oversized_second]).is_err());
+        Ok(())
     }
 }

@@ -19,6 +19,7 @@ use agent_service::candidate_materializer::{
     CandidateMaterializationError, EnvironmentCandidateMaterializer,
     WorkConfigurationArtifactMaterializer,
 };
+use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
     CandidateDocument, ClaudeCodeCommand, ClaudeCodeFailure, ClaudeCodeProcess,
     ClaudeCodeProcessError, ClaudeCodeProcessOutput, ClaudeCodeRuntime, EgressClassificationError,
@@ -54,9 +55,9 @@ use contracts::authoring::{
 use contracts::evaluation::EvaluationSpec;
 use contracts::http::InternalCreateAgentRunRequest;
 use contracts::http::{
-    AgentLlmReviewFile, AgentLlmReviewRubric, ContainerWorkExecutionQuery,
-    ContainerWorkExecutionReceipt, ContainerWorkExecutionRequest, CreateAgentRunRequest,
-    IdempotencyKey, InternalAgentLlmReviewRequest, InternalAgentRunRequest,
+    AgentLlmReviewFile, AgentLlmReviewQuery, AgentLlmReviewRubric, AgentLlmReviewState,
+    ContainerWorkExecutionQuery, ContainerWorkExecutionReceipt, ContainerWorkExecutionRequest,
+    CreateAgentRunRequest, IdempotencyKey, InternalAgentLlmReviewRequest, InternalAgentRunRequest,
 };
 use contracts::{
     ActorId, AgentRunId, ArtifactId, ArtifactRef, CourseId, EnvironmentId, FrozenSubmissionId,
@@ -79,6 +80,7 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use time::OffsetDateTime;
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
@@ -89,6 +91,7 @@ enum FakeMode {
     SlowSuccess,
     SlowFullSuccess,
     FullSuccess,
+    WorkFullSuccess,
     InvalidSession,
     InvalidResultType,
     InvalidSuccessSubtype,
@@ -139,24 +142,56 @@ struct StaticClassifier {
 
 struct FakeMaterializer {
     calls: AtomicUsize,
+    artifacts: Mutex<Vec<ArtifactRef>>,
+    plans: Mutex<Vec<Value>>,
+    scripts: Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl FakeMaterializer {
     fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
+            artifacts: Mutex::new(Vec::new()),
+            plans: Mutex::new(Vec::new()),
+            scripts: Mutex::new(Vec::new()),
         }
     }
 
     fn artifact(&self, content: &str, media_type: &str) -> ArtifactRef {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        ArtifactRef {
+        let artifact = ArtifactRef {
             artifact_id: ArtifactId::new(),
             store_binding: "fake-immutable-store".to_owned(),
             object_version: format!("fake-version-{call}"),
             size_bytes: u64::try_from(content.len()).expect("test content length fits"),
             media_type: media_type.to_owned(),
-        }
+        };
+        self.artifacts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(artifact.clone());
+        artifact
+    }
+
+    fn artifact_count(&self) -> usize {
+        self.artifacts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    fn plans(&self) -> Vec<Value> {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn scripts(&self) -> Vec<(String, Option<String>)> {
+        self.scripts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -168,8 +203,12 @@ impl EnvironmentCandidateMaterializer for FakeMaterializer {
         _course_id: Option<CourseId>,
         _package_id: contracts::ProblemPackageId,
         _package_revision: Revision,
-        _plan: &Value,
+        plan: &Value,
     ) -> Result<ArtifactRef, CandidateMaterializationError> {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(plan.clone());
         Ok(self.artifact("fake build context", "application/gzip"))
     }
 }
@@ -185,6 +224,10 @@ impl WorkConfigurationArtifactMaterializer for FakeMaterializer {
         script: &str,
         verification_script: Option<&str>,
     ) -> Result<(ArtifactRef, Option<ArtifactRef>), CandidateMaterializationError> {
+        self.scripts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((script.to_owned(), verification_script.map(str::to_owned)));
         let script_artifact = self.artifact(script, "text/x-shellscript");
         let verification_artifact =
             verification_script.map(|content| self.artifact(content, "text/x-shellscript"));
@@ -261,6 +304,7 @@ impl ClaudeCodeProcess for FakeProcess {
             .args()
             .last()
             .is_some_and(|prompt| prompt.contains("EvaluationSpec"));
+        let work_environment = matches!(self.mode, FakeMode::WorkFullSuccess);
         let work_configuration_track = command
             .args()
             .last()
@@ -335,8 +379,10 @@ impl ClaudeCodeProcess for FakeProcess {
             } else {
                 review_candidate("submission.md")
             }
-        } else if matches!(self.mode, FakeMode::FullSuccess | FakeMode::SlowFullSuccess)
-            && evaluation_track
+        } else if matches!(
+            self.mode,
+            FakeMode::FullSuccess | FakeMode::SlowFullSuccess | FakeMode::WorkFullSuccess
+        ) && evaluation_track
         {
             evaluation_candidate()?
         } else if work_configuration_track {
@@ -344,6 +390,9 @@ impl ClaudeCodeProcess for FakeProcess {
         } else {
             environment_candidate()
         };
+        if work_environment && !evaluation_track && !work_configuration_track {
+            output["class"] = json!("work");
+        }
         if matches!(self.mode, FakeMode::ProtectedField) {
             output["metadata"] = json!({"Final_Score": 100});
         }
@@ -467,6 +516,52 @@ fn environment_candidate() -> Value {
             },
             "storage_class_binding": "rwx-primary",
             "ssh_port": 22
+        },
+        "retention": {
+            "policyId": PolicyId::new(),
+            "policyRevision": 1,
+            "class": "run_evidence",
+            "retainUntil": "2026-08-14T08:00:00.000Z",
+            "disposition": "delete"
+        }
+    })
+}
+
+fn container_environment_candidate() -> Value {
+    json!({
+        "apiVersion": "environment.labweaver.io/v1",
+        "kind": "EnvironmentSpec",
+        "name": "linux-nginx-container",
+        "class": "experiment",
+        "resources": {
+            "cpuMillicores": 1_000,
+            "memoryBytes": 2_147_483_648_u64,
+            "storageBytes": 10_737_418_240_u64
+        },
+        "network": {"mode": "deny_all"},
+        "entries": [{
+            "name": "http",
+            "protocol": "http",
+            "servicePort": 8080
+        }],
+        "security": {
+            "userPolicy": "non_root_required",
+            "rootFilesystemPolicy": "read_only_required",
+            "privilegeEscalationPolicy": "deny",
+            "publicExposurePolicy": "deny",
+            "securityProfileBinding": "restricted-v1"
+        },
+        "runtime": {
+            "kind": "container",
+            "provider_binding": "kubernetes-primary",
+            "service_port": 8080,
+            "build_recipe": {
+                "mode": "generated",
+                "files": [{
+                    "path": "Dockerfile",
+                    "content": "FROM alpine:3.20\nRUN mkdir -p /opt/labweaver/workspace-seed\n"
+                }]
+            }
         },
         "retention": {
             "policyId": PolicyId::new(),
@@ -715,20 +810,10 @@ async fn work_package_input(
 #[tokio::test]
 #[ignore = "makes a real billable Claude Code/provider request"]
 async fn live_claude_code_generates_environment_candidate() -> Result<(), Box<dyn Error>> {
-    let model = std::env::var("LABWEAVER_LIVE_CLAUDE_MODEL")?;
-    let process = Arc::new(TokioClaudeCodeProcess::new(std::env::vars().collect()));
+    let (model, environment) = live_provider_environment()?;
+    let process = Arc::new(TokioClaudeCodeProcess::new(environment));
     let version = process.version().await?;
-    let mut policy_value = serde_json::to_value(valid_policy()?)?;
-    policy_value["binding"]["model"] = json!(model);
-    policy_value["binding"]["claudeCodeVersion"] = json!(version);
-    policy_value["budget"]["maxOutputTokens"] = json!(4_096);
-    policy_value["budget"]["maxRequests"] = json!(3);
-    policy_value["budget"]["maxCostMicrousd"] = json!(50_000);
-    policy_value["budget"]["timeoutMilliseconds"] = json!(60_000);
-    policy_value["budget"]["maxTransientRetries"] = json!(0);
-    policy_value["budget"]["maxSchemaRepairs"] = json!(1);
-    let policy = serde_json::from_value::<ProjectLlmEgressPolicy>(policy_value)?;
-    policy.validate()?;
+    let policy = live_provider_policy(&model, &version)?;
 
     let teacher_material = serde_json::to_vec(&json!({
         "instruction": "Return this approved EnvironmentSpec template exactly.",
@@ -748,6 +833,233 @@ async fn live_claude_code_generates_environment_candidate() -> Result<(), Box<dy
         environment.audit.usage.cost_microusd
     );
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "makes a real billable Claude Code/provider request"]
+async fn live_claude_code_generates_evaluation_candidate() -> Result<(), Box<dyn Error>> {
+    let (model, environment) = live_provider_environment()?;
+    let process = Arc::new(TokioClaudeCodeProcess::new(environment));
+    let version = process.version().await?;
+    let policy = live_provider_policy(&model, &version)?;
+
+    let teacher_material = serde_json::to_vec(&json!({
+        "instruction": "Return this approved EvaluationSpec template exactly.",
+        "evaluationSpec": evaluation_candidate()?,
+        "publicFiles": [{
+            "path": "student/auth.c",
+            "content": include_str!("../../../examples/security-controlled/student/auth.c")
+        }]
+    }))?;
+    let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
+    let runtime = ClaudeCodeRuntime::new(policy, process)?;
+    let evaluation = runtime
+        .generate(AgentTrackKind::Evaluation, input, RunCancellation::new())
+        .await?;
+    assert!(matches!(
+        evaluation.document,
+        CandidateDocument::Evaluation(_)
+    ));
+    eprintln!(
+        "live Claude Code evaluation cost: {} microusd",
+        evaluation.audit.usage.cost_microusd
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "makes a real billable Claude Code/provider request"]
+async fn live_claude_code_materializes_generated_container_environment()
+-> Result<(), Box<dyn Error>> {
+    let (model, environment) = live_provider_environment()?;
+    let process = Arc::new(TokioClaudeCodeProcess::new(environment));
+    let version = process.version().await?;
+    let policy = live_provider_policy(&model, &version)?;
+    let teacher_material = serde_json::to_vec(&json!({
+        "instruction": "Return the nested environmentSpec exactly, adapting only its provider-facing generated container build_recipe. Do not return an outer envelope.",
+        "environmentSpec": container_environment_candidate()
+    }))?;
+    let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
+    let materializer = Arc::new(FakeMaterializer::new());
+    let runtime =
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
+    let execution = runtime
+        .generate(AgentTrackKind::Environment, input, RunCancellation::new())
+        .await?;
+    let CandidateDocument::Environment(spec) = execution.document else {
+        return Err("live generated container response was not an EnvironmentSpec".into());
+    };
+    assert_eq!(spec.runtime.kind(), RuntimeKind::Container);
+    let serialized = serde_json::to_value(&spec)?;
+    let build_context = serialized
+        .pointer("/runtime/build_context")
+        .ok_or("materializer did not attach runtime.buildContext")?;
+    assert_eq!(build_context["mediaType"], "application/gzip");
+    assert!(
+        build_context["objectVersion"]
+            .as_str()
+            .is_some_and(|value| { !value.trim().is_empty() })
+    );
+
+    let plans = materializer.plans();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0]["mode"], "generated");
+    let files = plans[0]["files"]
+        .as_array()
+        .ok_or("generated build recipe did not contain files")?;
+    let dockerfile = files
+        .iter()
+        .find(|file| file["path"] == "Dockerfile")
+        .ok_or("generated build recipe did not contain Dockerfile")?;
+    assert!(
+        dockerfile["content"]
+            .as_str()
+            .is_some_and(|content| { !content.trim().is_empty() })
+    );
+    assert_eq!(materializer.artifact_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "makes a real billable Claude Code/provider request"]
+async fn live_claude_code_materializes_work_configuration_scripts() -> Result<(), Box<dyn Error>> {
+    let (model, environment) = live_provider_environment()?;
+    let process = Arc::new(TokioClaudeCodeProcess::new(environment));
+    let version = process.version().await?;
+    let policy = live_provider_policy(&model, &version)?;
+    let teacher_material = serde_json::to_vec(&json!({
+        "instruction": "Return the nested workConfigurationDraft exactly. Do not return an outer envelope or change any draft field.",
+        "workConfigurationDraft": work_configuration_candidate()
+    }))?;
+    let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
+    let materializer = Arc::new(FakeMaterializer::new());
+    let runtime =
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::WorkConfiguration,
+            input,
+            RunCancellation::new(),
+        )
+        .await?;
+    let CandidateDocument::WorkConfiguration(draft) = execution.document else {
+        return Err("live Work response was not a WorkConfigurationDraft".into());
+    };
+    assert!(!draft.script_content.trim().is_empty());
+    assert!(
+        draft
+            .verification_script_content
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty())
+    );
+
+    let scripts = materializer.scripts();
+    assert_eq!(scripts.len(), 1);
+    assert!(!scripts[0].0.trim().is_empty());
+    assert!(
+        scripts[0]
+            .1
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty())
+    );
+    let artifacts = materializer.artifact_count();
+    assert_eq!(artifacts, 2);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "makes a real billable Claude Code/provider request"]
+async fn live_claude_code_returns_bounded_advisory_goal_review() -> Result<(), Box<dyn Error>> {
+    let (model, environment) = live_provider_environment()?;
+    let process = Arc::new(TokioClaudeCodeProcess::new(environment));
+    let version = process.version().await?;
+    let policy = live_provider_policy(&model, &version)?;
+    let submission = include_str!("../../../examples/security-controlled/student/auth.c");
+    let rubric = "Advisory test rubric: inspect submission.md and determine whether authentication requires the complete expected password rather than accepting only a password prefix. Cite only submission.md. If the supplied file does not establish a criterion, use insufficient_evidence. Do not assign a numeric score or emit a verdict, approval, release decision, or gate result.";
+    let submission_artifact = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "minio-primary".to_owned(),
+        object_version: "public-submission-v1".to_owned(),
+        size_bytes: u64::try_from(submission.len())?,
+        media_type: "text/plain".to_owned(),
+    };
+    let rubric_artifact = ArtifactRef {
+        artifact_id: ArtifactId::new(),
+        store_binding: "minio-primary".to_owned(),
+        object_version: "public-rubric-v1".to_owned(),
+        size_bytes: u64::try_from(rubric.len())?,
+        media_type: "text/plain".to_owned(),
+    };
+    let input = serde_json::to_vec(&json!({
+        "kind": "AgentLlmReviewInput",
+        "taskRunId": TaskRunId::new(),
+        "frozenSubmissionId": FrozenSubmissionId::new(),
+        "submissionArtifact": submission_artifact,
+        "files": [AgentLlmReviewFile {
+            path: "submission.md".to_owned(),
+            sha256: Sha256Digest::of_bytes(submission.as_bytes()).to_string(),
+            content: submission.to_owned(),
+        }],
+        "rubric": AgentLlmReviewRubric {
+            artifact: rubric_artifact,
+            path: "rubric.md".to_owned(),
+            sha256: Sha256Digest::of_bytes(rubric.as_bytes()).to_string(),
+            content: rubric.to_owned(),
+        }
+    }))?;
+    let allowed_paths = vec!["submission.md".to_owned()];
+    let runtime = ClaudeCodeRuntime::new(policy, process)?;
+    let execution = runtime
+        .review_with_usage(input, &allowed_paths, RunCancellation::new())
+        .await
+        .map_err(|failure| std::io::Error::other(format!("live review failed: {failure:?}")))?;
+    execution.review.validate_against(&allowed_paths)?;
+    assert_eq!(execution.usage.requests, 1);
+    for finding in execution.review.findings() {
+        for evidence in finding.evidence() {
+            assert_eq!(evidence.path(), "submission.md");
+        }
+    }
+    let serialized_review = serde_json::to_value(&execution.review)?;
+    assert!(serialized_review.get("score").is_none());
+    assert!(serialized_review.get("verdict").is_none());
+    assert!(serialized_review.get("approval").is_none());
+    Ok(())
+}
+
+fn live_provider_environment() -> Result<(String, BTreeMap<String, String>), Box<dyn Error>> {
+    const KEYS: [&str; 3] = [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_MODEL",
+    ];
+    let environment = KEYS
+        .into_iter()
+        .map(|key| Ok((key.to_owned(), std::env::var(key)?)))
+        .collect::<Result<BTreeMap<_, _>, Box<dyn Error>>>()?;
+    let model = environment
+        .get("ANTHROPIC_MODEL")
+        .cloned()
+        .ok_or("ANTHROPIC_MODEL was not provided")?;
+    Ok((model, environment))
+}
+
+fn live_provider_policy(
+    model: &str,
+    version: &str,
+) -> Result<ProjectLlmEgressPolicy, Box<dyn Error>> {
+    let mut policy_value = serde_json::to_value(valid_policy()?)?;
+    policy_value["binding"]["model"] = json!(model);
+    policy_value["binding"]["claudeCodeVersion"] = json!(version);
+    policy_value["budget"]["maxOutputTokens"] = json!(20_000);
+    policy_value["budget"]["maxRequests"] = json!(1);
+    policy_value["budget"]["maxCostMicrousd"] = json!(1_000_000);
+    policy_value["budget"]["timeoutMilliseconds"] = json!(120_000);
+    policy_value["budget"]["maxTransientRetries"] = json!(0);
+    policy_value["budget"]["maxSchemaRepairs"] = json!(0);
+    let policy = serde_json::from_value::<ProjectLlmEgressPolicy>(policy_value)?;
+    policy.validate()?;
+    Ok(policy)
 }
 
 fn assert_diagnostic(failure: &ClaudeCodeFailure, expected: &str) {
@@ -778,6 +1090,53 @@ async fn hard_denied_data_is_blocked_before_runtime_input_exists() -> Result<(),
         .ok_or_else(|| std::io::Error::other("unexpected egress error type"))?;
     assert_eq!(*preparation, EgressPreparationError::DeniedData);
     assert_eq!(preparation.diagnostic_code(), "LW_ACCESS_DENIED");
+    assert_eq!(preparation.safe_detail(), "egress_denied_data");
+    Ok(())
+}
+
+#[tokio::test]
+async fn deterministic_gate_allows_student_auth_path_and_rejects_sensitive_content()
+-> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let clean = b"int authenticate(void) { return 0; }\n".to_vec();
+    let sensitive = b"-----BEGIN PRIVATE KEY-----\n".to_vec();
+
+    let mut clean_package = package(policy.project_id, policy.course_id, &clean)?;
+    clean_package
+        .files
+        .first_mut()
+        .ok_or("package file missing")?
+        .path = "student/auth.c".to_owned();
+    let clean_gate = ProblemPackageEgressGate::new(
+        Arc::new(StaticPackageReader {
+            bytes: clean.clone(),
+        }),
+        Arc::new(DeterministicEgressClassifier::new(
+            "dlp-v1".to_owned(),
+            Revision::new(1)?,
+        )?),
+    );
+    let prepared = clean_gate.prepare(&clean_package, &policy).await?;
+    assert_eq!(prepared.package_id(), clean_package.id);
+
+    let mut sensitive_package = package(policy.project_id, policy.course_id, &sensitive)?;
+    sensitive_package
+        .files
+        .first_mut()
+        .ok_or("package file missing")?
+        .path = "student/auth.c".to_owned();
+    let sensitive_gate = ProblemPackageEgressGate::new(
+        Arc::new(StaticPackageReader { bytes: sensitive }),
+        Arc::new(DeterministicEgressClassifier::new(
+            "dlp-v1".to_owned(),
+            Revision::new(1)?,
+        )?),
+    );
+    let error = sensitive_gate
+        .prepare(&sensitive_package, &policy)
+        .await
+        .expect_err("sensitive content must be blocked before runtime entry");
+    assert_eq!(error, EgressPreparationError::DeniedData);
     Ok(())
 }
 
@@ -911,13 +1270,28 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
                 "assert_dispatch_does_not_replay_live_tracks failed: {error}"
             ))
         })?;
-    assert_reserved_dispatch_executes_without_second_reservation(&store, now)
-        .await
-        .map_err(|error| {
-            std::io::Error::other(format!(
-                "assert_reserved_dispatch_executes_without_second_reservation failed: {error}"
-            ))
-        })?;
+    assert_reserved_dispatch_executes_without_second_reservation(
+        &store,
+        now,
+        EnvironmentClass::Experiment,
+    )
+    .await
+    .map_err(|error| {
+        std::io::Error::other(format!(
+            "assert_reserved_dispatch_executes_without_second_reservation failed: {error}"
+        ))
+    })?;
+    assert_reserved_dispatch_executes_without_second_reservation(
+        &store,
+        now,
+        EnvironmentClass::Work,
+    )
+    .await
+    .map_err(|error| {
+        std::io::Error::other(format!(
+            "work authoring dispatch did not execute one requested track: {error}"
+        ))
+    })?;
     assert_durable_cancellation(&store, now)
         .await
         .map_err(|error| {
@@ -1522,6 +1896,138 @@ async fn postgres_llm_review_replays_exact_request_after_deadline() -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
+async fn postgres_llm_review_completion_preserves_claim_start_and_cancellation()
+-> Result<(), Box<dyn Error>> {
+    let mut container = None;
+    let database_url = if let Ok(database_url) = std::env::var("LABWEAVER_TEST_DATABASE_URL") {
+        database_url
+    } else {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let database_url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        container = Some(postgres);
+        database_url
+    };
+    let (admin_pool, pool, database_name) = isolated_agent_database(&database_url).await?;
+
+    let policy = valid_policy()?;
+    let started_at = test_timestamp()?;
+    let finished_at = UtcTimestamp::from_utc(started_at.get() + time::Duration::milliseconds(1))?;
+    let deadline_at = UtcTimestamp::from_utc(started_at.get() + time::Duration::minutes(1))?;
+    let store = LlmReviewStore::new(pool.clone());
+    let request = review_request(&policy, deadline_at);
+    store
+        .enqueue(
+            &request,
+            &IdempotencyKey::parse("llm-review-preserve-start")?,
+            UtcTimestamp::from_utc(started_at.get() - time::Duration::milliseconds(1))?,
+        )
+        .await?;
+    let lease = store
+        .claim("timestamp-test-worker", Duration::from_secs(60), started_at)
+        .await?
+        .ok_or("review should be claimable")?;
+    let reverse = store
+        .complete(
+            &lease,
+            None,
+            None,
+            Some("LW_PROVIDER_UNAVAILABLE"),
+            UtcTimestamp::from_utc(started_at.get() - time::Duration::milliseconds(1))?,
+        )
+        .await
+        .expect_err("a terminal timestamp before the claimed start must fail closed");
+    assert_eq!(
+        reverse,
+        agent_service::llm_review::LlmReviewStoreError::InvalidContract
+    );
+    let completed = store
+        .complete(
+            &lease,
+            None,
+            None,
+            Some("LW_PROVIDER_UNAVAILABLE"),
+            finished_at,
+        )
+        .await?;
+    assert_eq!(completed.state, AgentLlmReviewState::Failed);
+    assert_eq!(completed.started_at, Some(started_at));
+    assert_eq!(completed.finished_at, Some(finished_at));
+    let persisted = store
+        .get(
+            request.task_run_id,
+            &AgentLlmReviewQuery {
+                project_id: request.project_id,
+                course_id: request.course_id,
+            },
+        )
+        .await?;
+    assert_eq!(persisted.started_at, Some(started_at));
+    assert_eq!(persisted.finished_at, Some(finished_at));
+
+    let cancellation_request = review_request(&policy, deadline_at);
+    store
+        .enqueue(
+            &cancellation_request,
+            &IdempotencyKey::parse("llm-review-cancel-preserve-start")?,
+            UtcTimestamp::from_utc(started_at.get() - time::Duration::milliseconds(1))?,
+        )
+        .await?;
+    let cancellation_started_at =
+        UtcTimestamp::from_utc(started_at.get() + time::Duration::milliseconds(2))?;
+    let cancellation_finished_at =
+        UtcTimestamp::from_utc(cancellation_started_at.get() + time::Duration::milliseconds(1))?;
+    let cancellation_lease = store
+        .claim(
+            "timestamp-test-worker",
+            Duration::from_secs(60),
+            cancellation_started_at,
+        )
+        .await?
+        .ok_or("cancellation review should be claimable")?;
+    let cancelling = store
+        .cancel(
+            cancellation_request.task_run_id,
+            &AgentLlmReviewQuery {
+                project_id: cancellation_request.project_id,
+                course_id: cancellation_request.course_id,
+            },
+            &IdempotencyKey::parse("llm-review-cancel-preserve-start-request")?,
+            cancellation_finished_at,
+        )
+        .await?;
+    assert_eq!(cancelling.state, AgentLlmReviewState::Cancelling);
+    assert_eq!(cancelling.started_at, Some(cancellation_started_at));
+    assert_eq!(cancelling.finished_at, None);
+    let cancelled = store
+        .complete(
+            &cancellation_lease,
+            None,
+            None,
+            Some("ignored-after-cancellation"),
+            cancellation_finished_at,
+        )
+        .await?;
+    assert_eq!(cancelled.state, AgentLlmReviewState::Cancelled);
+    assert_eq!(cancelled.started_at, Some(cancellation_started_at));
+    assert_eq!(cancelled.finished_at, Some(cancellation_finished_at));
+
+    drop(store);
+    remove_isolated_database(admin_pool, pool, &database_name).await?;
+    drop(container);
+    Ok(())
+}
+
+fn test_timestamp() -> Result<UtcTimestamp, Box<dyn Error>> {
+    let now = OffsetDateTime::now_utc();
+    let now = now.replace_nanosecond((now.nanosecond() / 1_000_000) * 1_000_000)?;
+    Ok(UtcTimestamp::from_utc(now)?)
+}
+
 fn review_request(
     policy: &ProjectLlmEgressPolicy,
     deadline_at: UtcTimestamp,
@@ -1649,8 +2155,14 @@ async fn assert_dispatch_does_not_replay_live_tracks(
 async fn assert_reserved_dispatch_executes_without_second_reservation(
     store: &PostgresAgentRunStore,
     now: UtcTimestamp,
+    environment_class: EnvironmentClass,
 ) -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let mode = if environment_class == EnvironmentClass::Work {
+        FakeMode::WorkFullSuccess
+    } else {
+        FakeMode::FullSuccess
+    };
+    let (runtime, process, policy) = runtime(mode)?;
     let bytes = b"reserved dispatch must execute exactly once".to_vec();
     let package = package(policy.project_id, policy.course_id, &bytes)?;
     let gate = ProblemPackageEgressGate::new(
@@ -1662,7 +2174,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     );
     let prepared = gate.prepare(&package, &policy).await?;
     let mut request = run_request(&prepared, &policy);
-    request.environment_class = EnvironmentClass::Experiment;
+    request.environment_class = environment_class;
     let object = package
         .files
         .first()
@@ -1670,14 +2182,15 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
         .object
         .clone();
     let locators = BTreeMap::from([(object.artifact_id, "problem-packages/reserved".to_owned())]);
-    let key = IdempotencyKey::parse("agent-dispatch-reserved-exec-0001")?;
+    let key = IdempotencyKey::parse(match environment_class {
+        EnvironmentClass::Experiment => "agent-dispatch-reserved-exec-experiment-0001",
+        EnvironmentClass::Work => "agent-dispatch-reserved-exec-work-0001",
+    })?;
     let command = InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
         request: InternalAgentRunRequest::Authoring(request.clone()),
-        purpose: AgentRunPurpose::Authoring {
-            environment_class: request.environment_class,
-        },
+        purpose: AgentRunPurpose::Authoring { environment_class },
         package: package.clone(),
         object_locators: locators.clone(),
         policy: policy.clone(),
@@ -1707,7 +2220,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
             ExecuteAgentRun {
                 project_id: policy.project_id,
                 course_id: policy.course_id,
-                expected_environment_class: EnvironmentClass::Experiment,
+                expected_environment_class: environment_class,
                 request: &request,
                 idempotency_key: &key,
                 input: prepared,
@@ -1722,7 +2235,41 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
         return Err("reserved dispatch was replayed instead of executed".into());
     };
     assert_eq!(run.run.state, AgentRunState::Succeeded);
-    assert_eq!(process.commands().len(), 2);
+    let expected_tracks: Vec<String> = if environment_class == EnvironmentClass::Experiment {
+        vec!["environment".to_owned(), "evaluation".to_owned()]
+    } else {
+        vec!["environment".to_owned()]
+    };
+    assert_eq!(
+        run.run
+            .tracks
+            .iter()
+            .map(|track| match track.kind {
+                AgentTrackKind::Environment => "environment",
+                AgentTrackKind::Evaluation => "evaluation",
+                AgentTrackKind::WorkConfiguration => "work_configuration",
+            }
+            .to_owned())
+            .collect::<Vec<_>>(),
+        expected_tracks
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT track FROM agent.agent_track_work_items WHERE run_id=$1 ORDER BY track",
+        )
+        .bind(run.run.id.as_uuid())
+        .fetch_all(store.pool())
+        .await?,
+        expected_tracks
+    );
+    assert_eq!(
+        process.commands().len(),
+        if environment_class == EnvironmentClass::Experiment {
+            2
+        } else {
+            1
+        }
+    );
     Ok(())
 }
 
@@ -2150,7 +2697,7 @@ async fn assert_exact_replay(
     pool: &PgPool,
     now: UtcTimestamp,
 ) -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy) = runtime(FakeMode::WorkFullSuccess)?;
     let initial_input = input(&policy).await?;
     let replay_input = initial_input.clone();
     let request = run_request(&initial_input, &policy);
@@ -2165,7 +2712,7 @@ async fn assert_exact_replay(
         .execute(ExecuteAgentRun {
             project_id: policy.project_id,
             course_id: policy.course_id,
-            expected_environment_class: EnvironmentClass::Experiment,
+            expected_environment_class: EnvironmentClass::Work,
             request: &request,
             idempotency_key: &idempotency_key,
             input: initial_input,
@@ -2178,7 +2725,7 @@ async fn assert_exact_replay(
         return Err("first request did not own execution".into());
     };
     assert_eq!(stored.run.state, AgentRunState::Succeeded);
-    assert_eq!(stored.run.revision.get(), 5);
+    assert_eq!(stored.run.revision.get(), 3);
     let run_id = stored.run.id;
     let candidate_ids = stored
         .run
@@ -2190,7 +2737,7 @@ async fn assert_exact_replay(
         .execute(ExecuteAgentRun {
             project_id: policy.project_id,
             course_id: policy.course_id,
-            expected_environment_class: EnvironmentClass::Experiment,
+            expected_environment_class: EnvironmentClass::Work,
             request: &request,
             idempotency_key: &idempotency_key,
             input: replay_input,
@@ -2212,8 +2759,8 @@ async fn assert_exact_replay(
             .collect::<Vec<_>>(),
         candidate_ids
     );
-    assert_eq!(process.commands().len(), 2);
-    assert_eq!(store.load_checkpoints(run_id).await?.len(), 2);
+    assert_eq!(process.commands().len(), 1);
+    assert_eq!(store.load_checkpoints(run_id).await?.len(), 1);
     assert_persistence_counts(pool, &run_id.as_uuid()).await?;
     Ok(())
 }
@@ -2224,7 +2771,8 @@ async fn assert_track_recovery(
 ) -> Result<(), Box<dyn Error>> {
     let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
     let prepared = input(&policy).await?;
-    let request = run_request(&prepared, &policy);
+    let mut request = run_request(&prepared, &policy);
+    request.environment_class = EnvironmentClass::Experiment;
     let key = IdempotencyKey::parse("agent-run-recovery-0001")?;
     let reservation = store
         .reserve(ReserveAgentRun {
@@ -2342,7 +2890,8 @@ async fn assert_durable_cancellation(
 ) -> Result<(), Box<dyn Error>> {
     let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
     let prepared = input(&policy).await?;
-    let request = run_request(&prepared, &policy);
+    let mut request = run_request(&prepared, &policy);
+    request.environment_class = EnvironmentClass::Experiment;
     let key = IdempotencyKey::parse("agent-run-cancel-0001")?;
     let reservation = store
         .reserve(ReserveAgentRun {
@@ -2404,7 +2953,8 @@ async fn assert_concurrent_idempotency(
     let policy = valid_policy()?;
     let process = Arc::new(FakeProcess::new(FakeMode::SlowFullSuccess));
     let prepared = input(&policy).await?;
-    let request = run_request(&prepared, &policy);
+    let mut request = run_request(&prepared, &policy);
+    request.environment_class = EnvironmentClass::Experiment;
     let key = IdempotencyKey::parse("agent-run-concurrent-0001")?;
     let project_id = policy.project_id;
     let mut workers = Vec::new();

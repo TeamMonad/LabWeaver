@@ -1387,242 +1387,6 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
-    "/api/v1/courses/{courseId}/me/evaluation-results": {
-      "get": {
-        "description": "Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "listOwnEvaluationResults",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "courseId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "cursor",
-            "required": false,
-            "schema": {
-              "maxLength": 512,
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "maximum": 100,
-              "minimum": 1,
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "items": {
-                      "items": {
-                        "$ref": "../contracts/v1/student-evaluation-result.schema.json"
-                      },
-                      "type": "array"
-                    },
-                    "nextCursor": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "items"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "oidc": [
-              "evaluation_result:read_own"
-            ]
-          }
-        ],
-        "summary": "listOwnEvaluationResults",
-        "x-labweaver-allowed-roles": [
-          "student"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "None",
-        "x-labweaver-permission": "evaluation_result:read_own",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": true,
-        "x-labweaver-scope": "course",
-        "x-labweaver-timeout-ms": 30000
-      }
-    },
-    "/api/v1/courses/{courseId}/me/evaluation-results/{runId}": {
-      "get": {
-        "description": "Permission: evaluation_result:read_own. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "getOwnEvaluationResult",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "courseId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "runId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "../contracts/v1/student-evaluation-result.schema.json"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "oidc": [
-              "evaluation_result:read_own"
-            ]
-          }
-        ],
-        "summary": "getOwnEvaluationResult",
-        "x-labweaver-allowed-roles": [
-          "student"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "None",
-        "x-labweaver-permission": "evaluation_result:read_own",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": true,
-        "x-labweaver-scope": "course",
-        "x-labweaver-timeout-ms": 30000
-      }
-    },
     "/api/v1/environments": {
       "get": {
         "description": "Permission: environment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -3649,101 +3413,6 @@
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "environment:write",
-        "x-labweaver-problem-content-type": "application/problem+json",
-        "x-labweaver-retryable": true,
-        "x-labweaver-scope": "environment",
-        "x-labweaver-timeout-ms": 30000
-      }
-    },
-    "/api/v1/frozen-submissions/{submissionId}": {
-      "get": {
-        "description": "Permission: submission:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "getFrozenSubmission",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "submissionId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "../contracts/v1/frozen-submission.schema.json"
-                }
-              }
-            },
-            "description": "Successful response",
-            "headers": {
-              "ETag": {
-                "schema": {
-                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "401": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "403": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "404": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "409": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "410": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "412": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "422": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "429": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "500": {
-            "$ref": "#/components/responses/Problem"
-          },
-          "503": {
-            "$ref": "#/components/responses/Problem"
-          }
-        },
-        "security": [
-          {
-            "oidc": [
-              "submission:read"
-            ]
-          }
-        ],
-        "summary": "getFrozenSubmission",
-        "x-labweaver-allowed-roles": [
-          "teacher",
-          "student"
-        ],
-        "x-labweaver-cancellable": false,
-        "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
-        ],
-        "x-labweaver-idempotency": "None",
-        "x-labweaver-permission": "submission:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "environment",
@@ -6842,6 +6511,110 @@
         ],
         "x-labweaver-idempotency": "None",
         "x-labweaver-permission": "events:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/frozen-submissions/{submissionId}": {
+      "get": {
+        "description": "Permission: submission:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getFrozenSubmission",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "submissionId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/frozen-submission.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "submission:read"
+            ]
+          }
+        ],
+        "summary": "getFrozenSubmission",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "submission:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "project",

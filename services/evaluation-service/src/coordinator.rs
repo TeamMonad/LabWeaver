@@ -28,7 +28,11 @@ use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{FreezeRequest, PgFreezeCommandStore, SubmissionFreezeCommand};
+use crate::authoring_client::{AuthoringAdmissionClient, AuthoringAdmissionClientError};
+use crate::{
+    EvaluationControlStoreError, FreezeCommandDurableOutcome, FreezeRequest,
+    PgEvaluationControlStore, PgFreezeCommandStore, SubmissionFreezeCommand,
+};
 
 const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
 
@@ -70,6 +74,8 @@ pub struct FreezeCoordinator {
     environment: Client,
     environment_token_client: Arc<ServiceTokenClient>,
     environment_token_scopes: BTreeSet<String>,
+    authoring_admission: AuthoringAdmissionClient,
+    evaluation: PgEvaluationControlStore,
     kubernetes_token: String,
     worker_configuration: String,
     worker_secrets: BTreeMap<String, Vec<u8>>,
@@ -82,6 +88,8 @@ impl FreezeCoordinator {
         store: PgFreezeCommandStore,
         environment_token_client: Arc<ServiceTokenClient>,
         available_service_scopes: &BTreeSet<String>,
+        authoring_admission: AuthoringAdmissionClient,
+        evaluation: PgEvaluationControlStore,
     ) -> Result<Self, FreezeCoordinatorError> {
         validate_configuration(&configuration)?;
         if !available_service_scopes.contains(ENVIRONMENT_FREEZE_SCOPE) {
@@ -137,6 +145,8 @@ impl FreezeCoordinator {
             environment,
             environment_token_client,
             environment_token_scopes,
+            authoring_admission,
+            evaluation,
             kubernetes_token,
             worker_configuration,
             worker_secrets,
@@ -148,6 +158,9 @@ impl FreezeCoordinator {
     pub async fn reconcile_once(&self) -> Result<(), FreezeCoordinatorError> {
         let _ = self.store.claim_next().await?;
         for command in self.store.cleanup_pending(32).await? {
+            if self.recover_completed_command(&command).await? {
+                continue;
+            }
             self.cleanup_failed_command(&command).await?;
         }
         let authority_now = self.store.authority_now().await?;
@@ -166,7 +179,7 @@ impl FreezeCoordinator {
                     event = "evaluation.freeze.reconcile.failed",
                     frozen_submission_id = %command.frozen_submission_id,
                     environment_id = %command.environment_id,
-                    diagnostic = error.diagnostic_code(),
+                    diagnostic_code = error.diagnostic_code(),
                     deadline_exceeded,
                     retry = !terminal,
                 );
@@ -189,7 +202,7 @@ impl FreezeCoordinator {
                             event = "evaluation.freeze.cleanup.failed",
                             frozen_submission_id = %command.frozen_submission_id,
                             environment_id = %command.environment_id,
-                            diagnostic = cleanup_error.diagnostic_code(),
+                            diagnostic_code = cleanup_error.diagnostic_code(),
                             retry = true,
                         );
                     }
@@ -203,22 +216,18 @@ impl FreezeCoordinator {
         &self,
         command: &SubmissionFreezeCommand,
     ) -> Result<(), FreezeCoordinatorError> {
-        let job_name = job_name(command);
-        let container_namespace = format!("lw-env-{}", command.environment_id);
-        for namespace in [&container_namespace, &self.configuration.vm_job_namespace] {
-            if !self.cleanup(namespace, &job_name).await? {
-                tracing::warn!(
-                    event = "evaluation.freeze.cleanup.pending",
-                    frozen_submission_id = %command.frozen_submission_id,
-                    environment_id = %command.environment_id,
-                    namespace,
-                );
-                return Ok(());
-            }
+        if self.recover_completed_command(command).await? {
+            return Ok(());
+        }
+        if !self.cleanup_command_resources(command).await? {
+            return Ok(());
         }
         self.store
             .mark_cleanup_verified(command.frozen_submission_id)
             .await?;
+        if self.recover_completed_command(command).await? {
+            return Ok(());
+        }
         tracing::info!(
             event = "evaluation.freeze.cleanup.verified",
             frozen_submission_id = %command.frozen_submission_id,
@@ -230,8 +239,50 @@ impl FreezeCoordinator {
     async fn fail_command_after_cleanup(
         &self,
         command: &SubmissionFreezeCommand,
-        diagnostic: &'static str,
+        diagnostic: &str,
     ) -> Result<(), FreezeCoordinatorError> {
+        if !self.cleanup_command_resources(command).await? {
+            return Ok(());
+        }
+        self.store
+            .mark_failed(command.frozen_submission_id, diagnostic)
+            .await?;
+        if self.recover_completed_command(command).await? {
+            return Ok(());
+        }
+        tracing::error!(
+            event = "evaluation.freeze.failed",
+            frozen_submission_id = %command.frozen_submission_id,
+            environment_id = %command.environment_id,
+            diagnostic_code = diagnostic,
+            cleanup_verified = true,
+        );
+        Ok(())
+    }
+
+    async fn complete_command_after_cleanup(
+        &self,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<(), FreezeCoordinatorError> {
+        if !self.cleanup_command_resources(command).await? {
+            return Ok(());
+        }
+        self.store
+            .mark_completed(command.frozen_submission_id)
+            .await?;
+        tracing::info!(
+            event = "evaluation.freeze.completed",
+            frozen_submission_id = %command.frozen_submission_id,
+            environment_id = %command.environment_id,
+            cleanup_verified = true,
+        );
+        Ok(())
+    }
+
+    async fn cleanup_command_resources(
+        &self,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<bool, FreezeCoordinatorError> {
         let job_name = job_name(command);
         let container_namespace = format!("lw-env-{}", command.environment_id);
         for namespace in [&container_namespace, &self.configuration.vm_job_namespace] {
@@ -242,26 +293,44 @@ impl FreezeCoordinator {
                     environment_id = %command.environment_id,
                     namespace,
                 );
-                return Ok(());
+                return Ok(false);
             }
         }
-        self.store
-            .mark_failed(command.frozen_submission_id, diagnostic)
-            .await?;
-        tracing::error!(
-            event = "evaluation.freeze.failed",
-            frozen_submission_id = %command.frozen_submission_id,
-            environment_id = %command.environment_id,
-            diagnostic,
-            cleanup_verified = true,
-        );
-        Ok(())
+        Ok(true)
+    }
+
+    async fn recover_completed_command(
+        &self,
+        command: &SubmissionFreezeCommand,
+    ) -> Result<bool, FreezeCoordinatorError> {
+        if !matches!(
+            self.store
+                .durable_outcome(command.frozen_submission_id)
+                .await?,
+            Some(FreezeCommandDurableOutcome::Completed)
+        ) {
+            return Ok(false);
+        }
+        self.complete_command_after_cleanup(command).await?;
+        Ok(true)
     }
 
     async fn reconcile(
         &self,
         command: &SubmissionFreezeCommand,
     ) -> Result<(), FreezeCoordinatorError> {
+        if self.recover_completed_command(command).await? {
+            return Ok(());
+        }
+        if let Some(FreezeCommandDurableOutcome::Failed(diagnostic)) = self
+            .store
+            .durable_outcome(command.frozen_submission_id)
+            .await?
+        {
+            self.fail_command_after_cleanup(command, diagnostic.as_str())
+                .await?;
+            return Ok(());
+        }
         let job_name = job_name(command);
         let namespace = self.job_namespace(command).await?;
         let job = self.get(&namespace, "batch/v1", "jobs", &job_name).await?;
@@ -278,12 +347,18 @@ impl FreezeCoordinator {
                 None
             };
             if failed {
+                if self.recover_completed_command(command).await? {
+                    return Ok(());
+                }
                 let diagnostic = worker_diagnostic
                     .as_ref()
                     .map_or("LW_COLLECT_JOB_FAILED", DiagnosticCode::as_str);
                 self.store
                     .mark_failed_pending_cleanup(command.frozen_submission_id, diagnostic)
                     .await?;
+                if self.recover_completed_command(command).await? {
+                    return Ok(());
+                }
                 self.cleanup_failed_command(command).await?;
                 return Ok(());
             }
@@ -380,6 +455,45 @@ impl FreezeCoordinator {
             || binding.environment.environment_revision != command.environment_revision
         {
             return Err(FreezeCoordinatorError::BindingInvalid);
+        }
+        match self
+            .authoring_admission
+            .resolve_environment(
+                binding.environment.release_id,
+                &contracts::http::EnvironmentPublicationAdmissionQuery {
+                    project_id: command.project_id,
+                    course_id: command.course_id,
+                    environment_release_version: binding.environment.release_version,
+                },
+            )
+            .await
+        {
+            Ok(Some(admission)) => {
+                let release = self
+                    .evaluation
+                    .load_release(admission.evaluation_release_id)
+                    .await?;
+                if release.state != contracts::evaluation::EvaluationReleaseState::Active
+                    || release.revision != admission.evaluation_release_revision
+                    || release.project_id != command.project_id
+                    || release.course_id != command.course_id
+                {
+                    return Err(FreezeCoordinatorError::BindingInvalid);
+                }
+                let expected_manifest =
+                    contracts::submission::SubmissionManifest::from_evaluation_spec(
+                        &release.evaluation_spec,
+                    )
+                    .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+                if expected_manifest != command.manifest {
+                    return Err(FreezeCoordinatorError::BindingInvalid);
+                }
+            }
+            Ok(None) => {
+                // Control has authoritatively identified a Work release.  It retains bounded
+                // snapshot behavior without entering the Evaluation run path.
+            }
+            Err(error) => return Err(FreezeCoordinatorError::AuthoringAdmission(error)),
         }
         let now = self.store.authority_now().await?;
         let request = FreezeRequest {
@@ -620,7 +734,12 @@ impl FreezeCoordinator {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(FreezeCoordinatorError::BindingUnavailable);
+            let status = response.status();
+            if status == StatusCode::UNPROCESSABLE_ENTITY {
+                let body = response.bytes().await?;
+                return Err(classify_binding_rejection(status, &body));
+            }
+            return Err(classify_binding_rejection(status, &[]));
         }
         let bytes = response.bytes().await?;
         contracts::parse_strict_json(&bytes).map_err(|_| FreezeCoordinatorError::BindingInvalid)
@@ -716,21 +835,15 @@ impl FreezeCoordinator {
             ("v1", "secrets"),
             ("networking.k8s.io/v1", "networkpolicies"),
         ] {
-            if let Some(resource) = self.get(namespace, api_version, plural, name).await? {
-                // A foreground Job deletion remains observable until its Pods have terminated.
-                // Once deletionTimestamp is set, the API server has accepted the destructive
-                // request and Kubernetes owns the remaining garbage collection. Treating that
-                // state as pending caused the coordinator to recreate the Job after it vanished,
-                // leaving a terminal command in an endless create/delete loop.
-                let deleting = api_version == "batch/v1"
-                    && plural == "jobs"
-                    && resource
-                        .pointer("/metadata/deletionTimestamp")
-                        .and_then(Value::as_str)
-                        .is_some();
-                if !deleting {
-                    return Ok(false);
-                }
+            if self
+                .get(namespace, api_version, plural, name)
+                .await?
+                .is_some()
+            {
+                // Foreground deletion remains observable until the API server has removed the
+                // object and all of its dependants.  Keep cleanup pending for every observation;
+                // terminal command state is written only after a subsequent absence check.
+                return Ok(false);
             }
         }
         Ok(true)
@@ -956,6 +1069,8 @@ pub enum FreezeCoordinatorError {
     CertificateInvalid,
     #[error("LW_COLLECT_BINDING_INVALID")]
     BindingInvalid,
+    #[error("LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE")]
+    BindingNotEligible,
     #[error("LW_COLLECT_BINDING_UNAVAILABLE")]
     BindingUnavailable,
     #[error("LW_COLLECT_KUBERNETES_REJECTED")]
@@ -966,6 +1081,10 @@ pub enum FreezeCoordinatorError {
     Http(#[from] reqwest::Error),
     #[error("LW_COLLECT_SERVICE_TOKEN_FAILED")]
     ServiceToken(#[from] ServiceTokenClientError),
+    #[error("LW_COLLECT_AUTHORING_ADMISSION_FAILED")]
+    AuthoringAdmission(#[from] AuthoringAdmissionClientError),
+    #[error("LW_COLLECT_EVALUATION_CONTROL_FAILED")]
+    Evaluation(#[from] EvaluationControlStoreError),
     #[error("LW_COLLECT_JSON_FAILED")]
     Json(#[from] serde_json::Error),
     #[error("LW_COLLECT_IDENTITY_INVALID")]
@@ -983,7 +1102,10 @@ impl FreezeCoordinatorError {
     }
 
     const fn is_terminal_command_error(&self) -> bool {
-        matches!(self, Self::BindingInvalid | Self::Json(_) | Self::Ssh(_))
+        matches!(
+            self,
+            Self::BindingInvalid | Self::BindingNotEligible | Self::Json(_) | Self::Ssh(_)
+        )
     }
 
     const fn diagnostic_code(&self) -> &'static str {
@@ -991,11 +1113,14 @@ impl FreezeCoordinatorError {
             Self::ConfigurationInvalid => "LW_COLLECT_COORDINATOR_CONFIG_INVALID",
             Self::CertificateInvalid => "LW_COLLECT_COORDINATOR_CERTIFICATE_INVALID",
             Self::BindingInvalid => "LW_COLLECT_BINDING_INVALID",
+            Self::BindingNotEligible => "LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE",
             Self::BindingUnavailable => "LW_COLLECT_BINDING_UNAVAILABLE",
             Self::KubernetesRejected => "LW_COLLECT_KUBERNETES_REJECTED",
             Self::Io(_) => "LW_COLLECT_IO_FAILED",
             Self::Http(_) => "LW_COLLECT_HTTP_FAILED",
             Self::ServiceToken(_) => "LW_COLLECT_SERVICE_TOKEN_FAILED",
+            Self::AuthoringAdmission(_) => "LW_COLLECT_AUTHORING_ADMISSION_FAILED",
+            Self::Evaluation(_) => "LW_COLLECT_EVALUATION_CONTROL_FAILED",
             Self::Json(_) => "LW_COLLECT_JSON_FAILED",
             Self::Ssh(_) => "LW_COLLECT_IDENTITY_INVALID",
             Self::Store(_) => "LW_COLLECT_STORE_FAILED",
@@ -1014,15 +1139,94 @@ fn command_deadline_exceeded(
     authority_now.get() >= requested_at.get() + time::Duration::seconds(deadline_seconds)
 }
 
+fn classify_binding_rejection(status: StatusCode, body: &[u8]) -> FreezeCoordinatorError {
+    let not_eligible = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("diagnosticCode")
+                .and_then(Value::as_str)
+                .map(|code| code == "LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE")
+        })
+        .unwrap_or(false);
+    if status == StatusCode::UNPROCESSABLE_ENTITY && not_eligible {
+        FreezeCoordinatorError::BindingNotEligible
+    } else {
+        FreezeCoordinatorError::BindingUnavailable
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FreezeCoordinatorError, command_deadline_exceeded, pod_failure_diagnostic,
-        read_registry_pull_config,
+        ENVIRONMENT_FREEZE_SCOPE, FreezeCoordinator, FreezeCoordinatorConfiguration,
+        FreezeCoordinatorError, classify_binding_rejection, command_deadline_exceeded,
+        pod_failure_diagnostic, read_registry_pull_config,
     };
-    use contracts::UtcTimestamp;
+    use crate::authoring_client::{
+        AuthoringAdmissionClient, AuthoringAdmissionClientConfiguration,
+        AuthoringAdmissionClientError,
+    };
+    use crate::{PgEvaluationControlStore, PgFreezeCommandStore, SubmissionFreezeCommand};
+    use auth::{
+        ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenClientError,
+        TransportSecurityMode,
+    };
+    use axum::{
+        Json, Router,
+        body::Body,
+        extract::State,
+        http::{Method, Request, StatusCode},
+        response::{IntoResponse, Response},
+        routing::{any, get, post},
+    };
+    use contracts::authoring::{PackageFile, RuntimeKind};
+    use contracts::evaluation::{
+        EvaluationExecutionBinding, EvaluationRuntimeIdentity, EvaluationSpec,
+    };
+    use contracts::http::{
+        AuthoringPublicationAdmissionBinding, IdempotencyKey,
+        InternalPublishEvaluationReleaseRequest,
+    };
+    use contracts::submission::{
+        EnvironmentFreezeBinding, EnvironmentFreezeSourceBinding, FrozenEnvironmentIdentity,
+        SubmissionManifest,
+    };
+    use contracts::{
+        ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, CourseId,
+        EnvironmentId, FrozenSubmissionId, PolicyId, ProjectId, ReleaseId, RetentionClass,
+        RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
+    };
+    use hyper_util::{
+        rt::{TokioExecutor, TokioIo},
+        server::conn::auto::Builder,
+        service::TowerToHyperService,
+    };
+    use persistence_sqlx::{Domain, MigrationCatalog, Sha256Digest};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, KeyUsagePurpose,
+    };
+    use reqwest::{Certificate, Client, Url};
+    use rustls::{ServerConfig, pki_types::PrivateKeyDer};
     use serde_json::json;
-    use std::fs;
+    use sqlx::postgres::PgPoolOptions;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        error::Error,
+        fs,
+        io::Cursor,
+        path::Path,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    use tempfile::TempDir;
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
 
     #[test]
     fn unavailable_binding_is_retried_until_the_command_deadline()
@@ -1037,6 +1241,40 @@ mod tests {
         assert!(!command_deadline_exceeded(requested, before, 299));
         assert!(command_deadline_exceeded(requested, deadline, 299));
         Ok(())
+    }
+
+    #[test]
+    fn confirmed_environment_freeze_rejection_is_terminal_but_service_unavailable_retries() {
+        let not_eligible = classify_binding_rejection(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            br#"{"diagnosticCode":"LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE"}"#,
+        );
+        assert!(not_eligible.is_terminal_command_error());
+        assert_eq!(
+            not_eligible.diagnostic_code(),
+            "LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE"
+        );
+
+        let unavailable = classify_binding_rejection(StatusCode::SERVICE_UNAVAILABLE, &[]);
+        assert!(!unavailable.is_terminal_command_error());
+        assert_eq!(
+            unavailable.diagnostic_code(),
+            "LW_COLLECT_BINDING_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn temporary_authoring_admission_failures_are_retried() {
+        for error in [
+            FreezeCoordinatorError::AuthoringAdmission(AuthoringAdmissionClientError::Unavailable),
+            FreezeCoordinatorError::AuthoringAdmission(AuthoringAdmissionClientError::Transport),
+            FreezeCoordinatorError::AuthoringAdmission(AuthoringAdmissionClientError::Token(
+                ServiceTokenClientError::TokenExchange,
+            )),
+        ] {
+            assert!(!error.is_systemic());
+            assert!(!error.is_terminal_command_error());
+        }
     }
 
     #[test]
@@ -1100,5 +1338,589 @@ mod tests {
         fs::write(&path, br#"{"auths":{}}"#)?;
         assert!(read_registry_pull_config(&path).is_err());
         Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the integration fixture keeps the complete admission and Kubernetes boundary in one scenario"
+    )]
+    #[tokio::test]
+    async fn approved_release_manifest_mismatch_rejects_before_kubernetes_write()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let database_url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            database.get_host_port_ipv4(5432).await?
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        apply_evaluation_migrations(&pool).await?;
+
+        let project_id = ProjectId::new();
+        let course_id = CourseId::new();
+        let actor_id = ActorId::new();
+        let environment_id = EnvironmentId::new();
+        let environment_release_id = ReleaseId::new();
+        let environment_revision = Revision::new(1)?;
+        let evaluation_spec = EvaluationSpec::from_yaml(
+            r#"apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: coordinator-manifest-v1
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include: [answer.txt]
+      maxBytes: 1024
+    llmReadable: [answer.txt]
+  steps:
+    - role: score
+      id: score-answer
+      runner:
+        kind: file_assertion
+        requiredFiles: [answer.txt]
+      checker:
+        kind: exit_code
+        expected: 0
+      score:
+        max: 1
+      failurePolicy: stop
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 1
+    gates: []
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen: []
+"#,
+        )?;
+        let expected_manifest = SubmissionManifest::from_evaluation_spec(&evaluation_spec)?;
+        let mut requested_manifest = expected_manifest.clone();
+        requested_manifest.include[0] = contracts::PathRule::ExactFile {
+            path: "tampered.txt".to_owned(),
+        };
+
+        let evaluation = PgEvaluationControlStore::new(pool.clone());
+        let now = evaluation.authority_now().await?;
+        let runtime_identity = EvaluationRuntimeIdentity {
+            provider_binding: "kubernetes/test".to_owned(),
+            runner_image: format!(
+                "registry.example/labweaver/evaluation-worker@sha256:{}",
+                Sha256Digest::of_bytes(b"coordinator-test-runner")
+            ),
+        };
+        let package_artifact_id = ArtifactId::new();
+        let package = contracts::authoring::ProblemPackage {
+            id: contracts::ProblemPackageId::new(),
+            project_id,
+            course_id: Some(course_id),
+            revision: Revision::new(1)?,
+            files: vec![PackageFile {
+                path: "program.json".to_owned(),
+                object: ArtifactRef {
+                    artifact_id: package_artifact_id,
+                    store_binding: "test-store".to_owned(),
+                    object_version: "v1".to_owned(),
+                    size_bytes: 1,
+                    media_type: "application/json".to_owned(),
+                },
+            }],
+            retention: RetentionSnapshot {
+                policy_id: PolicyId::new(),
+                policy_revision: Revision::new(1)?,
+                class: RetentionClass::CourseMaterial,
+                retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+                disposition: RetentionDisposition::Delete,
+            },
+            completed_at: "2026-01-01T00:00:00.000Z".parse()?,
+        };
+        let execution_binding = EvaluationExecutionBinding {
+            package,
+            object_locators: BTreeMap::from([(
+                package_artifact_id,
+                "packages/program.json".to_owned(),
+            )]),
+        };
+        let publish_request = InternalPublishEvaluationReleaseRequest {
+            project_id,
+            course_id: Some(course_id),
+            candidate_id: CandidateId::new(),
+            candidate_revision: Revision::new(1)?,
+            approval_id: ApprovalId::new(),
+            approval_revision: Revision::new(1)?,
+            evaluation_spec,
+            execution_binding,
+            runtime_identity,
+            published_by: actor_id,
+        };
+        let release = match evaluation
+            .publish_release(
+                &publish_request,
+                &IdempotencyKey::parse("coordinator-manifest-release")?,
+                now,
+                "coordinator-manifest-release",
+            )
+            .await?
+        {
+            crate::EvaluationReleaseReservation::Created(value)
+            | crate::EvaluationReleaseReservation::Replayed(value) => value,
+        };
+
+        let environment_binding = EnvironmentFreezeBinding {
+            environment: FrozenEnvironmentIdentity {
+                environment_id,
+                environment_revision,
+                release_id: environment_release_id,
+                release_version: 1,
+                runtime_kind: RuntimeKind::Container,
+                build_request_id: None,
+            },
+            agent_run_id: AgentRunId::new(),
+            source: EnvironmentFreezeSourceBinding::Container {
+                namespace: "student".to_owned(),
+                persistent_volume_claim: "student-workspace".to_owned(),
+                storage_class_name: "standard".to_owned(),
+            },
+        };
+        let environment_server = EnvironmentServer::start(environment_binding).await?;
+        let token_client = Arc::new(
+            ServiceTokenClient::discover(
+                ServiceTokenClientConfig::new(
+                    &environment_server.issuer,
+                    "evaluation-coordinator-test".to_owned(),
+                    "test-secret".to_owned(),
+                    "environment".to_owned(),
+                    BTreeSet::from([ENVIRONMENT_FREEZE_SCOPE.to_owned()]),
+                    1,
+                    TransportSecurityMode::InsecureTestOnly,
+                )?,
+                Client::builder().no_proxy().build()?,
+            )
+            .await?,
+        );
+        let admission_server = AdmissionServer::start().await?;
+        let temporary = TempDir::new()?;
+        let authoring_admission = build_authoring_client(
+            &admission_server,
+            token_client.clone(),
+            &temporary,
+            AuthoringPublicationAdmissionBinding {
+                approval_id: release.approval_id,
+                approval_revision: release.approval_revision,
+                project_id,
+                course_id: Some(course_id),
+                environment_release_id,
+                environment_release_version: 1,
+                evaluation_release_id: release.id,
+                evaluation_release_revision: release.revision,
+            },
+        )?;
+        let kubernetes_server = KubernetesServer::start().await?;
+        let coordinator = FreezeCoordinator {
+            configuration: FreezeCoordinatorConfiguration {
+                kubernetes_api_server: kubernetes_server.base_uri.clone(),
+                kubernetes_bearer_token_file: Path::new("unused").to_owned(),
+                kubernetes_ca_file: Path::new("unused").to_owned(),
+                environment_service_base_uri: environment_server.base_uri.clone(),
+                environment_ca_file: Path::new("unused").to_owned(),
+                environment_audience: "environment".to_owned(),
+                worker_image: format!(
+                    "registry.example/labweaver/freeze-worker@sha256:{}",
+                    Sha256Digest::of_bytes(b"freeze-worker")
+                ),
+                worker_service_account_name: "freeze-worker".to_owned(),
+                vm_job_namespace: "vm-jobs".to_owned(),
+                worker_configuration_file: Path::new("unused").to_owned(),
+                worker_secret_files: BTreeMap::new(),
+                worker_registry_pull_config_file: Path::new("unused").to_owned(),
+                worker_tls_ca_file: Path::new("unused").to_owned(),
+                infrastructure_namespace_labels: BTreeMap::from([(
+                    "managed".to_owned(),
+                    "true".to_owned(),
+                )]),
+                dns_namespace_labels: BTreeMap::from([("managed".to_owned(), "true".to_owned())]),
+                dns_pod_labels: BTreeMap::from([("managed".to_owned(), "true".to_owned())]),
+                retention_policy_id: PolicyId::new(),
+                retention_policy_revision: Revision::new(1)?,
+                retention_days: 1,
+                job_active_deadline_seconds: 60,
+                request_timeout_milliseconds: 2_000,
+            },
+            store: PgFreezeCommandStore::new(pool.clone()),
+            kubernetes: Client::builder().no_proxy().build()?,
+            environment: Client::builder().no_proxy().build()?,
+            environment_token_client: token_client,
+            environment_token_scopes: BTreeSet::from([ENVIRONMENT_FREEZE_SCOPE.to_owned()]),
+            authoring_admission,
+            evaluation,
+            kubernetes_token: "test-kubernetes-token".to_owned(),
+            worker_configuration: "{}".to_owned(),
+            worker_secrets: BTreeMap::new(),
+            worker_registry_pull_config: Vec::new(),
+        };
+        let command = SubmissionFreezeCommand {
+            frozen_submission_id: FrozenSubmissionId::new(),
+            operation_id: contracts::OperationId::new(),
+            project_id,
+            course_id: Some(course_id),
+            environment_id,
+            actor_id,
+            environment_revision,
+            manifest_revision: Revision::new(1)?,
+            manifest: requested_manifest,
+            idempotency_key: "coordinator-manifest-mismatch".to_owned(),
+            trace_id: "coordinator-manifest-mismatch".to_owned(),
+            requested_at: now,
+        };
+
+        let result = coordinator
+            .create_resources(&command, "student", "lw-freeze-test")
+            .await;
+        assert!(matches!(
+            result,
+            Err(FreezeCoordinatorError::BindingInvalid)
+        ));
+        assert_eq!(
+            kubernetes_server.patch_count.load(Ordering::Acquire),
+            0,
+            "manifest mismatch must reject before ConfigMap, Secret, or Job apply"
+        );
+        assert!(
+            !coordinator.cleanup("student", "lw-freeze-test").await?,
+            "a foreground Job that is still observed must keep cleanup pending"
+        );
+        assert!(
+            coordinator.cleanup("student", "lw-freeze-test").await?,
+            "cleanup completes only after the Job and all owned objects disappear"
+        );
+
+        kubernetes_server.stop().await;
+        admission_server.stop().await;
+        environment_server.stop().await;
+        drop(database);
+        Ok(())
+    }
+
+    async fn apply_evaluation_migrations(pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
+        sqlx::query("CREATE SCHEMA evaluation")
+            .execute(pool)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::query("SET search_path = evaluation, pg_catalog")
+            .execute(&mut *connection)
+            .await?;
+        let migration_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let catalog = MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
+        let domain = catalog
+            .domains
+            .iter()
+            .find(|domain| domain.name == Domain::Evaluation)
+            .ok_or("evaluation migration domain missing")?;
+        for migration in &domain.migrations {
+            let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
+            sqlx::raw_sql(&sql).execute(&mut *connection).await?;
+        }
+        Ok(())
+    }
+
+    struct EnvironmentServer {
+        base_uri: Url,
+        issuer: String,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl EnvironmentServer {
+        async fn start(binding: EnvironmentFreezeBinding) -> Result<Self, Box<dyn Error>> {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let port = listener.local_addr()?.port();
+            let base_uri = Url::parse(&format!("http://127.0.0.1:{port}/"))?;
+            let issuer = format!("http://localhost:{port}/realms/test");
+            let discovery_issuer = issuer.clone();
+            let router = Router::new()
+                .route(
+                    "/realms/test/.well-known/openid-configuration",
+                    get(move || {
+                        let issuer = discovery_issuer.clone();
+                        async move {
+                            Json(json!({
+                                "issuer": issuer,
+                                "authorization_endpoint": format!("{issuer}/authorize"),
+                                "token_endpoint": format!("{issuer}/token"),
+                                "jwks_uri": format!("{issuer}/jwks"),
+                                "response_types_supported": ["code"],
+                                "subject_types_supported": ["public"],
+                                "id_token_signing_alg_values_supported": ["ES256"],
+                                "grant_types_supported": ["authorization_code", "client_credentials"]
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/realms/test/token",
+                    post(|| async {
+                        Json(json!({
+                            "access_token": "eyJhbGciOiJub25lIn0.eyJhdWQiOlsiZW52aXJvbm1lbnQiLCJjb250cm9sIl19.sig",
+                            "token_type": "Bearer",
+                            "expires_in": 300
+                        }))
+                    }),
+                )
+                .route(
+                    "/realms/test/jwks",
+                    get(|| async { Json(json!({ "keys": [] })) }),
+                )
+                .fallback(any(environment_request))
+                .with_state(binding);
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            });
+            Ok(Self {
+                base_uri,
+                issuer,
+                task,
+            })
+        }
+
+        async fn stop(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    async fn environment_request(
+        State(binding): State<EnvironmentFreezeBinding>,
+        request: Request<Body>,
+    ) -> Response {
+        if request.method() == Method::POST
+            && request
+                .uri()
+                .path()
+                .starts_with("/internal/v1/environments/")
+        {
+            (StatusCode::OK, Json(binding)).into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
+
+    struct KubernetesServer {
+        base_uri: Url,
+        patch_count: Arc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl KubernetesServer {
+        async fn start() -> Result<Self, Box<dyn Error>> {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let port = listener.local_addr()?.port();
+            let base_uri = Url::parse(&format!("http://127.0.0.1:{port}/"))?;
+            let patch_count = Arc::new(AtomicUsize::new(0));
+            let deleting_job_reads = Arc::new(AtomicUsize::new(1));
+            let router =
+                Router::new()
+                    .fallback(any(kubernetes_request))
+                    .with_state(KubernetesState {
+                        patch_count: patch_count.clone(),
+                        deleting_job_reads: deleting_job_reads.clone(),
+                    });
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            });
+            Ok(Self {
+                base_uri,
+                patch_count,
+                task,
+            })
+        }
+
+        async fn stop(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    #[derive(Clone)]
+    struct KubernetesState {
+        patch_count: Arc<AtomicUsize>,
+        deleting_job_reads: Arc<AtomicUsize>,
+    }
+
+    async fn kubernetes_request(
+        State(state): State<KubernetesState>,
+        request: Request<Body>,
+    ) -> Response {
+        if request.method() == Method::PATCH {
+            state.patch_count.fetch_add(1, Ordering::AcqRel);
+            StatusCode::OK.into_response()
+        } else if request.method() == Method::DELETE {
+            StatusCode::OK.into_response()
+        } else if request.method() == Method::GET
+            && request.uri().path().contains("/jobs/")
+            && state
+                .deleting_job_reads
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        {
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "metadata": {"deletionTimestamp": "2026-09-12T00:00:00Z"}
+                })),
+            )
+                .into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
+
+    struct AdmissionServer {
+        base_uri: Url,
+        ca_pem: String,
+        binding: Arc<Mutex<Option<AuthoringPublicationAdmissionBinding>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl AdmissionServer {
+        async fn start() -> Result<Self, Box<dyn Error>> {
+            let ca = test_ca()?;
+            let (certificate_pem, private_key_pem) = leaf_certificate(&ca)?;
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let port = listener.local_addr()?.port();
+            let base_uri = Url::parse(&format!("https://localhost:{port}/"))?;
+            let binding = Arc::new(Mutex::new(None));
+            let router = Router::new()
+                .fallback(any(admission_request))
+                .with_state(binding.clone());
+            let tls = tls_config(&certificate_pem, &private_key_pem)?;
+            let task = tokio::spawn(serve_tls(listener, router, tls));
+            Ok(Self {
+                base_uri,
+                ca_pem: ca.pem(),
+                binding,
+                task,
+            })
+        }
+
+        async fn stop(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    async fn admission_request(
+        State(state): State<Arc<Mutex<Option<AuthoringPublicationAdmissionBinding>>>>,
+        request: Request<Body>,
+    ) -> Response {
+        if request.method() == Method::GET
+            && request
+                .uri()
+                .path()
+                .starts_with("/internal/v1/environment-releases/")
+            && let Ok(guard) = state.lock()
+            && let Some(binding) = guard.clone()
+        {
+            return (StatusCode::OK, Json(Some(binding))).into_response();
+        }
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    fn build_authoring_client(
+        server: &AdmissionServer,
+        token_client: Arc<ServiceTokenClient>,
+        temporary: &TempDir,
+        binding: AuthoringPublicationAdmissionBinding,
+    ) -> Result<AuthoringAdmissionClient, Box<dyn Error>> {
+        *server
+            .binding
+            .lock()
+            .map_err(|_| std::io::Error::other("admission state lock poisoned"))? = Some(binding);
+        let ca = Certificate::from_pem(server.ca_pem.as_bytes())?;
+        let client = Client::builder()
+            .no_proxy()
+            .add_root_certificate(ca)
+            .build()?;
+        let ca_file = temporary.path().join("admission-ca.pem");
+        fs::write(&ca_file, &server.ca_pem)?;
+        let client = AuthoringAdmissionClient::new(
+            AuthoringAdmissionClientConfiguration {
+                base_uri: server.base_uri.clone(),
+                ca_file,
+                timeout_milliseconds: 2_000,
+                max_request_bytes: 64 * 1024,
+                max_response_bytes: 64 * 1024,
+                audience: "control".to_owned(),
+            },
+            client,
+            token_client,
+            BTreeSet::from([
+                "control.authoring.read".to_owned(),
+                "control.llm_policy.read".to_owned(),
+            ]),
+        )?;
+        Ok(client)
+    }
+
+    async fn serve_tls(listener: TcpListener, router: Router, config: Arc<ServerConfig>) {
+        let acceptor = TlsAcceptor::from(config);
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = acceptor.clone();
+            let router = router.clone();
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let service = TowerToHyperService::new(router);
+                let connection = Builder::new(TokioExecutor::new())
+                    .serve_connection_with_upgrades(TokioIo::new(stream), service)
+                    .into_owned();
+                let _ = connection.await;
+            });
+        }
+    }
+
+    fn test_ca() -> Result<CertifiedIssuer<'static, KeyPair>, rcgen::Error> {
+        let mut parameters = CertificateParams::new(Vec::<String>::new())?;
+        parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        parameters.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        CertifiedIssuer::self_signed(parameters, KeyPair::generate()?)
+    }
+
+    fn leaf_certificate(
+        ca: &CertifiedIssuer<'static, KeyPair>,
+    ) -> Result<(String, String), rcgen::Error> {
+        let mut parameters = CertificateParams::new(vec!["localhost".to_owned()])?;
+        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let key = KeyPair::generate()?;
+        let certificate = parameters.signed_by(&key, ca)?;
+        Ok((certificate.pem(), key.serialize_pem()))
+    }
+
+    fn tls_config(
+        certificate_pem: &str,
+        private_key_pem: &str,
+    ) -> Result<Arc<ServerConfig>, Box<dyn Error>> {
+        let certificates = rustls_pemfile::certs(&mut Cursor::new(certificate_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let key: PrivateKeyDer<'static> =
+            rustls_pemfile::private_key(&mut Cursor::new(private_key_pem.as_bytes()))?
+                .ok_or("private key missing")?;
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, key)?;
+        Ok(Arc::new(config))
     }
 }

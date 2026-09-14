@@ -1,4 +1,4 @@
-//! Authenticated, path-bounded browser forwarding to the Control authority.
+//! Authenticated, path-bounded browser forwarding to service authorities.
 
 use std::{
     io,
@@ -67,7 +67,65 @@ struct ForwardRequest {
     headers: HeaderMap,
     body: Bytes,
     valid_path: fn(&str) -> bool,
-    scope: Option<EnvironmentFreezeScope>,
+    scope: Option<EvaluationScope>,
+    gateway: GatewayAuthority,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayAuthority {
+    Control,
+    Environment,
+    Evaluation,
+}
+
+impl GatewayAuthority {
+    const fn unavailable_diagnostic(self) -> &'static str {
+        match self {
+            Self::Control => "LW_AUTH_CONTROL_UNAVAILABLE",
+            Self::Environment => "LW_AUTH_ENVIRONMENT_UNAVAILABLE",
+            Self::Evaluation => "LW_AUTH_EVALUATION_UNAVAILABLE",
+        }
+    }
+
+    const fn response_too_large_diagnostic(self) -> &'static str {
+        match self {
+            Self::Control => "LW_AUTH_CONTROL_RESPONSE_TOO_LARGE",
+            Self::Environment => "LW_AUTH_ENVIRONMENT_RESPONSE_TOO_LARGE",
+            Self::Evaluation => "LW_AUTH_EVALUATION_RESPONSE_TOO_LARGE",
+        }
+    }
+
+    const fn unavailable_event(self) -> &'static str {
+        match self {
+            Self::Control => "auth.control_gateway.unavailable",
+            Self::Environment => "auth.environment_gateway.unavailable",
+            Self::Evaluation => "auth.evaluation_gateway.unavailable",
+        }
+    }
+
+    const fn request_failure_stage(self) -> &'static str {
+        match self {
+            Self::Control => "control_request",
+            Self::Environment => "environment_request",
+            Self::Evaluation => "evaluation_request",
+        }
+    }
+
+    const fn response_failure_stage(self) -> &'static str {
+        match self {
+            Self::Control => "control_response",
+            Self::Environment => "environment_response",
+            Self::Evaluation => "evaluation_response",
+        }
+    }
+
+    const fn metric_label(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Environment => "environment",
+            Self::Evaluation => "evaluation",
+        }
+    }
 }
 
 impl ResourceGatewayProxy {
@@ -253,6 +311,7 @@ pub(super) async fn forward_control(
             body,
             valid_path: valid_control_path,
             scope: None,
+            gateway: GatewayAuthority::Control,
         },
     )
     .await
@@ -335,6 +394,7 @@ pub(super) async fn forward_environment(
             body,
             valid_path: valid_environment_path,
             scope: None,
+            gateway: GatewayAuthority::Environment,
         },
     )
     .await
@@ -344,7 +404,7 @@ pub(super) async fn forward_evaluation(
     State(state): State<std::sync::Arc<AppState>>,
     method: Method,
     uri: Uri,
-    mut headers: HeaderMap,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let mut scope = None;
@@ -373,28 +433,6 @@ pub(super) async fn forward_evaluation(
             "freezeSubmission",
         )
         .await?;
-        // Evaluation is a separate service and cannot infer project ownership
-        // from the browser session.  Only the scope resolved from the active
-        // Access grant is forwarded; caller-supplied values are never trusted.
-        headers.insert(
-            "x-labweaver-project-id",
-            resolved_scope
-                .project_id
-                .to_string()
-                .parse()
-                .map_err(|_| ApiError::internal("LW_ACCESS_SCOPE_INVALID"))?,
-        );
-        if let Some(course_id) = resolved_scope.course_id {
-            headers.insert(
-                "x-labweaver-course-id",
-                course_id
-                    .to_string()
-                    .parse()
-                    .map_err(|_| ApiError::internal("LW_ACCESS_SCOPE_INVALID"))?,
-            );
-        } else {
-            headers.remove("x-labweaver-course-id");
-        }
         scope = Some(resolved_scope);
     } else if method == Method::GET {
         let segments = uri.path().split('/').collect::<Vec<_>>();
@@ -402,22 +440,45 @@ pub(super) async fn forward_evaluation(
             "",
             "api",
             "v1",
-            "courses",
-            course,
+            "projects",
+            project,
+            "frozen-submissions",
+            _submission,
+        ] = segments.as_slice()
+        {
+            let project_id = project
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_environment_project(&state, &headers, project_id, "getFrozenSubmission")
+                .await?;
+            scope = Some(EvaluationScope {
+                project_id,
+                course_id: None,
+            });
+        } else if let [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project,
             "me",
             "evaluation-results",
             rest @ ..,
         ] = segments.as_slice()
         {
-            let course_id = course
+            let project_id = project
                 .parse()
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
             let operation = if rest.is_empty() {
-                "listOwnEvaluationResults"
+                "listOwnProjectEvaluationResults"
             } else {
-                "getOwnEvaluationResult"
+                "getOwnProjectEvaluationResult"
             };
-            authorize_environment_course(&state, &headers, course_id, operation).await?;
+            authorize_environment_project(&state, &headers, project_id, operation).await?;
+            scope = Some(EvaluationScope {
+                project_id,
+                course_id: None,
+            });
         }
     }
     forward(
@@ -430,6 +491,7 @@ pub(super) async fn forward_evaluation(
             body,
             valid_path: valid_evaluation_path,
             scope,
+            gateway: GatewayAuthority::Evaluation,
         },
     )
     .await
@@ -1252,6 +1314,7 @@ async fn forward(
         body,
         valid_path,
         scope,
+        gateway,
     } = request;
     if !matches!(
         method,
@@ -1303,30 +1366,33 @@ async fn forward(
     let started = Instant::now();
     let response = request.send().await.map_err(|error| {
         tracing::warn!(
-            event = "auth.control_gateway.unavailable",
-            diagnostic_code = "LW_AUTH_CONTROL_UNAVAILABLE",
+            event = gateway.unavailable_event(),
+            diagnostic_code = gateway.unavailable_diagnostic(),
             error_kind = reqwest_error_kind(&error),
-            failure_stage = "control_request",
+            failure_stage = gateway.request_failure_stage(),
             retryable = error.is_timeout() || error.is_connect(),
             duration_ms = elapsed_millis(started),
             safe_detail = "redacted_unclassified",
         );
-        ApiError::unavailable("LW_AUTH_CONTROL_UNAVAILABLE")
+        ApiError::unavailable(gateway.unavailable_diagnostic())
     })?;
-    forward_control_response(proxy, &method, response).await
+    forward_service_response(proxy.max_response_bytes, gateway, &method, response).await
 }
 
-async fn forward_control_response(
-    proxy: &ControlGatewayProxy,
+async fn forward_service_response(
+    max_response_bytes: usize,
+    gateway: GatewayAuthority,
     method: &Method,
     response: reqwest::Response,
 ) -> Result<Response, ApiError> {
     let status = response.status();
     let content_length = response.content_length();
     if content_length
-        .is_some_and(|length| length > u64::try_from(proxy.max_response_bytes).unwrap_or(u64::MAX))
+        .is_some_and(|length| length > u64::try_from(max_response_bytes).unwrap_or(u64::MAX))
     {
-        return Err(ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_TOO_LARGE"));
+        return Err(ApiError::unavailable(
+            gateway.response_too_large_diagnostic(),
+        ));
     }
     let response_headers = response.headers().clone();
     let is_sse = response_headers
@@ -1336,12 +1402,21 @@ async fn forward_control_response(
     let response_body = if is_sse {
         Body::from_stream(response.bytes_stream().map_err(io::Error::other))
     } else {
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| ApiError::unavailable("LW_AUTH_CONTROL_UNAVAILABLE"))?;
-        if bytes.len() > proxy.max_response_bytes {
-            return Err(ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_TOO_LARGE"));
+        let bytes = response.bytes().await.map_err(|error| {
+            tracing::warn!(
+                event = gateway.unavailable_event(),
+                diagnostic_code = gateway.unavailable_diagnostic(),
+                error_kind = reqwest_error_kind(&error),
+                failure_stage = gateway.response_failure_stage(),
+                retryable = true,
+                safe_detail = "redacted_unclassified",
+            );
+            ApiError::unavailable(gateway.unavailable_diagnostic())
+        })?;
+        if bytes.len() > max_response_bytes {
+            return Err(ApiError::unavailable(
+                gateway.response_too_large_diagnostic(),
+            ));
         }
         Body::from(bytes)
     };
@@ -1358,7 +1433,8 @@ async fn forward_control_response(
         }
     }
     metrics::counter!(
-        "labweaver_auth_control_gateway_requests",
+        "labweaver_auth_service_gateway_requests",
+        "gateway" => gateway.metric_label(),
         "method" => method.to_string(),
         "status" => status.as_u16().to_string()
     )
@@ -1445,7 +1521,7 @@ async fn authorize_environment_project(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct EnvironmentFreezeScope {
+struct EvaluationScope {
     project_id: contracts::ProjectId,
     course_id: Option<contracts::CourseId>,
 }
@@ -1460,7 +1536,7 @@ async fn authorize_environment_freeze(
     environment_id: contracts::EnvironmentId,
     requested_course_id: Option<contracts::CourseId>,
     operation_id: &'static str,
-) -> Result<EnvironmentFreezeScope, ApiError> {
+) -> Result<EvaluationScope, ApiError> {
     let session = authenticated_session(state, headers).await?;
     let now = OffsetDateTime::now_utc();
     let rows = sqlx::query(
@@ -1497,7 +1573,7 @@ async fn authorize_environment_freeze(
         if requested_course_id.is_some() && requested_course_id != course_id {
             continue;
         }
-        let candidate = EnvironmentFreezeScope {
+        let candidate = EvaluationScope {
             project_id,
             course_id,
         };
@@ -1646,11 +1722,20 @@ fn valid_evaluation_path(path: &str) -> bool {
             ["", "api", "v1", "environments", _, "freeze"]
         ) || matches!(
             segments.as_slice(),
-            ["", "api", "v1", "frozen-submissions", _]
+            ["", "api", "v1", "projects", _, "frozen-submissions", _]
         ) || matches!(
             segments.as_slice(),
-            ["", "api", "v1", "courses", _, "me", "evaluation-results"]
-                | ["", "api", "v1", "courses", _, "me", "evaluation-results", _]
+            ["", "api", "v1", "projects", _, "me", "evaluation-results"]
+                | [
+                    "",
+                    "api",
+                    "v1",
+                    "projects",
+                    _,
+                    "me",
+                    "evaluation-results",
+                    _
+                ]
         ))
 }
 
@@ -1714,15 +1799,20 @@ pub(super) enum ControlGatewayError {
 mod tests {
     use std::str::FromStr;
 
+    use axum::http::{Method, StatusCode};
     use contracts::{
         ActorId, AuthenticatedActor, MembershipState, PlatformRole, ProjectId, ProjectMembership,
         Revision, UtcTimestamp,
     };
     use time::OffsetDateTime;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     use super::{
-        authorize_resource_actor, parse_runtime_path, valid_control_path, valid_evaluation_path,
-        valid_resource_path,
+        GatewayAuthority, authorize_resource_actor, forward_service_response, parse_runtime_path,
+        valid_control_path, valid_evaluation_path, valid_resource_path,
     };
 
     fn timestamp(value: &str) -> UtcTimestamp {
@@ -1795,23 +1885,95 @@ mod tests {
         assert!(!valid_control_path("/api/v1/projects/a%2Finternal"));
     }
 
+    #[tokio::test]
+    async fn evaluation_gateway_response_limit_returns_evaluation_diagnostic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 4 * 1024];
+            let _ = stream.read(&mut request).await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .await?;
+            stream.shutdown().await?;
+            Ok::<_, std::io::Error>(())
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await?;
+
+        let Err(error) =
+            forward_service_response(4, GatewayAuthority::Evaluation, &Method::GET, response).await
+        else {
+            return Err("response over the evaluation limit was accepted".into());
+        };
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.diagnostic, "LW_AUTH_EVALUATION_RESPONSE_TOO_LARGE");
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evaluation_gateway_response_read_failure_returns_evaluation_diagnostic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 4 * 1024];
+            let _ = stream.read(&mut request).await?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nx")
+                .await?;
+            stream.shutdown().await?;
+            Ok::<_, std::io::Error>(())
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await?;
+
+        let Err(error) = forward_service_response(
+            usize::MAX,
+            GatewayAuthority::Evaluation,
+            &Method::GET,
+            response,
+        )
+        .await
+        else {
+            return Err("truncated response was accepted".into());
+        };
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.diagnostic, "LW_AUTH_EVALUATION_UNAVAILABLE");
+        server.await??;
+        Ok(())
+    }
+
     #[test]
     fn evaluation_paths_are_exact_and_injection_safe() {
         assert!(valid_evaluation_path(
             "/api/v1/environments/01900000-0000-7000-8000-000000000001/freeze"
         ));
         assert!(valid_evaluation_path(
-            "/api/v1/frozen-submissions/01900000-0000-7000-8000-000000000001"
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/frozen-submissions/01900000-0000-7000-8000-000000000002"
         ));
         assert!(valid_evaluation_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/me/evaluation-results"
+        ));
+        assert!(valid_evaluation_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/me/evaluation-results/01900000-0000-7000-8000-000000000003"
+        ));
+        assert!(!valid_evaluation_path(
             "/api/v1/courses/01900000-0000-7000-8000-000000000001/me/evaluation-results"
-        ));
-        assert!(valid_evaluation_path(
-            "/api/v1/courses/01900000-0000-7000-8000-000000000001/me/evaluation-results/01900000-0000-7000-8000-000000000002"
         ));
         assert!(!valid_evaluation_path("/api/v1/environments/a/freeze/more"));
         assert!(!valid_evaluation_path(
-            "/api/v1/frozen-submissions/../internal"
+            "/api/v1/projects/../frozen-submissions/internal"
         ));
     }
 

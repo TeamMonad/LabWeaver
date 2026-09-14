@@ -21,6 +21,15 @@
       </div>
     </section>
 
+    <DiagnosticBanner
+      v-if="projects.projects.kind === 'error'"
+      :code="projects.projects.diagnostic.code"
+      :message="projects.projects.diagnostic.message"
+      :retryable="projects.projects.diagnostic.retryable"
+      severity="error"
+      @retry="projects.load"
+    />
+
     <nav class="mode-switch md-card" aria-label="Work 操作">
       <button
         type="button"
@@ -45,7 +54,7 @@
     <WorkTemplateAuthoringView
       v-if="mode === 'template'"
       :key="selectedProjectId ?? 'no-project'"
-      :project-id="selectedProjectId"
+      :project-id="selectedProject?.id ?? null"
       :course-id="selectedProject?.courseId ?? null"
       :run-id="routeRunId"
       :release-id="routeReleaseId"
@@ -263,7 +272,7 @@ const approvalReason = ref('')
 const restartConfirmed = ref(false)
 const approvalExpiresAt = ref('')
 const approving = ref(false)
-const canStart = computed(() => Boolean(selectedProjectId.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success'))
+const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success'))
 const canApprovePlan = computed(() => {
   if (plan.value.kind !== 'success' || agent.run.kind !== 'success' || agent.run.data.state !== 'awaiting_approval') return false
   if (!approvalReason.value.trim() || !approvalExpiresAt.value) return false
@@ -272,8 +281,14 @@ const canApprovePlan = computed(() => {
 })
 
 watch(
-  () => projectOptions.value,
-  (items) => {
+  () => projects.projects,
+  (state) => {
+    // Keep an explicit route project while the shared project list is still
+    // loading. Clearing it here makes the first mode switch rewrite the URL
+    // without projectId, so the template view cannot bind its upload to the
+    // project that the user just opened.
+    if (state.kind === 'idle' || state.kind === 'loading' || state.kind === 'error') return
+    const items = state.kind === 'success' ? state.data : []
     const preferred = routeProjectId.value
     const next = preferred && items.some((project) => project.id === preferred)
       ? preferred
@@ -302,7 +317,10 @@ function syncSoftwareRoute(
   void router.replace({
     query: {
       ...route.query,
-      projectId: selectedProjectId.value ?? undefined,
+      projectId: selectedProjectId.value
+        ?? ((projects.projects.kind === 'idle' || projects.projects.kind === 'loading')
+          ? routeProjectId.value
+          : undefined),
       mode: mode.value === 'template' ? 'template' : undefined,
       runId: runId ?? undefined,
       releaseId: releaseId ?? undefined,
@@ -324,7 +342,7 @@ watch(selectedProjectId, (id, previousId) => {
     previousId && previousId !== id ? null : sameProject ? routeReleaseId.value : null,
   )
   void reloadPolicy()
-})
+}, { immediate: true })
 
 watch(mode, () => syncSoftwareRoute())
 

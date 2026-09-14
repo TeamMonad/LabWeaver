@@ -5,7 +5,7 @@
       "type": "string"
     },
     "AgentRunPurpose": {
-      "description": "Immutable purpose selected by Control for one Agent run.\n\nThe purpose is authoritative: callers cannot substitute an environment class, target\nenvironment, actor, or runtime through an untyped request field. Authoring creates a new\nEnvironment/Evaluation package, while WorkConfiguration targets one existing Work environment\nand produces one configuration plan.",
+      "description": "Immutable purpose selected by Control for one Agent run.\n\nThe purpose is authoritative: callers cannot substitute an environment class, target\nenvironment, actor, or runtime through an untyped request field. Experiment Authoring creates\na new Environment/Evaluation package, Work Authoring creates one Environment candidate, while\nWorkConfiguration targets one existing Work environment and produces one configuration plan.",
       "oneOf": [
         {
           "additionalProperties": false,

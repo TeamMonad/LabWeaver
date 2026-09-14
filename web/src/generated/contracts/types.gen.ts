@@ -272,9 +272,9 @@ export type AgentRunId = string;
  * Immutable purpose selected by Control for one Agent run.
  *
  * The purpose is authoritative: callers cannot substitute an environment class, target
- * environment, actor, or runtime through an untyped request field. Authoring creates a new
- * Environment/Evaluation package, while WorkConfiguration targets one existing Work environment
- * and produces one configuration plan.
+ * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
+ * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
+ * WorkConfiguration targets one existing Work environment and produces one configuration plan.
  */
 export type AgentRunPurpose = {
     environmentClass: EnvironmentClass;
@@ -541,6 +541,11 @@ export type AuthoringApprovalPublicationStatusSchema = {
     evaluationReleaseRevision?: AuthoringApprovalPublicationStatusSchemaRevision | null;
     revision: AuthoringApprovalPublicationStatusSchemaRevision;
     status: AuthoringPublicationState;
+    /**
+     * Submission manifest carried by the exact approved Evaluation release when it is a
+     * workspace-backed experiment.
+     */
+    submissionManifest?: SubmissionManifest | null;
     updatedAt: AuthoringApprovalPublicationStatusSchemaUtcTimestamp;
 };
 
@@ -656,6 +661,17 @@ export type ImageArtifact = {
 export type ImageArtifactId = string;
 
 /**
+ * Strict safe path selector shared by packages, collectors, and LLM allowlists.
+ */
+export type PathRule = {
+    kind: 'exactFile';
+    path: string;
+} | {
+    kind: 'directoryTree';
+    path: string;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
  */
 export type AuthoringApprovalPublicationStatusSchemaProblemPackageId = string;
@@ -674,6 +690,32 @@ export type ReleaseId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type AuthoringApprovalPublicationStatusSchemaRevision = number;
+
+export type SubmissionApiVersion = 'evaluation.labweaver.io/v1';
+
+export type SubmissionDocumentKind = 'SubmissionManifest';
+
+/**
+ * Stable SubmissionManifest v1.
+ */
+export type SubmissionManifest = {
+    apiVersion: SubmissionApiVersion;
+    exclude: Array<PathRule>;
+    followSymlinks: boolean;
+    include: Array<PathRule>;
+    kind: SubmissionDocumentKind;
+    llmReadable: Array<PathRule>;
+    maxFiles: number;
+    maxTotalBytes: number;
+    name: string;
+    required: Array<PathRule>;
+    source: SubmissionSource;
+};
+
+/**
+ * Source available to a bounded Collector.
+ */
+export type SubmissionSource = 'workspace' | 'system_facts';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -4299,6 +4341,12 @@ export type EnvironmentTemplateReleaseViewSchema = {
     publishedAt: EnvironmentTemplateReleaseViewSchemaUtcTimestamp;
     publishedBy: EnvironmentTemplateReleaseViewSchemaActorId;
     runtimeKind: EnvironmentTemplateReleaseViewSchemaRuntimeKind;
+    /**
+     * Workspace submission manifest from the exact ready authoring publication, when present.
+     *
+     * Work releases and system-facts evaluations intentionally omit this projection.
+     */
+    submissionManifest?: EnvironmentTemplateReleaseViewSchemaSubmissionManifest | null;
     version: number;
     withdrawal?: ReleaseWithdrawal | null;
 };
@@ -4375,6 +4423,17 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
 export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
 
 /**
+ * Strict safe path selector shared by packages, collectors, and LLM allowlists.
+ */
+export type EnvironmentTemplateReleaseViewSchemaPathRule = {
+    kind: 'exactFile';
+    path: string;
+} | {
+    kind: 'directoryTree';
+    path: string;
+};
+
+/**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaProjectId = string;
@@ -4404,6 +4463,32 @@ export type EnvironmentTemplateReleaseViewSchemaRevision = number;
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+export type EnvironmentTemplateReleaseViewSchemaSubmissionApiVersion = 'evaluation.labweaver.io/v1';
+
+export type EnvironmentTemplateReleaseViewSchemaSubmissionDocumentKind = 'SubmissionManifest';
+
+/**
+ * Stable SubmissionManifest v1.
+ */
+export type EnvironmentTemplateReleaseViewSchemaSubmissionManifest = {
+    apiVersion: EnvironmentTemplateReleaseViewSchemaSubmissionApiVersion;
+    exclude: Array<EnvironmentTemplateReleaseViewSchemaPathRule>;
+    followSymlinks: boolean;
+    include: Array<EnvironmentTemplateReleaseViewSchemaPathRule>;
+    kind: EnvironmentTemplateReleaseViewSchemaSubmissionDocumentKind;
+    llmReadable: Array<EnvironmentTemplateReleaseViewSchemaPathRule>;
+    maxFiles: number;
+    maxTotalBytes: number;
+    name: string;
+    required: Array<EnvironmentTemplateReleaseViewSchemaPathRule>;
+    source: EnvironmentTemplateReleaseViewSchemaSubmissionSource;
+};
+
+/**
+ * Source available to a bounded Collector.
+ */
+export type EnvironmentTemplateReleaseViewSchemaSubmissionSource = 'workspace' | 'system_facts';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -4854,7 +4939,7 @@ export type FreezeSubmissionRequestSchema = {
      * Optional teaching association. Independent project work omits this field.
      */
     courseId?: FreezeSubmissionRequestSchemaCourseId | null;
-    manifest: SubmissionManifest;
+    manifest: FreezeSubmissionRequestSchemaSubmissionManifest;
 };
 
 /**
@@ -4865,7 +4950,7 @@ export type FreezeSubmissionRequestSchemaCourseId = string;
 /**
  * Strict safe path selector shared by packages, collectors, and LLM allowlists.
  */
-export type PathRule = {
+export type FreezeSubmissionRequestSchemaPathRule = {
     kind: 'exactFile';
     path: string;
 } | {
@@ -4873,31 +4958,31 @@ export type PathRule = {
     path: string;
 };
 
-export type SubmissionApiVersion = 'evaluation.labweaver.io/v1';
+export type FreezeSubmissionRequestSchemaSubmissionApiVersion = 'evaluation.labweaver.io/v1';
 
-export type SubmissionDocumentKind = 'SubmissionManifest';
+export type FreezeSubmissionRequestSchemaSubmissionDocumentKind = 'SubmissionManifest';
 
 /**
  * Stable SubmissionManifest v1.
  */
-export type SubmissionManifest = {
-    apiVersion: SubmissionApiVersion;
-    exclude: Array<PathRule>;
+export type FreezeSubmissionRequestSchemaSubmissionManifest = {
+    apiVersion: FreezeSubmissionRequestSchemaSubmissionApiVersion;
+    exclude: Array<FreezeSubmissionRequestSchemaPathRule>;
     followSymlinks: boolean;
-    include: Array<PathRule>;
-    kind: SubmissionDocumentKind;
-    llmReadable: Array<PathRule>;
+    include: Array<FreezeSubmissionRequestSchemaPathRule>;
+    kind: FreezeSubmissionRequestSchemaSubmissionDocumentKind;
+    llmReadable: Array<FreezeSubmissionRequestSchemaPathRule>;
     maxFiles: number;
     maxTotalBytes: number;
     name: string;
-    required: Array<PathRule>;
-    source: SubmissionSource;
+    required: Array<FreezeSubmissionRequestSchemaPathRule>;
+    source: FreezeSubmissionRequestSchemaSubmissionSource;
 };
 
 /**
  * Source available to a bounded Collector.
  */
-export type SubmissionSource = 'workspace' | 'system_facts';
+export type FreezeSubmissionRequestSchemaSubmissionSource = 'workspace' | 'system_facts';
 
 /**
  * GeneratedArtifactRecord
@@ -5480,9 +5565,9 @@ export type InternalAgentRunOutcomeSchemaAgentRunId = string;
  * Immutable purpose selected by Control for one Agent run.
  *
  * The purpose is authoritative: callers cannot substitute an environment class, target
- * environment, actor, or runtime through an untyped request field. Authoring creates a new
- * Environment/Evaluation package, while WorkConfiguration targets one existing Work environment
- * and produces one configuration plan.
+ * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
+ * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
+ * WorkConfiguration targets one existing Work environment and produces one configuration plan.
  */
 export type InternalAgentRunOutcomeSchemaAgentRunPurpose = {
     environmentClass: InternalAgentRunOutcomeSchemaEnvironmentClass;
@@ -6357,9 +6442,9 @@ export type InternalCreateAgentRunRequestSchemaActorId = string;
  * Immutable purpose selected by Control for one Agent run.
  *
  * The purpose is authoritative: callers cannot substitute an environment class, target
- * environment, actor, or runtime through an untyped request field. Authoring creates a new
- * Environment/Evaluation package, while WorkConfiguration targets one existing Work environment
- * and produces one configuration plan.
+ * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
+ * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
+ * WorkConfiguration targets one existing Work environment and produces one configuration plan.
  */
 export type InternalCreateAgentRunRequestSchemaAgentRunPurpose = {
     environmentClass: InternalCreateAgentRunRequestSchemaEnvironmentClass;
@@ -9898,147 +9983,6 @@ export type WithdrawEvaluationReleaseResponses = {
 
 export type WithdrawEvaluationReleaseResponse = WithdrawEvaluationReleaseResponses[keyof WithdrawEvaluationReleaseResponses];
 
-export type ListOwnEvaluationResultsData = {
-    body?: never;
-    path: {
-        courseId: string;
-    };
-    query?: {
-        cursor?: string;
-        limit?: number;
-    };
-    url: '/api/v1/courses/{courseId}/me/evaluation-results';
-};
-
-export type ListOwnEvaluationResultsErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type ListOwnEvaluationResultsError = ListOwnEvaluationResultsErrors[keyof ListOwnEvaluationResultsErrors];
-
-export type ListOwnEvaluationResultsResponses = {
-    /**
-     * Successful response
-     */
-    200: {
-        items: Array<StudentEvaluationResultSchema>;
-        nextCursor?: string | null;
-    };
-};
-
-export type ListOwnEvaluationResultsResponse = ListOwnEvaluationResultsResponses[keyof ListOwnEvaluationResultsResponses];
-
-export type GetOwnEvaluationResultData = {
-    body?: never;
-    path: {
-        courseId: string;
-        runId: string;
-    };
-    query?: never;
-    url: '/api/v1/courses/{courseId}/me/evaluation-results/{runId}';
-};
-
-export type GetOwnEvaluationResultErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type GetOwnEvaluationResultError = GetOwnEvaluationResultErrors[keyof GetOwnEvaluationResultErrors];
-
-export type GetOwnEvaluationResultResponses = {
-    /**
-     * Successful response
-     */
-    200: StudentEvaluationResultSchema;
-};
-
-export type GetOwnEvaluationResultResponse = GetOwnEvaluationResultResponses[keyof GetOwnEvaluationResultResponses];
-
 export type ListEnvironmentsData = {
     body?: never;
     path?: never;
@@ -11203,73 +11147,6 @@ export type StopEnvironmentResponses = {
 };
 
 export type StopEnvironmentResponse = StopEnvironmentResponses[keyof StopEnvironmentResponses];
-
-export type GetFrozenSubmissionData = {
-    body?: never;
-    path: {
-        submissionId: string;
-    };
-    query?: never;
-    url: '/api/v1/frozen-submissions/{submissionId}';
-};
-
-export type GetFrozenSubmissionErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type GetFrozenSubmissionError = GetFrozenSubmissionErrors[keyof GetFrozenSubmissionErrors];
-
-export type GetFrozenSubmissionResponses = {
-    /**
-     * Successful response
-     */
-    200: FrozenSubmissionSchema;
-};
-
-export type GetFrozenSubmissionResponse = GetFrozenSubmissionResponses[keyof GetFrozenSubmissionResponses];
 
 export type ListSshPublicKeysData = {
     body?: never;
@@ -13149,6 +13026,74 @@ export type StreamProjectEventsResponses = {
 };
 
 export type StreamProjectEventsResponse = StreamProjectEventsResponses[keyof StreamProjectEventsResponses];
+
+export type GetFrozenSubmissionData = {
+    body?: never;
+    path: {
+        projectId: string;
+        submissionId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/frozen-submissions/{submissionId}';
+};
+
+export type GetFrozenSubmissionErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetFrozenSubmissionError = GetFrozenSubmissionErrors[keyof GetFrozenSubmissionErrors];
+
+export type GetFrozenSubmissionResponses = {
+    /**
+     * Successful response
+     */
+    200: FrozenSubmissionSchema;
+};
+
+export type GetFrozenSubmissionResponse = GetFrozenSubmissionResponses[keyof GetFrozenSubmissionResponses];
 
 export type CreateProjectLlmPolicyData = {
     body: ProjectLlmEgressPolicySchema;

@@ -26,6 +26,12 @@ const project = {
   updatedAt: '2026-09-08T00:00:00.000Z',
 }
 
+const projectB = {
+  ...project,
+  id: 'project-2',
+  name: 'Second project',
+}
+
 describe('ResultDetailView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -99,5 +105,47 @@ describe('ResultDetailView', () => {
     expect(getOwnProjectEvaluationResult).toHaveBeenCalledWith({
       path: { projectId: 'project-1', runId: 'run-1' },
     })
+  })
+
+  it('keeps a direct project route context for detail loading and the back link', async () => {
+    vi.mocked(listProjects).mockResolvedValue({
+      data: [project, projectB] as never,
+      error: undefined as never,
+    })
+    vi.mocked(getOwnProjectEvaluationResult).mockResolvedValue({
+      data: {
+        runId: 'run-2',
+        projectId: 'project-2',
+        courseId: null,
+        releaseId: 'release-2',
+        frozenSubmissionId: 'submission-2',
+        revision: 1,
+        state: 'succeeded',
+        awardedScore: 10,
+        maxScore: 10,
+        createdAt: '2026-09-08T11:00:00.000Z',
+        updatedAt: '2026-09-08T12:00:00.000Z',
+        completedAt: '2026-09-08T12:00:00.000Z',
+        steps: [],
+      } as never,
+      error: undefined as never,
+    })
+    const router = createRouter({
+      history: createWebHistory(),
+      routes: [
+        { path: '/student/results', component: { template: '<div />' } },
+        { path: '/student/results/:runId', component: ResultDetailView },
+      ],
+    })
+    await router.push({ path: '/student/results/run-2', query: { projectId: 'project-2' } })
+    await router.isReady()
+
+    const wrapper = mount(ResultDetailView, { global: { plugins: [router] } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('run-2'))
+    expect(getOwnProjectEvaluationResult).toHaveBeenCalledWith({
+      path: { projectId: 'project-2', runId: 'run-2' },
+    })
+    expect(wrapper.find('.back-link').attributes('href')).toContain('/student/results?projectId=project-2')
+    wrapper.unmount()
   })
 })

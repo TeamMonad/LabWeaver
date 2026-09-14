@@ -24,6 +24,14 @@ function errorDiagnostic(error: unknown, fallbackCode: string, fallbackMessage: 
   return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
 }
 
+function staleContextDiagnostic(subject: string): DiagnosticViewModel {
+  return makeDiagnostic(
+    'PROJECT_APPROVAL_STALE_CONTEXT',
+    `${subject}已过期或不属于当前项目，请从当前项目重新打开审核。`,
+    false,
+  )
+}
+
 /**
  * Loads the complete, project-scoped authoring review and submits the one
  * teacher command that binds both candidates, the package revision and the
@@ -123,6 +131,15 @@ export function useProjectAuthoringApproval(
         : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_ENVIRONMENT_LOAD_FAILED', '加载 Environment 候选失败') }
       return
     }
+    if (
+      result.data.candidate.id !== candidateId
+      || result.data.candidate.projectId !== project
+      || result.data.candidate.runId !== runId.value
+    ) {
+      environmentCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('Environment 候选') }
+      stopCandidatePolling()
+      return
+    }
     environmentCandidateRetryCount = 0
     environmentCandidate.value = { kind: 'success', data: result.data }
   }
@@ -148,6 +165,15 @@ export function useProjectAuthoringApproval(
       evaluationCandidate.value = candidateProjectionPending
         ? { kind: 'error', diagnostic: makeDiagnostic('LW_CANDIDATE_NOT_FOUND', 'Evaluation 候选在限定时间内仍未同步，请重试。', true) }
         : { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_EVALUATION_LOAD_FAILED', '加载 Evaluation 候选失败') }
+      return
+    }
+    if (
+      result.data.candidate.id !== candidateId
+      || result.data.candidate.projectId !== project
+      || result.data.candidate.runId !== runId.value
+    ) {
+      evaluationCandidate.value = { kind: 'error', diagnostic: staleContextDiagnostic('Evaluation 候选') }
+      stopCandidatePolling()
       return
     }
     evaluationCandidateRetryCount = 0
@@ -179,6 +205,11 @@ export function useProjectAuthoringApproval(
         kind: 'error',
         diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_PUBLICATION_LOAD_FAILED', '加载发布状态失败'),
       }
+      return
+    }
+    if (result.data.approval.id !== publicationId || result.data.approval.projectId !== project) {
+      publication.value = { kind: 'error', diagnostic: staleContextDiagnostic('批准记录') }
+      stopPublicationPolling()
       return
     }
     publication.value = { kind: 'success', data: result.data }
@@ -242,6 +273,17 @@ export function useProjectAuthoringApproval(
       run.value = { kind: 'error', diagnostic: errorDiagnostic(runResult.error, 'PROJECT_APPROVAL_RUN_LOAD_FAILED', '加载 AgentRun 失败') }
       return
     }
+    if (runResult.data.id !== rid || runResult.data.projectId !== id) {
+      run.value = { kind: 'error', diagnostic: staleContextDiagnostic('AgentRun') }
+      return
+    }
+    if (runResult.data.purpose.kind !== 'authoring' || runResult.data.purpose.environmentClass !== 'experiment') {
+      run.value = {
+        kind: 'blocked',
+        diagnostic: makeDiagnostic('PROJECT_APPROVAL_RUN_KIND_UNSUPPORTED', '该运行记录不是实验包生成任务，无法在此批准。', false),
+      }
+      return
+    }
     run.value = { kind: 'success', data: runResult.data }
 
     const environmentTrack = runResult.data.tracks.find((track) => track.kind === 'environment')
@@ -266,9 +308,15 @@ export function useProjectAuthoringApproval(
     candidateJobs.push(
       getProjectProblemPackage({ path: { projectId: id, packageId: runResult.data.packageId } }).then((result) => {
         if (generation !== loadGeneration) return
-        problemPackage.value = result.error
-          ? { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_PACKAGE_LOAD_FAILED', '加载材料包失败') }
-          : { kind: 'success', data: result.data }
+        if (result.error) {
+          problemPackage.value = { kind: 'error', diagnostic: errorDiagnostic(result.error, 'PROJECT_APPROVAL_PACKAGE_LOAD_FAILED', '加载材料包失败') }
+          return
+        }
+        if (result.data.id !== runResult.data.packageId || result.data.projectId !== id) {
+          problemPackage.value = { kind: 'error', diagnostic: staleContextDiagnostic('材料包') }
+          return
+        }
+        problemPackage.value = { kind: 'success', data: result.data }
       }),
     )
 

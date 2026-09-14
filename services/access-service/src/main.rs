@@ -161,15 +161,15 @@ fn browser_routes() -> Router<Arc<AppState>> {
             post(proxy::forward_evaluation),
         )
         .route(
-            "/api/v1/frozen-submissions/{submission_id}",
+            "/api/v1/projects/{project_id}/frozen-submissions/{submission_id}",
             get(proxy::forward_evaluation),
         )
         .route(
-            "/api/v1/courses/{course_id}/me/evaluation-results",
+            "/api/v1/projects/{project_id}/me/evaluation-results",
             get(proxy::forward_evaluation),
         )
         .route(
-            "/api/v1/courses/{course_id}/me/evaluation-results/{run_id}",
+            "/api/v1/projects/{project_id}/me/evaluation-results/{run_id}",
             get(proxy::forward_evaluation),
         )
         .merge(control_browser_router())
@@ -1603,8 +1603,31 @@ impl IntoResponse for ApiError {
 }
 
 impl From<auth::OidcProviderError> for ApiError {
-    fn from(_: auth::OidcProviderError) -> Self {
-        Self::unavailable("LW_AUTH_JWKS_UNAVAILABLE")
+    fn from(error: auth::OidcProviderError) -> Self {
+        match error {
+            auth::OidcProviderError::Discovery | auth::OidcProviderError::JwksUnavailable => {
+                Self::unavailable("LW_AUTH_JWKS_UNAVAILABLE")
+            }
+            auth::OidcProviderError::IdTokenMissing
+            | auth::OidcProviderError::IdTokenRejected
+            | auth::OidcProviderError::AuthorizedPartyRejected => {
+                Self::unauthorized("LW_AUTH_OIDC_TOKEN_INVALID")
+            }
+            auth::OidcProviderError::TokenEndpoint | auth::OidcProviderError::TokenExchange => {
+                Self::unavailable("LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED")
+            }
+            auth::OidcProviderError::HttpClient => {
+                Self::unavailable("LW_AUTH_OIDC_HTTP_CLIENT_FAILED")
+            }
+            auth::OidcProviderError::Issuer
+            | auth::OidcProviderError::RedirectUri
+            | auth::OidcProviderError::EndpointTransport => {
+                Self::internal("LW_AUTH_CONFIG_URL_INVALID")
+            }
+            auth::OidcProviderError::EndSessionEndpoint | auth::OidcProviderError::TrustedCa => {
+                Self::internal("LW_AUTH_CONFIG_BINDING_MISSING")
+            }
+        }
     }
 }
 impl From<auth::RepositoryError> for ApiError {
@@ -1730,7 +1753,7 @@ enum StartupError {
 mod tests {
     use time::{Duration, OffsetDateTime};
 
-    use super::{browser_routes, deployment_duration};
+    use super::{ApiError, browser_routes, deployment_duration};
 
     #[test]
     fn browser_routes_register_without_conflicts() {
@@ -1750,5 +1773,20 @@ mod tests {
         assert_eq!(session_expiry, callback_at + Duration::seconds(900));
         assert!(session_expiry > id_token_expiry);
         Ok(())
+    }
+
+    #[test]
+    fn oidc_provider_errors_keep_retryable_and_invalid_token_boundaries() {
+        let jwks = ApiError::from(auth::OidcProviderError::JwksUnavailable);
+        assert_eq!(jwks.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(jwks.diagnostic, "LW_AUTH_JWKS_UNAVAILABLE");
+
+        let invalid = ApiError::from(auth::OidcProviderError::IdTokenRejected);
+        assert_eq!(invalid.status, axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(invalid.diagnostic, "LW_AUTH_OIDC_TOKEN_INVALID");
+
+        let exchange = ApiError::from(auth::OidcProviderError::TokenExchange);
+        assert_eq!(exchange.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(exchange.diagnostic, "LW_AUTH_OIDC_TOKEN_EXCHANGE_FAILED");
     }
 }

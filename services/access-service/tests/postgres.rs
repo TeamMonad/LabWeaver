@@ -276,5 +276,68 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     .fetch_one(&pool)
     .await?;
     assert!(session_revoked);
+
+    let valid_session_issued_at = OffsetDateTime::now_utc();
+    let valid_session = auth::create_bff_session(
+        &pool,
+        &key_ring,
+        auth::CreateBffSession {
+            actor_id: actor,
+            roles: vec![contracts::PlatformRole::Student],
+            authorization_revision: 1,
+            expires_at: valid_session_issued_at + Duration::days(3),
+            idle_ttl: Duration::days(3),
+            oidc_sid: None,
+            logout_hint: "valid-session-logout-hint".to_owned(),
+        },
+        valid_session_issued_at,
+    )
+    .await?;
+    let cleanup_now = valid_session_issued_at + Duration::days(2);
+    let cleanup = auth::cleanup_expired_auth_state(&pool, cleanup_now, Duration::days(1)).await?;
+    assert!(
+        cleanup.sessions_deleted >= 1,
+        "an old revoked session without console references should be removed"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM access.bff_sessions WHERE session_id=$1",
+        )
+        .bind(local_session.session_id)
+        .fetch_one(&pool)
+        .await?,
+        0,
+        "retention should delete an old revoked session without console references"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM access.bff_sessions WHERE session_id=$1",
+        )
+        .bind(bff_session_id)
+        .fetch_one(&pool)
+        .await?,
+        1,
+        "console references must retain the revoked BFF identity metadata"
+    );
+    assert!(matches!(
+        auth::load_bff_session(
+            &pool,
+            &key_ring,
+            bff_session_id,
+            Duration::minutes(5),
+            cleanup_now,
+        )
+        .await,
+        Err(auth::RepositoryError::SessionRejected)
+    ));
+    let valid_loaded = auth::load_bff_session(
+        &pool,
+        &key_ring,
+        valid_session.session_id,
+        Duration::minutes(5),
+        cleanup_now,
+    )
+    .await?;
+    assert_eq!(valid_loaded.session_id, valid_session.session_id);
     Ok(())
 }

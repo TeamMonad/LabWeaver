@@ -93,10 +93,10 @@ Control exposes the teacher release lifecycle through the Access BFF:
   trace, request hash and revision in an append-only withdrawal audit row.
 
 The Access BFF routes student reads directly to Evaluation after checking the
-session, student role and course membership:
+session, student role and project membership:
 
-- `GET /api/v1/courses/{courseId}/me/evaluation-results`
-- `GET /api/v1/courses/{courseId}/me/evaluation-results/{runId}`
+- `GET /api/v1/projects/{projectId}/me/evaluation-results`
+- `GET /api/v1/projects/{projectId}/me/evaluation-results/{runId}`
 
 Only terminal runs owned by the current actor are visible. Successful runs
 expose the deterministic total and public step scores. Failed and cancelled

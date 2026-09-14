@@ -81,15 +81,15 @@ pub fn evaluation_api_router(state: EvaluationApiState) -> Router {
             post(freeze_submission),
         )
         .route(
-            "/api/v1/frozen-submissions/{submission_id}",
+            "/api/v1/projects/{project_id}/frozen-submissions/{submission_id}",
             get(get_frozen_submission),
         )
         .route(
-            "/api/v1/courses/{course_id}/me/evaluation-results",
+            "/api/v1/projects/{project_id}/me/evaluation-results",
             get(list_student_results),
         )
         .route(
-            "/api/v1/courses/{course_id}/me/evaluation-results/{run_id}",
+            "/api/v1/projects/{project_id}/me/evaluation-results/{run_id}",
             get(get_student_result),
         )
         .route(
@@ -300,14 +300,14 @@ async fn withdraw_evaluation_release(
 async fn list_student_results(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
-    Path(course_id): Path<contracts::CourseId>,
+    Path(project_id): Path<contracts::ProjectId>,
     Query(query): Query<EvaluationReleaseListQuery>,
     headers: HeaderMap,
 ) -> Result<Json<CursorPage<StudentEvaluationResult>>, EvaluationApiError> {
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
-    let project_id = project_header(&headers)?;
+    require_project_header(&headers, project_id)?;
     query
         .validate()
         .map_err(|_| EvaluationApiError::RequestInvalid)?;
@@ -321,7 +321,7 @@ async fn list_student_results(
         .control
         .student_results(
             project_id,
-            Some(course_id),
+            None,
             actor_id,
             cursor,
             query.limit.unwrap_or(DEFAULT_PAGE_LIMIT),
@@ -329,7 +329,7 @@ async fn list_student_results(
         .await?;
     tracing::info!(
         event = "evaluation.student_results.listed",
-        course_id = %course_id,
+        project_id = %project_id,
         actor_id = %actor_id,
         result_count = page.items.len(),
         trace_id = %trace_id()?,
@@ -340,20 +340,20 @@ async fn list_student_results(
 async fn get_student_result(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
-    Path((course_id, run_id)): Path<(contracts::CourseId, EvaluationRunId)>,
+    Path((project_id, run_id)): Path<(contracts::ProjectId, EvaluationRunId)>,
     headers: HeaderMap,
 ) -> Result<Json<StudentEvaluationResult>, EvaluationApiError> {
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
-    let project_id = project_header(&headers)?;
+    require_project_header(&headers, project_id)?;
     let result = state
         .control
-        .student_result(project_id, Some(course_id), actor_id, run_id)
+        .student_result(project_id, None, actor_id, run_id)
         .await?;
     tracing::info!(
         event = "evaluation.student_result.read",
-        course_id = %course_id,
+        project_id = %project_id,
         actor_id = %actor_id,
         run_id = %run_id,
         release_id = %result.release_id,
@@ -559,24 +559,23 @@ async fn complete_evaluation_step(
 async fn get_frozen_submission(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
-    Path(submission_id): Path<FrozenSubmissionId>,
+    Path((project_id, submission_id)): Path<(contracts::ProjectId, FrozenSubmissionId)>,
     headers: HeaderMap,
 ) -> Result<Json<FrozenSubmission>, EvaluationApiError> {
     require_access(principal)?;
     require_session(&headers)?;
     let actor_id = actor(&headers)?;
-    let project_id = project_header(&headers)?;
-    let course_id = optional_course_header(&headers)?;
+    require_project_header(&headers, project_id)?;
     match state
         .submissions
-        .load_completed(submission_id, project_id, course_id, actor_id)
+        .load_completed_for_project_actor(submission_id, project_id, actor_id)
         .await
     {
         Ok(submission) => Ok(Json(submission)),
         Err(FreezeStoreError::NotFound) => {
             if let Some(diagnostic) = state
                 .commands
-                .terminal_failure(submission_id, project_id, course_id, actor_id)
+                .terminal_failure(submission_id, project_id, actor_id)
                 .await?
             {
                 Err(EvaluationApiError::FreezeFailed(
@@ -648,6 +647,15 @@ fn project_header(headers: &HeaderMap) -> Result<contracts::ProjectId, Evaluatio
         .get("x-labweaver-project-id")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| contracts::ProjectId::from_str(value).ok())
+        .ok_or(EvaluationApiError::IdentityInvalid)
+}
+
+fn require_project_header(
+    headers: &HeaderMap,
+    project_id: contracts::ProjectId,
+) -> Result<(), EvaluationApiError> {
+    (project_header(headers)? == project_id)
+        .then_some(())
         .ok_or(EvaluationApiError::IdentityInvalid)
 }
 

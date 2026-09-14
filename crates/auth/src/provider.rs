@@ -1,15 +1,19 @@
 //! OIDC Discovery and authorization-request construction.
 
+use std::sync::Arc;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, LogoutRequest, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, PostLogoutRedirectUrl, ProviderMetadataWithLogout,
-    RedirectUrl, Scope, TokenResponse,
-    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken},
+    AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, IssuerUrl,
+    JsonWebKeySetUrl, LogoutRequest, Nonce, PkceCodeChallenge, PkceCodeVerifier,
+    PostLogoutRedirectUrl, ProviderMetadataWithLogout, RedirectUrl, Scope,
+    SignatureVerificationError, TokenResponse,
+    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreJsonWebKeySet},
 };
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use time::OffsetDateTime;
+use tokio::sync::Mutex;
 use url::Url;
 
 use crate::{AuthConfig, OidcTransaction, TransportSecurityMode};
@@ -18,9 +22,16 @@ use crate::{AuthConfig, OidcTransaction, TransportSecurityMode};
 #[derive(Clone)]
 pub struct OidcProvider {
     metadata: ProviderMetadataWithLogout,
+    jwks_cache: Arc<Mutex<JwksCache>>,
     client_id: String,
     client_secret: Option<String>,
     redirect_uri: String,
+}
+
+#[derive(Clone)]
+struct JwksCache {
+    keys: CoreJsonWebKeySet,
+    generation: u64,
 }
 
 impl OidcProvider {
@@ -60,6 +71,10 @@ impl OidcProvider {
         }
         validate_discovered_endpoints(&metadata, config.transport_security)?;
         Ok(Self {
+            jwks_cache: Arc::new(Mutex::new(JwksCache {
+                keys: metadata.jwks().clone(),
+                generation: 0,
+            })),
             metadata,
             client_id: config.client_id.clone(),
             client_secret: None,
@@ -105,8 +120,12 @@ impl OidcProvider {
         transaction: &OidcTransaction,
         http: &reqwest::Client,
     ) -> Result<VerifiedOidcIdentity, OidcProviderError> {
+        let (jwks, jwks_generation) = {
+            let cache = self.jwks_cache.lock().await;
+            (cache.keys.clone(), cache.generation)
+        };
         let client = CoreClient::from_provider_metadata(
-            self.metadata.clone(),
+            self.metadata.clone().set_jwks(jwks),
             ClientId::new(self.client_id.clone()),
             self.client_secret.clone().map(ClientSecret::new),
         )
@@ -124,12 +143,35 @@ impl OidcProvider {
         let id_token = response
             .id_token()
             .ok_or(OidcProviderError::IdTokenMissing)?;
-        let claims = id_token
-            .claims(
-                &client.id_token_verifier(),
-                &Nonce::new(transaction.nonce.clone()),
-            )
-            .map_err(|_| OidcProviderError::IdTokenRejected)?;
+        let claims = match id_token.claims(
+            &client.id_token_verifier(),
+            &Nonce::new(transaction.nonce.clone()),
+        ) {
+            Ok(claims) => claims,
+            Err(ClaimsVerificationError::SignatureVerification(
+                SignatureVerificationError::NoMatchingKey,
+            )) => {
+                let refreshed_jwks = self
+                    .refresh_jwks_after_key_miss(jwks_generation, http)
+                    .await?;
+                let refreshed_client = CoreClient::from_provider_metadata(
+                    self.metadata.clone().set_jwks(refreshed_jwks),
+                    ClientId::new(self.client_id.clone()),
+                    self.client_secret.clone().map(ClientSecret::new),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(self.redirect_uri.clone())
+                        .map_err(|_| OidcProviderError::RedirectUri)?,
+                );
+                id_token
+                    .claims(
+                        &refreshed_client.id_token_verifier(),
+                        &Nonce::new(transaction.nonce.clone()),
+                    )
+                    .map_err(|_| OidcProviderError::IdTokenRejected)?
+            }
+            Err(_) => return Err(OidcProviderError::IdTokenRejected),
+        };
         if claims.authorized_party().map(|azp| azp.as_str()) != Some(self.client_id.as_str()) {
             return Err(OidcProviderError::AuthorizedPartyRejected);
         }
@@ -159,6 +201,21 @@ impl OidcProvider {
         Ok(identity)
     }
 
+    async fn refresh_jwks_after_key_miss(
+        &self,
+        observed_generation: u64,
+        http: &reqwest::Client,
+    ) -> Result<CoreJsonWebKeySet, OidcProviderError> {
+        // Hold the cache lock across the bounded fetch so concurrent callbacks coalesce a key
+        // rotation into one refresh. A generation change means another callback already fetched
+        // the verified metadata JWKS, so this request reuses that result.
+        let mut cache = self.jwks_cache.lock().await;
+        cache
+            .refresh_after_key_miss(observed_generation, self.metadata.jwks_uri(), http)
+            .await?;
+        Ok(cache.keys.clone())
+    }
+
     /// Builds a standards-based RP-Initiated Logout URL from Discovery
     /// metadata and the verified ID token retained only in encrypted session
     /// storage.
@@ -183,6 +240,24 @@ impl OidcProvider {
             .set_client_id(ClientId::new(self.client_id.clone()))
             .set_post_logout_redirect_uri(redirect)
             .http_get_url())
+    }
+}
+
+impl JwksCache {
+    async fn refresh_after_key_miss(
+        &mut self,
+        observed_generation: u64,
+        jwks_uri: &JsonWebKeySetUrl,
+        http: &reqwest::Client,
+    ) -> Result<(), OidcProviderError> {
+        if self.generation != observed_generation {
+            return Ok(());
+        }
+        self.keys = CoreJsonWebKeySet::fetch_async(jwks_uri, http)
+            .await
+            .map_err(|_| OidcProviderError::JwksUnavailable)?;
+        self.generation = self.generation.saturating_add(1);
+        Ok(())
     }
 }
 
@@ -296,7 +371,7 @@ struct RawIdTokenClaims {
     claims: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Provider failures expose no upstream payload and map to retryable service failures.
+/// Provider failures expose no upstream payload and retain stable diagnostic categories.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OidcProviderError {
     /// Secure HTTP client construction failed.
@@ -311,6 +386,9 @@ pub enum OidcProviderError {
     /// Discovery or provider metadata validation failed.
     #[error("LW_AUTH_JWKS_UNAVAILABLE")]
     Discovery,
+    /// A key-miss refresh could not retrieve a usable JWKS from the discovered endpoint.
+    #[error("LW_AUTH_JWKS_UNAVAILABLE")]
+    JwksUnavailable,
     /// Discovery metadata omitted the mandatory RP-Initiated Logout endpoint.
     #[error("LW_AUTH_CONFIG_BINDING_MISSING")]
     EndSessionEndpoint,
@@ -339,11 +417,18 @@ pub enum OidcProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use axum::{Json, Router, routing::get};
     use time::{Duration, OffsetDateTime};
+    use tokio::net::TcpListener;
 
     use super::{
-        OidcProviderError, TransportSecurityMode, Url, VerifiedOidcIdentity,
-        endpoint_transport_allowed,
+        CoreJsonWebKeySet, JsonWebKeySetUrl, JwksCache, OidcProviderError, TransportSecurityMode,
+        Url, VerifiedOidcIdentity, endpoint_transport_allowed, no_redirect_http_client,
     };
 
     #[test]
@@ -386,5 +471,38 @@ mod tests {
             identity.validate_expiry_at(now),
             Err(OidcProviderError::IdTokenRejected)
         );
+    }
+
+    #[tokio::test]
+    async fn jwks_key_miss_refresh_fetches_once_per_generation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/jwks",
+            get({
+                let fetches = Arc::clone(&fetches);
+                move || async move {
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"keys": []}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let jwks_uri = JsonWebKeySetUrl::new(format!("http://{address}/jwks"))?;
+        let http = no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?;
+        let mut cache = JwksCache {
+            keys: CoreJsonWebKeySet::default(),
+            generation: 0,
+        };
+
+        cache.refresh_after_key_miss(0, &jwks_uri, &http).await?;
+        cache.refresh_after_key_miss(0, &jwks_uri, &http).await?;
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.generation, 1);
+        server.abort();
+        Ok(())
     }
 }

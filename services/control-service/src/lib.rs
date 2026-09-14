@@ -20,7 +20,9 @@ use contracts::authoring::{
     CandidateDecision, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, PackageFile,
     ProblemPackage, ProjectLlmEgressPolicy, RuntimeKind,
 };
-use contracts::evaluation::{EvaluationExecutionBinding, EvaluationRuntimeIdentity};
+use contracts::evaluation::{
+    CollectorSpec, EvaluationExecutionBinding, EvaluationRuntimeIdentity, EvaluationSpec,
+};
 use contracts::events::{
     AgentBuildFailed, AgentBuildRequested, AgentRunEvent, AuthoringApprovalCompleted, CloudEvent,
     EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
@@ -30,11 +32,12 @@ use contracts::http::{
     AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery, CandidateBuildState,
     CandidateBuildView, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
-    CreateProblemPackageUploadRequest, EnvironmentCandidateView, EvaluationCandidateView,
-    GeneratedArtifactRecord, IdempotencyKey, InternalPublishEvaluationReleaseRequest,
-    ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
-    RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
-    WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
+    CreateProblemPackageUploadRequest, EnvironmentCandidateView,
+    EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactRecord,
+    IdempotencyKey, InternalPublishEvaluationReleaseRequest, ProblemPackageUploadFile,
+    ProblemPackageUploadSession, ProblemPackageUploadTarget, RemoveProjectMembershipRequest,
+    WorkConfigurationAdmissionBinding, WorkConfigurationAdmissionQuery,
+    WorkConfigurationRecoveryIdentity,
 };
 use contracts::supply_chain::{
     BuildNetworkPolicy, BuildRequest, EnvironmentTemplateRelease, EnvironmentTemplateReleaseView,
@@ -70,6 +73,7 @@ const ADD_PROJECT_MEMBERSHIP: &str = "control_add_project_membership_v1";
 const REMOVE_PROJECT_MEMBERSHIP: &str = "control_remove_project_membership_v1";
 const COMPLETE_AUTHORING_APPROVAL: &str = "control_complete_authoring_approval_v1";
 const APPROVE_WORK_CONFIGURATION: &str = "control_approve_work_configuration_v1";
+const AGENT_RUN_PROJECTION_CONSUMER: &str = "control_agent_run_projection_v1";
 const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED;
 const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
 const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
@@ -1589,6 +1593,29 @@ impl ControlService {
         .await
     }
 
+    /// Checks whether the exact Agent event was already consumed by the durable projection.
+    pub(crate) async fn agent_run_event_duplicate(
+        &self,
+        event: &CloudEvent<AgentRunEvent>,
+    ) -> Result<bool, ControlError> {
+        let payload = serde_json::to_value(event).map_err(|_| ControlError::ContractInvalid)?;
+        let payload_hash = canonical_hash(&payload)?;
+        let stored = sqlx::query_scalar::<_, String>(
+            "SELECT payload_sha256 FROM control.inbox_events \
+             WHERE consumer=$1 AND event_id=$2",
+        )
+        .bind(AGENT_RUN_PROJECTION_CONSUMER)
+        .bind(event.id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        match stored {
+            None => Ok(false),
+            Some(stored) if stored == payload_hash.to_string() => Ok(true),
+            Some(_) => Err(ControlError::ProjectionConflict),
+        }
+    }
+
     /// Reads and verifies one Agent-owned generated object through the shared immutable store.
     pub async fn read_generated_artifact(
         &self,
@@ -2392,6 +2419,7 @@ impl ControlService {
             .map_err(|_| ControlError::ContractInvalid)?;
         run.validate().map_err(|_| ControlError::ContractInvalid)?;
         if event.data.run_id != run.id
+            || event.project_id != run.project_id
             || event.course_id != run.course_id
             || event.aggregate_revision != run.revision
             || !event_matches_run(event, run, environment, evaluation)
@@ -2417,7 +2445,7 @@ impl ControlService {
         let decision = InboxStore::accept(
             &mut transaction,
             Domain::Control,
-            "control_agent_run_projection_v1",
+            AGENT_RUN_PROJECTION_CONSUMER,
             event.id.as_uuid(),
             run.id.as_uuid(),
             event.aggregate_sequence.0,
@@ -3336,6 +3364,7 @@ impl ControlService {
             environment_release_id: None,
             evaluation_release_id: None,
             evaluation_release_revision: None,
+            submission_manifest: None,
             diagnostic_code: None,
             updated_at: now,
             revision: Revision::new(1).map_err(|_| ControlError::ContractInvalid)?,
@@ -3505,6 +3534,7 @@ impl ControlService {
             environment_release_id: current.environment_release_id,
             evaluation_release_id: current.evaluation_release_id,
             evaluation_release_revision: current.evaluation_release_revision,
+            submission_manifest: current.submission_manifest,
             diagnostic_code: None,
             updated_at: now,
             revision: next_revision(current.revision)?,
@@ -4016,6 +4046,9 @@ impl ControlService {
             environment_release_id: Some(environment_release.id),
             evaluation_release_id: Some(evaluation_release.id),
             evaluation_release_revision: Some(evaluation_release.revision),
+            submission_manifest: authoring_submission_manifest(
+                &evaluation_release.evaluation_spec,
+            )?,
             diagnostic_code: None,
             updated_at: now,
             revision: next_revision(current.revision)?,
@@ -4095,6 +4128,7 @@ impl ControlService {
             environment_release_id: current.environment_release_id,
             evaluation_release_id: current.evaluation_release_id,
             evaluation_release_revision: current.evaluation_release_revision,
+            submission_manifest: current.submission_manifest,
             diagnostic_code: Some(diagnostic_code),
             updated_at: now,
             revision: next_revision(current.revision)?,
@@ -4218,6 +4252,120 @@ impl ControlService {
             evaluation_release_id,
             evaluation_release_revision,
         })
+    }
+
+    /// Resolves the exact approved Evaluation pair for one immutable Environment release.
+    ///
+    /// The release id, project/course scope, and version are all checked before the ready
+    /// publication projection is consulted.  No newest-release lookup is permitted here.
+    pub async fn environment_publication_admission(
+        &self,
+        release_id: ReleaseId,
+        query: &EnvironmentPublicationAdmissionQuery,
+    ) -> Result<Option<AuthoringPublicationAdmissionBinding>, ControlError> {
+        query
+            .validate()
+            .map_err(|_| ControlError::ContractInvalid)?;
+        let row = sqlx::query(
+            "SELECT releases.release_id,releases.project_id,releases.course_id,releases.version,
+                    releases.contract AS release_contract,
+                    publications.contract AS publication_contract,
+                    withdrawals.contract AS withdrawal_contract,
+                    candidates.contract AS candidate_contract
+             FROM control.environment_template_releases releases
+             JOIN control.candidates candidates
+               ON candidates.candidate_id=releases.environment_candidate_id
+              AND candidates.project_id=releases.project_id
+              AND candidates.course_id IS NOT DISTINCT FROM releases.course_id
+              AND candidates.candidate_kind='environment'
+              AND candidates.revision=releases.candidate_revision
+              AND candidates.state='validated'
+             LEFT JOIN control.authoring_approval_publications publications
+               ON publications.project_id=releases.project_id
+              AND publications.environment_release_id=releases.release_id
+              AND publications.state='ready'
+             LEFT JOIN control.release_withdrawals withdrawals
+               ON withdrawals.release_id=releases.release_id
+             WHERE releases.release_id=$1 AND releases.project_id=$2
+               AND releases.course_id IS NOT DISTINCT FROM $3
+               AND releases.version=$4",
+        )
+        .bind(release_id.as_uuid())
+        .bind(query.project_id.as_uuid())
+        .bind(query.course_id.map(CourseId::as_uuid))
+        .bind(
+            i64::try_from(query.environment_release_version)
+                .map_err(|_| ControlError::ContractInvalid)?,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::ReleaseNotFound)?;
+        if row
+            .try_get::<Option<Value>, _>("withdrawal_contract")
+            .map_err(db)?
+            .is_some()
+        {
+            return Err(ControlError::ReleaseNotFound);
+        }
+        let release: EnvironmentTemplateRelease =
+            serde_json::from_value(row.try_get("release_contract").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        release
+            .validate()
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        release
+            .validate_ownership(query.project_id, query.course_id)
+            .map_err(|_| ControlError::ProjectMismatch)?;
+        if release.id != release_id || release.version != query.environment_release_version {
+            return Err(ControlError::PersistenceIdentityMismatch);
+        }
+        let candidate: EnvironmentCandidate =
+            serde_json::from_value(row.try_get("candidate_contract").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        candidate
+            .validate()
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if candidate.id != release.candidate_id
+            || candidate.revision != release.candidate_revision
+            || candidate.project_id != query.project_id
+            || candidate.course_id != query.course_id
+        {
+            return Err(ControlError::PersistenceIdentityMismatch);
+        }
+        if candidate.spec.class == EnvironmentClass::Work {
+            return Ok(None);
+        }
+        let publication = row
+            .try_get::<Option<Value>, _>("publication_contract")
+            .map_err(db)?
+            .ok_or(ControlError::ReleaseEvidenceInvalid)?;
+        let publication: AuthoringApprovalPublicationStatus =
+            serde_json::from_value(publication)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        publication
+            .validate()
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if publication.status != AuthoringPublicationState::Ready
+            || publication.environment_release_id != Some(release_id)
+        {
+            return Err(ControlError::ReleaseEvidenceInvalid);
+        }
+        let evaluation_release_id = publication
+            .evaluation_release_id
+            .ok_or(ControlError::PersistenceIdentityMismatch)?;
+        Ok(Some(
+            self.authoring_publication_admission(
+                publication.approval.id,
+                &AuthoringPublicationAdmissionQuery {
+                    project_id: query.project_id,
+                    course_id: query.course_id,
+                    approval_revision: publication.approval.revision,
+                    evaluation_release_id,
+                },
+            )
+            .await?,
+        ))
     }
 
     /// Publishes an immutable Work release from authoritative project projections only.
@@ -6087,6 +6235,18 @@ fn publication_state_from_db(value: &str) -> Result<AuthoringPublicationState, C
     }
 }
 
+fn authoring_submission_manifest(
+    evaluation_spec: &EvaluationSpec,
+) -> Result<Option<contracts::submission::SubmissionManifest>, ControlError> {
+    match evaluation_spec.body().submission().collector() {
+        CollectorSpec::WorkspaceSnapshot { .. } => Ok(Some(
+            contracts::submission::SubmissionManifest::from_evaluation_spec(evaluation_spec)
+                .map_err(|_| ControlError::ContractInvalid)?,
+        )),
+        CollectorSpec::SystemFacts { .. } => Ok(None),
+    }
+}
+
 fn publication_contract(
     status: &AuthoringApprovalPublicationStatus,
 ) -> Result<Value, ControlError> {
@@ -6533,9 +6693,20 @@ fn release_view(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let submission_manifest = row
+        .try_get::<Option<Value>, _>("publication_contract")
+        .map_err(db)?
+        .map(|value| {
+            serde_json::from_value::<AuthoringApprovalPublicationStatus>(value)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)
+                .map(|status| status.submission_manifest)
+        })
+        .transpose()?
+        .flatten();
     Ok(EnvironmentTemplateReleaseView {
         release,
         withdrawal,
+        submission_manifest,
     })
 }
 
@@ -6920,6 +7091,7 @@ pub enum ControlError {
 mod tests {
     use contracts::AgentRunId;
     use contracts::authoring::{EnvironmentCandidate, EnvironmentRuntimeSpec};
+    use contracts::evaluation::EvaluationSpec;
     use contracts::http::{CreateProblemPackageUploadRequest, ProblemPackageUploadFile};
     use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk};
     use contracts::{CourseId, PolicyId, ProjectId, Revision};
@@ -6929,8 +7101,8 @@ mod tests {
 
     use super::{
         ContainerBuildPolicy, ControlConfig, ControlError, EvaluationRuntimePolicy,
-        VirtualMachineBasePolicy, reject_sensitive_payload, resolve_candidate_image_artifact,
-        validate_upload_request,
+        VirtualMachineBasePolicy, authoring_submission_manifest, reject_sensitive_payload,
+        resolve_candidate_image_artifact, validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -7014,6 +7186,21 @@ mod tests {
             reject_sensitive_payload(&payload),
             Err(ControlError::SensitiveEventPayload)
         ));
+    }
+
+    #[test]
+    fn authoring_submission_manifest_follows_collector_kind()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = EvaluationSpec::from_yaml(include_str!(
+            "../../../crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml"
+        ))?;
+        assert!(authoring_submission_manifest(&workspace)?.is_some());
+
+        let system_facts = EvaluationSpec::from_yaml(include_str!(
+            "../../../crates/contracts/tests/fixtures/evaluation/linux/evaluation.yaml"
+        ))?;
+        assert!(authoring_submission_manifest(&system_facts)?.is_none());
+        Ok(())
     }
 
     #[test]

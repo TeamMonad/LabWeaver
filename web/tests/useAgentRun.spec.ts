@@ -179,4 +179,18 @@ describe('useProjectAgentRun', () => {
 
     expect(agent.run.kind).toBe('idle')
   })
+
+  it('fails closed when the server returns a different run identity', async () => {
+    const projectId = ref<string | null>('project-1')
+    const agent = useProjectAgentRun(projectId)
+    vi.mocked(getProjectAgentRun).mockResolvedValueOnce({
+      data: { ...makeRun('succeeded'), id: 'run-other', projectId: 'project-2' } as never,
+      error: undefined as never,
+    })
+
+    await agent.load('run-1')
+
+    expect(agent.run.kind).toBe('error')
+    if (agent.run.kind === 'error') expect(agent.run.diagnostic.code).toBe('PROJECT_RUN_STALE_CONTEXT')
+  })
 })

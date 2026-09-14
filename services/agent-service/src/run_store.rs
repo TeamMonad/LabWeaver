@@ -125,15 +125,15 @@ pub struct AgentTrackCheckpoint {
     pub candidate: Option<StoredCandidate>,
 }
 
-/// Atomically retained terminal result.
+/// Atomically retained terminal result for an authoring run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredAgentRunOutcome {
     /// Terminal aggregate run.
     pub run: AgentRun,
     /// Environment checkpoint.
     pub environment: AgentTrackCheckpoint,
-    /// Evaluation checkpoint.
-    pub evaluation: AgentTrackCheckpoint,
+    /// Evaluation checkpoint, present for Experiment Authoring.
+    pub evaluation: Option<AgentTrackCheckpoint>,
 }
 
 /// One independently committed track result and the aggregate state derived in that transaction.
@@ -148,7 +148,7 @@ pub struct StoredAgentTrackOutcome {
 /// Main-path result distinguishing a new billable run from an idempotent replay.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentRunDispatch {
-    /// The caller owned and completed a new dual-track execution.
+    /// The caller owned and completed all tracks requested by the run purpose.
     Executed(Box<StoredAgentRunOutcome>),
     /// An exact prior reservation was returned without invoking Claude Code.
     Replayed(AgentRun),
@@ -1965,7 +1965,7 @@ impl PostgresAgentRunStore {
         Ok(run)
     }
 
-    /// Loads both retained checkpoints in sequence order for recovery or projection.
+    /// Loads retained checkpoints in sequence order for recovery or projection.
     ///
     /// # Errors
     ///
@@ -1990,7 +1990,7 @@ impl PostgresAgentRunStore {
             .collect()
     }
 
-    /// Loads the terminal aggregate together with the latest checkpoint for each track.
+    /// Loads the terminal aggregate together with the latest checkpoint for each authoring track.
     ///
     /// # Errors
     ///
@@ -2010,12 +2010,22 @@ impl PostgresAgentRunStore {
             .find(|checkpoint| checkpoint.track == AgentTrackKind::Environment)
             .cloned()
             .ok_or(AgentRunStoreError::InvalidContract)?;
-        let evaluation = checkpoints
-            .iter()
-            .rev()
-            .find(|checkpoint| checkpoint.track == AgentTrackKind::Evaluation)
-            .cloned()
-            .ok_or(AgentRunStoreError::InvalidContract)?;
+        let evaluation = if run
+            .purpose
+            .track_kinds()
+            .contains(&AgentTrackKind::Evaluation)
+        {
+            Some(
+                checkpoints
+                    .iter()
+                    .rev()
+                    .find(|checkpoint| checkpoint.track == AgentTrackKind::Evaluation)
+                    .cloned()
+                    .ok_or(AgentRunStoreError::InvalidContract)?,
+            )
+        } else {
+            None
+        };
         Ok(Some(StoredAgentRunOutcome {
             run,
             environment,
@@ -2033,7 +2043,7 @@ pub struct AgentRunService {
     lease_duration: Duration,
 }
 
-/// Complete service command for an idempotent dual-track execution.
+/// Complete service command for an idempotent purpose-specific execution.
 pub struct ExecuteAgentRun<'a> {
     /// Authoritative project route scope.
     pub project_id: ProjectId,
@@ -2139,6 +2149,9 @@ impl AgentRunService {
         run: AgentRun,
     ) -> Result<AgentRunDispatch, AgentRunStoreError> {
         validate_reserved_run(&command, &run)?;
+        if !matches!(run.purpose, AgentRunPurpose::Authoring { .. }) {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
         let input_sha256 = command.input.sha256();
         let environment = self
             .store
@@ -2150,16 +2163,23 @@ impl AgentRunService {
                 self.lease_duration,
             )
             .await?;
-        let evaluation = self
-            .store
-            .claim_track(
-                run.id,
-                AgentTrackKind::Evaluation,
-                input_sha256,
-                &self.worker_id,
-                self.lease_duration,
-            )
-            .await?;
+        let evaluation = if run
+            .purpose
+            .track_kinds()
+            .contains(&AgentTrackKind::Evaluation)
+        {
+            self.store
+                .claim_track(
+                    run.id,
+                    AgentTrackKind::Evaluation,
+                    input_sha256,
+                    &self.worker_id,
+                    self.lease_duration,
+                )
+                .await?
+        } else {
+            None
+        };
         let environment_execution = self.execute_track(
             environment,
             command.input.clone(),
@@ -2201,8 +2221,9 @@ impl AgentRunService {
 
     /// Executes one Control-reserved typed dispatch without attempting a second reservation.
     ///
-    /// Authoring keeps its existing dual-track execution, while Work configuration owns one
-    /// independently fenced track and binds its generated plan in the completion transaction.
+    /// Experiment Authoring keeps its dual-track execution, Work Authoring owns one Environment
+    /// track, and Work configuration owns one independently fenced track that binds its generated
+    /// plan in the completion transaction.
     #[allow(
         clippy::large_futures,
         reason = "the background dispatch preserves the reserved run boundary"
@@ -2531,6 +2552,9 @@ fn validate_reserved_run(
 }
 
 fn requested_run(request: &CreateAgentRunRequest) -> Result<AgentRun, AgentRunStoreError> {
+    let purpose = AgentRunPurpose::Authoring {
+        environment_class: request.environment_class,
+    };
     let run = AgentRun {
         id: AgentRunId::new(),
         project_id: request.project_id,
@@ -2538,23 +2562,19 @@ fn requested_run(request: &CreateAgentRunRequest) -> Result<AgentRun, AgentRunSt
         package_id: request.package_id,
         policy_id: request.policy_id,
         policy_revision: request.policy_revision,
-        purpose: AgentRunPurpose::Authoring {
-            environment_class: request.environment_class,
-        },
+        purpose,
         state: AgentRunState::Requested,
         revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
-        tracks: vec![
-            AgentTrack {
-                kind: AgentTrackKind::Environment,
+        tracks: purpose
+            .track_kinds()
+            .iter()
+            .copied()
+            .map(|kind| AgentTrack {
+                kind,
                 attempts: Vec::new(),
                 candidate_id: None,
-            },
-            AgentTrack {
-                kind: AgentTrackKind::Evaluation,
-                attempts: Vec::new(),
-                candidate_id: None,
-            },
-        ],
+            })
+            .collect(),
         plan: None,
     };
     run.validate()
@@ -2609,12 +2629,7 @@ fn requested_internal_run(
 }
 
 fn tracks_for_purpose(purpose: AgentRunPurpose) -> Vec<AgentTrackKind> {
-    match purpose {
-        AgentRunPurpose::Authoring { .. } => {
-            vec![AgentTrackKind::Environment, AgentTrackKind::Evaluation]
-        }
-        AgentRunPurpose::WorkConfiguration { .. } => vec![AgentTrackKind::WorkConfiguration],
-    }
+    purpose.track_kinds().to_vec()
 }
 
 async fn load_run_for_update(

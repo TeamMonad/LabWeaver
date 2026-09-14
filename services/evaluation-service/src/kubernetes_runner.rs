@@ -70,7 +70,7 @@ use crate::oj::{
     OjFileBinding, OjTerminalStatus,
 };
 use crate::oj_executor::OjJobObservation;
-use crate::oj_executor::{OjExecutorConfiguration, OjKubernetesExecutor};
+use crate::oj_executor::{OjExecutorConfiguration, OjExecutorError, OjKubernetesExecutor};
 use crate::oj_job::{OjJobBinding, OjJobResources};
 use crate::resource_client::ResourceClient;
 
@@ -215,6 +215,7 @@ pub struct KubernetesEvaluationRunner {
     control: PgEvaluationControlStore,
     freezes: PgFreezeStore,
     objects: Arc<S3ImmutableObjectStore>,
+    package_objects: Arc<S3ImmutableObjectStore>,
     resource: ResourceClient,
     agent: AgentClient,
     authoring: AuthoringAdmissionClient,
@@ -249,6 +250,7 @@ impl KubernetesEvaluationRunner {
         control: PgEvaluationControlStore,
         freezes: PgFreezeStore,
         objects: Arc<S3ImmutableObjectStore>,
+        package_objects: Arc<S3ImmutableObjectStore>,
         resource: ResourceClient,
         agent: AgentClient,
         authoring: AuthoringAdmissionClient,
@@ -283,6 +285,7 @@ impl KubernetesEvaluationRunner {
             control,
             freezes,
             objects,
+            package_objects,
             resource,
             agent,
             authoring,
@@ -348,7 +351,7 @@ impl KubernetesEvaluationRunner {
         lifecycle
             .create()
             .await
-            .map_err(|error| map_task_resource(&error, "create"))?;
+            .map_err(|error| map_task_resource(error, "create"))?;
         // A reassigned attempt may already own a Resource request from the previous worker. If
         // cancellation won while it was still before the execution Job, settle that exact
         // TaskRunId before claiming or acknowledging anything. This covers Reviewing,
@@ -359,7 +362,7 @@ impl KubernetesEvaluationRunner {
             lifecycle
                 .cancel("evaluation step cancelled before execution Job start")
                 .await
-                .map_err(|error| map_task_resource(&error, "cancel"))?;
+                .map_err(|error| map_task_resource(error, "cancel"))?;
             if context.lease_lost.is_cancelled() {
                 return Err(ExecutionError::LeaseLost);
             }
@@ -393,11 +396,11 @@ impl KubernetesEvaluationRunner {
                 return TerminalResult::Failed("LW_EVALUATION_RESOURCE_TERMINAL".to_owned())
                     .into_completion();
             }
-            Err(error) => return Err(map_task_resource(&error, "claim")),
+            Err(error) => return Err(map_task_resource(error, "claim")),
         };
         let mut resource_status = tokio::select! {
             result = lifecycle.acknowledge(&claimed, &self.configuration.runner_namespace) => {
-                result.map_err(|error| map_task_resource(&error, "ack"))?
+                result.map_err(|error| map_task_resource(error, "ack"))?
             }
             () = context.cancellation.cancelled() => {
                 if context.lease_lost.is_cancelled() {
@@ -406,7 +409,7 @@ impl KubernetesEvaluationRunner {
                 lifecycle
                     .cancel("evaluation step lease cancelled before resource handoff")
                     .await
-                    .map_err(|error| map_task_resource(&error, "cancel"))?;
+                    .map_err(|error| map_task_resource(error, "cancel"))?;
                 if self.run_is_cancelling(context.lease.run_id).await? {
                     return TerminalResult::Cancelled.into_completion();
                 }
@@ -422,7 +425,7 @@ impl KubernetesEvaluationRunner {
             let status = lifecycle
                 .release(&resource_status)
                 .await
-                .map_err(|error| map_task_resource(&error, "release"))?;
+                .map_err(|error| map_task_resource(error, "release"))?;
             if !status.cleanup_confirmed {
                 return Err(ExecutionError::Backend(
                     "resource_cleanup_not_confirmed".to_owned(),
@@ -509,7 +512,7 @@ impl KubernetesEvaluationRunner {
         resource_status = lifecycle
             .release(&resource_status)
             .await
-            .map_err(|error| map_task_resource(&error, "release"))?;
+            .map_err(|error| map_task_resource(error, "release"))?;
         if !resource_status.cleanup_confirmed {
             return Err(ExecutionError::Backend(
                 "resource_cleanup_not_confirmed".to_owned(),
@@ -559,14 +562,14 @@ impl KubernetesEvaluationRunner {
         let mut status = lifecycle
             .load_status()
             .await
-            .map_err(|error| map_task_resource(&error, "load"))?;
+            .map_err(|error| map_task_resource(error, "load"))?;
         if let Some(completion) = checkpoint.terminal_completion {
             self.cleanup_recovery(context, &recovery).await?;
             if !status.cleanup_confirmed {
                 status = lifecycle
                     .release(&status)
                     .await
-                    .map_err(|error| map_task_resource(&error, "release"))?;
+                    .map_err(|error| map_task_resource(error, "release"))?;
             }
             if !status.cleanup_confirmed {
                 return Err(ExecutionError::Backend(
@@ -631,7 +634,7 @@ impl KubernetesEvaluationRunner {
         status = lifecycle
             .release(&status)
             .await
-            .map_err(|error| map_task_resource(&error, "release"))?;
+            .map_err(|error| map_task_resource(error, "release"))?;
         if !status.cleanup_confirmed {
             return Err(ExecutionError::Backend(
                 "resource_cleanup_not_confirmed".to_owned(),
@@ -665,7 +668,7 @@ impl KubernetesEvaluationRunner {
         let mut status = lifecycle
             .load_status()
             .await
-            .map_err(|error| map_task_resource(&error, "load"))?;
+            .map_err(|error| map_task_resource(error, "load"))?;
         let terminal_at = self
             .control
             .authority_now()
@@ -707,7 +710,7 @@ impl KubernetesEvaluationRunner {
         status = lifecycle
             .release(&status)
             .await
-            .map_err(|error| map_task_resource(&error, "release"))?;
+            .map_err(|error| map_task_resource(error, "release"))?;
         if !status.cleanup_confirmed {
             return Err(ExecutionError::Backend(
                 "resource_cleanup_not_confirmed".to_owned(),
@@ -849,7 +852,7 @@ impl KubernetesEvaluationRunner {
                     .oj
                     .cleanup_recovery(recovery)
                     .await
-                    .map_err(|_| ExecutionError::Backend("oj_cleanup_failed".to_owned()))?,
+                    .map_err(|error| map_oj_cleanup_error(&error, context, "recovery"))?,
                 EvaluationExecutionKind::AnsibleProbe => self
                     .ansible_probe
                     .cleanup_recovery(recovery)
@@ -1278,12 +1281,38 @@ impl KubernetesEvaluationRunner {
             .oj
             .start(&binding)
             .await
-            .map_err(|_| ExecutionError::Backend("oj_start_failed".to_owned()))?;
-        let Ok(objects) = self.oj.capture_object_refs(&resources, &request).await else {
-            self.cleanup_oj(&resources, context).await?;
-            return Err(ExecutionError::Backend(
-                "oj_object_capture_failed".to_owned(),
-            ));
+            .map_err(|error| map_oj_start_error(&error))?;
+        let objects = match self.oj.capture_object_refs(&resources, &request).await {
+            Ok(objects) => objects,
+            Err(error) => {
+                let diagnostic_code = error.diagnostic_code();
+                tracing::error!(
+                    event = "evaluation.program.oj_object_capture_failed",
+                    run_id = %context.lease.run_id,
+                    step_run_id = %context.lease.step_run_id,
+                    task_run_id = %context.lease.task_run_id,
+                    failure_stage = "program.oj.capture_object_refs",
+                    diagnostic_code,
+                    error_kind = error.error_kind(),
+                    cleanup_verified = false,
+                    "OJ object identity capture failed",
+                );
+                if self.cleanup_oj(&resources, context).await.is_err() {
+                    tracing::error!(
+                        event = "evaluation.program.oj_capture_cleanup_failed",
+                        run_id = %context.lease.run_id,
+                        step_run_id = %context.lease.step_run_id,
+                        task_run_id = %context.lease.task_run_id,
+                        cleanup = "after_object_capture_failure",
+                        failure_stage = "program.oj.capture.cleanup",
+                        diagnostic_code,
+                        error_kind = "cleanup_after_capture_failure",
+                        cleanup_verified = false,
+                        "OJ cleanup after object identity capture failure did not complete",
+                    );
+                }
+                return Err(ExecutionError::Backend(diagnostic_code.to_owned()));
+            }
         };
         let recovery = execution_resources(
             context,
@@ -1762,7 +1791,7 @@ impl KubernetesEvaluationRunner {
                 .oj
                 .cleanup(resources)
                 .await
-                .map_err(|_| ExecutionError::Backend("oj_cleanup_failed".to_owned()))?;
+                .map_err(|error| map_oj_cleanup_error(&error, context, "cleanup"))?;
             if complete {
                 return Ok(());
             }
@@ -1856,7 +1885,7 @@ impl KubernetesEvaluationRunner {
         validate_frozen_archive(frozen, &archive)?;
         let mut bytes = BTreeMap::new();
         for file in &package.package.files {
-            if file.object.store_binding != self.objects.binding() {
+            if file.object.store_binding != self.package_objects.binding() {
                 return Err(ExecutionError::IdentityMismatch);
             }
             let key = package
@@ -1864,7 +1893,7 @@ impl KubernetesEvaluationRunner {
                 .get(&file.object.artifact_id)
                 .ok_or(ExecutionError::IdentityMismatch)?;
             let object = self
-                .objects
+                .package_objects
                 .read_verified(key, &file.object)
                 .await
                 .map_err(|_| ExecutionError::Backend("package_object_read_failed".to_owned()))?;
@@ -1964,6 +1993,9 @@ impl KubernetesEvaluationRunner {
             )
             .await
             .map_err(|_| ExecutionError::Backend("frozen_object_key_missing".to_owned()))?;
+        if frozen.object.store_binding != self.objects.binding() {
+            return Err(ExecutionError::IdentityMismatch);
+        }
         let signed = self
             .objects
             .presign_download(
@@ -2003,8 +2035,11 @@ impl KubernetesEvaluationRunner {
             .object_locators
             .get(&file.object.artifact_id)
             .ok_or(ExecutionError::IdentityMismatch)?;
+        if file.object.store_binding != self.package_objects.binding() {
+            return Err(ExecutionError::IdentityMismatch);
+        }
         let signed = self
-            .objects
+            .package_objects
             .presign_download(
                 key,
                 &file.object.object_version,
@@ -2299,9 +2334,54 @@ impl TerminalResult {
     }
 }
 
-fn map_task_resource(error: &TaskResourceError, stage: &str) -> ExecutionError {
-    tracing::warn!(event = "evaluation.resource.lifecycle_failed", stage, error = %error);
-    ExecutionError::Backend(format!("resource_{stage}_failed"))
+fn map_task_resource(error: TaskResourceError, stage: &str) -> ExecutionError {
+    tracing::warn!(
+        event = "evaluation.resource.lifecycle_failed",
+        failure_stage = stage,
+        diagnostic_code = %error,
+        cleanup_verified = false,
+        "Resource lifecycle failed during evaluation",
+    );
+    ExecutionError::TaskResource(error)
+}
+
+fn map_oj_start_error(error: &OjExecutorError) -> ExecutionError {
+    let diagnostic_code = error.diagnostic_code();
+    tracing::error!(
+        event = "evaluation.program.oj_start_failed",
+        failure_stage = "program.oj.start",
+        diagnostic_code,
+        error = %error,
+        cleanup_verified = false,
+        "OJ Job start failed",
+    );
+    ExecutionError::Backend(diagnostic_code.to_owned())
+}
+
+fn map_oj_cleanup_error(
+    error: &OjExecutorError,
+    context: &EvaluationAttemptContext,
+    cleanup: &'static str,
+) -> ExecutionError {
+    let diagnostic_code = error.diagnostic_code();
+    let failure_stage = match cleanup {
+        "recovery" => "program.oj.cleanup.recovery",
+        "cleanup" => "program.oj.cleanup",
+        _ => "program.oj.cleanup.unknown",
+    };
+    tracing::error!(
+        event = "evaluation.program.oj_cleanup_failed",
+        run_id = %context.lease.run_id,
+        step_run_id = %context.lease.step_run_id,
+        task_run_id = %context.lease.task_run_id,
+        cleanup,
+        failure_stage,
+        diagnostic_code,
+        error_kind = error.error_kind(),
+        cleanup_verified = false,
+        "OJ cleanup failed",
+    );
+    ExecutionError::Backend(diagnostic_code.to_owned())
 }
 
 fn execution_resources<T: Serialize>(
@@ -2451,7 +2531,8 @@ fn deterministic_usage_event_id(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        OjExecutionPhase, OjTerminalStatus, TerminalResult, oj_receipt_result,
+        ExecutionError, OjExecutionPhase, OjExecutorError, OjTerminalStatus, TaskResourceError,
+        TerminalResult, map_oj_start_error, map_task_resource, oj_receipt_result,
         validate_advisory_receipt_hash,
     };
     use contracts::authoring::ProjectLlmEgressPolicy;
@@ -2580,6 +2661,33 @@ mod tests {
                     .to_owned(),
             ),
             TerminalResult::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn task_resource_mapping_preserves_typed_error_and_diagnostic() {
+        let mapped = map_task_resource(TaskResourceError::ResourceTerminal, "claim");
+
+        assert_eq!(mapped.to_string(), "LW_EVALUATION_TASK_RESOURCE_TERMINAL");
+        assert!(matches!(
+            mapped,
+            ExecutionError::TaskResource(TaskResourceError::ResourceTerminal)
+        ));
+    }
+
+    #[test]
+    fn oj_start_mapping_preserves_typed_error_and_diagnostic() {
+        let error = OjExecutorError::NetworkIsolationUnavailable;
+        let mapped = map_oj_start_error(&error);
+
+        assert_eq!(
+            mapped.to_string(),
+            "LW_EVALUATION_EXECUTION_BACKEND_FAILED: LW_OJ_NETWORK_ISOLATION_UNAVAILABLE"
+        );
+        assert!(matches!(
+            mapped,
+            ExecutionError::Backend(code)
+                if code == "LW_OJ_NETWORK_ISOLATION_UNAVAILABLE"
         ));
     }
 
@@ -2970,6 +3078,51 @@ mod probe_recovery_tests {
         actor_id: ActorId,
         release: contracts::evaluation::EvaluationRelease,
         run: EvaluationRun,
+    }
+
+    #[tokio::test]
+    async fn package_materialization_uses_package_store_binding() -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")?;
+        let runner = build_runner(&cluster, &authority, &temp, &pool).await?;
+        let package = evaluation_binding(contracts::ProjectId::new(), CourseId::new())?;
+        let file = package.package.files[0].clone();
+        let package_bytes = BTreeMap::from([(file.object.artifact_id, b"x".to_vec())]);
+        assert_eq!(file.object.store_binding, runner.package_objects.binding());
+        assert!(
+            package
+                .object_locators
+                .contains_key(&file.object.artifact_id)
+        );
+        let signed = runner
+            .signed_package_artifact(
+                &package,
+                &package_bytes,
+                &file,
+                "2026-09-09T00:00:00.000Z".parse()?,
+            )
+            .await?;
+        assert!(signed.url.contains("test-package-bucket"));
+        assert_eq!(signed.expected_size_bytes, 1);
+
+        let mut wrong_binding = file;
+        wrong_binding.object.store_binding = "test-store".to_owned();
+        assert!(matches!(
+            runner
+                .signed_package_artifact(
+                    &package,
+                    &package_bytes,
+                    &wrong_binding,
+                    "2026-09-09T00:00:00.000Z".parse()?,
+                )
+                .await,
+            Err(crate::execution::ExecutionError::IdentityMismatch)
+        ));
+        cluster.stop().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3507,6 +3660,27 @@ mod probe_recovery_tests {
             )
             .await?,
         );
+        let package_objects = Arc::new(
+            S3ImmutableObjectStore::new(
+                S3StoreConfig {
+                    binding: "test-package-store".to_owned(),
+                    endpoint: base.clone(),
+                    bucket: "test-package-bucket".to_owned(),
+                    region: "us-east-1".to_owned(),
+                    object_prefix: "evaluation-package-tests".to_owned(),
+                    upload_ttl_seconds: 60,
+                    max_object_bytes: 1024 * 1024,
+                    force_path_style: true,
+                    ca_bundle_file: None,
+                },
+                S3Credential {
+                    access_key_id: "test-access".to_owned(),
+                    secret_access_key: "test-secret".to_owned(),
+                    session_token: None,
+                },
+            )
+            .await?,
+        );
         let kube =
             |config: &Path| crate::ansible_probe_executor::AnsibleProbeExecutorConfiguration {
                 kubernetes_api_server: base.clone(),
@@ -3554,6 +3728,7 @@ mod probe_recovery_tests {
             PgEvaluationControlStore::new(pool.clone()),
             PgFreezeStore::new(pool.clone()),
             objects,
+            package_objects,
             resource,
             agent,
             authoring,
@@ -3819,7 +3994,7 @@ mod probe_recovery_tests {
                     &contracts::http::IdempotencyKey::parse("probe-run-test-key")?,
                     "2026-09-09T00:00:00.000Z".parse()?,
                     "probe-recovery-test",
-                    &admission(&release),
+                    &admission(&release, &frozen),
                 )
                 .await?
             {
@@ -3899,7 +4074,7 @@ mod probe_recovery_tests {
              (frozen_submission_id,project_id,course_id,environment_id,manifest_sha256,content_sha256,
               schema_version,tool_version,contract,frozen_at,idempotency_key,source_identity_sha256,
               object_key,object_version)
-             VALUES ($1,$2,$3,$4,$5,$6,'submission.freeze/v1','probe-recovery-test',$7,$8,$9,$10,$11,$12)",
+             VALUES ($1,$2,$3,$4,$5,$6,'evaluation.labweaver.io/frozen-submission/v1','probe-recovery-test',$7,$8,$9,$10,$11,$12)",
         )
         .bind(frozen.id.as_uuid())
         .bind(frozen.project_id.as_uuid())
@@ -3960,7 +4135,7 @@ mod probe_recovery_tests {
                     path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
                     object: ArtifactRef {
                         artifact_id,
-                        store_binding: "test-store".to_owned(),
+                        store_binding: "test-package-store".to_owned(),
                         object_version: "v1".to_owned(),
                         size_bytes: 1,
                         media_type: "text/plain".to_owned(),
@@ -3975,18 +4150,24 @@ mod probe_recovery_tests {
                 },
                 completed_at: "2026-09-09T00:00:00.000Z".parse()?,
             },
-            object_locators: BTreeMap::from([(artifact_id, "probe/playbook.yml".to_owned())]),
+            object_locators: BTreeMap::from([(
+                artifact_id,
+                "evaluation-package-tests/probe/playbook.yml".to_owned(),
+            )]),
         })
     }
 
-    fn admission(release: &EvaluationRelease) -> AuthoringPublicationAdmissionBinding {
+    fn admission(
+        release: &EvaluationRelease,
+        frozen: &FrozenSubmission,
+    ) -> AuthoringPublicationAdmissionBinding {
         AuthoringPublicationAdmissionBinding {
             approval_id: release.approval_id,
             approval_revision: release.approval_revision,
             project_id: release.project_id,
             course_id: release.course_id,
-            environment_release_id: ReleaseId::new(),
-            environment_release_version: 1,
+            environment_release_id: frozen.environment.release_id,
+            environment_release_version: frozen.environment.release_version,
             evaluation_release_id: release.id,
             evaluation_release_revision: release.revision,
         }

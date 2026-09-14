@@ -28,9 +28,10 @@ The deployment must provision these identities before either service starts:
 - Control and Agent runtime database roles with only their own schema privileges.
 
 The reviewed Control configuration pins the active image-policy ID and revision.
-Publication accepts only an approved private Harbor repository, immutable digest
-and matching Trivy scanner/database identity and vulnerability gate. There is no
-signing trust-plane configuration in the deployment contract.
+Publication accepts only an approved private Harbor repository and immutable digest
+under that image-policy identity. The current deployment contract does not carry a
+scanner/database identity or vulnerability gate result. There is no signing trust-plane
+configuration in the deployment contract.
 
 Control publishes both Release publication and withdrawal facts from its PostgreSQL Outbox. The
 publisher uses the configured bounded ACK timeout and poll interval and marks `published_at` only
@@ -57,6 +58,18 @@ Service startup verifies required tables and exits with a stable diagnostic when
 certificate, secret locator, provider binding or durable consumer configuration is absent.
 Startup never repairs an unknown schema.
 
+## Evaluation runner prerequisites
+
+Every OJ Job uses `runtimeClassName: labweaver-oj`. Before Evaluation starts, each node eligible
+for OJ workloads must expose a `RuntimeClass` with handler `labweaver-oj` mapped to a dedicated
+runc/containerd runtime whose OCI base spec applies a finite `linux.resources.pids.limit` of 128
+or less to every OJ container, with `SystemdCgroup=true` matching the node cgroup manager. A
+kubelet Pod-level PID setting or a limit visible only on a parent cgroup is insufficient when the
+worker cgroup namespace hides it; the worker must observe the finite per-container cap. If the
+handler is unavailable, OJ scheduling must fail closed. Keep the existing seccomp, Landlock,
+no-new-privileges and other sandbox controls unchanged; do not weaken them to make the runtime
+available.
+
 ## Rollback
 
 1. Stop admission of new Control mutations at the trusted Gateway.
@@ -73,6 +86,6 @@ still-valid verified candidate and authoritative artifact evidence.
 ## Current production blocker
 
 The local v1 build and release path is implemented. Connected BuildKit, Harbor,
-Trivy, Container and KubeVirt replay under one deployment identity is still
+Container and KubeVirt replay under one deployment identity is still
 required before the deployment can claim verified operation. Fixtures and static
 reports are not production publication evidence.

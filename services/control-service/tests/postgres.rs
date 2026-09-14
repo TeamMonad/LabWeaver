@@ -20,8 +20,8 @@ use contracts::events::{AgentBuildRequested, CloudEvent};
 use contracts::http::{
     AuthoringPublicationAdmissionQuery, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
-    GeneratedArtifactKind, GeneratedArtifactRecord, IdempotencyKey, ProblemPackageUploadFile,
-    WorkConfigurationAdmissionQuery,
+    EnvironmentPublicationAdmissionQuery, GeneratedArtifactKind, GeneratedArtifactRecord,
+    IdempotencyKey, ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
@@ -447,7 +447,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         policy_id,
         environment_candidate.run_id,
         environment_candidate.id,
-        CandidateId::new(),
+        None,
         EnvironmentClass::Work,
     )?;
     let cross_course_context = service
@@ -632,6 +632,33 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             "trace-publish-container-release",
         )
         .await?;
+    let work_admission = service
+        .environment_publication_admission(
+            release.id,
+            &EnvironmentPublicationAdmissionQuery {
+                project_id: environment_candidate.project_id,
+                course_id: Some(course_id),
+                environment_release_version: release.version,
+            },
+        )
+        .await?;
+    assert_eq!(
+        work_admission, None,
+        "a validated Work release has an explicit null Evaluation admission"
+    );
+    assert!(matches!(
+        service
+            .environment_publication_admission(
+                release.id,
+                &EnvironmentPublicationAdmissionQuery {
+                    project_id: environment_candidate.project_id,
+                    course_id: Some(course_id),
+                    environment_release_version: release.version + 1,
+                },
+            )
+            .await,
+        Err(ControlError::ReleaseNotFound)
+    ));
     let withdrawal = service
         .withdraw_project_release(
             environment_candidate.project_id,
@@ -645,6 +672,19 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             "trace-withdraw-release",
         )
         .await?;
+    assert!(matches!(
+        service
+            .environment_publication_admission(
+                release.id,
+                &EnvironmentPublicationAdmissionQuery {
+                    project_id: environment_candidate.project_id,
+                    course_id: Some(course_id),
+                    environment_release_version: release.version,
+                },
+            )
+            .await,
+        Err(ControlError::ReleaseNotFound)
+    ));
     let view = service
         .project_release(
             environment_candidate.project_id,
@@ -784,7 +824,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
         PolicyId::new(),
         environment.run_id,
         environment.id,
-        evaluation.id,
+        Some(evaluation.id),
         EnvironmentClass::Experiment,
     )?;
     let build_context = match &environment.spec.runtime {
@@ -958,7 +998,8 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         EnvironmentClass::Experiment,
         now,
     )?;
-    let evaluation = evaluation_candidate(project_id, Some(course_id), environment.run_id, now)?;
+    let evaluation =
+        system_facts_evaluation_candidate(project_id, Some(course_id), environment.run_id, now)?;
     let run = succeeded_agent_run(
         project_id,
         Some(course_id),
@@ -966,7 +1007,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         policy.id,
         environment.run_id,
         environment.id,
-        evaluation.id,
+        Some(evaluation.id),
         EnvironmentClass::Experiment,
     )?;
     service
@@ -1085,7 +1126,8 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             now,
             "trace-authoring-environment-release",
         )
-        .await?;
+        .await
+        .map_err(|error| format!("publish authoring environment release failed: {error:?}"))?;
     assert!(matches!(
         service
             .authoring_publication_admission(approval.id, &admission_query)
@@ -1120,7 +1162,8 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             &evaluation_release,
             now,
         )
-        .await?;
+        .await
+        .map_err(|error| format!("complete authoring publication failed: {error:?}"))?;
     let ready = service
         .authoring_approval_publication_status(project_id, approval.id)
         .await?;
@@ -1130,6 +1173,10 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
     assert_eq!(
         ready.evaluation_release_revision,
         Some(evaluation_release.revision)
+    );
+    assert!(
+        ready.submission_manifest.is_none(),
+        "system-facts evaluations must not project a workspace submission manifest"
     );
 
     let ready_query = AuthoringPublicationAdmissionQuery {
@@ -1141,6 +1188,43 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         .await?;
     assert_eq!(admission.environment_release_id, environment_release.id);
     assert_eq!(admission.evaluation_release_id, evaluation_release.id);
+    let environment_admission = service
+        .environment_publication_admission(
+            environment_release.id,
+            &EnvironmentPublicationAdmissionQuery {
+                project_id,
+                course_id: Some(course_id),
+                environment_release_version: environment_release.version,
+            },
+        )
+        .await
+        .map_err(|error| format!("experiment exact admission failed: {error:?}"))?
+        .ok_or("Experiment release must return an Evaluation admission")?;
+    assert_eq!(
+        environment_admission.environment_release_id,
+        environment_release.id
+    );
+    assert_eq!(
+        environment_admission.environment_release_version,
+        environment_release.version
+    );
+    assert_eq!(
+        environment_admission.evaluation_release_id,
+        evaluation_release.id
+    );
+    assert!(matches!(
+        service
+            .environment_publication_admission(
+                environment_release.id,
+                &EnvironmentPublicationAdmissionQuery {
+                    project_id,
+                    course_id: Some(course_id),
+                    environment_release_version: environment_release.version + 1,
+                },
+            )
+            .await,
+        Err(ControlError::ReleaseNotFound)
+    ));
     service
         .complete_authoring_publication(
             approval.id,
@@ -1150,6 +1234,32 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             now,
         )
         .await?;
+    service
+        .withdraw_project_release(
+            project_id,
+            environment_release.id,
+            environment_release.version,
+            owner,
+            false,
+            "SECURITY_REVOKED",
+            &IdempotencyKey::parse("withdraw-authoring-environment-release")?,
+            now,
+            "trace-withdraw-authoring-environment-release",
+        )
+        .await?;
+    assert!(matches!(
+        service
+            .environment_publication_admission(
+                environment_release.id,
+                &EnvironmentPublicationAdmissionQuery {
+                    project_id,
+                    course_id: Some(course_id),
+                    environment_release_version: environment_release.version,
+                },
+            )
+            .await,
+        Err(ControlError::ReleaseNotFound)
+    ));
     Ok(())
 }
 
@@ -1241,6 +1351,7 @@ async fn authoring_publication_failure_is_durable_and_not_admissible()
         environment_release_id: None,
         evaluation_release_id: None,
         evaluation_release_revision: None,
+        submission_manifest: None,
         diagnostic_code: None,
         updated_at: now,
         revision: Revision::new(1)?,
@@ -1347,7 +1458,6 @@ async fn private_work_environment_approval_requires_project_owner()
         .await?;
     let environment =
         vm_environment_candidate(project_id, None, &vm_base, EnvironmentClass::Work, now)?;
-    let evaluation = evaluation_candidate(project_id, None, environment.run_id, now)?;
     let run = succeeded_agent_run(
         project_id,
         None,
@@ -1355,17 +1465,11 @@ async fn private_work_environment_approval_requires_project_owner()
         policy.id,
         environment.run_id,
         environment.id,
-        evaluation.id,
+        None,
         EnvironmentClass::Work,
     )?;
     service
-        .project_candidates(
-            EventId::new(),
-            &run,
-            Some(&environment),
-            Some(&evaluation),
-            None,
-        )
+        .project_candidates(EventId::new(), &run, Some(&environment), None, None)
         .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: environment.revision,
@@ -1909,15 +2013,44 @@ fn evaluation_candidate(
     run_id: AgentRunId,
     now: UtcTimestamp,
 ) -> Result<EvaluationCandidate, Box<dyn std::error::Error>> {
+    evaluation_candidate_from_yaml(
+        project_id,
+        course_id,
+        run_id,
+        now,
+        include_str!("../../../crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml"),
+    )
+}
+
+fn system_facts_evaluation_candidate(
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
+    run_id: AgentRunId,
+    now: UtcTimestamp,
+) -> Result<EvaluationCandidate, Box<dyn std::error::Error>> {
+    evaluation_candidate_from_yaml(
+        project_id,
+        course_id,
+        run_id,
+        now,
+        include_str!("../../../crates/contracts/tests/fixtures/evaluation/linux/evaluation.yaml"),
+    )
+}
+
+fn evaluation_candidate_from_yaml(
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
+    run_id: AgentRunId,
+    now: UtcTimestamp,
+    yaml: &str,
+) -> Result<EvaluationCandidate, Box<dyn std::error::Error>> {
     Ok(EvaluationCandidate {
         id: CandidateId::new(),
         run_id,
         project_id,
         course_id,
         revision: Revision::new(1)?,
-        spec: EvaluationSpec::from_yaml(include_str!(
-            "../../../crates/contracts/tests/fixtures/evaluation/linux/evaluation.yaml"
-        ))?,
+        spec: EvaluationSpec::from_yaml(yaml)?,
         policy_revision: Revision::new(1)?,
         model: "fixture-provider-v1".to_owned(),
         created_at: now,
@@ -1932,7 +2065,7 @@ fn succeeded_agent_run(
     policy_id: PolicyId,
     run_id: AgentRunId,
     environment_candidate_id: CandidateId,
-    evaluation_candidate_id: CandidateId,
+    evaluation_candidate_id: Option<CandidateId>,
     environment_class: EnvironmentClass,
 ) -> Result<AgentRun, Box<dyn std::error::Error>> {
     let attempt = AgentAttempt {
@@ -1948,6 +2081,24 @@ fn succeeded_agent_run(
         usage_observed: true,
         diagnostic_code: None,
     };
+    let environment_track = AgentTrack {
+        kind: AgentTrackKind::Environment,
+        attempts: vec![attempt.clone()],
+        candidate_id: Some(environment_candidate_id),
+    };
+    let tracks = match environment_class {
+        EnvironmentClass::Experiment => vec![
+            environment_track,
+            AgentTrack {
+                kind: AgentTrackKind::Evaluation,
+                attempts: vec![attempt],
+                candidate_id: Some(
+                    evaluation_candidate_id.ok_or("Experiment run missing evaluation candidate")?,
+                ),
+            },
+        ],
+        EnvironmentClass::Work => vec![environment_track],
+    };
     let run = AgentRun {
         id: run_id,
         project_id,
@@ -1958,18 +2109,7 @@ fn succeeded_agent_run(
         purpose: AgentRunPurpose::Authoring { environment_class },
         state: AgentRunState::Succeeded,
         revision: Revision::new(1)?,
-        tracks: vec![
-            AgentTrack {
-                kind: AgentTrackKind::Environment,
-                attempts: vec![attempt.clone()],
-                candidate_id: Some(environment_candidate_id),
-            },
-            AgentTrack {
-                kind: AgentTrackKind::Evaluation,
-                attempts: vec![attempt],
-                candidate_id: Some(evaluation_candidate_id),
-            },
-        ],
+        tracks,
         plan: None,
     };
     run.validate()?;

@@ -3,109 +3,242 @@
     <header class="page-header">
       <div>
         <h2>实验包批准</h2>
-        <p class="page-subtitle">检查同一 Project 下的材料包、Environment 候选、Evaluation 候选和镜像身份，一次批准完整实验包。</p>
+        <p class="page-subtitle">
+          检查同一 Project 下的材料包、Environment 候选、Evaluation 候选和镜像身份，一次批准完整实验包。
+        </p>
       </div>
       <div class="review-context md-card">
         <label class="context-field">
           <span>Project</span>
-          <select v-model="selectedProjectId" class="text-input" aria-label="选择项目" :disabled="projects.projects.kind !== 'success'">
-            <option v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }} · {{ project.id }}</option>
+          <select
+            v-model="selectedProjectId"
+            class="text-input"
+            aria-label="选择项目"
+            :disabled="projects.projects.kind !== 'success'"
+          >
+            <option
+              v-for="project in projectOptions"
+              :key="project.id"
+              :value="project.id"
+            >{{ project.name }}</option>
           </select>
         </label>
         <label class="context-field">
           <span>AgentRun ID</span>
-          <input v-model="runIdInput" class="text-input run-id-input" type="text" placeholder="粘贴 AgentRun ID" aria-label="AgentRun ID" />
+          <input
+            v-model="runIdInput"
+            class="text-input run-id-input"
+            type="text"
+            placeholder="粘贴 AgentRun ID"
+            aria-label="AgentRun ID"
+          >
         </label>
-        <button type="button" class="outlined-button" :disabled="!selectedProjectId || !runIdInput.trim()" @click="authoring.load">加载审核材料</button>
+        <button
+          type="button"
+          class="outlined-button"
+          :disabled="!selectedProjectId || !runIdInput.trim()"
+          @click="authoring.load"
+        >
+          加载审核材料
+        </button>
       </div>
     </header>
 
-    <AsyncStateView :state="projects.projects" empty-text="没有可访问的项目，请先创建项目。" @retry="projects.load">
+    <AsyncStateView
+      :state="projects.projects"
+      empty-text="没有可访问的项目，请先创建项目。"
+      @retry="projects.load"
+    >
       <template #success>
-        <div v-if="projectOptions.length === 0" class="state-note">没有可访问的项目。</div>
+        <div
+          v-if="projectOptions.length === 0"
+          class="state-note"
+        >
+          没有可访问的项目。
+        </div>
       </template>
     </AsyncStateView>
 
-    <AsyncStateView :state="authoring.run" @retry="authoring.load">
+    <AsyncStateView
+      :state="authoring.run"
+      @retry="authoring.load"
+    >
       <template #success="{ data: run }">
-        <section class="run-summary md-card" aria-labelledby="run-heading">
+        <section
+          class="run-summary md-card"
+          aria-labelledby="run-heading"
+        >
           <div class="section-heading">
-            <h3 id="run-heading">AgentRun</h3>
-            <GcpStatusPill :state="run.state" domain="agent" />
+            <h3 id="run-heading">
+              AgentRun
+            </h3>
+            <GcpStatusPill
+              :state="run.state"
+              domain="agent"
+            />
           </div>
           <dl class="meta-grid">
-            <dt>Run ID</dt>
-            <dd><code>{{ run.id }}</code></dd>
-            <dt>Project</dt>
-            <dd><code>{{ run.projectId }}</code></dd>
-            <dt>材料包</dt>
-            <dd><code>{{ run.packageId }}</code> · rev-{{ run.revision }}</dd>
+            <dt>运行状态</dt>
+            <dd><strong>{{ runStateLabel(run.state) }}</strong></dd>
+            <dt>项目</dt>
+            <dd>{{ selectedProjectName }}</dd>
             <dt>目标 Runtime</dt>
             <dd>{{ environmentRuntimeLabel }}</dd>
           </dl>
-          <p v-if="run.state === 'failed' || run.state === 'cancelled'" class="state-note">AgentRun 未成功完成，无法批准。</p>
+          <details class="technical-details">
+            <summary>查看生成任务引用</summary>
+            <dl class="meta-grid">
+              <dt>AgentRun ID</dt>
+              <dd><code>{{ run.id }}</code></dd>
+              <dt>Project ID</dt>
+              <dd><code>{{ run.projectId }}</code></dd>
+              <dt>材料包 ID</dt>
+              <dd><code>{{ run.packageId }}</code></dd>
+              <dt>Run Revision</dt>
+              <dd><code>rev-{{ run.revision }}</code></dd>
+            </dl>
+          </details>
+          <p
+            v-if="run.state === 'failed' || run.state === 'cancelled'"
+            class="state-note"
+          >
+            AgentRun 未成功完成，无法批准。
+          </p>
         </section>
+        <p
+          v-if="stateGuidance(authoring.run)"
+          class="diagnostic-action"
+          role="status"
+        >
+          建议：{{ stateGuidance(authoring.run) }}
+        </p>
 
         <div class="candidate-grid">
-          <section class="candidate-section" aria-labelledby="environment-heading">
-            <h3 id="environment-heading" class="section-title">Environment 候选</h3>
-            <AsyncStateView :state="authoring.environmentCandidate" @retry="authoring.load">
+          <section
+            class="candidate-section"
+            aria-labelledby="environment-heading"
+          >
+            <h3
+              id="environment-heading"
+              class="section-title"
+            >
+              Environment 候选
+            </h3>
+            <AsyncStateView
+              :state="authoring.environmentCandidate"
+              @retry="authoring.load"
+            >
               <template #success="{ data: view }">
                 <article class="candidate-card md-card">
                   <dl class="meta-grid">
-                    <dt>候选 ID</dt>
-                    <dd><code>{{ view.candidate.id }}</code></dd>
-                    <dt>Revision</dt>
-                    <dd>rev-{{ view.candidate.revision }}</dd>
-                    <dt>环境类</dt>
-                    <dd>{{ view.candidate.spec.class === 'work' ? 'Work' : 'Experiment' }}</dd>
                     <dt>名称</dt>
-                    <dd>{{ view.candidate.spec.name }}</dd>
-                    <dt>候选审批记录</dt>
+                    <dd><strong>{{ view.candidate.spec.name }}</strong></dd>
+                    <dt>运行环境</dt>
+                    <dd>{{ view.candidate.spec.class === 'work' ? 'Work' : 'Experiment' }} · {{ environmentRuntimeLabelFor(view.candidate.spec.runtime.kind) }}</dd>
+                    <dt>构建状态</dt>
+                    <dd>{{ buildStateLabel(view.build?.state) }}</dd>
+                    <dt>运行时镜像</dt>
+                    <dd>{{ view.imageArtifact ? '已解析，可供批准' : '尚未就绪' }}</dd>
+                    <dt>已有审批记录</dt>
                     <dd>{{ view.approvals.length }} 条（只读）</dd>
                   </dl>
+                  <details class="technical-details">
+                    <summary>查看候选技术详情</summary>
+                    <dl class="meta-grid">
+                      <dt>候选 ID</dt>
+                      <dd><code>{{ view.candidate.id }}</code></dd>
+                      <dt>Candidate Revision</dt>
+                      <dd><code>rev-{{ view.candidate.revision }}</code></dd>
+                      <dt>策略 Revision</dt>
+                      <dd><code>rev-{{ view.candidate.policyRevision }}</code></dd>
+                      <dt>信任 Revision</dt>
+                      <dd><code>rev-{{ view.trustRevision }}</code></dd>
+                    </dl>
+                  </details>
                   <details class="spec-details">
                     <summary>查看 Environment 配置</summary>
                     <pre>{{ formatJson(view.candidate.spec) }}</pre>
                   </details>
-                  <div v-if="view.build?.artifact" class="artifact-summary">
-                    <h4>运行时镜像身份</h4>
-                    <dl class="meta-grid">
-                      <template v-for="entry in artifactEntries(view.build.artifact)" :key="entry.label">
-                        <dt>{{ entry.label }}</dt>
-                        <dd><code>{{ entry.value }}</code></dd>
-                      </template>
-                    </dl>
+                  <div
+                    v-if="view.build?.artifact"
+                    class="artifact-summary"
+                  >
+                    <details class="technical-details">
+                      <summary>查看 immutable 运行时身份</summary>
+                      <dl class="meta-grid">
+                        <template
+                          v-for="entry in artifactEntries(view.build.artifact)"
+                          :key="entry.label"
+                        >
+                          <dt>{{ entry.label }}</dt>
+                          <dd><code>{{ entry.value }}</code></dd>
+                        </template>
+                      </dl>
+                    </details>
                   </div>
                   <DiagnosticBanner
                     v-if="view.build?.diagnosticCode"
                     :code="view.build.diagnosticCode"
-                    :message="`构建状态：${view.build.state}`"
+                    :message="`构建状态：${buildStateLabel(view.build.state)}`"
                     :retryable="false"
                     severity="warning"
                   />
+                  <p
+                    v-if="view.build?.diagnosticCode && diagnosticAction(view.build.diagnosticCode)"
+                    class="diagnostic-action"
+                    role="status"
+                  >
+                    建议：{{ diagnosticAction(view.build.diagnosticCode) }}
+                  </p>
                 </article>
               </template>
             </AsyncStateView>
+            <p
+              v-if="stateGuidance(authoring.environmentCandidate)"
+              class="diagnostic-action"
+              role="status"
+            >
+              建议：{{ stateGuidance(authoring.environmentCandidate) }}
+            </p>
           </section>
 
-          <section class="candidate-section" aria-labelledby="evaluation-heading">
-            <h3 id="evaluation-heading" class="section-title">Evaluation 候选</h3>
-            <AsyncStateView :state="authoring.evaluationCandidate" @retry="authoring.load">
+          <section
+            class="candidate-section"
+            aria-labelledby="evaluation-heading"
+          >
+            <h3
+              id="evaluation-heading"
+              class="section-title"
+            >
+              Evaluation 候选
+            </h3>
+            <AsyncStateView
+              :state="authoring.evaluationCandidate"
+              @retry="authoring.load"
+            >
               <template #success="{ data: view }">
                 <article class="candidate-card md-card">
                   <dl class="meta-grid">
-                    <dt>候选 ID</dt>
-                    <dd><code>{{ view.candidate.id }}</code></dd>
-                    <dt>Revision</dt>
-                    <dd>rev-{{ view.candidate.revision }}</dd>
                     <dt>名称</dt>
-                    <dd>{{ view.candidate.spec.metadata.name }} · {{ view.candidate.spec.metadata.version }}</dd>
-                    <dt>步骤</dt>
+                    <dd><strong>{{ view.candidate.spec.metadata.name }}</strong> · {{ view.candidate.spec.metadata.version }}</dd>
+                    <dt>评测步骤</dt>
                     <dd>{{ view.candidate.spec.spec.steps.length }} 个</dd>
-                    <dt>候选审批记录</dt>
-                    <dd>{{ view.approvals.length }} 条（只读）</dd>
+                    <dt>候选状态</dt>
+                    <dd>{{ view.approvals.length > 0 ? '已有审批记录' : '待本次批准' }}</dd>
                   </dl>
+                  <details class="technical-details">
+                    <summary>查看候选技术详情</summary>
+                    <dl class="meta-grid">
+                      <dt>候选 ID</dt>
+                      <dd><code>{{ view.candidate.id }}</code></dd>
+                      <dt>Candidate Revision</dt>
+                      <dd><code>rev-{{ view.candidate.revision }}</code></dd>
+                      <dt>策略 Revision</dt>
+                      <dd><code>rev-{{ view.candidate.policyRevision }}</code></dd>
+                      <dt>信任 Revision</dt>
+                      <dd><code>rev-{{ view.trustRevision }}</code></dd>
+                    </dl>
+                  </details>
                   <details class="spec-details">
                     <summary>查看 Evaluation 配置</summary>
                     <pre>{{ formatJson(view.candidate.spec) }}</pre>
@@ -113,33 +246,65 @@
                 </article>
               </template>
             </AsyncStateView>
+            <p
+              v-if="stateGuidance(authoring.evaluationCandidate)"
+              class="diagnostic-action"
+              role="status"
+            >
+              建议：{{ stateGuidance(authoring.evaluationCandidate) }}
+            </p>
           </section>
         </div>
 
-        <section class="package-section" aria-labelledby="package-heading">
-          <h3 id="package-heading" class="section-title">材料包与批准</h3>
-          <AsyncStateView :state="authoring.problemPackage" @retry="authoring.load">
+        <section
+          class="package-section"
+          aria-labelledby="package-heading"
+        >
+          <h3
+            id="package-heading"
+            class="section-title"
+          >
+            材料包与批准
+          </h3>
+          <AsyncStateView
+            :state="authoring.problemPackage"
+            @retry="authoring.load"
+          >
             <template #success="{ data: pkg }">
               <article class="approval-card md-card">
                 <dl class="meta-grid">
-                  <dt>Package ID</dt>
-                  <dd><code>{{ pkg.id }}</code></dd>
-                  <dt>Package Revision</dt>
-                  <dd>rev-{{ pkg.revision }}</dd>
                   <dt>文件数量</dt>
                   <dd>{{ pkg.files.length }}</dd>
                   <dt>完成时间</dt>
                   <dd>{{ formatTimestamp(pkg.completedAt) }}</dd>
                 </dl>
 
-                <div v-if="authoring.imageArtifact" class="bound-artifact">
-                  <h4>将绑定的完整镜像身份</h4>
+                <details class="technical-details">
+                  <summary>查看材料包引用</summary>
                   <dl class="meta-grid">
-                    <template v-for="entry in artifactEntries(authoring.imageArtifact)" :key="entry.label">
-                      <dt>{{ entry.label }}</dt>
-                      <dd><code>{{ entry.value }}</code></dd>
-                    </template>
+                    <dt>Package ID</dt>
+                    <dd><code>{{ pkg.id }}</code></dd>
+                    <dt>Package Revision</dt>
+                    <dd><code>rev-{{ pkg.revision }}</code></dd>
                   </dl>
+                </details>
+
+                <div
+                  v-if="authoring.imageArtifact"
+                  class="bound-artifact"
+                >
+                  <details class="technical-details">
+                    <summary>查看将绑定的 immutable 运行时身份</summary>
+                    <dl class="meta-grid">
+                      <template
+                        v-for="entry in artifactEntries(authoring.imageArtifact)"
+                        :key="entry.label"
+                      >
+                        <dt>{{ entry.label }}</dt>
+                        <dd><code>{{ entry.value }}</code></dd>
+                      </template>
+                    </dl>
+                  </details>
                 </div>
 
                 <DiagnosticBanner
@@ -150,45 +315,166 @@
                   severity="error"
                   @retry="authoring.load"
                 />
-                <div v-if="authoring.approval.kind === 'success'" class="approval-success" role="status">
-                  <SvgIcon name="check_circle" size="md" aria-hidden="true" />
-                  <span>完整实验包已批准：<code>{{ authoring.approval.data.id }}</code>（rev-{{ authoring.approval.data.revision }}）</span>
+                <p
+                  v-if="authoring.approval.kind === 'error' && diagnosticAction(authoring.approval.diagnostic.code)"
+                  class="diagnostic-action"
+                  role="status"
+                >
+                  建议：{{ diagnosticAction(authoring.approval.diagnostic.code) }}
+                </p>
+                <div
+                  v-if="authoring.approval.kind === 'success'"
+                  class="approval-success"
+                  role="status"
+                >
+                  <SvgIcon
+                    name="check_circle"
+                    size="md"
+                    aria-hidden="true"
+                  />
+                  <div>
+                    <strong>完整实验包已批准</strong>
+                    <details class="technical-details">
+                      <summary>查看批准记录引用</summary>
+                      <dl class="meta-grid">
+                        <dt>Approval ID</dt>
+                        <dd><code>{{ authoring.approval.data.id }}</code></dd>
+                        <dt>Revision</dt>
+                        <dd><code>rev-{{ authoring.approval.data.revision }}</code></dd>
+                      </dl>
+                    </details>
+                  </div>
                 </div>
 
-                <div v-if="authoring.approval.kind !== 'success'" class="approval-form">
+                <div
+                  v-if="authoring.approval.kind !== 'success'"
+                  class="approval-form"
+                >
                   <label class="confirmation-row">
-                    <input v-model="ownerConfirmed" type="checkbox" />
-                    <span>我已确认材料包、两个候选和镜像身份属于该 Project，并完成了发布前审阅。</span>
+                    <input
+                      v-model="ownerConfirmed"
+                      type="checkbox"
+                    >
+                    <span>我已查看两个真实候选的完整配置，并确认批准当前 Project 的材料包、这两个候选及其 immutable 运行时身份。</span>
                   </label>
                   <label class="reason-field">
                     <span>批准理由（必填，1-500 字）</span>
-                    <textarea v-model="reason" class="reason-input" rows="3" maxlength="500" placeholder="记录本次完整实验包批准的依据" />
+                    <textarea
+                      v-model="reason"
+                      class="reason-input"
+                      rows="3"
+                      maxlength="500"
+                      placeholder="记录本次完整实验包批准的依据"
+                    />
                   </label>
-                  <button type="button" class="filled-button" :disabled="!canSubmit" @click="completeApproval">批准完整实验包</button>
-                  <p v-if="!authoring.canApprove" class="state-note">需要同时加载两个候选、材料包和已解析的运行时镜像身份。</p>
+                  <button
+                    type="button"
+                    class="filled-button"
+                    :disabled="!canSubmit"
+                    @click="completeApproval"
+                  >
+                    批准完整实验包
+                  </button>
+                  <p
+                    v-if="!authoring.canApprove"
+                    class="state-note"
+                  >
+                    需要同时加载两个候选、材料包和已解析的运行时镜像身份，且运行记录必须属于当前项目。
+                  </p>
                 </div>
               </article>
             </template>
           </AsyncStateView>
+          <p
+            v-if="stateGuidance(authoring.problemPackage)"
+            class="diagnostic-action"
+            role="status"
+          >
+            建议：{{ stateGuidance(authoring.problemPackage) }}
+          </p>
         </section>
       </template>
     </AsyncStateView>
+    <p
+      v-if="authoring.run.kind !== 'success' && stateGuidance(authoring.run)"
+      class="diagnostic-action"
+      role="status"
+    >
+      建议：{{ stateGuidance(authoring.run) }}
+    </p>
 
-    <section v-if="authoring.publication.kind !== 'idle'" class="publication-section" aria-labelledby="publication-heading">
-      <h3 id="publication-heading" class="section-title">发布状态</h3>
-      <AsyncStateView :state="authoring.publication" @retry="authoring.loadPublication">
+    <section
+      v-if="authoring.publication.kind !== 'idle'"
+      class="publication-section"
+      aria-labelledby="publication-heading"
+    >
+      <h3
+        id="publication-heading"
+        class="section-title"
+      >
+        发布状态
+      </h3>
+      <AsyncStateView
+        :state="authoring.publication"
+        @retry="authoring.loadPublication"
+      >
         <template #success="{ data }">
-          <div class="publication-status md-card" role="status" :data-status="data.status">
+          <div
+            class="publication-status md-card"
+            role="status"
+            :data-status="data.status"
+          >
             <div class="publication-status__header">
-              <span>Approval <code>{{ data.approval.id }}</code></span>
-              <span class="state-chip" :class="`state-chip--${data.status}`">{{ publicationStateLabel(data.status) }}</span>
+              <span>完整实验包发布</span>
+              <span
+                class="state-chip"
+                :class="`state-chip--${data.status}`"
+              >{{ publicationStateLabel(data.status) }}</span>
             </div>
-            <p v-if="data.diagnosticCode" class="publication-status__diagnostic"><code>{{ data.diagnosticCode }}</code></p>
-            <p v-if="data.status === 'ready'" class="publication-status__detail">
-              Environment Release <code>{{ data.environmentReleaseId }}</code> · Evaluation Release <code>{{ data.evaluationReleaseId }}</code>
+            <p
+              v-if="data.diagnosticCode"
+              class="publication-status__diagnostic"
+            >
+              <code>{{ data.diagnosticCode }}</code>
             </p>
-            <p v-else-if="data.status === 'failed'" class="publication-status__detail">发布未完成，请根据诊断码处理后重新检查。</p>
-            <p v-else class="publication-status__detail">下游发布仍在处理，页面会继续读取服务端状态。</p>
+            <p
+              v-if="data.diagnosticCode && diagnosticAction(data.diagnosticCode)"
+              class="diagnostic-action"
+              role="status"
+            >
+              建议：{{ diagnosticAction(data.diagnosticCode) }}
+            </p>
+            <p
+              v-if="data.status === 'ready'"
+              class="publication-status__detail"
+            >
+              Environment 与 Evaluation 已发布，可以继续配置学生实验。
+            </p>
+            <p
+              v-else-if="data.status === 'failed'"
+              class="publication-status__detail"
+            >
+              发布未完成，请根据诊断码处理后重新检查。
+            </p>
+            <p
+              v-else
+              class="publication-status__detail"
+            >
+              下游发布仍在处理，页面会继续读取服务端状态。
+            </p>
+            <details class="technical-details">
+              <summary>查看发布引用</summary>
+              <dl class="meta-grid">
+                <dt>Approval ID</dt>
+                <dd><code>{{ data.approval.id }}</code></dd>
+                <dt>Environment Release</dt>
+                <dd><code>{{ data.environmentReleaseId ?? '未生成' }}</code></dd>
+                <dt>Evaluation Release</dt>
+                <dd><code>{{ data.evaluationReleaseId ?? '未生成' }}</code></dd>
+                <dt>Evaluation Release Revision</dt>
+                <dd><code>{{ data.evaluationReleaseRevision ?? '未生成' }}</code></dd>
+              </dl>
+            </details>
           </div>
         </template>
       </AsyncStateView>
@@ -213,7 +499,13 @@ import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjects } from '@/composables/useProjects'
 import { useProjectAuthoringApproval } from '@/composables/useProjectAuthoringApproval'
-import type { AuthoringPublicationState, CompleteAuthoringApprovalRequestSchemaImageArtifact, ProjectSchema } from '@/generated/contracts'
+import type {
+  AgentRunSchema,
+  AuthoringPublicationState,
+  CandidateBuildState,
+  CompleteAuthoringApprovalRequestSchemaImageArtifact,
+  ProjectSchema,
+} from '@/generated/contracts'
 
 const route = useRoute()
 const router = useRouter()
@@ -233,11 +525,10 @@ const selectedProjectId = computed({
 const projectId = computed(() => projects.selectedProjectId)
 const runId = computed(() => runIdInput.value.trim() || undefined)
 const authoring = useProjectAuthoringApproval(projectId, runId, approvalId)
+const selectedProjectName = computed(() => projectOptions.value.find((project) => project.id === projectId.value)?.name ?? '当前项目')
 const environmentRuntimeLabel = computed(() => {
   if (authoring.environmentCandidate.kind !== 'success') return '未知'
-  return authoring.environmentCandidate.data.candidate.spec.runtime.kind === 'virtual_machine'
-    ? 'Virtual Machine'
-    : 'Container'
+  return environmentRuntimeLabelFor(authoring.environmentCandidate.data.candidate.spec.runtime.kind)
 })
 
 watch(
@@ -267,6 +558,54 @@ const canSubmit = computed(() => {
 async function completeApproval() {
   if (!canSubmit.value) return
   await authoring.complete(reason.value)
+}
+
+function runStateLabel(state: AgentRunSchema['state']): string {
+  return ({
+    requested: '已提交',
+    running: '运行中',
+    partially_succeeded: '部分完成',
+    succeeded: '已完成',
+    awaiting_approval: '等待批准',
+    failed: '失败',
+    cancelling: '取消中',
+    cancelled: '已取消',
+  } as Record<AgentRunSchema['state'], string>)[state]
+}
+
+function environmentRuntimeLabelFor(kind: 'container' | 'virtual_machine'): string {
+  return kind === 'virtual_machine' ? '虚拟机' : '容器'
+}
+
+function buildStateLabel(state: CandidateBuildState | null | undefined): string {
+  if (!state) return '未提供'
+  return ({ requested: '构建中', succeeded: '构建完成', failed: '构建失败', cancelled: '构建已取消' } as Record<CandidateBuildState, string>)[state]
+}
+
+function diagnosticAction(code: string): string | null {
+  switch (code) {
+    case 'LW_RESOURCE_EXHAUSTED':
+      return 'AI 生成预算可能因输入或输出 token、调用次数达到项目上限而不足；当前诊断未说明具体项，也未提供已用量或上限。请缩短材料后重试，或请管理员检查项目 AI 预算与调用限制。'
+    case 'REVISION_CONFLICT':
+      return '当前审核内容已经变化，请重新加载后确认最新候选和材料包。'
+    case 'LW_ACCESS_DENIED':
+      return '请确认当前账号仍有该项目的教师权限，并从可访问项目重新打开审核。'
+    case 'LW_CANDIDATE_NOT_FOUND':
+      return '候选可能仍在服务端同步，点击重试继续读取；超时后请从材料页重新打开 AgentRun。'
+    case 'PROJECT_RUN_STALE_CONTEXT':
+    case 'PROJECT_APPROVAL_STALE_CONTEXT':
+    case 'UPLOAD_RUN_PACKAGE_MISMATCH':
+      return '当前链接引用了不同项目或材料，请回到材料页重新选择项目和生成任务。'
+    default:
+      return null
+  }
+}
+
+type DiagnosticState = { kind: string; diagnostic?: { code: string } }
+
+function stateGuidance(state: DiagnosticState): string | null {
+  if (!['error', 'blocked', 'timeout', 'conflict', 'unauthorized', 'revoked', 'sse-gap'].includes(state.kind)) return null
+  return state.diagnostic ? diagnosticAction(state.diagnostic.code) : null
 }
 
 function formatJson(value: unknown): string {
@@ -326,6 +665,8 @@ function publicationStateLabel(state: AuthoringPublicationState): string {
 .meta-grid { display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); gap: 9px 16px; margin: 0; }
 .meta-grid dt { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
 .meta-grid dd { min-width: 0; margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); overflow-wrap: anywhere; }
+.technical-details { margin-top: 14px; }
+.technical-details summary { color: var(--md-sys-color-primary); cursor: pointer; font: var(--md-sys-label-large); }
 .spec-details { margin-top: 16px; }
 .spec-details summary { color: var(--md-sys-color-primary); cursor: pointer; font: var(--md-sys-label-large); }
 .spec-details pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-small); white-space: pre-wrap; }
@@ -337,6 +678,7 @@ function publicationStateLabel(state: AuthoringPublicationState): string {
 .reason-input { box-sizing: border-box; width: 100%; padding: 10px 12px; resize: vertical; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .approval-success { display: flex; align-items: center; gap: 10px; margin-top: 18px; padding: 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); font: var(--md-sys-body-medium); }
 .state-note { margin: 12px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.diagnostic-action { margin: 8px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .publication-section { display: flex; flex-direction: column; gap: 12px; }
 .publication-status { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); background: var(--md-sys-color-surface-container-low); }
 .publication-status__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

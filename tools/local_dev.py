@@ -16,9 +16,18 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit
+
+import local_dev_build
+
+try:
+    from dotenv.parser import parse_stream
+except ImportError:  # pragma: no cover - reported when a provider is requested
+    parse_stream = None  # type: ignore[assignment]
 
 try:
     import psutil
@@ -45,10 +54,10 @@ ACCESS_PORT = "38081"
 WEB_PORT = "38082"
 RUN_ID = "bootstrap"
 KUBERNETES_OWNER_LABEL_VALUE = "tools.local_dev.py"
-# The local Kind profile points every enabled workload at the local Keycloak
-# issuer through the portal edge. Keep this list aligned with
-# values.local-kind.yaml: the disabled BuildKit and KubeVirt executors must not
-# receive an allowance that cannot be exercised by the disposable stack.
+# The local Kind profile points every OIDC caller at the local Keycloak issuer
+# through the portal edge. Keep this list limited to workloads that actually
+# use that path; the BuildKit and KubeVirt executors do not call the portal,
+# whether the real BuildKit path or the fixture profile is selected.
 LOCAL_OIDC_CALLER_WORKLOADS = (
     "control-service",
     "access-service",
@@ -63,6 +72,12 @@ LABEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$")
 DNS_SUBDOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 REGISTRY_IMAGE = "docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e"
 KIND_IMAGE = "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
+KIND_CONTAINERD_CONFIG = "/etc/containerd/config.toml"
+KIND_CONTAINERD_BASE_RUNTIME_SPEC = "/etc/containerd/cri-base.json"
+KIND_OJ_RUNTIME_SPEC = "/etc/containerd/labweaver-oj-base.json"
+KIND_OJ_RUNTIME_HANDLER = "labweaver-oj"
+KIND_OJ_RUNTIME_CLASS = "labweaver-oj"
+KIND_OJ_PIDS_LIMIT = 128
 POSTGRES_IMAGE = "docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be"
 NATS_IMAGE = "docker.io/library/nats:2.14.1-scratch@sha256:4223c8fa116891628611e154fb66570cad599d8f8b3b131b82caf10f378e9dcf"
 NATS_BOX_IMAGE = "docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6"
@@ -70,6 +85,11 @@ MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d
 KEYCLOAK_IMAGE = "docker.io/keycloak/keycloak:26.7.0@sha256:1362a9d9f13ab325231ea133610cc905e12805804abc7acbef552dd613720aa6"
 CLAUDE_CODE_VERSION = "2.1.215"
 CLAUDE_CODE_LINUX_X64_SHA512 = "cf00de4e2b500f7bf4fc6c57de19753d3639e23ee2177fe103d40614cf79ca29ddf61064bcbcafe9a53d59d1fbd3cf6cdc02027c8ea167be00157b41469e9bcd"
+PROVIDER_ENVIRONMENT_KEYS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+)
 
 class LocalDevError(RuntimeError):
     pass
@@ -77,11 +97,35 @@ class LocalDevError(RuntimeError):
 def fail(message: str) -> None:
     raise LocalDevError(message)
 
-def run(argv: list[str], *, input_text: str | None = None, capture: bool = False,
-        check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    argv: list[str],
+    *,
+    input_text: str | None = None,
+    input_bytes: bytes | None = None,
+    capture: bool = False,
+    check: bool = True,
+) -> subprocess.CompletedProcess[Any]:
+    if input_text is not None and input_bytes is not None:
+        fail("run accepts either input_text or input_bytes, not both")
     try:
-        result = subprocess.run(argv, cwd=ROOT, input=input_text, text=True,
-                                capture_output=capture, check=False)
+        if input_bytes is not None:
+            result = subprocess.run(
+                argv,
+                cwd=ROOT,
+                input=input_bytes,
+                text=False,
+                capture_output=capture,
+                check=False,
+            )
+        else:
+            result = subprocess.run(
+                argv,
+                cwd=ROOT,
+                input=input_text,
+                text=True,
+                capture_output=capture,
+                check=False,
+            )
     except FileNotFoundError:
         fail("required executable is unavailable: " + argv[0])
     if check and result.returncode:
@@ -107,6 +151,100 @@ def load_yaml(path: Path) -> Any:
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         fail(f"cannot read YAML configuration: {path}: {error}")
 
+
+def _provider_path_label(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT.resolve()))
+    except ValueError:
+        return path.name or "provider environment file"
+
+
+def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:
+    """Validate and copy the exact provider environment passed to the worker."""
+
+    unsupported = sorted(set(values) - set(PROVIDER_ENVIRONMENT_KEYS))
+    if unsupported:
+        fail("provider configuration has unsupported fields: " + ", ".join(unsupported))
+    normalized: dict[str, str] = {}
+    for key in PROVIDER_ENVIRONMENT_KEYS:
+        value = values.get(key)
+        if not isinstance(value, str) or not value.strip():
+            fail(f"provider configuration is missing a non-empty {key}")
+        normalized[key] = value.strip()
+    try:
+        base_url = urlsplit(normalized["ANTHROPIC_BASE_URL"])
+        # Accessing .port is required: urlsplit defers malformed port validation
+        # (for example, a non-numeric or out-of-range port) until this property
+        # is read.
+        parsed_port = base_url.port
+    except ValueError:
+        fail("provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL")
+    if (
+        base_url.scheme != "https"
+        or not base_url.netloc
+        or not base_url.hostname
+        or (base_url.netloc.endswith(":") and parsed_port is None)
+        or any(character.isspace() for character in normalized["ANTHROPIC_BASE_URL"])
+    ):
+        fail("provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL")
+    if base_url.username or base_url.password or base_url.query or base_url.fragment:
+        fail("provider configuration ANTHROPIC_BASE_URL must not contain credentials or query data")
+    if any(character.isspace() for character in normalized["ANTHROPIC_MODEL"]):
+        fail("provider configuration ANTHROPIC_MODEL must not contain whitespace")
+    if any(character in normalized["ANTHROPIC_AUTH_TOKEN"] for character in "\r\n"):
+        fail("provider configuration ANTHROPIC_AUTH_TOKEN must be a single line")
+    return normalized
+
+
+def load_provider_environment(path: Path) -> dict[str, str]:
+    """Read the three standard provider fields without consulting ambient env."""
+
+    if parse_stream is None:
+        fail("missing Python dependency: python-dotenv; install tools/requirements-local-dev.txt")
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            parsed = tuple(parse_stream(stream))
+    except (OSError, UnicodeError) as error:
+        # Do not include the exception text: OSError messages can contain the
+        # caller's absolute path and UnicodeError messages can echo file data.
+        fail(
+            f"cannot read provider environment {_provider_path_label(path)}: "
+            f"{type(error).__name__}"
+        )
+    if any(binding.error for binding in parsed):
+        fail("provider configuration contains an invalid dotenv entry")
+    values = {
+        binding.key: binding.value
+        for binding in parsed
+        if binding.key is not None
+    }
+    return validate_provider_environment(values)
+
+
+def fixture_provider_environment() -> dict[str, str]:
+    """Return non-secret values for the explicit local Claude fixture only."""
+
+    return validate_provider_environment(
+        {
+            "ANTHROPIC_BASE_URL": "https://local-claude-fixture.invalid/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "local-claude-fixture-token",
+            "ANTHROPIC_MODEL": "local-claude-fixture",
+        }
+    )
+
+
+def resolve_provider_environment(
+    *, external_fixtures: bool, provider_env: Path | None
+) -> dict[str, str]:
+    """Resolve one explicit provider source before any cluster side effect."""
+
+    if external_fixtures:
+        if provider_env is not None:
+            fail("--provider-env cannot be combined with --external-fixtures")
+        return fixture_provider_environment()
+    return load_provider_environment(provider_env or ROOT / ".env")
+
+
 def write(path: Path, data: bytes | str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data.encode() if isinstance(data, str) else data)
@@ -114,6 +252,46 @@ def write(path: Path, data: bytes | str, mode: int = 0o600) -> None:
         os.chmod(path, mode)
     except OSError:
         pass
+
+
+def _read_real_build_file(
+    provider: local_dev_build.RealBuildProvider,
+    path: Path,
+    label: str,
+) -> bytes:
+    """Read a provider-owned private file without exposing its path or data."""
+
+    try:
+        payload = path.read_bytes()
+    except (OSError, UnicodeError) as error:
+        fail(f"real build provider {label} is unavailable: {type(error).__name__}")
+    if not payload:
+        fail(f"real build provider {label} is empty")
+    return payload
+
+
+def real_build_helm_values(
+    provider: local_dev_build.RealBuildProvider,
+) -> dict[str, Any]:
+    """Return the dynamic Helm overlay for the run-owned real provider."""
+
+    if not re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", provider.registry_service_ip):
+        fail("real build provider returned an invalid Harbor service address")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", provider.registry_host):
+        fail("real build provider returned an invalid Harbor hostname")
+    return {
+        "workloads": {
+            "build-executor": {
+                "enabled": True,
+                "hostAliases": [
+                    {
+                        "ip": provider.registry_service_ip,
+                        "hostnames": [provider.registry_host],
+                    }
+                ],
+            }
+        }
+    }
 
 def digest(path: Path) -> str:
     h = hashlib.sha256()
@@ -505,6 +683,48 @@ def local_platform_defaults() -> dict[str, Any]:
     return defaults
 
 
+def local_minio_buckets() -> tuple[str, ...]:
+    """Return every MinIO bucket declared by the local platform configuration."""
+
+    defaults = local_platform_defaults()
+    configured: list[tuple[str, Any]] = [
+        (
+            "platform application default",
+            defaults.get("platform_application_minio_bucket"),
+        ),
+    ]
+    for path in (
+        ROOT / "deploy" / "config" / "evaluation-service.yaml.example",
+        ROOT / "deploy" / "config" / "evaluation-freeze-worker.yaml.example",
+    ):
+        document = load_yaml(path)
+        if not isinstance(document, dict):
+            fail(f"{path.name} must be a YAML object")
+        object_store = document.get("objectStore")
+        if not isinstance(object_store, dict):
+            fail(f"{path.name} has no objectStore mapping")
+        configured.append((f"{path.name} objectStore.bucket", object_store.get("bucket")))
+        if path.name == "evaluation-service.yaml.example":
+            package_object_store = document.get("packageObjectStore")
+            if not isinstance(package_object_store, dict):
+                fail(f"{path.name} has no packageObjectStore mapping")
+            configured.append(
+                (
+                    f"{path.name} packageObjectStore.bucket",
+                    package_object_store.get("bucket"),
+                )
+            )
+
+    buckets: list[str] = []
+    for label, value in configured:
+        if not isinstance(value, str) or not value.strip():
+            fail(f"{label} is missing a non-empty bucket name")
+        bucket = value.strip()
+        if bucket not in buckets:
+            buckets.append(bucket)
+    return tuple(buckets)
+
+
 def _required_private_file(path: Path) -> bytes:
     try:
         value = path.read_bytes()
@@ -766,6 +986,13 @@ def bootstrap_minio_bucket(minio: Any, bucket: str) -> None:
         fail(f"MinIO bucket {bucket} versioning was not enabled: {_command_detail(version)}")
 
 
+def bootstrap_minio_buckets(minio: Any) -> None:
+    """Provision and verify all buckets declared by the local stack."""
+
+    for bucket in local_minio_buckets():
+        bootstrap_minio_bucket(minio, bucket)
+
+
 def bootstrap_nats_and_minio(kubeconfig: Path, foundation: Path) -> None:
     defaults = local_platform_defaults()
     streams = defaults.get("platform_application_nats_streams")
@@ -933,8 +1160,7 @@ def bootstrap_nats_and_minio(kubeconfig: Path, foundation: Path) -> None:
         wait_command(kubeconfig, ["-n", DATA_NAMESPACE, "exec", minio_pod, "--",
                                   *minio_admin_command(["ready", "local"])],
                      "MinIO ready endpoint")
-        bucket = str(defaults.get("platform_application_minio_bucket", ""))
-        bootstrap_minio_bucket(minio, bucket)
+        bootstrap_minio_buckets(minio)
     finally:
         delete_admin_pod(kubeconfig, nats_pod)
         delete_admin_pod(kubeconfig, minio_pod)
@@ -1015,6 +1241,8 @@ def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
     write(kind_config, f"""kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: {CLUSTER}\nnodes:\n- role: control-plane\n  image: {KIND_IMAGE}\n""")
     run(["kind", "create", "cluster", "--name", CLUSTER, "--config",
          str(kind_config), "--kubeconfig", str(kubeconfig), "--wait", "120s"])
+    configure_kind_oj_runtime(kubeconfig)
+    configure_kindnet_resources(kubeconfig)
     run(["docker", "run", "-d", "--restart=always", "--name", REGISTRY,
          "--label", f"labweaver.local-dev.run-id={RUN_ID}",
          "--label", "labweaver.local-dev.owner=tools/local_dev.py",
@@ -1078,13 +1306,301 @@ def kind_nodes() -> list[str]:
     return nodes
 
 
-def configure_local_portal_dns(kubeconfig: Path) -> None:
-    """Make the public loopback hostname resolve to the in-cluster portal."""
+def configure_kind_oj_runtime(kubeconfig: Path) -> None:
+    """Install the dedicated process-limited runtime used by OJ Jobs."""
 
-    rewrite = (
-        "rewrite name exact 127.0.0.1.nip.io "
-        "local-dev-portal.labweaver-system.svc.cluster.local"
+    handler_header = (
+        '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.'
+        f"{KIND_OJ_RUNTIME_HANDLER}]"
     )
+    handler_options_header = handler_header[:-1] + ".options]"
+    handler_block = (
+        f"{handler_header}\n"
+        '  runtime_type = "io.containerd.runc.v2"\n'
+        f'  base_runtime_spec = "{KIND_OJ_RUNTIME_SPEC}"\n'
+        f"\n{handler_options_header}\n"
+        "  SystemdCgroup = true\n"
+    )
+    runtime_class = {
+        "apiVersion": "node.k8s.io/v1",
+        "kind": "RuntimeClass",
+        "metadata": {
+            "name": KIND_OJ_RUNTIME_CLASS,
+            "labels": {"labweaver.local-dev.owner": KUBERNETES_OWNER_LABEL_VALUE},
+        },
+        "handler": KIND_OJ_RUNTIME_HANDLER,
+    }
+
+    for node in kind_nodes():
+        base_spec_result = run(
+            ["docker", "exec", node, "cat", KIND_CONTAINERD_BASE_RUNTIME_SPEC],
+            capture=True,
+        )
+        raw_base_spec = base_spec_result.stdout
+        if not isinstance(raw_base_spec, str):
+            fail("Kind node containerd base runtime spec was not returned as text")
+        try:
+            base_spec = json.loads(raw_base_spec)
+        except json.JSONDecodeError as error:
+            fail(f"Kind node containerd base runtime spec is invalid JSON: {error.msg}")
+        if not isinstance(base_spec, dict):
+            fail("Kind node containerd base runtime spec must be a JSON object")
+        linux = base_spec.get("linux")
+        if not isinstance(linux, dict):
+            fail("Kind node containerd base runtime spec has no linux object")
+        resources = linux.get("resources")
+        if not isinstance(resources, dict):
+            fail("Kind node containerd base runtime spec has invalid linux.resources")
+        pids = resources.get("pids")
+        if pids is None:
+            pids = {}
+            resources["pids"] = pids
+        if not isinstance(pids, dict):
+            fail("Kind node containerd base runtime spec has invalid linux.resources.pids")
+        pids["limit"] = KIND_OJ_PIDS_LIMIT
+        runtime_spec_payload = (json.dumps(base_spec, indent=2) + "\n").encode("utf-8")
+        run(
+            [
+                "docker",
+                "exec",
+                "-i",
+                node,
+                "sh",
+                "-c",
+                f"cat > {KIND_OJ_RUNTIME_SPEC}",
+            ],
+            input_bytes=runtime_spec_payload,
+        )
+
+        config_result = run(
+            ["docker", "exec", node, "cat", KIND_CONTAINERD_CONFIG],
+            capture=True,
+        )
+        raw_config = config_result.stdout
+        if not isinstance(raw_config, str):
+            fail("Kind node containerd config was not returned as text")
+        try:
+            parsed_config = tomllib.loads(raw_config)
+        except tomllib.TOMLDecodeError as error:
+            fail(f"Kind node containerd config is invalid TOML: {error.msg}")
+        plugins = parsed_config.get("plugins")
+        cri_plugin = plugins.get("io.containerd.grpc.v1.cri") if isinstance(plugins, dict) else None
+        containerd_plugin = cri_plugin.get("containerd") if isinstance(cri_plugin, dict) else None
+        runtimes = containerd_plugin.get("runtimes") if isinstance(containerd_plugin, dict) else None
+        if not isinstance(runtimes, dict):
+            fail("Kind node containerd config has no CRI runtime table")
+        existing_handler = runtimes.get(KIND_OJ_RUNTIME_HANDLER)
+        if existing_handler is None:
+            config_payload = (raw_config.rstrip("\n") + "\n\n" + handler_block).encode("utf-8")
+            run(
+                [
+                    "docker",
+                    "exec",
+                    "-i",
+                    node,
+                    "sh",
+                    "-c",
+                    f"cat > {KIND_CONTAINERD_CONFIG}",
+                ],
+                input_bytes=config_payload,
+            )
+        else:
+            options = existing_handler.get("options") if isinstance(existing_handler, dict) else None
+            if (
+                not isinstance(existing_handler, dict)
+                or existing_handler.get("runtime_type") != "io.containerd.runc.v2"
+                or existing_handler.get("base_runtime_spec") != KIND_OJ_RUNTIME_SPEC
+                or not isinstance(options, dict)
+                or options.get("SystemdCgroup") is not True
+            ):
+                fail("Kind node containerd OJ runtime handler has unexpected settings")
+        run(["docker", "exec", node, "systemctl", "restart", "containerd"])
+
+    apply(kubeconfig, [runtime_class])
+
+
+def configure_kindnet_resources(kubeconfig: Path) -> None:
+    """Give the owned Kind network-policy worker enough CPU and memory."""
+
+    resources = {
+        "requests": {"cpu": "500m", "memory": "128Mi"},
+        "limits": {"cpu": "500m", "memory": "128Mi"},
+    }
+    patch = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{"name": "kindnet-cni", "resources": resources}]
+                }
+            }
+        }
+    }
+    kubectl(
+        kubeconfig,
+        [
+            "-n",
+            "kube-system",
+            "patch",
+            "daemonset/kindnet",
+            "--type=strategic",
+            "--patch",
+            json.dumps(patch, sort_keys=True),
+        ],
+    )
+    wait_rollout(kubeconfig, "daemonset", "kindnet", "kube-system")
+
+
+def configure_kind_harbor_trust(
+    provider: local_dev_build.RealBuildProvider,
+) -> None:
+    """Teach each Kind node to pull from Harbor and restore its name on node boot.
+
+    Docker regenerates a node container's ``/etc/hosts`` file whenever that
+    container starts.  The node-local systemd unit below therefore restores
+    this one containerd mapping before containerd or kubelet starts, while
+    keeping the Harbor hostname and CA-based TLS verification unchanged.
+    """
+
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", provider.registry_host):
+        fail("real build provider returned an invalid Harbor hostname")
+    if not re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", provider.registry_service_ip):
+        fail("real build provider returned an invalid Harbor service address")
+    certificate = provider.harbor_ca_file
+    if not certificate.is_file():
+        fail("real build provider did not return a Harbor CA file")
+    nodes = kind_nodes()
+    certificate_path = f"/etc/containerd/certs.d/{provider.registry_host}/ca.crt"
+    hosts_path = f"/etc/containerd/certs.d/{provider.registry_host}/hosts.toml"
+    hosts_dir = hosts_path.rsplit("/", 1)[0]
+    hosts_toml = (
+        f'server = "https://{provider.registry_host}"\n\n'
+        f'[host."https://{provider.registry_host}"]\n'
+        '  capabilities = ["pull", "resolve"]\n'
+        f'  ca = ["{certificate_path}"]\n'
+    )
+    hosts_restore_path = "/usr/local/sbin/labweaver-restore-harbor-host"
+    hosts_unit_name = "labweaver-harbor-hosts.service"
+    hosts_unit_path = f"/etc/systemd/system/{hosts_unit_name}"
+    hosts_restore_script = _kind_harbor_hosts_restore_script(
+        provider.registry_host, provider.registry_service_ip
+    )
+    hosts_unit = _kind_harbor_hosts_unit(hosts_restore_path)
+    for node in nodes:
+        run(["docker", "exec", node, "mkdir", "-p", hosts_dir])
+        run(["docker", "cp", str(certificate), f"{node}:{certificate_path}"])
+        run(
+            ["docker", "exec", "-i", node, "sh", "-c", f"cat > {hosts_path}"],
+            input_bytes=hosts_toml.encode("utf-8"),
+        )
+        run(
+            ["docker", "exec", "-i", node, "sh", "-c", f"cat > {hosts_restore_path}"],
+            input_bytes=hosts_restore_script.encode("utf-8"),
+        )
+        run(["docker", "exec", node, "chmod", "0755", hosts_restore_path])
+        run(
+            ["docker", "exec", "-i", node, "sh", "-c", f"cat > {hosts_unit_path}"],
+            input_bytes=hosts_unit.encode("utf-8"),
+        )
+        run(["docker", "exec", node, "chmod", "0644", hosts_unit_path])
+        run(
+            [
+                "docker",
+                "exec",
+                node,
+                "chown",
+                "root:root",
+                hosts_restore_path,
+                hosts_unit_path,
+            ]
+        )
+        run(["docker", "exec", node, "systemctl", "daemon-reload"])
+        # This waits for the oneshot to finish, so a read-only node filesystem
+        # or failed in-place update aborts local bootstrap immediately.
+        run(["docker", "exec", node, "systemctl", "enable", "--now", hosts_unit_name])
+
+
+def _kind_harbor_hosts_restore_script(registry_host: str, registry_ip: str) -> str:
+    """Render the node-local in-place ``/etc/hosts`` repair command."""
+
+    # The caller validates both values before rendering.  Keep the values in
+    # shell variables so the awk program receives them without interpolation.
+    return f"""#!/bin/sh
+set -eu
+registry_ip='{registry_ip}'
+registry_host='{registry_host}'
+temporary_file=$(mktemp /run/labweaver-harbor-hosts.XXXXXX)
+trap 'rm -f "$temporary_file"' 0
+awk -v registry_ip="$registry_ip" -v registry_host="$registry_host" '
+$1 ~ /^#/ {{ print; next }}
+{{
+  comment = 0
+  for (i = 1; i <= NF; i++) {{
+    if (substr($i, 1, 1) == "#") {{
+      comment = i
+      break
+    }}
+  }}
+  field_end = comment ? comment - 1 : NF
+  matched = 0
+  for (i = 2; i <= field_end; i++) {{
+    if ($i == registry_host) {{
+      matched = 1
+      break
+    }}
+  }}
+  if (!matched) {{
+    print
+    next
+  }}
+  line = $1
+  kept_aliases = 0
+  for (i = 2; i <= field_end; i++) {{
+    if ($i == registry_host) continue
+    kept_aliases++
+    line = line " " $i
+  }}
+  if (kept_aliases > 0) {{
+    if (comment) {{
+      comment_text = $comment
+      for (i = comment + 1; i <= NF; i++) comment_text = comment_text " " $i
+      print line " " comment_text
+    }} else print line
+  }} else if (comment) {{
+    comment_text = $comment
+    for (i = comment + 1; i <= NF; i++) comment_text = comment_text " " $i
+    print comment_text
+  }}
+}}
+END {{ print registry_ip " " registry_host }}
+' /etc/hosts > "$temporary_file"
+# /etc/hosts can be a Docker-managed mount; truncate it through the mount
+# instead of renaming a replacement file over the mount point.
+cat "$temporary_file" > /etc/hosts
+"""
+
+
+def _kind_harbor_hosts_unit(restore_script_path: str) -> str:
+    """Render the systemd unit that restores Harbor resolution before pulls."""
+
+    return f"""[Unit]
+Description=Restore the local LabWeaver Harbor host mapping
+After=local-fs.target
+Before=containerd.service kubelet.service
+
+[Service]
+Type=oneshot
+ExecStart={restore_script_path}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _configure_local_dns_rewrites(
+    kubeconfig: Path, rewrites: Iterable[tuple[str, str]]
+) -> None:
+    """Install run-owned CoreDNS rewrites used by local in-cluster clients."""
+
     current = kubectl(kubeconfig, ["-n", "kube-system", "get", "configmap", "coredns",
                                    "-o", "json"], capture=True)
     try:
@@ -1097,14 +1613,17 @@ def configure_local_portal_dns(kubeconfig: Path) -> None:
     corefile = data.get("Corefile")
     if not isinstance(corefile, str) or not corefile.strip():
         fail("Kind CoreDNS ConfigMap has no Corefile")
-    if rewrite not in corefile.splitlines():
+    required = [f"rewrite name exact {source} {target}" for source, target in rewrites]
+    missing = [rewrite for rewrite in required if rewrite not in corefile.splitlines()]
+    if missing:
         lines = corefile.splitlines()
         try:
             kubernetes_index = next(i for i, line in enumerate(lines)
                                     if line.strip().startswith("kubernetes cluster.local"))
         except StopIteration:
             fail("Kind CoreDNS Corefile has no kubernetes plugin")
-        lines.insert(kubernetes_index, f"    {rewrite}")
+        for rewrite in reversed(missing):
+            lines.insert(kubernetes_index, f"    {rewrite}")
         apply(kubeconfig, [config("coredns", "kube-system", {
             "Corefile": "\n".join(lines) + "\n",
             **{key: value for key, value in data.items() if key != "Corefile"},
@@ -1112,6 +1631,163 @@ def configure_local_portal_dns(kubeconfig: Path) -> None:
         kubectl(kubeconfig, ["-n", "kube-system", "rollout", "restart",
                              "deployment/coredns"])
         wait_rollout(kubeconfig, "deployment", "coredns", "kube-system")
+
+
+def configure_local_portal_dns(kubeconfig: Path) -> None:
+    """Make the public loopback hostname resolve to the in-cluster portal."""
+
+    _configure_local_dns_rewrites(
+        kubeconfig,
+        ((
+            "127.0.0.1.nip.io",
+            "local-dev-portal.labweaver-system.svc.cluster.local",
+        ),),
+    )
+
+
+def configure_local_harbor_dns(kubeconfig: Path) -> None:
+    """Make the deployment-owned Harbor name resolve inside local workloads."""
+
+    _configure_local_dns_rewrites(
+        kubeconfig,
+        (("harbor.lab.lan", "harbor.harbor.svc.cluster.local"),),
+    )
+
+
+def bootstrap_evaluation_runner_resources(
+    kubeconfig: Path,
+    app_input: Path,
+    registry_pull_config: Path,
+) -> None:
+    """Provision the permanent evaluation runner objects from final config.
+
+    Kindnet records these policies but does not enforce them; the local stack
+    still creates the same required objects and leaves enforcement to a policy
+    capable cluster plugin.
+    """
+
+    configuration_path = app_input / "configmaps" / "evaluation-service-config" / "config.yaml"
+    configuration = load_yaml(configuration_path)
+    if not isinstance(configuration, dict):
+        fail("local evaluation service configuration must be a mapping")
+    execution = configuration.get("execution")
+    if not isinstance(execution, dict):
+        fail("local evaluation service configuration has no execution mapping")
+
+    def required_name(key: str) -> str:
+        value = execution.get(key)
+        if (
+            not isinstance(value, str)
+            or DNS_SUBDOMAIN_LABEL_PATTERN.fullmatch(value) is None
+            or len(value) > 63
+        ):
+            fail(f"local evaluation execution.{key} must be a DNS label")
+        return value
+
+    runner_namespace = required_name("runnerNamespace")
+    oj_service_account = required_name("ojServiceAccountName")
+    ansible_probe_service_account = required_name("ansibleProbeServiceAccountName")
+    image_pull_secret = required_name("imagePullSecretName")
+    try:
+        pull_config = registry_pull_config.read_bytes()
+    except (OSError, UnicodeError) as error:
+        fail(f"local evaluation image pull configuration is unavailable: {type(error).__name__}")
+    if not pull_config.strip():
+        fail("local evaluation image pull configuration is empty")
+    try:
+        pull_document = json.loads(pull_config)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        fail("local evaluation image pull configuration is invalid JSON")
+    if (
+        not isinstance(pull_document, dict)
+        or not isinstance(pull_document.get("auths"), dict)
+        or not pull_document["auths"]
+    ):
+        fail("local evaluation image pull configuration has no auths")
+
+    policy_labels = {
+        "app.kubernetes.io/part-of": "labweaver",
+        "app.kubernetes.io/managed-by": "local-dev",
+    }
+    objects: list[dict[str, Any]] = [
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": runner_namespace,
+                "labels": {
+                    "app.kubernetes.io/part-of": "labweaver",
+                    "labweaver.io/managed": "true",
+                    "pod-security.kubernetes.io/enforce": "restricted",
+                    "pod-security.kubernetes.io/audit": "restricted",
+                    "pod-security.kubernetes.io/warn": "restricted",
+                },
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": "oj-runner-default-deny",
+                "namespace": runner_namespace,
+                "labels": policy_labels,
+            },
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [],
+                "egress": [],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": "ansible-probe-default-deny",
+                "namespace": runner_namespace,
+                "labels": policy_labels,
+            },
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [],
+                "egress": [],
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {
+                "name": oj_service_account,
+                "namespace": runner_namespace,
+                "labels": policy_labels,
+            },
+            "automountServiceAccountToken": False,
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {
+                "name": ansible_probe_service_account,
+                "namespace": runner_namespace,
+                "labels": policy_labels,
+            },
+            "automountServiceAccountToken": False,
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": image_pull_secret,
+                "namespace": runner_namespace,
+                "labels": policy_labels,
+            },
+            "type": "kubernetes.io/dockerconfigjson",
+            "data": {".dockerconfigjson": encode(pull_config)},
+        },
+    ]
+    apply(kubeconfig, objects)
+
 
 def foundation_objects(foundation: Path) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
@@ -1172,6 +1848,7 @@ def start_foundation(kubeconfig: Path, foundation: Path, work: Path,
         kubectl(kubeconfig, ["create", "namespace", namespace], check=False)
     kubectl(kubeconfig, ["label", "namespace", DATA_NAMESPACE,
                          "labweaver.io/infrastructure=true", "--overwrite"], check=False)
+    storage_class_name, _ = local_kind_workspace_configuration()
     objects = foundation_objects(foundation)
     if registry_ip is not None:
         objects = local_registry_objects(registry_ip) + objects
@@ -1390,9 +2067,20 @@ def start_foundation(kubeconfig: Path, foundation: Path, work: Path,
                        config("keycloak-realm", IDENTITY_NAMESPACE,
                               {"workloads-realm.json":json.dumps(realm)})])
     apply(kubeconfig, [
+      # `start-dev` stores its development H2 database under /opt/keycloak/data.
+      # Keep one writer on the local RWO volume while retaining the disposable
+      # realm file as the first-start import source.
+      {"apiVersion":"v1","kind":"PersistentVolumeClaim",
+       "metadata":{"name":"keycloak-data","namespace":IDENTITY_NAMESPACE},
+       "spec":{"accessModes":["ReadWriteOnce"],"storageClassName":storage_class_name,
+               "resources":{"requests":{"storage":"1Gi"}}}},
       {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"keycloak","namespace":IDENTITY_NAMESPACE},
-       "spec":{"replicas":1,"selector":{"matchLabels":{"app":"keycloak"}},"template":{"metadata":{"labels":{"app":"keycloak"}},
-       "spec":{"containers":[{"name":"keycloak","image":KEYCLOAK_IMAGE,
+       "spec":{"replicas":1,"strategy":{"type":"Recreate"},
+               "selector":{"matchLabels":{"app":"keycloak"}},"template":{"metadata":{"labels":{"app":"keycloak"}},
+       "spec":{"securityContext":{"runAsNonRoot":True,"fsGroup":1000,
+                                    "fsGroupChangePolicy":"OnRootMismatch",
+                                    "seccompProfile":{"type":"RuntimeDefault"}},
+       "containers":[{"name":"keycloak","image":KEYCLOAK_IMAGE,
        "args":["start-dev","--https-port=8443","--http-enabled=false","--hostname-strict=true",
                f"--hostname={portal_origin}/identity","--import-realm"],
        "env":[{"name":"KEYCLOAK_ADMIN","valueFrom":{"secretKeyRef":{"name":"keycloak-admin","key":"username"}}},
@@ -1412,13 +2100,17 @@ def start_foundation(kubeconfig: Path, foundation: Path, work: Path,
                         "periodSeconds":2,"failureThreshold":60},
        "readinessProbe":{"httpGet":{"path":"/health/ready","port":"management"},
                           "periodSeconds":2,"failureThreshold":30},
-       "livenessProbe":{"httpGet":{"path":"/health/live","port":"management"},
-                         "periodSeconds":10,"failureThreshold":6},
+        "livenessProbe":{"httpGet":{"path":"/health/live","port":"management"},
+                          "periodSeconds":10,"failureThreshold":6},
+        "securityContext":{"runAsUser":1000,"allowPrivilegeEscalation":False,
+                            "capabilities":{"drop":["ALL"]}},
        "volumeMounts":[
-       {"name":"tls","mountPath":"/opt/keycloak/conf/tls.crt","subPath":"tls.crt","readOnly":True},
-       {"name":"tls","mountPath":"/opt/keycloak/conf/tls.key","subPath":"tls.key","readOnly":True},
-       {"name":"realm","mountPath":"/opt/keycloak/data/import/workloads-realm.json","subPath":"workloads-realm.json","readOnly":True}]}],
-       "volumes":[{"name":"tls","secret":{"secretName":"keycloak-tls"}},
+        {"name":"data","mountPath":"/opt/keycloak/data"},
+        {"name":"tls","mountPath":"/opt/keycloak/conf/tls.crt","subPath":"tls.crt","readOnly":True},
+        {"name":"tls","mountPath":"/opt/keycloak/conf/tls.key","subPath":"tls.key","readOnly":True},
+        {"name":"realm","mountPath":"/opt/keycloak/data/import/workloads-realm.json","subPath":"workloads-realm.json","readOnly":True}]}],
+       "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"keycloak-data"}},
+                  {"name":"tls","secret":{"secretName":"keycloak-tls"}},
        {"name":"realm","configMap":{"name":"keycloak-realm"}}]}}}},
       {"apiVersion":"v1","kind":"Service","metadata":{"name":"keycloak","namespace":IDENTITY_NAMESPACE},
        "spec":{"selector":{"app":"keycloak"},"ports":[{"name":"https","port":8443,"targetPort":"https"},
@@ -1606,7 +2298,7 @@ def build_work_runtime_fixture() -> str:
     return f"{root}/work-runtime-fixture{match.group(0)}"
 
 
-def local_container_image_repository_prefix() -> str:
+def local_container_image_repository_prefix(registry_host: str | None = None) -> str:
     """Resolve the Environment container prefix from the Control deployment config.
 
     Control is the authority that chooses the repository where an approved
@@ -1623,12 +2315,13 @@ def local_container_image_repository_prefix() -> str:
     prefix = container_build.get("outputRepositoryPrefix") if isinstance(container_build, dict) else None
     if not isinstance(prefix, str) or not prefix.strip():
         fail("control deployment configuration has no containerBuild.outputRepositoryPrefix")
+    effective_registry_host = registry_host or f"localhost:{REGISTRY_PORT}"
     local_prefix = (
         prefix.strip()
-        .replace("harbor.example.invalid", f"localhost:{REGISTRY_PORT}")
-        .replace("harbor.internal", f"localhost:{REGISTRY_PORT}")
+        .replace("harbor.example.invalid", effective_registry_host)
+        .replace("harbor.internal", effective_registry_host)
     )
-    if not local_prefix.startswith(f"localhost:{REGISTRY_PORT}/"):
+    if not local_prefix.startswith(f"{effective_registry_host}/"):
         fail("local container repository prefix does not target the run-owned registry")
     return local_prefix
 
@@ -1656,7 +2349,9 @@ def local_kind_workspace_configuration() -> tuple[str, str]:
     return storage_class_name, access_mode
 
 
-def _local_platform_manifest() -> dict[str, Any]:
+def _local_platform_manifest(
+    real_build_provider: local_dev_build.RealBuildProvider | None = None,
+) -> dict[str, Any]:
     """Select bundle objects for every enabled local Kind workload.
 
     The checked-in platform manifest is the production contract and includes
@@ -1679,6 +2374,17 @@ def _local_platform_manifest() -> dict[str, Any]:
     )
     if not isinstance(base_workloads, dict) or not isinstance(profile_workloads, dict):
         fail("local Kind profile does not contain workload configuration")
+    copied_profile_workloads: dict[str, dict[str, Any]] = {}
+    for name, configuration in profile_workloads.items():
+        if not isinstance(configuration, dict):
+            fail(f"local Kind workloads.{name} must be a mapping")
+        copied_profile_workloads[name] = dict(configuration)
+    profile_workloads = copied_profile_workloads
+    if real_build_provider is not None:
+        # The checked-in local profile keeps the real executor disabled so the
+        # disposable fixture path cannot advertise a missing BuildKit. The
+        # normal path explicitly enables it after the provider is ready.
+        profile_workloads.setdefault("build-executor", {})["enabled"] = True
     unknown = set(profile_workloads) - set(base_workloads)
     if unknown:
         fail("local Kind profile references unknown workloads: " + ", ".join(sorted(unknown)))
@@ -1731,18 +2437,21 @@ def make_app_input(
     work: Path,
     foundation: Path,
     images: dict[str, str],
+    provider_environment: dict[str, str],
+    real_build_provider: local_dev_build.RealBuildProvider | None = None,
 ) -> tuple[Path, Path, str]:
-    manifest = _local_platform_manifest()
-    # The Kind profile owns a plain local OCI registry only.  BuildKit and
-    # Harbor are deployment-owned services and are intentionally absent from
-    # this disposable stack.  Render a profile-specific bundle so their
-    # configuration and credentials are not manufactured for an executor that
-    # cannot run here.
+    provider_environment = validate_provider_environment(provider_environment)
+    manifest = _local_platform_manifest(real_build_provider)
+    # The checked-in Kind values keep the real build executor disabled for the
+    # fixture profile. The normal path enables it only after Harbor and
+    # BuildKit have been bootstrapped, then renders the matching credentials.
     manifest_path = work / "local-platform-bundle-manifest.json"
     write(manifest_path, json.dumps(manifest, indent=2) + "\n")
     portal_origin = f"https://127.0.0.1.nip.io:{PORTAL_PORT}"
     public_issuer = f"{portal_origin}/identity/realms/workloads"
-    container_image_repository_prefix = local_container_image_repository_prefix()
+    container_image_repository_prefix = local_container_image_repository_prefix(
+        real_build_provider.registry_host if real_build_provider is not None else None
+    )
     root=work/"app-input"
     for section, manifest_key in (("configmaps", "configMaps"), ("secrets", "secrets")):
         for name in manifest[manifest_key]:
@@ -1750,6 +2459,7 @@ def make_app_input(
     sources={"control-service-config/config.yaml":"control-plane.yaml.example",
              "access-service-config/config.yaml":"access-auth.yaml.example",
              "agent-service-config/config.yaml":"agent-control-plane.yaml.example",
+             "build-executor-config/config.yaml":"build-executor.yaml.example",
              "environment-service-config/providers.json":"environment-providers.local-hostpath.example.json",
              "evaluation-service-config/config.yaml":"evaluation-service.yaml.example",
              "evaluation-service-config/worker.yaml":"evaluation-freeze-worker.yaml.example",
@@ -1770,7 +2480,12 @@ def make_app_input(
         data=data.replace("https://keycloak.example.invalid/realms/workloads", public_issuer)
         data=data.replace("https://portal.example.invalid", portal_origin)
         data=data.replace("https://demo.lab.example/", portal_origin + "/")
-        data=data.replace("harbor.example.invalid",f"localhost:{REGISTRY_PORT}").replace("harbor.internal",f"localhost:{REGISTRY_PORT}")
+        registry_host = (
+            real_build_provider.registry_host
+            if real_build_provider is not None
+            else f"localhost:{REGISTRY_PORT}"
+        )
+        data=data.replace("harbor.example.invalid",registry_host).replace("harbor.internal",registry_host)
         if source == "control-plane.yaml.example":
             evaluation_runner_image = images.get("evaluation_runner")
             if not isinstance(evaluation_runner_image, str) or not re.fullmatch(
@@ -1799,6 +2514,15 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("evaluation service configuration has no coordinator.workerImage")
+        if source == "build-executor.yaml.example" and real_build_provider is not None:
+            quota_pattern = re.compile(r"(?m)^(\s*projectStorageQuotaBytes:\s*)\d+\s*$")
+            data, replacements = quota_pattern.subn(
+                rf"\g<1>{real_build_provider.project_storage_quota_bytes}",
+                data,
+                count=1,
+            )
+            if replacements != 1:
+                fail("build executor configuration has no projectStorageQuotaBytes")
         if source.startswith("environment-providers"):
             data=(ROOT/"deploy/config/environment-providers.local-hostpath.example.json").read_text()
             providers = json.loads(data)
@@ -1820,16 +2544,13 @@ def make_app_input(
                 provider["imageRepositoryPrefix"] = container_image_repository_prefix
             data=json.dumps(providers, indent=2) + "\n"
         write(root/"configmaps"/target,data)
-    # The local profile has no provider credential by default.  Keep the
-    # provider boundary explicit and fail closed instead of sending a task to
-    # a billable remote endpoint accidentally.
-    for target, data in {
-        "agent-service-config/anthropic-base-url": "https://127.0.0.1:9/v1\n",
-        "agent-service-config/anthropic-model": "claude-sonnet-4-5\n",
+    for target, environment_key in {
+        "agent-service-config/anthropic-base-url": "ANTHROPIC_BASE_URL",
+        "agent-service-config/anthropic-model": "ANTHROPIC_MODEL",
     }.items():
         object_name, _key = target.split("/", 1)
         if target in generated_config_targets and object_name in manifest["configMaps"]:
-            write(root / "configmaps" / target, data)
+            write(root / "configmaps" / target, provider_environment[environment_key] + "\n")
     ca=(foundation/"authority/ca.crt").read_bytes()
     platform_ca=(foundation/"platform-authority/ca.crt").read_bytes()
     identities=foundation/"platform-identities"
@@ -1845,7 +2566,10 @@ def make_app_input(
         values:dict[str,bytes|str]={}
         for key in keys:
             if key=="database-url":
-                db_service = {"container-executor":"environment-service"}.get(service, service)
+                db_service = {
+                    "build-executor": "agent-service",
+                    "container-executor": "environment-service",
+                }.get(service, service)
                 db_role = {"control-service":"lw_control_runtime", "access-service":"lw_access_runtime",
                            "agent-service":"lw_agent_runtime", "environment-service":"lw_environment_runtime",
                            "evaluation-service":"lw_evaluation_runtime", "resource-service":"lw_resource_runtime"}[db_service]
@@ -1869,12 +2593,51 @@ def make_app_input(
             elif key=="oidc-client-secret": values[key]=clients["web-service"]
             elif key=="resource-delegation-key": values[key]=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
             elif key=="session-keyring.json": values[key]=keyring
-            elif key=="anthropic-auth-token": values[key]=os.environ.get("LABWEAVER_ANTHROPIC_AUTH_TOKEN","unconfigured-local-provider")
+            elif key=="anthropic-auth-token": values[key]=provider_environment["ANTHROPIC_AUTH_TOKEN"]
             elif key=="minio-access-key": values[key]="labweaver-root"
             elif key=="minio-secret-key": values[key]=(foundation/"render-input/secrets/minio-secrets/root-password").read_bytes()
             elif key=="registry-pull-config.json":
-                values[key]=json.dumps({"auths": {f"localhost:{REGISTRY_PORT}":
-                                                   {"auth": encode("local-dev:local-dev")}}})
+                if real_build_provider is not None:
+                    values[key] = _read_real_build_file(
+                        real_build_provider,
+                        real_build_provider.registry_pull_config_file,
+                        "registry pull configuration",
+                    )
+                else:
+                    values[key]=json.dumps({"auths": {f"localhost:{REGISTRY_PORT}":
+                                                       {"auth": encode("local-dev:local-dev")}}})
+            elif key in {
+                "buildkit-ca.pem",
+                "buildkit-client.crt",
+                "buildkit-client.key",
+                "harbor-ca.crt",
+                "harbor-password",
+                "harbor-username",
+            }:
+                if real_build_provider is None:
+                    fail(f"real build provider is required for build executor secret {key}")
+                provider_files = {
+                    "buildkit-ca.pem": (real_build_provider.buildkit_ca_file, "BuildKit CA"),
+                    "buildkit-client.crt": (
+                        real_build_provider.buildkit_client_certificate_file,
+                        "BuildKit client certificate",
+                    ),
+                    "buildkit-client.key": (
+                        real_build_provider.buildkit_client_private_key_file,
+                        "BuildKit client private key",
+                    ),
+                    "harbor-ca.crt": (real_build_provider.harbor_ca_file, "Harbor CA"),
+                    "harbor-password": (
+                        real_build_provider.builder_password_file,
+                        "Harbor builder password",
+                    ),
+                    "harbor-username": (
+                        real_build_provider.builder_username_file,
+                        "Harbor builder username",
+                    ),
+                }
+                provider_file, label = provider_files[key]
+                values[key] = _read_real_build_file(real_build_provider, provider_file, label)
             elif key=="system-actor-id": values[key]="00000000-0000-7000-8000-000000000001"
             elif key=="collector-ssh-user-ca-key": values[key]=(foundation/"ssh-authority/collector-ca").read_bytes()
             elif key in ("mtls.crt","mtls.key"): values[key]=(identities/"openssh-gateway"/("certificate.pem" if key=="mtls.crt" else "key.pem")).read_bytes()
@@ -1939,7 +2702,9 @@ def make_app_input(
     return bundle,resource_bundle,hashlib.sha256(payload).hexdigest()
 
 def deploy(kubeconfig: Path, images: dict[str,str], bundle: Path, resource_bundle: Path,
-           bundle_sha: str, public_issuer: str) -> None:
+           bundle_sha: str, public_issuer: str,
+           real_build_provider: local_dev_build.RealBuildProvider | None = None,
+           real_build_values: Path | None = None) -> None:
     kubectl(kubeconfig,["create","namespace",NAMESPACE],check=False)
     kubectl(kubeconfig,["label","namespace",NAMESPACE,"labweaver.io/edge=true","--overwrite"],check=False)
     kubectl(kubeconfig,["apply","-f",str(bundle)])
@@ -1948,15 +2713,28 @@ def deploy(kubeconfig: Path, images: dict[str,str], bundle: Path, resource_bundl
           "--namespace",NAMESPACE,"--create-namespace","--kubeconfig",str(kubeconfig),
           "--values","deploy/helm/labweaver/values.local-kind.yaml",
           "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}"]
-    for workload in ("control-service", "access-service", "agent-service", "environment-service",
-                     "container-executor", "evaluation-service", "resource-service", "openssh-gateway"):
+    if real_build_provider is not None:
+        if real_build_values is None:
+            fail("real build Helm values were not prepared")
+        args.extend(["--values", str(real_build_values)])
+    workloads = [
+        "control-service", "access-service", "agent-service", "environment-service",
+        "container-executor", "evaluation-service", "resource-service", "openssh-gateway",
+    ]
+    if real_build_provider is not None:
+        workloads.append("build-executor")
+    for workload in workloads:
         args.extend(["--set-string",
                      f"workloads.{workload}.env.LABWEAVER_SERVICE_OIDC_ISSUER={public_issuer}"])
     for key,value in images.items(): args.extend(["--set-string",f"images.{key}={value}"])
     run(args)
-    for name in ("control-service","access-service","agent-service",
-                 "environment-service","container-executor","web","evaluation-service",
-                 "resource-service","openssh-gateway"):
+    rollout_names = [
+        "control-service", "access-service", "agent-service", "environment-service",
+        "container-executor", "web", "evaluation-service", "resource-service", "openssh-gateway",
+    ]
+    if real_build_provider is not None:
+        rollout_names.append("build-executor")
+    for name in rollout_names:
         wait_rollout(kubeconfig,"deployment",name,NAMESPACE)
 
 
@@ -2195,8 +2973,12 @@ http {
     apply(kubeconfig, objects)
     wait_rollout(kubeconfig, "deployment", "local-dev-portal", NAMESPACE)
 
-def up(*, external_fixtures: bool = False) -> None:
+def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> None:
     global CLUSTER, REGISTRY, REGISTRY_PORT, PORTAL_PORT, ACCESS_PORT, WEB_PORT, RUN_ID
+    provider_environment = resolve_provider_environment(
+        external_fixtures=external_fixtures,
+        provider_env=provider_env,
+    )
     need_tools(["docker","kind","kubectl","helm","openssl","ssh-keygen"])
     require_psutil()
     verify_loopback_nip_io()
@@ -2212,6 +2994,8 @@ def up(*, external_fixtures: bool = False) -> None:
     work=PRIVATE_DIR/RUN_ID; work.mkdir(parents=True)
     kubeconfig=STATE_DIR/"kubeconfig"
     profile = "external-fixtures" if external_fixtures else "default"
+    real_build_provider: local_dev_build.RealBuildProvider | None = None
+    real_build_chart: Path | None = None
     write(STATE_FILE,json.dumps({"phase":"starting","profile":profile,
                                  "externalFixtures":external_fixtures,"runId":RUN_ID,"cluster":CLUSTER,
                                  "registry":REGISTRY,"registryPort":int(REGISTRY_PORT),
@@ -2220,6 +3004,11 @@ def up(*, external_fixtures: bool = False) -> None:
                                  "kubeconfig":str(kubeconfig.relative_to(ROOT)),
                                  "runRoot":str(work.relative_to(ROOT)),"portForwards":[]},indent=2)+"\n")
     try:
+        if not external_fixtures:
+            # Resolve and hash-check the official Harbor chart before creating
+            # Kind. A failed download or missing tool therefore leaves no
+            # cluster mutation behind.
+            real_build_chart = local_dev_build.inspect_real_build_prerequisites(work)
         # Author the local PKI and NATS credentials before creating Kind.  This
         # work only needs local/Docker tooling, so an authoring failure should
         # not leave a cluster to tear down.
@@ -2234,12 +3023,41 @@ def up(*, external_fixtures: bool = False) -> None:
         if not kubectl_path:
             fail("required executable is unavailable: kubectl")
         apply_migrations(kubeconfig,work)
+        if not external_fixtures:
+            real_build_provider = local_dev_build.bootstrap_real_build_provider(
+                kubeconfig,
+                work,
+                RUN_ID,
+                chart_archive=real_build_chart,
+                openssl=Path(shutil.which("openssl") or "openssl"),
+            )
+            configure_local_harbor_dns(kubeconfig)
+            configure_kind_harbor_trust(real_build_provider)
         info=json.loads(STATE_FILE.read_text()); info["phase"]="building"; write(STATE_FILE,json.dumps(info,indent=2)+"\n")
         images=build_images(external_fixtures=external_fixtures)
         if external_fixtures:
             source_image = build_work_runtime_fixture()
             start_build_executor_fixture(kubeconfig, foundation, source_image)
-        bundle,resource_bundle,bundle_sha=make_app_input(work,foundation,images)
+        bundle,resource_bundle,bundle_sha=make_app_input(
+            work, foundation, images, provider_environment, real_build_provider
+        )
+        real_build_values: Path | None = None
+        if real_build_provider is not None:
+            real_build_values = work / "real-build-values.yaml"
+            write(
+                real_build_values,
+                yaml.safe_dump(real_build_helm_values(real_build_provider), sort_keys=False),
+            )
+        evaluation_pull_config = (
+            real_build_provider.registry_pull_config_file
+            if real_build_provider is not None
+            else work / "app-input" / "secrets" / "evaluation-service-secrets" / "registry-pull-config.json"
+        )
+        bootstrap_evaluation_runner_resources(
+            kubeconfig,
+            work / "app-input",
+            evaluation_pull_config,
+        )
         kubectl(kubeconfig, ["create", "namespace", NAMESPACE], check=False)
         kubectl(kubeconfig, ["label", "namespace", NAMESPACE, "labweaver.io/edge=true",
                              "--overwrite"], check=False)
@@ -2260,7 +3078,16 @@ def up(*, external_fixtures: bool = False) -> None:
         wait_local_oidc_issuer(kubeconfig, int(PORTAL_PORT), foundation)
         info=json.loads(STATE_FILE.read_text()); info["phase"]="deploying"; write(STATE_FILE,json.dumps(info,indent=2)+"\n")
         public_issuer = f"https://127.0.0.1.nip.io:{PORTAL_PORT}/identity/realms/workloads"
-        deploy(kubeconfig,images,bundle,resource_bundle,bundle_sha,public_issuer)
+        deploy(
+            kubeconfig,
+            images,
+            bundle,
+            resource_bundle,
+            bundle_sha,
+            public_issuer,
+            real_build_provider,
+            real_build_values,
+        )
         access_forward = start_owned_process(
             [kubectl_path, "--kubeconfig", str(kubeconfig), "-n", NAMESPACE,
              "port-forward", "svc/access-service", f"{ACCESS_PORT}:8080"],
@@ -2283,7 +3110,14 @@ def up(*, external_fixtures: bool = False) -> None:
                ],
                "portalPort":int(PORTAL_PORT),
                "accessPort":int(ACCESS_PORT),"webPort":int(WEB_PORT),
-               "images":images,"bundleSha256":bundle_sha}
+                "images":images,"bundleSha256":bundle_sha}
+        if real_build_provider is not None:
+            state["realBuildProvider"] = {
+                "registryHost": real_build_provider.registry_host,
+                "buildkitAddress": real_build_provider.buildkit_address,
+                "harborApi": real_build_provider.harbor_api,
+                "networkPolicyMode": real_build_provider.buildkit_network_policy_mode,
+            }
         write(STATE_FILE,json.dumps(state,indent=2)+"\n")
         ready = {"status":"ready","profile":profile,
                  "url":f"https://127.0.0.1.nip.io:{PORTAL_PORT}","cluster":CLUSTER}
@@ -2456,12 +3290,19 @@ def main() -> int:
         action="store_true",
         help="use the explicit local Claude/NATS build fixtures for integration tests",
     )
+    parser.add_argument(
+        "--provider-env",
+        type=Path,
+        help="dotenv file containing ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_MODEL",
+    )
     args=parser.parse_args()
     if args.external_fixtures and args.command != "up":
         parser.error("--external-fixtures is valid only with the up command")
+    if args.provider_env is not None and args.command != "up":
+        parser.error("--provider-env is valid only with the up command")
     try:
         if args.command == "up":
-            up(external_fixtures=args.external_fixtures)
+            up(external_fixtures=args.external_fixtures, provider_env=args.provider_env)
         elif args.command == "status":
             status()
         else:

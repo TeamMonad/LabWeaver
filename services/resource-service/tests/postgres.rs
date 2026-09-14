@@ -7,15 +7,30 @@
     reason = "integration fixtures intentionally keep the full transactional scenario visible"
 )]
 
-use std::time::Duration;
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    extract::State,
+    http::{Method, Request, StatusCode, header},
+    routing::get,
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rcgen::KeyPair;
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
+use tokio::{net::TcpListener, sync::oneshot};
+use tower::ServiceExt;
 use uuid::Uuid;
 
+use auth::{ServiceAuthConfig, ServiceTokenVerifier, TransportSecurityMode};
 use contracts::http::{
-    CreateResourceRateRequest, RecordResourceUsageRequest, UpsertResourceBudgetRequest,
+    CreateResourceRateRequest, InternalCreateTaskResourceRequest, RecordResourceUsageRequest,
+    UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, FixedDecimal, GpuAllocationMode, GpuCatalogEntry, GpuRequest, Money,
@@ -23,8 +38,8 @@ use contracts::resource::{
     ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement, WorkloadResources,
 };
 use contracts::{
-    ActorId, CapacityClaimId, CourseId, EnvironmentId, GpuCatalogEntryId, LeaseId, ProjectId,
-    ReleaseId, ResourceApprovalId, ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
+    ActorId, CapacityClaimId, CourseId, EnvironmentId, GpuCatalogEntryId, LeaseId, PlatformRole,
+    ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
 };
 use resource_service::ApprovalPolicy;
 use resource_service::LifecycleError;
@@ -1882,4 +1897,344 @@ fn outbox_request() -> Result<ResourceRequest, Box<dyn std::error::Error>> {
         updated_at: now,
         diagnostic_code: None,
     })
+}
+
+const RESOURCE_AUTH_AUDIENCE: &str = "labweaver-resource";
+const RESOURCE_ACCESS_CLIENT_ID: &str = "labweaver-access-test";
+const RESOURCE_ENVIRONMENT_CLIENT_ID: &str = "labweaver-environment-test";
+const RESOURCE_EVALUATION_CLIENT_ID: &str = "labweaver-evaluation-test";
+const RESOURCE_TASK_PERMISSION: &str = "resource.task.create";
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn resource_http_auth_binds_task_routes_to_evaluation_client()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_postgres, pool) = migrated_pool().await?;
+    let authority =
+        spawn_resource_auth_authority(resource_signing_material("resource-auth")?).await?;
+    let verifier = build_resource_verifier(&authority.issuer).await?;
+    let owner_id = ActorId::new();
+    let project_id = ProjectId::new();
+    let delegation_key = [7_u8; 32];
+    let state = resource_service::api::ResourceApiState::new(PgResourceStore::new(pool.clone()))
+        .with_service_verifier(Arc::new(verifier))
+        .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.to_owned())
+        .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.to_owned())
+        .with_evaluation_service_client_id(RESOURCE_EVALUATION_CLIENT_ID.to_owned());
+    let router = resource_service::api::with_delegation(
+        resource_service::api::resource_api_router(state),
+        Arc::new(delegation_key.to_vec()),
+    );
+
+    let environment_token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ENVIRONMENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &[RESOURCE_TASK_PERMISSION],
+    )?;
+    let environment_response = router
+        .clone()
+        .oneshot(task_request(
+            &environment_token,
+            &task_input(
+                TaskRunId::new(),
+                owner_id,
+                project_id,
+                "environment-forbidden",
+            ),
+            "resource-auth-environment",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(environment_response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        to_bytes(environment_response.into_body(), 1024 * 1024).await?,
+        "LW_AUTH_EVALUATION_CLIENT_ID_MISMATCH"
+    );
+
+    let missing_permission_token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_EVALUATION_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.task.read"],
+    )?;
+    let missing_permission_response = router
+        .clone()
+        .oneshot(task_request(
+            &missing_permission_token,
+            &task_input(TaskRunId::new(), owner_id, project_id, "missing-permission"),
+            "resource-auth-missing-permission",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(missing_permission_response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        to_bytes(missing_permission_response.into_body(), 1024 * 1024).await?,
+        "LW_AUTH_SERVICE_PERMISSION_DENIED"
+    );
+
+    let task_run_id = TaskRunId::new();
+    let evaluation_token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_EVALUATION_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &[RESOURCE_TASK_PERMISSION],
+    )?;
+    let evaluation_response = router
+        .clone()
+        .oneshot(task_request(
+            &evaluation_token,
+            &task_input(task_run_id, owner_id, project_id, "evaluation-authorized"),
+            "resource-auth-evaluation",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(evaluation_response.status(), StatusCode::CREATED);
+    let created: ResourceRequest =
+        serde_json::from_slice(&to_bytes(evaluation_response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(created.request_key, "evaluation-authorized");
+    assert_eq!(created.state, ResourceRequestState::Reviewing);
+    assert_eq!(created.target, ResourceTarget::Task { task_run_id });
+    let persisted_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.resource_requests WHERE request_key = 'evaluation-authorized'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_count, 1);
+
+    let now = time::OffsetDateTime::now_utc();
+    let session = auth::BffSession {
+        session_id: Uuid::now_v7(),
+        actor_id: owner_id.as_uuid(),
+        roles: vec![PlatformRole::PlatformAdmin],
+        authorization_revision: 1,
+        expires_at: now + time::Duration::minutes(5),
+        idle_expires_at: now + time::Duration::minutes(5),
+        csrf_token: auth::CsrfToken::from_secret("resource-auth-csrf".to_owned()),
+    };
+    let delegation = auth::encode_resource_delegation(&delegation_key, &session, now)?;
+    let access_token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_ACCESS_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &["resource.api.invoke"],
+    )?;
+    let public_response = router
+        .oneshot(public_list_request(&access_token, &delegation)?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(public_response.status(), StatusCode::OK);
+    let public_requests: Vec<ResourceRequest> =
+        serde_json::from_slice(&to_bytes(public_response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(public_requests.len(), 1);
+    assert_eq!(public_requests[0].request_key, "evaluation-authorized");
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ResourceOidcState {
+    issuer: String,
+    jwk: Value,
+}
+
+struct ResourceAuthAuthority {
+    issuer: String,
+    material: ResourceSigningMaterial,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ResourceAuthAuthority {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+    }
+}
+
+struct ResourceSigningMaterial {
+    kid: String,
+    private_der: Vec<u8>,
+    jwk: Value,
+}
+
+async fn build_resource_verifier(
+    issuer: &str,
+) -> Result<ServiceTokenVerifier, Box<dyn std::error::Error>> {
+    let config = ServiceAuthConfig::new(
+        issuer,
+        RESOURCE_AUTH_AUDIENCE.to_owned(),
+        BTreeSet::from([
+            RESOURCE_ACCESS_CLIENT_ID.to_owned(),
+            RESOURCE_ENVIRONMENT_CLIENT_ID.to_owned(),
+            RESOURCE_EVALUATION_CLIENT_ID.to_owned(),
+        ]),
+        BTreeSet::new(),
+        BTreeSet::from(["ES256".to_owned()]),
+        3_600,
+        1,
+        TransportSecurityMode::InsecureTestOnly,
+    )?;
+    let http = auth::no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?;
+    Ok(ServiceTokenVerifier::discover(config, http).await?)
+}
+
+async fn spawn_resource_auth_authority(
+    material: ResourceSigningMaterial,
+) -> Result<ResourceAuthAuthority, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let issuer = format!("http://localhost:{}/realms/test", address.port());
+    let state = ResourceOidcState {
+        issuer: issuer.clone(),
+        jwk: material.jwk.clone(),
+    };
+    let router = Router::new()
+        .route(
+            "/realms/test/.well-known/openid-configuration",
+            get(resource_oidc_discovery),
+        )
+        .route("/realms/test/jwks", get(resource_oidc_jwks))
+        .with_state(state);
+    let (shutdown, shutdown_signal) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            result = axum::serve(listener, router) => {
+                let _ = result;
+            }
+            _ = shutdown_signal => {}
+        }
+    });
+    tokio::task::yield_now().await;
+    Ok(ResourceAuthAuthority {
+        issuer,
+        material,
+        shutdown: Some(shutdown),
+        task,
+    })
+}
+
+async fn resource_oidc_discovery(State(state): State<ResourceOidcState>) -> Json<Value> {
+    Json(json!({
+        "issuer": state.issuer,
+        "authorization_endpoint": format!("{}/authorize", state.issuer),
+        "token_endpoint": format!("{}/token", state.issuer),
+        "jwks_uri": format!("{}/jwks", state.issuer),
+        "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["ES256"],
+        "grant_types_supported": ["authorization_code", "client_credentials"]
+    }))
+}
+
+async fn resource_oidc_jwks(State(state): State<ResourceOidcState>) -> Json<Value> {
+    Json(json!({"keys": [state.jwk]}))
+}
+
+fn resource_signing_material(
+    kid: &str,
+) -> Result<ResourceSigningMaterial, Box<dyn std::error::Error>> {
+    let key = KeyPair::generate()?;
+    let public = key.public_key_raw();
+    if public.len() != 65 || public[0] != 4 {
+        return Err("test P-256 key did not use an uncompressed public point".into());
+    }
+    let encode_component = |component: &[u8]| URL_SAFE_NO_PAD.encode(component);
+    Ok(ResourceSigningMaterial {
+        kid: kid.to_owned(),
+        private_der: key.serialize_der(),
+        jwk: json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": encode_component(&public[1..33]),
+            "y": encode_component(&public[33..65]),
+            "use": "sig",
+            "alg": "ES256",
+            "kid": kid
+        }),
+    })
+}
+
+fn signed_resource_token(
+    material: &ResourceSigningMaterial,
+    issuer: &str,
+    client_id: &str,
+    audience: &str,
+    permissions: &[&str],
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(material.kid.clone());
+    let roles = permissions
+        .iter()
+        .map(|permission| Value::String((*permission).to_owned()))
+        .collect::<Vec<_>>();
+    let mut resource_access = serde_json::Map::new();
+    resource_access.insert(audience.to_owned(), json!({"roles": roles}));
+    let claims = json!({
+        "iss": issuer,
+        "sub": "service-account",
+        "azp": client_id,
+        "aud": audience,
+        "exp": time::OffsetDateTime::now_utc().unix_timestamp() + 300,
+        "nbf": time::OffsetDateTime::now_utc().unix_timestamp() - 1,
+        "resource_access": resource_access,
+    });
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_ec_der(&material.private_der),
+    )
+}
+
+fn task_input(
+    task_run_id: TaskRunId,
+    owner_id: ActorId,
+    project_id: ProjectId,
+    request_key: &str,
+) -> InternalCreateTaskResourceRequest {
+    InternalCreateTaskResourceRequest {
+        task_run_id,
+        project_id,
+        course_id: None,
+        owner_id,
+        request_key: request_key.to_owned(),
+        resources: WorkloadResources {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            gpu: None,
+        },
+        duration_seconds: 60,
+    }
+}
+
+fn task_request(
+    token: &str,
+    input: &InternalCreateTaskResourceRequest,
+    idempotency_key: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    Ok(Request::builder()
+        .method(Method::POST)
+        .uri("/internal/v1/task-resources")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("idempotency-key", idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(input)?))?)
+}
+
+fn public_list_request(
+    token: &str,
+    delegation: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    Ok(Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/resource-requests")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("x-labweaver-resource-delegation", delegation)
+        .body(Body::empty())?)
 }

@@ -517,21 +517,84 @@
                 class="tab-pane"
               >
                 <div
-                  v-if="access.grant.kind === 'success' && access.grant.data.state === 'active'"
+                  v-if="freezeSubmissionPending"
+                  class="console-freeze-pane md-card"
+                  role="status"
+                >
+                  <SvgIcon
+                    name="lock"
+                    size="lg"
+                    aria-hidden="true"
+                  />
+                  <h4>冻结提交处理中，终端已暂时断开</h4>
+                  <p>
+                    冻结会读取不可变提交快照，处理期间浏览器终端连接会断开；这是预期行为。请等待提交状态变为“冻结完成”，再重新连接。
+                  </p>
+                  <button
+                    type="button"
+                    class="outlined-button"
+                    @click="activeTab = 'freeze'"
+                  >
+                    查看提交状态
+                  </button>
+                </div>
+                <div
+                  v-else-if="access.grant.kind === 'success' && access.grant.data.state === 'active'"
                   class="console-wrapper"
                 >
+                  <div
+                    v-if="consoleReconnectRequired"
+                    class="console-freeze-notice"
+                    role="status"
+                  >
+                    <strong>冻结提交可能已断开当前终端连接</strong>
+                    <p>
+                      冻结状态已结束；现有访问权限仍由当前 AccessGrant 控制。点击重新连接会使用同一授权重新建立终端，不会扩大权限范围。
+                    </p>
+                    <button
+                      type="button"
+                      class="outlined-button"
+                      :disabled="access.creating"
+                      @click="reconnectConsole"
+                    >
+                      重新连接终端
+                    </button>
+                  </div>
                   <ConsolePanel
                     v-if="data.runtimeKind === 'container'"
+                    :key="`console-${consoleSessionKey}`"
                     kind="xterm"
                     :grant="access.grant.data"
                     :environment="data"
                   />
                   <ConsolePanel
                     v-else-if="data.runtimeKind === 'virtual_machine'"
+                    :key="`console-${consoleSessionKey}`"
                     kind="novnc"
                     :grant="access.grant.data"
                     :environment="data"
                   />
+                </div>
+                <div
+                  v-else-if="consoleReconnectRequired && freezeStatus === 'succeeded'"
+                  class="console-freeze-pane md-card"
+                  role="status"
+                >
+                  <SvgIcon
+                    name="lock"
+                    size="lg"
+                    aria-hidden="true"
+                  />
+                  <h4>冻结完成，终端连接已断开</h4>
+                  <p>重新签发访问授权后即可继续使用当前环境。现有权限校验保持不变。</p>
+                  <button
+                    type="button"
+                    class="filled-button"
+                    :disabled="access.creating"
+                    @click="reconnectConsole"
+                  >
+                    重新签发授权并连接终端
+                  </button>
                 </div>
                 <div
                   v-else
@@ -687,10 +750,10 @@
               >
                 <div class="freeze-section md-card">
                   <h4 class="section-subtitle">
-                    冻结不可变提交
+                    提交评测
                   </h4>
                   <p class="freeze-desc">
-                    将当前工作区冻结为不可变提交，保留 Collector object version 与 SHA-256。
+                    确认要提交的文件内容后，平台会保存不可变快照并生成评测结果。
                   </p>
                   <div class="freeze-action-row">
                     <button
@@ -704,23 +767,136 @@
                   </div>
 
                   <div
+                    v-if="freezeStatus"
+                    class="freeze-status-card"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <div class="freeze-status-header">
+                      <span class="freeze-status-label">冻结提交状态</span>
+                      <strong>{{ freezeStatusLabel(freezeStatus) }}</strong>
+                    </div>
+                    <p>{{ freezeStatusDescription(freezeStatus) }}</p>
+                    <p
+                      v-if="freezeOperation?.diagnosticCode"
+                      class="freeze-status-diagnostic"
+                    >
+                      诊断码：<code>{{ freezeOperation.diagnosticCode }}</code>
+                    </p>
+                    <div class="freeze-status-actions">
+                      <RouterLink
+                        v-if="freezeStatus === 'accepted' || freezeStatus === 'running' || freezeStatus === 'succeeded'"
+                        :to="{ path: '/student/results', query: { projectId: data.projectId } }"
+                        class="outlined-button"
+                      >
+                        查看评测结果
+                      </RouterLink>
+                      <button
+                        v-if="freezeOperation?.state === 'failed' && freezeOperation.retryEligible"
+                        type="button"
+                        class="outlined-button"
+                        :disabled="freezeState.kind === 'loading'"
+                        @click="retryFreeze"
+                      >
+                        重试冻结提交
+                      </button>
+                    </div>
+                  </div>
+
+                  <p
+                    v-if="freezeBlockReason(data)"
+                    class="freeze-unavailable"
+                    role="status"
+                  >
+                    {{ freezeBlockReason(data) }}
+                  </p>
+
+                  <div
                     v-if="freezeConfirmVisible"
                     class="freeze-confirm"
                     role="dialog"
                     aria-label="确认冻结清单"
                   >
                     <h5 class="section-subtitle">
-                      确认冻结清单（SubmissionManifest）
+                      确认提交内容
                     </h5>
-                    <pre class="freeze-manifest">{{ freezeManifestText }}</pre>
+                    <template v-if="selectedSubmissionManifestFor(data)">
+                      <div class="freeze-manifest">
+                        <div class="freeze-manifest-group">
+                          <strong>收集文件</strong>
+                          <ul>
+                            <li
+                              v-for="rule in selectedSubmissionManifestFor(data)!.include"
+                              :key="`include-${rule.kind}-${rule.path}`"
+                            >
+                              {{ manifestRuleLabel(rule) }}
+                            </li>
+                            <li v-if="selectedSubmissionManifestFor(data)!.include.length === 0">
+                              无
+                            </li>
+                          </ul>
+                        </div>
+                        <div class="freeze-manifest-group">
+                          <strong>必交文件</strong>
+                          <ul>
+                            <li
+                              v-for="rule in selectedSubmissionManifestFor(data)!.required"
+                              :key="`required-${rule.kind}-${rule.path}`"
+                            >
+                              {{ manifestRuleLabel(rule) }}
+                            </li>
+                            <li v-if="selectedSubmissionManifestFor(data)!.required.length === 0">
+                              无
+                            </li>
+                          </ul>
+                        </div>
+                        <div class="freeze-manifest-group">
+                          <strong>排除规则</strong>
+                          <ul>
+                            <li
+                              v-for="rule in selectedSubmissionManifestFor(data)!.exclude"
+                              :key="`exclude-${rule.kind}-${rule.path}`"
+                            >
+                              {{ manifestRuleLabel(rule) }}
+                            </li>
+                            <li v-if="selectedSubmissionManifestFor(data)!.exclude.length === 0">
+                              无
+                            </li>
+                          </ul>
+                        </div>
+                        <div class="freeze-manifest-group">
+                          <strong>允许 LLM 读取</strong>
+                          <ul>
+                            <li
+                              v-for="rule in selectedSubmissionManifestFor(data)!.llmReadable"
+                              :key="`llm-readable-${rule.kind}-${rule.path}`"
+                            >
+                              {{ manifestRuleLabel(rule) }}
+                            </li>
+                            <li v-if="selectedSubmissionManifestFor(data)!.llmReadable.length === 0">
+                              无
+                            </li>
+                          </ul>
+                        </div>
+                        <p class="freeze-manifest-limits">
+                          最多 {{ selectedSubmissionManifestFor(data)!.maxFiles }} 个文件，合计不超过
+                          {{ selectedSubmissionManifestFor(data)!.maxTotalBytes }} 字节；
+                          {{ selectedSubmissionManifestFor(data)!.followSymlinks ? '允许' : '不允许' }}跟随符号链接。
+                        </p>
+                      </div>
+                      <details class="freeze-manifest-details">
+                        <summary>查看完整清单 JSON</summary>
+                        <pre class="freeze-manifest-json">{{ freezeManifestText(data) }}</pre>
+                      </details>
+                    </template>
                     <p class="freeze-confirm-hint">
-                      提交前请确认清单覆盖全部必交文件；当前清单为课程默认工作区冻结规则，按提交规范定制清单的能力依赖服务端清单投影。
+                      提交前请确认清单覆盖全部必交文件。提交后平台会保存不可变快照，评测结果将在结果页出现。
                     </p>
                     <div class="env-failed-actions">
                       <button
                         type="button"
                         class="filled-button"
-                        :disabled="!canFreeze(data) || freezeState.kind === 'loading'"
+                        :disabled="!canFreeze(data) || !selectedSubmissionManifestFor(data) || freezeState.kind === 'loading'"
                         @click="confirmFreeze(data)"
                       >
                         确认冻结
@@ -900,6 +1076,17 @@ const operations = useEnvironmentOperations(selectedEnvironmentId)
 const freezeState = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
 const freezeDiagnostic = ref<DiagnosticViewModel | null>(null)
 const lastFreezeEnvironmentId = ref<string | null>(null)
+interface FreezeAcceptance {
+  environmentId: string
+  projectId: string
+  operationId: string
+  statusUrl: string
+  state: EnvironmentOperationSnapshotSchema['state']
+}
+
+const freezeAccepted = ref<FreezeAcceptance | null>(null)
+const consoleReconnectRequired = ref(false)
+const consoleSessionKey = ref(0)
 // Freeze evidence is deliberately component-local: the environment instance is
 // replaced wholesale by polling, and the public contract does not embed freeze
 // evidence on the instance, so injecting it there would silently disappear.
@@ -913,23 +1100,81 @@ const frozenSubmission = ref<{
 const retryDiagnostic = ref<DiagnosticViewModel | null>(null)
 const retryingEnvironment = ref(false)
 const freezeConfirmVisible = ref(false)
-// Until the public contract exposes a server-owned SubmissionSpec projection
-// for the selected release, the freeze manifest is the platform default
-// workspace rule. It is rendered for student confirmation before freezing and
-// is the exact object sent to the freeze endpoint (needs-contract: #178).
-const FREEZE_MANIFEST: SubmissionManifest = {
-  apiVersion: 'evaluation.labweaver.io/v1',
-  kind: 'SubmissionManifest',
-  name: 'workspace-freeze',
-  include: [{ kind: 'exactFile', path: 'README.md' }],
-  exclude: [],
-  required: [{ kind: 'exactFile', path: 'README.md' }],
-  llmReadable: [],
-  followSymlinks: false,
-  maxFiles: 1000,
-  maxTotalBytes: 10485760,
-  source: 'workspace',
+
+const freezeOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
+  if (operations.operations.kind !== 'success') return null
+  const environmentId = selectedEnvironmentId.value
+  if (!environmentId) return null
+  const freezeOperations = operations.operations.data
+    .filter((operation) => operation.environmentId === environmentId && operation.kind === 'freeze')
+    .sort((left, right) => right.acceptedAt.localeCompare(left.acceptedAt))
+  const trackedOperationId = freezeAccepted.value?.operationId
+  return (trackedOperationId
+    ? freezeOperations.find((operation) => operation.operationId === trackedOperationId)
+    : null) ?? freezeOperations[0] ?? null
+})
+
+const freezeStatus = computed<EnvironmentOperationSnapshotSchema['state'] | null>(() =>
+  freezeOperation.value?.state
+    ?? (freezeAccepted.value && freezeAccepted.value.environmentId === selectedEnvironmentId.value ? freezeAccepted.value.state : null)
+    ?? (frozenSubmission.value?.environmentId === selectedEnvironmentId.value ? 'succeeded' : null),
+)
+
+const freezeSubmissionPending = computed(() =>
+  freezeState.value.kind === 'loading'
+  || freezeStatus.value === 'accepted'
+  || freezeStatus.value === 'running'
+  || freezeStatus.value === 'cancelling',
+)
+
+function releaseRows(): readonly EnvironmentTemplateReleaseViewSchema[] {
+  return releases.releases.kind === 'success'
+    ? releases.releases.data
+    : []
 }
+
+function releaseForEnvironment(data: EnvironmentInstanceSchema): EnvironmentTemplateReleaseViewSchema | null {
+  return releaseRows().find((release) => release.id === data.releaseId && release.version === data.releaseVersion) ?? null
+}
+
+function selectedSubmissionManifestFor(data: EnvironmentInstanceSchema): SubmissionManifest | null {
+  if (data.class === 'work' || isWorkConnection.value) return null
+  const release = releaseForEnvironment(data)
+  if (!release || release.withdrawal) return null
+  return release.submissionManifest ?? null
+}
+
+function freezeBlockReason(data: EnvironmentInstanceSchema): string | null {
+  if (data.class === 'work' || isWorkConnection.value) {
+    return '此 Work 环境未配置评测，无法提交评测。'
+  }
+  if (data.observedState !== 'ready') return '环境必须处于就绪状态才能提交评测。'
+
+  const releaseState = releases.releases
+  if (releaseState.kind === 'idle' || releaseState.kind === 'loading') {
+    return '正在确认当前环境的提交内容。'
+  }
+  if (releaseState.kind === 'error' || releaseState.kind === 'unauthorized' || releaseState.kind === 'blocked') {
+    return `暂时无法确认当前环境的提交内容：${releaseState.diagnostic.message}`
+  }
+  if (releaseState.kind === 'empty') return '当前项目没有可用的已发布版本，无法提交评测。'
+
+  const release = releaseForEnvironment(data)
+  if (!release) return '未找到当前环境对应的已发布版本，无法提交评测。'
+  if (release.withdrawal) return '当前环境所用版本已撤回，无法提交评测。'
+  if (!release.submissionManifest) return '此版本未配置提交评测，无法提交评测。'
+  return null
+}
+
+function manifestRuleLabel(rule: SubmissionManifest['include'][number]): string {
+  return rule.kind === 'directoryTree' ? `${rule.path}/（目录）` : rule.path
+}
+
+function freezeManifestText(data: EnvironmentInstanceSchema): string {
+  const manifest = selectedSubmissionManifestFor(data)
+  return manifest ? JSON.stringify(manifest, null, 2) : ''
+}
+
 // One Idempotency-Key per logical intent, kept across retries until the intent
 // reaches a terminal outcome, so a network timeout + retry cannot mint a
 // duplicate frozen submission or a duplicate environment.
@@ -1047,6 +1292,44 @@ function operationStateLabel(state: EnvironmentOperationSnapshotSchema['state'])
   return OPERATION_STATE_LABELS[state] ?? '状态未知'
 }
 
+function freezeStatusLabel(state: EnvironmentOperationSnapshotSchema['state']): string {
+  switch (state) {
+    case 'accepted':
+      return '已排队'
+    case 'running':
+      return '冻结中'
+    case 'cancelling':
+      return '正在取消'
+    case 'succeeded':
+      return '冻结完成'
+    case 'failed':
+      return '冻结失败'
+    case 'cancelled':
+      return '已取消'
+    default:
+      return operationStateLabel(state)
+  }
+}
+
+function freezeStatusDescription(state: EnvironmentOperationSnapshotSchema['state']): string {
+  switch (state) {
+    case 'accepted':
+      return '提交请求已进入队列，平台正在准备不可变快照。'
+    case 'running':
+      return '平台正在读取清单并保存不可变快照；此期间终端连接会暂时断开。'
+    case 'cancelling':
+      return '正在取消冻结并清理本次提交的处理中资源。'
+    case 'succeeded':
+      return '不可变提交快照已保存，评测结果会在结果页显示。'
+    case 'failed':
+      return '冻结提交未完成。请查看诊断码，确认环境仍就绪后再重试。'
+    case 'cancelled':
+      return '冻结提交已取消，尚未生成可供评测的不可变快照。'
+    default:
+      return operationStatusDescription(state)
+  }
+}
+
 function operationStatusDescription(state: EnvironmentOperationSnapshotSchema['state']): string {
   switch (state) {
     case 'accepted':
@@ -1124,10 +1407,10 @@ function sshFingerprint(g: AccessGrantWithGateway): string | null {
 }
 
 function canFreeze(data: EnvironmentInstanceSchema): boolean {
-  return data.observedState === 'ready' && freezeState.value.kind !== 'loading'
+  return data.observedState === 'ready'
+    && selectedSubmissionManifestFor(data) !== null
+    && freezeState.value.kind !== 'loading'
 }
-
-const freezeManifestText = JSON.stringify(FREEZE_MANIFEST, null, 2)
 
 async function confirmFreeze(data: EnvironmentInstanceSchema) {
   freezeConfirmVisible.value = false
@@ -1136,10 +1419,29 @@ async function confirmFreeze(data: EnvironmentInstanceSchema) {
 
 async function freeze(data: EnvironmentInstanceSchema) {
   freezeDiagnostic.value = null
+  const previousFreezeEnvironmentId = lastFreezeEnvironmentId.value
+  const manifest = selectedSubmissionManifestFor(data)
+  if (!manifest) {
+    freezeState.value = {
+      kind: 'error',
+      diagnostic: makeDiagnostic(
+        'SUBMISSION_MANIFEST_UNAVAILABLE',
+        freezeBlockReason(data) ?? '当前环境尚未配置提交评测，无法提交评测。',
+        false,
+      ),
+    }
+    freezeDiagnostic.value = freezeState.value.diagnostic
+    freezeConfirmVisible.value = false
+    return
+  }
   lastFreezeEnvironmentId.value = data.id
   // Reuse the same idempotency key across retries of this freeze intent; it is
   // cleared once the freeze reaches a terminal outcome.
-  if (!freezeIntentKey.value || lastFreezeEnvironmentId.value !== data.id) {
+  if (!freezeIntentKey.value || previousFreezeEnvironmentId !== data.id) {
+    if (previousFreezeEnvironmentId !== data.id) {
+      freezeAccepted.value = null
+      consoleReconnectRequired.value = false
+    }
     freezeIntentKey.value = idempotencyKey()
   }
   const intentKey = freezeIntentKey.value
@@ -1149,7 +1451,7 @@ async function freeze(data: EnvironmentInstanceSchema) {
     headers: { 'Idempotency-Key': intentKey, 'If-Match': ifMatch(data.revision) },
     body: {
       ...(data.courseId ? { courseId: data.courseId } : {}),
-      manifest: FREEZE_MANIFEST,
+      manifest,
     },
   })
   if (result.error) {
@@ -1163,15 +1465,15 @@ async function freeze(data: EnvironmentInstanceSchema) {
       ),
     }
     freezeDiagnostic.value = freezeState.value.kind === 'error' ? freezeState.value.diagnostic : null
-    freezeIntentKey.value = null
+    if (!(problem?.retryable ?? true)) freezeIntentKey.value = null
     return
   }
-  freezeIntentKey.value = null
   freezeState.value = { kind: 'success', data: result.data }
-  const submissionId = result.data.statusUrl.match(
-    /^\/api\/v1\/frozen-submissions\/([0-9a-f-]{36})$/,
-  )?.[1]
-  if (!submissionId) {
+  const statusMatch = result.data.statusUrl.match(
+    /^\/api\/v1\/projects\/([^/?#]+)\/frozen-submissions\/([0-9a-f-]{36})$/,
+  )
+  const submissionId = statusMatch?.[2]
+  if (!statusMatch || statusMatch[1] !== data.projectId || !submissionId) {
     freezeState.value = {
       kind: 'error',
       diagnostic: makeDiagnostic(
@@ -1184,11 +1486,23 @@ async function freeze(data: EnvironmentInstanceSchema) {
     freezeIntentKey.value = null
     return
   }
+  freezeAccepted.value = {
+    environmentId: data.id,
+    projectId: data.projectId,
+    operationId: result.data.operationId,
+    statusUrl: result.data.statusUrl,
+    state: 'accepted',
+  }
+  consoleReconnectRequired.value = true
+  await operations.load()
   let frozenObject: NonNullable<EnvironmentInstanceWithFreeze['freezeEvidence']> | undefined
   let frozenContentSha256: string | null = null
   let frozenAt: string | null = null
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const frozen = await getFrozenSubmission({ path: { submissionId } })
+    if (attempt > 0 && attempt % 3 === 0) await operations.load()
+    const frozen = await getFrozenSubmission({
+      path: { projectId: data.projectId, submissionId },
+    })
     if (frozen.data) {
       frozenObject = frozen.data.object
       frozenContentSha256 = frozen.data.contentSha256
@@ -1230,6 +1544,10 @@ async function freeze(data: EnvironmentInstanceSchema) {
     contentSha256: frozenContentSha256 ?? '',
     frozenAt: frozenAt ?? '',
   }
+  if (freezeAccepted.value?.operationId === result.data.operationId) {
+    freezeAccepted.value.state = 'succeeded'
+  }
+  freezeIntentKey.value = null
   await env.load()
   await operations.load()
 }
@@ -1241,7 +1559,7 @@ function freezeEvidenceFor(data: EnvironmentInstanceSchema) {
 }
 
 async function retryFreeze() {
-  const id = lastFreezeEnvironmentId.value
+  const id = lastFreezeEnvironmentId.value ?? freezeOperation.value?.environmentId ?? selectedEnvironmentId.value
   if (!id) return
   const instance = env.instance.kind === 'success' ? env.instance.data : undefined
   if (instance && instance.id === id) {
@@ -1374,6 +1692,20 @@ async function issueAccessGrant() {
   const result = await access.createGrant()
   if (result && !result.ok && result.diagnostic) {
     createGrantDiagnostic.value = result.diagnostic
+  }
+}
+
+async function reconnectConsole() {
+  createGrantDiagnostic.value = null
+  if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
+    consoleSessionKey.value += 1
+    consoleReconnectRequired.value = false
+    return
+  }
+  await issueAccessGrant()
+  if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
+    consoleSessionKey.value += 1
+    consoleReconnectRequired.value = false
   }
 }
 
@@ -1785,6 +2117,80 @@ async function revokeAccessGrant() {
   color: var(--md-sys-color-on-surface-variant);
 }
 
+.freeze-status-card,
+.console-freeze-pane,
+.console-freeze-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+}
+
+.freeze-status-card {
+  margin-top: 16px;
+}
+
+.freeze-status-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.freeze-status-label {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-medium);
+}
+
+.freeze-status-header strong {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-medium);
+}
+
+.freeze-status-card p,
+.console-freeze-pane p,
+.console-freeze-notice p {
+  margin: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+}
+
+.freeze-status-diagnostic {
+  color: var(--md-sys-color-error) !important;
+}
+
+.freeze-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.console-freeze-pane {
+  align-items: flex-start;
+  min-height: 180px;
+  justify-content: center;
+}
+
+.console-freeze-pane h4 {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-medium);
+}
+
+.console-freeze-notice {
+  margin-bottom: 16px;
+  align-items: flex-start;
+}
+
+.console-freeze-notice strong {
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-small);
+}
+
 .freeze-confirm {
   margin-top: 12px;
   border: 1px solid var(--md-sys-color-outline-variant);
@@ -1798,10 +2204,48 @@ async function revokeAccessGrant() {
   border-radius: var(--md-sys-shape-small);
   background: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface);
-  font-family: monospace;
-  font-size: 12px;
+  font: var(--md-sys-body-small);
+  overflow-x: auto;
+}
+
+.freeze-manifest-group + .freeze-manifest-group {
+  margin-top: 12px;
+}
+
+.freeze-manifest-group ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.freeze-manifest-limits {
+  margin: 12px 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.freeze-manifest-details {
+  margin: 8px 0;
+  font: var(--md-sys-body-small);
+}
+
+.freeze-manifest-details summary {
+  cursor: pointer;
+  color: var(--md-sys-color-primary);
+}
+
+.freeze-manifest-json {
+  margin: 8px 0 0;
+  padding: 12px;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container);
+  font: 12px/1.5 monospace;
   overflow-x: auto;
   white-space: pre;
+}
+
+.freeze-unavailable {
+  margin: 12px 0 0;
+  color: var(--md-sys-color-error);
+  font: var(--md-sys-body-small);
 }
 
 .freeze-confirm-hint {

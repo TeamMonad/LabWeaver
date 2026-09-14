@@ -73,6 +73,7 @@ CONTROLLED_ENV_NAMES = frozenset(
         "SSL_CERT_FILE",
         "LABWEAVER_BASE_URL",
         "LABWEAVER_CA_FILE",
+        "LABWEAVER_E2E_PROVIDER_MODEL",
         *(item[2] for item in AUTH_ACTORS),
         *(item[3] for item in AUTH_ACTORS),
     }
@@ -712,6 +713,16 @@ def make_job(
         {"name": "CI", "value": "true"},
         {"name": "LABWEAVER_BASE_URL", "value": base_url},
         {"name": "LABWEAVER_CA_FILE", "value": CA_FILE_IN_JOB},
+        {
+            "name": "LABWEAVER_E2E_PROVIDER_MODEL",
+            "valueFrom": {
+                "configMapKeyRef": {
+                    "name": "agent-service-config",
+                    "key": "anthropic-model",
+                    "optional": False,
+                }
+            },
+        },
     ]
     for actor, _role, username_env, password_file_env in AUTH_ACTORS:
         env.append({"name": username_env, "valueFrom": _secret_ref(credentials_secret, f"{actor}-username")})
@@ -727,6 +738,10 @@ def make_job(
         "test",
         "--config=playwright.config.mjs",
         "--workers=1",
+        # A local live run may invoke a paid provider.  Override the CI
+        # config's retry default at the CLI boundary so one failure cannot
+        # silently start another provider request.
+        "--retries=0",
     ]
     for project in projects:
         command.extend(["--project", project])

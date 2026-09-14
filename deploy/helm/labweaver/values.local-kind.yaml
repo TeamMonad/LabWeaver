@@ -8,9 +8,10 @@ localValidation:
   accessMode: ReadWriteOnce
 
 workloads:
-  # Kind provisions only the local OCI registry.  It does not include the
-  # deployment-owned BuildKit and Harbor services, so keep the build executor
-  # out of this profile instead of advertising an unavailable build path.
+  # The checked-in values are the fixture/base overlay. local_dev.py up
+  # enables this workload after it provisions the run-owned Harbor and
+  # BuildKit services; external-fixtures keeps it disabled and supplies its
+  # separate bounded build fixture.
   build-executor:
     enabled: false
   kubevirt-executor:

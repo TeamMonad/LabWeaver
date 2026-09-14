@@ -91,7 +91,7 @@ pub fn expand_program_argv(
             .ok_or(ExecutionError::ProgramProfileInvalid)?,
         ProgramPhase::Test => &profile.run_argv,
     };
-    if argv.is_empty() || argv[0].contains('{') || argv[0].contains('}') {
+    if argv.is_empty() {
         return Err(ExecutionError::ProgramProfileInvalid);
     }
     argv.iter()
@@ -905,7 +905,7 @@ mod tests {
                 "-o".to_owned(),
                 "{binary}".to_owned(),
             ]),
-            run_argv: vec!["runner".to_owned(), "{binary}".to_owned()],
+            run_argv: vec!["{binary}".to_owned()],
             support_files: Vec::new(),
         };
         let root = std::env::temp_dir().join("labweaver-execution-tests");
@@ -930,7 +930,7 @@ mod tests {
         );
         assert_eq!(
             expand_program_argv(&profile, ProgramPhase::Test, &paths)?,
-            vec!["runner".to_owned(), binary.to_string_lossy().to_string()]
+            vec![binary.to_string_lossy().to_string()]
         );
         Ok(())
     }

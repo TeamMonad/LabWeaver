@@ -132,6 +132,9 @@ platform_application_nats_consumers:
     filters:
       - labweaver.control.environment_template_release.published.v1
       - labweaver.control.environment_template_release.withdrawn.v1
+  - name: evaluation-submission-run-v1
+    stream: LABWEAVER_SUBMISSION
+    filters: [labweaver.evaluation.submission.frozen.v1]
 platform_application_minio_alias: ""
 platform_application_minio_endpoint: ""
 # The retained v1 controller also has no route to the Kubernetes Service CIDR

@@ -1338,18 +1338,24 @@ async fn execute_process(
     let monitor_stop = Arc::new(AtomicBool::new(false));
     let monitor = memory_limit
         .map(|_| tokio::spawn(monitor_peak_memory(child_id, Arc::clone(&monitor_stop))));
-    let mut stdin = child.stdin.take().ok_or(OjWorkerError::ProcessSpawn)?;
+    let stdin = child.stdin.take().ok_or(OjWorkerError::ProcessSpawn)?;
     let stdout = child.stdout.take().ok_or(OjWorkerError::ProcessSpawn)?;
     let stderr = child.stderr.take().ok_or(OjWorkerError::ProcessSpawn)?;
     let total = Arc::new(AtomicU64::new(0));
     let exceeded = Arc::new(AtomicBool::new(false));
     let output = async {
-        let write_input = async {
+        let write_input = async move {
+            let mut stdin = stdin;
             stdin
                 .write_all(input)
                 .await
                 .map_err(|_| OjWorkerError::ProcessIo)?;
-            stdin.shutdown().await.map_err(|_| OjWorkerError::ProcessIo)
+            stdin
+                .shutdown()
+                .await
+                .map_err(|_| OjWorkerError::ProcessIo)?;
+            drop(stdin);
+            Ok::<_, OjWorkerError>(())
         };
         let stdout_read = drain_bounded(
             stdout,
@@ -1564,7 +1570,8 @@ mod tests {
     use super::{
         COMMAND_PATH_ENV, COMPILER_READ_PATHS, CompletedProcess, EVALUATOR_ROOT,
         OJ_HELPER_FAILURE_EXIT_CODE, ProcessCapture, SUBMISSION_READ_PATHS, classify_case,
-        consume_helper_ready, create_helper_ready, ensure_helper_started, mark_helper_ready,
+        consume_helper_ready, create_helper_ready, ensure_helper_started, execute_process,
+        mark_helper_ready,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1738,6 +1745,22 @@ mod tests {
         // nonzero status, allowing the caller to emit compile_error evidence.
         let compiler_rejected = process(exit_status(1), b"syntax error");
         assert!(ensure_helper_started(&compiler_rejected).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_process_closes_stdin_after_writing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "input=$(cat); printf 'EOF:%s\\n' \"$input\""]);
+
+        let result =
+            execute_process(&mut command, b"requires-eof\n", 1_000, 1024 * 1024, None).await?;
+
+        assert!(!result.capture.timed_out);
+        assert_eq!(result.status.code(), Some(0));
+        assert_eq!(result.capture.stdout, b"EOF:requires-eof\n");
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

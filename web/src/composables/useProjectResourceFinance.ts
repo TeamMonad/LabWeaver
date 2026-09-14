@@ -126,14 +126,18 @@ function asCharges(value: unknown): ResourceCharge[] {
 }
 
 function isBudgetNotFound(error: unknown): boolean {
+  // The generated Axios transport exposes non-JSON error bodies through the
+  // result.error field as the body value itself. Resource currently returns
+  // its stable diagnostic code as a plain-text 404, so this branch must run
+  // before ProblemDetails extraction instead of treating an unconfigured
+  // budget as a load failure.
+  if (error === 'LW_RESOURCE_BUDGET_NOT_FOUND') return true
   const problem = extractProblemDetails(error)
   if (problem?.diagnosticCode === 'LW_RESOURCE_BUDGET_NOT_FOUND') return true
   if (!isRecord(error)) return false
   const response = isRecord(error.response) ? error.response : undefined
   const responseData = response?.data
   return (
-    error.status === 404 ||
-    response?.status === 404 ||
     responseData === 'LW_RESOURCE_BUDGET_NOT_FOUND' ||
     (isRecord(responseData) && responseData.diagnosticCode === 'LW_RESOURCE_BUDGET_NOT_FOUND')
   )

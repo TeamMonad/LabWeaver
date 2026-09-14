@@ -2,6 +2,8 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+USER root
+
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes \
         coreutils \
@@ -18,6 +20,7 @@ COPY README.md /opt/labweaver/workspace-seed/README.md
 COPY profiles /opt/labweaver/workspace-seed/profiles
 COPY student /opt/labweaver/workspace-seed/student
 COPY tests /opt/labweaver/workspace-seed/tests
+COPY workspace-seed/real-experiment-marker.txt /opt/labweaver/workspace-seed/real-experiment-marker.txt
 
 RUN mkdir -p /work /workspace /tmp \
     && chmod 0755 /opt/labweaver/scripts/local-test.sh \
