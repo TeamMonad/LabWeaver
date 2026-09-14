@@ -15,7 +15,6 @@ pub struct DeterministicEgressClassifier {
     revision: Revision,
     secrets: RegexSet,
     pii: RegexSet,
-    student_paths: RegexSet,
 }
 
 impl DeterministicEgressClassifier {
@@ -48,17 +47,11 @@ impl DeterministicEgressClassifier {
             r"\b[1-9][0-9]{5}(?:18|19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx]\b",
         ])
         .map_err(|_| EgressClassificationError)?;
-        let student_paths = RegexSet::new([
-            r"(?i)(?:^|/)(?:student|students|submission|submissions)(?:/|$)",
-            r"(?i)(?:^|/)(?:roster|gradebook)(?:\.|/|$)",
-        ])
-        .map_err(|_| EgressClassificationError)?;
         Ok(Self {
             binding,
             revision,
             secrets,
             pii,
-            student_paths,
         })
     }
 }
@@ -75,7 +68,7 @@ impl EgressClassifier for DeterministicEgressClassifier {
 
     async fn classify(
         &self,
-        path: &str,
+        _path: &str,
         bytes: &[u8],
     ) -> Result<BTreeSet<DeniedDataClass>, EgressClassificationError> {
         let text = std::str::from_utf8(bytes).map_err(|_| EgressClassificationError)?;
@@ -89,9 +82,6 @@ impl EgressClassifier for DeterministicEgressClassifier {
         }
         if self.pii.is_match(text) {
             denied.insert(DeniedDataClass::PersonallyIdentifiableInformation);
-        }
-        if self.student_paths.is_match(path) {
-            denied.insert(DeniedDataClass::UnallowlistedStudentSubmission);
         }
         Ok(denied)
     }
@@ -107,19 +97,23 @@ mod tests {
     use super::DeterministicEgressClassifier;
 
     #[tokio::test]
-    async fn fixed_profile_detects_private_keys_tokens_pii_and_student_paths()
+    async fn fixed_profile_detects_sensitive_content_without_path_guessing()
     -> Result<(), Box<dyn std::error::Error>> {
         let classifier =
             DeterministicEgressClassifier::new("dlp-v1".to_owned(), Revision::new(1)?)?;
         let denied = classifier
             .classify(
-                "students/a/submission.md",
+                "student/auth.c",
                 b"email: student@example.org\n-----BEGIN PRIVATE KEY-----\n",
             )
             .await?;
         assert!(denied.contains(&DeniedDataClass::PrivateKey));
         assert!(denied.contains(&DeniedDataClass::PersonallyIdentifiableInformation));
-        assert!(denied.contains(&DeniedDataClass::UnallowlistedStudentSubmission));
+        assert!(!denied.contains(&DeniedDataClass::UnallowlistedStudentSubmission));
+        let allowed = classifier
+            .classify("student/auth.c", b"int authenticate(void) { return 0; }\n")
+            .await?;
+        assert!(allowed.is_empty());
         Ok(())
     }
 }

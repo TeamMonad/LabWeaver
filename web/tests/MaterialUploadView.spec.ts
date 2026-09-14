@@ -4,6 +4,15 @@ import { createPinia, setActivePinia } from 'pinia'
 import MaterialUploadView from '@/views/teacher/MaterialUploadView.vue'
 import { getActiveProjectLlmPolicy, listProjects } from '@/generated/contracts'
 
+vi.mock('vue-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-router')>()
+  return {
+    ...actual,
+    useRoute: vi.fn(() => ({ query: {} })),
+    useRouter: vi.fn(() => ({ replace: vi.fn() })),
+  }
+})
+
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {

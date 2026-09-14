@@ -528,7 +528,7 @@ impl LlmReviewStore {
             .await
             .map_err(|_| LlmReviewStoreError::PersistenceFailed)?;
         let row = sqlx::query(
-            "SELECT state,request_json,request_sha256,lease_expires_at > now() AS lease_current \
+            "SELECT state,request_json,request_sha256,receipt_json,lease_expires_at > now() AS lease_current \
              FROM agent.llm_review_runs WHERE task_run_id=$1 AND worker_id=$2 \
                AND lease_token=$3 AND attempt=$4 FOR UPDATE",
         )
@@ -561,10 +561,29 @@ impl LlmReviewStore {
         if saved_hash != lease.request_sha256 {
             return Err(LlmReviewStoreError::StateConflict);
         }
-        let cancelling = row
+        let persisted_state = row
             .try_get::<String, _>("state")
-            .map_err(|_| LlmReviewStoreError::InvalidContract)?
-            == "cancelling";
+            .map_err(|_| LlmReviewStoreError::InvalidContract)?;
+        let mut receipt = decode_receipt(
+            row.try_get::<Value, _>("receipt_json")
+                .map_err(|_| LlmReviewStoreError::InvalidContract)?,
+        )?;
+        let expected_receipt_state = match persisted_state.as_str() {
+            "running" => AgentLlmReviewState::Running,
+            "cancelling" => AgentLlmReviewState::Cancelling,
+            _ => return Err(LlmReviewStoreError::StateConflict),
+        };
+        if receipt.task_run_id != lease.task_run_id
+            || receipt.request_sha256 != lease.request_sha256
+            || receipt.state != expected_receipt_state
+            || receipt.started_at.is_none()
+            || receipt
+                .started_at
+                .is_some_and(|started_at| now < started_at)
+        {
+            return Err(LlmReviewStoreError::InvalidContract);
+        }
+        let cancelling = persisted_state == "cancelling";
         let (state, review, usage, diagnostic_code) = if cancelling {
             (
                 AgentLlmReviewState::Cancelled,
@@ -590,16 +609,14 @@ impl LlmReviewStore {
                 Some(diagnostic),
             )
         };
-        let receipt = InternalAgentLlmReviewReceipt {
-            task_run_id: lease.task_run_id,
-            request_sha256: lease.request_sha256.clone(),
-            state,
-            review,
-            usage,
-            diagnostic_code: diagnostic_code.clone(),
-            started_at: Some(now),
-            finished_at: Some(now),
-        };
+        // `claim` is the authoritative start boundary.  Preserve it while terminalizing the
+        // locked row; replacing it with `now` makes an immediate provider completion look like a
+        // zero-duration execution to Evaluation and discards the durable lifecycle boundary.
+        receipt.state = state;
+        receipt.review = review;
+        receipt.usage = usage;
+        receipt.diagnostic_code = diagnostic_code.clone();
+        receipt.finished_at = Some(now);
         receipt
             .validate()
             .map_err(|_| LlmReviewStoreError::InvalidContract)?;
@@ -1116,6 +1133,7 @@ mod tests {
     use serde_json::json;
     use tokio::time::Instant;
 
+    use crate::classifier::DeterministicEgressClassifier;
     use crate::claude_code::{
         ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
         EgressClassificationError,
@@ -1162,6 +1180,28 @@ mod tests {
             _cancellation: RunCancellation,
         ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
             self.calls.fetch_add(1, Ordering::Release);
+            Err(ClaudeCodeProcessError::Unavailable)
+        }
+    }
+
+    struct RecordingProcess {
+        version_calls: Arc<AtomicUsize>,
+        execute_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ClaudeCodeProcess for RecordingProcess {
+        async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
+            self.version_calls.fetch_add(1, Ordering::AcqRel);
+            Ok("2.1.207".to_owned())
+        }
+
+        async fn execute(
+            &self,
+            _command: ClaudeCodeCommand,
+            _cancellation: RunCancellation,
+        ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+            self.execute_calls.fetch_add(1, Ordering::AcqRel);
             Err(ClaudeCodeProcessError::Unavailable)
         }
     }
@@ -1286,5 +1326,49 @@ mod tests {
         assert_eq!(failure.diagnostic_code, REVIEW_DEADLINE_EXCEEDED);
         assert!(started.elapsed() < Duration::from_millis(150));
         assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn clean_student_auth_path_passes_review_egress_gate_to_runtime() {
+        let mut request = request(deadline_after(5_000));
+        let file = request
+            .files
+            .first_mut()
+            .expect("review fixture has one submission file");
+        file.path = "student/auth.c".to_owned();
+        file.content = "int authenticate(void) { return 0; }\n".to_owned();
+        file.sha256 = Sha256Digest::of_bytes(file.content.as_bytes()).to_string();
+
+        let version_calls = Arc::new(AtomicUsize::new(0));
+        let execute_calls = Arc::new(AtomicUsize::new(0));
+        let worker = LlmReviewWorker {
+            store: LlmReviewStore::new(
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://invalid")
+                    .expect("test pool URL is valid"),
+            ),
+            classifier: Arc::new(
+                DeterministicEgressClassifier::new(
+                    "dlp-v1".to_owned(),
+                    Revision::new(1).expect("test revision is valid"),
+                )
+                .expect("classifier profile is valid"),
+            ),
+            process: Arc::new(RecordingProcess {
+                version_calls: Arc::clone(&version_calls),
+                execute_calls: Arc::clone(&execute_calls),
+            }),
+            worker_id: "test-worker".to_owned(),
+            lease_duration: Duration::from_secs(1),
+            poll_interval: Duration::from_millis(10),
+        };
+
+        let failure = worker
+            .execute(&lease(request), RunCancellation::new())
+            .await
+            .expect_err("provider fixture should fail after runtime entry");
+        assert_eq!(failure.diagnostic_code, "LW_PROVIDER_UNAVAILABLE");
+        assert_eq!(version_calls.load(Ordering::Acquire), 1);
+        assert_eq!(execute_calls.load(Ordering::Acquire), 1);
     }
 }

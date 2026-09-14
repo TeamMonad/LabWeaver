@@ -1549,6 +1549,7 @@ where
                     "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
                     "spec":{
                         "replicas":1,
+                        "strategy":{"type":"Recreate"},
                         "selector":{"matchLabels":{"app":app_name}},
                         "template":{
                             "metadata":{"labels":pod_labels},
@@ -1764,7 +1765,11 @@ where
             (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
                 let observed = self
                     .backend
-                    .restart(&fence, &plan, instance.revision)
+                    // The aggregate revision changes after every observation and
+                    // retry. The accepted operation revision is immutable for
+                    // one user restart, so it is the only stable template
+                    // identity that makes repeated reconciliation idempotent.
+                    .restart(&fence, &plan, instance.operation.accepted_revision)
                     .await?;
                 ready_observation(instance, observed)
             }

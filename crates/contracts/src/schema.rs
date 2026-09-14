@@ -444,6 +444,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::AuthoringPublicationAdmissionQuery
     );
     document!(
+        "schemas/contracts/v1/http/environment-publication-admission-query.schema.json",
+        crate::http::EnvironmentPublicationAdmissionQuery
+    );
+    document!(
         "schemas/contracts/v1/http/work-configuration-admission-binding.schema.json",
         crate::http::WorkConfigurationAdmissionBinding
     );
@@ -892,7 +896,6 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
             operation.operation_id,
             "listEnvironmentTemplateReleases"
                 | "listEvaluationReleases"
-                | "listOwnEvaluationResults"
                 | "listOwnProjectEvaluationResults"
                 | "listSshPublicKeys"
         ) {
@@ -917,6 +920,13 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}),
                 json!({"name":"approvalRevision","in":"query","required":true,"schema":{"type":"integer","minimum":1}}),
                 json!({"name":"evaluationReleaseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+            ]);
+        }
+        if operation.operation_id == "getInternalEnvironmentPublicationAdmission" {
+            parameters.extend([
+                json!({"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
+                json!({"name":"courseId","in":"query","required":false,"schema":{"type":["string","null"],"format":"uuid"}}),
+                json!({"name":"environmentReleaseVersion","in":"query","required":true,"schema":{"type":"integer","minimum":1}}),
             ]);
         }
         if operation.operation_id == "getInternalGeneratedArtifact" {
@@ -1483,10 +1493,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listEvaluationReleases" => {
             json!({"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":contract_ref("evaluation-release")} ,"nextCursor":{"type":["string","null"]}}})
         }
-        "getOwnEvaluationResult" | "getOwnProjectEvaluationResult" => {
-            contract_ref("student-evaluation-result")
-        }
-        "listOwnEvaluationResults" | "listOwnProjectEvaluationResults" => {
+        "getOwnProjectEvaluationResult" => contract_ref("student-evaluation-result"),
+        "listOwnProjectEvaluationResults" => {
             json!({"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":contract_ref("student-evaluation-result")} ,"nextCursor":{"type":["string","null"]}}})
         }
         "appendProjectEnvironmentCandidateDecision"
@@ -1497,7 +1505,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             json!({"type":"object","required":["items"],"properties":{"items":{"type":"array","items":contract_ref("http/environment-template-release-view")},"nextCursor":{"type":["string","null"]}}})
         }
         "getEnvironment" => contract_ref("environment-instance"),
-        "getInternalAuthoringPublicationAdmission" => {
+        "getInternalAuthoringPublicationAdmission"
+        | "getInternalEnvironmentPublicationAdmission" => {
             contract_ref("http/authoring-publication-admission-binding")
         }
         "getInternalGeneratedArtifact" => contract_ref("http/generated-artifact-record"),

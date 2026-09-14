@@ -14,12 +14,12 @@ use contracts::events::{AgentRunEvent, CloudEvent, DATA_SCHEMA_BASE, SPEC_VERSIO
 use contracts::http::{GeneratedArtifactQuery, GeneratedArtifactRecord, InternalAgentRunOutcome};
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::{
-    AgentRunId, ArtifactRef, CourseId, EventId, PolicyId, ProblemPackageId, ProjectId, Revision,
-    Sequence, UtcTimestamp,
+    AgentRunId, ArtifactRef, EventId, PolicyId, ProblemPackageId, ProjectId, Revision, Sequence,
+    UtcTimestamp,
 };
 use control_service::clients::DownstreamError;
 use control_service::messaging::{AgentAuthority, AgentRunConsumer};
-use control_service::{ContainerBuildPolicy, ControlConfig, ControlService};
+use control_service::{ContainerBuildPolicy, ControlConfig, ControlError, ControlService};
 use persistence_sqlx::{Domain, Sha256Digest};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -75,9 +75,10 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
         .await?;
 
     let requested = requested_run()?;
+    let advanced = running_run(&requested)?;
     let authority = FakeAuthority {
         unavailable: AtomicBool::new(false),
-        requested: requested.clone(),
+        requested: advanced,
         outcome: failed_outcome(&requested)?,
     };
     let event1 = event(
@@ -88,9 +89,6 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
         "requested",
         None,
     )?;
-    service
-        .project_agent_run(EventId::new(), &requested)
-        .await?;
     publish(&context, &event1).await?;
     let mut consumer = AgentRunConsumer::bind(
         client.clone(),
@@ -100,11 +98,34 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
     )
     .await?;
     consumer.process_next(&service, &authority).await?;
-    assert_projection(&pool, requested.id, 1, 1, 1).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.agent_run_projections WHERE run_id=$1",
+        )
+        .bind(requested.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    service
+        .project_agent_run(EventId::new(), &requested)
+        .await?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        consumer.process_next(&service, &authority),
+    )
+    .await??;
+    assert_projection(&pool, requested.id, 1, 1, 0).await?;
 
-    publish(&context, &event1).await?;
-    consumer.process_next(&service, &authority).await?;
-    assert_projection(&pool, requested.id, 1, 1, 1).await?;
+    let mut wrong_project_event = event1.clone();
+    wrong_project_event.project_id = ProjectId::new();
+    assert!(matches!(
+        service
+            .consume_agent_run_event(&wrong_project_event, &requested, None, None, None)
+            .await,
+        Err(ControlError::ProjectionConflict)
+    ));
+
     drop(consumer);
 
     let failed = &authority.outcome.run;
@@ -126,14 +147,27 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
     )
     .await?;
     consumer.process_next(&service, &authority).await?;
-    assert_projection(&pool, requested.id, 1, 1, 1).await?;
+    assert_projection(&pool, requested.id, 1, 1, 0).await?;
     authority.unavailable.store(false, Ordering::SeqCst);
     tokio::time::timeout(
         Duration::from_secs(5),
         consumer.process_next(&service, &authority),
     )
     .await??;
-    assert_projection(&pool, requested.id, 2, 2, 2).await?;
+    assert_projection(&pool, requested.id, 2, 2, 0).await?;
+
+    publish(&context, &event1).await?;
+    consumer.process_next(&service, &authority).await?;
+    assert_projection(&pool, requested.id, 2, 2, 0).await?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            consumer.process_next(&service, &authority),
+        )
+        .await
+        .is_err(),
+        "an already consumed requested event must not be redelivered after the run advances",
+    );
 
     let gap = event(
         failed,
@@ -145,7 +179,7 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
     )?;
     publish(&context, &gap).await?;
     consumer.process_next(&service, &authority).await?;
-    assert_projection(&pool, requested.id, 2, 2, 2).await?;
+    assert_projection(&pool, requested.id, 2, 2, 0).await?;
     Ok(())
 }
 
@@ -199,7 +233,7 @@ fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
     let run = AgentRun {
         id: AgentRunId::new(),
         project_id: ProjectId::new(),
-        course_id: Some(CourseId::new()),
+        course_id: None,
         package_id: ProblemPackageId::new(),
         policy_id: PolicyId::new(),
         policy_revision: Revision::new(1)?,
@@ -222,6 +256,29 @@ fn requested_run() -> Result<AgentRun, Box<dyn std::error::Error>> {
         ],
         plan: None,
     };
+    run.validate()?;
+    Ok(run)
+}
+
+fn running_run(requested: &AgentRun) -> Result<AgentRun, Box<dyn std::error::Error>> {
+    let mut run = requested.clone();
+    run.state = AgentRunState::Running;
+    run.revision = Revision::new(2)?;
+    for track in &mut run.tracks {
+        track.attempts.push(AgentAttempt {
+            number: 1,
+            state: AgentAttemptState::Running,
+            checkpoint: None,
+            usage: LlmUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                requests: 0,
+                cost_microusd: 0,
+            },
+            usage_observed: false,
+            diagnostic_code: None,
+        });
+    }
     run.validate()?;
     Ok(run)
 }

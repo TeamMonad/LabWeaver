@@ -901,6 +901,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             "agent-build-command-v1",
             "environment-service-v1",
             "environment-release-v1",
+            "evaluation-submission-run-v1",
         ):
             self.assertIn(consumer, defaults)
         self.assertIn("Create only missing configured durable consumers", tasks)

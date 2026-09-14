@@ -36,5 +36,9 @@ url.workspace = true
 workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+jsonwebtoken.workspace = true
+rcgen.workspace = true
 testcontainers = { version = "=0.25.0", features = ["blocking", "properties-config"] }
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+tower.workspace = true

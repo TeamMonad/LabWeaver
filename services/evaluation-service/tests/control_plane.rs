@@ -8,12 +8,12 @@ mod support;
 
 use std::time::Duration;
 
-use contracts::authoring::{PackageFile, ProblemPackage};
+use contracts::authoring::{PackageFile, ProblemPackage, RuntimeKind};
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, CourseId, DiagnosticCode,
-    EnvironmentId, EvaluationRunId, EvaluationStepRunId, FrozenSubmissionId, PolicyId,
-    ProblemPackageId, ProjectId, ReleaseId, RetentionClass, RetentionDisposition,
-    RetentionSnapshot, Revision, TaskRunId, UtcTimestamp,
+    ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, CourseId,
+    DiagnosticCode, EnvironmentId, EvaluationRunId, EvaluationStepRunId, EventId,
+    FrozenSubmissionId, PolicyId, ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId,
+    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, TaskRunId, UtcTimestamp,
     evaluation::{
         EvaluationExecutionBinding, EvaluationRelease, EvaluationRunIdentity, EvaluationRunState,
         EvaluationRuntimeIdentity, EvaluationSpec, EvaluationStepCompletion, EvaluationStepRole,
@@ -22,12 +22,15 @@ use contracts::{
     http::{
         AuthoringPublicationAdmissionBinding, IdempotencyKey, InternalCreateEvaluationRunRequest,
         InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
-        InternalWithdrawEvaluationReleaseRequest,
+        InternalWithdrawEvaluationReleaseRequest, RecordResourceUsageRequest,
     },
+    resource::{ResourceUsageKind, UsageMeasurement},
+    submission::{FrozenEnvironmentIdentity, FrozenFile, FrozenSubmission},
 };
 use evaluation_service::{
-    EvaluationControlStoreError, EvaluationReleaseReservation, EvaluationRunReservation,
-    EvaluationStepLease, PgEvaluationControlStore,
+    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
+    EvaluationExecutionKind, EvaluationExecutionResources, EvaluationReleaseReservation,
+    EvaluationRunReservation, EvaluationStepLease, PgEvaluationControlStore,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::Row;
@@ -135,6 +138,152 @@ async fn release_and_run_are_idempotent_and_close_identity()
 }
 
 #[tokio::test]
+async fn project_only_submission_runs_and_rejects_scope_or_environment_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, release, request) = project_only_run_context().await?;
+    let trace_id = "trace-project-only-run";
+    let run = fixture
+        .store
+        .create_run(
+            &request,
+            &idempotency("run-project-only")?,
+            fixture.now().await?,
+            trace_id,
+            &admission(&release),
+        )
+        .await?;
+    assert!(matches!(run, EvaluationRunReservation::Created(_)));
+
+    let cross_project_submission_id = FrozenSubmissionId::new();
+    fixture
+        .seed_frozen_submission_for(
+            cross_project_submission_id,
+            ProjectId::new(),
+            None,
+            fixture.actor_id,
+        )
+        .await?;
+    let mut cross_project = request.clone();
+    cross_project.frozen_submission_id = cross_project_submission_id;
+    assert_identity_mismatch(
+        &fixture,
+        &cross_project,
+        "run-project-only-cross-project",
+        trace_id,
+        &admission(&release),
+    )
+    .await?;
+
+    let cross_course_submission_id = FrozenSubmissionId::new();
+    fixture
+        .seed_frozen_submission_for(
+            cross_course_submission_id,
+            fixture.project_id,
+            Some(fixture.course_id),
+            fixture.actor_id,
+        )
+        .await?;
+    let mut cross_course = request.clone();
+    cross_course.frozen_submission_id = cross_course_submission_id;
+    assert_identity_mismatch(
+        &fixture,
+        &cross_course,
+        "run-project-only-cross-course",
+        trace_id,
+        &admission(&release),
+    )
+    .await?;
+
+    let mut cross_actor = request.clone();
+    cross_actor.actor_id = ActorId::new();
+    assert_identity_mismatch(
+        &fixture,
+        &cross_actor,
+        "run-project-only-cross-actor",
+        trace_id,
+        &admission(&release),
+    )
+    .await?;
+
+    let mut wrong_environment_version = admission(&release);
+    wrong_environment_version.environment_release_version = 2;
+    assert_identity_mismatch(
+        &fixture,
+        &request,
+        "run-project-only-wrong-environment-version",
+        trace_id,
+        &wrong_environment_version,
+    )
+    .await?;
+
+    let mut wrong_environment = admission(&release);
+    wrong_environment.environment_release_id = ReleaseId::new();
+    assert_identity_mismatch(
+        &fixture,
+        &request,
+        "run-project-only-wrong-environment",
+        trace_id,
+        &wrong_environment,
+    )
+    .await?;
+    assert_eq!(
+        count(&fixture.pool, "evaluation.evaluation_runs").await?,
+        1,
+        "rejected frozen identities must not leave run rows"
+    );
+    Ok(())
+}
+
+async fn project_only_run_context() -> Result<
+    (
+        TestContext,
+        EvaluationRelease,
+        InternalCreateEvaluationRunRequest,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let mut publish_request = fixture.publish_request.clone();
+    publish_request.course_id = None;
+    publish_request.execution_binding = evaluation_execution_binding(fixture.project_id, None);
+    let release = match fixture
+        .store
+        .publish_release(
+            &publish_request,
+            &idempotency("release-project-only")?,
+            fixture.now().await?,
+            "trace-project-only",
+        )
+        .await?
+    {
+        EvaluationReleaseReservation::Created(value)
+        | EvaluationReleaseReservation::Replayed(value) => value,
+    };
+    fixture
+        .seed_frozen_submission_for(
+            fixture.frozen_submission_id,
+            fixture.project_id,
+            None,
+            fixture.actor_id,
+        )
+        .await?;
+    let trace_id = "trace-project-only-run";
+    let request = InternalCreateEvaluationRunRequest {
+        project_id: fixture.project_id,
+        course_id: None,
+        release_id: release.id,
+        release_revision: release.revision,
+        frozen_submission_id: fixture.frozen_submission_id,
+        actor_id: fixture.actor_id,
+        identity: EvaluationRunIdentity {
+            runtime_identity: release.runtime_identity.clone(),
+            trace_id: trace_id.to_owned(),
+        },
+    };
+    Ok((fixture, release, request))
+}
+
+#[tokio::test]
 async fn release_withdrawal_is_revision_fenced_and_idempotent()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = TestContext::start(single_score_spec()?).await?;
@@ -233,6 +382,121 @@ async fn release_withdrawal_is_revision_fenced_and_idempotent()
         .await
         .expect_err("withdrawn release cannot transition twice");
     assert!(matches!(error, EvaluationControlStoreError::StateConflict));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the idempotency and withdrawn replay assertions share one PostgreSQL fixture"
+)]
+async fn submission_frozen_duplicate_and_withdrawn_replay_are_idempotent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let release = match fixture
+        .store
+        .publish_release(
+            &fixture.publish_request,
+            &idempotency("release-submission-frozen")?,
+            fixture.now().await?,
+            "submission-frozen:test",
+        )
+        .await?
+    {
+        EvaluationReleaseReservation::Created(value)
+        | EvaluationReleaseReservation::Replayed(value) => value,
+    };
+    fixture.seed_frozen_submission().await?;
+    let stable_trace = format!("submission-frozen:{}", fixture.frozen_submission_id);
+    let request = fixture.create_run_request(&release, &stable_trace)?;
+    let key = idempotency(&format!(
+        "submission-frozen:{}",
+        fixture.frozen_submission_id
+    ))?;
+
+    let first = fixture
+        .store
+        .create_run(
+            &request,
+            &key,
+            fixture.now().await?,
+            &stable_trace,
+            &admission(&release),
+        )
+        .await?;
+    let run_id = match first {
+        EvaluationRunReservation::Created(run) => run.id,
+        EvaluationRunReservation::Replayed(run) => {
+            return Err(format!("unexpected first reservation: {run:?}").into());
+        }
+    };
+    let duplicate = fixture
+        .store
+        .create_run(
+            &request,
+            &key,
+            fixture.now().await?,
+            &stable_trace,
+            &admission(&release),
+        )
+        .await?;
+    assert!(matches!(
+        duplicate,
+        EvaluationRunReservation::Replayed(run) if run.id == run_id
+    ));
+    assert_eq!(count(&fixture.pool, "evaluation.evaluation_runs").await?, 1);
+
+    let withdrawn = fixture
+        .store
+        .withdraw_release(
+            release.id,
+            &InternalWithdrawEvaluationReleaseRequest {
+                project_id: fixture.project_id,
+                course_id: Some(fixture.course_id),
+                expected_revision: release.revision,
+                withdrawn_by: fixture.actor_id,
+                reason_code: DiagnosticCode::registered("LW_EVALUATION_RELEASE_WITHDRAWN"),
+            },
+            &idempotency("submission-frozen-withdraw")?,
+            fixture.now().await?,
+            "submission-frozen:withdraw",
+        )
+        .await?;
+    assert_eq!(
+        withdrawn.state,
+        contracts::evaluation::EvaluationReleaseState::Withdrawn
+    );
+
+    let replay_after_withdraw = fixture
+        .store
+        .create_run(
+            &request,
+            &key,
+            fixture.now().await?,
+            &stable_trace,
+            &admission(&release),
+        )
+        .await?;
+    assert!(matches!(
+        replay_after_withdraw,
+        EvaluationRunReservation::Replayed(run) if run.id == run_id
+    ));
+
+    let new_delivery = fixture
+        .store
+        .create_run(
+            &request,
+            &idempotency("submission-frozen-after-withdraw")?,
+            fixture.now().await?,
+            &stable_trace,
+            &admission(&release),
+        )
+        .await
+        .expect_err("a new delivery after withdrawal must be rejected");
+    assert!(matches!(
+        new_delivery,
+        EvaluationControlStoreError::ReleaseWithdrawn
+    ));
     Ok(())
 }
 
@@ -564,6 +828,230 @@ async fn resource_meter_delivery_requires_exact_step_attempt_identity()
     .await?;
     assert_eq!(persisted, 1);
     assert_eq!(run.project_id, fixture.project_id);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the integration case exercises all advisory checkpoint timing boundaries"
+)]
+async fn llm_review_checkpoint_accepts_equal_or_prestart_terminal_time_and_rejects_reverse()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-llm-review-timing").await?;
+    let lease = fixture
+        .store
+        .claim_next_step("worker-llm-review-timing", Duration::from_secs(30))
+        .await?
+        .expect("review timing step must be claimable");
+    let resources = EvaluationExecutionResources {
+        schema_version: EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
+        run_id: run.id,
+        step_run_id: lease.step_run_id,
+        task_run_id: lease.task_run_id,
+        namespace: "evaluation".to_owned(),
+        kind: EvaluationExecutionKind::LlmReview,
+        request: serde_json::json!({"taskRunId": lease.task_run_id}),
+        objects: Vec::new(),
+    };
+    fixture
+        .store
+        .persist_execution_intent(&lease, &resources)
+        .await?;
+    fixture
+        .store
+        .mark_execution_started(&lease, None, &resources)
+        .await?;
+
+    let started = fixture.now().await?;
+    fixture
+        .store
+        .checkpoint_execution_terminal(
+            &lease,
+            Some(started),
+            Some(started),
+            &success_completion(7),
+            &[],
+        )
+        .await?;
+    let checkpoint = fixture
+        .store
+        .load_execution_checkpoint(&lease)
+        .await?
+        .expect("terminal checkpoint must be readable");
+    assert_eq!(checkpoint.execution_started_at, Some(started));
+    assert_eq!(checkpoint.execution_terminated_at, Some(started));
+
+    let completed = complete_leased_step(
+        &fixture,
+        run.id,
+        &lease,
+        &success_completion(7),
+        "trace-llm-review-timing",
+    )
+    .await?;
+    assert_eq!(completed.state, EvaluationRunState::Succeeded);
+
+    let second_run = fixture
+        .create_seeded_run("trace-llm-review-prestart")
+        .await?;
+    let second_lease = fixture
+        .store
+        .claim_next_step("worker-llm-review-prestart", Duration::from_secs(30))
+        .await?
+        .expect("prestart timing step must be claimable");
+    let second_resources = EvaluationExecutionResources {
+        schema_version: EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
+        run_id: second_run.id,
+        step_run_id: second_lease.step_run_id,
+        task_run_id: second_lease.task_run_id,
+        namespace: "evaluation".to_owned(),
+        kind: EvaluationExecutionKind::LlmReview,
+        request: serde_json::json!({"taskRunId": second_lease.task_run_id}),
+        objects: Vec::new(),
+    };
+    fixture
+        .store
+        .persist_execution_intent(&second_lease, &second_resources)
+        .await?;
+    fixture
+        .store
+        .mark_execution_started(&second_lease, None, &second_resources)
+        .await?;
+    let finished = fixture.now().await?;
+    let later = UtcTimestamp::from_utc(finished.get() + time::Duration::milliseconds(1))?;
+    let reverse = fixture
+        .store
+        .checkpoint_execution_terminal(
+            &second_lease,
+            Some(later),
+            Some(finished),
+            &failed_completion(true),
+            &[],
+        )
+        .await
+        .expect_err("reverse advisory timing must fail closed");
+    assert!(matches!(
+        reverse,
+        EvaluationControlStoreError::ContractInvalid
+    ));
+    let succeeded_before_start = fixture
+        .store
+        .checkpoint_execution_terminal(
+            &second_lease,
+            None,
+            Some(finished),
+            &success_completion(7),
+            &[],
+        )
+        .await
+        .expect_err("an advisory success without a start must fail closed");
+    assert!(matches!(
+        succeeded_before_start,
+        EvaluationControlStoreError::ContractInvalid
+    ));
+    let usage = RecordResourceUsageRequest {
+        project_id: fixture.project_id,
+        course_id: Some(fixture.course_id),
+        kind: ResourceUsageKind::Compute,
+        request_id: ResourceRequestId::new(),
+        lease_id: None,
+        source_event_id: EventId::new(),
+        measured_from: UtcTimestamp::from_utc(finished.get() - time::Duration::milliseconds(1))?,
+        measured_until: finished,
+        measurement: UsageMeasurement::Unknown {
+            reason: "advisory review has no Resource meter".to_owned(),
+        },
+    };
+    let metered = fixture
+        .store
+        .checkpoint_execution_terminal(
+            &second_lease,
+            None,
+            Some(finished),
+            &failed_completion(true),
+            &[usage],
+        )
+        .await
+        .expect_err("an advisory checkpoint must not create Resource deliveries");
+    assert!(matches!(
+        metered,
+        EvaluationControlStoreError::ContractInvalid
+    ));
+    fixture
+        .store
+        .checkpoint_execution_terminal(
+            &second_lease,
+            None,
+            Some(finished),
+            &failed_completion(true),
+            &[],
+        )
+        .await?;
+    let second_checkpoint = fixture
+        .store
+        .load_execution_checkpoint(&second_lease)
+        .await?
+        .expect("prestart terminal checkpoint must be readable");
+    assert_eq!(second_checkpoint.execution_started_at, None);
+    assert_eq!(second_checkpoint.execution_terminated_at, Some(finished));
+    assert_eq!(
+        second_checkpoint
+            .terminal_completion
+            .expect("terminal completion must be persisted")
+            .state,
+        EvaluationStepRunState::Failed
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn program_checkpoint_keeps_strict_terminal_timing() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-program-timing").await?;
+    let lease = fixture
+        .store
+        .claim_next_step("worker-program-timing", Duration::from_secs(30))
+        .await?
+        .expect("program timing step must be claimable");
+    let resources = EvaluationExecutionResources {
+        schema_version: EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
+        run_id: run.id,
+        step_run_id: lease.step_run_id,
+        task_run_id: lease.task_run_id,
+        namespace: "evaluation".to_owned(),
+        kind: EvaluationExecutionKind::Program,
+        request: serde_json::json!({"taskRunId": lease.task_run_id}),
+        objects: Vec::new(),
+    };
+    fixture
+        .store
+        .persist_execution_intent(&lease, &resources)
+        .await?;
+    fixture
+        .store
+        .mark_execution_started(&lease, None, &resources)
+        .await?;
+    let now = fixture.now().await?;
+    for (started_at, terminated_at) in [(Some(now), Some(now)), (None, Some(now))] {
+        let error = fixture
+            .store
+            .checkpoint_execution_terminal(
+                &lease,
+                started_at,
+                terminated_at,
+                &failed_completion(true),
+                &[],
+            )
+            .await
+            .expect_err("program timing must retain strict interval boundaries");
+        assert!(matches!(
+            error,
+            EvaluationControlStoreError::ContractInvalid
+        ));
+    }
     Ok(())
 }
 
@@ -1167,7 +1655,7 @@ impl TestContext {
             approval_id: ApprovalId::new(),
             approval_revision: Revision::new(3)?,
             evaluation_spec: spec,
-            execution_binding: evaluation_execution_binding(project_id, course_id),
+            execution_binding: evaluation_execution_binding(project_id, Some(course_id)),
             runtime_identity: runtime_identity(),
             published_by: actor_id,
         };
@@ -1190,33 +1678,103 @@ impl TestContext {
     }
 
     async fn seed_frozen_submission(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.seed_frozen_submission_for(
+            self.frozen_submission_id,
+            self.project_id,
+            Some(self.course_id),
+            self.actor_id,
+        )
+        .await
+    }
+
+    async fn seed_frozen_submission_for(
+        &self,
+        frozen_submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        actor_id: ActorId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frozen_at = self.now().await?;
+        let frozen = self.frozen_submission(
+            frozen_at,
+            frozen_submission_id,
+            project_id,
+            course_id,
+            actor_id,
+        )?;
         sqlx::query(
             "INSERT INTO evaluation.frozen_submissions \
              (frozen_submission_id,project_id,course_id,environment_id,manifest_sha256,content_sha256,\
-              schema_version,tool_version,contract,frozen_at,idempotency_key,\
+               schema_version,tool_version,contract,frozen_at,idempotency_key,\
              source_identity_sha256,object_key,object_version) \
-             VALUES ($1,$2,$3,$4,$5,$6,'submission.freeze/v1','control-plane-test',$7,$8,$9,$10,$11,$12) \
+             VALUES ($1,$2,$3,$4,$5,$6,'evaluation.labweaver.io/frozen-submission/v1','control-plane-test',$7,$8,$9,$10,$11,$12) \
              ON CONFLICT (frozen_submission_id) DO NOTHING",
         )
-        .bind(self.frozen_submission_id.as_uuid())
-        .bind(self.project_id.as_uuid())
-        .bind(self.course_id.as_uuid())
-        .bind(EnvironmentId::new().as_uuid())
+        .bind(frozen.id.as_uuid())
+        .bind(frozen.project_id.as_uuid())
+        .bind(frozen.course_id.map(CourseId::as_uuid))
+        .bind(frozen.environment.environment_id.as_uuid())
         .bind(Sha256Digest::of_bytes(b"submission-manifest").to_string())
-        .bind(self.frozen_submission_sha256.to_string())
-        .bind(serde_json::json!({
-            "frozenSubmissionId": self.frozen_submission_id,
-            "courseId": self.course_id,
-            "contentSha256": self.frozen_submission_sha256,
-        }))
-        .bind(self.now().await?.get())
-        .bind(format!("freeze:{}", self.frozen_submission_id))
+        .bind(&frozen.content_sha256)
+        .bind(serde_json::to_value(&frozen)?)
+        .bind(frozen.frozen_at.get())
+        .bind(format!("freeze:{}", frozen.id))
         .bind(self.source_identity_sha256.to_string())
-        .bind(format!("frozen/{}", self.frozen_submission_id))
-        .bind("v1")
+        .bind(format!("frozen/{}", frozen.id))
+        .bind(&frozen.object.object_version)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    fn frozen_submission(
+        &self,
+        frozen_at: UtcTimestamp,
+        frozen_submission_id: FrozenSubmissionId,
+        project_id: ProjectId,
+        course_id: Option<CourseId>,
+        actor_id: ActorId,
+    ) -> Result<FrozenSubmission, Box<dyn std::error::Error>> {
+        Ok(FrozenSubmission {
+            id: frozen_submission_id,
+            project_id,
+            course_id,
+            actor_id,
+            agent_run_id: AgentRunId::new(),
+            attempt: 1,
+            manifest_revision: Revision::new(1)?,
+            files: vec![FrozenFile {
+                path: "answer.txt".to_owned(),
+                size_bytes: 1,
+                media_type: "text/plain".to_owned(),
+            }],
+            object: ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "test-store".to_owned(),
+                object_version: "v1".to_owned(),
+                size_bytes: 32,
+                media_type: "application/zip".to_owned(),
+            },
+            content_sha256: self.frozen_submission_sha256.to_string(),
+            environment: FrozenEnvironmentIdentity {
+                environment_id: EnvironmentId::new(),
+                environment_revision: Revision::new(1)?,
+                release_id: test_environment_release_id(),
+                release_version: 1,
+                runtime_kind: RuntimeKind::VirtualMachine,
+                build_request_id: None,
+            },
+            retention: RetentionSnapshot {
+                policy_id: PolicyId::new(),
+                policy_revision: Revision::new(1)?,
+                class: RetentionClass::StudentSubmission,
+                retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+                disposition: RetentionDisposition::Delete,
+            },
+            system_facts: std::collections::BTreeMap::new(),
+            frozen_at,
+            derived_archive: None,
+        })
     }
 
     #[allow(clippy::unnecessary_wraps)]
@@ -1279,6 +1837,31 @@ fn idempotency(value: &str) -> Result<IdempotencyKey, contracts::http::HttpContr
     IdempotencyKey::parse(value)
 }
 
+async fn assert_identity_mismatch(
+    fixture: &TestContext,
+    request: &InternalCreateEvaluationRunRequest,
+    idempotency_key: &str,
+    trace_id: &str,
+    admission_binding: &AuthoringPublicationAdmissionBinding,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let error = fixture
+        .store
+        .create_run(
+            request,
+            &idempotency(idempotency_key)?,
+            fixture.now().await?,
+            trace_id,
+            admission_binding,
+        )
+        .await
+        .expect_err("identity mismatch must fail closed");
+    assert!(matches!(
+        error,
+        EvaluationControlStoreError::IdentityMismatch
+    ));
+    Ok(())
+}
+
 fn mutation(
     project_id: ProjectId,
     course_id: CourseId,
@@ -1329,13 +1912,13 @@ fn runtime_identity() -> EvaluationRuntimeIdentity {
 
 fn evaluation_execution_binding(
     project_id: ProjectId,
-    course_id: CourseId,
+    course_id: Option<CourseId>,
 ) -> EvaluationExecutionBinding {
     let artifact_id = ArtifactId::new();
     let package = ProblemPackage {
         id: ProblemPackageId::new(),
         project_id,
-        course_id: Some(course_id),
+        course_id,
         revision: Revision::new(1).expect("valid revision"),
         files: vec![PackageFile {
             path: "program.json".to_owned(),
@@ -1370,11 +1953,17 @@ fn admission(release: &EvaluationRelease) -> AuthoringPublicationAdmissionBindin
         approval_revision: release.approval_revision,
         project_id: release.project_id,
         course_id: release.course_id,
-        environment_release_id: ReleaseId::new(),
+        environment_release_id: test_environment_release_id(),
         environment_release_version: 1,
         evaluation_release_id: release.id,
         evaluation_release_revision: release.revision,
     }
+}
+
+fn test_environment_release_id() -> ReleaseId {
+    "018f2ea4-0000-7000-8000-000000000001"
+        .parse()
+        .expect("valid UUIDv7 release identity")
 }
 
 fn success_completion(score: u32) -> EvaluationStepCompletion {

@@ -254,9 +254,9 @@ pub enum RuntimeKind {
 /// Immutable purpose selected by Control for one Agent run.
 ///
 /// The purpose is authoritative: callers cannot substitute an environment class, target
-/// environment, actor, or runtime through an untyped request field. Authoring creates a new
-/// Environment/Evaluation package, while WorkConfiguration targets one existing Work environment
-/// and produces one configuration plan.
+/// environment, actor, or runtime through an untyped request field. Experiment Authoring creates
+/// a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
+/// WorkConfiguration targets one existing Work environment and produces one configuration plan.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentRunPurpose {
@@ -282,6 +282,20 @@ pub enum AgentRunPurpose {
 }
 
 impl AgentRunPurpose {
+    /// Returns the exact independent tracks requested by this purpose.
+    #[must_use]
+    pub const fn track_kinds(self) -> &'static [AgentTrackKind] {
+        match self {
+            Self::Authoring {
+                environment_class: EnvironmentClass::Experiment,
+            } => &[AgentTrackKind::Environment, AgentTrackKind::Evaluation],
+            Self::Authoring {
+                environment_class: EnvironmentClass::Work,
+            } => &[AgentTrackKind::Environment],
+            Self::WorkConfiguration { .. } => &[AgentTrackKind::WorkConfiguration],
+        }
+    }
+
     /// Returns the target existing environment for a Work configuration run.
     #[must_use]
     pub const fn work_environment(&self) -> Option<(EnvironmentId, Revision, ActorId)> {
@@ -781,23 +795,19 @@ pub struct AgentRun {
 }
 
 impl AgentRun {
-    /// Validates the exact two-track shape and monotonically numbered attempts.
+    /// Validates the exact purpose-specific track shape and monotonically numbered attempts.
     pub fn validate(&self) -> Result<(), AuthoringError> {
         let kinds = self
             .tracks
             .iter()
             .map(|track| track.kind)
             .collect::<BTreeSet<_>>();
-        let expected_kinds = match self.purpose {
-            AgentRunPurpose::Authoring { .. } => {
-                [AgentTrackKind::Environment, AgentTrackKind::Evaluation]
-                    .into_iter()
-                    .collect::<BTreeSet<_>>()
-            }
-            AgentRunPurpose::WorkConfiguration { .. } => [AgentTrackKind::WorkConfiguration]
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-        };
+        let expected_kinds = self
+            .purpose
+            .track_kinds()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         if kinds != expected_kinds || self.tracks.len() != expected_kinds.len() {
             return Err(AuthoringError::InvalidAgentRun(
                 "AgentRun tracks do not match its immutable purpose".to_owned(),
@@ -939,12 +949,9 @@ impl AgentRun {
         Ok(())
     }
 
-    /// Derives aggregate state without discarding either track's outcome.
+    /// Derives aggregate state without discarding any requested track's outcome.
     pub fn derived_state(&self) -> Result<AgentRunState, AuthoringError> {
-        let expected_track_count = match self.purpose {
-            AgentRunPurpose::Authoring { .. } => 2,
-            AgentRunPurpose::WorkConfiguration { .. } => 1,
-        };
+        let expected_track_count = self.purpose.track_kinds().len();
         let latest = self
             .tracks
             .iter()
@@ -1201,6 +1208,10 @@ pub struct AuthoringApprovalPublicationStatus {
     /// projection once Evaluation has returned its durable publish result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluation_release_revision: Option<Revision>,
+    /// Submission manifest carried by the exact approved Evaluation release when it is a
+    /// workspace-backed experiment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_manifest: Option<crate::submission::SubmissionManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_code: Option<DiagnosticCode>,
     pub updated_at: UtcTimestamp,
@@ -1420,6 +1431,35 @@ mod agent_run_state_tests {
         )?;
         assert_eq!(partial.derived_state()?, AgentRunState::PartiallySucceeded);
         assert!(partial.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn work_authoring_uses_one_environment_track() -> Result<(), Box<dyn Error>> {
+        let purpose = AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Work,
+        };
+        let succeeded = run(
+            purpose,
+            AgentRunState::Succeeded,
+            vec![track(
+                AgentTrackKind::Environment,
+                AgentAttemptState::Succeeded,
+            )],
+        )?;
+        assert_eq!(purpose.track_kinds(), &[AgentTrackKind::Environment]);
+        assert_eq!(succeeded.derived_state()?, AgentRunState::Succeeded);
+        assert!(succeeded.validate().is_ok());
+
+        let extra_evaluation = run(
+            purpose,
+            AgentRunState::Succeeded,
+            vec![
+                track(AgentTrackKind::Environment, AgentAttemptState::Succeeded),
+                track(AgentTrackKind::Evaluation, AgentAttemptState::Succeeded),
+            ],
+        )?;
+        assert!(extra_evaluation.validate().is_err());
         Ok(())
     }
 

@@ -21,7 +21,7 @@ use contracts::events::ReleasePublished;
 use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId, ImageArtifactId,
-    PolicyId, ReleaseId, Revision, UtcTimestamp,
+    OperationId, PolicyId, ReleaseId, Revision, UtcTimestamp,
 };
 use environment_service::{
     CONTAINER_BACKEND_PROTOCOL_VERSION, ContainerApplyObservation, ContainerBackendFence,
@@ -63,6 +63,7 @@ impl ContainerReleaseResolver for FixtureResolver {
 struct FixtureBackend {
     operations: Mutex<Vec<String>>,
     fences: Mutex<Vec<ContainerBackendFence>>,
+    restart_revisions: Mutex<Vec<Revision>>,
 }
 
 impl FixtureBackend {
@@ -109,9 +110,13 @@ impl ContainerProviderBackend for FixtureBackend {
         &self,
         fence: &ContainerBackendFence,
         _plan: &ContainerResourcePlan,
-        _operation_revision: Revision,
+        operation_revision: Revision,
     ) -> Result<ContainerApplyObservation, ProviderFailure> {
         self.record("restart", fence);
+        self.restart_revisions
+            .lock()
+            .expect("restart revisions lock")
+            .push(operation_revision);
         Ok(ready())
     }
 
@@ -166,6 +171,10 @@ fn plan_uses_digest_only_image_and_only_the_access_proxy() {
             .document
             .pointer("/spec/template/spec/containers/0/image"),
         Some(&json!(first.image))
+    );
+    assert_eq!(
+        deployment.document.pointer("/spec/strategy/type"),
+        Some(&json!("Recreate"))
     );
     assert_workspace_seed(&deployment.document, &first.image);
     assert_runtime_security_and_tmp(&deployment.document);
@@ -462,6 +471,46 @@ async fn provision_returns_one_stable_healthy_endpoint() {
             && fence.deadline_at == instance.operation.deadline_at
     }));
     assert_ne!(fences[0].request_id, fences[1].request_id);
+}
+
+#[tokio::test]
+async fn restart_reuses_operation_acceptance_revision_across_observations() {
+    let projection = projection();
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider(projection.clone(), backend.clone());
+    let mut instance = instance_for(&projection);
+    instance.observed_state = ObservedEnvironmentState::Provisioning;
+    instance.operation.kind = EnvironmentOperationKind::Restart;
+    instance.operation.accepted_revision = revision(7);
+    instance.revision = revision(12);
+
+    provider
+        .execute(ReconcileAction::Restart, &instance)
+        .await
+        .expect("first restart reconciliation succeeds");
+
+    instance.revision = revision(13);
+    provider
+        .execute(ReconcileAction::Restart, &instance)
+        .await
+        .expect("retrying the same restart succeeds");
+
+    instance.operation.id = OperationId::new();
+    instance.operation.accepted_revision = revision(8);
+    instance.revision = revision(14);
+    provider
+        .execute(ReconcileAction::Restart, &instance)
+        .await
+        .expect("a distinct restart succeeds");
+
+    assert_eq!(
+        backend
+            .restart_revisions
+            .lock()
+            .expect("restart revisions lock")
+            .as_slice(),
+        [revision(7), revision(7), revision(8)]
+    );
 }
 
 #[tokio::test]

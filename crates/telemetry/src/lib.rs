@@ -259,16 +259,21 @@ impl Visit for SafeEventVisitor {
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        let value = if field.name() == "safe_detail" && !valid_safe_detail(value) {
-            "redacted_unclassified"
-        } else {
-            value
+        let value = match field.name() {
+            "safe_detail" if !valid_safe_detail(value) => "redacted_unclassified",
+            "s3_error_code" if !valid_s3_error_code(value) => "redacted_unclassified",
+            "s3_request_id" if !valid_s3_request_id(value) => "redacted_unclassified",
+            _ => value,
         };
         self.record_value(field, serde_json::Value::from(value));
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.record_value(field, serde_json::Value::from(format!("{value:?}")));
+        if matches!(field.name(), "s3_error_code" | "s3_request_id") {
+            self.record_value(field, serde_json::Value::from("redacted_unclassified"));
+        } else {
+            self.record_value(field, serde_json::Value::from(format!("{value:?}")));
+        }
     }
 }
 
@@ -317,6 +322,8 @@ fn safe_log_field(name: &str) -> bool {
             | "error_kind"
             | "failure_stage"
             | "safe_detail"
+            | "s3_error_code"
+            | "s3_request_id"
             | "stdout_preview"
             | "retryable"
             | "http_method"
@@ -335,6 +342,9 @@ fn safe_log_field(name: &str) -> bool {
             | "sequence"
             | "count"
             | "items"
+            | "timestamp_precision"
+            | "started_at"
+            | "finished_at"
     )
 }
 
@@ -368,6 +378,24 @@ fn valid_safe_detail(value: &str) -> bool {
         && value.len() <= 64
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
+}
+
+fn valid_s3_error_code(value: &str) -> bool {
+    valid_bounded_s3_token(value, 64, false)
+}
+
+fn valid_s3_request_id(value: &str) -> bool {
+    valid_bounded_s3_token(value, 128, true)
+}
+
+fn valid_bounded_s3_token(value: &str, max_length: usize, allow_base64_symbols: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= max_length
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+                || (allow_base64_symbols && matches!(byte, b'/' | b'+' | b'='))
         })
 }
 
@@ -761,8 +789,14 @@ mod tests {
                 operation = "telemetry.format",
                 outcome = "succeeded",
                 duration_ms = 7_u64,
+                timestamp_precision = "seconds",
+                started_at = "2026-09-14T06:26:32Z",
+                finished_at = "2026-09-14T06:26:32Z",
                 max_delivery_attempt = 10_i64,
                 trace_id = "01900000000070008000000000000001",
+                s3_error_code = "NoSuchBucket",
+                s3_request_id =
+                    "tx000000000000000000000-0000000000000000-0000000000000000-0000000000000000",
                 token = "TOKEN_SENTINEL",
                 path = "/PRIVATE/PATH_SENTINEL",
                 url = "https://URL_SENTINEL.invalid",
@@ -800,8 +834,42 @@ mod tests {
             return Err(error.to_string().into());
         }
         assert_eq!(event["service"], "telemetry-test");
+        assert_eq!(event["timestamp_precision"], "seconds");
+        assert_eq!(event["started_at"], "2026-09-14T06:26:32Z");
+        assert_eq!(event["finished_at"], "2026-09-14T06:26:32Z");
         assert_eq!(event["token"], "redacted_unclassified");
         assert_eq!(event["max_delivery_attempt"], 10);
+        assert_eq!(event["s3_error_code"], "NoSuchBucket");
+        assert_eq!(
+            event["s3_request_id"],
+            "tx000000000000000000000-0000000000000000-0000000000000000-0000000000000000"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn formatter_redacts_invalid_s3_diagnostic_metadata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .event_format(SafeJsonFormatter {
+                service: "telemetry-test",
+            })
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(SharedWriter(Arc::clone(&bytes)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(
+                event = "telemetry.privacy.s3_probe",
+                s3_error_code = "NoSuchBucket secret",
+                s3_request_id = "request-id\nRAW_SENTINEL",
+            );
+        });
+        let output = String::from_utf8(bytes.lock().map_err(|_| "poisoned")?.clone())?;
+        assert!(!output.contains("RAW_SENTINEL"));
+        let event: serde_json::Value = serde_json::from_str(output.trim())?;
+        assert_eq!(event["s3_error_code"], "redacted_unclassified");
+        assert_eq!(event["s3_request_id"], "redacted_unclassified");
         Ok(())
     }
 

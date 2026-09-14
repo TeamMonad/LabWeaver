@@ -22,12 +22,7 @@
       {
         "path": "Dockerfile",
         "role": "public",
-        "sha256": "45616844b02b8388cb1dd2ba8a07a2ee663eff8fd2576d8c9d4671a0ae65c39a"
-      },
-      {
-        "path": "README.md",
-        "role": "public",
-        "sha256": "d39e105ffe7207910f231f3e60a0fe9e2477806d3a3d5617984ff9689e71b44e"
+        "sha256": "417cedcfe7b6d74120d846e6e35fd30911923e237bd9beec568438a05d00d5bd"
       },
       {
         "path": "environment.yaml",
@@ -53,6 +48,11 @@
         "path": "reference/vulnerable_auth.c",
         "role": "public",
         "sha256": "c9b17fa1770d95d1065d7f362f77c81b35a364a62140fd70362c741b9373ecf1"
+      },
+      {
+        "path": "rubrics/security-boundary-review-v1.yaml",
+        "role": "controlled",
+        "sha256": "0468c47cf39293e95c499e04fcaa7f661bdc08b7e8ee00020c5aa0df9ac369fd"
       },
       {
         "path": "scripts/local-test.sh",
@@ -93,6 +93,18 @@
         "path": "tests/security-controlled/valid-logins.out",
         "role": "public",
         "sha256": "c4cbbca115e8836a3a4eadb377273947278fd2786feda817f944890d8feb7538"
+      }
+    ],
+    "controlledArtifacts": [
+      {
+        "name": "evaluation-runner",
+        "binding": "evaluation-runner-image",
+        "locator": "private://labweaver/evaluation-runner/security-controlled@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "name": "security-review-rubric",
+        "binding": "evaluation-rubrics",
+        "locator": "private://labweaver/evaluation-rubrics/security-boundary-review-v1.yaml"
       }
     ]
   }

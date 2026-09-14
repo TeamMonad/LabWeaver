@@ -934,6 +934,25 @@ pub struct AuthoringPublicationAdmissionQuery {
     pub evaluation_release_id: EvaluationReleaseId,
 }
 
+/// Exact environment release identity used to recover the authoring-approved Evaluation pair.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentPublicationAdmissionQuery {
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub environment_release_version: u64,
+}
+
+impl EnvironmentPublicationAdmissionQuery {
+    /// Validates the immutable release selector before it reaches Control persistence.
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        if self.environment_release_version == 0 {
+            return Err(HttpContractError::InvalidEnvironmentQuery);
+        }
+        Ok(())
+    }
+}
+
 /// Exact Work environment and actor revisions used to resolve a Control admission binding.
 ///
 /// The run revision is included so the returned binding cannot be silently substituted after the
@@ -2509,34 +2528,6 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
-        "/api/v1/courses/{courseId}/me/evaluation-results",
-        "listOwnEvaluationResults",
-        "evaluation_result:read_own",
-        Oidc,
-        None,
-        200,
-        false,
-        true,
-        &[PlatformRole::Student],
-        Course
-    ),
-    op!(
-        Public,
-        Get,
-        "/api/v1/courses/{courseId}/me/evaluation-results/{runId}",
-        "getOwnEvaluationResult",
-        "evaluation_result:read_own",
-        Oidc,
-        None,
-        200,
-        false,
-        true,
-        &[PlatformRole::Student],
-        Course
-    ),
-    op!(
-        Public,
-        Get,
         "/api/v1/projects/{projectId}/me/evaluation-results",
         "listOwnProjectEvaluationResults",
         "evaluation_result:read_own",
@@ -2831,7 +2822,7 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
-        "/api/v1/frozen-submissions/{submissionId}",
+        "/api/v1/projects/{projectId}/frozen-submissions/{submissionId}",
         "getFrozenSubmission",
         "submission:read",
         Oidc,
@@ -2840,7 +2831,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         false,
         true,
         TEACHER_OR_STUDENT,
-        Environment
+        Project
     ),
     op!(
         Public,
@@ -3155,6 +3146,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/internal/v1/authoring-publications/{approvalId}/admission",
         "getInternalAuthoringPublicationAdmission",
+        "control.authoring.read",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/environment-releases/{releaseId}/admission",
+        "getInternalEnvironmentPublicationAdmission",
         "control.authoring.read",
         ServiceJwt,
         None,

@@ -25,6 +25,7 @@ pub mod outbox;
 pub mod process;
 pub mod resource_client;
 pub mod ssh_source;
+pub mod submission_consumer;
 pub mod worker;
 
 #[path = "../../http_transport.rs"]
@@ -41,7 +42,8 @@ pub use collector::{
     SnapshotCollector, SnapshotSource, SnapshotTransport, SourceEntry, SourceKind, SourceMetadata,
 };
 pub use command_store::{
-    FreezeCommandAccept, FreezeCommandStoreError, PgFreezeCommandStore, SubmissionFreezeCommand,
+    FreezeCommandAccept, FreezeCommandDurableOutcome, FreezeCommandStoreError,
+    PgFreezeCommandStore, SubmissionFreezeCommand,
 };
 pub use control_plane::{
     EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
@@ -77,4 +79,5 @@ pub use outbox::{EvaluationOutboxDispatcher, EvaluationOutboxError};
 pub use process::{EvaluationProcessError, run_evaluation_service};
 pub use resource_client::{ResourceClient, ResourceClientConfiguration, ResourceClientError};
 pub use ssh_source::{SshSnapshotConfig, SshSnapshotSource};
+pub use submission_consumer::{SubmissionConsumerError, SubmissionFrozenConsumer};
 pub use worker::{FreezeWorkerError, run_freeze_worker};

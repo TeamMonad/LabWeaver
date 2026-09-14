@@ -1,0 +1,31 @@
+apiVersion: evaluation.labweaver.io/rubric/v1
+kind: GoalReviewRubric
+metadata:
+  name: security-boundary-review-v1
+  version: "1.0.0"
+goal: >-
+  Review whether the student source removes the authentication prefix bypass while
+  preserving the input boundary and the complete expected-password check.
+instructions:
+  - Use only the supplied student/auth.c file as submission evidence.
+  - Treat this review as advisory: do not assign points, a numeric score, a pass/fail gate, or a release decision.
+  - Cite exact student/auth.c line ranges for every finding.
+criteria:
+  - id: complete-secret-comparison
+    description: The source requires the complete expected password before granting access.
+    evidence: student/auth.c
+  - id: input-boundary-preserved
+    description: The source still rejects malformed records, extra delimiters, and incomplete lines without widening the accepted input format.
+    evidence: student/auth.c
+  - id: normal-login-preserved
+    description: The source retains the intended operator identity and successful complete-password behavior.
+    evidence: student/auth.c
+  - id: bounded-change
+    description: The remediation is localized and does not add network, filesystem escape, shell, or privilege behavior.
+    evidence: student/auth.c
+response:
+  assessment: met | partially_met | not_met | insufficient_evidence
+  findings:
+    result: met | partial | missing | unclear
+    suggestion: Explain the observation and any remaining concern without scoring it.
+  requires_teacher_attention: true when evidence is incomplete or a boundary is unclear

@@ -48,6 +48,7 @@ const CREATE_RUN_OPERATION: &str = "create_evaluation_run_v1";
 const CANCEL_RUN_OPERATION: &str = "cancel_evaluation_run_v1";
 const RETRY_STEP_OPERATION: &str = "retry_evaluation_step_v1";
 const VERIFY_STEP_CLEANUP_OPERATION: &str = "verify_evaluation_step_cleanup_v1";
+const FROZEN_SUBMISSION_SCHEMA_VERSION: &str = "evaluation.labweaver.io/frozen-submission/v1";
 
 /// Result of publishing a release through the idempotency ledger.
 #[derive(Clone, Debug, PartialEq)]
@@ -180,6 +181,52 @@ impl EvaluationExecutionResources {
         }
         Ok(())
     }
+}
+
+fn validate_terminal_timing(
+    kind: EvaluationExecutionKind,
+    started_at: Option<UtcTimestamp>,
+    terminated_at: Option<UtcTimestamp>,
+) -> Result<(), EvaluationControlStoreError> {
+    match kind {
+        EvaluationExecutionKind::Program | EvaluationExecutionKind::AnsibleProbe => {
+            if started_at.is_some() != terminated_at.is_some()
+                || started_at
+                    .zip(terminated_at)
+                    .is_some_and(|(started, terminated)| terminated <= started)
+            {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+        }
+        EvaluationExecutionKind::LlmReview => {
+            // An advisory review has no Resource execution interval.  Its durable Agent receipt
+            // may represent a queued cancellation with only a terminal boundary, and a provider
+            // can finish within the same millisecond as its claimed start.  A reversed interval
+            // remains invalid, as does a start without a terminal boundary.
+            if started_at.is_some() && terminated_at.is_none()
+                || started_at
+                    .zip(terminated_at)
+                    .is_some_and(|(started, terminated)| terminated < started)
+            {
+                return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_terminal_completion_timing(
+    kind: EvaluationExecutionKind,
+    started_at: Option<UtcTimestamp>,
+    completion: &EvaluationStepCompletion,
+) -> Result<(), EvaluationControlStoreError> {
+    if kind == EvaluationExecutionKind::LlmReview
+        && completion.state == EvaluationStepRunState::Succeeded
+        && started_at.is_none()
+    {
+        return Err(EvaluationControlStoreError::ContractInvalid);
+    }
+    Ok(())
 }
 
 /// Durable execution checkpoint used to resume observation, billing delivery, and cleanup after
@@ -651,7 +698,7 @@ impl PgEvaluationControlStore {
             transaction.rollback().await?;
             return Err(EvaluationControlStoreError::IdentityMismatch);
         }
-        verify_frozen_submission(&mut transaction, request).await?;
+        verify_frozen_submission(&mut transaction, request, admission).await?;
         let run_id = EvaluationRunId::new();
         let steps = step_runs_for(&release, run_id)?;
         let max_score = release.evaluation_spec.body().aggregation().max_score();
@@ -741,6 +788,27 @@ impl PgEvaluationControlStore {
         decode_run(value)
     }
 
+    /// Loads a previously reserved run by the durable submission-frozen idempotency key.
+    ///
+    /// This lookup is intentionally available before authoring admission resolution.  A
+    /// committed run must remain replayable even when the paired publication is withdrawn before
+    /// the consumer receives its acknowledgement.
+    pub async fn load_run_by_idempotency_key(
+        &self,
+        project_id: ProjectId,
+        idempotency_key: &IdempotencyKey,
+    ) -> Result<Option<EvaluationRun>, EvaluationControlStoreError> {
+        let value: Option<Value> = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.evaluation_runs \
+             WHERE project_id=$1 AND idempotency_key=$2",
+        )
+        .bind(project_id.as_uuid())
+        .bind(idempotency_key.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        value.map(decode_run).transpose()
+    }
+
     /// Loads the payload-free execution checkpoint for one exact attempt.
     pub async fn load_execution_checkpoint(
         &self,
@@ -787,6 +855,15 @@ impl PgEvaluationControlStore {
             .transpose()?;
         if let Some(resources) = &execution_resources {
             resources.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+            let started_at = started_at
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+            let terminated_at = terminated_at
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+            validate_terminal_timing(resources.kind, started_at, terminated_at)?;
         }
         let terminal_completion = terminal_value
             .map(|value| {
@@ -794,13 +871,20 @@ impl PgEvaluationControlStore {
                     .map_err(|_| EvaluationControlStoreError::ContractInvalid)
             })
             .transpose()?;
-        if started_at.is_some() != terminated_at.is_some()
+        if let (Some(resources), Some(completion)) = (&execution_resources, &terminal_completion) {
+            let started_at = started_at
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+            validate_terminal_completion_timing(resources.kind, started_at, completion)?;
+        }
+        if execution_resources.is_none()
+            && (started_at.is_some() || terminated_at.is_some() || terminal_completion.is_some())
             || (started_at.is_some()
                 && execution_resources.as_ref().is_some_and(|resources| {
                     resources.objects.is_empty()
                         && resources.kind != EvaluationExecutionKind::LlmReview
                 }))
-            || (terminal_completion.is_some() && execution_resources.is_none())
         {
             return Err(EvaluationControlStoreError::ContractInvalid);
         }
@@ -812,11 +896,6 @@ impl PgEvaluationControlStore {
             .map(UtcTimestamp::from_utc)
             .transpose()
             .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
-        if let Some((started, terminated)) = execution_started_at.zip(execution_terminated_at)
-            && terminated <= started
-        {
-            return Err(EvaluationControlStoreError::ContractInvalid);
-        }
         Ok(Some(EvaluationExecutionCheckpoint {
             execution_started_at,
             execution_terminated_at,
@@ -1045,13 +1124,6 @@ impl PgEvaluationControlStore {
         completion: &EvaluationStepCompletion,
         deliveries: &[RecordResourceUsageRequest],
     ) -> Result<(), EvaluationControlStoreError> {
-        if execution_started_at.is_some() != execution_terminated_at.is_some()
-            || execution_started_at
-                .zip(execution_terminated_at)
-                .is_some_and(|(started, terminated)| terminated <= started)
-        {
-            return Err(EvaluationControlStoreError::ContractInvalid);
-        }
         if deliveries.len() > 2 {
             return Err(EvaluationControlStoreError::ContractInvalid);
         }
@@ -1108,6 +1180,15 @@ impl PgEvaluationControlStore {
         let resources: EvaluationExecutionResources = serde_json::from_value(resources_value)
             .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
         resources.validate_for(lease.run_id, lease.step_run_id, lease.task_run_id)?;
+        validate_terminal_timing(
+            resources.kind,
+            execution_started_at,
+            execution_terminated_at,
+        )?;
+        validate_terminal_completion_timing(resources.kind, execution_started_at, completion)?;
+        if resources.kind == EvaluationExecutionKind::LlmReview && !deliveries.is_empty() {
+            return Err(EvaluationControlStoreError::ContractInvalid);
+        }
         // A failed intent with no created objects is a known pre-start
         // outcome and needs no UID set.  A successful completion still
         // requires at least one persisted object identity.
@@ -1136,8 +1217,19 @@ impl PgEvaluationControlStore {
                 return Err(EvaluationControlStoreError::IdentityMismatch);
             }
         } else {
+            // Before this terminal write, the only valid durable checkpoint is the pre-start
+            // intent.  A partially persisted interval is corruption for every execution kind;
+            // the LLM-specific `None, Some(finished)` form is valid only as this terminal input,
+            // never as an intermediate running checkpoint.
             if existing_started.is_some() != existing_terminated.is_some() {
                 return Err(EvaluationControlStoreError::ContractInvalid);
+            }
+            if let (Some(started), Some(terminated)) = (existing_started, existing_terminated) {
+                let started = UtcTimestamp::from_utc(started)
+                    .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+                let terminated = UtcTimestamp::from_utc(terminated)
+                    .map_err(|_| EvaluationControlStoreError::ClockInvalid)?;
+                validate_terminal_timing(resources.kind, Some(started), Some(terminated))?;
             }
             let updated = sqlx::query(
                 "UPDATE evaluation.evaluation_step_attempts AS attempt
@@ -2128,19 +2220,51 @@ async fn enqueue_resource_delivery(
 async fn verify_frozen_submission(
     transaction: &mut Transaction<'_, Postgres>,
     request: &InternalCreateEvaluationRunRequest,
+    admission: &AuthoringPublicationAdmissionBinding,
 ) -> Result<(), EvaluationControlStoreError> {
     let row = sqlx::query(
-        "SELECT course_id,content_sha256,source_identity_sha256 \
+        "SELECT project_id,course_id,environment_id,manifest_sha256,content_sha256,\
+                schema_version,contract \
          FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1",
     )
     .bind(request.frozen_submission_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(EvaluationControlStoreError::FrozenSubmissionNotFound)?;
-    let course_id = request
-        .course_id
-        .ok_or(EvaluationControlStoreError::IdentityMismatch)?;
-    if row.try_get::<Uuid, _>("course_id")? != course_id.as_uuid() {
+
+    let persisted_project_id: Uuid = row.try_get("project_id")?;
+    let persisted_course_id: Option<Uuid> = row.try_get("course_id")?;
+    let persisted_environment_id: Uuid = row.try_get("environment_id")?;
+    let manifest_sha256: String = row.try_get("manifest_sha256")?;
+    let content_sha256: String = row.try_get("content_sha256")?;
+    let schema_version: String = row.try_get("schema_version")?;
+    let contract: Value = row.try_get("contract")?;
+    let submission: contracts::submission::FrozenSubmission = serde_json::from_value(contract)
+        .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+    submission
+        .validate()
+        .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+
+    // The database columns are the immutable lookup authority while the JSON contract carries
+    // the actor and environment release identity. Validate both representations before any run
+    // rows are created so a malformed or partially mismatched freeze cannot be evaluated.
+    let persisted_manifest_valid = manifest_sha256.parse::<Sha256Digest>().is_ok();
+    let persisted_content_valid = content_sha256.parse::<Sha256Digest>().is_ok();
+    let contract_course_id = submission.course_id.map(CourseId::as_uuid);
+    if schema_version != FROZEN_SUBMISSION_SCHEMA_VERSION
+        || !persisted_manifest_valid
+        || !persisted_content_valid
+        || submission.id != request.frozen_submission_id
+        || persisted_project_id != submission.project_id.as_uuid()
+        || persisted_course_id != contract_course_id
+        || persisted_environment_id != submission.environment.environment_id.as_uuid()
+        || content_sha256 != submission.content_sha256
+        || request.project_id.as_uuid() != persisted_project_id
+        || request.course_id.map(CourseId::as_uuid) != persisted_course_id
+        || request.actor_id != submission.actor_id
+        || submission.environment.release_id != admission.environment_release_id
+        || submission.environment.release_version != admission.environment_release_version
+    {
         return Err(EvaluationControlStoreError::IdentityMismatch);
     }
     Ok(())

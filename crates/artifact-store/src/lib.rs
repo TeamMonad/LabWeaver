@@ -8,7 +8,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Region};
-use aws_sdk_s3::error::ProvideErrorMetadata as _;
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
 use aws_sdk_s3::types::ObjectLockMode;
@@ -367,7 +367,10 @@ impl S3ImmutableObjectStore {
             .body(ByteStream::from(bytes.to_vec()))
             .send()
             .await
-            .map_err(|_| ObjectStoreError::UploadFailed)?;
+            .map_err(|error| {
+                log_upload_failure(&self.config.binding, "artifact.write.versioned", &error);
+                ObjectStoreError::UploadFailed
+            })?;
         let version = response
             .version_id()
             .filter(|value| !value.is_empty() && *value != "null")
@@ -614,7 +617,14 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .body(ByteStream::from(bytes.to_vec()))
             .send()
             .await
-            .map_err(|_| ObjectStoreError::UploadFailed)?;
+            .map_err(|error| {
+                log_upload_failure(
+                    &self.config.binding,
+                    "artifact.write.governance_locked",
+                    &error,
+                );
+                ObjectStoreError::UploadFailed
+            })?;
         let version = response
             .version_id()
             .filter(|value| !value.is_empty() && *value != "null")
@@ -669,6 +679,58 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .map_err(|_| ObjectStoreError::DeleteFailed)?;
         Ok(())
     }
+}
+
+struct S3UploadDiagnostics<'a> {
+    sdk_error_category: &'static str,
+    service_code: &'a str,
+    http_status: u16,
+    request_id: &'a str,
+}
+
+fn s3_upload_diagnostics<E>(error: &SdkError<E>) -> S3UploadDiagnostics<'_>
+where
+    E: ProvideErrorMetadata,
+{
+    let response = error.raw_response();
+    S3UploadDiagnostics {
+        sdk_error_category: match error {
+            SdkError::ConstructionFailure(_) => "construction",
+            SdkError::TimeoutError(_) => "timeout",
+            SdkError::DispatchFailure(_) => "dispatch",
+            SdkError::ResponseError(_) => "response",
+            SdkError::ServiceError(_) => "service",
+            _ => "unknown",
+        },
+        service_code: error.code().unwrap_or("unknown"),
+        http_status: response.map_or(0, |value| value.status().as_u16()),
+        request_id: response
+            .and_then(|value| value.headers().get("x-amz-request-id"))
+            .unwrap_or("unknown"),
+    }
+}
+
+fn log_upload_failure<E>(binding: &str, operation: &'static str, error: &SdkError<E>)
+where
+    E: ProvideErrorMetadata,
+{
+    let diagnostics = s3_upload_diagnostics(error);
+    tracing::error!(
+        event = "artifact_store.put_object_failed",
+        component = "immutable-object-store",
+        operation,
+        outcome = "failed",
+        duration_ms = 0_u64,
+        binding,
+        diagnostic_code = "LW_OBJECT_UPLOAD_FAILED",
+        error_kind = diagnostics.sdk_error_category,
+        failure_stage = "artifact.write.request",
+        retryable = false,
+        http_status = diagnostics.http_status,
+        s3_error_code = diagnostics.service_code,
+        s3_request_id = diagnostics.request_id,
+        safe_detail = "object_upload_failed",
+    );
 }
 
 /// Fail-fast storage errors with stable diagnostics.
@@ -731,15 +793,37 @@ impl ObjectStoreError {
 
 #[cfg(test)]
 mod tests {
+    use aws_sdk_s3::error::{ErrorMetadata, SdkError};
+    use aws_sdk_s3::operation::put_object::PutObjectError;
     use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+    use aws_smithy_runtime_api::http::{Response, StatusCode};
+    use aws_smithy_types::body::SdkBody;
     use contracts::{ArtifactRef, UtcTimestamp};
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 
     use super::{
         BehaviorVersion, Credentials, ImmutableObjectStore, Region, S3ConfigBuilder,
-        S3ImmutableObjectStore, S3StoreConfig,
+        S3ImmutableObjectStore, S3StoreConfig, s3_upload_diagnostics,
     };
+
+    #[test]
+    fn upload_diagnostics_extract_service_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let mut response = Response::new(StatusCode::try_from(404_u16)?, SdkBody::empty());
+        response
+            .headers_mut()
+            .insert("x-amz-request-id", "req-no-such-bucket");
+        let error = SdkError::service_error(
+            PutObjectError::generic(ErrorMetadata::builder().code("NoSuchBucket").build()),
+            response,
+        );
+        let diagnostics = s3_upload_diagnostics(&error);
+        assert_eq!(diagnostics.sdk_error_category, "service");
+        assert_eq!(diagnostics.service_code, "NoSuchBucket");
+        assert_eq!(diagnostics.http_status, 404);
+        assert_eq!(diagnostics.request_id, "req-no-such-bucket");
+        Ok(())
+    }
 
     #[test]
     fn configuration_rejects_http_and_unbounded_uploads() -> Result<(), Box<dyn std::error::Error>>
@@ -798,7 +882,7 @@ mod tests {
         let shared = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(config.region.clone()))
             .credentials_provider(credentials)
-            .endpoint_url(endpoint)
+            .endpoint_url(&endpoint)
             .load()
             .await;
         let client = aws_sdk_s3::Client::from_conf(
@@ -824,6 +908,36 @@ mod tests {
             .await?;
         let store = S3ImmutableObjectStore {
             config,
+            client: client.clone(),
+        };
+        let package_config = S3StoreConfig {
+            binding: "minio-package-e2-v1".to_owned(),
+            endpoint: endpoint.parse()?,
+            bucket: "issue-48-packages".to_owned(),
+            region: "labweaver-test-1".to_owned(),
+            object_prefix: "problem-packages".to_owned(),
+            upload_ttl_seconds: 60,
+            max_object_bytes: 1_024,
+            force_path_style: true,
+            ca_bundle_file: None,
+        };
+        client
+            .create_bucket()
+            .bucket(&package_config.bucket)
+            .send()
+            .await?;
+        client
+            .put_bucket_versioning()
+            .bucket(&package_config.bucket)
+            .versioning_configuration(
+                VersioningConfiguration::builder()
+                    .status(BucketVersioningStatus::Enabled)
+                    .build(),
+            )
+            .send()
+            .await?;
+        let package_store = S3ImmutableObjectStore {
+            config: package_config,
             client: client.clone(),
         };
         let bytes = b"immutable teacher material";
@@ -892,6 +1006,73 @@ mod tests {
         let reread = store.read_verified(key, &frozen.reference).await?;
         assert_eq!(reread.reference, frozen.reference);
         assert_eq!(reread.bytes, bytes);
+
+        let package_bytes = b"approved package playbook";
+        let package_key = "problem-packages/course/package/playbook";
+        let package_upload = package_store
+            .presign_upload(
+                package_key,
+                u64::try_from(package_bytes.len())?,
+                "text/plain",
+                "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
+            )
+            .await?;
+        let mut package_request = http.put(&package_upload.url);
+        for (name, value) in &package_upload.required_headers {
+            package_request = package_request.header(name, value);
+        }
+        assert!(
+            package_request
+                .body(package_bytes.to_vec())
+                .send()
+                .await?
+                .status()
+                .is_success()
+        );
+        let package = package_store
+            .freeze_current(
+                package_key,
+                u64::try_from(package_bytes.len())?,
+                "text/plain",
+            )
+            .await?;
+        assert_eq!(package.reference.store_binding, package_store.binding());
+        assert_eq!(package.bytes, package_bytes);
+        let package_reread = package_store
+            .read_verified(package_key, &package.reference)
+            .await?;
+        assert_eq!(package_reread.bytes, package_bytes);
+        let package_download = package_store
+            .presign_download(
+                package_key,
+                &package.reference.object_version,
+                package.reference.size_bytes,
+                &package.reference.media_type,
+                "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
+            )
+            .await?;
+        assert!(package_download.url.contains("issue-48-packages"));
+        let mut package_download_request = http.get(&package_download.url);
+        for (name, value) in &package_download.required_headers {
+            package_download_request = package_download_request.header(name, value);
+        }
+        assert_eq!(
+            package_download_request
+                .send()
+                .await?
+                .bytes()
+                .await?
+                .as_ref(),
+            package_bytes
+        );
+        let mut wrong_binding = package.reference.clone();
+        wrong_binding.store_binding = store.binding().to_owned();
+        assert!(
+            package_store
+                .read_verified(package_key, &wrong_binding)
+                .await
+                .is_err()
+        );
         store.delete_orphan(key, &version).await?;
         assert!(store.read_verified(key, &frozen.reference).await.is_err());
         let observed_now = time::OffsetDateTime::now_utc();

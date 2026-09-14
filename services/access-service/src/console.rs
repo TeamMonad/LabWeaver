@@ -26,7 +26,7 @@ use persistence_sqlx::Sha256Digest;
 use rand::RngCore;
 use rustls::{ClientConfig, RootCertStore};
 use sha2::{Digest, Sha256};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use subtle::ConstantTimeEq;
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
@@ -337,7 +337,16 @@ pub(super) async fn connect(
     let requested_kind = requested_console_kind(&headers)?;
     let session = authenticated_session(&state, &headers).await?;
     let secret = handoff_secret(&headers)?;
-    let consumed = consume_capability(&state, &opaque, &secret, &session, requested_kind).await?;
+    let consumed = consume_capability(
+        &state.pool,
+        state.deployment.grants.max_console_sessions,
+        &state.console_proxy_owner,
+        &opaque,
+        &secret,
+        &session,
+        requested_kind,
+    )
+    .await?;
     Ok(upgrade
         .protocols([requested_kind.websocket_subprotocol()])
         .max_frame_size(MAX_FRAME_BYTES)
@@ -554,9 +563,26 @@ struct ConsumedCapability {
     bff_session_id: Uuid,
 }
 
+fn console_store_unavailable(operation: &'static str, error: &sqlx::Error) -> ApiError {
+    let sqlstate = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .map_or_else(|| "unknown".to_owned(), std::borrow::Cow::into_owned);
+    tracing::error!(
+        event = "access.console.persistence_failed",
+        diagnostic_code = "LW_ACCESS_STORE_UNAVAILABLE",
+        operation,
+        sqlstate = %sqlstate,
+        "console persistence operation failed",
+    );
+    ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE")
+}
+
 #[allow(clippy::too_many_lines)] // This is one auditable consume-and-open transaction boundary.
 async fn consume_capability(
-    state: &AppState,
+    pool: &PgPool,
+    max_console_sessions: u16,
+    console_proxy_owner: &str,
     opaque: &str,
     secret: &[u8],
     session: &BffSession,
@@ -571,8 +597,7 @@ async fn consume_capability(
         return Err(ApiError::bad_request("LW_CONSOLE_LOCATOR_INVALID"));
     }
     let locator = format!("/connect/console/{opaque}");
-    let mut tx = state
-        .pool
+    let mut tx = pool
         .begin()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
@@ -582,7 +607,7 @@ async fn consume_capability(
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     let active: i64 = sqlx::query_scalar("SELECT count(*) FROM access.console_sessions WHERE state IN ('opening','active','terminating','termination_overdue')")
         .fetch_one(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    if active >= i64::from(state.deployment.grants.max_console_sessions) {
+    if active >= i64::from(max_console_sessions) {
         return Err(ApiError::unavailable("LW_CONSOLE_CAPACITY_EXHAUSTED"));
     }
     let row = sqlx::query(
@@ -641,8 +666,8 @@ async fn consume_capability(
         (None, None, None) => None,
         _ => return Err(ApiError::internal("LW_ACCESS_CONSOLE_RECORD_INVALID")),
     };
-    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,revision,state,opened_at,authorization_expires_at) SELECT $1,c.capability_id,c.kind,c.bff_session_id,c.access_grant_id,c.access_grant_revision,c.actor_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,$2,1,'opening',$3,c.authorization_expires_at FROM access.console_capabilities c WHERE c.capability_id=$4")
-        .bind(session_id.as_uuid()).bind(state.console_proxy_owner.as_str()).bind(now).bind(capability_id).execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    sqlx::query("INSERT INTO access.console_sessions (session_id,capability_id,kind,bff_session_id,access_grant_id,access_grant_revision,actor_id,project_id,course_id,environment_id,environment_revision,lease_id,lease_revision,lease_expires_at,proxy_owner,revision,state,opened_at,authorization_expires_at) SELECT $1,c.capability_id,c.kind,c.bff_session_id,c.access_grant_id,c.access_grant_revision,c.actor_id,c.project_id,c.course_id,c.environment_id,c.environment_revision,c.lease_id,c.lease_revision,c.lease_expires_at,$2,1,'opening',$3,c.authorization_expires_at FROM access.console_capabilities c WHERE c.capability_id=$4")
+        .bind(session_id.as_uuid()).bind(console_proxy_owner).bind(now).bind(capability_id).execute(&mut *tx).await.map_err(|error| console_store_unavailable("consume_capability.insert_console_session", &error))?;
     let project_id = ProjectId::from_str(&row.get::<Uuid, _>("project_id").to_string())
         .map_err(|_| ApiError::internal("LW_ACCESS_ID_INVALID"))?;
     let course_id = row
@@ -1012,6 +1037,10 @@ fn requested_console_kind(headers: &HeaderMap) -> Result<ConsoleKind, ApiError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use auth::CsrfToken;
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
 
     #[test]
     fn handoff_cookie_is_path_scoped_strict_and_never_domain_scoped()
@@ -1049,5 +1078,155 @@ mod tests {
             HeaderValue::from_static("labweaver.console.xterm.v1, labweaver.console.novnc.v1"),
         );
         assert!(requested_console_kind(&headers).is_err());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression exercises the production consume transaction against the migrated schema"
+    )]
+    async fn consume_capability_persists_project_and_consumes_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await?;
+        let migrations = format!(
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}",
+            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
+            include_str!("../../../migrations/access/0003_independent_project_memberships.sql")
+        );
+        sqlx::raw_sql(&migrations).execute(&pool).await?;
+
+        let actor_id = Uuid::now_v7();
+        let project_id = ProjectId::new();
+        let grant_id = AccessGrantId::new();
+        let environment_id = EnvironmentId::new();
+        let bff_session_id = Uuid::now_v7();
+        let capability_id = Uuid::now_v7();
+        let opaque = "console-test-locator";
+        let locator = format!("/connect/console/{opaque}");
+        let secret = [7_u8; 32];
+        let now = OffsetDateTime::now_utc();
+        let expires_at = now + Duration::seconds(30);
+        let authorization_expires_at = now + Duration::minutes(15);
+
+        sqlx::query(
+            "INSERT INTO access.actors (actor_id,issuer,subject_sha256) VALUES ($1,'https://issuer.example.test',$2)",
+        )
+        .bind(actor_id)
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.project_memberships (course_id,project_id,actor_id,role,state,revision) VALUES (NULL,$1,$2,'student','active',1)",
+        )
+        .bind(project_id.as_uuid())
+        .bind(actor_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.access_grants (grant_id,actor_id,project_id,course_id,environment_id,environment_revision,revision,state,not_before,expires_at,contract) VALUES ($1,$2,$3,NULL,$4,1,1,'active',$5,$6,$7)",
+        )
+        .bind(grant_id.as_uuid())
+        .bind(actor_id)
+        .bind(project_id.as_uuid())
+        .bind(environment_id.as_uuid())
+        .bind(now)
+        .bind(now + Duration::minutes(30))
+        .bind(serde_json::json!({"subjectKind": "owner"}))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.bff_sessions (session_id,actor_id,platform_roles,authorization_revision,expires_at,idle_expires_at,encrypted_csrf_token,csrf_encryption_key_id) VALUES ($1,$2,ARRAY['student'],1,$3,$4,$5,'test-key')",
+        )
+        .bind(bff_session_id)
+        .bind(actor_id)
+        .bind(now + Duration::minutes(30))
+        .bind(now + Duration::minutes(15))
+        .bind(vec![8_u8; 32])
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.console_capabilities (capability_id,kind,access_grant_id,access_grant_revision,actor_id,bff_session_id,project_id,course_id,environment_id,environment_class,environment_revision,issued_at,expires_at,authorization_expires_at,locator_sha256,handoff_secret_sha256,encrypted_handoff_secret,encryption_key_id,idempotency_scope,idempotency_key_sha256) VALUES ($1,'xterm',$2,1,$3,$4,$5,NULL,$6,'experiment',1,$7,$8,$9,$10,$11,$12,'test-key','actor:test',$13)",
+        )
+        .bind(capability_id)
+        .bind(grant_id.as_uuid())
+        .bind(actor_id)
+        .bind(bff_session_id)
+        .bind(project_id.as_uuid())
+        .bind(environment_id.as_uuid())
+        .bind(now)
+        .bind(expires_at)
+        .bind(authorization_expires_at)
+        .bind(Sha256Digest::of_bytes(locator.as_bytes()).to_string())
+        .bind(hex_sha(&secret))
+        .bind(vec![9_u8; 32])
+        .bind("d".repeat(64))
+        .execute(&pool)
+        .await?;
+
+        let session = BffSession {
+            session_id: bff_session_id,
+            actor_id,
+            roles: vec![contracts::PlatformRole::Student],
+            authorization_revision: 1,
+            expires_at: now + Duration::minutes(30),
+            idle_expires_at: now + Duration::minutes(15),
+            csrf_token: CsrfToken::from_secret("test-csrf".to_owned()),
+        };
+        let consumed = consume_capability(
+            &pool,
+            128,
+            "test-console-proxy",
+            opaque,
+            &secret,
+            &session,
+            ConsoleKind::Xterm,
+        )
+        .await
+        .map_err(|error| format!("consume capability: {}", error.diagnostic))?;
+        assert_eq!(consumed.bff_session_id, bff_session_id);
+
+        let persisted = sqlx::query(
+            "SELECT project_id,course_id,state FROM access.console_sessions WHERE session_id=$1",
+        )
+        .bind(consumed.session_id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(persisted.get::<Uuid, _>("project_id"), project_id.as_uuid());
+        assert!(persisted.get::<Option<Uuid>, _>("course_id").is_none());
+        assert_eq!(persisted.get::<String, _>("state"), "opening");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM access.console_sessions WHERE project_id=$1",
+            )
+            .bind(project_id.as_uuid())
+            .fetch_one(&pool)
+            .await?,
+            1
+        );
+
+        let Err(replay) = consume_capability(
+            &pool,
+            128,
+            "test-console-proxy",
+            opaque,
+            &secret,
+            &session,
+            ConsoleKind::Xterm,
+        )
+        .await
+        else {
+            return Err("a consumed capability must reject replay".into());
+        };
+        assert_eq!(replay.diagnostic, "LW_CONSOLE_CAPABILITY_CONSUMED");
+        Ok(())
     }
 }

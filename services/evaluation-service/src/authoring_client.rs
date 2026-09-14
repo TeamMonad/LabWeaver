@@ -16,8 +16,11 @@ use std::{
 
 use auth::{ServiceTokenClient, ServiceTokenClientError};
 use contracts::authoring::ProjectLlmEgressPolicy;
-use contracts::http::{AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery};
-use contracts::{ApprovalId, ProjectId};
+use contracts::http::{
+    AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery,
+    EnvironmentPublicationAdmissionQuery,
+};
+use contracts::{ApprovalId, ProjectId, ReleaseId};
 use futures_util::StreamExt;
 use reqwest::{Certificate, Client, StatusCode, Url, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -226,6 +229,73 @@ impl AuthoringAdmissionClient {
         Ok(binding)
     }
 
+    /// Resolves the exact approved Evaluation pair for one environment release identity.
+    pub async fn resolve_environment(
+        &self,
+        release_id: ReleaseId,
+        query: &EnvironmentPublicationAdmissionQuery,
+    ) -> Result<Option<AuthoringPublicationAdmissionBinding>, AuthoringAdmissionClientError> {
+        query
+            .validate()
+            .map_err(|_| AuthoringAdmissionClientError::RequestInvalid)?;
+        let path = format!("internal/v1/environment-releases/{release_id}/admission");
+        let url = self
+            .base_uri
+            .join(&path)
+            .map_err(|_| AuthoringAdmissionClientError::Configuration)?;
+        if url.scheme() != "https" {
+            return Err(AuthoringAdmissionClientError::Configuration);
+        }
+        let mut headers = HeaderMap::new();
+        self.token_client
+            .bearer_auth_for(&mut headers, &self.audience, &self.scopes)
+            .await
+            .map_err(AuthoringAdmissionClientError::Token)?;
+        let mut query_pairs = vec![
+            ("projectId", query.project_id.to_string()),
+            (
+                "environmentReleaseVersion",
+                query.environment_release_version.to_string(),
+            ),
+        ];
+        if let Some(course_id) = query.course_id {
+            query_pairs.push(("courseId", course_id.to_string()));
+        }
+        let response = self
+            .client
+            .get(url)
+            .headers(headers)
+            .query(&query_pairs)
+            .send()
+            .await
+            .map_err(|_| AuthoringAdmissionClientError::Transport)?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Err(AuthoringAdmissionClientError::AdmissionMissing);
+        }
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(AuthoringAdmissionClientError::Denied);
+        }
+        if status == StatusCode::CONFLICT || status == StatusCode::PRECONDITION_FAILED {
+            return Err(AuthoringAdmissionClientError::Conflict);
+        }
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(AuthoringAdmissionClientError::ResponseTooLarge);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(AuthoringAdmissionClientError::Unavailable);
+        }
+        if !status.is_success() {
+            return Err(AuthoringAdmissionClientError::Rejected);
+        }
+        let body = read_bounded_body(response, self.max_response_bytes).await?;
+        let binding: Option<AuthoringPublicationAdmissionBinding> = decode_response(&body)?;
+        if let Some(binding) = &binding {
+            validate_environment_binding(release_id, query, binding)?;
+        }
+        Ok(binding)
+    }
+
     /// Resolves the current project LLM egress policy immediately before an advisory review.
     ///
     /// The policy is intentionally uncached.  Agent receives this exact snapshot and enforces
@@ -322,6 +392,22 @@ fn validate_binding(
         || binding.course_id != query.course_id
         || binding.evaluation_release_id != query.evaluation_release_id
         || binding.environment_release_version == 0
+        || binding.evaluation_release_revision.get() == 0
+    {
+        return Err(AuthoringAdmissionClientError::ResponseInvalid);
+    }
+    Ok(())
+}
+
+fn validate_environment_binding(
+    release_id: ReleaseId,
+    query: &EnvironmentPublicationAdmissionQuery,
+    binding: &AuthoringPublicationAdmissionBinding,
+) -> Result<(), AuthoringAdmissionClientError> {
+    if binding.environment_release_id != release_id
+        || binding.project_id != query.project_id
+        || binding.course_id != query.course_id
+        || binding.environment_release_version != query.environment_release_version
         || binding.evaluation_release_revision.get() == 0
     {
         return Err(AuthoringAdmissionClientError::ResponseInvalid);

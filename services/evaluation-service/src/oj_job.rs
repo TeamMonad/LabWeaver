@@ -191,6 +191,7 @@ impl OjJobResources {
                     "metadata":{"labels":labels,"annotations":annotations},
                     "spec":{
                         "restartPolicy":"Never",
+                        "runtimeClassName":"labweaver-oj",
                         "serviceAccountName":binding.service_account_name,
                         "automountServiceAccountToken":false,
                         "terminationGracePeriodSeconds":5,
@@ -246,7 +247,7 @@ impl OjJobResources {
                                 "limits":{"cpu":"1","memory":worker_memory_limit,"ephemeral-storage":"256Mi"},
                             },
                             "volumeMounts":[
-                                {"name":"command","mountPath":"/etc/labweaver/oj","readOnly":true},
+                                {"name":"command","mountPath":"/etc/labweaver/oj/command.json","subPath":"command.json","readOnly":true},
                                 {"name":"submission","mountPath":"/input/submission","readOnly":true},
                                 {"name":"evaluator","mountPath":"/input/evaluator","readOnly":true},
                                 {"name":"evidence","mountPath":"/evidence"},

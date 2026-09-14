@@ -49,7 +49,7 @@ const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 512;
 const MAX_FILES_PER_ARCHIVE: usize = 10_000;
-const MAX_CA_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_CA_BYTES: u64 = 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Which read-only input root receives one archive.

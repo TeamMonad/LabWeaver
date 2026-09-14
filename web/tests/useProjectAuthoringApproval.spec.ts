@@ -162,6 +162,36 @@ describe('useProjectAuthoringApproval', () => {
     expect(approval.canApprove).toBe(true)
   })
 
+  it('fails closed when a route run resolves outside the selected project', async () => {
+    vi.mocked(getProjectAgentRun).mockResolvedValue({
+      data: { ...makeRun(), id: 'run-other', projectId: 'project-2' } as never,
+      error: undefined as never,
+    })
+
+    const approval = useProjectAuthoringApproval(ref<string | null>('project-1'), ref<string | undefined>('run-1'))
+
+    await vi.waitFor(() => expect(approval.run.kind).toBe('error'))
+    expect(getProjectEnvironmentCandidate).not.toHaveBeenCalled()
+    expect(getProjectEvaluationCandidate).not.toHaveBeenCalled()
+    expect(approval.run.kind === 'error' && approval.run.diagnostic.code).toBe('PROJECT_APPROVAL_STALE_CONTEXT')
+  })
+
+  it('fails closed when a candidate projection is not linked to the loaded run', async () => {
+    vi.mocked(getProjectEnvironmentCandidate).mockResolvedValue({
+      data: {
+        ...makeEnvironmentCandidate(),
+        candidate: { ...makeEnvironmentCandidate().candidate, runId: 'run-other' },
+      } as never,
+      error: undefined as never,
+    })
+
+    const approval = useProjectAuthoringApproval(ref<string | null>('project-1'), ref<string | undefined>('run-1'))
+
+    await vi.waitFor(() => expect(approval.environmentCandidate.kind).toBe('error'))
+    expect(approval.environmentCandidate.kind === 'error' && approval.environmentCandidate.diagnostic.code).toBe('PROJECT_APPROVAL_STALE_CONTEXT')
+    expect(approval.canApprove).toBe(false)
+  })
+
   it('waits for a projected Environment candidate after a transient not-found response', async () => {
     vi.useFakeTimers()
     try {

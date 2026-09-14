@@ -27,6 +27,7 @@ RUN --mount=type=cache,id=labweaver-playwright-pnpm,target=/root/.local/share/pn
     pnpm install --frozen-lockfile
 
 COPY web/ ./
+COPY examples/security-controlled /workspace/examples/security-controlled
 COPY tools/local-dev/playwright-entrypoint.sh /usr/local/bin/labweaver-playwright-entrypoint
 RUN chmod 0555 /usr/local/bin/labweaver-playwright-entrypoint
 

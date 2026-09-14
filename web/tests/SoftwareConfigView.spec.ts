@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { routeLocationKey, routerKey } from 'vue-router'
 import SoftwareConfigView from '@/views/researcher/SoftwareConfigView.vue'
 import {
   approveProjectWorkConfigurationRun,
@@ -277,5 +278,67 @@ describe('SoftwareConfigView', () => {
     expect((wrapper.find('input[type="number"]').element as HTMLInputElement).value).toBe('1')
     expect((wrapper.find('select[required]').element as HTMLSelectElement).value).toBe('')
     expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('keeps a route project while the shared project list is loading', async () => {
+    let resolveProjects: ((value: { data: typeof project[]; error: never }) => void) | undefined
+    const projectsResponse = new Promise<{ data: typeof project[]; error: never }>((resolve) => {
+      resolveProjects = resolve
+    })
+    vi.mocked(listProjects).mockReturnValue(projectsResponse as never)
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: project.id } },
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await wrapper.get('button.mode-switch__button:nth-of-type(2)').trigger('click')
+    await Promise.resolve()
+    expect(replace.mock.calls).not.toEqual(expect.arrayContaining([
+      [expect.objectContaining({ query: expect.objectContaining({ projectId: undefined }) })],
+    ]))
+
+    resolveProjects?.({ data: [project], error: undefined as never })
+    await vi.waitFor(() => expect((wrapper.find('select').element as HTMLSelectElement).value).toBe(project.id))
+  })
+
+  it('replaces an invalid route project with a project returned by the list', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'missing-project' } },
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect((wrapper.find('select').element as HTMLSelectElement).value).toBe(project.id))
+    expect(replace.mock.calls.some(([location]) => location.query?.projectId === project.id)).toBe(true)
+    expect(replace.mock.calls.some(([location]) => location.query?.projectId === 'missing-project')).toBe(false)
+  })
+
+  it('clears a route project when the confirmed project list is empty', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [] as never, error: undefined as never })
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'missing-project' } },
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect((wrapper.find('select').element as HTMLSelectElement).value).toBe(''))
+    expect(replace.mock.calls.some(([location]) => location.query?.projectId === undefined)).toBe(true)
   })
 })

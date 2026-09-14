@@ -24,12 +24,12 @@ use contracts::http::{
     CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreateProblemPackageUploadRequest, CreateWorkConfigurationRunRequest, CursorPage,
-    EvaluationReleaseListQuery, GeneratedArtifactKind, GeneratedArtifactQuery, IdempotencyKey,
-    InternalAgentRunMutationRequest, InternalApproveWorkConfigurationRequest,
-    InternalCreateAgentRunRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
-    RemoveProjectMembershipRequest, StrongEtag, WithdrawEnvironmentTemplateReleaseRequest,
-    WithdrawEvaluationReleaseRequest, WorkConfigurationAdmissionQuery, WorkConfigurationPlanView,
-    resolve_sse_resume,
+    EnvironmentPublicationAdmissionQuery, EvaluationReleaseListQuery, GeneratedArtifactKind,
+    GeneratedArtifactQuery, IdempotencyKey, InternalAgentRunMutationRequest,
+    InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
+    InternalWithdrawEvaluationReleaseRequest, OperationAccepted, RemoveProjectMembershipRequest,
+    StrongEtag, WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
+    WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
@@ -247,6 +247,10 @@ pub fn authenticated_router(state: &Arc<ApiState>, verifier: &Arc<ServiceTokenVe
             .route(
                 "/internal/v1/authoring-publications/{approval_id}/admission",
                 get(get_internal_authoring_publication_admission),
+            )
+            .route(
+                "/internal/v1/environment-releases/{release_id}/admission",
+                get(get_internal_environment_publication_admission),
             )
             .with_state(Arc::clone(state))
             .layer(middleware::from_fn_with_state(
@@ -1236,6 +1240,18 @@ async fn get_internal_authoring_publication_admission(
     let binding = state
         .control
         .authoring_publication_admission(approval_id, &query)
+        .await?;
+    Ok(Json(binding).into_response())
+}
+
+async fn get_internal_environment_publication_admission(
+    State(state): State<Arc<ApiState>>,
+    Path(release_id): Path<ReleaseId>,
+    Query(query): Query<EnvironmentPublicationAdmissionQuery>,
+) -> Result<Response, ApiError> {
+    let binding = state
+        .control
+        .environment_publication_admission(release_id, &query)
         .await?;
     Ok(Json(binding).into_response())
 }

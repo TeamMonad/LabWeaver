@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +25,146 @@ import local_dev_e2e  # noqa: E402
 
 
 class LocalDevBundleTests(unittest.TestCase):
+    def test_run_passes_raw_bytes_without_text_transcoding(self) -> None:
+        captured: dict[str, object] = {}
+
+        def capture_subprocess_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(argv, 0)
+
+        payload = b"#!/bin/sh\nexit 0\n"
+        with patch.object(local_dev.subprocess, "run", side_effect=capture_subprocess_run):
+            local_dev.run(["docker", "exec", "-i", "node", "sh", "-c", "cat > /tmp/script"], input_bytes=payload)
+
+        self.assertEqual(captured["input"], payload)
+        self.assertFalse(captured["text"])
+
+    def test_provider_environment_loads_only_the_three_standard_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "provider.env"
+            path.write_text(
+                "ANTHROPIC_BASE_URL=https://provider.example.test/anthropic\n"
+                "ANTHROPIC_AUTH_TOKEN=file-token\n"
+                "ANTHROPIC_MODEL=file-model\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "ambient-token"}):
+                self.assertEqual(
+                    local_dev.load_provider_environment(path),
+                    {
+                        "ANTHROPIC_BASE_URL": "https://provider.example.test/anthropic",
+                        "ANTHROPIC_AUTH_TOKEN": "file-token",
+                        "ANTHROPIC_MODEL": "file-model",
+                    },
+                )
+
+    def test_provider_environment_rejects_missing_or_invalid_values_without_echoing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing_token = root / "missing-token.env"
+            missing_token.write_text(
+                "ANTHROPIC_BASE_URL=https://provider.example.test/anthropic\n"
+                "ANTHROPIC_MODEL=file-model\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(local_dev.LocalDevError, "ANTHROPIC_AUTH_TOKEN") as missing:
+                local_dev.load_provider_environment(missing_token)
+            self.assertNotIn("ambient-token", str(missing.exception))
+
+            invalid_port = root / "invalid-port.env"
+            invalid_port.write_text(
+                "ANTHROPIC_BASE_URL=https://provider.example.test:not-a-port/anthropic\n"
+                "ANTHROPIC_AUTH_TOKEN=private-token\n"
+                "ANTHROPIC_MODEL=file-model\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(local_dev.LocalDevError, "absolute HTTPS URL") as invalid:
+                local_dev.load_provider_environment(invalid_port)
+            self.assertNotIn("private-token", str(invalid.exception))
+
+    def test_provider_environment_rejects_extra_fields_and_path_is_not_exposed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = Path(directory) / "provider-with-extra.env"
+            path.write_text(
+                "ANTHROPIC_BASE_URL=https://provider.example.test/anthropic\n"
+                "ANTHROPIC_AUTH_TOKEN=private-token\n"
+                "ANTHROPIC_MODEL=file-model\n"
+                "ANTHROPIC_LEGACY_KEY=must-reject\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(local_dev.LocalDevError, "unsupported fields") as error:
+                local_dev.load_provider_environment(path)
+            self.assertNotIn("private-token", str(error.exception))
+            self.assertNotIn(str(path), str(error.exception))
+
+            malformed = root / "provider-malformed.env"
+            malformed.write_text(
+                "ANTHROPIC_BASE_URL=https://provider.example.test/anthropic\n"
+                "ANTHROPIC_AUTH_TOKEN=private-token\n"
+                "ANTHROPIC_MODEL=file-model\n"
+                "this is not a dotenv assignment\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(local_dev.LocalDevError, "invalid dotenv entry"):
+                local_dev.load_provider_environment(malformed)
+
+    def test_external_fixture_provider_does_not_load_dotenv(self) -> None:
+        with patch.object(
+            local_dev,
+            "load_provider_environment",
+            side_effect=AssertionError("fixture must not load a provider file"),
+        ):
+            self.assertEqual(
+                local_dev.resolve_provider_environment(external_fixtures=True, provider_env=None),
+                {
+                    "ANTHROPIC_BASE_URL": "https://local-claude-fixture.invalid/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": "local-claude-fixture-token",
+                    "ANTHROPIC_MODEL": "local-claude-fixture",
+                },
+            )
+        with self.assertRaisesRegex(local_dev.LocalDevError, "cannot be combined"):
+            local_dev.resolve_provider_environment(
+                external_fixtures=True,
+                provider_env=Path("provider.env"),
+            )
+
+    def test_playwright_job_reads_provider_model_from_agent_configmap(self) -> None:
+        stack = local_dev_e2e.Stack(
+            state_file=Path(".tmp/local-dev/state.json"),
+            state={},
+            kubeconfig=Path(".private/local-dev/kubeconfig"),
+            run_root=Path(".private/local-dev"),
+            run_id="a" * 12,
+            namespace="labweaver-system",
+            identity_namespace="keycloak-system",
+            registry="labweaver-local-registry-" + "a" * 12,
+            registry_port=5001,
+            portal_port=38080,
+        )
+        job = local_dev_e2e.make_job(
+            stack,
+            job_name="local-dev-e2e-test",
+            image="localhost:5001/labweaver/local/playwright-e2e:test",
+            credentials_secret="credentials",
+            ca_secret="ca",
+            projects=["teacher"],
+            grep=None,
+            grep_invert=None,
+            extra_environment={},
+            skip_vm=False,
+            timeout_seconds=120,
+        )
+        main_env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        provider_model = next(item for item in main_env if item["name"] == "LABWEAVER_E2E_PROVIDER_MODEL")
+        self.assertEqual(
+            provider_model["valueFrom"]["configMapKeyRef"],
+            {"name": "agent-service-config", "key": "anthropic-model", "optional": False},
+        )
+        command = job["spec"]["template"]["spec"]["containers"][0]["args"]
+        self.assertEqual(command.count("--retries=0"), 1)
+
     def test_local_kind_workspace_configuration_requires_explicit_supported_mode(self) -> None:
         with patch.object(
             local_dev,
@@ -160,6 +302,223 @@ class LocalDevBundleTests(unittest.TestCase):
                 ["docker", "exec", "labweaver-local-test-control-plane", "crictl", "pull", image]
                 for image in expected_images
             ],
+        )
+
+    def test_kindnet_resources_use_owned_kubeconfig_and_preserve_daemonset_fields(self) -> None:
+        calls: list[tuple[Path, list[str]]] = []
+
+        def capture_kubectl(
+            kubeconfig: Path,
+            args: list[str],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((kubeconfig, args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with (
+            patch.object(local_dev, "kubectl", side_effect=capture_kubectl),
+            patch.object(local_dev, "wait_rollout") as wait,
+        ):
+            kubeconfig = Path(".tmp/local-dev/owned-kubeconfig")
+            local_dev.configure_kindnet_resources(kubeconfig)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], kubeconfig)
+        args = calls[0][1]
+        self.assertEqual(
+            args[:6],
+            [
+                "-n",
+                "kube-system",
+                "patch",
+                "daemonset/kindnet",
+                "--type=strategic",
+                "--patch",
+            ],
+        )
+        patch_document = json.loads(args[6])
+        self.assertEqual(
+            patch_document,
+            {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "kindnet-cni",
+                                    "resources": {
+                                        "limits": {"cpu": "500m", "memory": "128Mi"},
+                                        "requests": {"cpu": "500m", "memory": "128Mi"},
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
+        wait.assert_called_once_with(kubeconfig, "daemonset", "kindnet", "kube-system")
+
+    def test_kind_oj_runtime_preserves_base_spec_and_installs_dedicated_handler(self) -> None:
+        base_spec = {
+            "ociVersion": "1.0.2",
+            "process": {"args": ["/pause"]},
+            "linux": {
+                "resources": {
+                    "devices": [{"allow": False}],
+                    "pids": {"existing": "preserved", "limit": 57793},
+                }
+            },
+        }
+        base_spec_text = json.dumps(base_spec)
+        containerd_config = (
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
+            '  runtime_type = "io.containerd.runc.v2"\n'
+        )
+        calls: list[tuple[list[str], bytes | None]] = []
+        applied: list[list[dict[str, object]]] = []
+
+        def capture_run(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            capture: bool = False,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            del capture, check
+            calls.append((argv, input_bytes))
+            if argv == [
+                "docker",
+                "exec",
+                "kind-control-plane",
+                "cat",
+                local_dev.KIND_CONTAINERD_BASE_RUNTIME_SPEC,
+            ]:
+                return subprocess.CompletedProcess(argv, 0, stdout=base_spec_text)
+            if argv == [
+                "docker",
+                "exec",
+                "kind-control-plane",
+                "cat",
+                local_dev.KIND_CONTAINERD_CONFIG,
+            ]:
+                return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        def capture_apply(_kubeconfig: Path, objects: list[dict[str, object]]) -> None:
+            applied.append(objects)
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(local_dev, "run", side_effect=capture_run),
+            patch.object(local_dev, "apply", side_effect=capture_apply),
+        ):
+            kubeconfig = Path(".tmp/local-dev/owned-kubeconfig")
+            local_dev.configure_kind_oj_runtime(kubeconfig)
+
+        runtime_writes = [
+            payload
+            for argv, payload in calls
+            if payload is not None and argv[-1] == f"cat > {local_dev.KIND_OJ_RUNTIME_SPEC}"
+        ]
+        self.assertEqual(len(runtime_writes), 1)
+        written_spec = json.loads(runtime_writes[0])
+        self.assertEqual(written_spec["ociVersion"], base_spec["ociVersion"])
+        self.assertEqual(written_spec["process"], base_spec["process"])
+        self.assertEqual(
+            written_spec["linux"]["resources"]["devices"],
+            base_spec["linux"]["resources"]["devices"],
+        )
+        self.assertEqual(
+            written_spec["linux"]["resources"]["pids"],
+            {"existing": "preserved", "limit": local_dev.KIND_OJ_PIDS_LIMIT},
+        )
+
+        config_writes = [
+            payload
+            for argv, payload in calls
+            if payload is not None and argv[-1] == f"cat > {local_dev.KIND_CONTAINERD_CONFIG}"
+        ]
+        self.assertEqual(len(config_writes), 1)
+        written_config = config_writes[0].decode("utf-8")
+        self.assertTrue(written_config.startswith(containerd_config))
+        self.assertIn(
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj]\n'
+            '  runtime_type = "io.containerd.runc.v2"\n'
+            '  base_runtime_spec = "/etc/containerd/labweaver-oj-base.json"\n'
+            '\n[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj.options]\n'
+            '  SystemdCgroup = true\n',
+            written_config,
+        )
+        self.assertEqual(
+            [argv for argv, _payload in calls if argv[-3:] == ["systemctl", "restart", "containerd"]],
+            [["docker", "exec", "kind-control-plane", "systemctl", "restart", "containerd"]],
+        )
+        self.assertEqual(
+            applied,
+            [
+                [
+                    {
+                        "apiVersion": "node.k8s.io/v1",
+                        "kind": "RuntimeClass",
+                        "metadata": {
+                            "name": "labweaver-oj",
+                            "labels": {
+                                "labweaver.local-dev.owner": local_dev.KUBERNETES_OWNER_LABEL_VALUE
+                            },
+                        },
+                        "handler": "labweaver-oj",
+                    }
+                ]
+            ],
+        )
+
+    def test_kind_oj_runtime_accepts_existing_handler_without_duplicate_config(self) -> None:
+        base_spec_text = json.dumps(
+            {"linux": {"resources": {"devices": [{"allow": False}]}}}
+        )
+        containerd_config = (
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
+            '  runtime_type = "io.containerd.runc.v2"\n'
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj]\n'
+            '  runtime_type = "io.containerd.runc.v2"\n'
+            '  base_runtime_spec = "/etc/containerd/labweaver-oj-base.json"\n'
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj.options]\n'
+            '  SystemdCgroup = true\n'
+        )
+        calls: list[tuple[list[str], bytes | None]] = []
+
+        def capture_run(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            capture: bool = False,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            del capture, check
+            calls.append((argv, input_bytes))
+            if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_BASE_RUNTIME_SPEC]:
+                return subprocess.CompletedProcess(argv, 0, stdout=base_spec_text)
+            if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_CONFIG]:
+                return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(local_dev, "run", side_effect=capture_run),
+            patch.object(local_dev, "apply"),
+        ):
+            local_dev.configure_kind_oj_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
+
+        self.assertFalse(
+            any(
+                payload is not None and argv[-1] == f"cat > {local_dev.KIND_CONTAINERD_CONFIG}"
+                for argv, payload in calls
+            )
+        )
+        self.assertEqual(
+            sum(argv[-3:] == ["systemctl", "restart", "containerd"] for argv, _payload in calls),
+            1,
         )
 
     def test_cert_creates_nested_output_and_verifies_chain(self) -> None:
@@ -320,6 +679,284 @@ class LocalDevBundleTests(unittest.TestCase):
             local_dev.KUBERNETES_OWNER_LABEL_VALUE,
         )
 
+    def test_keycloak_foundation_uses_persistent_single_writer_storage(self) -> None:
+        applied: list[list[dict[str, object]]] = []
+
+        def capture_apply(_kubeconfig: Path, objects: list[dict[str, object]]) -> None:
+            applied.append(objects)
+            local_dev.validate_kubernetes_label_maps(objects)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            foundation = root / "foundation"
+            work = root / "work"
+            foundation.mkdir()
+            work.mkdir()
+            key = root / "keycloak.key"
+            crt = root / "keycloak.crt"
+            key.write_bytes(b"key")
+            crt.write_bytes(b"certificate")
+            with (
+                patch.object(local_dev, "apply", side_effect=capture_apply),
+                patch.object(local_dev, "foundation_objects", return_value=[]),
+                patch.object(local_dev, "local_kind_workspace_configuration", return_value=("standard", "ReadWriteOnce")),
+                patch.object(local_dev, "cert", return_value=(key, crt)),
+                patch.object(local_dev, "wait_rollout"),
+                patch.object(local_dev, "wait_postgres_ready"),
+                patch.object(local_dev, "bootstrap_nats_and_minio"),
+                patch.object(
+                    local_dev,
+                    "kubectl",
+                    return_value=local_dev.subprocess.CompletedProcess([], 0),
+                ),
+            ):
+                local_dev.start_foundation(Path("kubeconfig"), foundation, work)
+
+        keycloak_objects = next(
+            objects
+            for objects in applied
+            if any(document.get("metadata", {}).get("name") == "keycloak" for document in objects)
+        )
+        self.assertEqual(
+            [document["kind"] for document in keycloak_objects],
+            ["PersistentVolumeClaim", "Deployment", "Service"],
+        )
+        pvc = keycloak_objects[0]
+        self.assertEqual(pvc["metadata"], {"name": "keycloak-data", "namespace": "keycloak-system"})
+        self.assertEqual(
+            pvc["spec"],
+            {
+                "accessModes": ["ReadWriteOnce"],
+                "storageClassName": "standard",
+                "resources": {"requests": {"storage": "1Gi"}},
+            },
+        )
+
+        deployment = keycloak_objects[1]
+        self.assertEqual(deployment["spec"]["strategy"], {"type": "Recreate"})
+        pod_spec = deployment["spec"]["template"]["spec"]
+        self.assertEqual(
+            pod_spec["securityContext"],
+            {
+                "runAsNonRoot": True,
+                "fsGroup": 1000,
+                "fsGroupChangePolicy": "OnRootMismatch",
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+        )
+        container = pod_spec["containers"][0]
+        self.assertEqual(
+            container["securityContext"],
+            {
+                "runAsUser": 1000,
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            },
+        )
+        self.assertNotIn("runAsGroup", container["securityContext"])
+        self.assertIn("--import-realm", container["args"])
+        data_mount = next(mount for mount in container["volumeMounts"] if mount["name"] == "data")
+        self.assertEqual(data_mount["mountPath"], "/opt/keycloak/data")
+        self.assertFalse(data_mount.get("readOnly", False))
+        realm_mount = next(mount for mount in container["volumeMounts"] if mount["name"] == "realm")
+        self.assertEqual(realm_mount["mountPath"], "/opt/keycloak/data/import/workloads-realm.json")
+        self.assertTrue(realm_mount["readOnly"])
+        data_volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "data")
+        self.assertEqual(data_volume["persistentVolumeClaim"], {"claimName": "keycloak-data"})
+
+    def test_kind_harbor_trust_installs_idempotent_restart_restore_unit(self) -> None:
+        calls: list[tuple[list[str], bytes | None]] = []
+
+        def capture_run(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            capture: bool = False,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            del capture, check
+            calls.append((argv, input_bytes))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            certificate = Path(directory) / "harbor-ca.crt"
+            certificate.write_bytes(b"harbor-ca")
+            provider = SimpleNamespace(
+                registry_host="harbor.lab.lan",
+                registry_service_ip="10.96.0.42",
+                harbor_ca_file=certificate,
+            )
+            with (
+                patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane", "kind-worker"]),
+                patch.object(local_dev, "run", side_effect=capture_run),
+            ):
+                local_dev.configure_kind_harbor_trust(provider)
+                local_dev.configure_kind_harbor_trust(provider)
+
+        script_payloads = [
+            payload
+            for _argv, payload in calls
+            if payload is not None and payload.startswith(b"#!/bin/sh")
+        ]
+        unit_payloads = [
+            payload
+            for _argv, payload in calls
+            if payload is not None and payload.startswith(b"[Unit]")
+        ]
+        self.assertEqual(len(script_payloads), 4)
+        self.assertEqual(len(unit_payloads), 4)
+        self.assertEqual(len(set(script_payloads)), 1)
+        self.assertEqual(len(set(unit_payloads)), 1)
+
+        self.assertTrue(all(b"\r\n" not in payload for _argv, payload in calls if payload is not None))
+        script = script_payloads[0].decode("utf-8")
+        self.assertIn("registry_ip='10.96.0.42'", script)
+        self.assertIn("registry_host='harbor.lab.lan'", script)
+        self.assertIn('substr($i, 1, 1) == "#"', script)
+        self.assertIn("kept_aliases++", script)
+        self.assertIn('cat "$temporary_file" > /etc/hosts', script)
+        self.assertNotIn(">> /etc/hosts", script)
+        self.assertNotIn("mv ", script)
+
+        unit = unit_payloads[0].decode("utf-8")
+        self.assertIn("Before=containerd.service kubelet.service", unit)
+        self.assertIn("ExecStart=/usr/local/sbin/labweaver-restore-harbor-host", unit)
+        self.assertIn("WantedBy=multi-user.target", unit)
+        self.assertNotIn("RemainAfterExit", unit)
+
+        enable_now = [
+            argv
+            for argv, _payload in calls
+            if argv[-4:] == ["systemctl", "enable", "--now", "labweaver-harbor-hosts.service"]
+        ]
+        self.assertEqual(len(enable_now), 4)
+
+    def test_kind_harbor_trust_surfaces_restore_unit_start_failure(self) -> None:
+        def fail_unit_start(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            capture: bool = False,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            del input_bytes, capture, check
+            if argv[-4:] == ["systemctl", "enable", "--now", "labweaver-harbor-hosts.service"]:
+                raise local_dev.LocalDevError("command failed (1): systemctl enable --now")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            certificate = Path(directory) / "harbor-ca.crt"
+            certificate.write_bytes(b"harbor-ca")
+            provider = SimpleNamespace(
+                registry_host="harbor.lab.lan",
+                registry_service_ip="10.96.0.42",
+                harbor_ca_file=certificate,
+            )
+            with (
+                patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+                patch.object(local_dev, "run", side_effect=fail_unit_start),
+            ):
+                with self.assertRaisesRegex(local_dev.LocalDevError, "systemctl enable --now"):
+                    local_dev.configure_kind_harbor_trust(provider)
+
+    def test_evaluation_runner_bootstrap_uses_final_execution_and_private_pull_config(self) -> None:
+        applied: list[list[dict[str, object]]] = []
+
+        def capture_apply(_kubeconfig: Path, objects: list[dict[str, object]]) -> None:
+            applied.append(objects)
+            local_dev.validate_kubernetes_label_maps(objects)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_input = root / "app-input"
+            config_path = app_input / "configmaps/evaluation-service-config/config.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "execution": {
+                            "runnerNamespace": "evaluation-runners",
+                            "ojServiceAccountName": "oj-runner-v2",
+                            "ansibleProbeServiceAccountName": "ansible-probe-v2",
+                            "imagePullSecretName": "harbor-course-pull-v2",
+                        }
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            private_pull_config = root / "registry-pull-config.json"
+            private_payload = b'{"auths":{"harbor.lab.lan":{"auth":"runtime"}}}\n'
+            private_pull_config.write_bytes(private_payload)
+
+            with patch.object(local_dev, "apply", side_effect=capture_apply):
+                local_dev.bootstrap_evaluation_runner_resources(
+                    Path("kubeconfig"), app_input, private_pull_config
+                )
+
+        self.assertEqual(len(applied), 1)
+        objects = applied[0]
+        self.assertEqual(
+            [(document["kind"], document["metadata"]["name"]) for document in objects],
+            [
+                ("Namespace", "evaluation-runners"),
+                ("NetworkPolicy", "oj-runner-default-deny"),
+                ("NetworkPolicy", "ansible-probe-default-deny"),
+                ("ServiceAccount", "oj-runner-v2"),
+                ("ServiceAccount", "ansible-probe-v2"),
+                ("Secret", "harbor-course-pull-v2"),
+            ],
+        )
+        namespace = objects[0]
+        self.assertEqual(
+            namespace["metadata"]["labels"],
+            {
+                "app.kubernetes.io/part-of": "labweaver",
+                "labweaver.io/managed": "true",
+                "pod-security.kubernetes.io/enforce": "restricted",
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/warn": "restricted",
+            },
+        )
+        for policy in objects[1:3]:
+            self.assertEqual(policy["metadata"]["namespace"], "evaluation-runners")
+            self.assertEqual(
+                policy["spec"],
+                {
+                    "podSelector": {},
+                    "policyTypes": ["Ingress", "Egress"],
+                    "ingress": [],
+                    "egress": [],
+                },
+            )
+        for service_account in objects[3:5]:
+            self.assertEqual(service_account["metadata"]["namespace"], "evaluation-runners")
+            self.assertFalse(service_account["automountServiceAccountToken"])
+        pull_secret = objects[5]
+        self.assertEqual(pull_secret["type"], "kubernetes.io/dockerconfigjson")
+        self.assertEqual(
+            base64.b64decode(pull_secret["data"][".dockerconfigjson"]),
+            private_payload,
+        )
+
+    def test_evaluation_runner_bootstrap_rejects_missing_private_pull_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "app-input/configmaps/evaluation-service-config/config.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                "execution:\n"
+                "  runnerNamespace: labweaver-evaluation\n"
+                "  ojServiceAccountName: oj-runner\n"
+                "  ansibleProbeServiceAccountName: ansible-probe\n"
+                "  imagePullSecretName: harbor-course-pull\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(local_dev.LocalDevError, "unavailable"):
+                local_dev.bootstrap_evaluation_runner_resources(
+                    Path("kubeconfig"), root / "app-input", root / "missing.json"
+                )
+
     def test_oidc_probe_cleans_its_resources_when_pod_start_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -409,6 +1046,27 @@ class LocalDevBundleTests(unittest.TestCase):
             ],
         )
         self.assertTrue(all(not check for _command, check in calls))
+
+    def test_local_minio_buckets_include_all_declared_unique_buckets(self) -> None:
+        self.assertEqual(
+            local_dev.local_minio_buckets(),
+            ("labweaver-artifacts", "labweaver-frozen-submissions"),
+        )
+
+    def test_minio_bootstrap_runs_immutable_verifier_for_each_configured_bucket(self) -> None:
+        verifier = patch.object(local_dev, "bootstrap_minio_bucket")
+        with patch.object(
+            local_dev,
+            "local_minio_buckets",
+            return_value=("labweaver-artifacts", "labweaver-frozen-submissions"),
+        ), verifier as bootstrap:
+            minio = object()
+            local_dev.bootstrap_minio_buckets(minio)
+
+        self.assertEqual(
+            [call.args[1] for call in bootstrap.call_args_list],
+            ["labweaver-artifacts", "labweaver-frozen-submissions"],
+        )
 
     def test_minio_bootstrap_rejects_non_enabled_or_invalid_version_status(self) -> None:
         bucket = "labweaver-artifacts"
@@ -685,7 +1343,16 @@ class LocalDevBundleTests(unittest.TestCase):
                     "evaluation-runner@sha256:" + "b" * 64
                 ),
             }
-            bundle, resource_bundle, _ = local_dev.make_app_input(work, foundation, images)
+            bundle, resource_bundle, _ = local_dev.make_app_input(
+                work,
+                foundation,
+                images,
+                {
+                    "ANTHROPIC_BASE_URL": "https://provider.example.test/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": "test-provider-token",
+                    "ANTHROPIC_MODEL": "test-model",
+                },
+            )
 
             platform_documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
             platform_names = {
@@ -720,6 +1387,28 @@ class LocalDevBundleTests(unittest.TestCase):
                 if document["kind"] == "ConfigMap"
                 and document["metadata"]["name"] == "environment-service-config"
             )
+            agent_config = next(
+                document
+                for document in platform_documents
+                if document["kind"] == "ConfigMap"
+                and document["metadata"]["name"] == "agent-service-config"
+            )
+            self.assertEqual(
+                agent_config["data"]["anthropic-base-url"],
+                "https://provider.example.test/anthropic\n",
+            )
+            self.assertEqual(agent_config["data"]["anthropic-model"], "test-model\n")
+            agent_secret = next(
+                document
+                for document in platform_documents
+                if document["kind"] == "Secret"
+                and document["metadata"]["name"] == "agent-service-secrets"
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["anthropic-auth-token"]),
+                b"test-provider-token",
+            )
+            self.assertNotIn("test-provider-token", bundle.read_text(encoding="utf-8"))
             control_values = yaml.safe_load(control_config["data"]["config.yaml"])
             self.assertEqual(
                 control_values["control"]["evaluationRuntime"]["runnerImage"],
@@ -735,6 +1424,18 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertEqual(
                 evaluation_values["coordinator"]["workerImage"],
                 images["evaluation_service"],
+            )
+            self.assertEqual(
+                evaluation_values["objectStore"]["binding"],
+                "minio-submissions-v1",
+            )
+            self.assertEqual(
+                evaluation_values["packageObjectStore"]["binding"],
+                "problem-package-minio-v1",
+            )
+            self.assertNotEqual(
+                evaluation_values["objectStore"]["binding"],
+                evaluation_values["packageObjectStore"]["binding"],
             )
             providers = json.loads(environment_config["data"]["providers.json"])
             container_provider = next(
@@ -775,6 +1476,133 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertFalse((app_input / "configmaps" / "kubevirt-console-executor-config").exists())
             self.assertFalse((app_input / "secrets" / "kubevirt-executor-secrets").exists())
             self.assertFalse((app_input / "secrets" / "kubevirt-console-executor-secrets").exists())
+
+    def test_real_provider_bundle_uses_harbor_buildkit_inputs_and_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            foundation = root / "foundation"
+            provider_root = root / "provider"
+            work.mkdir()
+            provider_root.mkdir()
+
+            client_names = ("web", "access", "agent", "control", "environment", "evaluation", "resource")
+            (work / "client-secrets.json").write_text(
+                json.dumps({name: f"{name}-secret" for name in client_names}),
+                encoding="utf-8",
+            )
+            database_names = (
+                "control-service",
+                "access-service",
+                "agent-service",
+                "environment-service",
+                "evaluation-service",
+                "resource-service",
+            )
+            (work / "database-passwords.json").write_text(
+                json.dumps({name: f"{name}-password" for name in database_names}),
+                encoding="utf-8",
+            )
+            self._write_foundation_fixture(foundation)
+            build_nats = foundation / "nats-clients" / "build-executor"
+            build_nats.mkdir(parents=True)
+            for name in ("nats.creds", "nats-client.crt", "nats-client.key"):
+                (build_nats / name).write_bytes(f"build-{name}".encode())
+            for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
+                (work / name).write_bytes(name.encode())
+
+            files = {
+                "harbor-ca.crt": b"harbor-ca",
+                "builder-username": b"robot$labweaver-system+platform-build-executor\n",
+                "builder-password": b"builder-token\n",
+                "runtime-username": b"robot$labweaver-system+runtime-puller\n",
+                "runtime-password": b"runtime-token\n",
+                "registry-pull-config.json": b'{"auths": {"harbor.lab.lan": {"auth": "runtime"}}}\n',
+                "buildkit-ca.crt": b"buildkit-ca",
+                "buildkit-client.crt": b"buildkit-client-crt",
+                "buildkit-client.key": b"buildkit-client-key",
+                "chart.tgz": b"chart",
+            }
+            paths = {}
+            for name, value in files.items():
+                path = provider_root / name
+                path.write_bytes(value)
+                paths[name] = path
+            provider = local_dev.local_dev_build.RealBuildProvider(
+                registry_host="harbor.lab.lan",
+                registry_service_ip="10.96.0.42",
+                harbor_api="https://harbor.lab.lan/",
+                buildkit_address="tcp://buildkit.labweaver-build.svc:1234",
+                harbor_ca_file=paths["harbor-ca.crt"],
+                builder_username_file=paths["builder-username"],
+                builder_password_file=paths["builder-password"],
+                runtime_username_file=paths["runtime-username"],
+                runtime_password_file=paths["runtime-password"],
+                registry_pull_config_file=paths["registry-pull-config.json"],
+                buildkit_ca_file=paths["buildkit-ca.crt"],
+                buildkit_client_certificate_file=paths["buildkit-client.crt"],
+                buildkit_client_private_key_file=paths["buildkit-client.key"],
+                chart_archive=paths["chart.tgz"],
+                project_storage_quota_bytes=4 * 1024 * 1024 * 1024,
+                buildkit_network_policy_mode="kindnet-network-policy-unenforced;cilium-unavailable",
+            )
+            images = {
+                "evaluation_service": "localhost:5001/labweaver/local/evaluation-service@sha256:" + "a" * 64,
+                "evaluation_runner": "localhost:5001/labweaver/local/evaluation-runner@sha256:" + "b" * 64,
+            }
+            bundle, _resource_bundle, _ = local_dev.make_app_input(
+                work,
+                foundation,
+                images,
+                {
+                    "ANTHROPIC_BASE_URL": "https://provider.example.test/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": "test-provider-token",
+                    "ANTHROPIC_MODEL": "test-model",
+                },
+                provider,
+            )
+
+            documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
+            build_config = next(
+                document["data"]["config.yaml"]
+                for document in documents
+                if document["kind"] == "ConfigMap"
+                and document["metadata"]["name"] == "build-executor-config"
+            )
+            build_values = yaml.safe_load(build_config)
+            self.assertEqual(build_values["executor"]["harborRegistry"], "harbor.lab.lan")
+            self.assertEqual(build_values["executor"]["harborApi"], "https://harbor.lab.lan/")
+            self.assertEqual(
+                build_values["executor"]["projectStorageQuotaBytes"],
+                provider.project_storage_quota_bytes,
+            )
+            build_secret = next(
+                document
+                for document in documents
+                if document["kind"] == "Secret"
+                and document["metadata"]["name"] == "build-executor-secrets"
+            )
+            self.assertEqual(
+                base64.b64decode(build_secret["data"]["harbor-ca.crt"]),
+                b"harbor-ca",
+            )
+            self.assertEqual(
+                base64.b64decode(build_secret["data"]["buildkit-client.key"]),
+                b"buildkit-client-key",
+            )
+            self.assertEqual(
+                local_dev.real_build_helm_values(provider),
+                {
+                    "workloads": {
+                        "build-executor": {
+                            "enabled": True,
+                            "hostAliases": [
+                                {"ip": "10.96.0.42", "hostnames": ["harbor.lab.lan"]}
+                            ],
+                        }
+                    }
+                },
+            )
 
     @staticmethod
     def _write_foundation_fixture(foundation: Path) -> None:

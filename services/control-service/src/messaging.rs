@@ -429,18 +429,48 @@ impl AgentRunConsumer {
                 outcome.evaluation_candidate,
             )
         } else if event.subject == subjects::AGENT_RUN_REQUESTED {
-            let run = if let Some(course_id) = event.course_id {
-                if let Ok(run) = control.agent_run(course_id, event.data.run_id).await {
-                    run
-                } else if let Ok(run) = agent.get(event.data.run_id).await {
-                    run
-                } else {
+            match control.agent_run_event_duplicate(&event).await {
+                Ok(true) => {
+                    message
+                        .double_ack()
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(ControlError::ProjectionConflict) => {
+                    self.quarantine(&message, Some(event.id), "LW_AGENT_PROJECTION_CONFLICT")
+                        .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
+                Err(_) => {
                     message
                         .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
                         .await
                         .map_err(|_| MessagingError::Ack)?;
                     return Ok(());
                 }
+            }
+            let projected = control
+                .projected_agent_run(event.project_id, event.data.run_id)
+                .await;
+            let projected = match projected {
+                Ok(run) => Some(run),
+                Err(ControlError::NotFound) => None,
+                Err(_) => {
+                    message
+                        .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
+            };
+            let run = if let Some(run) = projected {
+                run
             } else if let Ok(run) = agent.get(event.data.run_id).await {
                 run
             } else {
@@ -450,6 +480,19 @@ impl AgentRunConsumer {
                     .map_err(|_| MessagingError::Ack)?;
                 return Ok(());
             };
+            let identity_matches = run.id == event.data.run_id
+                && run.project_id == event.project_id
+                && run.course_id == event.course_id;
+            if identity_matches
+                && (run.revision != event.aggregate_revision
+                    || run.state != contracts::authoring::AgentRunState::Requested)
+            {
+                message
+                    .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                    .await
+                    .map_err(|_| MessagingError::Ack)?;
+                return Ok(());
+            }
             (run, None, None)
         } else {
             self.quarantine(&message, Some(event.id), "LW_EVENT_SUBJECT_MISMATCH")

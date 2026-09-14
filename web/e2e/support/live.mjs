@@ -21,7 +21,11 @@ export function uuidv7() {
   return [...bytes].map((value, index) => `${value.toString(16).padStart(2, '0')}${[3, 5, 7, 9].includes(index) ? '-' : ''}`).join('').slice(0, 36)
 }
 
-export function policyFor(projectId, courseId = null) {
+export function policyFor(projectId, courseId = null, providerModel, budgetOverrides = {}) {
+  const model = typeof providerModel === 'string' ? providerModel.trim() : ''
+  if (!model || /\s/.test(model)) {
+    throw new Error('LABWEAVER_E2E_PROVIDER_MODEL_REQUIRED')
+  }
   return {
     id: uuidv7(),
     projectId,
@@ -29,7 +33,7 @@ export function policyFor(projectId, courseId = null) {
     revision: 1,
     binding: {
       runtimeBinding: 'claude-code-production',
-      model: 'claude-sonnet-4-6-20260601',
+      model,
       claudeCodeVersion: '2.1.215',
       maxInFlightPerWorker: 1,
     },
@@ -41,6 +45,7 @@ export function policyFor(projectId, courseId = null) {
       timeoutMilliseconds: 120000,
       maxTransientRetries: 1,
       maxSchemaRepairs: 2,
+      ...budgetOverrides,
     },
     deniedDataClasses: [
       'secret',
@@ -71,8 +76,8 @@ export async function expectJson(response, label) {
   }
 }
 
-export async function createProjectPolicy(request, baseURL, projectId) {
-  const body = policyFor(projectId)
+export async function createProjectPolicy(request, baseURL, projectId, budgetOverrides = {}) {
+  const body = policyFor(projectId, null, process.env.LABWEAVER_E2E_PROVIDER_MODEL, budgetOverrides)
   const response = await request.post(`/api/v1/projects/${projectId}/llm-egress-policies`, {
     headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
     data: body,

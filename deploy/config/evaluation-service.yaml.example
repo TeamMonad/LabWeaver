@@ -12,6 +12,9 @@ nats:
   clientCertificateFile: /etc/labweaver/secrets/nats-client.crt
   clientPrivateKeyFile: /etc/labweaver/secrets/nats-client.key
   credentialsFile: /etc/labweaver/secrets/nats.creds
+  submissionStreamName: LABWEAVER_SUBMISSION
+  submissionConsumerName: evaluation-submission-run-v1
+  submissionQuarantineSubject: labweaver.evaluation.submission.quarantine.v1
 outboxPublishTimeoutMilliseconds: 5000
 outboxPollIntervalMilliseconds: 100
 coordinatorPollIntervalMilliseconds: 500
@@ -79,6 +82,19 @@ objectStore:
 objectStoreAccessKeyFile: /etc/labweaver/secrets/minio-access-key
 objectStoreSecretKeyFile: /etc/labweaver/secrets/minio-secret-key
 objectStoreSessionTokenFile: null
+packageObjectStore:
+  binding: problem-package-minio-v1
+  endpoint: https://minio.labweaver-data.svc:9000/
+  bucket: labweaver-artifacts
+  region: labweaver-internal-1
+  objectPrefix: problem-packages
+  uploadTtlSeconds: 900
+  maxObjectBytes: 67108864
+  forcePathStyle: true
+  caBundleFile: /etc/labweaver/secrets/minio-ca.pem
+packageObjectStoreAccessKeyFile: /etc/labweaver/secrets/minio-access-key
+packageObjectStoreSecretKeyFile: /etc/labweaver/secrets/minio-secret-key
+packageObjectStoreSessionTokenFile: null
 execution:
   runnerNamespace: labweaver-evaluation
   workerId: evaluation-worker-01

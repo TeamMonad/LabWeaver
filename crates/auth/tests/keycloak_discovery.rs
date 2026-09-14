@@ -10,7 +10,7 @@ use std::{
 };
 
 use auth::config::OidcFileConfig;
-use auth::{AuthConfig, OidcProvider, OidcTransaction, build_bearer_authorizer};
+use auth::{AuthConfig, OidcProvider, OidcProviderError, OidcTransaction, build_bearer_authorizer};
 use reqwest::{Certificate, StatusCode, redirect::Policy};
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -99,6 +99,27 @@ async fn configured_keycloak_completes_pkce_exchange_and_provider_logout()
     let rotated_token = issue_access_token(&http, &provider, &config, &issuer).await?;
     assert_ne!(token_kid(&first_token)?, token_kid(&rotated_token)?);
     verifier.check_auth(&rotated_token).await?;
+
+    // The browser provider starts with the previous discovery JWKS. A newly issued ID token
+    // signed by the rotated key must refresh that JWKS once and then pass the complete claims
+    // verification path.
+    let (rotated_transaction, rotated_code) = authorization_code(&http, &provider, &config).await?;
+    let rotated_identity = provider
+        .exchange_code(rotated_code, &rotated_transaction, &http)
+        .await?;
+    assert_eq!(rotated_identity.subject, identity.subject);
+
+    // A valid signature with a mismatched transaction nonce remains a terminal token rejection;
+    // it must not be treated as a JWKS refresh condition.
+    let (mut invalid_nonce_transaction, invalid_nonce_code) =
+        authorization_code(&http, &provider, &config).await?;
+    invalid_nonce_transaction.nonce.push_str("-mismatch");
+    assert!(matches!(
+        provider
+            .exchange_code(invalid_nonce_code, &invalid_nonce_transaction, &http,)
+            .await,
+        Err(OidcProviderError::IdTokenRejected)
+    ));
 
     let stale_verifier = build_bearer_authorizer(&config, &oidc, http.clone()).await?;
     stale_verifier.check_auth(&rotated_token).await?;

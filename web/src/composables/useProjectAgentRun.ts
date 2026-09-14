@@ -64,6 +64,18 @@ export function useProjectAgentRun(projectId: ReturnType<typeof ref<string | nul
       stopPolling()
       return
     }
+    if (result.data.id !== runId || result.data.projectId !== id) {
+      run.value = {
+        kind: 'error',
+        diagnostic: makeDiagnostic(
+          'PROJECT_RUN_STALE_CONTEXT',
+          'AgentRun 返回的项目引用已变化，已停止恢复以避免显示过期任务。请从当前项目重新打开。',
+          false,
+        ),
+      }
+      stopPolling()
+      return
+    }
     run.value = { kind: 'success', data: result.data }
     schedulePoll(result.data)
   }

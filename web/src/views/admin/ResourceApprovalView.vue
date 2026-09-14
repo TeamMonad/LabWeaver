@@ -15,6 +15,15 @@
       :severity="approval.outcome.kind === 'success' ? 'info' : 'error'"
     />
 
+    <DiagnosticBanner
+      v-if="approval.refreshDiagnostic"
+      :code="approval.refreshDiagnostic.code"
+      :message="approval.refreshDiagnostic.message"
+      :retryable="approval.refreshDiagnostic.retryable"
+      severity="warning"
+      @retry="approval.load"
+    />
+
     <section
       class="request-section"
       aria-labelledby="request-heading"
@@ -53,7 +62,44 @@
             {{ courseId }}
           </option>
         </select>
+        <label
+          class="filter-label"
+          for="request-search"
+        >请求搜索</label>
+        <input
+          id="request-search"
+          v-model="requestSearch"
+          class="text-input filter-input"
+          type="search"
+          placeholder="ID、Request Key、申请人、项目或目标"
+          aria-label="按真实请求字段搜索"
+        >
+        <label
+          class="filter-label"
+          for="request-state-filter"
+        >状态</label>
+        <select
+          id="request-state-filter"
+          v-model="requestStateFilter"
+          class="filter-select"
+          aria-label="按资源申请状态过滤"
+        >
+          <option value="">
+            全部状态
+          </option>
+          <option
+            v-for="state in requestStateOptions"
+            :key="state"
+            :value="state"
+          >
+            {{ resourceRequestStateLabel(state) }}
+          </option>
+        </select>
       </div>
+
+      <p class="filter-hint">
+        筛选只匹配服务端返回的 ID、Request Key、申请人、课程、项目和目标标识；公开请求没有可靠的 submission 关联字段，不按名称推断关联。
+      </p>
 
       <DiagnosticBanner
         v-if="approval.requests.kind === 'error'"
@@ -82,7 +128,119 @@
             domain="resource"
           />
         </template>
+        <template #selection="{ row }">
+          <input
+            v-if="isBatchSelectable(row)"
+            type="checkbox"
+            :checked="selectedRequestIds.includes(row.id)"
+            :aria-label="`选择任务请求 ${row.requestKey}`"
+            @click.stop
+            @change="toggleRequestSelection(row.id)"
+          >
+          <span
+            v-else
+            class="selection-unavailable"
+            title="只支持明确选择待审批的任务请求"
+          >—</span>
+        </template>
       </DataTable>
+
+      <div
+        v-if="requestRows.some((row) => row.targetKind === 'task') || approval.batchOutcome"
+        class="batch-approval-panel md-card"
+        aria-labelledby="batch-approval-heading"
+      >
+        <div class="batch-approval-heading">
+          <div>
+            <h4 id="batch-approval-heading">
+              批量批准明确选中的任务请求
+            </h4>
+            <p>
+              当前 API 没有 submission 关联契约，因此只对你勾选的真实 task 请求逐项调用批准接口；每项会读取最新 revision 和状态，失败项会单独保留。
+            </p>
+          </div>
+          <span
+            class="batch-selection-count"
+            role="status"
+          >
+            已选择 {{ selectedBatchRequests.length }} 项
+          </span>
+        </div>
+
+        <div class="batch-approval-fields">
+          <label for="batch-provider-binding">执行后端绑定</label>
+          <input
+            id="batch-provider-binding"
+            v-model="batchProviderBinding"
+            class="text-input"
+            type="text"
+            maxlength="120"
+            placeholder="填写所有选中请求可用的 provider binding"
+            aria-label="批量审批执行后端绑定"
+          >
+          <label for="batch-approval-reason">批量审批理由</label>
+          <textarea
+            id="batch-approval-reason"
+            v-model="batchReason"
+            class="reason-input"
+            rows="2"
+            maxlength="500"
+            placeholder="批量审批理由（必填，1-500 字）"
+            aria-label="批量资源申请操作理由"
+          />
+        </div>
+        <p
+          class="batch-approval-hint"
+          role="note"
+        >
+          <template v-if="selectedBatchRequests.length === 0">
+            先勾选状态为“待审批”的 task 请求；环境请求与其他状态不能批量审批。
+          </template>
+          <template v-else-if="!validBatchProviderBinding">
+            当前绑定不是所有已选请求可用的真实 provider binding；GPU 请求必须匹配当前容量目录。
+          </template>
+          <template v-else>
+            将按列表中的每个请求原始资源规格和申请时长提交；不会按 Request Key 或名称猜测 submission 关系。
+          </template>
+        </p>
+        <div class="approval-buttons">
+          <button
+            type="button"
+            class="filled-button"
+            :disabled="!canBatchApprove || approval.acting !== null"
+            @click="openBatchConfirm"
+          >
+            批准已选择的 {{ selectedBatchRequests.length }} 项
+          </button>
+          <button
+            type="button"
+            class="text-button"
+            :disabled="selectedRequestIds.length === 0 || approval.acting !== null"
+            @click="clearRequestSelection"
+          >
+            清除选择
+          </button>
+        </div>
+
+        <div
+          v-if="approval.batchOutcome"
+          class="batch-outcome"
+          role="status"
+        >
+          <strong>批量审批结果：{{ batchOutcomeLabel(approval.batchOutcome.kind) }}</strong>
+          <ul>
+            <li
+              v-for="item in approval.batchOutcome.items"
+              :key="item.requestId"
+              :class="`batch-outcome-item batch-outcome-item--${item.kind}`"
+            >
+              <code>{{ batchRequestLabel(item.requestId) }}</code>
+              <span>{{ item.diagnostic.message }}</span>
+              <code>{{ item.diagnostic.code }}</code>
+            </li>
+          </ul>
+        </div>
+      </div>
 
       <div
         v-if="approval.selectedRequest"
@@ -515,7 +673,17 @@
       confirm-text="确认"
       severity="warning"
       @confirm="onRequestConfirmed"
-      @cancel="pendingRequestAction = null"
+      @cancel="cancelRequestConfirm"
+    />
+
+    <ConfirmDialog
+      :open="pendingBatchApproval"
+      title="确认批量批准任务请求"
+      :description="batchConfirmDescription"
+      confirm-text="确认批量批准"
+      severity="warning"
+      @confirm="onBatchConfirmed"
+      @cancel="cancelBatchConfirm"
     />
 
     <ConfirmDialog
@@ -537,8 +705,8 @@ import DataTable, { type DataTableColumn } from '@/components/common/DataTable.v
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
-import { useResourceApproval, type LeaseActionKind, type RequestActionKind } from '@/composables/useResourceApproval'
-import type { ResourceRequestSchemaResourceTarget, WorkloadResources } from '@/generated/contracts'
+import { requestFingerprint, useResourceApproval, type LeaseActionKind, type RequestActionKind, type BatchActionOutcome, type RequestActionItem } from '@/composables/useResourceApproval'
+import type { ResourceRequestSchema, ResourceRequestSchemaResourceTarget, ResourceRequestState, WorkloadResources } from '@/generated/contracts'
 import { formatBytes, formatTimestamp } from '@/utils/format'
 import { resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
 
@@ -549,6 +717,7 @@ const approval = useResourceApproval()
 
 interface RequestRow extends Record<string, unknown> {
   id: string
+  selection: string
   requestKey: string
   environmentId: string
   releaseVersion: string
@@ -557,6 +726,8 @@ interface RequestRow extends Record<string, unknown> {
   state: string
   revision: string
   updatedAt: string
+  targetKind: ResourceRequestSchema['target']['kind']
+  stateValue: ResourceRequestState
 }
 
 interface LeaseRow extends Record<string, unknown> {
@@ -575,6 +746,13 @@ function formatResources(resources: WorkloadResources): string {
   return resources.gpu ? `${base} · ${resources.gpu.class} × ${resources.gpu.count}` : base
 }
 
+function copyResources(resources: WorkloadResources): WorkloadResources {
+  return {
+    ...resources,
+    ...(resources.gpu ? { gpu: { ...resources.gpu } } : {}),
+  }
+}
+
 function formatDuration(seconds: number): string {
   if (seconds % 3600 === 0) return `${seconds / 3600} 小时`
   if (seconds % 60 === 0) return `${seconds / 60} 分钟`
@@ -590,6 +768,12 @@ function targetRelease(target: ResourceRequestSchemaResourceTarget): string {
 }
 
 const courseFilter = ref('')
+const requestSearch = ref('')
+const requestStateFilter = ref<ResourceRequestState | ''>('')
+const selectedRequestIds = ref<string[]>([])
+const batchProviderBinding = ref('')
+const batchReason = ref('')
+const pendingBatchApproval = ref(false)
 
 const courseOptions = computed(() => {
   if (approval.requests.kind !== 'success') return []
@@ -601,6 +785,7 @@ const courseOptions = computed(() => {
 })
 
 const requestColumns: DataTableColumn<RequestRow>[] = [
+  { key: 'selection', title: '选择任务', width: '100px' },
   { key: 'requestKey', title: '申请标识' },
   { key: 'environmentId', title: '环境' },
   { key: 'releaseVersion', title: 'Release 版本' },
@@ -613,10 +798,14 @@ const requestColumns: DataTableColumn<RequestRow>[] = [
 
 const requestRows = computed<RequestRow[]>(() => {
   if (approval.requests.kind !== 'success') return []
+  const query = requestSearch.value.trim().toLocaleLowerCase()
   return approval.requests.data
     .filter((request) => !courseFilter.value || request.courseId === courseFilter.value)
+    .filter((request) => !requestStateFilter.value || request.state === requestStateFilter.value)
+    .filter((request) => !query || requestSearchFields(request).some((field) => field.toLocaleLowerCase().includes(query)))
     .map((request) => ({
       id: request.id,
+      selection: '',
       requestKey: request.requestKey,
       environmentId: targetEnvironment(request.target),
       releaseVersion: request.target.kind === 'environment' ? `v${request.target.releaseVersion}` : '—',
@@ -625,8 +814,123 @@ const requestRows = computed<RequestRow[]>(() => {
       state: resourceRequestStateLabel(request.state),
       revision: `rev-${request.revision}`,
       updatedAt: formatTimestamp(request.updatedAt),
+      targetKind: request.target.kind,
+      stateValue: request.state,
     }))
 })
+
+const requestStateOptions = computed<ResourceRequestState[]>(() => {
+  if (approval.requests.kind !== 'success') return []
+  return Array.from(new Set(approval.requests.data.map((request) => request.state))).sort()
+})
+
+function requestSearchFields(request: ResourceRequestSchema): string[] {
+  const target = request.target.kind === 'environment'
+    ? [request.target.kind, request.target.environmentId, request.target.releaseId, String(request.target.releaseVersion)]
+    : [request.target.kind, request.target.taskRunId]
+  return [
+    request.id,
+    request.requestKey,
+    request.requesterId,
+    request.courseId ?? '',
+    request.projectId,
+    ...target,
+  ]
+}
+
+function requestById(requestId: string): ResourceRequestSchema | null {
+  if (approval.requests.kind !== 'success') return null
+  return approval.requests.data.find((request) => request.id === requestId) ?? null
+}
+
+function isBatchSelectable(row: RequestRow): boolean {
+  const request = requestById(row.id)
+  return request?.target.kind === 'task' && request.state === 'reviewing'
+}
+
+const selectedBatchRequests = computed<ResourceRequestSchema[]>(() => selectedRequestIds.value
+  .map((requestId) => requestById(requestId))
+  .filter((request): request is ResourceRequestSchema => request !== null
+    && request.target.kind === 'task'
+    && request.state === 'reviewing'))
+
+watch(
+  () => approval.requests.kind === 'success'
+    ? approval.requests.data
+      .filter((request) => request.target.kind === 'task' && request.state === 'reviewing')
+      .map((request) => request.id)
+    : [],
+  (availableIds) => {
+    const available = new Set(availableIds)
+    selectedRequestIds.value = selectedRequestIds.value.filter((requestId) => available.has(requestId))
+  },
+  { immediate: true },
+)
+
+function toggleRequestSelection(requestId: string) {
+  const request = requestById(requestId)
+  if (!request || request.target.kind !== 'task' || request.state !== 'reviewing') return
+  selectedRequestIds.value = selectedRequestIds.value.includes(requestId)
+    ? selectedRequestIds.value.filter((id) => id !== requestId)
+    : [...selectedRequestIds.value, requestId]
+}
+
+function clearRequestSelection() {
+  selectedRequestIds.value = []
+}
+
+function providerSupportsRequest(request: ResourceRequestSchema, binding: string): boolean {
+  if (!binding) return false
+  if (!request.requestedResources.gpu) return true
+  if (approval.providerOptions.kind !== 'success') return false
+  return approval.providerOptions.data.some((option) =>
+    option.providerBinding === binding
+      && option.gpuClasses.includes(request.requestedResources.gpu!.class),
+  )
+}
+
+const validBatchProviderBinding = computed(() => {
+  const binding = batchProviderBinding.value.trim()
+  const hasControlCharacter = Array.from(binding).some((character) => {
+    const code = character.charCodeAt(0)
+    return code < 0x20 || code === 0x7f
+  })
+  return binding.length > 0
+    && binding.length <= 120
+    && !hasControlCharacter
+    && selectedBatchRequests.value.every((request) => providerSupportsRequest(request, binding))
+})
+
+const validBatchReason = computed(() => {
+  const length = batchReason.value.trim().length
+  return length >= 1 && length <= 500
+})
+
+const canBatchApprove = computed(() => selectedBatchRequests.value.length > 0
+  && validBatchProviderBinding.value
+  && validBatchReason.value)
+
+const batchItems = computed<RequestActionItem[]>(() => selectedBatchRequests.value.map((request) => ({
+  requestId: request.id,
+  expectedRevision: request.revision,
+  expectedFingerprint: requestFingerprint(request),
+  payload: {
+    providerBinding: batchProviderBinding.value.trim(),
+    resources: copyResources(request.requestedResources),
+    durationSeconds: request.requestedDurationSeconds,
+    reason: batchReason.value.trim(),
+  },
+})))
+
+const batchRequestLabels = ref(new Map<string, string>())
+
+function batchRequestLabel(requestId: string): string {
+  return batchRequestLabels.value.get(requestId) ?? requestId
+}
+
+function batchOutcomeLabel(kind: BatchActionOutcome['kind']): string {
+  return { success: '全部已受理', partial: '部分已受理', error: '未有项目受理' }[kind]
+}
 
 const leaseColumns: DataTableColumn<LeaseRow>[] = [
   { key: 'id', title: 'Lease ID' },
@@ -766,6 +1070,13 @@ watch(
 )
 
 const pendingRequestAction = ref<RequestActionKind | null>(null)
+const pendingRequestItem = ref<RequestActionItem | null>(null)
+const pendingBatchItems = ref<RequestActionItem[]>([])
+const pendingRequestDisplay = ref<{
+  requestKey: string
+  revision: number
+  resources: WorkloadResources
+} | null>(null)
 const pendingLeaseAction = ref<LeaseActionKind | null>(null)
 
 const requestConfirmTitle = computed(() => {
@@ -784,14 +1095,46 @@ const requestConfirmTitle = computed(() => {
 })
 
 const requestConfirmDescription = computed(() => {
-  const request = approval.selectedRequest
-  if (!request || !pendingRequestAction.value) return ''
-  const base = `将对申请 ${request.requestKey}（rev-${request.revision}）执行操作，理由：${requestReason.value.trim()}`
-  return pendingRequestAction.value === 'resize' ? `${base}。调整后规格：${formatResources(resizeResources())}。` : `${base}。`
+  const item = pendingRequestItem.value
+  const display = pendingRequestDisplay.value
+  if (!item || !display || !pendingRequestAction.value) return ''
+  const base = `将对申请 ${display.requestKey}（rev-${display.revision}）执行操作，理由：${item.payload.reason}`
+  return pendingRequestAction.value === 'resize'
+    ? `${base}。调整后规格：${formatResources(item.payload.resources)}。`
+    : `${base}。`
 })
 
 function openRequestConfirm(kind: RequestActionKind) {
+  const request = approval.selectedRequest
+  if (!request) return
+  const resources = kind === 'resize' ? resizeResources() : request.requestedResources
+  const item: RequestActionItem = {
+    requestId: request.id,
+    expectedRevision: request.revision,
+    expectedFingerprint: requestFingerprint(request),
+    payload: {
+      providerBinding: providerBinding.value.trim(),
+      resources: {
+        ...resources,
+        ...(resources.gpu ? { gpu: { ...resources.gpu } } : {}),
+      },
+      durationSeconds: approveDuration.value,
+      reason: requestReason.value.trim(),
+    },
+  }
+  pendingRequestItem.value = item
+  pendingRequestDisplay.value = {
+    requestKey: request.requestKey,
+    revision: request.revision,
+    resources: item.payload.resources,
+  }
   pendingRequestAction.value = kind
+}
+
+function cancelRequestConfirm() {
+  pendingRequestAction.value = null
+  pendingRequestItem.value = null
+  pendingRequestDisplay.value = null
 }
 
 function onResizeClick() {
@@ -804,19 +1147,48 @@ function onResizeClick() {
 
 async function onRequestConfirmed() {
   const kind = pendingRequestAction.value
-  const request = approval.selectedRequest
-  pendingRequestAction.value = null
-  if (!kind || !request) return
-  const ok = await approval.runRequestAction(kind, request.id, {
-    providerBinding: providerBinding.value.trim(),
-    resources: kind === 'resize' ? resizeResources() : request.requestedResources,
-    durationSeconds: approveDuration.value,
-    reason: requestReason.value.trim(),
-  })
+  const item = pendingRequestItem.value
+  cancelRequestConfirm()
+  if (!kind || !item) return
+  const ok = await approval.runRequestAction(kind, item.requestId, item.payload, item)
   if (ok) {
     requestReason.value = ''
     resizeMode.value = false
   }
+}
+
+const batchConfirmDescription = computed(() => {
+  const items = pendingBatchItems.value
+  if (items.length === 0) return ''
+  const labels = items.map((item) => `${batchRequestLabel(item.requestId)}（${item.requestId}，rev-${item.expectedRevision}）`).join('、')
+  const reason = items[0]?.payload.reason ?? ''
+  return `将按当前列表中明确选择的 ${items.length} 项 task 请求逐项批准：${labels}。每项会再次读取确认时的 revision 和内容；如果任一请求已变化，该项会单独失败，不会自动替换或跳过确认。理由：${reason}。`
+})
+
+function openBatchConfirm() {
+  if (!canBatchApprove.value) return
+  pendingBatchItems.value = batchItems.value
+  batchRequestLabels.value = new Map(
+    selectedBatchRequests.value.map((request) => [request.id, request.requestKey]),
+  )
+  pendingBatchApproval.value = true
+}
+
+function cancelBatchConfirm() {
+  pendingBatchApproval.value = false
+  pendingBatchItems.value = []
+}
+
+async function onBatchConfirmed() {
+  pendingBatchApproval.value = false
+  const items = pendingBatchItems.value
+  pendingBatchItems.value = []
+  if (items.length === 0) return
+  const result = await approval.runRequestActions('approve', items)
+  selectedRequestIds.value = result.items
+    .filter((item) => item.kind === 'error')
+    .map((item) => item.requestId)
+  if (result.kind === 'success') batchReason.value = ''
 }
 
 const leaseConfirmTitle = computed(() =>
@@ -881,6 +1253,7 @@ async function onLeaseConfirmed() {
   align-items: center;
   gap: 12px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
 }
 
 .filter-label {
@@ -896,6 +1269,93 @@ async function onLeaseConfirmed() {
   background: var(--md-sys-color-surface);
   color: var(--md-sys-color-on-surface);
   font: var(--md-sys-body-medium);
+}
+
+.filter-input {
+  min-width: 220px;
+  flex: 1 1 240px;
+}
+
+.filter-hint {
+  margin: -4px 0 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.selection-unavailable {
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.batch-approval-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+}
+
+.batch-approval-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.batch-approval-heading h4 {
+  margin: 0;
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-title-medium);
+}
+
+.batch-approval-heading p,
+.batch-approval-hint {
+  margin: 4px 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.batch-selection-count {
+  flex-shrink: 0;
+  color: var(--md-sys-color-primary);
+  font: var(--md-sys-label-large);
+}
+
+.batch-approval-fields {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.batch-approval-fields label {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+}
+
+.batch-outcome {
+  padding-top: 12px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.batch-outcome ul {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.batch-outcome-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.batch-outcome-item--error {
+  color: var(--md-sys-color-error);
 }
 
 .request-detail,
@@ -1037,5 +1497,14 @@ async function onLeaseConfirmed() {
   font: var(--md-sys-body-small);
   color: var(--md-sys-color-on-surface-variant);
   margin: 12px 0 0;
+}
+
+@media (max-width: 720px) {
+  .batch-approval-heading,
+  .batch-approval-fields {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>
