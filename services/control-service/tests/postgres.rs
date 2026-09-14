@@ -447,7 +447,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         policy_id,
         environment_candidate.run_id,
         environment_candidate.id,
-        CandidateId::new(),
+        None,
         EnvironmentClass::Work,
     )?;
     let cross_course_context = service
@@ -824,7 +824,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
         PolicyId::new(),
         environment.run_id,
         environment.id,
-        evaluation.id,
+        Some(evaluation.id),
         EnvironmentClass::Experiment,
     )?;
     let build_context = match &environment.spec.runtime {
@@ -1007,7 +1007,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         policy.id,
         environment.run_id,
         environment.id,
-        evaluation.id,
+        Some(evaluation.id),
         EnvironmentClass::Experiment,
     )?;
     service
@@ -1458,7 +1458,6 @@ async fn private_work_environment_approval_requires_project_owner()
         .await?;
     let environment =
         vm_environment_candidate(project_id, None, &vm_base, EnvironmentClass::Work, now)?;
-    let evaluation = evaluation_candidate(project_id, None, environment.run_id, now)?;
     let run = succeeded_agent_run(
         project_id,
         None,
@@ -1466,17 +1465,11 @@ async fn private_work_environment_approval_requires_project_owner()
         policy.id,
         environment.run_id,
         environment.id,
-        evaluation.id,
+        None,
         EnvironmentClass::Work,
     )?;
     service
-        .project_candidates(
-            EventId::new(),
-            &run,
-            Some(&environment),
-            Some(&evaluation),
-            None,
-        )
+        .project_candidates(EventId::new(), &run, Some(&environment), None, None)
         .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: environment.revision,
@@ -2072,7 +2065,7 @@ fn succeeded_agent_run(
     policy_id: PolicyId,
     run_id: AgentRunId,
     environment_candidate_id: CandidateId,
-    evaluation_candidate_id: CandidateId,
+    evaluation_candidate_id: Option<CandidateId>,
     environment_class: EnvironmentClass,
 ) -> Result<AgentRun, Box<dyn std::error::Error>> {
     let attempt = AgentAttempt {
@@ -2088,6 +2081,24 @@ fn succeeded_agent_run(
         usage_observed: true,
         diagnostic_code: None,
     };
+    let environment_track = AgentTrack {
+        kind: AgentTrackKind::Environment,
+        attempts: vec![attempt.clone()],
+        candidate_id: Some(environment_candidate_id),
+    };
+    let tracks = match environment_class {
+        EnvironmentClass::Experiment => vec![
+            environment_track,
+            AgentTrack {
+                kind: AgentTrackKind::Evaluation,
+                attempts: vec![attempt],
+                candidate_id: Some(
+                    evaluation_candidate_id.ok_or("Experiment run missing evaluation candidate")?,
+                ),
+            },
+        ],
+        EnvironmentClass::Work => vec![environment_track],
+    };
     let run = AgentRun {
         id: run_id,
         project_id,
@@ -2098,18 +2109,7 @@ fn succeeded_agent_run(
         purpose: AgentRunPurpose::Authoring { environment_class },
         state: AgentRunState::Succeeded,
         revision: Revision::new(1)?,
-        tracks: vec![
-            AgentTrack {
-                kind: AgentTrackKind::Environment,
-                attempts: vec![attempt.clone()],
-                candidate_id: Some(environment_candidate_id),
-            },
-            AgentTrack {
-                kind: AgentTrackKind::Evaluation,
-                attempts: vec![attempt],
-                candidate_id: Some(evaluation_candidate_id),
-            },
-        ],
+        tracks,
         plan: None,
     };
     run.validate()?;
