@@ -3,7 +3,7 @@
     <header class="page-header">
       <div>
         <h2>预算与费用</h2>
-        <p class="page-subtitle">Resource 记录项目预算、用量结算和管理员调整。金额只用于核算，不代表支付。</p>
+        <p class="page-subtitle">选择项目后查看预算、费用和调整记录。金额用于核算，不代表支付。</p>
       </div>
       <button type="button" class="icon-button" aria-label="刷新预算与费用" :disabled="finance.acting !== null" @click="finance.load">
         <SvgIcon name="refresh" size="sm" aria-hidden="true" />
@@ -22,6 +22,21 @@
     </section>
 
     <DiagnosticBanner
+      v-if="projectContextUnavailable"
+      code="PROJECT_CONTEXT_UNAVAILABLE"
+      message="链接中的项目不存在或你无权访问，已停止加载预算和费用。请从项目选择器重新选择。"
+      :retryable="false"
+      severity="warning"
+    />
+    <RouterLink
+      v-if="projectContextUnavailable"
+      class="outlined-button project-context-action"
+      to="/researcher/workspaces"
+    >
+      打开项目与工作空间
+    </RouterLink>
+
+    <DiagnosticBanner
       v-if="finance.outcome"
       :code="finance.outcome.diagnostic.code"
       :message="finance.outcome.diagnostic.message"
@@ -35,7 +50,7 @@
         <div class="section-heading">
           <div>
             <h3 id="budget-heading">项目预算</h3>
-            <p>预算和已花费由 Resource 服务按当前项目实时计算。</p>
+            <p>预算和已花费会按当前项目实时更新。</p>
           </div>
         </div>
         <AsyncStateView :state="finance.budget" empty-text="该项目还没有预算记录。" @retry="finance.load">
@@ -133,6 +148,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
@@ -141,8 +157,31 @@ import { useProjects } from '@/composables/useProjects'
 import { formatTimestamp } from '@/utils/format'
 
 const projects = useProjects()
-const selectedProjectId = ref<string | null>(null)
+const route = useRoute()
+const router = useRouter()
 const projectOptions = computed(() => projects.projects.kind === 'success' ? projects.projects.data : [])
+const routeProjectId = computed(() => {
+  const value = route.query.projectId
+  const projectId = Array.isArray(value) ? value[0] : value
+  return typeof projectId === 'string' ? projectId : undefined
+})
+const projectContextUnavailable = computed(() => Boolean(
+  routeProjectId.value
+  && projects.projects.kind === 'success'
+  && !projectOptions.value.some((project) => project.id === routeProjectId.value),
+))
+const selectedProjectId = computed<string | null>({
+  get: () => routeProjectId.value
+    ? projects.projects.kind === 'success' && !projectContextUnavailable.value ? routeProjectId.value : null
+    : projects.selectedProjectId,
+  set: (projectId) => {
+    if (!projectId) return
+    if (projectId !== projects.selectedProjectId) projects.select(projectId)
+    if (route.query.projectId !== projectId) {
+      void router.replace({ query: { ...route.query, projectId } })
+    }
+  },
+})
 const selectedProject = computed(() => projectOptions.value.find((project) => project.id === selectedProjectId.value) ?? null)
 const finance = useProjectResourceFinance(selectedProjectId)
 const budgetCurrency = ref('USD')
@@ -164,13 +203,33 @@ const canSaveBudget = computed(() => {
 const canSubmitAdjustment = computed(() => Boolean(selectedCharge.value && /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/.test(adjustmentAmount.value) && adjustmentReason.value.trim()))
 
 watch(
-  () => projectOptions.value,
+  [() => projectOptions.value, routeProjectId],
   (items) => {
-    if (!selectedProjectId.value && items.length > 0) selectedProjectId.value = items[0].id
-    if (selectedProjectId.value && !items.some((project) => project.id === selectedProjectId.value)) selectedProjectId.value = items[0]?.id ?? null
+    const [availableProjects] = items
+    const fromUrl = routeProjectId.value
+    const preferred = fromUrl
+      ? availableProjects.find((project) => project.id === fromUrl)?.id
+      : selectedProjectId.value && availableProjects.some((project) => project.id === selectedProjectId.value)
+        ? selectedProjectId.value
+        : availableProjects[0]?.id
+    if (preferred && preferred !== projects.selectedProjectId) projects.select(preferred)
   },
   { immediate: true },
 )
+
+watch(() => projects.selectedProjectId, (projectId) => {
+  if (!projectId || (routeProjectId.value && projects.projects.kind !== 'success') || projectContextUnavailable.value || routeProjectId.value === projectId) return
+  void router.replace({ query: { ...route.query, projectId: projectId ?? undefined } })
+})
+
+watch(selectedProjectId, () => {
+  budgetCurrency.value = 'USD'
+  limitAmount.value = '0.000000'
+  warningAmount.value = '0.000000'
+  selectedChargeId.value = ''
+  adjustmentAmount.value = '0.000000'
+  adjustmentReason.value = ''
+})
 
 watch(
   () => finance.budget,
@@ -240,12 +299,13 @@ function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
 .project-strip label, .budget-form label, .adjustment-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .project-strip label { flex: 1; max-width: 560px; }
 .project-scope { padding-bottom: 10px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.project-context-action { justify-self: start; }
 .finance-layout { display: grid; grid-template-columns: minmax(300px, .75fr) minmax(0, 1.25fr); gap: 20px; align-items: start; }
 .budget-card, .charges-card { display: grid; gap: 18px; padding: 20px; }
-.budget-summary { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.budget-summary { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .budget-summary div { display: grid; gap: 5px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
 .budget-summary span { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.budget-summary strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); overflow-wrap: anywhere; }
+.budget-summary strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); white-space: nowrap; }
 .budget-form { display: grid; gap: 12px; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 textarea.text-input { resize: vertical; }

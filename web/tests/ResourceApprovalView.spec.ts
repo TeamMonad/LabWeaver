@@ -175,7 +175,7 @@ describe('ResourceApprovalView provider binding rules', () => {
     const { approval, wrapper } = mountView(taskRequestOne, { kind: 'empty' }, [taskRequestOne, taskRequestTwo, cpuRequest])
     const batchCheckboxes = wrapper.findAll('input[aria-label^="选择任务请求"]')
     expect(batchCheckboxes).toHaveLength(2)
-    expect(wrapper.text()).toContain('公开请求没有可靠的 submission 关联字段')
+    expect(wrapper.text()).toContain('仅处理你勾选的待审批评测任务；每项操作前都会重新校验当前状态，单项失败会保留并单独显示。')
 
     await batchCheckboxes[0].setValue(true)
     await batchCheckboxes[1].setValue(true)
@@ -237,6 +237,21 @@ describe('ResourceApprovalView provider binding rules', () => {
 
     expect(wrapper.findAll('.request-row')).toHaveLength(1)
     expect(wrapper.find('.request-row').text()).toContain('evaluation-task-2')
-    expect(wrapper.text()).toContain('不按名称推断关联')
+    expect(wrapper.text()).toContain('结果只来自服务端返回的真实字段')
+  })
+
+  it('distinguishes a filtered no-match from an empty backend response and clears filters', async () => {
+    const { wrapper } = mountView(taskRequestOne, { kind: 'empty' }, [taskRequestOne, taskRequestTwo, cpuRequest])
+
+    await wrapper.get('input[aria-label="按真实请求字段搜索"]').setValue('missing-request')
+    await nextTick()
+
+    expect(wrapper.findAll('.request-row')).toHaveLength(0)
+    expect(wrapper.text()).toContain('已加载资源申请，但当前筛选条件没有匹配项')
+    await wrapper.get('.filter-empty button').trigger('click')
+    await nextTick()
+
+    expect(wrapper.findAll('.request-row')).toHaveLength(3)
+    expect(wrapper.find('.filter-empty').exists()).toBe(false)
   })
 })

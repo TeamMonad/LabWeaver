@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "pnpm typecheck && vite build && pnpm verify:production-bundle",
+    "build:fixtures": "vite build --config vite.fixtures.config.ts",
     "verify:production-bundle": "node scripts/verify-production-bundle.mjs",
     "preview": "vite preview",
+    "preview:fixtures": "vite --config vite.fixtures.config.ts",
+    "typecheck:fixtures": "vue-tsc --noEmit -p fixtures/tsconfig.json",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:live": "vitest run",

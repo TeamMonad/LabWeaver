@@ -1,9 +1,9 @@
 <template>
   <div class="environment-entry">
     <header class="page-header">
-      <h2>环境控制台</h2>
+      <h2>项目环境控制台</h2>
       <p class="page-subtitle">
-        选择已发布版本创建环境，管理生命周期并获取 SSH/HTTP 访问授权。
+        选择已发布模板创建项目环境，管理生命周期并获取 SSH/HTTP 访问授权。
       </p>
     </header>
 
@@ -15,7 +15,10 @@
       severity="error"
     />
 
-    <section aria-labelledby="releases-heading">
+    <section
+      v-if="!isEnvironmentLoaded || environmentToolsOpen"
+      aria-labelledby="releases-heading"
+    >
       <h3
         id="releases-heading"
         class="section-title"
@@ -25,7 +28,7 @@
           size="sm"
           aria-hidden="true"
         />
-        已发布版本
+        已发布环境模板
       </h3>
       <AsyncStateView
         v-if="!isContextMissing"
@@ -107,7 +110,10 @@
         环境控制台
       </h3>
 
-      <div class="environment-selector">
+      <div
+        v-if="!isEnvironmentLoaded || environmentToolsOpen"
+        class="environment-selector"
+      >
         <label for="env-id-input">环境 ID</label>
         <input
           id="env-id-input"
@@ -142,17 +148,22 @@
           <div class="gcp-resource-header">
             <div class="gcp-breadcrumbs">
               <RouterLink
-                :to="isWorkConnection ? '/researcher/workspaces' : '/student/labs'"
+                :to="{ path: isWorkConnection ? '/researcher/workspaces' : '/student/labs', query: projectId ? { projectId } : undefined }"
                 class="breadcrumb-link"
               >
-                {{ isWorkConnection ? '我的 Work' : '我的实验' }}
+                {{ isWorkConnection ? 'Work 项目环境' : '课程实验环境' }}
               </RouterLink>
               <span class="breadcrumb-sep">/</span>
-              <span class="breadcrumb-current">{{ selectedEnvironmentId }}</span>
+              <span
+                v-if="environmentTitle"
+                class="breadcrumb-current"
+              >{{ environmentTitle }}</span>
             </div>
             <div class="resource-title-row">
               <div class="title-with-pill">
-                <h2>{{ selectedEnvironmentId }}</h2>
+                <h2 v-if="environmentTitle">
+                  {{ environmentTitle }}
+                </h2>
                 <GcpStatusPill
                   v-if="env.instance.kind === 'success'"
                   :state="env.instance.data.observedState"
@@ -160,16 +171,18 @@
                 />
               </div>
               <button
+                v-if="isEnvironmentLoaded"
                 type="button"
                 class="text-button small"
-                @click="clearSelectedEnvironment"
+                :aria-expanded="environmentToolsOpen"
+                @click="environmentToolsOpen = !environmentToolsOpen"
               >
                 <SvgIcon
-                  name="swap_horiz"
+                  name="tune"
                   size="sm"
                   aria-hidden="true"
                 />
-                <span>切换其他环境</span>
+                <span>{{ environmentToolsOpen ? '收起创建与切换' : '创建或切换环境' }}</span>
               </button>
             </div>
           </div>
@@ -184,6 +197,9 @@
                 type="button"
                 class="filled-button"
                 :disabled="!canStart(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'start')"
+                aria-label="启动"
+                aria-describedby="lifecycle-action-hint"
                 @click="runLifecycle(env.instance.data, 'start')"
               >
                 启动
@@ -192,6 +208,9 @@
                 type="button"
                 class="outlined-button"
                 :disabled="!canStop(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'stop')"
+                aria-label="停止"
+                aria-describedby="lifecycle-action-hint"
                 @click="runLifecycle(env.instance.data, 'stop')"
               >
                 停止
@@ -200,6 +219,9 @@
                 type="button"
                 class="outlined-button"
                 :disabled="!canRestart(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'restart')"
+                aria-label="重启"
+                aria-describedby="lifecycle-action-hint"
                 @click="runLifecycle(env.instance.data, 'restart')"
               >
                 重启
@@ -217,12 +239,24 @@
                 type="button"
                 class="text-button error"
                 :disabled="!canDelete(env.instance.data)"
+                :title="lifecycleActionReason(env.instance.data, 'delete')"
+                aria-label="删除"
+                aria-describedby="lifecycle-action-hint"
                 @click="openDelete(env.instance.data)"
               >
                 删除
               </button>
             </template>
           </GcpActionBar>
+
+          <p
+            v-if="env.instance.kind === 'success'"
+            id="lifecycle-action-hint"
+            class="lifecycle-action-hint"
+            role="status"
+          >
+            {{ lifecycleActionHint(env.instance.data) }}
+          </p>
 
           <div
             v-if="lifecycleDiagnostic"
@@ -310,12 +344,12 @@
                 <div class="env-card md-card">
                   <div class="env-meta-grid">
                     <div class="meta-item">
-                      <span class="meta-item__label">Runtime</span>
+                      <span class="meta-item__label">运行方式</span>
                       <span class="meta-item__value">{{ data.runtimeKind === 'container' ? '容器' : '虚拟机' }}</span>
                     </div>
                     <div class="meta-item">
                       <span class="meta-item__label">期望状态</span>
-                      <span class="meta-item__value">{{ environmentStateLabel(data.desiredState) }}</span>
+                      <span class="meta-item__value">{{ desiredEnvironmentStateLabel(data.desiredState) }}</span>
                     </div>
                     <div class="meta-item">
                       <span class="meta-item__label">修订版本</span>
@@ -326,11 +360,15 @@
                       <span class="meta-item__value">{{ formatTimestamp(data.eligibilityExpiresAt) }}</span>
                     </div>
                   </div>
+                  <details class="environment-id-details">
+                    <summary>查看环境 ID</summary>
+                    <code>{{ data.id }}</code>
+                  </details>
                 </div>
 
                 <div class="access-section">
                   <h4 class="section-subtitle">
-                    访问端点与授权 (Access & Endpoints)
+                    访问端点与授权
                   </h4>
                   <AsyncStateView
                     :state="access.endpoints"
@@ -357,9 +395,12 @@
                         </template>
                       </DataTable>
 
-                      <div class="grant-actions">
+                      <div
+                        v-if="access.grant.kind === 'success' || canIssueAccessGrant(data)"
+                        class="grant-actions"
+                      >
                         <button
-                          v-if="access.grant.kind !== 'success'"
+                          v-if="access.grant.kind !== 'success' && canIssueAccessGrant(data)"
                           type="button"
                           class="filled-button"
                           :disabled="access.creating || eps.length === 0"
@@ -376,6 +417,14 @@
                           撤销授权
                         </button>
                       </div>
+
+                      <p
+                        v-if="access.grant.kind !== 'success' && !canIssueAccessGrant(data)"
+                        class="access-grant-hint"
+                        role="status"
+                      >
+                        {{ accessGrantBlockReason(data) }}
+                      </p>
 
                       <div
                         v-if="createGrantDiagnostic"
@@ -446,7 +495,7 @@
                                 容器实验入口
                               </h5>
                               <p class="access-card__desc">
-                                通过当前登录会话与 AccessGrant 打开受保护的容器实验页面。
+                                通过当前登录会话与访问授权打开受保护的容器实验页面。
                               </p>
                               <button
                                 type="button"
@@ -477,7 +526,7 @@
                                 SSH
                               </h5>
                               <p class="access-card__desc">
-                                单行命令到唯一 VM；无需下载配置。
+                                单行命令连接到唯一虚拟机；无需下载配置。
                               </p>
                               <div
                                 v-if="sshCommand(g)"
@@ -493,8 +542,8 @@
                                 v-if="sshCommand(g)"
                                 class="ssh-meta"
                               >
-                                <span>Gateway fingerprint：<code>{{ sshFingerprint(g) ?? 'unavailable' }}</code></span>
-                                <span>Grant：{{ formatExpiry(g.expiresAt) }}</span>
+                                <span>网关指纹：<code>{{ sshFingerprint(g) ?? '不可用' }}</code></span>
+                                <span>访问授权有效期：{{ formatExpiry(g.expiresAt) }}</span>
                               </div>
                               <p
                                 v-else
@@ -549,7 +598,7 @@
                   >
                     <strong>冻结提交可能已断开当前终端连接</strong>
                     <p>
-                      冻结状态已结束；现有访问权限仍由当前 AccessGrant 控制。点击重新连接会使用同一授权重新建立终端，不会扩大权限范围。
+                      冻结状态已结束；现有访问权限仍由当前访问授权控制。点击重新连接会使用同一授权重新建立终端，不会扩大权限范围。
                     </p>
                     <button
                       type="button"
@@ -586,8 +635,11 @@
                     aria-hidden="true"
                   />
                   <h4>冻结完成，终端连接已断开</h4>
-                  <p>重新签发访问授权后即可继续使用当前环境。现有权限校验保持不变。</p>
+                  <p v-if="canIssueAccessGrant(data)">
+                    重新签发访问授权后即可继续使用当前环境。现有权限校验保持不变。
+                  </p>
                   <button
+                    v-if="canIssueAccessGrant(data)"
                     type="button"
                     class="filled-button"
                     :disabled="access.creating"
@@ -595,6 +647,13 @@
                   >
                     重新签发授权并连接终端
                   </button>
+                  <p
+                    v-else
+                    class="access-grant-hint"
+                    role="status"
+                  >
+                    {{ accessGrantBlockReason(data) }}
+                  </p>
                 </div>
                 <div
                   v-else
@@ -606,8 +665,11 @@
                     aria-hidden="true"
                   />
                   <h4>终端未连接</h4>
-                  <p>连接云终端需要有效的 AccessGrant 访问授权。请点击下方按钮一键签发：</p>
+                  <p v-if="canIssueAccessGrant(data)">
+                    连接云终端需要有效的访问授权。请点击下方按钮一键签发：
+                  </p>
                   <button
+                    v-if="canIssueAccessGrant(data)"
                     type="button"
                     class="filled-button"
                     :disabled="access.creating"
@@ -615,6 +677,13 @@
                   >
                     立即签发授权并连接终端
                   </button>
+                  <p
+                    v-else
+                    class="access-grant-hint"
+                    role="status"
+                  >
+                    {{ accessGrantBlockReason(data) }}
+                  </p>
                 </div>
               </div>
 
@@ -692,20 +761,9 @@
                 >
                   <DiagnosticBanner
                     :message="failedEnvironmentMessage(data)"
-                    :retryable="Boolean(retryableOperation)"
+                    :retryable="false"
                     severity="error"
                   />
-                  <div class="env-failed-actions">
-                    <button
-                      v-if="retryableOperation"
-                      type="button"
-                      class="outlined-button"
-                      :disabled="retryingEnvironment"
-                      @click="retryFailedOperation(data)"
-                    >
-                      {{ retryingEnvironment ? '重试中…' : '重试失败的操作' }}
-                    </button>
-                  </div>
                 </div>
 
                 <div
@@ -715,9 +773,8 @@
                   <DiagnosticBanner
                     :code="retryDiagnostic.code"
                     :message="retryDiagnostic.message"
-                    :retryable="retryDiagnostic.retryable"
+                    :retryable="false"
                     severity="error"
-                    @retry="retryFailedOperation(data)"
                   />
                 </div>
 
@@ -974,7 +1031,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
@@ -1018,12 +1075,6 @@ const projects = useProjects()
 
 const activeTab = ref<'overview' | 'terminal' | 'operations' | 'freeze'>('overview')
 
-function clearSelectedEnvironment() {
-  selectedEnvironmentId.value = undefined
-  environmentIdInput.value = ''
-  void router.replace({ query: { ...route.query, environmentId: undefined } })
-}
-
 async function refreshAll() {
   await Promise.all([env.load(), access.loadEndpoints(), operations.load()])
 }
@@ -1037,12 +1088,22 @@ const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
 const deleteEnvironment = ref<EnvironmentInstanceSchema | null>(null)
 const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
 const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
+const environmentToolsOpen = ref(false)
 
 const env = useEnvironmentInstance(selectedEnvironmentId)
+const isEnvironmentLoaded = computed(() => env.instance.kind === 'success')
+const environmentTitle = computed(() => {
+  if (env.instance.kind === 'success') return env.instance.data.displayLabel
+  if (env.instance.kind === 'loading') return '正在加载环境'
+  return null
+})
 const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || undefined
 })
+const environmentProjectId = computed(() => (
+  env.instance.kind === 'success' ? env.instance.data.projectId : undefined
+))
 const projectId = computed(() => routeProjectId.value ?? (env.instance.kind === 'success' ? env.instance.data.projectId : undefined) ?? projects.selectedProjectId ?? undefined)
 const selectedProject = computed(() => {
   const id = projectId.value
@@ -1194,12 +1255,69 @@ watch(
   selectedEnvironmentId,
   (id) => {
     access.resetGrant()
+    if (id) environmentToolsOpen.value = false
     lifecycleDiagnostic.value = null
     createGrantDiagnostic.value = null
     retryDiagnostic.value = null
     if (id) void Promise.all([access.loadEndpoints(), access.loadCurrentGrant()])
   },
   { immediate: true },
+)
+
+function hasProject(id: string): boolean {
+  return projects.projects.kind === 'success' && projects.projects.data.some((project) => project.id === id)
+}
+
+function clearEnvironmentSelection() {
+  selectedEnvironmentId.value = undefined
+  environmentIdInput.value = ''
+  environmentToolsOpen.value = true
+}
+
+watch(
+  [() => projects.projects, routeProjectId, environmentProjectId],
+  ([state, requestedProjectId, instanceProjectId]) => {
+    const contextProjectId = requestedProjectId ?? instanceProjectId
+    if (state.kind !== 'success' || !contextProjectId || !state.data.some((project) => project.id === contextProjectId)) return
+    if (projects.selectedProjectId !== contextProjectId) projects.select(contextProjectId)
+  },
+  { immediate: true },
+)
+
+const routeNavigationProjectId = ref<string | null>(null)
+
+onBeforeRouteUpdate((to) => {
+  const nextProjectId = typeof to.query.projectId === 'string' ? to.query.projectId.trim() : ''
+  const nextEnvironmentId = typeof to.query.environmentId === 'string' ? to.query.environmentId.trim() : ''
+  if (nextProjectId !== (routeProjectId.value ?? '')) {
+    const currentEnvironmentId = selectedEnvironmentId.value
+    if (!nextEnvironmentId || nextEnvironmentId === currentEnvironmentId) clearEnvironmentSelection()
+    if (nextEnvironmentId === currentEnvironmentId && to.query.environmentId !== undefined) {
+      return { query: { ...to.query, environmentId: undefined } }
+    }
+  }
+  if (nextProjectId && hasProject(nextProjectId) && projects.selectedProjectId !== nextProjectId) {
+    routeNavigationProjectId.value = nextProjectId
+    projects.select(nextProjectId)
+  }
+  return true
+})
+
+watch(
+  () => projects.selectedProjectId,
+  (selectedId, previousId) => {
+    if (!selectedId || !hasProject(selectedId)) return
+    if (routeNavigationProjectId.value === selectedId) {
+      routeNavigationProjectId.value = null
+      return
+    }
+    const contextProjectId = routeProjectId.value ?? environmentProjectId.value
+    if (routeProjectId.value && !hasProject(routeProjectId.value)) return
+    if (contextProjectId === selectedId) return
+    if (selectedEnvironmentId.value && !environmentProjectId.value && (env.instance.kind === 'idle' || env.instance.kind === 'loading') && previousId === null) return
+    clearEnvironmentSelection()
+    void router.replace({ query: { ...route.query, projectId: selectedId, environmentId: undefined } })
+  },
 )
 
 watch(
@@ -1215,7 +1333,7 @@ watch(
 )
 
 const releaseColumns: DataTableColumn<EnvironmentTemplateReleaseViewSchema & { actions?: never }>[] = [
-  { key: 'runtimeKind', title: 'Runtime' },
+  { key: 'runtimeKind', title: '运行方式' },
   { key: 'id', title: '版本 ID' },
   { key: 'publishedBy', title: '发布者' },
   { key: 'publishedAt', title: '发布时间' },
@@ -1362,7 +1480,7 @@ function operationTimelineDescription(op: EnvironmentOperationSnapshotSchema): s
 
 function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
   const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
-  return `环境${phase}未能完成操作。${retryableOperation.value ? '可以重试失败的操作。' : ''}`
+  return `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`
 }
 
 async function cancelCurrentOperation() {
@@ -1404,6 +1522,46 @@ function sshCommand(g: AccessGrantWithGateway): string | null {
 
 function sshFingerprint(g: AccessGrantWithGateway): string | null {
   return sshGrant(g)?.sshGatewayHostKeyFingerprint ?? null
+}
+
+function canIssueAccessGrant(data: EnvironmentInstanceSchema): boolean {
+  return data.desiredState === 'running' && data.observedState === 'ready'
+}
+
+function accessGrantBlockReason(data: EnvironmentInstanceSchema): string {
+  if (data.observedState === 'stopped') return '环境已停止，启动后才能签发访问授权。'
+  if (data.observedState === 'failed') return '环境处于失败状态，重试成功并恢复就绪后才能签发访问授权。'
+  if (isTerminalEnvironment(data)) return '环境正在删除或已删除，不能签发访问授权。'
+  return '环境就绪后才能签发访问授权。'
+}
+
+function desiredEnvironmentStateLabel(value: string): string {
+  return ({
+    running: '运行中',
+    stopped: '已停止',
+    deleted: '已删除',
+  } as Record<string, string>)[value] ?? environmentStateLabel(value)
+}
+
+function accessGrantRequestEnvironment(): EnvironmentInstanceSchema | null {
+  const data = env.instance.kind === 'success' ? env.instance.data : null
+  if (!data) {
+    createGrantDiagnostic.value = makeDiagnostic(
+      'ACCESS_GRANT_ENVIRONMENT_NOT_READY',
+      '环境状态尚未加载，无法签发访问授权。',
+      false,
+    )
+    return null
+  }
+  if (!canIssueAccessGrant(data)) {
+    createGrantDiagnostic.value = makeDiagnostic(
+      'ACCESS_GRANT_NOT_ELIGIBLE',
+      accessGrantBlockReason(data),
+      false,
+    )
+    return null
+  }
+  return data
 }
 
 function canFreeze(data: EnvironmentInstanceSchema): boolean {
@@ -1567,17 +1725,71 @@ async function retryFreeze() {
   }
 }
 
+function hasActiveLifecycleOperation(data: EnvironmentInstanceSchema): boolean {
+  const current = data.operation.state
+  if (current === 'accepted' || current === 'running' || current === 'cancelling') return true
+  return activeOperation.value?.environmentId === data.id
+}
+
+function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
+  return data.observedState === 'deleting' || data.observedState === 'deleted'
+}
+
 function canStart(data: EnvironmentInstanceSchema) {
-  return data.desiredState !== 'running' && !lifecycle.operating.has(`${data.id}:start`)
+  return !isTerminalEnvironment(data)
+    && !hasActiveLifecycleOperation(data)
+    && data.desiredState !== 'deleted'
+    && data.desiredState !== 'running'
+    && data.observedState === 'stopped'
+    && !lifecycle.operating.has(`${data.id}:start`)
 }
+
 function canStop(data: EnvironmentInstanceSchema) {
-  return data.desiredState !== 'stopped' && !lifecycle.operating.has(`${data.id}:stop`)
+  return !isTerminalEnvironment(data)
+    && !hasActiveLifecycleOperation(data)
+    && data.desiredState !== 'deleted'
+    && data.desiredState !== 'stopped'
+    && data.observedState === 'ready'
+    && !lifecycle.operating.has(`${data.id}:stop`)
 }
+
 function canRestart(data: EnvironmentInstanceSchema) {
-  return !lifecycle.operating.has(`${data.id}:restart`)
+  return !isTerminalEnvironment(data)
+    && !hasActiveLifecycleOperation(data)
+    && data.desiredState !== 'deleted'
+    && (data.observedState === 'ready' || data.observedState === 'stopped' || data.observedState === 'failed')
+    && !lifecycle.operating.has(`${data.id}:restart`)
 }
+
 function canDelete(data: EnvironmentInstanceSchema) {
-  return !lifecycle.operating.has(`${data.id}:delete`)
+  return !isTerminalEnvironment(data)
+    && data.desiredState !== 'deleted'
+    && !(hasActiveLifecycleOperation(data) && data.operation.kind === 'delete')
+    && !lifecycle.operating.has(`${data.id}:delete`)
+}
+
+function lifecycleActionReason(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']): string {
+  if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+  if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
+  if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
+    return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
+  }
+  if (action === 'start' && data.desiredState === 'running') return '环境已经是运行目标状态。'
+  if (action === 'start' && data.observedState !== 'stopped') return `环境当前为${environmentStateLabel(data.observedState)}，只能在已停止状态启动。`
+  if (action === 'stop' && data.desiredState === 'stopped') return '环境已经是停止目标状态。'
+  if (action === 'stop' && data.observedState !== 'ready') return `环境当前为${environmentStateLabel(data.observedState)}，就绪后才能停止。`
+  if (action === 'restart' && !['ready', 'stopped', 'failed'].includes(data.observedState)) return '只有就绪、已停止或失败的环境才能重启。'
+  return `${action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '删除'}环境`
+}
+
+function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
+  if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
+  if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
+  if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
+  if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
+  if (data.observedState === 'stopped') return '环境已停止，启动后才能打开终端。'
+  if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
+  return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
 }
 
 function applyEnvironmentId() {
@@ -1688,6 +1900,7 @@ async function confirmDeleteEnvironment() {
 }
 
 async function issueAccessGrant() {
+  if (!accessGrantRequestEnvironment()) return
   createGrantDiagnostic.value = null
   const result = await access.createGrant()
   if (result && !result.ok && result.diagnostic) {
@@ -1702,6 +1915,7 @@ async function reconnectConsole() {
     consoleReconnectRequired.value = false
     return
   }
+  if (!accessGrantRequestEnvironment()) return
   await issueAccessGrant()
   if (access.grant.kind === 'success' && access.grant.data.state === 'active') {
     consoleSessionKey.value += 1
@@ -1755,7 +1969,6 @@ async function revokeAccessGrant() {
 }
 
 .breadcrumb-current {
-  font-family: monospace;
   font-weight: 500;
   color: var(--md-sys-color-on-surface);
 }
@@ -1778,7 +1991,7 @@ async function revokeAccessGrant() {
   font: var(--md-sys-headline-small);
   color: var(--md-sys-color-on-surface);
   margin: 0;
-  font-family: monospace;
+  overflow-wrap: anywhere;
 }
 
 /* GCP Detail Tabs */
@@ -1862,6 +2075,23 @@ async function revokeAccessGrant() {
   color: var(--md-sys-color-on-surface);
 }
 
+.environment-id-details {
+  margin: 0 16px 16px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-small);
+}
+
+.environment-id-details summary {
+  cursor: pointer;
+}
+
+.environment-id-details code {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: var(--md-sys-color-on-surface);
+}
+
 .console-unauthorized-pane {
   display: flex;
   flex-direction: column;
@@ -1922,6 +2152,12 @@ async function revokeAccessGrant() {
 
 .lifecycle-result {
   margin-top: 16px;
+}
+
+.lifecycle-action-hint {
+  margin: 8px 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 
 .create-hint {
@@ -2332,6 +2568,12 @@ async function revokeAccessGrant() {
   display: flex;
   gap: 12px;
   margin-top: 16px;
+}
+
+.access-grant-hint {
+  margin: 12px 0 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
 }
 
 .grant-result {

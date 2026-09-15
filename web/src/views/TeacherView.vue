@@ -1,7 +1,5 @@
 <template>
-  <TeacherWorkbenchShell>
-    <RouterView />
-  </TeacherWorkbenchShell>
+  <TeacherWorkbenchShell />
 </template>
 
 <script setup lang="ts">

@@ -43,7 +43,7 @@
                 :class="{ 'project-item--selected': project.id === projects.selectedProjectId }"
                 role="option"
                 :aria-selected="project.id === projects.selectedProjectId"
-                @click="projects.select(project.id)"
+                @click="selectProject(project.id)"
               >
                 <span class="project-item__main">
                   <strong>{{ project.name }}</strong>
@@ -60,13 +60,18 @@
       </section>
 
       <section class="project-detail md-card" aria-labelledby="project-detail-heading">
-        <template v-if="projects.selectedProject">
+        <div v-if="routeProjectInvalid" class="detail-empty" role="status">
+          <SvgIcon name="link_off" size="xl" aria-hidden="true" />
+          <h3>项目链接无效</h3>
+          <p>当前账号无法访问链接指定的项目，请从左侧项目列表选择可访问的项目。</p>
+        </div>
+        <template v-else-if="selectedProject">
           <div class="section-heading">
             <div>
               <p class="eyebrow">Project 详情</p>
-              <h3 id="project-detail-heading">{{ projects.selectedProject.name }}</h3>
+              <h3 id="project-detail-heading">{{ selectedProject.name }}</h3>
             </div>
-            <span class="state-chip" :class="`state-chip--${projects.selectedProject.state}`">{{ projects.selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+            <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
           </div>
 
           <form class="project-form" @submit.prevent="saveProject">
@@ -79,16 +84,16 @@
               <textarea v-model="editDescription" class="text-input" rows="3" maxlength="2000" />
             </label>
             <div class="readonly-meta">
-              <span>课程关联</span><code>{{ projects.selectedProject.courseId ?? '独立项目' }}</code>
+              <span>课程关联</span><code>{{ selectedProject.courseId ?? '独立项目' }}</code>
             </div>
             <div class="form-actions">
               <button type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
-                v-if="projects.selectedProject.state === 'active'"
+                v-if="selectedProject.state === 'active'"
                 type="button"
                 class="outlined-button danger-button"
                 :disabled="projects.acting !== null"
-                @click="archiveProject"
+                @click="openArchiveConfirmation"
               >
                 归档项目
               </button>
@@ -113,12 +118,12 @@
                       <strong>{{ member.actorId }}</strong>
                       <small>{{ member.role }} · {{ member.state }}</small>
                     </span>
-                    <button v-if="member.actorId !== projects.selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="removeMember(member)">移除</button>
+                    <button v-if="member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
                   </li>
                 </ul>
               </template>
             </AsyncStateView>
-            <form v-if="projects.selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
+            <form v-if="selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
               <label>
                 <span>Actor ID</span>
                 <input v-model="memberActorId" class="text-input" placeholder="OIDC actor id" required />
@@ -153,7 +158,7 @@
                   <SvgIcon name="refresh" size="sm" aria-hidden="true" />
                 </button>
                 <RouterLink
-                  v-if="projects.selectedProject.state === 'active'"
+                  v-if="selectedProject.state === 'active'"
                   class="filled-button small"
                   :to="{ path: '/researcher/resources', query: { projectId: selectedProjectId } }"
                 >
@@ -194,6 +199,16 @@
       </section>
     </section>
 
+    <ConfirmDialog
+      :open="destructiveConfirmation !== null"
+      :title="confirmationTitle"
+      :description="confirmationDescription"
+      confirm-text="确认"
+      severity="error"
+      @cancel="destructiveConfirmation = null"
+      @confirm="confirmDestructiveAction"
+    />
+
     <div v-if="createOpen" class="modal-backdrop" role="presentation" @click.self="createOpen = false">
       <section class="modal-card md-card" role="dialog" aria-modal="true" aria-labelledby="create-project-heading">
         <div class="section-heading">
@@ -228,18 +243,36 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjectMemberships, useProjects } from '@/composables/useProjects'
-import type { ProjectMembershipSchema } from '@/generated/contracts'
+import type { ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
 import { environmentStateLabel } from '@/utils/stateLabels'
 
+const route = useRoute()
+const router = useRouter()
 const projects = useProjects()
-const selectedProjectId = computed(() => projects.selectedProjectId)
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || null
+})
+const routeProjectInvalid = computed(() => {
+  if (!routeProjectId.value || projects.projects.kind !== 'success') return false
+  return !projects.projects.data.some((project) => project.id === routeProjectId.value)
+})
+const routeProjectPending = computed(() => Boolean(
+  routeProjectId.value
+  && projects.projects.kind === 'success'
+  && projects.selectedProjectId !== routeProjectId.value,
+))
+const projectSelectionBlocked = computed(() => projects.projects.kind !== 'success' || routeProjectInvalid.value || routeProjectPending.value)
+const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : projects.selectedProjectId)
+const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
 const members = useProjectMemberships(selectedProjectId)
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
 
@@ -251,16 +284,54 @@ const editName = ref('')
 const editDescription = ref('')
 const memberActorId = ref('')
 const memberRole = ref<'student' | 'teacher'>('student')
-const canSave = computed(() => Boolean(projects.selectedProject && editName.value.trim()))
+const canSave = computed(() => Boolean(selectedProject.value && editName.value.trim()))
+type WorkspaceConfirmation =
+  | { kind: 'archive'; project: ProjectSchema }
+  | { kind: 'remove'; member: ProjectMembershipSchema; projectId: string; projectName: string }
+const destructiveConfirmation = ref<WorkspaceConfirmation | null>(null)
+const confirmationTitle = computed(() => destructiveConfirmation.value?.kind === 'archive' ? '归档项目' : '移除项目成员')
+const confirmationDescription = computed(() => {
+  const confirmation = destructiveConfirmation.value
+  if (!confirmation) return ''
+  return confirmation.kind === 'archive'
+    ? `确认归档项目“${confirmation.project.name}”？归档会停止新的项目操作，但会保留已有记录。`
+    : `确认从项目“${confirmation.projectName}”移除成员 ${confirmation.member.actorId}？移除后该成员将失去此项目的访问权限。`
+})
 
 watch(
-  () => projects.selectedProject,
-  (project) => {
+  () => selectedProject.value,
+  (project, previousProject) => {
+    if (project?.id !== previousProject?.id) destructiveConfirmation.value = null
     editName.value = project?.name ?? ''
     editDescription.value = project?.description ?? ''
   },
   { immediate: true },
 )
+
+watch(
+  [() => projects.projects, routeProjectId],
+  ([state, requestedProjectId]) => {
+    if (state.kind !== 'success' || !requestedProjectId) return
+    if (!state.data.some((project) => project.id === requestedProjectId)) return
+    if (projects.selectedProjectId !== requestedProjectId) projects.select(requestedProjectId)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => projects.selectedProjectId,
+  (projectId) => {
+    if (!projectId || routeProjectInvalid.value || route.query.projectId === projectId) return
+    void router.replace({ query: { ...route.query, projectId } })
+  },
+)
+
+function selectProject(projectId: string) {
+  projects.select(projectId)
+  if (route.query.projectId !== projectId) {
+    void router.replace({ query: { ...route.query, projectId } })
+  }
+}
 
 async function submitCreate() {
   const created = await projects.create(newName.value, newDescription.value, newCourseId.value)
@@ -277,10 +348,10 @@ async function saveProject() {
   await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
 }
 
-async function archiveProject() {
+function openArchiveConfirmation() {
   const project = projects.selectedProject
   if (!project) return
-  await projects.archive(project)
+  destructiveConfirmation.value = { kind: 'archive', project }
 }
 
 async function addMember() {
@@ -288,8 +359,26 @@ async function addMember() {
   if (ok) memberActorId.value = ''
 }
 
-async function removeMember(member: ProjectMembershipSchema) {
-  await members.remove(member.actorId, member)
+function openRemoveMemberConfirmation(member: ProjectMembershipSchema) {
+  const project = projects.selectedProject
+  if (!project) return
+  destructiveConfirmation.value = {
+    kind: 'remove',
+    member,
+    projectId: project.id,
+    projectName: project.name,
+  }
+}
+
+async function confirmDestructiveAction() {
+  const confirmation = destructiveConfirmation.value
+  destructiveConfirmation.value = null
+  if (!confirmation) return
+  if (confirmation.kind === 'archive') {
+    await projects.archive(confirmation.project)
+  } else if (projects.selectedProjectId === confirmation.projectId) {
+    await members.remove(confirmation.member.actorId, confirmation.member)
+  }
 }
 </script>
 

@@ -2,14 +2,22 @@
   <div class="my-labs">
     <header class="page-header">
       <div class="header-title-row">
-        <h2>我的实验</h2>
+        <h2>我的项目环境</h2>
         <span class="header-badge" v-if="state.kind === 'success'">{{ state.data.length }} 个环境</span>
       </div>
-      <p class="page-subtitle">查看课程内你创建的计算与实验环境，进入终端控制台或冻结不可变提交。</p>
+      <p class="page-subtitle">查看当前项目创建的环境；进入终端控制台或提交评测材料。</p>
     </header>
 
     <DiagnosticBanner
-      v-if="isContextMissing"
+      v-if="isInvalidProjectContext"
+      code="PROJECT_CONTEXT_INVALID"
+      message="链接中的项目当前不可访问，请通过项目选择器选择可访问的项目。"
+      :retryable="false"
+      severity="error"
+    />
+
+    <DiagnosticBanner
+      v-else-if="isContextMissing"
       code="PROJECT_CONTEXT_MISSING"
       message="项目上下文未绑定，无法加载你的实验列表。请通过顶栏项目选择器选择项目或联系管理员。"
       :retryable="false"
@@ -22,7 +30,7 @@
         :refreshing="state.kind === 'loading'"
         :show-auto-refresh="true"
         :auto-refresh="autoRefreshEnabled"
-        aria-label="实验环境管理工具栏"
+        aria-label="项目环境管理工具栏"
         @refresh="load"
         @update:auto-refresh="autoRefreshEnabled = $event"
       >
@@ -33,7 +41,7 @@
             @click="openCreateDrawer"
           >
             <SvgIcon name="add" size="sm" aria-hidden="true" />
-            <span>创建实验环境</span>
+            <span>创建项目环境</span>
           </button>
         </template>
       </GcpActionBar>
@@ -51,7 +59,7 @@
       <GcpFilterBar
         v-if="state.kind === 'success'"
         v-model="filterSearch"
-        placeholder="按实验名称、环境 ID 或 Runtime 过滤…"
+        placeholder="按项目环境名称、环境 ID 或 Runtime 过滤…"
         :presets="filterPresets"
         @filter-change="onFilterChange"
       />
@@ -61,23 +69,27 @@
           <DataTable
             :columns="columns"
             :rows="filteredRows"
-            empty-text="没有匹配过滤条件的实验环境"
+            empty-text="没有匹配过滤条件的项目环境"
             interactive
-            aria-label="我的实验环境列表"
+            aria-label="我的项目环境列表"
             @row-click="(row) => selectRowForInspect(row as unknown as EnvironmentSummary)"
           >
             <template #displayLabel="{ row }">
               <div class="env-name-cell">
                 <span class="env-name">{{ row.displayLabel }}</span>
+                <span class="env-kind-sub">{{ environmentClassLabel(row.class) }}</span>
                 <span class="env-id-sub">{{ row.id }}</span>
               </div>
             </template>
 
             <template #observedState="{ row }">
-              <GcpStatusPill
-                :state="row.observedState"
-                domain="environment"
-              />
+              <div class="state-cell">
+                <GcpStatusPill
+                  :state="row.observedState"
+                  domain="environment"
+                />
+                <small class="env-next-action">{{ nextActionLabel(row) }}</small>
+              </div>
             </template>
 
             <template #runtimeKind="{ row }">
@@ -96,10 +108,13 @@
                 <button
                   type="button"
                   class="filled-button small"
+                  :disabled="!canOpenConsole(row)"
+                  :title="consoleActionReason(row)"
+                  :aria-label="canOpenConsole(row) ? '打开控制台' : '控制台不可用'"
                   @click="openEnvironment(row.id)"
                 >
                   <SvgIcon name="terminal" size="sm" aria-hidden="true" />
-                  <span>控制台</span>
+                  <span>{{ canOpenConsole(row) ? '控制台' : '控制台不可用' }}</span>
                 </button>
                 <button
                   type="button"
@@ -113,22 +128,22 @@
           </DataTable>
 
           <p class="labs-hint" role="status">
-            点击行可原地查看环境规格与端点详情；点击「创建实验环境」从已发布模板快速启动新环境。
+            点击行可原地查看项目环境规格与端点详情；点击「创建项目环境」从已发布模板快速启动新环境。
           </p>
         </template>
 
         <template #empty>
           <div class="empty-labs-pane">
             <SvgIcon name="science" size="xl" aria-hidden="true" />
-            <h3>暂无实验环境</h3>
-            <p>你尚未在该课程中创建任何实验环境。点击下方按钮，从教师已发布的实验模板一键创建。</p>
+            <h3>暂无项目环境</h3>
+            <p>当前项目还没有环境。可从教师已发布的模板创建一个项目环境。</p>
             <button
               type="button"
               class="filled-button"
               @click="openCreateDrawer"
             >
               <SvgIcon name="add" size="sm" aria-hidden="true" />
-              <span>创建第一个实验环境</span>
+              <span>创建第一个项目环境</span>
             </button>
           </div>
         </template>
@@ -138,7 +153,7 @@
     <!-- Right Side-Sheet Inspector (GCP Style) -->
     <EvidenceSideSheet
       :open="inspectedEnv !== null"
-      title="实验环境详情"
+      title="项目环境详情"
       @close="inspectedEnv = null"
     >
       <div v-if="inspectedEnv" class="inspect-content">
@@ -149,30 +164,37 @@
 
         <div class="inspect-properties">
           <div class="prop-row">
-            <span class="prop-label">环境 ID</span>
+            <span class="prop-label">项目环境 ID</span>
             <div class="prop-value-with-copy">
               <code>{{ inspectedEnv.id }}</code>
               <CopyButton :text="inspectedEnv.id" label="复制环境 ID" />
             </div>
           </div>
-          <div class="prop-row">
-            <span class="prop-label">Runtime 类型</span>
-            <span class="prop-value">{{ inspectedEnv.runtimeKind === 'container' ? '容器环境 (Container)' : '虚拟机环境 (KubeVirt VM)' }}</span>
-          </div>
-          <div class="prop-row">
-            <span class="prop-label">到期时间</span>
-            <span class="prop-value">{{ formatTimestamp(inspectedEnv.eligibilityExpiresAt) }}</span>
-          </div>
+            <div class="prop-row">
+              <span class="prop-label">Runtime 类型</span>
+              <span class="prop-value">{{ inspectedEnv.runtimeKind === 'container' ? '容器环境 (Container)' : '虚拟机环境 (KubeVirt VM)' }}</span>
+            </div>
+            <div class="prop-row">
+              <span class="prop-label">用途</span>
+              <span class="prop-value">{{ environmentClassLabel(inspectedEnv.class) }}</span>
+            </div>
+            <div class="prop-row">
+              <span class="prop-label">到期时间</span>
+              <span class="prop-value">{{ formatTimestamp(inspectedEnv.eligibilityExpiresAt) }}</span>
+            </div>
+            <p class="inspect-next-action" role="status">{{ nextActionLabel(inspectedEnv) }}</p>
         </div>
 
         <div class="inspect-actions">
           <button
             type="button"
             class="filled-button full-width"
+            :disabled="!canOpenConsole(inspectedEnv)"
+            :title="consoleActionReason(inspectedEnv)"
             @click="openEnvironment(inspectedEnv.id)"
           >
             <SvgIcon name="terminal" size="sm" aria-hidden="true" />
-            <span>进入终端控制台</span>
+            <span>{{ canOpenConsole(inspectedEnv) ? '进入终端控制台' : '终端控制台不可用' }}</span>
           </button>
         </div>
       </div>
@@ -183,14 +205,14 @@
       v-if="showCreateModal"
       class="create-modal-overlay"
       role="dialog"
-      aria-label="创建新实验环境"
+      aria-label="创建项目环境"
       @click.self="showCreateModal = false"
     >
       <div class="create-modal md-card">
         <div class="modal-header">
           <div class="modal-title-group">
             <SvgIcon name="add_circle" size="md" class="modal-icon" aria-hidden="true" />
-            <h3>从发布版本创建实验环境</h3>
+            <h3>从已发布版本创建项目环境</h3>
           </div>
           <button
             type="button"
@@ -205,7 +227,7 @@
         <div class="modal-body">
           <AsyncStateView :state="releases.releases" @retry="releases.load">
             <template #success="{ data: releaseList }">
-              <p class="modal-subtitle">选择教师已发布并经过门禁验证的实验镜像模板：</p>
+              <p class="modal-subtitle">选择教师已发布并经过门禁验证的项目环境模板：</p>
               <div class="release-cards-grid">
                 <div
                   v-for="rel in releaseList"
@@ -250,7 +272,7 @@
 
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
 import { useProjects } from '@/composables/useProjects'
@@ -268,12 +290,29 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import { formatTimestamp, idempotencyKey } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
+import { environmentStateLabel } from '@/utils/stateLabels'
 
 const projects = useProjects()
-const projectId = computed(() => projects.selectedProjectId ?? undefined)
-const selectedProject = computed(() => projects.selectedProject)
+const route = useRoute()
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || null
+})
+const routeProjectInvalid = computed(() => {
+  if (!routeProjectId.value || projects.projects.kind !== 'success') return false
+  return !projects.projects.data.some((project) => project.id === routeProjectId.value)
+})
+const routeProjectPending = computed(() => Boolean(
+  routeProjectId.value
+  && projects.projects.kind === 'success'
+  && projects.selectedProjectId !== routeProjectId.value,
+))
+const projectContextBlocked = computed(() => projects.projects.kind !== 'success' || routeProjectInvalid.value || routeProjectPending.value)
+const projectId = computed(() => projectContextBlocked.value ? undefined : projects.selectedProjectId ?? undefined)
+const selectedProject = computed(() => projectContextBlocked.value ? null : projects.selectedProject)
 const courseId = computed(() => selectedProject.value?.courseId ?? undefined)
 const isContextMissing = computed(() => !projectId.value)
+const isInvalidProjectContext = computed(() => routeProjectInvalid.value)
 
 const router = useRouter()
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
@@ -300,7 +339,7 @@ const filterPresets: FilterPreset[] = [
 ]
 
 const columns: DataTableColumn<EnvironmentSummary & { actions?: never }>[] = [
-  { key: 'displayLabel', title: '实验名称 / ID' },
+  { key: 'displayLabel', title: '项目环境名称 / ID' },
   { key: 'observedState', title: '状态' },
   { key: 'runtimeKind', title: 'Runtime' },
   { key: 'eligibilityExpiresAt', title: '到期时间' },
@@ -340,6 +379,35 @@ function onFilterChange(payload: { search: string; chips: FilterChip[] }) {
 
 function selectRowForInspect(env: EnvironmentSummary) {
   inspectedEnv.value = env
+}
+
+function environmentClassLabel(environmentClass: EnvironmentSummary['class']): string {
+  return environmentClass === 'work' ? 'Work 项目环境' : '课程实验环境'
+}
+
+function hasActiveOperation(env: EnvironmentSummary): boolean {
+  const operation = env.currentOperation
+  return Boolean(operation && ['accepted', 'running', 'cancelling'].includes(operation.state))
+}
+
+function canOpenConsole(env: EnvironmentSummary): boolean {
+  return env.desiredState !== 'deleted' && env.observedState !== 'deleting' && env.observedState !== 'deleted'
+}
+
+function consoleActionReason(env: EnvironmentSummary): string {
+  if (env.observedState === 'deleted') return '此项目环境已删除，无法打开控制台。请创建新的项目环境。'
+  if (env.observedState === 'deleting' || env.desiredState === 'deleted') return '删除已请求/正在回收，完成后将无法打开控制台。'
+  return '打开项目环境控制台'
+}
+
+function nextActionLabel(env: EnvironmentSummary): string {
+  if (env.observedState === 'deleted') return '已删除；请创建新的项目环境'
+  if (env.observedState === 'deleting' || env.desiredState === 'deleted') return '删除已请求/正在回收；请等待清理完成'
+  if (hasActiveOperation(env)) return '正在处理；请等待当前操作完成'
+  if (env.observedState === 'ready') return '已就绪；可以打开控制台'
+  if (env.observedState === 'stopped') return '已停止；可以启动环境'
+  if (env.observedState === 'failed') return env.currentOperation?.retryEligible ? '操作失败；可以重试失败操作' : '操作失败；请查看详情中的诊断'
+  return `当前为${environmentStateLabel(env.observedState)}；请等待状态更新`
 }
 
 function openCreateDrawer() {
@@ -427,6 +495,24 @@ function onVisibilityChange() {
   if (document.visibilityState === 'visible' && autoRefreshEnabled.value) void load()
 }
 
+watch(
+  [() => projects.projects, routeProjectId],
+  ([state, requestedProjectId]) => {
+    if (state.kind !== 'success' || !requestedProjectId) return
+    if (!state.data.some((project) => project.id === requestedProjectId)) return
+    if (projects.selectedProjectId !== requestedProjectId) projects.select(requestedProjectId)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => projects.selectedProjectId,
+  (projectId) => {
+    if (!projectId || routeProjectInvalid.value || route.query.projectId === projectId) return
+    void router.replace({ query: { ...route.query, projectId } })
+  },
+)
+
 watch(projectId, load, { immediate: true })
 watch(autoRefreshEnabled, (enabled) => {
   if (enabled) scheduleRefresh()
@@ -445,6 +531,13 @@ if (typeof document !== 'undefined') {
 }
 
 function openEnvironment(environmentId: string) {
+  const environment = state.value.kind === 'success'
+    ? state.value.data.find((item) => item.id === environmentId)
+    : undefined
+  if (environment && !canOpenConsole(environment)) {
+    inspectedEnv.value = environment
+    return
+  }
   void router.push({
     path: '/student/environments',
     query: {
@@ -495,6 +588,25 @@ function openEnvironment(environmentId: string) {
   color: var(--md-sys-color-on-surface-variant);
 }
 
+.env-kind-sub,
+.env-next-action,
+.inspect-next-action {
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-label-small);
+}
+
+.inspect-next-action {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container-low);
+}
+
+.state-cell {
+  display: grid;
+  gap: 4px;
+}
+
 .runtime-tag {
   display: inline-flex;
   align-items: center;
@@ -507,6 +619,54 @@ function openEnvironment(environmentId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.filled-button,
+.outlined-button,
+.text-button {
+  min-height: 40px;
+  padding: 0 17px;
+  border-radius: var(--md-sys-shape-full);
+  font: var(--md-sys-label-large);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.filled-button.small,
+.outlined-button.small {
+  min-height: 32px;
+  padding: 0 12px;
+  font: var(--md-sys-label-medium);
+}
+
+.filled-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+
+.outlined-button {
+  border: 1px solid var(--md-sys-color-outline);
+  background: transparent;
+  color: var(--md-sys-color-primary);
+}
+
+.text-button {
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+  color: var(--md-sys-color-primary);
+}
+
+.filled-button:disabled,
+.outlined-button:disabled,
+.text-button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
 }
 
 .labs-hint {

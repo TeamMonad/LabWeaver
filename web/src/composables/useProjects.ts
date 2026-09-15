@@ -1,4 +1,4 @@
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import {
   addProjectMembership,
   archiveProject,
@@ -180,25 +180,34 @@ export function useProjects() {
 }
 
 /** Load and mutate project-local Access memberships. */
-export function useProjectMemberships(projectId: ReturnType<typeof ref<string | null>>) {
+export function useProjectMemberships(projectId: Ref<string | null | undefined>) {
   const memberships = ref<AsyncState<ProjectMembershipSchema[]>>({ kind: 'idle' })
   const acting = ref<string | null>(null)
   const outcome = ref<ProjectMutationResult | null>(null)
+  let loadGeneration = 0
 
   async function load() {
     const id = projectId.value
+    const generation = ++loadGeneration
     if (!id) {
       memberships.value = { kind: 'idle' }
       return
     }
     memberships.value = { kind: 'loading', message: '加载项目成员…' }
     const result = await listProjectMemberships({ path: { projectId: id } })
+    if (generation !== loadGeneration || projectId.value !== id) return
     if (result.error) {
       memberships.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_MEMBERS_LIST_FAILED', '加载项目成员失败') }
       return
     }
     memberships.value = result.data.length > 0 ? { kind: 'success', data: result.data } : { kind: 'empty' }
   }
+
+  watch(projectId, (id, previousId) => {
+    if (id !== previousId) outcome.value = null
+    void load()
+  }, { immediate: true })
+  onScopeDispose(() => { loadGeneration += 1 })
 
   async function add(input: AddProjectMembershipRequestSchema): Promise<boolean> {
     const id = projectId.value

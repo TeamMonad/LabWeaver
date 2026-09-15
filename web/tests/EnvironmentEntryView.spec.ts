@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { createRouter, createWebHistory } from 'vue-router'
+import { defineComponent, h } from 'vue'
+import { createRouter, createWebHistory, RouterView } from 'vue-router'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
+import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
 import {
   listEnvironmentTemplateReleases,
   listProjects,
   getEnvironment,
   listEnvironmentEndpoints,
+  listEnvironmentAccessGrants,
   listEnvironmentOperations,
   cancelEnvironmentOperation,
   startEnvironment,
@@ -24,6 +27,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     createEnvironment: vi.fn(),
     getEnvironment: vi.fn(),
     listEnvironmentEndpoints: vi.fn(),
+    listEnvironmentAccessGrants: vi.fn(),
     listEnvironmentOperations: vi.fn(),
     cancelEnvironmentOperation: vi.fn(),
     startEnvironment: vi.fn(),
@@ -154,14 +158,20 @@ function mockEnvironmentInstance(overrides: Record<string, unknown> = {}) {
   vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never })
 }
 
-async function mountAt(query: Record<string, string> = {}) {
+async function mountAt(query: Record<string, string> = {}, withProjectSelector = false) {
   const router = createRouter({
     history: createWebHistory(),
     routes: [{ path: '/student/environments', name: 'student-environments', component: EnvironmentEntryView }],
   })
   await router.push({ path: '/student/environments', query })
   await router.isReady()
-  const wrapper = mount(EnvironmentEntryView, {
+  const component = defineComponent({
+    setup: () => () => h('div', [
+      ...(withProjectSelector ? [h(GcpProjectSelector)] : []),
+      h(RouterView),
+    ]),
+  })
+  const wrapper = mount(component, {
     global: { plugins: [router] },
   })
   mountedWrappers.push(wrapper)
@@ -176,6 +186,7 @@ describe('EnvironmentEntryView', () => {
     vi.resetAllMocks()
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject], error: undefined as never })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] }, error: undefined as never })
+    vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     window.localStorage.clear()
   })
@@ -220,6 +231,7 @@ describe('EnvironmentEntryView', () => {
         id: 'env-1',
         courseId: 'demo-course-1',
         class: 'experiment',
+        displayLabel: 'Demo environment',
         desiredState: 'running',
         eligibilityExpiresAt: '2026-07-12T10:00:00.000Z',
         endpoints: [],
@@ -260,6 +272,45 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('ssh')
   })
 
+  it('uses the environment display name and keeps the full ID in secondary details', async () => {
+    mockEnvironmentInstance()
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.find('.title-with-pill h2').text()).toBe('Environment 1'))
+    expect(wrapper.find('.breadcrumb-current').text()).toBe('Environment 1')
+    expect(wrapper.find('.title-with-pill h2').text()).not.toContain('env-1')
+    expect(wrapper.find('.breadcrumb-current').text()).not.toContain('env-1')
+    expect(wrapper.get('.environment-id-details').text()).toContain('env-1')
+    expect(wrapper.findAll('.resource-title-row > button')).toHaveLength(1)
+
+    const toolsToggle = wrapper.find('.resource-title-row > button')
+    expect(toolsToggle.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.environment-selector').exists()).toBe(false)
+    await toolsToggle.trigger('click')
+    expect(toolsToggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.find('.environment-selector').exists()).toBe(true)
+    expect(wrapper.text()).toContain('收起创建与切换')
+
+    await toolsToggle.trigger('click')
+    expect(toolsToggle.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.environment-selector').exists()).toBe(false)
+  })
+
+  it('disables console lifecycle actions after the server reports deletion', async () => {
+    mockEnvironmentInstance({ desiredState: 'deleted', observedState: 'deleted' })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const lifecycleButtons = wrapper.find('.gcp-action-bar').findAll('button').filter((button) => (
+      ['启动', '停止', '重启', '删除'].includes(button.text())
+    ))
+    expect(lifecycleButtons).toHaveLength(4)
+    expect(lifecycleButtons.every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
+    expect(wrapper.text()).toContain('此项目环境已删除')
+    expect(wrapper.find('.environment-selector').exists()).toBe(false)
+    expect(wrapper.find('button[aria-expanded="false"]').exists()).toBe(true)
+  })
+
   it('renders every public operation state and its optional cleanup and diagnostic details', async () => {
     mockEnvironmentInstance({ observedState: 'failed' })
     const operationItems = (['accepted', 'running', 'cancelling', 'failed', 'cancelled'] as const).map((state) =>
@@ -286,6 +337,93 @@ describe('EnvironmentEntryView', () => {
     expect(text).toContain('资源清理已于')
     expect(text).toContain('诊断码：ENVIRONMENT_START_FAILED')
     expect(wrapper.findAll('button').some((button) => button.text() === '重试失败的操作')).toBe(true)
+  })
+
+  it('keeps the toolbar retry as the only retry entry for a failed environment', async () => {
+    mockEnvironmentInstance({ observedState: 'failed' })
+    vi.mocked(listEnvironmentOperations).mockResolvedValue({
+      data: { items: [mockOperation('failed')] },
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    const terminalTab = wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))
+    await terminalTab!.trigger('click')
+
+    expect(wrapper.findAll('button').filter((button) => button.text() === '重试失败的操作')).toHaveLength(1)
+    expect(wrapper.findAll('button').filter((button) => button.text() === '重试')).toHaveLength(0)
+  })
+
+  it.each([
+    ['ready', 'running', true, '', '运行中'],
+    ['stopped', 'stopped', false, '环境已停止，启动后才能签发访问授权。', '已停止'],
+    ['failed', 'running', false, '环境处于失败状态，重试成功并恢复就绪后才能签发访问授权。', '运行中'],
+  ] as const)('only offers access grants for a ready environment (%s)', async (observedState, desiredState, canIssue, hint, desiredLabel) => {
+    mockEnvironmentInstance({ observedState, desiredState })
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+      data: {
+        items: [
+          { id: 'ep-http', protocol: 'https', health: 'healthy', observedAt: '2026-07-11T10:00:00.000Z' },
+          { id: 'ep-ssh', protocol: 'ssh', health: 'healthy', observedAt: '2026-07-11T10:00:00.000Z' },
+        ],
+      },
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await vi.waitFor(() => expect(wrapper.find('.access-section').text()).toContain(canIssue ? '签发访问授权' : hint))
+    expect(wrapper.find('.env-meta-grid').text()).toContain(desiredLabel)
+    const grantButton = wrapper.findAll('button').find((button) => button.text() === '签发访问授权')
+    expect(Boolean(grantButton?.exists())).toBe(canIssue)
+    if (!canIssue) expect(wrapper.text()).toContain(hint)
+  })
+
+  it.each([
+    ['stopped', 'stopped', '环境已停止，启动后才能签发访问授权。'],
+    ['failed', 'running', '环境处于失败状态，重试成功并恢复就绪后才能签发访问授权。'],
+  ] as const)('does not offer terminal access grant when the environment is not ready (%s)', async (observedState, desiredState, hint) => {
+    mockEnvironmentInstance({ observedState, desiredState })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
+    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    const pane = wrapper.get('.console-unauthorized-pane')
+    expect(pane.text()).toContain(hint)
+    expect(pane.text()).not.toContain('一键签发')
+    expect(pane.find('button').exists()).toBe(false)
+  })
+
+  it('uses an explicit URL project over the shared context and preserves a linked environment', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    mockEnvironmentInstance()
+    const { wrapper, router } = await mountAt({ environmentId: 'env-1' }, true)
+
+    await vi.waitFor(() => expect(wrapper.find('.selector-trigger').text()).toContain('Course project'))
+    await router.push({
+      path: '/student/environments',
+      query: { projectId: 'project-2', environmentId: 'env-2' },
+    })
+
+    await vi.waitFor(() => expect(wrapper.find('.selector-trigger').text()).toContain('Second project'))
+    expect(wrapper.find('.selector-trigger').text()).toContain('project-2')
+    expect(router.currentRoute.value.query.environmentId).toBe('env-2')
+  })
+
+  it('clears the environment and opens its tools when the shared project changes', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, mockProjectB], error: undefined as never })
+    mockEnvironmentInstance()
+    const { wrapper, router } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, true)
+
+    await vi.waitFor(() => expect(wrapper.find('.selector-trigger').text()).toContain('Course project'))
+    await wrapper.get('.selector-trigger').trigger('click')
+    await wrapper.findAll('.selector-menu .project-item').find((item) => item.text().includes('Second project'))!.trigger('click')
+
+    await vi.waitFor(() => expect(router.currentRoute.value.query.projectId).toBe('project-2'))
+    expect(router.currentRoute.value.query.environmentId).toBeUndefined()
+    expect(wrapper.find('.placeholder-pane').exists()).toBe(true)
+    expect(wrapper.find('.environment-selector').exists()).toBe(true)
   })
 
   it('cancels the active operation with the selected environment revision', async () => {
@@ -394,10 +532,11 @@ describe('EnvironmentEntryView', () => {
         id: 'env-1',
         courseId: 'demo-course-1',
         class: 'experiment',
+        displayLabel: 'Demo environment',
         desiredState: 'stopped',
         eligibilityExpiresAt: '2026-07-12T10:00:00.000Z',
         endpoints: [],
-        observedState: 'failed',
+        observedState: 'stopped',
         operation: {
           id: 'op-1',
           acceptedAt: '2026-07-11T10:00:00.000Z',

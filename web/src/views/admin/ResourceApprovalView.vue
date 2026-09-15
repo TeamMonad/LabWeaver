@@ -1,9 +1,9 @@
 <template>
   <div class="resource-approval">
     <header class="page-header">
-      <h2>资源审批与 Lease 管理</h2>
+      <h2>资源审批与资源使用授权管理</h2>
       <p class="page-subtitle">
-        审批平台资源申请，管理已签发的资源 Lease。所有变更均携带 revision fence 与幂等键。
+        审核资源申请，管理已签发的资源使用授权，并在每次操作前确认最新状态。
       </p>
     </header>
 
@@ -98,7 +98,7 @@
       </div>
 
       <p class="filter-hint">
-        筛选只匹配服务端返回的 ID、Request Key、申请人、课程、项目和目标标识；公开请求没有可靠的 submission 关联字段，不按名称推断关联。
+        可按请求 ID、申请人、课程、项目或目标标识筛选。结果只来自服务端返回的真实字段。
       </p>
 
       <DiagnosticBanner
@@ -117,7 +117,7 @@
         :columns="requestColumns"
         :rows="requestRows"
         :loading="approval.requests.kind === 'loading' || approval.requests.kind === 'idle'"
-        empty-text="暂无资源申请"
+        :empty-text="hasFilteredRequestResults ? '当前筛选无匹配的资源申请' : '暂无资源申请'"
         interactive
         aria-label="资源申请列表"
         @row-click="(row) => approval.selectRequest((row as unknown as RequestRow).id)"
@@ -146,6 +146,21 @@
       </DataTable>
 
       <div
+        v-if="hasFilteredRequestResults"
+        class="filter-empty"
+        role="status"
+      >
+        <span>已加载资源申请，但当前筛选条件没有匹配项。</span>
+        <button
+          type="button"
+          class="outlined-button"
+          @click="clearRequestFilters"
+        >
+          清除筛选
+        </button>
+      </div>
+
+      <div
         v-if="requestRows.some((row) => row.targetKind === 'task') || approval.batchOutcome"
         class="batch-approval-panel md-card"
         aria-labelledby="batch-approval-heading"
@@ -153,10 +168,10 @@
         <div class="batch-approval-heading">
           <div>
             <h4 id="batch-approval-heading">
-              批量批准明确选中的任务请求
+              逐项处理已勾选的待审批评测任务
             </h4>
             <p>
-              当前 API 没有 submission 关联契约，因此只对你勾选的真实 task 请求逐项调用批准接口；每项会读取最新 revision 和状态，失败项会单独保留。
+              仅处理你勾选的待审批评测任务；每项操作前都会重新校验当前状态，单项失败会保留并单独显示。
             </p>
           </div>
           <span
@@ -194,13 +209,13 @@
           role="note"
         >
           <template v-if="selectedBatchRequests.length === 0">
-            先勾选状态为“待审批”的 task 请求；环境请求与其他状态不能批量审批。
+            先勾选状态为“待审批”的评测任务请求；环境资源申请与其他状态不能批量处理。
           </template>
           <template v-else-if="!validBatchProviderBinding">
             当前绑定不是所有已选请求可用的真实 provider binding；GPU 请求必须匹配当前容量目录。
           </template>
           <template v-else>
-            将按列表中的每个请求原始资源规格和申请时长提交；不会按 Request Key 或名称猜测 submission 关系。
+            将按每个已勾选的评测任务逐项处理；每项提交前会重新校验当前状态，失败项会保留并单独显示。
           </template>
         </p>
         <div class="approval-buttons">
@@ -268,7 +283,7 @@
             <code class="meta-value">{{ targetEnvironment(approval.selectedRequest.target) }}</code>
           </div>
           <div class="meta-row">
-            <span class="meta-label">Release</span>
+            <span class="meta-label">模板版本</span>
             <code class="meta-value">{{ targetRelease(approval.selectedRequest.target) }}</code>
           </div>
           <div class="meta-row">
@@ -287,7 +302,7 @@
             />
           </div>
           <div class="meta-row">
-            <span class="meta-label">当前 Revision</span>
+            <span class="meta-label">当前版本</span>
             <span class="meta-value">rev-{{ approval.selectedRequest.revision }}</span>
           </div>
           <div class="meta-row">
@@ -526,11 +541,11 @@
         class="section-title"
       >
         <SvgIcon
-          name="environment"
+          name="verified"
           size="sm"
           aria-hidden="true"
         />
-        资源 Lease
+        资源使用授权
       </h3>
 
       <DiagnosticBanner
@@ -549,9 +564,9 @@
         :columns="leaseColumns"
         :rows="leaseRows"
         :loading="approval.leases.kind === 'loading' || approval.leases.kind === 'idle'"
-        empty-text="暂无资源 Lease"
+        empty-text="暂无资源使用授权"
         interactive
-        aria-label="资源 Lease 列表"
+        aria-label="资源使用授权列表"
         @row-click="(row) => approval.selectLease((row as unknown as LeaseRow).id)"
       >
         <template #state="{ row }">
@@ -568,7 +583,7 @@
       >
         <div class="detail-meta">
           <div class="meta-row">
-            <span class="meta-label">Lease ID</span>
+            <span class="meta-label">资源使用授权 ID</span>
             <code class="meta-value">{{ approval.selectedLease.id }}</code>
           </div>
           <div class="meta-row">
@@ -587,15 +602,15 @@
             />
           </div>
           <div class="meta-row">
-            <span class="meta-label">当前 Revision</span>
+            <span class="meta-label">当前版本</span>
             <span class="meta-value">rev-{{ approval.selectedLease.revision }}</span>
           </div>
           <div class="meta-row">
-            <span class="meta-label">Active From</span>
+            <span class="meta-label">生效时间</span>
             <span class="meta-value">{{ approval.selectedLease.activeFrom ? formatTimestamp(approval.selectedLease.activeFrom) : '—' }}</span>
           </div>
           <div class="meta-row">
-            <span class="meta-label">Expires At</span>
+            <span class="meta-label">到期时间</span>
             <span class="meta-value">{{ approval.selectedLease.expiresAt ? formatTimestamp(approval.selectedLease.expiresAt) : '—' }}</span>
           </div>
           <div
@@ -628,7 +643,7 @@
             rows="2"
             maxlength="500"
             placeholder="续期 / 撤销理由（必填，1-500 字）"
-            aria-label="Lease 操作理由"
+            aria-label="资源使用授权操作理由"
           />
           <div class="approval-buttons">
             <button
@@ -647,7 +662,7 @@
               :disabled="!validLeaseReason || approval.acting !== null"
               @click="openLeaseConfirm('revoke')"
             >
-              撤销 Lease
+              撤销资源使用授权
             </button>
             <p
               v-if="approval.selectedLease.state === 'expired' || approval.selectedLease.state === 'revoked'"
@@ -662,7 +677,7 @@
         v-else
         class="select-hint"
       >
-        选择一条 Lease 执行续期或撤销。
+        选择一条资源使用授权执行续期或撤销。
       </p>
     </section>
 
@@ -788,11 +803,11 @@ const requestColumns: DataTableColumn<RequestRow>[] = [
   { key: 'selection', title: '选择任务', width: '100px' },
   { key: 'requestKey', title: '申请标识' },
   { key: 'environmentId', title: '环境' },
-  { key: 'releaseVersion', title: 'Release 版本' },
+  { key: 'releaseVersion', title: '模板版本' },
   { key: 'resources', title: '资源规格' },
   { key: 'duration', title: '时长' },
   { key: 'state', title: '状态' },
-  { key: 'revision', title: 'Revision' },
+  { key: 'revision', title: '版本' },
   { key: 'updatedAt', title: '更新时间' },
 ]
 
@@ -818,6 +833,17 @@ const requestRows = computed<RequestRow[]>(() => {
       stateValue: request.state,
     }))
 })
+
+const hasFilteredRequestResults = computed(() => approval.requests.kind === 'success'
+  && approval.requests.data.length > 0
+  && requestRows.value.length === 0
+  && Boolean(courseFilter.value || requestSearch.value.trim() || requestStateFilter.value))
+
+function clearRequestFilters() {
+  courseFilter.value = ''
+  requestSearch.value = ''
+  requestStateFilter.value = ''
+}
 
 const requestStateOptions = computed<ResourceRequestState[]>(() => {
   if (approval.requests.kind !== 'success') return []
@@ -933,13 +959,13 @@ function batchOutcomeLabel(kind: BatchActionOutcome['kind']): string {
 }
 
 const leaseColumns: DataTableColumn<LeaseRow>[] = [
-  { key: 'id', title: 'Lease ID' },
+  { key: 'id', title: '资源使用授权 ID' },
   { key: 'requestId', title: '申请 ID' },
   { key: 'resources', title: '资源规格' },
   { key: 'state', title: '状态' },
-  { key: 'revision', title: 'Revision' },
-  { key: 'activeFrom', title: 'Active From' },
-  { key: 'expiresAt', title: 'Expires At' },
+  { key: 'revision', title: '版本' },
+  { key: 'activeFrom', title: '生效时间' },
+  { key: 'expiresAt', title: '到期时间' },
 ]
 
 const leaseRows = computed<LeaseRow[]>(() => {
@@ -1162,7 +1188,7 @@ const batchConfirmDescription = computed(() => {
   if (items.length === 0) return ''
   const labels = items.map((item) => `${batchRequestLabel(item.requestId)}（${item.requestId}，rev-${item.expectedRevision}）`).join('、')
   const reason = items[0]?.payload.reason ?? ''
-  return `将按当前列表中明确选择的 ${items.length} 项 task 请求逐项批准：${labels}。每项会再次读取确认时的 revision 和内容；如果任一请求已变化，该项会单独失败，不会自动替换或跳过确认。理由：${reason}。`
+  return `将逐项处理当前选中的 ${items.length} 项待审批评测任务：${labels}。每项操作前会重新校验当前状态；如果某项状态已变化，该项会保留为失败并提示你重新选择，其他已选任务继续处理。理由：${reason}。`
 })
 
 function openBatchConfirm() {
@@ -1192,13 +1218,13 @@ async function onBatchConfirmed() {
 }
 
 const leaseConfirmTitle = computed(() =>
-  pendingLeaseAction.value === 'renew' ? '确认续期 Lease' : pendingLeaseAction.value === 'revoke' ? '确认撤销 Lease' : '',
+  pendingLeaseAction.value === 'renew' ? '确认续期资源使用授权' : pendingLeaseAction.value === 'revoke' ? '确认撤销资源使用授权' : '',
 )
 
 const leaseConfirmDescription = computed(() => {
   const lease = approval.selectedLease
   if (!lease || !pendingLeaseAction.value) return ''
-  const base = `将对 Lease ${lease.id}（rev-${lease.revision}）执行操作，理由：${leaseReason.value.trim()}`
+  const base = `将对资源使用授权 ${lease.id}（版本 ${lease.revision}）执行操作，理由：${leaseReason.value.trim()}`
   return pendingLeaseAction.value === 'renew' ? `${base}。续期时长：${formatDuration(renewDuration.value)}。` : `${base}。撤销后访问立即失效。`
 })
 
@@ -1278,6 +1304,16 @@ async function onLeaseConfirmed() {
 
 .filter-hint {
   margin: -4px 0 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.filter-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-body-small);
 }

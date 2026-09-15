@@ -324,7 +324,7 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
   const page = await context.newPage()
   try {
     await page.goto('/admin/resource-approval', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '资源审批与 Lease 管理', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '资源审批与资源使用授权管理', exact: true })).toBeVisible()
     const row = page.locator('tbody tr').filter({ hasText: requestBody.requestKey })
     await expect(row).toHaveCount(1, { timeout: 120_000 })
     await row.click()
@@ -660,7 +660,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     const releaseSelect = page.getByLabel('已发布版本')
     await expect(releaseSelect.locator(`option[value="${release.id}:${release.version}"]`)).toHaveCount(1, { timeout: 120_000 })
     await releaseSelect.selectOption(`${release.id}:${release.version}`)
-    await page.getByLabel('CPU（millicores）').fill('1000')
+    await page.getByLabel('CPU（m）').fill('1000')
     await page.getByLabel('时长（小时）').fill('1')
     await page.getByLabel('内存（GiB）').fill('2')
     await page.getByLabel('存储（GiB）').fill('10')

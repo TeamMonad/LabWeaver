@@ -145,8 +145,8 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
 async function createEnvironmentByStudentUi(page, projectId, releaseId) {
   await page.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, projectId)
-  await page.getByRole('button', { name: /创建实验环境/ }).first().click()
-  const dialog = page.getByRole('dialog', { name: '创建新实验环境', exact: true })
+  await page.getByRole('button', { name: /创建项目环境/ }).first().click()
+  const dialog = page.getByRole('dialog', { name: '创建项目环境', exact: true })
   await expect(dialog).toBeVisible()
   const releaseCard = dialog.locator('.release-card').filter({ hasText: releaseId }).first()
   await expect(releaseCard).toBeVisible({ timeout: 120_000 })

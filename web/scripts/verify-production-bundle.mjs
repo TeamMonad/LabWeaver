@@ -14,10 +14,15 @@ const distDir = path.resolve(__dirname, '../dist')
 const forbiddenPatterns = [
   /mockServiceWorker/i,
   /msw[/\\]/i,
+  /\bFIXTURE PREVIEW\b/i,
+  /\bFixturePreview\b/i,
+  /fixtures[/\\]main\.ts/i,
+  /fixture-preview\.html/i,
 ]
 
 const forbiddenFilenameFragments = [
   'mockServiceWorker',
+  'fixture-preview',
 ]
 
 function walk(dir) {
@@ -28,10 +33,7 @@ function walk(dir) {
       entries.push(...walk(fullPath))
     } else if (
       entry.isFile() &&
-      (entry.name.endsWith('.js') ||
-        entry.name.endsWith('.css') ||
-        entry.name.endsWith('.html') ||
-        entry.name.endsWith('.map'))
+      ['.js', '.css', '.html', '.map'].includes(path.extname(entry.name).toLowerCase())
     ) {
       entries.push(fullPath)
     }
@@ -41,7 +43,7 @@ function walk(dir) {
 
 function main() {
   if (!fs.existsSync(distDir)) {
-    console.error(`dist directory not found: ${distDir}`)
+    console.error('dist directory not found')
     process.exit(1)
   }
 
@@ -53,7 +55,7 @@ function main() {
     const basename = path.basename(file)
 
     for (const fragment of forbiddenFilenameFragments) {
-      if (basename.includes(fragment)) {
+      if (basename.toLowerCase().includes(fragment.toLowerCase())) {
         violations.push({ file: relative, pattern: `filename:${fragment}` })
       }
     }

@@ -15,7 +15,7 @@
 
 ## 快速开始
 
-```bash
+```sh
 cd web
 pnpm install
 pnpm dev
@@ -29,11 +29,27 @@ pnpm dev
 |---|---|
 | `pnpm dev` | 启动开发服务器 |
 | `pnpm build` | 生产构建 |
+| `pnpm build:fixtures` | 构建本地 Fixture 预览 |
 | `pnpm preview` | 预览生产构建 |
+| `pnpm preview:fixtures` | 启动本地 Fixture 预览 |
 | `pnpm lint` | ESLint 检查并自动修复 |
 | `pnpm test` | 运行单元测试 |
 | `pnpm typecheck` | TypeScript 类型检查 |
+| `pnpm typecheck:fixtures` | Fixture Vue 页面类型检查 |
 | `pnpm exec tsx scripts/screenshot-roles.ts` | 生成四角色导航截图 |
+
+## Fixture UI 预览
+
+从仓库根目录运行以下命令：
+
+```sh
+pnpm --dir web typecheck:fixtures
+pnpm --dir web build:fixtures
+pnpm --dir web preview:fixtures
+node web/fixtures/gallery.mjs artifacts/ux-preview
+```
+
+Fixture 预览地址为 `http://127.0.0.1:4174/fixture-preview.html`。构建输出写入 `artifacts/fixture-build`，不会覆盖生产构建的 `web/dist`。场景选择器包含 21 个页面场景，适合检查不同角色、状态和空数据布局。Fixture 只使用本地预览数据；登录、提交、批准、续期、撤销等写操作明确标记为不支持，不会调用真实后端。
 
 ## 环境变量
 

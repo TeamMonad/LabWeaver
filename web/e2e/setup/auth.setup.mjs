@@ -11,7 +11,7 @@ const actors = Object.freeze([
     passwordFileVariable: 'LABWEAVER_TEACHER_PASSWORD_FILE',
     destination: path.join(authDir, 'teacher.json'),
     landingPath: '/teacher/materials',
-    entryLabel: '教师入口',
+    entryLabel: '创建与生成实验',
     heading: '材料上传与 AgentRun',
   }),
   Object.freeze({
@@ -20,17 +20,17 @@ const actors = Object.freeze([
     passwordFileVariable: 'LABWEAVER_STUDENT_PASSWORD_FILE',
     destination: path.join(authDir, 'student.json'),
     landingPath: '/student/environments',
-    entryLabel: '学生入口',
-    heading: '环境控制台',
+    entryLabel: '环境控制台',
+    heading: '项目环境控制台',
   }),
   Object.freeze({
     role: 'platform-admin',
     usernameVariable: 'LABWEAVER_PLATFORM_ADMIN_USERNAME',
     passwordFileVariable: 'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE',
     destination: path.join(authDir, 'platform-admin.json'),
-    landingPath: '/admin/policies',
-    entryLabel: '管理入口',
-    heading: '管理员工作台',
+    landingPath: '/admin/resource-approval',
+    entryLabel: '资源审批',
+    heading: '资源审批与资源使用授权管理',
   }),
 ])
 
@@ -70,13 +70,16 @@ async function authenticate({ browser, baseURL, actor }) {
       }),
       page.locator('#kc-login').click({ noWaitAfter: true }),
     ])
-    // Keycloak returns to the authenticated role selector when no previous
-    // BFF session exists. Follow the explicit role entry before asserting the
-    // protected landing page; this keeps the auth setup aligned with the real
-    // teacher/student browser journey instead of assuming a hidden redirect.
+    // When authentication returns to the task home, follow the actor's
+    // authorized task link before asserting the protected landing page.
     if (!new URL(page.url()).pathname.startsWith(actor.landingPath)) {
-      await page.getByText(actor.entryLabel, { exact: true }).click()
-      await page.goto(actor.landingPath, { waitUntil: 'domcontentloaded' })
+      const taskNav = page.getByRole('navigation', { name: '任务导航', exact: true })
+      const taskLink = taskNav.getByRole('link', { name: actor.entryLabel, exact: true })
+      if (!(await taskLink.isVisible())) {
+        await page.getByRole('button', { name: '打开导航', exact: true }).click()
+      }
+      await expect(taskLink).toBeVisible()
+      await taskLink.click()
     }
     await expect(page.getByRole('heading', { name: actor.heading }).first()).toBeVisible()
     await expect(page).toHaveURL(new RegExp(`${actor.landingPath.replaceAll('/', '\\/')}(?:[?#].*)?$`))
