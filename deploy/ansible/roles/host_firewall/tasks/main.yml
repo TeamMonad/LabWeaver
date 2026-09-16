@@ -148,6 +148,7 @@
              and not (host_firewall_docker_policy_stat.stat.exists | default(false))) }}
 
 - name: Snapshot the current firewalld configuration
+  when: host_firewall_change_pending | bool
   block:
     - name: Create the firewall snapshot root
       ansible.builtin.file:
@@ -164,7 +165,6 @@
         argv: [cp, -a, /etc/firewalld, "{{ host_firewall_snapshot_dir }}"]
         creates: "{{ host_firewall_snapshot_dir }}"
       changed_when: true
-  when: host_firewall_change_pending | bool
 
 - name: Install the automatic rollback script
   ansible.builtin.template:
