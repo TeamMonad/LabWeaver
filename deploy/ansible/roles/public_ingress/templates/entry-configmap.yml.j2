@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ public_ingress_entry_name }}
+  namespace: {{ public_ingress_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+data:
+  haproxy.cfg: |
+    global
+      maxconn 4096
+    defaults
+      mode tcp
+      timeout connect 5s
+      timeout client 1h
+      timeout server 1h
+    frontend http
+      bind 0.0.0.0:80
+      default_backend gateway_http
+    backend gateway_http
+      server gateway {{ public_ingress_gateway_vip }}:80
+    frontend https
+      bind 0.0.0.0:443
+      default_backend gateway_https
+    backend gateway_https
+      server gateway {{ public_ingress_gateway_vip }}:443

@@ -30,6 +30,17 @@ public_ingress_cloudflare_token_locator: /var/lib/labweaver/.private/tls/cloudfl
 public_ingress_cloudflare_token_key: CLOUDFLARE_API_TOKEN
 public_ingress_cloudflare_secret_name: labweaver-cloudflare-api-token
 
+# The node's own public address cannot terminate on the Cilium Gateway VIP:
+# tc-ingress eBPF resolves the LoadBalancer VIP before netfilter DNAT, so a
+# firewalld/iptables forward-port never reaches the Gateway. A hostNetwork
+# DaemonSet binds the node's 80/443 and forwards to the VIP over the socket
+# path, which Cilium's socket load balancer does resolve.
+public_ingress_entry_enabled: true
+public_ingress_entry_name: labweaver-public-entry
+public_ingress_entry_image: haproxy:2.9-alpine
+public_ingress_entry_node_selector:
+  node-role.kubernetes.io/control-plane: ""
+
 # Hostnames published through the public Gateway. Each route lives in the
 # namespace of its backend Service so no cross-namespace ReferenceGrant is
 # needed for the backend reference.

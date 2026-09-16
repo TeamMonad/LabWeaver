@@ -79,6 +79,35 @@
     state: present
     definition: "{{ lookup('template', 'routes.yml.j2') | from_yaml_all | list }}"
 
+- name: Apply the public entry proxy configuration
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'entry-configmap.yml.j2') | from_yaml }}"
+  when: public_ingress_entry_enabled | bool
+
+- name: Apply the public entry proxy DaemonSet
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'entry-daemonset.yml.j2') | from_yaml }}"
+  when: public_ingress_entry_enabled | bool
+
+- name: Wait for the public entry proxy DaemonSet
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ public_ingress_namespace }}"
+      - rollout
+      - status
+      - "daemonset/{{ public_ingress_entry_name }}"
+      - --timeout=5m
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: false
+  when: public_ingress_entry_enabled | bool
+
 - name: Wait for the wildcard certificate to become ready
   ansible.builtin.command:
     argv:
