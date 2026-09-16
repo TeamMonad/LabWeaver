@@ -1,0 +1,30 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ public_ingress_gateway_name }}
+  namespace: {{ public_ingress_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  gatewayClassName: {{ public_ingress_gateway_class }}
+  infrastructure:
+    annotations:
+      metallb.io/loadBalancerIPs: "{{ public_ingress_gateway_vip }}"
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ public_ingress_certificate_secret }}
+      allowedRoutes:
+        namespaces:
+          from: All

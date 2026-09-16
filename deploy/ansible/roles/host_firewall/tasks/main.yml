@@ -85,9 +85,16 @@
 - name: Read the public zone state
   ansible.builtin.command:
     argv: [firewall-cmd, --permanent, "--zone={{ host_firewall_public_zone }}", "--list-{{ item }}"]
-  loop: [services, interfaces, ports]
+  loop: [services, interfaces, ports, forward-ports]
   changed_when: false
   register: host_firewall_public_zone_state
+
+- name: Build the effective public forward-port specs
+  ansible.builtin.set_fact:
+    host_firewall_effective_public_forward_ports: >-
+      {{ (host_firewall_effective_public_forward_ports | default([]))
+         + ['port=' ~ item.port ~ ':proto=' ~ item.protocol ~ ':toport=' ~ item.toport ~ ':toaddr=' ~ item.toaddr] }}
+  loop: "{{ host_firewall_public_forward_ports }}"
 
 - name: Read the internal zone state
   ansible.builtin.command:
@@ -124,6 +131,9 @@
       {{ host_firewall_public_services | difference(host_firewall_public_zone_state.results[0].stdout.split()) }}
     host_firewall_pending_public_ports: >-
       {{ host_firewall_public_ports | difference(host_firewall_public_zone_state.results[2].stdout.split()) }}
+    host_firewall_pending_public_forward_ports: >-
+      {{ host_firewall_effective_public_forward_ports | default([])
+         | difference(host_firewall_public_zone_state.results[3].stdout.split()) }}
     host_firewall_pending_internal_interfaces: >-
       {{ host_firewall_effective_internal_interfaces | difference(host_firewall_internal_zone_state.results[1].stdout.split()) }}
     host_firewall_pending_internal_services: >-
@@ -137,9 +147,9 @@
   ansible.builtin.set_fact:
     host_firewall_change_pending: >-
       {{ (host_firewall_pending_public_interfaces + host_firewall_pending_public_services
-          + host_firewall_pending_public_ports + host_firewall_pending_internal_interfaces
-          + host_firewall_pending_internal_services + host_firewall_pending_internal_ports
-          + host_firewall_pending_internal_sources) | length > 0
+          + host_firewall_pending_public_ports + host_firewall_pending_public_forward_ports
+          + host_firewall_pending_internal_interfaces + host_firewall_pending_internal_services
+          + host_firewall_pending_internal_ports + host_firewall_pending_internal_sources) | length > 0
          or (host_firewall_ensure_public_ssh is changed)
          or (host_firewall_manage_docker | bool
              and host_firewall_docker_interface in (ansible_facts.interfaces | default([]))
@@ -224,6 +234,17 @@
       - "--zone={{ host_firewall_public_zone }}"
       - "--add-port={{ item }}"
   loop: "{{ host_firewall_pending_public_ports }}"
+  changed_when: true
+  notify: Reload the host firewall safely
+
+- name: Forward the public entry ports
+  ansible.builtin.command:
+    argv:
+      - firewall-cmd
+      - --permanent
+      - "--zone={{ host_firewall_public_zone }}"
+      - "--add-forward-port={{ item }}"
+  loop: "{{ host_firewall_pending_public_forward_ports }}"
   changed_when: true
   notify: Reload the host firewall safely
 

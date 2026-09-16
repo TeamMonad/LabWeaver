@@ -1,0 +1,10 @@
+---
+# Publish the platform on the public domain with a cert-manager certificate
+# (self-signed by default, Let's Encrypt via Cloudflare DNS-01 when enabled).
+# Opt in per inventory with public_ingress_enabled: true.
+- name: Publish the public domain with cert-manager TLS
+  hosts: control_plane
+  gather_facts: false
+  roles:
+    - role: public_ingress
+      when: public_ingress_enabled | default(false) | bool

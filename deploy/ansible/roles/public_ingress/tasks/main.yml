@@ -1,0 +1,146 @@
+---
+- name: Require the public ingress inputs
+  ansible.builtin.assert:
+    that:
+      - public_ingress_domain | length > 0
+      - public_ingress_tls_mode in ['selfsigned', 'acme']
+      - public_ingress_tls_mode != 'acme' or public_ingress_acme_email | length > 0
+      - public_ingress_gateway_vip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+    fail_msg: PUBLIC_INGRESS_INPUT_INVALID
+
+- name: Reject an unknown certificate mode
+  ansible.builtin.assert:
+    that:
+      - public_ingress_tls_mode in ['selfsigned', 'acme']
+    fail_msg: PUBLIC_INGRESS_TLS_MODE_UNKNOWN
+
+- name: Read the Cloudflare API token from the protected locator
+  ansible.builtin.slurp:
+    src: "{{ public_ingress_cloudflare_token_locator }}"
+  register: public_ingress_cloudflare_locator
+  no_log: true
+  when: public_ingress_tls_mode == 'acme'
+
+- name: Extract the Cloudflare API token
+  ansible.builtin.set_fact:
+    public_ingress_cloudflare_token: >-
+      {{ (public_ingress_cloudflare_locator.content | b64decode)
+         | regex_search('(?m)^' ~ public_ingress_cloudflare_token_key ~ '=(.+)$', '\\1') | first }}
+  no_log: true
+  when: public_ingress_tls_mode == 'acme'
+
+- name: Refuse to continue without a Cloudflare API token
+  ansible.builtin.assert:
+    that:
+      - public_ingress_cloudflare_token | default('') | length > 0
+    fail_msg: PUBLIC_INGRESS_CLOUDFLARE_TOKEN_MISSING
+  no_log: true
+  when: public_ingress_tls_mode == 'acme'
+
+- name: Publish the Cloudflare API token for the ACME DNS-01 solver
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ public_ingress_cloudflare_secret_name }}"
+        namespace: cert-manager
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      type: Opaque
+      data:
+        api-token: "{{ public_ingress_cloudflare_token | b64encode }}"
+  no_log: true
+  when: public_ingress_tls_mode == 'acme'
+
+- name: Apply the certificate issuers
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'issuers.yml.j2') | from_yaml_all | list }}"
+
+- name: Apply the wildcard certificate
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'certificate.yml.j2') | from_yaml }}"
+
+- name: Apply the public Gateway
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'gateway.yml.j2') | from_yaml }}"
+
+- name: Apply the public HTTP routes
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'routes.yml.j2') | from_yaml_all | list }}"
+
+- name: Wait for the wildcard certificate to become ready
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ public_ingress_namespace }}"
+      - wait
+      - "certificate/{{ public_ingress_certificate_name }}"
+      - --for=condition=Ready
+      - --timeout=10m
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: false
+
+- name: Wait for the public Gateway to be programmed
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ public_ingress_namespace }}"
+      - wait
+      - "gateway/{{ public_ingress_gateway_name }}"
+      - --for=condition=Programmed
+      - --timeout=5m
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: false
+
+- name: Read back the issued certificate
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/kubernetes/admin.conf
+    api_version: cert-manager.io/v1
+    kind: Certificate
+    namespace: "{{ public_ingress_namespace }}"
+    name: "{{ public_ingress_certificate_name }}"
+  register: public_ingress_certificate_readback
+
+- name: Require the certificate to be ready and to cover the wildcard
+  ansible.builtin.assert:
+    that:
+      - public_ingress_certificate_readback.resources | length == 1
+      - >-
+        public_ingress_certificate_readback.resources[0].status.conditions
+        | selectattr('type', 'equalto', 'Ready')
+        | selectattr('status', 'equalto', 'True') | list | length == 1
+      - "'*.{{ public_ingress_domain }}' in public_ingress_certificate_readback.resources[0].spec.dnsNames"
+    fail_msg: PUBLIC_INGRESS_CERTIFICATE_NOT_READY
+
+- name: Read back the public Gateway address
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/kubernetes/admin.conf
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ public_ingress_namespace }}"
+    name: "{{ public_ingress_gateway_name }}"
+  register: public_ingress_gateway_readback
+
+- name: Require the public Gateway to expose the requested VIP
+  ansible.builtin.assert:
+    that:
+      - public_ingress_gateway_readback.resources | length == 1
+      - >-
+        public_ingress_gateway_readback.resources[0].status.addresses | default([])
+        | map(attribute='value') | select('equalto', public_ingress_gateway_vip) | list | length == 1
+    fail_msg: PUBLIC_INGRESS_GATEWAY_VIP_MISMATCH

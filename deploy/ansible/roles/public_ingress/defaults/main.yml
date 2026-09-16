@@ -1,0 +1,55 @@
+---
+# Publish the platform on a public DNS name with cert-manager issued TLS.
+#
+# Two certificate sources are supported:
+#   selfsigned - a local self-signed ClusterIssuer, usable offline
+#   acme       - Let's Encrypt via a Cloudflare DNS-01 solver, which is the
+#                only ACME challenge that can issue a wildcard certificate
+#
+# The Cloudflare API token is never stored in Git: it is read from a root-only
+# locator on the controller and written straight into a Kubernetes Secret.
+public_ingress_enabled: false
+
+public_ingress_namespace: labweaver-system
+public_ingress_domain: labweaver.2018wzh.top
+public_ingress_gateway_name: labweaver-public
+public_ingress_gateway_vip: 10.99.0.140
+public_ingress_gateway_class: cilium
+
+public_ingress_tls_mode: selfsigned
+public_ingress_certificate_name: labweaver-public-wildcard
+public_ingress_certificate_secret: labweaver-public-wildcard
+public_ingress_certificate_duration: 2160h
+public_ingress_certificate_renew_before: 720h
+
+public_ingress_selfsigned_issuer: labweaver-selfsigned
+public_ingress_acme_issuer: labweaver-acme
+public_ingress_acme_email: ""
+public_ingress_acme_server: https://acme-v02.api.letsencrypt.org/directory
+public_ingress_cloudflare_token_locator: /var/lib/labweaver/.private/tls/cloudflare.env
+public_ingress_cloudflare_token_key: CLOUDFLARE_API_TOKEN
+public_ingress_cloudflare_secret_name: labweaver-cloudflare-api-token
+
+# Hostnames published through the public Gateway. Each route lives in the
+# namespace of its backend Service so no cross-namespace ReferenceGrant is
+# needed for the backend reference.
+public_ingress_routes:
+  - name: portal-public
+    namespace: labweaver-system
+    hostnames:
+      - labweaver.2018wzh.top
+      - portal.labweaver.2018wzh.top
+    service: web
+    port: 8080
+  - name: keycloak-public
+    namespace: keycloak-system
+    hostnames:
+      - keycloak.labweaver.2018wzh.top
+    service: labweaver-keycloak-http
+    port: 8080
+  - name: harbor-public
+    namespace: harbor
+    hostnames:
+      - harbor.labweaver.2018wzh.top
+    service: harbor
+    port: 80

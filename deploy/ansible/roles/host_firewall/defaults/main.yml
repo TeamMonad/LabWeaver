@@ -25,6 +25,10 @@ host_firewall_public_services:
   - ssh
   - dhcpv6-client
 host_firewall_public_ports: []
+# DNAT entries published on the public zone, e.g. forwarding 80/443 from the
+# node's public address to a Cilium Gateway load-balancer VIP.
+#   - {port: 443, protocol: tcp, toport: 443, toaddr: 10.99.0.140}
+host_firewall_public_forward_ports: []
 
 # Cluster/operator facing interfaces and sources. `wg0` is the management
 # overlay created by the platform WireGuard mesh; it is optional on nodes that

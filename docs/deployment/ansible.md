@@ -26,6 +26,14 @@ GPU 需要已有设备插件或 KubeVirt mediated device 配置。目录声明�
 
 每次变更前快照 `/etc/firewalld`，并用 `systemd-run` 调度自动回滚：确认新的 SSH 会话可建立后才取消回滚，否则到期自动恢复快照。`firewall-cmd --check-config` 校验通过后才 reload；`ssh` 不在 `public` zone 或 sshd 未监听时直接 fail closed。这些步骤只使用 firewalld，不修改 iptables-persistent 或 `/etc/iptables/rules.v4|v6`。
 
+## 公网域名与证书
+
+`82-public-ingress.yml` 用 cert-manager 为公网域名签发并挂载 TLS 证书，默认 `selfsigned`（本地自签名，可离线使用），通过 `public_ingress_tls_mode: acme` 切换为 Let's Encrypt。通配符证书必须走 DNS-01，本仓使用 Cloudflare solver；`acme` 依赖控制器能直连 `acme-v02.api.letsencrypt.org` 与 `api.cloudflare.com`。
+
+发布的主机名由 `public_ingress_routes` 声明：根域与 `portal.` 指向 `labweaver-system/web:8080`，`keycloak.` 指向 `keycloak-system/labweaver-keycloak-http:8080`，`harbor.` 指向 `harbor/harbor:80`。角色创建独立的 `labweaver-public` Gateway（Cilium，专用 VIP），外部流量由 `host_firewall_public_forward_ports` 将节点公网 IP 的 80/443 DNAT 到该 VIP；不改动既有内部 Gateway。
+
+Cloudflare API Token 只从 root-only locator（`/var/lib/labweaver/.private/tls/cloudflare.env`）读取并直接写入 `cert-manager` 命名空间的 Secret，使用 `no_log`，不进入 Git、日志或报告。证书与 Gateway 就绪后角色会 readback `Certificate Ready` 与 Gateway VIP 才通过。
+
 ## 维护
 
 升级先校验配置、渲染模板并检查数据库迁移，再应用目标应用版本。v3 迁移支持空数据库初始化；服务启动不会清空旧数据。不兼容旧数据库时应停止并单独安排数据处理，不能通过自动删除或隐藏迁移继续启动。
