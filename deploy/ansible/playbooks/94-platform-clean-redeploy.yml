@@ -12,6 +12,11 @@
     platform_clean_redeploy_kubeconfig: /etc/kubernetes/admin.conf
     platform_clean_redeploy_helm: /usr/local/bin/helm
     platform_clean_redeploy_rollout_timeout: 10m
+    platform_clean_redeploy_namespaces:
+      - labweaver-system
+      - labweaver-data
+      - labweaver-demo
+      - labweaver-evaluation
   tasks:
     - name: Require the reviewed platform namespace set
       ansible.builtin.assert:
@@ -38,7 +43,7 @@
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
         api_version: v1
         kind: Namespace
-      register: platform_clean_redeploy_namespaces
+      register: platform_clean_redeploy_namespace_list
 
     - name: Delete the reviewed platform namespaces
       kubernetes.core.k8s:
@@ -49,7 +54,7 @@
         state: absent
         wait: true
         wait_timeout: 300
-      loop: "{{ labweaver_namespaces }}"
+      loop: "{{ platform_clean_redeploy_namespaces }}"
 
     - name: Delete stale user environment namespaces
       kubernetes.core.k8s:
@@ -61,7 +66,7 @@
         wait: true
         wait_timeout: 300
       loop: >-
-        {{ platform_clean_redeploy_namespaces.resources
+        {{ platform_clean_redeploy_namespace_list.resources
            | selectattr('metadata.name', 'match', '^lw-env-')
            | list }}
 
@@ -84,7 +89,7 @@
       loop: >-
         {{ platform_clean_redeploy_persistent_volumes.resources
            | selectattr('spec.claimRef.namespace', 'defined')
-           | selectattr('spec.claimRef.namespace', 'in', labweaver_namespaces)
+           | selectattr('spec.claimRef.namespace', 'in', platform_clean_redeploy_namespaces)
            | list }}
 
     - name: Read leftover node debugger pods
@@ -123,7 +128,7 @@
           - >-
             platform_clean_redeploy_readback.resources
             | map(attribute='metadata.name')
-            | intersect(labweaver_namespaces) | length == 0
+            | intersect(platform_clean_redeploy_namespaces) | length == 0
           - >-
             platform_clean_redeploy_readback.resources
             | map(attribute='metadata.name')
