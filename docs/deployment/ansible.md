@@ -18,19 +18,17 @@ GPU 需要已有设备插件或 KubeVirt mediated device 配置。目录声明�
 
 ## 主机防火墙
 
-`16-host-firewall.yml` 用 firewalld 声明式管理节点主机防火墙，替代按 `iptables-save` 反复持久化规则的做法。角色默认关闭，RHEL/Rocky 路径保持 `rocky_common` 的 firewalld 禁用语义；v1 inventory 用 `host_firewall_enabled: true` 显式启用。
+节点主机防火墙由 **Cilium Host Firewall** 承担，不再使用 firewalld。`cluster_network` 角色在 Cilium Helm values 中启用 `hostFirewall.enabled: true`，并应用 `CiliumClusterwideNetworkPolicy`（`host-firewall-policy.yml.j2`）作为节点防火墙策略：集群节点间与 health 流量整体放行，外部放行 SSH（22）、公网入口（80/443）、WireGuard 管理网（51820/udp）与 ICMP echo。策略在 Cilium 安装后立即应用，`hostFirewall` 启用但尚未有策略选中节点时保持默认放行，因此不会在应用策略前中断管理通道。
 
-防火墙契约在 inventory 中声明：`public` zone 绑定上行网卡并放行 `ssh`（保证管理通道不被切断），`internal` zone 绑定 `wg0` 和集群节点源地址，并包含 Cilium/Kubernetes underlay 端口（VXLAN `8472/udp`、cilium-health `4240/tcp`、Hubble `4244/tcp`、kubelet `10250/tcp`、kube-apiserver `6443/tcp`、etcd `2379-2380/tcp`、NodePort 范围等），使全新部署在 Cilium 安装前即已放行节点间通信。Geneve 与 Cilium WireGuard 端口通过变量按需开启。
+节点同时使用 `bpf.masquerade: true` 与 `bpf.hostLegacyRouting: false`，数据面完全走 eBPF，不再依赖 iptables-nft 链。这样 firewalld/iptables 的 flush 不会破坏 pod 与 Gateway 流量，也不需要启动排序或 Cilium 自动恢复逻辑。节点上不安装、不启用 firewalld；`rocky_common` 不再需要“禁用 firewalld”。
 
-集群节点源地址会被 firewalld 从 `public` zone 改判到 `internal`，因此 `internal` 会继承 `public` 的全部 service（含 `wireguard`/51820）。否则节点加入源地址后 WireGuard 管理网会因 keepalive 落入 `internal` 而被拒绝，出现“节点仍在但 overlay 失联”。这一项在 v1 上曾由手工迁移触发，已由角色修复。
-
-每次变更前快照 `/etc/firewalld`，并用 `systemd-run` 调度自动回滚：确认新的 SSH 会话可建立后才取消回滚，否则到期自动恢复快照。`firewall-cmd --check-config` 校验通过后才 reload；`ssh` 不在 `public` zone 或 sshd 未监听时直接 fail closed。这些步骤只使用 firewalld，不修改 iptables-persistent 或 `/etc/iptables/rules.v4|v6`。
+`router_services`（边缘路由器 WAN/LAN NAT 的旧 profile）仍使用 firewalld，仅用于 dev/edge-router 拓扑；当前集群 inventory 通过 `labweaver_skip_router_services: true` 跳过。如需完全去除 firewalld，应单独迁移该 profile。
 
 ## 公网域名与证书
 
 `82-public-ingress.yml` 用 cert-manager 为公网域名签发并挂载 TLS 证书，默认 `selfsigned`（本地自签名，可离线使用），通过 `public_ingress_tls_mode: acme` 切换为 Let's Encrypt。通配符证书必须走 DNS-01，本仓使用 Cloudflare solver；`acme` 依赖控制器能直连 `acme-v02.api.letsencrypt.org` 与 `api.cloudflare.com`。
 
-发布的主机名由 `public_ingress_routes` 声明：根域与 `portal.` 指向 `labweaver-system/web:8080`，`keycloak.` 指向 `keycloak-system/labweaver-keycloak-http:8080`，`harbor.` 指向 `harbor/harbor:80`。角色创建独立的 `labweaver-public` Gateway（Cilium，专用 VIP），外部流量由 `host_firewall_public_forward_ports` 将节点公网 IP 的 80/443 DNAT 到该 VIP；不改动既有内部 Gateway。
+发布的主机名由 `public_ingress_routes` 声明：根域与 `portal.` 指向 `labweaver-system/web:8080`，`keycloak.` 指向 `keycloak-system/labweaver-keycloak-http:8080`，`harbor.` 指向 `harbor/harbor:80`。角色创建独立的 `labweaver-public` Gateway（Cilium，专用 VIP）。节点自身公网地址无法直接命中 Gateway VIP：Cilium 的 tc-ingress eBPF 在 netfilter DNAT 之前解析 VIP，因此 firewalld/iptables 的 forward-port 不可用；改为 `hostNetwork` HAProxy DaemonSet 绑定节点 80/443 并转发到 VIP，走 socket 路径由 Cilium socket LB 解析。不改动既有内部 Gateway。
 
 Cloudflare API Token 只从 root-only locator（`/var/lib/labweaver/.private/tls/cloudflare.env`）读取并直接写入 `cert-manager` 命名空间的 Secret，使用 `no_log`，不进入 Git、日志或报告。证书与 Gateway 就绪后角色会 readback `Certificate Ready` 与 Gateway VIP 才通过。
 
