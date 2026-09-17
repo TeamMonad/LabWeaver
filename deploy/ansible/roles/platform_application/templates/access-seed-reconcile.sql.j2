@@ -1,5 +1,6 @@
 \set ON_ERROR_STOP on
 BEGIN;
+SET ROLE lw_access_owner;
 INSERT INTO access.service_identities (
     service_identity_id, san_uri, service_name, state, revision
 ) VALUES

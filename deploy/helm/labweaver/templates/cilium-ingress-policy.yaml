@@ -37,4 +37,17 @@ specs:
               {{- range $port := .Values.network.kubernetesApiPorts }}
               - {port: {{ $port | quote }}, protocol: TCP}
               {{- end }}
+  {{- if .Values.internalIdentityProxy.enabled }}
+  - endpointSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: labweaver
+    egress:
+      - toEndpoints:
+          - matchLabels:
+              k8s:io.kubernetes.pod.namespace: {{ .Values.internalIdentityProxy.namespace }}
+              k8s:app: keycloak-internal-proxy
+        toPorts:
+          - ports:
+              - {port: "8080", protocol: TCP}
+  {{- end }}
 {{- end }}

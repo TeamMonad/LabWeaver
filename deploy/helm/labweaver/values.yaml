@@ -187,7 +187,7 @@ workloads:
       LABWEAVER_RESOURCE_USAGE_BASE_URI: https://resource-service:9448/
       LABWEAVER_RESOURCE_USAGE_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_RESOURCE_USAGE_AUDIENCE: labweaver-resource
-      LABWEAVER_RESOURCE_USAGE_SCOPES: resource.usage.record,resource.gpu.resolve,resource.gpu.release
+      LABWEAVER_RESOURCE_USAGE_SCOPES: resource.usage.record resource.gpu.resolve resource.gpu.release
       LABWEAVER_RESOURCE_USAGE_TIMEOUT_MILLISECONDS: "5000"
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
@@ -397,3 +397,13 @@ network:
   kubernetesApiPorts: [443, 6443]
   gatewayIngressCidrs: []
   externalServiceEndpoints: []
+
+internalIdentityProxy:
+  enabled: false
+  namespace: keycloak-system
+  replicas: 2
+  hostname: keycloak.labweaver.internal
+  backendAddress: labweaver-keycloak-http
+  backendPort: 8080
+  tlsSecret: labweaver-keycloak-tls
+  clusterIP: ""

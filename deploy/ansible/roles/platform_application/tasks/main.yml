@@ -881,7 +881,6 @@
   retries: 6
   delay: 2
   until: platform_application_baseline_apply.rc == 0
-  no_log: true
 
 - name: Render conflict-detecting Access seed reconciliation
   ansible.builtin.template:
@@ -909,7 +908,6 @@
   retries: 6
   delay: 2
   until: platform_application_access_seed_apply.rc == 0
-  no_log: true
 
 - name: Remove temporary database reconciliation material
   ansible.builtin.file:

@@ -1,0 +1,114 @@
+{{- if .Values.internalIdentityProxy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-internal-proxy-config
+  namespace: {{ .Values.internalIdentityProxy.namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    worker_processes 2;
+    pid /tmp/nginx.pid;
+    error_log /tmp/error.log warn;
+    events { worker_connections 256; }
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      access_log /tmp/access.log;
+      client_body_temp_path /tmp/client_body;
+      proxy_temp_path /tmp/proxy;
+      fastcgi_temp_path /tmp/fastcgi;
+      uwsgi_temp_path /tmp/uwsgi;
+      scgi_temp_path /tmp/scgi;
+      server {
+        listen 8080 ssl;
+        server_name {{ .Values.internalIdentityProxy.hostname }};
+        ssl_certificate /etc/nginx/tls/tls.crt;
+        ssl_certificate_key /etc/nginx/tls/tls.key;
+        location / {
+          proxy_pass http://{{ .Values.internalIdentityProxy.backendAddress }}:{{ .Values.internalIdentityProxy.backendPort }};
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_set_header X-Forwarded-Host $host;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak-internal-proxy
+  namespace: {{ .Values.internalIdentityProxy.namespace }}
+  labels:
+    app: keycloak-internal-proxy
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.internalIdentityProxy.replicas }}
+  selector:
+    matchLabels: {app: keycloak-internal-proxy}
+  template:
+    metadata:
+      labels: {app: keycloak-internal-proxy}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {runAsNonRoot: true, runAsUser: 101, runAsGroup: 101, fsGroup: 101, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: proxy
+          image: {{ include "labweaver.image" (dict "key" "web" "value" (index .Values.images "web")) | quote }}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, readOnlyRootFilesystem: true}
+          ports: [{containerPort: 8080}]
+          volumeMounts:
+            - {name: config, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true}
+            - {name: tls, mountPath: /etc/nginx/tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          readinessProbe: {tcpSocket: {port: 8080}, initialDelaySeconds: 3, periodSeconds: 5}
+      volumes:
+        - {name: config, configMap: {name: keycloak-internal-proxy-config}}
+        - {name: tls, secret: {secretName: {{ .Values.internalIdentityProxy.tlsSecret }}}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-internal
+  namespace: {{ .Values.internalIdentityProxy.namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.internalIdentityProxy.clusterIP }}
+  clusterIP: {{ . }}
+  {{- end }}
+  selector: {app: keycloak-internal-proxy}
+  ports: [{name: https, port: 443, targetPort: 8080}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: keycloak-internal-proxy
+  namespace: {{ .Values.internalIdentityProxy.namespace }}
+  labels:
+    {{- include "labweaver.labels" . | nindent 4 }}
+spec:
+  endpointSelector: {matchLabels: {app: keycloak-internal-proxy}}
+  ingress:
+    - fromEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: {{ .Release.Namespace }}}
+      toPorts:
+        - ports: [{port: "8080", protocol: TCP}]
+  egress:
+    - toEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s:k8s-app: kube-dns}
+      toPorts:
+        - ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]
+    - toEndpoints:
+        - matchLabels: {k8s:io.kubernetes.pod.namespace: {{ .Values.internalIdentityProxy.namespace }}, k8s:app.kubernetes.io/name: labweaver-keycloak}
+      toPorts:
+        - ports: [{port: "8080", protocol: TCP}]
+{{- end }}

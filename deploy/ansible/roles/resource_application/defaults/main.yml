@@ -30,5 +30,6 @@ resource_application_workloads:
   - evaluation-service
   - container-executor
   - kubevirt-executor
+  - kubevirt-console-executor
   - openssh-gateway
   - web
