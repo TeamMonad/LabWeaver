@@ -58,9 +58,3 @@
     - { name: net.ipv4.ip_forward, value: '1' }
     - { name: fs.inotify.max_user_instances, value: '8192' }
     - { name: fs.inotify.max_user_watches, value: '1048576' }
-
-- name: Disable firewalld only on Kubernetes nodes
-  ansible.builtin.systemd_service:
-    name: firewalld
-    enabled: false
-    state: stopped

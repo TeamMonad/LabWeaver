@@ -31,6 +31,18 @@
       kubeProxyReplacement: true
       k8sServiceHost: "{{ kubernetes_api_advertise_address }}"
       k8sServicePort: 6443
+      # Keep the datapath in eBPF instead of iptables-nft. firewalld flushes
+      # the nftables ruleset when it starts, which removes Cilium's legacy
+      # iptables chains and breaks pod/gateway traffic until the agent is
+      # restarted. BPF masquerade and eBPF host routing remove that dependency.
+      bpf:
+        masquerade: true
+        hostLegacyRouting: false
+      # Cilium Host Firewall replaces firewalld for the node firewall duty.
+      # Enforcement only starts once a host policy selects the node, which is
+      # applied right after this install.
+      hostFirewall:
+        enabled: true
       hubble:
         relay:
           enabled: true
@@ -39,6 +51,12 @@
       gatewayAPI:
         enabled: true
   environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+
+- name: Apply the LabWeaver node firewall policy
+  kubernetes.core.k8s:
+    kubeconfig: /etc/kubernetes/admin.conf
+    state: present
+    definition: "{{ lookup('template', 'host-firewall-policy.yml.j2') | from_yaml }}"
 
 - name: Install MetalLB
   kubernetes.core.helm:
