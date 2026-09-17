@@ -29,6 +29,12 @@ spec:
               protocol: TCP
             - port: "51820"
               protocol: UDP
+    - fromCIDR:
+        - {{ kubernetes_host_firewall_cluster_cidr | default('10.0.0.0/8') }}
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
     - icmps:
         - fields:
             - type: EchoRequest

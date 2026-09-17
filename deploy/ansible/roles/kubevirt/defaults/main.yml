@@ -1,0 +1,9 @@
+---
+# KubeVirt control-plane placement. Empty keeps the upstream control-plane-only
+# scheduling. Set an explicit node selector when the control-plane node cannot
+# reach the adopted API endpoint but worker nodes can.
+kubevirt_control_plane_node_selector: {}
+# Allow KubeVirt control-plane pods to reach the adopted kube-apiserver identity
+# and cluster DNS. Cilium host firewall only permits explicit node ports, so the
+# service path must be allowed explicitly.
+kubevirt_control_plane_egress_enabled: true

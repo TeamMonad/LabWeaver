@@ -59,3 +59,54 @@
       spec:
         config:
           scratchSpaceStorageClass: "{{ storageclass_local_path }}"
+
+- name: Allow KubeVirt control-plane access to the adopted API endpoint
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata:
+        name: kubevirt-control-plane
+        namespace: kubevirt
+      spec:
+        endpointSelector: {}
+        egress:
+          - toEntities: [kube-apiserver]
+            toPorts:
+              - ports: [{port: "6443", protocol: TCP}, {port: "443", protocol: TCP}]
+          - toEndpoints:
+              - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s:k8s-app: kube-dns}
+            toPorts:
+              - ports: [{port: "53", protocol: UDP}, {port: "53", protocol: TCP}]
+          - toEntities: [cluster]
+        ingress:
+          - fromEntities: [cluster, health, remote-node]
+  when: kubevirt_control_plane_egress_enabled | bool
+
+- name: Place the KubeVirt control plane on the selected nodes
+  when: kubevirt_control_plane_node_selector | length > 0
+  block:
+    - name: Remove the control-plane-only affinity from KubeVirt control-plane deployments
+      kubernetes.core.k8s_json_patch:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kubevirt
+        name: "{{ item }}"
+        patch:
+          - op: remove
+            path: /spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution
+      loop: [virt-operator, virt-api, virt-controller]
+      failed_when: false
+
+    - name: Apply the reviewed KubeVirt control-plane node selector
+      kubernetes.core.k8s_json_patch:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kubevirt
+        name: "{{ item }}"
+        patch:
+          - op: add
+            path: /spec/template/spec/nodeSelector
+            value: "{{ kubevirt_control_plane_node_selector }}"
+      loop: [virt-operator, virt-api, virt-controller]
