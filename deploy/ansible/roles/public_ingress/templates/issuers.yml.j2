@@ -1,0 +1,29 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ public_ingress_selfsigned_issuer }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  selfSigned: {}
+{% if public_ingress_tls_mode == 'acme' %}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ public_ingress_acme_issuer }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  acme:
+    email: {{ public_ingress_acme_email }}
+    server: {{ public_ingress_acme_server }}
+    privateKeySecretRef:
+      name: {{ public_ingress_acme_issuer }}-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: {{ public_ingress_cloudflare_secret_name }}
+              key: api-token
+{% endif %}

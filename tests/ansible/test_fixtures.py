@@ -1012,8 +1012,8 @@ class AnsibleFixtureTests(unittest.TestCase):
         tasks = (ROOT / "deploy/ansible/roles/cluster_addons/tasks/main.yml").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(tasks.count("kubeconfig: /etc/kubernetes/admin.conf"), 3)
-        self.assertEqual(tasks.count("KUBECONFIG: /etc/kubernetes/admin.conf"), 2)
+        self.assertEqual(tasks.count("kubeconfig: /etc/kubernetes/admin.conf"), 4)
+        self.assertEqual(tasks.count("KUBECONFIG: /etc/kubernetes/admin.conf"), 4)
 
     def test_platform_application_reconciles_portal_route_and_shared_ssh_service(self) -> None:
         tasks = (

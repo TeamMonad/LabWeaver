@@ -1,0 +1,11 @@
+---
+# Host firewall via firewalld. Runs after node preparation and before the
+# Kubernetes/Cilium bring-up so the Cilium underlay ports are already allowed
+# when the cluster is created. Opt in per inventory with
+# host_firewall_enabled: true (the RHEL/Rocky profile keeps firewalld off).
+- name: Configure the host firewall with firewalld
+  hosts: "routers:k8s_cluster"
+  gather_facts: true
+  roles:
+    - role: host_firewall
+      when: host_firewall_enabled | default(false) | bool

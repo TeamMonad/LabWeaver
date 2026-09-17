@@ -1,0 +1,88 @@
+---
+# Declarative host firewall managed with firewalld.
+#
+# This role replaces ad-hoc iptables rule persistence. firewalld owns host
+# filtering and NAT; the role only applies the documented zones and includes
+# the Cilium/Kubernetes underlay ports so a fresh deployment can bring up the
+# cluster while the host firewall is already active.
+#
+# The role is disabled by default so the RHEL/Rocky profile (which disables
+# firewalld on Kubernetes nodes in rocky_common) is not changed implicitly.
+# The v1 inventory opts in with host_firewall_enabled: true.
+host_firewall_enabled: false
+
+host_firewall_public_zone: public
+host_firewall_internal_zone: internal
+host_firewall_docker_zone: docker
+
+# Uplink interfaces bound to the public zone. When unset the interface that
+# owns the default IPv4 route is used; inventories with a WAN/LAN split must
+# set this explicitly.
+host_firewall_public_interfaces: >-
+  {{ ([ansible_facts.default_ipv4.interface] if (ansible_facts.default_ipv4 is defined
+      and ansible_facts.default_ipv4.interface is defined) else []) }}
+host_firewall_public_services:
+  - ssh
+  - dhcpv6-client
+host_firewall_public_ports: []
+# DNAT entries published on the public zone, e.g. forwarding 80/443 from the
+# node's public address to a Cilium Gateway load-balancer VIP.
+#   - {port: 443, protocol: tcp, toport: 443, toaddr: 10.99.0.140}
+host_firewall_public_forward_ports: []
+
+# Cluster/operator facing interfaces and sources. `wg0` is the management
+# overlay created by the platform WireGuard mesh; it is optional on nodes that
+# only consume it.
+host_firewall_internal_interfaces:
+  - wg0
+host_firewall_internal_services:
+  - ssh
+host_firewall_internal_ports: []
+host_firewall_internal_sources: []
+
+# Cluster underlay source addresses. Traffic from these nodes is classified
+# into the internal zone, where the Cilium/Kubernetes ports below are allowed.
+# Defaults to every Kubernetes node's inventory address.
+host_firewall_cluster_sources: >-
+  {{ groups['k8s_cluster'] | default([])
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined') | list }}
+
+# Cilium and Kubernetes underlay requirements. Without these a firewalld
+# host firewall installed before Cilium blocks VXLAN, health checks, the
+# kubelet API and the Kubernetes API server, and a fresh `kubeadm join`
+# fails. See https://docs.cilium.io/en/stable/operations/system_requirements/.
+host_firewall_cluster_ports:
+  - "8472/udp" # Cilium VXLAN overlay
+  - "4240/tcp" # cilium-health
+  - "4244/tcp" # Hubble relay peer
+  - "10250/tcp" # kubelet API
+  - "6443/tcp" # kube-apiserver
+  - "2379-2380/tcp" # etcd client/peer
+  - "10257/tcp" # kube-controller-manager
+  - "10259/tcp" # kube-scheduler
+  - "30000-32767/tcp" # NodePort range
+  - "30000-32767/udp" # NodePort range
+# Cilium WireGuard encryption uses a dedicated port; enable when the cluster
+# enables transparent encryption (not enabled by default on v1).
+host_firewall_cilium_wireguard_enabled: false
+host_firewall_cilium_wireguard_port: "51871/udp"
+# Geneve is only needed when tunnel-protocol=geneve (v1 uses VXLAN).
+host_firewall_cilium_geneve_enabled: false
+host_firewall_cilium_geneve_port: "6081/udp"
+
+# Docker bridge zone and forwarding policy. Only nodes that run a Docker
+# daemon need these.
+host_firewall_manage_docker: false
+host_firewall_docker_interface: docker0
+host_firewall_manage_docker_policy: false
+host_firewall_docker_policy_name: docker-forwarding
+
+# Automatic rollback guard. If a fresh SSH session cannot be confirmed before
+# the deadline, the pre-change firewalld snapshot is restored automatically.
+host_firewall_rollback_seconds: 900
+host_firewall_snapshot_root: /var/lib/labweaver/.private/host-firewall
+host_firewall_rollback_script: /usr/local/sbin/labweaver-host-firewall-rollback
+host_firewall_rollback_unit: labweaver-host-firewall-rollback
+host_firewall_ssh_probe_port: 22
+host_firewall_ssh_probe_timeout: 30

@@ -1,0 +1,23 @@
+{% for route in public_ingress_routes %}
+{% if not loop.first %}---
+{% endif %}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ route.name }}
+  namespace: {{ route.namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  parentRefs:
+    - name: {{ public_ingress_gateway_name }}
+      namespace: {{ public_ingress_namespace }}
+  hostnames:
+{% for hostname in route.hostnames %}
+    - {{ hostname }}
+{% endfor %}
+  rules:
+    - backendRefs:
+        - name: {{ route.service }}
+          port: {{ route.port }}
+{% endfor %}

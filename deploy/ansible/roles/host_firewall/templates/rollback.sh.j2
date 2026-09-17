@@ -1,0 +1,27 @@
+#!/bin/bash
+# LabWeaver host firewall automatic rollback.
+#
+# Restores the firewalld snapshot taken immediately before the connected
+# change and reloads. Scheduled by the host_firewall role as a transient
+# systemd timer; the timer is cancelled only after a fresh SSH session to the
+# node has been confirmed. If the operator loses access, this runs unattended.
+set -euo pipefail
+
+SNAPSHOT="{{ host_firewall_snapshot_dir }}"
+
+logger -t labweaver-host-firewall "automatic rollback from ${SNAPSHOT}"
+
+systemctl stop firewalld || true
+rm -rf /etc/firewalld/zones
+cp -a "${SNAPSHOT}/zones" /etc/firewalld/zones
+if [ -d "${SNAPSHOT}/policies" ]; then
+  rm -rf /etc/firewalld/policies
+  cp -a "${SNAPSHOT}/policies" /etc/firewalld/policies
+fi
+if [ -f "${SNAPSHOT}/firewalld.conf" ]; then
+  cp -a "${SNAPSHOT}/firewalld.conf" /etc/firewalld/firewalld.conf
+fi
+chown -R root:root /etc/firewalld
+systemctl start firewalld
+
+logger -t labweaver-host-firewall "automatic rollback complete"

@@ -52,6 +52,44 @@
   changed_when: false
   when: ansible_swaptotal_mb | default(0) | int > 0
 
+# Commenting /etc/fstab is not enough: systemd-gpt-auto-generator activates a
+# GPT swap partition on every boot even without an fstab entry. Kubelet then
+# refuses to start with "running with swap on is not supported". Mask the
+# discovered swap units so the generator cannot re-activate them.
+- name: Discover swap units
+  ansible.builtin.command:
+    argv: [systemctl, list-units, --type=swap, --all, --no-legend, --plain]
+  changed_when: false
+  register: v1_swap_units
+
+- name: Read the enablement of each swap unit
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, "{{ item }}"]
+  loop: "{{ v1_swap_units.stdout_lines | map('split') | map('first') | list }}"
+  changed_when: false
+  failed_when: false
+  register: v1_swap_enablement
+
+- name: Mask swap units so swap cannot be re-enabled on reboot
+  ansible.builtin.command:
+    argv: [systemctl, mask, "{{ item.item }}"]
+  loop: "{{ v1_swap_enablement.results }}"
+  when: item.stdout != 'masked'
+  changed_when: true
+
+- name: Read the active swap state
+  ansible.builtin.command:
+    argv: [cat, /proc/swaps]
+  changed_when: false
+  register: v1_swap_state
+
+- name: Fail when swap is still active after masking
+  ansible.builtin.assert:
+    that:
+      - v1_swap_state.stdout_lines | length == 1
+    fail_msg: V1_SWAP_STILL_ACTIVE
+    success_msg: V1_SWAP_DISABLED
+
 - name: Configure Kubernetes kernel modules
   ansible.builtin.copy:
     dest: /etc/modules-load.d/k8s.conf

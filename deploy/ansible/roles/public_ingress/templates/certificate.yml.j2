@@ -1,0 +1,22 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ public_ingress_certificate_name }}
+  namespace: {{ public_ingress_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  secretName: {{ public_ingress_certificate_secret }}
+  commonName: {{ public_ingress_domain }}
+  dnsNames:
+    - {{ public_ingress_domain }}
+    - "*.{{ public_ingress_domain }}"
+  duration: {{ public_ingress_certificate_duration }}
+  renewBefore: {{ public_ingress_certificate_renew_before }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ public_ingress_acme_issuer if public_ingress_tls_mode == 'acme' else public_ingress_selfsigned_issuer }}
+    kind: ClusterIssuer

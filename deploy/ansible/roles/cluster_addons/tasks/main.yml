@@ -15,6 +15,47 @@
   changed_when: false
   loop: [cert-manager, cert-manager-webhook]
 
+- name: Read the cert-manager controller arguments
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/kubernetes/admin.conf
+    api_version: apps/v1
+    kind: Deployment
+    namespace: cert-manager
+    name: cert-manager
+  register: cluster_addons_cert_manager
+
+# ACME DNS-01 propagation self-checks resolve the zone's authoritative
+# nameservers directly. Campus egress cannot reach arbitrary port 53 targets,
+# so pin cert-manager to public recursive resolvers instead; otherwise a
+# correctly published challenge never leaves the "not yet propagated" state.
+- name: Bound cert-manager DNS-01 checks to public recursive resolvers
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - cert-manager
+      - patch
+      - deploy
+      - cert-manager
+      - --type=json
+      - -p
+      - >-
+        [{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--dns01-recursive-nameservers-only"},
+         {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53"}]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  when: >-
+    cluster_addons_cert_manager.resources | length == 1 and
+    '--dns01-recursive-nameservers-only' not in
+    (cluster_addons_cert_manager.resources[0].spec.template.spec.containers[0].args | default([]))
+  changed_when: true
+
+- name: Wait for cert-manager after the DNS-01 arguments change
+  ansible.builtin.command: kubectl -n cert-manager rollout status deploy/cert-manager --timeout=5m
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: false
+
 - name: Create internal development issuer
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf

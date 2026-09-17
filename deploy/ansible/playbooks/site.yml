@@ -2,6 +2,7 @@
 - import_playbook: 00-preflight.yml
 - import_playbook: 05-router-services.yml
 - import_playbook: 10-prepare-nodes.yml
+- import_playbook: 16-host-firewall.yml
 - import_playbook: 20-install-crio-k8s.yml
 - import_playbook: 30-bootstrap-control-plane.yml
 - import_playbook: 40-join-workers.yml
@@ -9,3 +10,4 @@
 - import_playbook: 60-install-storage.yml
 - import_playbook: 70-install-kubevirt.yml
 - import_playbook: 80-install-addons.yml
+- import_playbook: 82-public-ingress.yml

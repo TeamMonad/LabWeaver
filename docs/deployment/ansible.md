@@ -16,6 +16,24 @@ Environment 管理环境 Namespace、Quota、PVC 和运行对象；Resource 管�
 
 GPU 需要已有设备插件或 KubeVirt mediated device 配置。目录声明的模式和实际资源名称必须匹配；容器时间片申请一个共享份额，不能视为整卡。VM vGPU 必须使用已配置规格。无匹配设备、容量信息过期或设备释放未确认时，不自动降级或归还可分配容量。
 
+## 主机防火墙
+
+`16-host-firewall.yml` 用 firewalld 声明式管理节点主机防火墙，替代按 `iptables-save` 反复持久化规则的做法。角色默认关闭，RHEL/Rocky 路径保持 `rocky_common` 的 firewalld 禁用语义；v1 inventory 用 `host_firewall_enabled: true` 显式启用。
+
+防火墙契约在 inventory 中声明：`public` zone 绑定上行网卡并放行 `ssh`（保证管理通道不被切断），`internal` zone 绑定 `wg0` 和集群节点源地址，并包含 Cilium/Kubernetes underlay 端口（VXLAN `8472/udp`、cilium-health `4240/tcp`、Hubble `4244/tcp`、kubelet `10250/tcp`、kube-apiserver `6443/tcp`、etcd `2379-2380/tcp`、NodePort 范围等），使全新部署在 Cilium 安装前即已放行节点间通信。Geneve 与 Cilium WireGuard 端口通过变量按需开启。
+
+集群节点源地址会被 firewalld 从 `public` zone 改判到 `internal`，因此 `internal` 会继承 `public` 的全部 service（含 `wireguard`/51820）。否则节点加入源地址后 WireGuard 管理网会因 keepalive 落入 `internal` 而被拒绝，出现“节点仍在但 overlay 失联”。这一项在 v1 上曾由手工迁移触发，已由角色修复。
+
+每次变更前快照 `/etc/firewalld`，并用 `systemd-run` 调度自动回滚：确认新的 SSH 会话可建立后才取消回滚，否则到期自动恢复快照。`firewall-cmd --check-config` 校验通过后才 reload；`ssh` 不在 `public` zone 或 sshd 未监听时直接 fail closed。这些步骤只使用 firewalld，不修改 iptables-persistent 或 `/etc/iptables/rules.v4|v6`。
+
+## 公网域名与证书
+
+`82-public-ingress.yml` 用 cert-manager 为公网域名签发并挂载 TLS 证书，默认 `selfsigned`（本地自签名，可离线使用），通过 `public_ingress_tls_mode: acme` 切换为 Let's Encrypt。通配符证书必须走 DNS-01，本仓使用 Cloudflare solver；`acme` 依赖控制器能直连 `acme-v02.api.letsencrypt.org` 与 `api.cloudflare.com`。
+
+发布的主机名由 `public_ingress_routes` 声明：根域与 `portal.` 指向 `labweaver-system/web:8080`，`keycloak.` 指向 `keycloak-system/labweaver-keycloak-http:8080`，`harbor.` 指向 `harbor/harbor:80`。角色创建独立的 `labweaver-public` Gateway（Cilium，专用 VIP），外部流量由 `host_firewall_public_forward_ports` 将节点公网 IP 的 80/443 DNAT 到该 VIP；不改动既有内部 Gateway。
+
+Cloudflare API Token 只从 root-only locator（`/var/lib/labweaver/.private/tls/cloudflare.env`）读取并直接写入 `cert-manager` 命名空间的 Secret，使用 `no_log`，不进入 Git、日志或报告。证书与 Gateway 就绪后角色会 readback `Certificate Ready` 与 Gateway VIP 才通过。
+
 ## 维护
 
 升级先校验配置、渲染模板并检查数据库迁移，再应用目标应用版本。v3 迁移支持空数据库初始化；服务启动不会清空旧数据。不兼容旧数据库时应停止并单独安排数据处理，不能通过自动删除或隐藏迁移继续启动。
