@@ -1,0 +1,131 @@
+---
+- import_playbook: 00-preflight.yml
+  vars:
+    labweaver_preflight_scope: platform-application
+    labweaver_preflight_validate_remote_hosts: false
+
+- name: Clean the platform layer with an exact reviewed scope
+  hosts: control_plane
+  gather_facts: false
+  become: true
+  vars:
+    platform_clean_redeploy_kubeconfig: /etc/kubernetes/admin.conf
+    platform_clean_redeploy_helm: /usr/local/bin/helm
+    platform_clean_redeploy_rollout_timeout: 10m
+  tasks:
+    - name: Require the reviewed platform namespace set
+      ansible.builtin.assert:
+        that:
+          - labweaver_namespaces | sort == ['labweaver-build', 'labweaver-data', 'labweaver-demo', 'labweaver-evaluation', 'labweaver-system']
+        fail_msg: PLATFORM_CLEAN_REDEPLOY_NAMESPACES_INVALID
+
+    - name: Uninstall the platform Helm releases
+      ansible.builtin.command:
+        argv:
+          - "{{ platform_clean_redeploy_helm }}"
+          - --kubeconfig
+          - "{{ platform_clean_redeploy_kubeconfig }}"
+          - uninstall
+          - labweaver
+          - labweaver-resource
+          - --ignore-not-found
+          - --wait
+          - "--timeout={{ platform_clean_redeploy_rollout_timeout }}"
+      changed_when: true
+
+    - name: Read the platform namespaces
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+      register: platform_clean_redeploy_namespaces
+
+    - name: Delete the reviewed platform namespaces
+      kubernetes.core.k8s:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+      loop: "{{ labweaver_namespaces }}"
+
+    - name: Delete stale user environment namespaces
+      kubernetes.core.k8s:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+      loop: >-
+        {{ platform_clean_redeploy_namespaces.resources
+           | selectattr('metadata.name', 'match', '^lw-env-')
+           | list }}
+
+    - name: Read persistent volumes bound to the platform namespaces
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: PersistentVolume
+      register: platform_clean_redeploy_persistent_volumes
+
+    - name: Delete persistent volumes owned by the platform namespaces
+      kubernetes.core.k8s:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+      loop: >-
+        {{ platform_clean_redeploy_persistent_volumes.resources
+           | selectattr('spec.claimRef.namespace', 'defined')
+           | selectattr('spec.claimRef.namespace', 'in', labweaver_namespaces)
+           | list }}
+
+    - name: Read leftover node debugger pods
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: Pod
+        namespace: default
+      register: platform_clean_redeploy_default_pods
+
+    - name: Delete leftover node debugger pods
+      kubernetes.core.k8s:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: Pod
+        namespace: default
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      loop: >-
+        {{ platform_clean_redeploy_default_pods.resources
+           | selectattr('metadata.name', 'match', '^node-debugger-')
+           | list }}
+
+    - name: Read the remaining namespaces
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+      register: platform_clean_redeploy_readback
+
+    - name: Require an empty platform scope
+      ansible.builtin.assert:
+        that:
+          - >-
+            platform_clean_redeploy_readback.resources
+            | map(attribute='metadata.name')
+            | intersect(labweaver_namespaces) | length == 0
+          - >-
+            platform_clean_redeploy_readback.resources
+            | map(attribute='metadata.name')
+            | select('match', '^lw-env-') | list | length == 0
+        fail_msg: PLATFORM_CLEAN_REDEPLOY_READBACK_FAILED

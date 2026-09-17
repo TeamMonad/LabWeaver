@@ -468,3 +468,76 @@ helm -n labweaver-system history labweaver
 - 共享基础组件（`labweaver-data`、`harbor`、`keycloak-system`）不随应用升级隐式清理；清理必须单独确认对象、归属和恢复路径。
 - 安全停止：优先停止用户环境/VM 并等待执行后端确认释放。停止请求不等于已释放；未确认停止的计费保持待核实，不得标记为免费。
 - 长时间或不可逆操作（删除基础层 PVC/PV、重建 Harbor/Keycloak、数据库清理）必须提前说明影响范围，并在变更窗口内由对应负责人确认后再执行。
+
+## 11. v1 控制器实测补充（Issue #127）
+
+以下为在 v1 共享集群控制器（本机 `v1-cp-63`）实际执行后必须遵循的环境事实。
+
+### 11.1 控制器与私有输入
+
+- 控制器的私有 Ansible 根目录是 `/var/lib/labweaver/v1-controller`（root-only），包含真实的
+  `deploy/ansible/inventories/v1/hosts.yml`、`group_vars/all/{main,vault}.yml` 与
+  `deploy/ansible/collections`。通过 `LABWEAVER_ANSIBLE_DEPENDENCY_ROOT=/var/lib/labweaver/v1-controller`
+  让 xtask 使用私有 inventory，而 playbook/roles 仍来自当前检出。
+- 固定控制插件在 `/opt/labweaver/venv`（ansible-core 2.18.6、kubernetes 34.1.0）。执行时必须把它加入 `PATH`；
+  vault 口令文件位于 `deploy/ansible/inventories/v1/.vault-password`。
+- 节点 SSH 使用 `labweaver-deploy` 用户与 `.private/v1-deploy-controller-key`；仓库内
+  `inventories/v1/hosts.yml` 若仍指向 `root`/`/root/.ssh/id_rsa` 需要修正。
+- 以 root 在 wzh 检出中运行 xtask 前，先执行
+  `git config --global --add safe.directory /home/wzh/LabWeaver`，否则 `cargo xtask package` 读取
+  Git 身份会失败。
+
+### 11.2 镜像打包必须使用集群内 BuildKit
+
+- `cargo xtask package` 会校验 BuildKit 版本与锁定值（`v0.31.1`）。本机 Docker 自带 v0.33.0，不满足。
+  正确做法是把集群内 rootless BuildKit 端口转发到本地并建立 remote builder：
+
+  ```sh
+  kubectl -n labweaver-build port-forward svc/buildkit 1234:1234   # 需要在整个打包期间保持
+  CERTS=/var/lib/labweaver/.private/v1/platform-buildkit/build-executor-client
+  docker buildx create --name bk-local --driver remote \
+    --driver-opt "cacert=$CERTS/ca.crt,cert=$CERTS/tls.crt,key=$CERTS/tls.key,servername=buildkit.labweaver-build.svc" \
+    tcp://127.0.0.1:1234
+  docker buildx use bk-local
+  ```
+
+- 打包需要 `LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf`、`LABWEAVER_PLATFORM_REGISTRY=harbor.lab.lan`，
+  且源码树干净（含 untracked）。
+- Harbor 的基础镜像必须按 `deploy/versions.lock.yml` 的原 digest 存在；若某个 `base-*` 仓库的 digest 漂移，
+  用 `docker buildx imagetools create` 经校园代理重新镜像（保留原 digest），例如：
+
+  ```sh
+  HTTPS_PROXY=http://49.52.27.95:7897 HTTP_PROXY=http://49.52.27.95:7897 \
+  NO_PROXY=harbor.lab.lan,localhost,127.0.0.1 \
+  docker buildx imagetools create \
+    --tag harbor.lab.lan/labweaver-system/base-rust-builder:1.97.1 \
+    docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
+  ```
+
+### 11.3 BuildKit 出网
+
+- 新模板默认 `platform_buildkit_egress_mode: open`。若 `92-platform-buildkit` 因集群 CoreDNS 已存在
+  非本 role 写入的 `harbor.lab.lan` 记录而报 `PLATFORM_BUILDKIT_CLUSTER_DNS_AMBIGUOUS`，可直接把
+  `labweaver-build` 命名空间内的 `NetworkPolicy/buildkit` 与 `CiliumNetworkPolicy/buildkit-dependency-egress`
+  的 egress 收敛为开放形态（DNS + 全部出网），与 `open` 模板一致。
+
+### 11.4 OJ 运行时与 GPU
+
+- `oj_runtime` role 定义 CRI-O runtime handler 时必须同时设置 `monitor_path`（v1 为
+  `/usr/libexec/crio/conmon`），否则 CRI-O 启动失败。role 默认 `oj_runtime_runc_path=/usr/libexec/crio/runc`。
+- NVIDIA device plugin 需要通过 `runtimeClassName: nvidia` 运行才能看到设备，且集群需要
+  `RuntimeClass/nvidia`（handler `nvidia`）。仅重启 device plugin 不够。
+- 仅 worker-97 的 V100 会以独占 `nvidia.com/gpu` 上报；time-slice 本轮不验证；worker-158 的 P40
+  驱动/库版本不匹配，修复需要重载模块或重启节点，且会中断其 NFS 服务，因此必须排在镜像推送之后。
+
+### 11.5 每实验评估 runner 镜像
+
+- 控制器 `containerBuild.runnerDockerfilePath=evaluation/Dockerfile`；build-executor 配置
+  `executor.serviceImage` 必须指向平台 evaluation-service 镜像（含 `/usr/local/bin/labweaver-service`），
+  由打包产物 digest 填充。实验 `evaluation/Dockerfile` 使用
+  `FROM ${LABWEAVER_SERVICE_IMAGE} AS labweaver-service` 再 `COPY --from=labweaver-service`。
+
+### 11.6 已知阻塞
+
+- KubeVirt 控制面（virt-api/virt-controller/virt-operator）已连续 40 天 CrashLoop，报
+  `dial tcp 10.96.0.1:443: i/o timeout`，因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。

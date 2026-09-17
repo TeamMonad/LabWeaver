@@ -49,8 +49,8 @@ control:
   trustRevision: 1
   imagePolicyId: "00000000-0000-7000-8000-000000000002"
   imagePolicyRevision: 1
-  environmentSchemaSha256: "61d13e7b95c7cd2013ecbe7ed6be4206a539134162d2400d5363bfc9a874bae9"
-  evaluationSchemaSha256: "e6ccd10b1c34d8aa3024e29ec0884488f07a9be0df9f6b2c47605a1279d62cc7"
+  environmentSchemaSha256: "570ca31b022dc8651e382918e0b35c4312554f685472e892050d677b47b8e662"
+  evaluationSchemaSha256: "be4c350a23345c26fb79e457f3b617a161694f48d2e93f3936c46c6b5d5f0117"
   containerBuild:
     builderBinding: "buildkit-primary-v1"
     # Harbor registry and project scope used by the fixed build executor.
