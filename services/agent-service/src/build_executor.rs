@@ -1090,6 +1090,18 @@ fn buildkit_frontend_options(
     if !service_image.is_empty() {
         builder = builder.buildarg("LABWEAVER_SERVICE_IMAGE", service_image);
     }
+    if let Ok(proxy) = std::env::var("LABWEAVER_BUILD_PROXY")
+        && !proxy.trim().is_empty()
+    {
+        let no_proxy = std::env::var("LABWEAVER_BUILD_NO_PROXY").unwrap_or_else(|_| {
+            "localhost,127.0.0.1,harbor.lab.lan,10.0.0.0/8,10.96.0.0/12,10.99.0.0/16,10.244.0.0/16,49.52.27.0/24"
+                .to_owned()
+        });
+        builder = builder
+            .buildarg("HTTP_PROXY", proxy.as_str())
+            .buildarg("HTTPS_PROXY", proxy.as_str())
+            .buildarg("NO_PROXY", no_proxy.as_str());
+    }
     match network {
         BuildNetworkPolicy::DenyAll => builder.force_network_mode(&ImageBuildNetworkMode::None),
         BuildNetworkPolicy::Restricted { .. } => builder,

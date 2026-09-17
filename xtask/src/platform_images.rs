@@ -577,6 +577,9 @@ fn build_image(
         ]);
     }
     command.args(["--tag", tag]);
+    for argument in build_proxy_arguments() {
+        command.arg("--build-arg").arg(argument);
+    }
     for (name, source) in build_base_images(component, lock) {
         command.args([
             "--build-arg",
@@ -585,6 +588,25 @@ fn build_image(
     }
     command.arg(".");
     run_checked(&mut command, "BuildKit platform image build").map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn build_proxy_arguments() -> Vec<String> {
+    let Ok(proxy) = std::env::var("LABWEAVER_BUILD_PROXY") else {
+        return Vec::new();
+    };
+    if proxy.trim().is_empty() {
+        return Vec::new();
+    }
+    let no_proxy = std::env::var("LABWEAVER_BUILD_NO_PROXY").unwrap_or_else(|_| {
+        "localhost,127.0.0.1,harbor.lab.lan,10.0.0.0/8,10.96.0.0/12,10.99.0.0/16,10.244.0.0/16,49.52.27.0/24"
+            .to_owned()
+    });
+    vec![
+        format!("HTTP_PROXY={proxy}"),
+        format!("HTTPS_PROXY={proxy}"),
+        format!("NO_PROXY={no_proxy}"),
+    ]
 }
 
 #[cfg(target_os = "linux")]
