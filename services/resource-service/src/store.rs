@@ -32,6 +32,7 @@ use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
 use rust_decimal::{Decimal, RoundingStrategy};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::cmp::{max, min};
@@ -74,6 +75,17 @@ pub struct ProvisioningCapacityClaim {
     pub lease_synced_revision: Option<Revision>,
 }
 
+/// Workload identity that owns a durable GPU reservation.
+#[derive(Clone, Debug)]
+pub(crate) enum ActiveReservationTarget {
+    Environment {
+        environment_id: contracts::EnvironmentId,
+    },
+    Task {
+        task_run_id: TaskRunId,
+    },
+}
+
 /// A GPU reservation that is still authoritative in Resource.
 ///
 /// The capacity observer uses this projection to subtract only pods that can be
@@ -81,12 +93,42 @@ pub struct ProvisioningCapacityClaim {
 /// are never sufficient to classify provider occupancy as Resource-owned.
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveGpuReservation {
-    pub claim_id: contracts::CapacityClaimId,
     pub entry_id: GpuCatalogEntryId,
     pub units: u32,
     pub allocation_binding: String,
     pub namespace_name: Option<String>,
-    pub target: ResourceTarget,
+    pub target: ActiveReservationTarget,
+}
+
+/// Durable Experiment GPU reservation stored in `resource.environment_gpu_reservations`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EnvironmentGpuReservationState {
+    Reserved,
+    Released,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentGpuReservationContract {
+    environment_id: contracts::EnvironmentId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    owner_actor_id: contracts::ActorId,
+    provider_binding: String,
+    allocation: GpuAllocation,
+    state: EnvironmentGpuReservationState,
+}
+
+impl EnvironmentGpuReservationContract {
+    fn validate(&self) -> Result<(), ResourceStoreError> {
+        if self.provider_binding.trim().is_empty() || self.provider_binding.len() > 120 {
+            return Err(ResourceStoreError::EnvironmentGpuReservationInvalid);
+        }
+        self.allocation
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentGpuReservationInvalid)
+    }
 }
 
 impl PendingAllocation {
@@ -987,6 +1029,10 @@ impl PgResourceStore {
     /// contract and SQL projections are checked together before they are exposed to
     /// the provider observer. No provider object is treated as owned from a label
     /// without a matching row returned here.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the claim and Environment reservation projections are validated together"
+    )]
     pub(crate) async fn list_active_gpu_reservations(
         &self,
     ) -> Result<Vec<ActiveGpuReservation>, ResourceStoreError> {
@@ -1013,7 +1059,8 @@ impl PgResourceStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
+        let mut reservations = rows
+            .into_iter()
             .map(|row| {
                 let request = decode_request(row.try_get("request_contract")?)?;
                 let claim = decode_claim(row.try_get("claim_contract")?)?;
@@ -1064,16 +1111,185 @@ impl PgResourceStore {
                 {
                     return Err(ResourceStoreError::CapacityReadbackInvalid);
                 }
+                let target = match request.target {
+                    ResourceTarget::Environment { environment_id, .. } => {
+                        ActiveReservationTarget::Environment { environment_id }
+                    }
+                    ResourceTarget::Task { task_run_id } => {
+                        ActiveReservationTarget::Task { task_run_id }
+                    }
+                };
                 Ok(ActiveGpuReservation {
-                    claim_id: claim.id,
                     entry_id: allocation.entry_id,
                     units,
                     allocation_binding,
                     namespace_name,
-                    target: request.target,
+                    target,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, ResourceStoreError>>()?;
+        let environment_rows = sqlx::query(
+            "SELECT contract FROM resource.environment_gpu_reservations
+             WHERE state='reserved'
+             ORDER BY reservation_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in environment_rows {
+            let reservation = decode_environment_gpu_reservation(row.try_get("contract")?)?;
+            reservations.push(ActiveGpuReservation {
+                entry_id: reservation.allocation.entry_id,
+                units: reservation.allocation.count,
+                allocation_binding: reservation.allocation.allocation_binding.clone(),
+                namespace_name: None,
+                target: ActiveReservationTarget::Environment {
+                    environment_id: reservation.environment_id,
+                },
+            });
+        }
+        Ok(reservations)
+    }
+
+    /// Resolves and durably reserves one Experiment GPU allocation for an Environment instance.
+    ///
+    /// Environment submits only a catalog class and count. Resource selects the exact catalog row,
+    /// allocation binding, mode, and provider binding from the active catalog and the current
+    /// capacity observation, so an unknown class, exhausted pool, or stale observation fails
+    /// closed. The reservation is keyed by `environment_id`, so a transport retry is idempotent
+    /// without double-counting capacity.
+    pub async fn resolve_environment_gpu_allocation(
+        &self,
+        request: &contracts::environment::ResolveEnvironmentGpuAllocationRequest,
+    ) -> Result<GpuAllocation, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentGpuReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let existing = sqlx::query(
+            "SELECT contract FROM resource.environment_gpu_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            let reservation = decode_environment_gpu_reservation(row.try_get("contract")?)?;
+            if reservation.state == EnvironmentGpuReservationState::Reserved {
+                let matches_request = reservation.environment_id == request.environment_id
+                    && reservation.project_id == request.project_id
+                    && reservation.course_id == request.course_id
+                    && reservation.owner_actor_id == request.owner_actor_id
+                    && reservation.provider_binding == request.provider_binding
+                    && reservation.allocation.class == request.gpu.class
+                    && reservation.allocation.count == request.gpu.count;
+                if !matches_request {
+                    return Err(ResourceStoreError::EnvironmentGpuReservationConflict);
+                }
+                transaction.commit().await?;
+                return Ok(reservation.allocation);
+            }
+        }
+        let allocation = resolve_gpu_allocation(
+            &mut transaction,
+            &request.provider_binding,
+            Some(&request.gpu),
+        )
+        .await?
+        .ok_or(ResourceStoreError::GpuCatalogMissing)?;
+        let contract = EnvironmentGpuReservationContract {
+            environment_id: request.environment_id,
+            project_id: request.project_id,
+            course_id: request.course_id,
+            owner_actor_id: request.owner_actor_id,
+            provider_binding: request.provider_binding.clone(),
+            allocation: allocation.clone(),
+            state: EnvironmentGpuReservationState::Reserved,
+        };
+        sqlx::query(
+            "INSERT INTO resource.environment_gpu_reservations (
+                 reservation_id, environment_id, project_id, course_id, owner_actor_id,
+                 provider_binding, entry_id, allocation_binding, units, state, released_at, contract)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NULL,$10)
+             ON CONFLICT (environment_id) DO UPDATE SET
+                 project_id=EXCLUDED.project_id,
+                 course_id=EXCLUDED.course_id,
+                 owner_actor_id=EXCLUDED.owner_actor_id,
+                 provider_binding=EXCLUDED.provider_binding,
+                 entry_id=EXCLUDED.entry_id,
+                 allocation_binding=EXCLUDED.allocation_binding,
+                 units=EXCLUDED.units,
+                 state='reserved',
+                 released_at=NULL,
+                 contract=EXCLUDED.contract",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(request.environment_id.as_uuid())
+        .bind(request.project_id.as_uuid())
+        .bind(request.course_id.map(contracts::CourseId::as_uuid))
+        .bind(request.owner_actor_id.as_uuid())
+        .bind(&request.provider_binding)
+        .bind(allocation.entry_id.as_uuid())
+        .bind(&allocation.allocation_binding)
+        .bind(i32::try_from(allocation.count)?)
+        .bind(serde_json::to_value(&contract)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(allocation)
+    }
+
+    /// Releases the durable Experiment GPU reservation for one Environment instance.
+    ///
+    /// Release is idempotent: a missing or already-released reservation returns `false` instead of
+    /// failing, while a mismatched project or owner identity is rejected. The capacity is
+    /// immediately available to the next admission.
+    pub async fn release_environment_gpu_allocation(
+        &self,
+        request: &contracts::environment::ReleaseEnvironmentGpuAllocationRequest,
+    ) -> Result<bool, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentGpuReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT contract, project_id, owner_actor_id
+             FROM resource.environment_gpu_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        let reservation = decode_environment_gpu_reservation(row.try_get("contract")?)?;
+        let project_id: uuid::Uuid = row.try_get("project_id")?;
+        let owner_actor_id: uuid::Uuid = row.try_get("owner_actor_id")?;
+        if project_id != request.project_id.as_uuid()
+            || owner_actor_id != request.owner_actor_id.as_uuid()
+            || reservation.environment_id != request.environment_id
+        {
+            return Err(ResourceStoreError::EnvironmentGpuReservationConflict);
+        }
+        if reservation.state == EnvironmentGpuReservationState::Released {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let mut released = reservation;
+        released.state = EnvironmentGpuReservationState::Released;
+        let result = sqlx::query(
+            "UPDATE resource.environment_gpu_reservations
+             SET state='released', released_at=clock_timestamp(), contract=$2
+             WHERE environment_id=$1 AND state='reserved'",
+        )
+        .bind(request.environment_id.as_uuid())
+        .bind(serde_json::to_value(&released)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Adds one immutable GPU catalog revision. Fresh capacity observations are recorded
@@ -3747,13 +3963,23 @@ async fn resolve_gpu_allocation(
     let Some(available) = available else {
         return Err(ResourceStoreError::GpuObservationStale);
     };
+    // Work claims and Experiment environment reservations share one physical allocation binding,
+    // so both durable reservation tables must be subtracted before admitting new capacity.
     let reserved: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(sum(reservation.units),0)::bigint
-         FROM resource.gpu_capacity_reservations reservation
-         JOIN resource.gpu_catalog_entries catalog
-           ON catalog.entry_id=reservation.entry_id
-         WHERE reservation.state='reserved'
-           AND catalog.allocation_binding=$1",
+        "SELECT COALESCE(sum(reserved.units),0)::bigint
+         FROM (
+             SELECT reservation.units AS units
+             FROM resource.gpu_capacity_reservations reservation
+             JOIN resource.gpu_catalog_entries catalog
+               ON catalog.entry_id=reservation.entry_id
+             WHERE reservation.state='reserved'
+               AND catalog.allocation_binding=$1
+             UNION ALL
+             SELECT reservation.units AS units
+             FROM resource.environment_gpu_reservations reservation
+             WHERE reservation.state='reserved'
+               AND reservation.allocation_binding=$1
+         ) AS reserved",
     )
     .bind(&allocation_binding)
     .fetch_one(&mut **transaction)
@@ -4211,6 +4437,13 @@ fn decode_gpu_catalog(value: Value) -> Result<GpuCatalogEntry, ResourceStoreErro
     entry.validate()?;
     Ok(entry)
 }
+fn decode_environment_gpu_reservation(
+    value: Value,
+) -> Result<EnvironmentGpuReservationContract, ResourceStoreError> {
+    let reservation: EnvironmentGpuReservationContract = serde_json::from_value(value)?;
+    reservation.validate()?;
+    Ok(reservation)
+}
 fn decode_budget(value: Value) -> Result<ResourceBudget, ResourceStoreError> {
     let budget: ResourceBudget = serde_json::from_value(value)?;
     budget.validate()?;
@@ -4366,6 +4599,10 @@ pub enum ResourceStoreError {
     GpuObservationStale,
     #[error("LW_RESOURCE_GPU_ALLOCATION_MISSING")]
     GpuAllocationMissing,
+    #[error("LW_RESOURCE_ENVIRONMENT_GPU_RESERVATION_INVALID")]
+    EnvironmentGpuReservationInvalid,
+    #[error("LW_RESOURCE_ENVIRONMENT_GPU_RESERVATION_CONFLICT")]
+    EnvironmentGpuReservationConflict,
     #[error("LW_RESOURCE_GPU_CATALOG_REVISION_CONFLICT")]
     GpuCatalogRevisionConflict,
     #[error("LW_RESOURCE_GPU_CATALOG_MODE_COLLISION")]

@@ -1005,6 +1005,17 @@
         "runId": {
           "$ref": "#/$defs/AgentRunId"
         },
+        "runnerBuildContext": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Generated build context for this experiment's own Evaluation runner image.\n\nOnly Container experiments carry a runner image; deployment-owned VM evaluation leaves this\nabsent. Control resolves the object key from the Agent artifact authority before enqueueing\nthe second single-image build."
+        },
         "spec": {
           "$ref": "#/$defs/EvaluationSpec"
         }
@@ -1271,6 +1282,25 @@
         }
       ]
     },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
     "LlmUsage": {
       "additionalProperties": false,
       "description": "Frozen LLM usage for one attempt.",
@@ -1424,6 +1454,17 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Policy-catalogued GPU class and count. It never carries a Kubernetes resource name."
         },
         "memoryBytes": {
           "format": "uint64",

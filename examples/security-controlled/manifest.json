@@ -27,7 +27,7 @@
       {
         "path": "environment.yaml",
         "role": "public",
-        "sha256": "fb66f93d6a5d072a3035919339e0cd5401dbb77b8d7dd799fb896eeb613c5ec2"
+        "sha256": "5e91fe92764d8020e4108327eaaef9c91e3e293bcefa86a6d36ccad0df356ea7"
       },
       {
         "path": "evaluation.yaml",
@@ -93,6 +93,11 @@
         "path": "tests/security-controlled/valid-logins.out",
         "role": "public",
         "sha256": "c4cbbca115e8836a3a4eadb377273947278fd2786feda817f944890d8feb7538"
+      },
+      {
+        "path": "workspace-seed/real-experiment-marker.txt",
+        "role": "public",
+        "sha256": "0b8cb6cf0725fe57ff919fcaa3373adfd864ecf2de66738d151c0c2b4751d0cf"
       }
     ],
     "controlledArtifacts": [

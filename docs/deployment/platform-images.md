@@ -20,8 +20,8 @@ cargo xtask package --env demo --release platform --yes
 ```
 
 The command requires a clean source tree, a matching locked Rust toolchain,
-and digest-pinned base images. Each component is built twice with reproducible
-timestamps and the resulting `linux/amd64` image digest is recorded. A build
+and digest-pinned base images. Each component is built once with a reproducible
+timestamp and the resulting `linux/amd64` image digest is recorded. A build
 failure or missing digest stops the command.
 
 Before packaging, mirror the digest-pinned base images and BuildKit image into
@@ -37,18 +37,12 @@ cargo xtask package-validate \
 
 LABWEAVER_CONFIGURATION_BUNDLE_SHA256=sha256:<configuration-bundle-sha256> \
   cargo xtask deploy --env demo \
-  --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json
+  --package-manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json
 ```
 
 Connected validation rechecks the component lock and the digest currently
 served by Harbor. Deployment passes the immutable references to Helm and writes
-the deployment manifest with the cluster UID and Helm revision. Rollback uses
-the package manifest selected by `LABWEAVER_PLATFORM_ROLLBACK_MANIFEST`:
-
-```sh
-export LABWEAVER_PLATFORM_ROLLBACK_MANIFEST=artifacts/package/<previous-run>/PlatformImagePackageManifest.json
-cargo xtask rollback --env demo --revision <helm-revision> --yes
-```
+the deployment manifest with the cluster UID and Helm revision.
 
 The package and deployment commands do not replace runtime checks. Container,
 KubeVirt, GPU, and external identity behavior still require their respective

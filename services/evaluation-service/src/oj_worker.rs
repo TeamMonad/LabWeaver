@@ -102,12 +102,13 @@ const SUBMISSION_READ_PATHS: [&str; 11] = [
     "/dev/null",
     "/dev/urandom",
 ];
-const COMPILER_READ_PATHS: [&str; 13] = [
+const COMPILER_READ_PATHS: [&str; 14] = [
     "/usr/bin",
     "/usr/include",
     "/usr/lib",
     "/usr/libexec",
     "/usr/lib64",
+    "/usr/local/cuda",
     "/usr/x86_64-pc-linux-gnu",
     "/usr/share",
     "/lib",

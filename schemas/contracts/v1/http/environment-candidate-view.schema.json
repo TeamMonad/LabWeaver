@@ -431,6 +431,25 @@
       ],
       "type": "object"
     },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
     "ImageArtifact": {
       "description": "Complete immutable runtime artifact identity.",
       "oneOf": [
@@ -570,6 +589,17 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Policy-catalogued GPU class and count. It never carries a Kubernetes resource name."
         },
         "memoryBytes": {
           "format": "uint64",

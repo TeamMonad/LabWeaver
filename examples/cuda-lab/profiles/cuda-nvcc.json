@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "evaluation.labweaver.io/program-profile/v1",
+  "compileArgv": [
+    "/usr/local/cuda/bin/nvcc",
+    "-O2",
+    "-o",
+    "{binary}",
+    "{source}"
+  ],
+  "runArgv": [
+    "/usr/bin/python3",
+    "{evaluator_dir}/scripts/check_result.py",
+    "{submission_dir}/student/result.txt",
+    "{evaluator_dir}/tests/cuda-nvcc/expected_result.txt"
+  ],
+  "supportFiles": [
+    "scripts/check_result.py",
+    "tests/cuda-nvcc/expected_result.txt"
+  ]
+}

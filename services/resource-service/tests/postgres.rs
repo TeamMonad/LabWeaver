@@ -28,6 +28,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use auth::{ServiceAuthConfig, ServiceTokenVerifier, TransportSecurityMode};
+use contracts::environment::{
+    ReleaseEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationRequest,
+};
 use contracts::http::{
     CreateResourceRateRequest, InternalCreateTaskResourceRequest, RecordResourceUsageRequest,
     UpsertResourceBudgetRequest,
@@ -64,7 +67,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -78,6 +81,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0009_settlement_retry.sql"),
         include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
         include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
+        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql"),
     ))
     .execute(&pool)
     .await?;
@@ -1338,6 +1342,163 @@ async fn gpu_reservation_counts_across_catalog_revisions_for_one_physical_pool()
 }
 
 #[tokio::test]
+async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let now = store.current_time().await?;
+    let provider_binding = "kubernetes-standard".to_owned();
+    let allocation_binding = "nvidia.com/gpu".to_owned();
+    let catalog = GpuCatalogEntry {
+        id: GpuCatalogEntryId::new(),
+        class: "a100-exclusive".to_owned(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: provider_binding.clone(),
+        capacity_units: 1,
+        allocation_binding,
+        revision: Revision::new(1)?,
+        active: true,
+    };
+    store
+        .create_gpu_catalog_entry("environment-gpu-catalog", &catalog)
+        .await?;
+    store
+        .record_gpu_capacity_observation(
+            catalog.id,
+            1,
+            "test-observer",
+            now,
+            UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
+        )
+        .await?;
+
+    let project_id = ProjectId::new();
+    let owner_actor_id = ActorId::new();
+    let first_environment = EnvironmentId::new();
+    let resolve = |environment_id: EnvironmentId, class: &str, count: u32| {
+        ResolveEnvironmentGpuAllocationRequest {
+            version: 1,
+            environment_id,
+            project_id,
+            course_id: None,
+            owner_actor_id,
+            provider_binding: provider_binding.clone(),
+            gpu: GpuRequest {
+                class: class.to_owned(),
+                count,
+            },
+            trace_id: format!("environment-gpu-{environment_id}"),
+        }
+    };
+
+    let first = store
+        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(first.class, "a100-exclusive");
+    assert_eq!(first.count, 1);
+
+    // The same Environment identity replays the durable reservation instead of double counting.
+    let replayed = store
+        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(replayed, first);
+
+    // A different class or count for the same identity is a conflict, not a silent re-allocation.
+    let mismatched = store
+        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 2))
+        .await;
+    assert!(matches!(
+        mismatched,
+        Err(resource_service::store::ResourceStoreError::EnvironmentGpuReservationConflict)
+    ));
+
+    // An unknown class fails closed before any capacity is reserved.
+    let unknown = store
+        .resolve_environment_gpu_allocation(&resolve(EnvironmentId::new(), "unknown-class", 1))
+        .await;
+    assert!(matches!(
+        unknown,
+        Err(resource_service::store::ResourceStoreError::GpuCatalogMissing)
+    ));
+
+    // The single observed unit is owned by the first Environment, so a second cannot be admitted.
+    let second_environment = EnvironmentId::new();
+    let exhausted = store
+        .resolve_environment_gpu_allocation(&resolve(second_environment, "a100-exclusive", 1))
+        .await;
+    assert!(matches!(
+        exhausted,
+        Err(resource_service::store::ResourceStoreError::GpuCapacityExhausted)
+    ));
+
+    let release = |environment_id: EnvironmentId| ReleaseEnvironmentGpuAllocationRequest {
+        version: 1,
+        environment_id,
+        project_id,
+        owner_actor_id,
+        trace_id: format!("environment-gpu-release-{environment_id}"),
+    };
+    assert!(
+        store
+            .release_environment_gpu_allocation(&release(first_environment))
+            .await?
+    );
+    // Release is idempotent.
+    assert!(
+        !store
+            .release_environment_gpu_allocation(&release(first_environment))
+            .await?
+    );
+
+    // Releasing the first Environment makes the unit available to the second.
+    let admitted = store
+        .resolve_environment_gpu_allocation(&resolve(second_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(admitted.count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let provider_binding = "kubernetes-standard".to_owned();
+    let catalog = GpuCatalogEntry {
+        id: GpuCatalogEntryId::new(),
+        class: "a100-exclusive".to_owned(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: provider_binding.clone(),
+        capacity_units: 1,
+        allocation_binding: "nvidia.com/gpu".to_owned(),
+        revision: Revision::new(1)?,
+        active: true,
+    };
+    store
+        .create_gpu_catalog_entry("environment-gpu-stale-catalog", &catalog)
+        .await?;
+    let request = ResolveEnvironmentGpuAllocationRequest {
+        version: 1,
+        environment_id: EnvironmentId::new(),
+        project_id: ProjectId::new(),
+        course_id: None,
+        owner_actor_id: ActorId::new(),
+        provider_binding,
+        gpu: GpuRequest {
+            class: "a100-exclusive".to_owned(),
+            count: 1,
+        },
+        trace_id: "environment-gpu-stale".to_owned(),
+    };
+    let result = store.resolve_environment_gpu_allocation(&request).await;
+    assert!(matches!(
+        result,
+        Err(resource_service::store::ResourceStoreError::GpuObservationStale)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_gpu_approvals_serialize_on_the_shared_admission_lock()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
@@ -1915,7 +2076,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -1928,7 +2089,8 @@ async fn migrated_pool()
         include_str!("../../../migrations/resource/0008_v3_project_gpu_billing.sql"),
         include_str!("../../../migrations/resource/0009_settlement_retry.sql"),
         include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
-        include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql")
+        include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
+        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql")
     ))
     .execute(&pool)
     .await?;

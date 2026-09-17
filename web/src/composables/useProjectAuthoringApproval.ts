@@ -35,8 +35,9 @@ function staleContextDiagnostic(subject: string): DiagnosticViewModel {
 /**
  * Loads the complete, project-scoped authoring review and submits the one
  * teacher command that binds both candidates, the package revision and the
- * resolved image artifact. Candidate decisions remain read-only context here;
- * the durable approval is the single authoritative publish prerequisite.
+ * resolved environment and per-experiment runner image artifacts. Candidate
+ * decisions remain read-only context here; the durable approval is the single
+ * authoritative publish prerequisite.
  */
 export function useProjectAuthoringApproval(
   projectId: Ref<string | null>,
@@ -223,6 +224,17 @@ export function useProjectAuthoringApproval(
     return artifact ? (artifact as CompleteAuthoringApprovalRequestSchemaImageArtifact) : null
   })
 
+  const runnerImageArtifact = computed<CompleteAuthoringApprovalRequestSchemaImageArtifact | null>(() => {
+    if (evaluationCandidate.value.kind !== 'success') return null
+    const artifact = evaluationCandidate.value.data.runnerImageArtifact
+    return artifact ? (artifact as CompleteAuthoringApprovalRequestSchemaImageArtifact) : null
+  })
+
+  const runnerArtifactRequired = computed(() => (
+    environmentCandidate.value.kind === 'success' &&
+    environmentCandidate.value.data.candidate.spec.runtime.kind === 'container'
+  ))
+
   const canApprove = computed(() => {
     return (
       run.value.kind === 'success' &&
@@ -230,6 +242,7 @@ export function useProjectAuthoringApproval(
       evaluationCandidate.value.kind === 'success' &&
       problemPackage.value.kind === 'success' &&
       imageArtifact.value !== null &&
+      (!runnerArtifactRequired.value || runnerImageArtifact.value !== null) &&
       // An approval id identifies an already-created immutable approval. Its
       // publication may still be pending, but the same candidate tuple cannot
       // be approved again. Keep the form closed while that status is rebuilt.
@@ -331,8 +344,11 @@ export function useProjectAuthoringApproval(
     const evaluation = evaluationCandidate.value.kind === 'success' ? evaluationCandidate.value.data : null
     const pkg = problemPackage.value.kind === 'success' ? problemPackage.value.data : null
     const artifact = imageArtifact.value
+    const runnerArtifact = runnerImageArtifact.value
+    const runnerRequired = environment?.candidate.spec.runtime.kind === 'container'
     const trimmedReason = reason.trim()
     if (!runData || !environment || !evaluation || !pkg || !artifact || !trimmedReason || trimmedReason.length > 500) return false
+    if (runnerRequired && !runnerArtifact) return false
 
     const body = {
       projectId: id,
@@ -344,6 +360,7 @@ export function useProjectAuthoringApproval(
       evaluationCandidateId: evaluation.candidate.id,
       evaluationCandidateRevision: evaluation.candidate.revision,
       imageArtifact: artifact,
+      evaluationRunnerImageArtifact: runnerArtifact,
       reason: trimmedReason,
     }
     const fingerprint = JSON.stringify(body)
@@ -387,6 +404,9 @@ export function useProjectAuthoringApproval(
     approval,
     publication,
     imageArtifact,
+    runnerImageArtifact,
+    evaluationRunnerImageArtifact: runnerImageArtifact,
+    runnerArtifactRequired,
     canApprove,
     acting,
     load,

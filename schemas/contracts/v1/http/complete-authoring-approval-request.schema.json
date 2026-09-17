@@ -147,6 +147,17 @@
     "evaluationCandidateRevision": {
       "$ref": "#/$defs/Revision"
     },
+    "evaluationRunnerImageArtifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImageArtifact"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exact per-experiment Evaluation runner image selected for a Container experiment.\n\nContainer experiments must select the runner artifact produced by their own runner build;\nVM experiments omit it and use the deployment-owned Evaluation runtime."
+    },
     "imageArtifact": {
       "$ref": "#/$defs/ImageArtifact"
     },

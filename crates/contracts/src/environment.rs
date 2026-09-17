@@ -74,6 +74,12 @@ pub struct EnvironmentCreateSpec {
     pub provider_binding: String,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
+    /// Resource-resolved Experiment GPU allocation held for this environment instance.
+    ///
+    /// Experiment creation resolves this through Resource before the aggregate is accepted; Work
+    /// environments keep their allocation on the Lease authorization instead and leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_allocation: Option<GpuAllocation>,
     pub eligibility_expires_at: UtcTimestamp,
 }
 
@@ -438,6 +444,107 @@ fn validate_gpu_allocation(
         }
         _ => Err(EnvironmentError::InvalidResourceHandoff),
     }
+}
+
+/// Environment-owned request to resolve and durably hold one Experiment GPU allocation.
+///
+/// The caller submits only a policy-catalogued class and count. Resource selects the exact
+/// allocation binding, mode, and provider binding from its active catalog and current capacity
+/// observation; an unknown class, exhausted pool, or stale observation fails closed.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveEnvironmentGpuAllocationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub provider_binding: String,
+    pub gpu: crate::resource::GpuRequest,
+    pub trace_id: String,
+}
+
+impl ResolveEnvironmentGpuAllocationRequest {
+    /// Validates the trusted Environment command before any capacity side effect.
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.provider_binding.is_empty()
+            || self.provider_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        self.gpu
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        Ok(())
+    }
+}
+
+/// Resource-authoritative resolution returned to Environment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveEnvironmentGpuAllocationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub provider_binding: String,
+    pub allocation: GpuAllocation,
+}
+
+impl ResolveEnvironmentGpuAllocationResponse {
+    /// Validates the resolved allocation against the requesting Environment identity.
+    pub fn validate_for(
+        &self,
+        request: &ResolveEnvironmentGpuAllocationRequest,
+    ) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.environment_id != request.environment_id
+            || self.provider_binding != request.provider_binding
+            || self.allocation.class != request.gpu.class
+            || self.allocation.count != request.gpu.count
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        self.allocation
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)
+    }
+}
+
+/// Environment-owned request to release one durable Experiment GPU reservation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseEnvironmentGpuAllocationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub owner_actor_id: ActorId,
+    pub trace_id: String,
+}
+
+impl ReleaseEnvironmentGpuAllocationRequest {
+    /// Validates the trusted Environment release command.
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Idempotent Resource release readback. `released` is false when no reservation remained.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseEnvironmentGpuAllocationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub released: bool,
 }
 
 /// Resource-authoritative Lease update for an existing Work aggregate.
@@ -806,6 +913,12 @@ pub struct EnvironmentInstance {
     pub generation: u64,
     pub observed_generation: u64,
     pub operation: EnvironmentOperation,
+    /// Resource-resolved Experiment GPU allocation held while this instance exists.
+    ///
+    /// Work environments never use this field; their allocation remains on the Lease
+    /// authorization. A present value is validated against the immutable instance identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_allocation: Option<GpuAllocation>,
     pub eligibility_expires_at: UtcTimestamp,
     pub endpoints: Vec<EnvironmentEndpoint>,
     pub last_diagnostic_code: Option<String>,
@@ -862,6 +975,7 @@ impl EnvironmentInstance {
             }
             EnvironmentClass::Work
                 if self.lease_id.is_none()
+                    || self.gpu_allocation.is_some()
                     || self
                         .capacity_binding
                         .as_deref()
@@ -870,6 +984,11 @@ impl EnvironmentInstance {
                 return Err(EnvironmentError::LeaseRequired);
             }
             _ => {}
+        }
+        if let Some(allocation) = &self.gpu_allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidAggregate)?;
         }
         if (self.observed_state == ObservedEnvironmentState::Failed) != self.failed_phase.is_some()
         {

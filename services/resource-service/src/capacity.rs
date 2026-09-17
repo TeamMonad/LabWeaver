@@ -23,7 +23,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use url::Url;
 
-use crate::store::ActiveGpuReservation;
+use crate::store::{ActiveGpuReservation, ActiveReservationTarget};
 
 const MAX_KUBERNETES_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KUBERNETES_LIST_ITEMS: u32 = 100_000;
@@ -531,32 +531,29 @@ fn pod_is_resource_owned(
         // observer does not count that workload as external capacity usage.
         reservation.allocation_binding == allocation_binding
     }) {
-        let namespace_matches = match &reservation.target {
-            ResourceTarget::Environment { .. } => {
-                reservation.namespace_name.as_deref() == namespace.as_deref()
-            }
-            ResourceTarget::Task { .. } => reservation
-                .namespace_name
-                .as_deref()
-                .is_some_and(|expected| namespace.as_deref() == Some(expected)),
+        let namespace_matches = match (&reservation.namespace_name, &reservation.target) {
+            (Some(expected), _) => namespace.as_deref() == Some(expected.as_str()),
+            // Experiment reservations are keyed by the exact Environment identity and exact
+            // requested units, so an absent namespace cannot be used to claim an unrelated pod.
+            (None, ActiveReservationTarget::Environment { .. }) => true,
+            (None, ActiveReservationTarget::Task { .. }) => false,
         };
         if !namespace_matches {
             continue;
         }
         let target_matches = match &reservation.target {
-            ResourceTarget::Environment {
+            ActiveReservationTarget::Environment {
                 environment_id: id, ..
             } => {
                 task_run_id.is_none() && environment_id.as_deref() == Some(id.to_string().as_str())
             }
-            ResourceTarget::Task { task_run_id: id } => {
+            ActiveReservationTarget::Task { task_run_id: id } => {
                 environment_id.is_none() && task_run_id.as_deref() == Some(id.to_string().as_str())
             }
         };
         if target_matches && pod_requested_units(pod, allocation_binding)? == reservation.units {
             tracing::debug!(
                 event = "resource.gpu_capacity.reservation_excluded",
-                claim_id = %reservation.claim_id,
                 entry_id = %reservation.entry_id,
                 allocation_binding,
                 units = reservation.units,
@@ -1445,16 +1442,11 @@ mod tests {
     fn pod_labels_and_phases_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let environment_id = contracts::EnvironmentId::new();
         let reservation = ActiveGpuReservation {
-            claim_id: contracts::CapacityClaimId::new(),
             entry_id: contracts::GpuCatalogEntryId::new(),
             units: 1,
             allocation_binding: "nvidia.com/gpu".to_owned(),
             namespace_name: Some("lw-env".to_owned()),
-            target: ResourceTarget::Environment {
-                environment_id,
-                release_id: contracts::ReleaseId::new(),
-                release_version: 1,
-            },
+            target: ActiveReservationTarget::Environment { environment_id },
         };
         let mut pod = json!({
             "metadata": {
@@ -1496,12 +1488,11 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let task_run_id = contracts::TaskRunId::new();
         let reservation = ActiveGpuReservation {
-            claim_id: contracts::CapacityClaimId::new(),
             entry_id: contracts::GpuCatalogEntryId::new(),
             units: 2,
             allocation_binding: "nvidia.com/gpu".to_owned(),
             namespace_name: Some("labweaver-evaluation-runs".to_owned()),
-            target: ResourceTarget::Task { task_run_id },
+            target: ActiveReservationTarget::Task { task_run_id },
         };
         let pod = json!({
             "metadata": {

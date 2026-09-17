@@ -13,14 +13,14 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use contracts::evaluation::{
-    AdvisoryOutputMode, AdvisoryRunnerSpec, ApprovedProgramProfile, DeterministicRunnerSpec,
-    EvaluationRelease, EvaluationRun, EvaluationStep, EvaluationStepCompletion,
-    EvaluationStepRunState, ProgramPhase,
+    AdvisoryOutputMode, AdvisoryRunnerSpec, ApprovedProgramProfile, CheckerSpec,
+    DeterministicRunnerSpec, EvaluationRelease, EvaluationRun, EvaluationStep,
+    EvaluationStepCompletion, EvaluationStepRunState, ProgramPhase,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{EvaluationStepLease, PgEvaluationControlStore};
+use crate::{EvaluationStepLease, PgEvaluationControlStore, oj::OjCheckerKind};
 
 /// The execution identity used by every direct argv expansion.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,6 +132,7 @@ pub enum StepExecutionPlan {
         input: String,
         test_groups: Vec<contracts::evaluation::TestGroup>,
         limits: contracts::evaluation::ExecutionLimits,
+        checker: OjCheckerKind,
     },
     /// Executes a read-only Linux probe.
     AnsibleProbe {
@@ -176,13 +177,29 @@ pub fn plan_deterministic_step(step: &EvaluationStep) -> Result<StepExecutionPla
             input,
             test_groups,
             limits,
-        } => Ok(StepExecutionPlan::Program {
-            toolchain_profile: toolchain_profile.clone(),
-            phase: *phase,
-            input: input.clone(),
-            test_groups: test_groups.clone(),
-            limits: *limits,
-        }),
+        } => {
+            let declared = match step {
+                EvaluationStep::Gate(gate) => Some(gate.checker()),
+                EvaluationStep::Score(score) => Some(score.checker()),
+                EvaluationStep::Advisory(_) => None,
+            };
+            let checker = match *phase {
+                ProgramPhase::Test => match declared {
+                    Some(CheckerSpec::Token) => OjCheckerKind::Token,
+                    Some(CheckerSpec::Exact) | None => OjCheckerKind::Exact,
+                    Some(_) => return Err(ExecutionError::StepInvalid),
+                },
+                ProgramPhase::Compile => OjCheckerKind::Exact,
+            };
+            Ok(StepExecutionPlan::Program {
+                toolchain_profile: toolchain_profile.clone(),
+                phase: *phase,
+                input: input.clone(),
+                test_groups: test_groups.clone(),
+                limits: *limits,
+                checker,
+            })
+        }
         DeterministicRunnerSpec::AnsibleProbe {
             playbook_profile,
             module_allowlist,

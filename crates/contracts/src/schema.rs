@@ -604,6 +604,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::RecordResourceUsageRequest
     );
     document!(
+        "schemas/contracts/v1/http/resolve-environment-gpu-allocation-request.schema.json",
+        crate::environment::ResolveEnvironmentGpuAllocationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/resolve-environment-gpu-allocation-response.schema.json",
+        crate::environment::ResolveEnvironmentGpuAllocationResponse
+    );
+    document!(
+        "schemas/contracts/v1/http/release-environment-gpu-allocation-request.schema.json",
+        crate::environment::ReleaseEnvironmentGpuAllocationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/release-environment-gpu-allocation-response.schema.json",
+        crate::environment::ReleaseEnvironmentGpuAllocationResponse
+    );
+    document!(
         "schemas/contracts/v1/http/task-resource-status.schema.json",
         crate::http::TaskResourceStatus
     );

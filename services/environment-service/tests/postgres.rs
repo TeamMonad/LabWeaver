@@ -775,6 +775,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         provider_binding: handoff.provider_binding.clone(),
         lease_id: handoff.lease_id,
         capacity_binding: handoff.capacity_binding.clone(),
+        gpu_allocation: None,
         eligibility_expires_at: handoff.eligibility_expires_at,
     };
 

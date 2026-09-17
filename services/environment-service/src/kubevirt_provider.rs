@@ -2478,7 +2478,7 @@ fn approved_resources(
                 resources.cpu_millicores,
                 resources.memory_bytes,
                 resources.storage_bytes,
-                None,
+                experiment_gpu_allocation(instance, projection)?,
             ))
         }
         contracts::authoring::EnvironmentClass::Work => {
@@ -2506,6 +2506,31 @@ fn approved_resources(
                 authorization.gpu_allocation.clone(),
             ))
         }
+    }
+}
+
+/// Returns the Resource-resolved Experiment GPU allocation, failing closed on any mismatch.
+///
+/// A release that declares a GPU but has no durable allocation, or whose allocation does not
+/// match the declared class and count, is rejected before any VM object is rendered.
+fn experiment_gpu_allocation(
+    instance: &EnvironmentInstance,
+    projection: &ReleasePublished,
+) -> Result<Option<GpuAllocation>, ReleaseProjectionError> {
+    match (
+        &instance.gpu_allocation,
+        projection.environment_spec.resources.gpu.as_ref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(allocation), Some(request))
+            if allocation.class == request.class && allocation.count == request.count =>
+        {
+            allocation
+                .validate()
+                .map_err(|_| ReleaseProjectionError::SecurityPostureInvalid)?;
+            Ok(Some(allocation.clone()))
+        }
+        _ => Err(ReleaseProjectionError::SecurityPostureInvalid),
     }
 }
 

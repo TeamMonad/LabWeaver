@@ -3192,7 +3192,7 @@ fn evaluation_checkpoint(
 ) -> Result<AgentTrackCheckpoint, AgentRunStoreError> {
     match result {
         Ok(execution) => {
-            let CandidateDocument::Evaluation(spec) = execution.document else {
+            let CandidateDocument::Evaluation(document) = execution.document else {
                 return Err(AgentRunStoreError::InvalidContract);
             };
             let candidate = EvaluationCandidate {
@@ -3201,7 +3201,8 @@ fn evaluation_checkpoint(
                 project_id: run.project_id,
                 course_id: run.course_id,
                 revision: Revision::new(1).map_err(|_| AgentRunStoreError::InvalidContract)?,
-                spec,
+                spec: document.spec,
+                runner_build_context: document.runner_build_context,
                 policy_revision: run.policy_revision,
                 model: execution.audit.model.clone(),
                 created_at: now,

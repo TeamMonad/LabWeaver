@@ -35,3 +35,4 @@ executor:
   harborPasswordFile: "/etc/labweaver/secrets/harbor-password"
   projectStorageQuotaBytes: 10737418240
   robotSubject: "platform-build-executor"
+  serviceImage: "harbor.example.invalid/labweaver-system/evaluation-service@sha256:4444444444444444444444444444444444444444444444444444444444444444"

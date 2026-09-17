@@ -8,5 +8,6 @@
 - import_playbook: 50-install-network.yml
 - import_playbook: 60-install-storage.yml
 - import_playbook: 70-install-kubevirt.yml
+- import_playbook: 75-sandbox-runtime.yml
 - import_playbook: 80-install-addons.yml
 - import_playbook: 82-public-ingress.yml

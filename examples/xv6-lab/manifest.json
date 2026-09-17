@@ -21,22 +21,22 @@
       {
         "path": "Dockerfile",
         "role": "public",
-        "sha256": "3cecf0ba2d84a5ebbd3fd382cf0ad3468a044169d37c8799af5d777680afbfe9"
-      },
-      {
-        "path": "README.md",
-        "role": "public",
-        "sha256": "72cc002cc27b5d4dc42695480d54d81f27636f972379a4a3fa7884062d76d2bb"
+        "sha256": "d3084debf13a6b393dd1596aa90f514728d3644df014898804033fadcf797dd9"
       },
       {
         "path": "environment.yaml",
         "role": "public",
-        "sha256": "77666e7af818c5fb19d83b2b033580dd896378a0ab91edd51d8c57cbf15376d5"
+        "sha256": "0722109d85159ef54fd2544c52b346a4eef03cdc78b01b9eb865f2cb18cc747e"
       },
       {
         "path": "evaluation.yaml",
         "role": "public",
-        "sha256": "2139edb51fd25d850994a65e2a6937bf923fd1af7b9d57d10a5c349513c5fb2f"
+        "sha256": "de7b470a2b9bf564afd63277fc6fd5d6ab3d8ae2006e18da20efe407ffaf3d83"
+      },
+      {
+        "path": "evaluation/Dockerfile",
+        "role": "controlled",
+        "sha256": "9e05aee0f2dcb26692e6e63c6bc77a632c3d2e8f6f5771596b2528f441e0a8ae"
       },
       {
         "path": "profiles/xv6-riscv64.json",
@@ -56,7 +56,7 @@
       {
         "path": "scripts/run-xv6.py",
         "role": "public",
-        "sha256": "5be81a75187e9ac2cd922eef08375632cc043570aaabc644f604d8df8d614236"
+        "sha256": "9e9f2aec106072bc18a91c03defb29c3e5b4e8a403e2f812caba6d573562476c"
       },
       {
         "path": "scripts/run-xv6.sh",
@@ -70,22 +70,22 @@
       },
       {
         "path": "tests/xv6-riscv64/filesystem.in",
-        "role": "public",
+        "role": "controlled",
         "sha256": "f02aec217cc43a4f231dd40369de26f863314c95e48f31b7a1868a948bfc3f9e"
       },
       {
         "path": "tests/xv6-riscv64/filesystem.out",
-        "role": "public",
+        "role": "controlled",
         "sha256": "eec63cdd47b5cbbca46068b91e472d505fc0e28fbd6caa315bb6ca00df639bef"
       },
       {
         "path": "tests/xv6-riscv64/smoke.in",
-        "role": "public",
+        "role": "controlled",
         "sha256": "8827bc20c501a8b240a93ddd7d227b55c46cf3e225a7a0bf3d5f2c8567630df3"
       },
       {
         "path": "tests/xv6-riscv64/smoke.out",
-        "role": "public",
+        "role": "controlled",
         "sha256": "2eddc1428d96c2632aa818020bfaf3ae1bd70f1b0664b491a8f47cfb49e6f8fc"
       },
       {
@@ -501,9 +501,9 @@
     ],
     "controlledArtifacts": [
       {
-        "name": "xv6-toolchain-image",
-        "locator": "private://evaluation/xv6-riscv64/toolchain-image",
-        "binding": "xv6-riscv64-toolchain-v1"
+        "name": "xv6-runner-image",
+        "locator": "private://evaluation/xv6-riscv64/runner-image",
+        "binding": "xv6-riscv64-runner-v1"
       },
       {
         "name": "xv6-hidden-tests",

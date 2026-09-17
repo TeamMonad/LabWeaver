@@ -220,38 +220,6 @@ pub(crate) fn deploy(environment: &str, manifest_path: &Path, root: &Path) -> Re
     }
 }
 
-pub(crate) fn rollback(
-    environment: &str,
-    release_revision: &str,
-    yes: bool,
-    root: &Path,
-) -> Result<(), AppError> {
-    if !yes {
-        return Err(AppError::ConfirmationRequired {
-            command: "rollback",
-        });
-    }
-    validate_environment(environment)?;
-    let revision = release_revision
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or(AppError::InvalidArgument {
-            role: "positive Helm release revision",
-        })?;
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (revision, root);
-        Err(AppError::UnsupportedPlatform {
-            command: "rollback",
-        })
-    }
-    #[cfg(target_os = "linux")]
-    {
-        rollback_linux(environment, revision, root)
-    }
-}
-
 fn read_manifest(path: &Path) -> Result<PackageManifest, AppError> {
     let bytes = fs::read(path).map_err(|error| io_error("read package manifest", error))?;
     serde_json::from_slice(&bytes).map_err(|error| AppError::Io {
@@ -1069,30 +1037,6 @@ fn cluster_uid(kubeconfig: &str) -> Result<String, AppError> {
         });
     }
     Ok(uid)
-}
-
-#[cfg(target_os = "linux")]
-fn rollback_linux(environment: &str, revision: u64, root: &Path) -> Result<(), AppError> {
-    let manifest_path = PathBuf::from(required_env("LABWEAVER_PLATFORM_ROLLBACK_MANIFEST")?);
-    let manifest = read_manifest(&manifest_path)?;
-    validate_manifest(&manifest)?;
-    connected_validate(&manifest, root)?;
-    let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
-    run_checked(
-        Command::new("helm").env("KUBECONFIG", kubeconfig).args([
-            "rollback",
-            "labweaver",
-            &revision.to_string(),
-            "--namespace",
-            "labweaver-system",
-            "--wait",
-            "--timeout",
-            "10m",
-        ]),
-        "Helm verified digest rollback",
-    )?;
-    let _ = environment;
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]

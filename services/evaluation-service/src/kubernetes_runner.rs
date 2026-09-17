@@ -453,6 +453,7 @@ impl KubernetesEvaluationRunner {
                 input,
                 test_groups,
                 limits,
+                checker,
             } => {
                 self.start_program(
                     &context,
@@ -463,6 +464,7 @@ impl KubernetesEvaluationRunner {
                     &test_groups,
                     limits,
                     &admission,
+                    checker,
                 )
                 .await?
             }
@@ -1283,6 +1285,7 @@ impl KubernetesEvaluationRunner {
         test_groups: &[contracts::evaluation::TestGroup],
         limits: contracts::evaluation::ExecutionLimits,
         admission: &crate::execution_backend::AdmittedExecution,
+        checker: OjCheckerKind,
     ) -> Result<StartedExecution, ExecutionError> {
         let (request, package, package_bytes, profile_file, profile) = self
             .build_program_request(
@@ -1293,6 +1296,7 @@ impl KubernetesEvaluationRunner {
                 input,
                 test_groups,
                 limits,
+                checker,
             )
             .await?;
         let intent = execution_resources(
@@ -1393,6 +1397,7 @@ impl KubernetesEvaluationRunner {
         input: &str,
         test_groups: &[contracts::evaluation::TestGroup],
         limits: contracts::evaluation::ExecutionLimits,
+        checker: OjCheckerKind,
     ) -> Result<
         (
             OjExecutionRequest,
@@ -1499,7 +1504,7 @@ impl KubernetesEvaluationRunner {
                 ProgramPhase::Compile => OjExecutionPhase::Compile,
                 ProgramPhase::Test => OjExecutionPhase::Test,
             },
-            checker: (phase == ProgramPhase::Test).then_some(OjCheckerKind::Exact),
+            checker: (phase == ProgramPhase::Test).then_some(checker),
             cases,
             score_max_points: if phase == ProgramPhase::Test {
                 context.lease.max_score

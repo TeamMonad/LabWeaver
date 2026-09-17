@@ -1,0 +1,76 @@
+apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: cuda-gpu-reduction-lab
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include:
+        - student/gpu_stats.cu
+        - student/result.txt
+      exclude:
+        - build
+      maxBytes: 8388608
+    llmReadable: []
+  steps:
+    - role: gate
+      id: source-present
+      runner:
+        kind: file_assertion
+        requiredFiles:
+          - student/gpu_stats.cu
+          - student/result.txt
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: gate
+      id: compile
+      dependsOn: [source-present]
+      runner:
+        kind: program
+        toolchainProfile: cuda-nvcc
+        phase: compile
+        input: student/gpu_stats.cu
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 1073741824
+          outputBytes: 4194304
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: score
+      id: result-check
+      dependsOn: [compile]
+      runner:
+        kind: program
+        toolchainProfile: cuda-nvcc
+        phase: test
+        input: student/gpu_stats.cu
+        testGroups:
+          - name: gpu-stats
+            source: evaluator://tests/cuda-nvcc/gpu-stats
+            maxPoints: 100
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 1073741824
+          outputBytes: 4194304
+      checker:
+        kind: token
+      score:
+        max: 100
+      failurePolicy: continue
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 100
+    gates:
+      - step: compile
+        requiredStatus: passed
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen:
+      - infrastructureError
+      - invalidEvidence

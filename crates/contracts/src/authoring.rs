@@ -398,12 +398,15 @@ impl WorkConfigurationPreauthorization {
 }
 
 /// Bounded runtime resources expressed without Kubernetes-dependent parsing.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceRequirements {
     pub cpu_millicores: u32,
     pub memory_bytes: u64,
     pub storage_bytes: u64,
+    /// Policy-catalogued GPU class and count. It never carries a Kubernetes resource name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<crate::resource::GpuRequest>,
 }
 
 /// Network egress posture for a published environment.
@@ -603,6 +606,13 @@ impl EnvironmentSpec {
             return Err(AuthoringError::InvalidEnvironmentSpec(
                 "resource requirements must be non-zero".to_owned(),
             ));
+        }
+        if let Some(gpu) = &self.resources.gpu {
+            gpu.validate().map_err(|_| {
+                AuthoringError::InvalidEnvironmentSpec(
+                    "gpu must name a catalog class with a non-zero count".to_owned(),
+                )
+            })?;
         }
         if self.entries.is_empty() || self.security.security_profile_binding.trim().is_empty() {
             return Err(AuthoringError::InvalidEnvironmentSpec(
@@ -1055,6 +1065,13 @@ pub struct EvaluationCandidate {
     pub spec: EvaluationSpec,
     pub policy_revision: Revision,
     pub model: String,
+    /// Generated build context for this experiment's own Evaluation runner image.
+    ///
+    /// Only Container experiments carry a runner image; deployment-owned VM evaluation leaves this
+    /// absent. Control resolves the object key from the Agent artifact authority before enqueueing
+    /// the second single-image build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_build_context: Option<ArtifactRef>,
     pub created_at: UtcTimestamp,
 }
 
@@ -1064,6 +1081,9 @@ impl EvaluationCandidate {
             return Err(AuthoringError::InvalidAgentRun(
                 "candidate model is invalid".to_owned(),
             ));
+        }
+        if let Some(runner) = &self.runner_build_context {
+            validate_artifact_ref(runner)?;
         }
         Ok(())
     }
@@ -1142,6 +1162,12 @@ pub struct AuthoringApproval {
     /// Exact Evaluation execution identity frozen when this approval is completed.
     pub evaluation_runtime_identity: EvaluationRuntimeIdentity,
     pub image_artifact: ImageArtifact,
+    /// Exact per-experiment Evaluation runner image frozen with this approval.
+    ///
+    /// Container experiments must carry their own built runner image. VM experiments use the
+    /// deployment-owned Evaluation runtime and leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_runner_image_artifact: Option<ImageArtifact>,
     pub actor_id: ActorId,
     pub reason: String,
     pub approved_at: UtcTimestamp,
@@ -1161,7 +1187,27 @@ impl AuthoringApproval {
             .map_err(|_| AuthoringError::InvalidApproval)?;
         self.image_artifact
             .validate()
-            .map_err(|_| AuthoringError::InvalidArtifactReference)
+            .map_err(|_| AuthoringError::InvalidArtifactReference)?;
+        match (&self.image_artifact, &self.evaluation_runner_image_artifact) {
+            (ImageArtifact::Container { .. }, Some(runner)) => {
+                if !matches!(runner, ImageArtifact::Container { .. }) {
+                    return Err(AuthoringError::InvalidApproval);
+                }
+                runner
+                    .validate()
+                    .map_err(|_| AuthoringError::InvalidArtifactReference)?;
+            }
+            (ImageArtifact::Container { .. }, None) => {
+                return Err(AuthoringError::InvalidApproval);
+            }
+            (ImageArtifact::VirtualMachine { .. }, Some(runner)) => {
+                runner
+                    .validate()
+                    .map_err(|_| AuthoringError::InvalidArtifactReference)?;
+            }
+            (ImageArtifact::VirtualMachine { .. }, None) => {}
+        }
+        Ok(())
     }
 
     /// Verifies that the approval belongs to the requested project context.

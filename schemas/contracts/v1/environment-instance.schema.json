@@ -645,6 +645,17 @@
       "minimum": 0,
       "type": "integer"
     },
+    "gpuAllocation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Resource-resolved Experiment GPU allocation held while this instance exists.\n\nWork environments never use this field; their allocation remains on the Lease\nauthorization. A present value is validated against the immutable instance identity."
+    },
     "id": {
       "$ref": "#/$defs/EnvironmentId"
     },

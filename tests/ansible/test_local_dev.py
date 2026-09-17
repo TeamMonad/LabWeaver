@@ -2181,6 +2181,10 @@ class LocalDevBundleTests(unittest.TestCase):
                 build_values["executor"]["projectStorageQuotaBytes"],
                 provider.project_storage_quota_bytes,
             )
+            self.assertEqual(
+                build_values["executor"]["serviceImage"],
+                images["evaluation_service"],
+            )
             build_secret = next(
                 document
                 for document in documents

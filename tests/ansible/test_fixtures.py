@@ -58,7 +58,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("checksum: \"sha256:", tasks)
         self.assertNotIn("ansible.builtin.shell", tasks)
 
-    def test_platform_foundation_is_persistent_and_reset_preserves_it(self) -> None:
+    def test_platform_foundation_is_persistent(self) -> None:
         playbook = (ROOT / "deploy/ansible/playbooks/92-platform-foundation.yml").read_text(
             encoding="utf-8"
         )
@@ -68,9 +68,6 @@ class AnsibleFixtureTests(unittest.TestCase):
         workloads = (
             ROOT / "deploy/ansible/roles/platform_foundation/templates/workloads.yml.j2"
         ).read_text(encoding="utf-8")
-        reset = (ROOT / "deploy/ansible/roles/platform_reset/defaults/main.yml").read_text(
-            encoding="utf-8"
-        )
         foundation_defaults = (
             ROOT / "deploy/ansible/roles/platform_foundation/defaults/main.yml"
         ).read_text(encoding="utf-8")
@@ -150,116 +147,6 @@ class AnsibleFixtureTests(unittest.TestCase):
             {"4222", "5432", "9000"},
         )
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", tasks)
-        reset_namespaces = reset.split("platform_reset_domains:", maxsplit=1)[0]
-        self.assertNotIn("labweaver-data", reset_namespaces)
-        self.assertNotIn("labweaver-build", reset_namespaces)
-
-    def test_nats_authority_rotation_is_bounded_and_recoverable(self) -> None:
-        playbook = (
-            ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("--workloads-seed-file", playbook)
-        self.assertIn("NATS_AUTHORITY_ROTATION_ROLLBACK_SURFACE_INCOMPLETE", playbook)
-        self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_SURFACE_AMBIGUOUS", playbook)
-        self.assertIn("nats_rotation_resource_bootstrap", playbook)
-        self.assertIn(
-            "(nats_rotation_record.identities | map(attribute='identity') | sort)",
-            playbook,
-        )
-        self.assertIn(
-            "== (nats_rotation_expected_identities | sort)",
-            playbook,
-        )
-        self.assertIn("nats_rotation_existing_secret_objects", playbook)
-        self.assertIn("item != 'resource-service'", playbook)
-        self.assertIn("rollback/kubernetes-objects.yaml", playbook)
-        self.assertIn("Require a complete application rollback surface", playbook)
-        self.assertIn("rollback/application-objects.yaml", playbook)
-        self.assertLess(
-            playbook.index("Create the root-only rollback directory"),
-            playbook.index("Preserve the complete root-only application rollback surface"),
-        )
-        self.assertIn("- import_playbook: 92-platform-foundation.yml", playbook)
-        self.assertIn("Apply only reviewed NATS-bearing application objects", playbook)
-        self.assertIn(
-            "Apply reviewed Resource NATS-bearing objects when Resource is adopted",
-            playbook,
-        )
-        self.assertIn("--force-conflicts", playbook)
-        self.assertIn("Roll every affected workload to the replacement authority", playbook)
-        self.assertIn("resource-service", playbook)
-        self.assertIn("nats_rotation_record.identities | length == 10", playbook)
-        self.assertIn("Verify replacement administrator JWT and mutual TLS", playbook)
-        self.assertIn("Wait for replacement NATS administrator transport", playbook)
-        self.assertIn("LABWEAVER_RESOURCE", playbook)
-        self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_STREAM_INVALID", playbook)
-        self.assertIn("nats_rotation_resource_stream_after.stdout | from_json", playbook)
-        self.assertIn("when: not ansible_check_mode", playbook)
-        self.assertNotIn("ansible.builtin.shell", playbook)
-        self.assertNotRegex(playbook, r"\bkubectl\s+delete\b")
-        self.assertNotRegex(playbook, r"\bDROP\s+(?:DATABASE|SCHEMA)\b")
-
-    def test_nats_rotation_resource_bootstrap_does_not_synthesize_secret(
-        self,
-    ) -> None:
-        plays = yaml.safe_load(
-            (ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml").read_text(
-                encoding="utf-8"
-            )
-        )
-        readiness = next(
-            task
-            for play in plays
-            for task in play.get("tasks", [])
-            if task.get("name") == "Require NATS and every affected workload to be ready"
-        )
-        conditions = readiness["ansible.builtin.assert"]["that"]
-        resource_secret = next(
-            condition
-            for condition in conditions
-            if "nats_rotation_readback.results[3]" in condition
-        )
-        self.assertIn("resources | length == 1", resource_secret)
-        self.assertIn("nats_rotation_resource_bootstrap", resource_secret)
-        self.assertIn("not", resource_secret)
-        resource_apply = next(
-            task
-            for play in plays
-            for task in play.get("tasks", [])
-            if task.get("name")
-            == "Apply reviewed Resource NATS-bearing objects when Resource is adopted"
-        )
-        self.assertIn("nats_rotation_resource_bootstrap", resource_apply["when"])
-        self.assertIn("not", resource_apply["when"])
-
-    def test_nats_rotation_readback_checks_each_workload_without_nested_map(self) -> None:
-        playbook = (
-            ROOT / "deploy/ansible/playbooks/96-nats-authority-rotation.yml"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn(
-            "map(attribute='status.readyReplicas')",
-            playbook,
-        )
-        self.assertIn("Require every affected workload to be ready", playbook)
-        self.assertIn(
-            "item.status.readyReplicas | default(0, true) | int == 1",
-            playbook,
-        )
-        self.assertIn("NATS_AUTHORITY_ROTATION_WORKLOAD_READBACK_FAILED", playbook)
-        self.assertIn("Require NATS StatefulSet to be ready", playbook)
-        self.assertIn("Require Resource workload to be ready when adopted", playbook)
-        self.assertIn("NATS_AUTHORITY_ROTATION_NATS_READBACK_FAILED", playbook)
-        self.assertIn("NATS_AUTHORITY_ROTATION_RESOURCE_READBACK_FAILED", playbook)
-        self.assertIn(
-            "hostvars['localhost'].nats_rotation_expected_application_deployments | int",
-            playbook,
-        )
-        readiness = playbook.split(
-            "- name: Require NATS and every affected workload to be ready",
-            maxsplit=1,
-        )[1].split("- name: Require NATS StatefulSet to be ready", maxsplit=1)[0]
-        self.assertNotIn(".status.readyReplicas", readiness)
 
     def test_object_store_proxy_has_a_minio_only_transport_rule(self) -> None:
         tasks = (
@@ -357,7 +244,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("state: absent", platform_route)
         self.assertNotIn("field_manager", platform_route)
         self.assertNotIn("adopt", platform_route.lower())
-        self.assertIn("roles: [backup, harbor, platform_harbor_route]", playbook)
+        self.assertIn("roles: [harbor, platform_harbor_route]", playbook)
         self.assertIn("LABWEAVER PLATFORM HARBOR", platform_route)
         self.assertIn("Reject foreign Harbor route objects before mutation", platform_route)
         self.assertIn("platform_harbor_gateway_read.resources | length == 0 or", platform_route)
@@ -1720,40 +1607,6 @@ class AnsibleFixtureTests(unittest.TestCase):
         }
         self.assertEqual(set(stream["subjects"]), expected)
         self.assertNotIn("labweaver.resource.lease.verify.v1", stream["subjects"])
-        reset_defaults = yaml.safe_load(
-            (
-                ROOT / "deploy/ansible/roles/platform_reset/defaults/main.yml"
-            ).read_text(encoding="utf-8")
-        )
-        reset_stream = next(
-            item
-            for item in reset_defaults["platform_reset_nats_streams"]
-            if item["name"] == "LABWEAVER_RESOURCE_EVENTS"
-        )
-        self.assertEqual(set(reset_stream["subjects"].split(",")), expected)
-        self.assertNotIn("labweaver.resource.lease.verify.v1", reset_stream["subjects"])
-
-    def test_platform_reset_recreates_all_evaluation_outbox_stream_subjects(self) -> None:
-        defaults = yaml.safe_load(
-            (
-                ROOT
-                / "deploy/ansible/roles/platform_reset/defaults/main.yml"
-            ).read_text(encoding="utf-8")
-        )
-        streams = {
-            stream["name"]: stream
-            for stream in defaults["platform_reset_nats_streams"]
-        }
-        self.assertIn(
-            "labweaver.evaluation.release.published.v1",
-            streams["LABWEAVER_RELEASES"]["subjects"].split(","),
-        )
-        for subject in (
-            "labweaver.evaluation.run.requested.v1",
-            "labweaver.evaluation.run.state_changed.v1",
-            "labweaver.evaluation.step_run.state_changed.v1",
-        ):
-            self.assertIn(subject, streams["LABWEAVER_SUBMISSION"]["subjects"].split(","))
 
     def test_kubevirt_executor_can_apply_its_planned_resource_quota(self) -> None:
         service_account = (
@@ -1844,24 +1697,23 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("verify_runtime_namespace", verify)
         self.assertIn("virtctl -n {{ verify_runtime_namespace }} start kvm-probe", verify)
         self.assertIn("virtctl -n {{ verify_runtime_namespace }} stop kvm-probe", verify)
+        self.assertIn("delete vm/kvm-probe", verify)
         self.assertNotIn("patch virtualmachine/kvm-probe", verify)
-        self.assertIn("verify_cleanup_failed", verify)
-        self.assertIn("CILIUM_CLEANUP_FAILED", verify)
+        self.assertIn("VERIFY_CLEANUP_FAILED", verify)
 
-    def test_gateway_testflight_resources_are_run_scoped(self) -> None:
+    def test_gateway_verify_resources_are_run_scoped(self) -> None:
         verify = (ROOT / "deploy/ansible/roles/verify/tasks/main.yml").read_text(encoding="utf-8")
         probes = (ROOT / "deploy/ansible/roles/verify/templates/runtime-probes.yml.j2").read_text(encoding="utf-8")
         self.assertIn("verify_gateway_backend_name", verify)
-        self.assertIn("labweaver.io/testflight-run={{ verify_testflight_run_id }}", verify)
+        self.assertIn("labweaver.io/verify-run={{ verify_run_id }}", verify)
         self.assertIn("name: {{ verify_gateway_backend_name }}", probes)
-        self.assertIn("labweaver.io/testflight-run", probes)
+        self.assertIn("labweaver.io/verify-run", probes)
 
-    def test_harbor_reconcile_requires_bound_backup_and_pinned_artifacts(self) -> None:
+    def test_harbor_reconcile_uses_pinned_artifacts(self) -> None:
         playbook = (ROOT / "deploy/ansible/playbooks/95-harbor.yml").read_text(encoding="utf-8")
         harbor = (ROOT / "deploy/ansible/roles/harbor/tasks/main.yml").read_text(encoding="utf-8")
         lock = (ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8")
-        self.assertIn("roles: [backup, harbor, platform_harbor_route]", playbook)
-        self.assertIn("HARBOR_BACKUP_EVIDENCE_INVALID", harbor)
+        self.assertIn("roles: [harbor, platform_harbor_route]", playbook)
         self.assertIn("HARBOR_CHART_ARCHIVE_IDENTITY_INVALID", harbor)
         self.assertIn("database_permissions", harbor)
         self.assertIn("harbor_component_resources", harbor)
@@ -1997,31 +1849,6 @@ class AnsibleFixtureTests(unittest.TestCase):
             )
             self.assertEqual(rendered_values["audience"], client["audience"])
 
-    def test_testflight_report_requires_deployment_identity_chain(self) -> None:
-        schema = json.loads(
-            (ROOT / "schemas/infrastructure/infrastructure-testflight-report.v1.schema.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        for field in (
-            "schema_version", "scope", "run_id", "deployment_run_id", "cluster_uid",
-            "harbor_policy_manifest_hash", "deployment_manifest_hash",
-            "deployment_manifest_locator", "overall", "checks", "cleanup",
-        ):
-            self.assertIn(field, schema["required"])
-
-    def test_baseline_testflight_defers_identity_governance(self) -> None:
-        verify = (ROOT / "deploy/ansible/roles/verify/tasks/main.yml").read_text(encoding="utf-8")
-        schema = json.loads(
-            (ROOT / "schemas/infrastructure/infrastructure-testflight-report.v1.schema.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertIn("adopted-cluster-baseline", verify)
-        self.assertIn("deferred-to-issue-47", verify)
-        self.assertIn("deferred-to-issue-2", verify)
-        self.assertIn("deferred", schema["properties"]["checks"]["items"]["properties"]["status"]["enum"])
-
     def test_storage_safety_rejects_dangerous_devices(self) -> None:
         safe = {"path": "/dev/test", "type": "disk", "fstype": None, "wwn": "fixture-wwn", "size": 1073741824, "pkname": None, "mountpoints": [None]}
         result = SAFETY.validate([safe], "/dev/test", "fixture-wwn", 1073741824, "/dev/root", [])
@@ -2035,51 +1862,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         with self.assertRaises(SAFETY.UnsafeStorage):
             SAFETY.validate([safe], "/dev/test", "fixture-wwn", 1073741824, "/dev/root", ["holder"])
 
-    def test_platform_reset_is_identity_bound_and_fail_closed(self) -> None:
-        playbook = (ROOT / "deploy/ansible/playbooks/93-platform-reset.yml").read_text(
-            encoding="utf-8"
-        )
-        tasks = (ROOT / "deploy/ansible/roles/platform_reset/tasks/main.yml").read_text(
-            encoding="utf-8"
-        )
-        baseline = (
-            ROOT / "deploy/ansible/roles/platform_reset/templates/baseline.sql.j2"
-        ).read_text(encoding="utf-8")
-        xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
-        self.assertEqual(playbook.splitlines()[1], "- import_playbook: 00-preflight.yml")
-        self.assertIn("labweaver_preflight_scope: platform-reset", playbook)
-        self.assertIn("destroy-pre-release-data:", tasks)
-        self.assertIn("platform_reset_cluster_uid", tasks)
-        self.assertIn("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED", tasks)
-        destructive_action = tasks.index("Uninstall the historical Private Sigstore release")
-        for dependency_probe in (
-            "Probe PostgreSQL before any destructive action",
-            "Probe JetStream before any destructive action",
-            "Probe MinIO before any destructive action",
-            "Probe BuildKit before any destructive action",
-            "Probe Harbor before any destructive action",
-            "Authenticate Keycloak administration before any destructive action",
-        ):
-            self.assertLess(tasks.index(dependency_probe), destructive_action)
-        self.assertLess(
-            tasks.index("KYVERNO_EXTERNAL_DEPENDENCY_DETECTED"),
-            tasks.index("Uninstall the Kyverno release"),
-        )
-        self.assertIn("KYVERNO_ADMISSION_WEBHOOK_REMAINS", tasks)
-        self.assertIn("Deploy the identical Sprint 2 profile a second time", tasks)
-        self.assertIn("Exercise atomic rollback with reviewed invalid readiness values", tasks)
-        self.assertIn("PLATFORM_ATOMIC_ROLLBACK_FAILED", tasks)
-        self.assertIn("Delete exact residual Kyverno CRDs", tasks)
-        self.assertIn("Require the exact Sprint 2 deployment set", tasks)
-        self.assertIn("platform_reset_migration_catalog_stat", tasks)
-        self.assertIn("platform_reset_inventory_stat", tasks)
-        self.assertIn("PLATFORM_CONFIGURATION_BUNDLE_INVALID", tasks)
-        self.assertIn("Apply the reviewed workload configuration bundle", tasks)
-        self.assertIn("kubernetes.core.k8s", tasks)
-        self.assertNotIn("configuration_bundle", baseline)
-        self.assertIn("DROP SCHEMA IF EXISTS", baseline)
-        self.assertIn("0001_platform_baseline.sql", baseline)
-        self.assertEqual(baseline.count("0001_roles_and_schemas.sql"), 2)
+    def test_bootstrap_migration_contract_is_fail_closed(self) -> None:
         bootstrap = (ROOT / "migrations/bootstrap/0001_roles_and_schemas.sql").read_text(
             encoding="utf-8"
         )
@@ -2116,10 +1899,6 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("IF NOT FOUND THEN", bootstrap)
         self.assertIn("IF NOT EXISTS (\n                SELECT 1", bootstrap)
         self.assertIn("GRANT %I TO %I", bootstrap)
-        self.assertIn("SET ROLE lw_{{ domain }}_owner", baseline)
-        self.assertIn("schema_migrations", baseline)
-        self.assertIn("catalog_sha256", baseline)
-        self.assertNotIn("ansible.builtin.shell", tasks)
 
 
 if __name__ == "__main__":

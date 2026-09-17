@@ -3182,6 +3182,19 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("build executor configuration has no projectStorageQuotaBytes")
+            service_image = images.get("evaluation_service")
+            if not isinstance(service_image, str) or not re.fullmatch(
+                r"[^\s@]+(?:/[^\s@]+)*@sha256:[0-9a-f]{64}", service_image
+            ):
+                fail(
+                    "local build executor service image must be an immutable evaluation_service image"
+                )
+            executor_pattern = re.compile(r"(?m)^(executor:\s*)$")
+            data, replacements = executor_pattern.subn(
+                rf"\g<1>\n  serviceImage: {service_image}", data, count=1
+            )
+            if replacements != 1:
+                fail("build executor configuration has no executor mapping")
         if source.startswith("environment-providers"):
             data=(ROOT/"deploy/config/environment-providers.local-hostpath.example.json").read_text()
             providers = json.loads(data)

@@ -775,6 +775,84 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance
 }
 
+#[test]
+fn experiment_gpu_allocation_renders_the_extended_resource_on_the_pod() {
+    let projection = gpu_projection();
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(gpu_allocation("a100-exclusive", 1));
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("resolved Experiment GPU allocation is rendered");
+    let deployment = resource(&plan, "Deployment");
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu"),
+        Some(&json!("1"))
+    );
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu"),
+        Some(&json!("1"))
+    );
+    let quota = resource(&plan, "ResourceQuota");
+    assert_eq!(
+        quota.document.pointer("/spec/hard/limits.nvidia.com~1gpu"),
+        Some(&json!("1"))
+    );
+}
+
+#[test]
+fn experiment_gpu_release_without_a_durable_allocation_fails_closed() {
+    let projection = gpu_projection();
+    let instance = instance_for(&projection);
+    assert!(instance.gpu_allocation.is_none());
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+#[test]
+fn experiment_gpu_allocation_must_match_the_declared_class_and_count() {
+    let projection = gpu_projection();
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(gpu_allocation("a100-exclusive", 2));
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+fn gpu_projection() -> ReleasePublished {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(contracts::resource::GpuRequest {
+        class: "a100-exclusive".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU experiment projection");
+    projection
+}
+
+fn gpu_allocation(class: &str, count: u32) -> contracts::resource::GpuAllocation {
+    contracts::resource::GpuAllocation {
+        entry_id: contracts::GpuCatalogEntryId::new(),
+        class: class.to_owned(),
+        count,
+        mode: contracts::resource::GpuAllocationMode::Exclusive,
+        provider_binding: "container-primary-v1".to_owned(),
+        allocation_binding: "nvidia.com/gpu".to_owned(),
+        catalog_revision: revision(1),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the fixture deliberately constructs the complete immutable release identity"

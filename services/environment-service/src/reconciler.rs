@@ -557,6 +557,7 @@ mod tests {
             release_version: 1,
             lease_id: None,
             capacity_binding: None,
+            gpu_allocation: None,
             provider_binding: "container-primary-v1".to_owned(),
             desired_state: DesiredEnvironmentState::Running,
             observed_state: ObservedEnvironmentState::Provisioning,

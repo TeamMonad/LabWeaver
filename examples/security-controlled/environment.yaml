@@ -8,7 +8,7 @@ resources:
   storageBytes: 1073741824
 network:
   mode: restricted
-  policyBinding: security-lab-restricted-egress-v1
+  policy_binding: security-lab-restricted-egress-v1
 entries:
   - name: public-files
     protocol: http
@@ -21,14 +21,14 @@ security:
   securityProfileBinding: security-lab-container-v1
 runtime:
   kind: container
-  providerBinding: kubernetes-work-local-hostpath
-  buildContext:
+  provider_binding: kubernetes-work-local-hostpath
+  build_context:
     artifactId: 01900000-0000-7000-8000-000000000021
     storeBinding: problem-package-minio-v1
     objectVersion: security-context-v1
     sizeBytes: 1
     mediaType: application/vnd.labweaver.build-context.v1+tar
-  servicePort: 8080
+  service_port: 8080
   terminal:
     executable: /bin/sh
     args: []

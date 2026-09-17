@@ -1,0 +1,44 @@
+apiVersion: environment.labweaver.io/v1
+kind: EnvironmentSpec
+name: cuda-gpu-reduction-lab
+class: experiment
+resources:
+  cpuMillicores: 1000
+  memoryBytes: 2147483648
+  storageBytes: 5368709120
+  gpu:
+    class: v100-exclusive
+    count: 1
+network:
+  mode: restricted
+  policy_binding: cuda-lab-restricted-egress-v1
+entries:
+  - name: public-files
+    protocol: http
+    servicePort: 8080
+security:
+  userPolicy: non_root_required
+  rootFilesystemPolicy: read_only_required
+  privilegeEscalationPolicy: deny
+  publicExposurePolicy: deny
+  securityProfileBinding: cuda-lab-container-v1
+runtime:
+  kind: container
+  provider_binding: kubernetes-work-local-hostpath
+  build_context:
+    artifactId: 01900000-0000-7000-8000-000000000041
+    storeBinding: problem-package-minio-v1
+    objectVersion: cuda-context-v1
+    sizeBytes: 1
+    mediaType: application/vnd.labweaver.build-context.v1+tar
+  service_port: 8080
+  terminal:
+    executable: /bin/sh
+    args: []
+    workingDirectory: /workspace
+retention:
+  policyId: 01900000-0000-7000-8000-000000000042
+  policyRevision: 1
+  class: course_material
+  retainUntil: "2036-01-01T00:00:00.000Z"
+  disposition: delete

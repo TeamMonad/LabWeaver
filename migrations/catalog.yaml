@@ -21,9 +21,11 @@ domains:
       - id: 7
         file: control/0007_work_configuration_preauthorizations.sql
       - id: 8
-        file: control/0008_platform_image_uploads.sql
+        file: control/0008_evaluation_runner_builds.sql
       - id: 9
-        file: control/0009_vm_template_upload.sql
+        file: control/0009_platform_image_uploads.sql
+      - id: 10
+        file: control/0010_vm_template_upload.sql
   - name: access
     migrations:
       - id: 1
@@ -65,11 +67,13 @@ domains:
       - id: 10
         file: agent/0010_llm_review_runs.sql
       - id: 11
-        file: agent/0011_authoring_sandbox.sql
+        file: agent/0011_evaluation_runner_build_context.sql
       - id: 12
-        file: agent/0012_dispatch_actor.sql
+        file: agent/0012_authoring_sandbox.sql
       - id: 13
-        file: agent/0013_platform_image_catalog.sql
+        file: agent/0013_dispatch_actor.sql
+      - id: 14
+        file: agent/0014_platform_image_catalog.sql
       - id: 15
         file: agent/0015_platform_image_vm_fields.sql
   - name: evaluation
@@ -116,3 +120,5 @@ domains:
         file: resource/0010_task_run_identity.sql
       - id: 11
         file: resource/0011_gpu_catalog_pool_uniqueness.sql
+      - id: 12
+        file: resource/0012_environment_gpu_reservations.sql

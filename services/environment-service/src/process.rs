@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
-use contracts::environment::EnvironmentOperationKind;
+use contracts::environment::{EnvironmentOperationKind, ReleaseEnvironmentGpuAllocationRequest};
 use contracts::supply_chain::VirtualMachineDiskFormat;
 use contracts::{ActorId, PolicyId, Revision, UtcTimestamp};
 use serde::Deserialize;
@@ -361,6 +361,7 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
+        .with_gpu_allocations(self.resource_usage_client.clone())
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.
@@ -393,7 +394,13 @@ impl EnvironmentProcessRuntime {
                 shutdown_rx.clone()
             ),
             release_loop(release_store, &mut release_consumer, shutdown_rx.clone()),
-            reconcile_loop(store.clone(), worker, worker_id, shutdown_rx.clone()),
+            reconcile_loop(
+                store.clone(),
+                worker,
+                worker_id,
+                Some(resource_usage_client.clone()),
+                shutdown_rx.clone()
+            ),
             outbox_loop(outbox, shutdown_rx.clone()),
             resource_usage_loop(store.clone(), resource_usage_client, shutdown_rx.clone(),),
             work_execution_recovery_loop(work_executions, shutdown_rx.clone()),
@@ -495,6 +502,7 @@ async fn reconcile_loop(
     store: PgEnvironmentStore,
     worker: ReconcileWorker,
     worker_id: String,
+    gpu_allocations: Option<crate::metering::ResourceUsageClient>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
     let mut interval = tokio::time::interval(WORKER_INTERVAL);
@@ -508,6 +516,9 @@ async fn reconcile_loop(
             _ = interval.tick() => {
                 let now = store.current_time().await?;
                 let outcome = worker.run_once(&worker_id, now).await?;
+                if let Some(client) = &gpu_allocations {
+                    release_deleted_gpu_environments(&store, client).await?;
+                }
                 match outcome {
                     crate::reconciler::ReconcileWorkerOutcome::Idle => { tracing::debug!(event = "environment.reconcile.idle", outcome = "idle"); }
                     crate::reconciler::ReconcileWorkerOutcome::LeaseLost => { tracing::warn!(event = "environment.reconcile.lease_lost", outcome = "ownership_lost", failure_stage = "reconcile", error_kind = "concurrency", retryable = false); }
@@ -518,6 +529,44 @@ async fn reconcile_loop(
             }
         }
     }
+}
+
+/// Releases durable Experiment GPU reservations once an Environment reaches Deleted.
+///
+/// Deletion is terminal: the instance can never render the GPU again, so its reservation must not
+/// be retained. A failed release leaves the aggregate untouched for the next reconcile pass.
+async fn release_deleted_gpu_environments(
+    store: &PgEnvironmentStore,
+    client: &crate::metering::ResourceUsageClient,
+) -> Result<(), EnvironmentProcessRuntimeError> {
+    for instance in store.list_deleted_gpu_environments(32).await? {
+        let Some(allocation) = instance.gpu_allocation.as_ref() else {
+            continue;
+        };
+        let request = ReleaseEnvironmentGpuAllocationRequest {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            owner_actor_id: instance.owner_id,
+            trace_id: format!("environment-gpu-release-{}", instance.id),
+        };
+        match client.release_gpu_allocation(&request).await {
+            Ok(_) => {
+                store.clear_environment_gpu_allocation(instance.id).await?;
+            }
+            Err(error) => {
+                tracing::error!(
+                    event = "environment.gpu_allocation.release_failed",
+                    environment_id = %instance.id,
+                    gpu_class = %allocation.class,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "resource_dependency",
+                    retryable = true,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn outbox_loop(

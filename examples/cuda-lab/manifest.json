@@ -1,0 +1,95 @@
+{
+  "apiVersion": "labweaver.io/problem-package/v1",
+  "kind": "ProblemPackage",
+  "metadata": {
+    "name": "cuda-gpu-reduction-lab",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "container",
+      "providerBinding": "kubernetes-work-local-hostpath",
+      "runnerImage": "registry.example.invalid/labweaver/evaluation-runner@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "security": {
+      "runAsNonRoot": true,
+      "readOnlyRootFilesystem": true,
+      "allowPrivilegeEscalation": false,
+      "networkPolicyBinding": "cuda-lab-restricted-egress-v1"
+    },
+    "files": [
+      {
+        "path": "Dockerfile",
+        "role": "public",
+        "sha256": "c0a28b2617019cbd3d724b7144c495fd4d816568a64819323812c2558ecfed37"
+      },
+      {
+        "path": "environment.yaml",
+        "role": "public",
+        "sha256": "e87b771c548100a07ca065ddba969576582a65ef4383b8aad4384c5748726006"
+      },
+      {
+        "path": "evaluation.yaml",
+        "role": "public",
+        "sha256": "f3e094f99b222ffe77edf70459ea8ddc2937f1b4e1c6925d00ec6784cb9d8283"
+      },
+      {
+        "path": "evaluation/Dockerfile",
+        "role": "controlled",
+        "sha256": "2fcfdd50f17ed6c79fe92803f28e55e8b15888ba7273cc6f63e0f2dfdf47b7bd"
+      },
+      {
+        "path": "profiles/cuda-nvcc.json",
+        "role": "public",
+        "sha256": "15cd1eec735d51a35410095c272320580163cdda8a1b3bdc23021caaabbe7b74"
+      },
+      {
+        "path": "scripts/check_result.py",
+        "role": "public",
+        "sha256": "ac524eab5a872f61bd60a321c8812c52676ca63a2ae663fbbe3f07037d906616"
+      },
+      {
+        "path": "scripts/local-test.sh",
+        "role": "public",
+        "sha256": "42b032c776fb146352f3f2f29bb8d748ea912a4304a7bed8837c7cbc7a85cbb1"
+      },
+      {
+        "path": "statement.md",
+        "role": "public",
+        "sha256": "6ae3575222bd2dd9e43a9ddddf37cf112b5897721cc932d01a84066c262e4075"
+      },
+      {
+        "path": "student/gpu_stats.cu",
+        "role": "public",
+        "sha256": "49c748adf7bac04bca66086e18a4e9f714644554fda15de0df7b1f4fa35d19b5"
+      },
+      {
+        "path": "tests/cuda-nvcc/expected_result.txt",
+        "role": "controlled",
+        "sha256": "44b6f5a86b6c395d634ea8742295875f1d2ca229b44f106760765ac96f26033f"
+      },
+      {
+        "path": "tests/cuda-nvcc/gpu-stats.in",
+        "role": "controlled",
+        "sha256": "44b6f5a86b6c395d634ea8742295875f1d2ca229b44f106760765ac96f26033f"
+      },
+      {
+        "path": "tests/cuda-nvcc/gpu-stats.out",
+        "role": "controlled",
+        "sha256": "44b6f5a86b6c395d634ea8742295875f1d2ca229b44f106760765ac96f26033f"
+      }
+    ],
+    "controlledArtifacts": [
+      {
+        "name": "cuda-runner-image",
+        "locator": "private://evaluation/cuda-lab/runner-image",
+        "binding": "cuda-lab-runner-v1"
+      },
+      {
+        "name": "cuda-expected-result",
+        "locator": "private://evaluation/cuda-lab/expected-result",
+        "binding": "cuda-lab-expected-v1"
+      }
+    ]
+  }
+}

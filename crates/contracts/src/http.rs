@@ -562,6 +562,12 @@ pub struct CompleteAuthoringApprovalRequest {
     pub evaluation_candidate_id: CandidateId,
     pub evaluation_candidate_revision: Revision,
     pub image_artifact: crate::supply_chain::ImageArtifact,
+    /// Exact per-experiment Evaluation runner image selected for a Container experiment.
+    ///
+    /// Container experiments must select the runner artifact produced by their own runner build;
+    /// VM experiments omit it and use the deployment-owned Evaluation runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_runner_image_artifact: Option<crate::supply_chain::ImageArtifact>,
     pub reason: String,
 }
 
@@ -676,6 +682,13 @@ pub struct EnvironmentCandidateView {
 pub struct EvaluationCandidateView {
     pub candidate: crate::authoring::EvaluationCandidate,
     pub approvals: Vec<crate::authoring::CandidateApproval>,
+    /// Per-experiment runner build resolved by Control from the authoritative build projection.
+    ///
+    /// This remains null for deployment-owned VM evaluation, which has no per-experiment runner
+    /// image, and while a Container experiment's runner build is incomplete.
+    pub runner_build: Option<CandidateBuildView>,
+    /// Exact runner artifact a teacher can approve for a Container experiment.
+    pub runner_image_artifact: Option<crate::supply_chain::ImageArtifact>,
     pub trust_revision: Revision,
 }
 
@@ -1078,6 +1091,7 @@ pub struct GeneratedArtifactRecord {
 #[serde(rename_all = "snake_case")]
 pub enum GeneratedArtifactKind {
     BuildContext,
+    EvaluationRunnerBuildContext,
     WorkScript,
     VerificationScript,
 }

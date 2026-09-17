@@ -356,6 +356,7 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             builder_binding: "buildkit-primary-v1".to_owned(),
             output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
+            runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,

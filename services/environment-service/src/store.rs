@@ -254,6 +254,54 @@ impl PgEnvironmentStore {
         decode_contract(row.try_get("contract")?)
     }
 
+    /// Lists Deleted Experiment instances that still hold a durable GPU allocation.
+    ///
+    /// Deletion is terminal, so the reservation can be released and the allocation cleared. The
+    /// list is bounded; a release that fails simply leaves the row for the next reconcile pass.
+    pub(crate) async fn list_deleted_gpu_environments(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<EnvironmentInstance>, EnvironmentStoreError> {
+        if limit <= 0 {
+            return Err(EnvironmentStoreError::InvalidLimit);
+        }
+        let rows = sqlx::query(
+            "SELECT contract FROM environment.environment_instances \
+             WHERE contract->>'class'='experiment' \
+               AND contract ? 'gpuAllocation' \
+               AND contract->>'observedState'='deleted' \
+             ORDER BY updated_at, environment_id LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode_contract(row.try_get("contract")?))
+            .collect()
+    }
+
+    /// Clears the GPU allocation from a terminal Deleted Experiment aggregate.
+    pub(crate) async fn clear_environment_gpu_allocation(
+        &self,
+        environment_id: EnvironmentId,
+    ) -> Result<(), EnvironmentStoreError> {
+        let result = sqlx::query(
+            "UPDATE environment.environment_instances \
+             SET contract = contract - 'gpuAllocation', updated_at = clock_timestamp() \
+             WHERE environment_id=$1 \
+               AND contract->>'class'='experiment' \
+               AND contract->>'observedState'='deleted' \
+               AND contract ? 'gpuAllocation'",
+        )
+        .bind(environment_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(EnvironmentStoreError::RevisionConflict);
+        }
+        Ok(())
+    }
+
     /// Loads one operation from the actor-visible history and projects it through the
     /// Environment lifecycle rules. The operation table is the history authority; the aggregate
     /// contract is used only to evaluate whether this row is still the current operation.
@@ -1057,6 +1105,7 @@ fn build_create_instance(
         release_version: spec.release_version,
         lease_id: spec.lease_id,
         capacity_binding: spec.capacity_binding.clone(),
+        gpu_allocation: spec.gpu_allocation.clone(),
         provider_binding: spec.provider_binding.clone(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Requested,

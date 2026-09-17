@@ -59,6 +59,20 @@ Control resolves the exact successful build projection and policy evaluation;
 the public publication request contains only candidate, approval and runtime
 identity and cannot supply its own artifact or scanner evidence.
 
+## Build network posture
+
+`BuildRequest.network` is an explicit per-request posture:
+
+- `deny_all` is enforced for that build through the BuildKit frontend
+  `force-network-mode=none`, so no build step can reach a network.
+- `restricted` is not enforced per build. It is enforced at the BuildKit
+  daemon level as a union allowlist shared by every build, so the
+  request-scoped `allowed_registries` list does not narrow the daemon policy.
+
+The current cluster deployment runs BuildKit with open egress. `deny_all`
+still forces `network=none` for that build regardless of the deployment mode;
+see [cluster internal configuration](../deployment/cluster-internal-configuration.md).
+
 ## Fencing, replay and failure behavior
 
 Every executor request binds the command payload, generation or attempt,

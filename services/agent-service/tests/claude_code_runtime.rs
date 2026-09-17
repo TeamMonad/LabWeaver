@@ -91,6 +91,7 @@ enum FakeMode {
     SlowSuccess,
     SlowFullSuccess,
     FullSuccess,
+    ContainerFullSuccess,
     WorkFullSuccess,
     InvalidSession,
     InvalidResultType,
@@ -144,6 +145,7 @@ struct FakeMaterializer {
     calls: AtomicUsize,
     artifacts: Mutex<Vec<ArtifactRef>>,
     plans: Mutex<Vec<Value>>,
+    runner_plans: Mutex<Vec<Value>>,
     scripts: Mutex<Vec<(String, Option<String>)>>,
 }
 
@@ -153,6 +155,7 @@ impl FakeMaterializer {
             calls: AtomicUsize::new(0),
             artifacts: Mutex::new(Vec::new()),
             plans: Mutex::new(Vec::new()),
+            runner_plans: Mutex::new(Vec::new()),
             scripts: Mutex::new(Vec::new()),
         }
     }
@@ -187,6 +190,13 @@ impl FakeMaterializer {
             .clone()
     }
 
+    fn runner_plans(&self) -> Vec<Value> {
+        self.runner_plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn scripts(&self) -> Vec<(String, Option<String>)> {
         self.scripts
             .lock()
@@ -210,6 +220,21 @@ impl EnvironmentCandidateMaterializer for FakeMaterializer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(plan.clone());
         Ok(self.artifact("fake build context", "application/gzip"))
+    }
+
+    async fn materialize_runner(
+        &self,
+        _project_id: ProjectId,
+        _course_id: Option<CourseId>,
+        _package_id: contracts::ProblemPackageId,
+        _package_revision: Revision,
+        plan: &Value,
+    ) -> Result<ArtifactRef, CandidateMaterializationError> {
+        self.runner_plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(plan.clone());
+        Ok(self.artifact("fake runner build context", "application/gzip"))
     }
 }
 
@@ -382,12 +407,17 @@ impl ClaudeCodeProcess for FakeProcess {
             }
         } else if matches!(
             self.mode,
-            FakeMode::FullSuccess | FakeMode::SlowFullSuccess | FakeMode::WorkFullSuccess
+            FakeMode::FullSuccess
+                | FakeMode::SlowFullSuccess
+                | FakeMode::WorkFullSuccess
+                | FakeMode::ContainerFullSuccess
         ) && evaluation_track
         {
-            evaluation_candidate()?
+            evaluation_track_candidate()?
         } else if work_configuration_track {
             work_configuration_candidate()
+        } else if matches!(self.mode, FakeMode::ContainerFullSuccess) {
+            container_environment_candidate()
         } else {
             environment_candidate()
         };
@@ -599,6 +629,23 @@ fn evaluation_candidate() -> Result<Value, ClaudeCodeProcessError> {
     serde_json::to_value(spec).map_err(|_| ClaudeCodeProcessError::Io)
 }
 
+fn runner_build_recipe() -> Value {
+    json!({
+        "mode": "generated",
+        "files": [{
+            "path": "evaluation/Dockerfile",
+            "content": "ARG LABWEAVER_SERVICE_IMAGE\nFROM alpine:3.20\nCOPY --from=${LABWEAVER_SERVICE_IMAGE} /usr/local/bin/labweaver-service /usr/local/bin/labweaver-service\nUSER 65532:65532\nENTRYPOINT [\"/usr/local/bin/labweaver-service\"]\n"
+        }]
+    })
+}
+
+fn evaluation_track_candidate() -> Result<Value, ClaudeCodeProcessError> {
+    Ok(json!({
+        "evaluation": evaluation_candidate()?,
+        "runnerBuildRecipe": runner_build_recipe(),
+    }))
+}
+
 fn review_candidate(path: &str) -> Value {
     json!({
         "schema_version": "goal-review/v1",
@@ -710,6 +757,28 @@ fn work_runtime_with_policy(
     let runtime =
         ClaudeCodeRuntime::new_with_materializer(policy.clone(), process.clone(), materializer)?;
     Ok((runtime, process, policy))
+}
+
+fn materializing_runtime(
+    mode: FakeMode,
+) -> Result<
+    (
+        ClaudeCodeRuntime,
+        Arc<FakeProcess>,
+        ProjectLlmEgressPolicy,
+        Arc<FakeMaterializer>,
+    ),
+    Box<dyn Error>,
+> {
+    let process = Arc::new(FakeProcess::new(mode));
+    let policy = valid_policy()?;
+    let materializer = Arc::new(FakeMaterializer::new());
+    let runtime = ClaudeCodeRuntime::new_with_materializer(
+        policy.clone(),
+        process.clone(),
+        Arc::clone(&materializer),
+    )?;
+    Ok((runtime, process, policy, materializer))
 }
 
 fn package(
@@ -845,22 +914,26 @@ async fn live_claude_code_generates_evaluation_candidate() -> Result<(), Box<dyn
     let policy = live_provider_policy(&model, &version)?;
 
     let teacher_material = serde_json::to_vec(&json!({
-        "instruction": "Return this approved EvaluationSpec template exactly.",
+        "instruction": "Return this approved EvaluationSpec as the evaluation member and this runnerBuildRecipe exactly.",
         "evaluationSpec": evaluation_candidate()?,
+        "runnerBuildRecipe": runner_build_recipe(),
         "publicFiles": [{
             "path": "student/auth.c",
             "content": include_str!("../../../examples/security-controlled/student/auth.c")
         }]
     }))?;
     let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
-    let runtime = ClaudeCodeRuntime::new(policy, process)?;
+    let materializer = Arc::new(FakeMaterializer::new());
+    let runtime =
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
     let evaluation = runtime
         .generate(AgentTrackKind::Evaluation, input, RunCancellation::new())
         .await?;
-    assert!(matches!(
-        evaluation.document,
-        CandidateDocument::Evaluation(_)
-    ));
+    let CandidateDocument::Evaluation(document) = evaluation.document else {
+        return Err("live Evaluation response was not an Evaluation candidate".into());
+    };
+    assert!(document.runner_build_context.is_some());
+    assert_eq!(materializer.runner_plans().len(), 1);
     eprintln!(
         "live Claude Code evaluation cost: {} microusd",
         evaluation.audit.usage.cost_microusd
@@ -2776,7 +2849,7 @@ async fn assert_track_recovery(
     store: &PostgresAgentRunStore,
     now: UtcTimestamp,
 ) -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy) = work_runtime(FakeMode::FullSuccess)?;
     let prepared = input(&policy).await?;
     let mut request = run_request(&prepared, &policy);
     request.environment_class = EnvironmentClass::Experiment;
@@ -2895,7 +2968,7 @@ async fn assert_durable_cancellation(
     store: &PostgresAgentRunStore,
     now: UtcTimestamp,
 ) -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy) = work_runtime(FakeMode::FullSuccess)?;
     let prepared = input(&policy).await?;
     let mut request = run_request(&prepared, &policy);
     request.environment_class = EnvironmentClass::Experiment;
@@ -2968,7 +3041,11 @@ async fn assert_concurrent_idempotency(
     for worker in 0..4 {
         workers.push(AgentRunService::new(
             store.clone(),
-            ClaudeCodeRuntime::new(policy.clone(), process.clone())?,
+            ClaudeCodeRuntime::new_with_materializer(
+                policy.clone(),
+                process.clone(),
+                Arc::new(FakeMaterializer::new()),
+            )?,
             format!("concurrent-worker-{worker}"),
             Duration::from_secs(1),
         )?);
@@ -3334,7 +3411,7 @@ async fn virtual_machine_schema_repair_recovers_from_the_first_invalid_response(
 #[tokio::test]
 async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
 -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy, materializer) = materializing_runtime(FakeMode::FullSuccess)?;
     let execution = runtime
         .generate(
             AgentTrackKind::Evaluation,
@@ -3343,10 +3420,13 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
         )
         .await?;
 
-    assert!(matches!(
-        execution.document,
-        CandidateDocument::Evaluation(_)
-    ));
+    let CandidateDocument::Evaluation(document) = &execution.document else {
+        return Err("evaluation track did not return an Evaluation candidate".into());
+    };
+    assert!(document.runner_build_context.is_some());
+    assert!(materializer.plans().is_empty());
+    assert_eq!(materializer.runner_plans().len(), 1);
+    assert_eq!(materializer.artifact_count(), 1);
     let commands = process.commands();
     assert_eq!(commands.len(), 1);
     let prompt = commands[0]
@@ -3371,6 +3451,38 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
             "missing prompt invariant: {required}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn evaluation_track_materializes_exactly_one_runner_context_alongside_environment()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, _process, policy, materializer) =
+        materializing_runtime(FakeMode::ContainerFullSuccess)?;
+    let outcome = runtime
+        .generate_both(input(&policy).await?, RunCancellation::new())
+        .await;
+    let environment = outcome.environment?;
+    let evaluation = outcome.evaluation?;
+
+    let CandidateDocument::Environment(environment_spec) = environment.document else {
+        return Err("environment track did not return an Environment candidate".into());
+    };
+    assert_eq!(environment_spec.runtime.kind(), RuntimeKind::Container);
+    let environment_json = serde_json::to_value(&environment_spec)?;
+    assert!(environment_json.pointer("/runtime/build_context").is_some());
+
+    let CandidateDocument::Evaluation(evaluation_document) = evaluation.document else {
+        return Err("evaluation track did not return an Evaluation candidate".into());
+    };
+    assert!(evaluation_document.runner_build_context.is_some());
+    assert_eq!(materializer.plans().len(), 1);
+    assert_eq!(materializer.runner_plans().len(), 1);
+    assert_eq!(materializer.artifact_count(), 2);
+    assert_eq!(
+        materializer.runner_plans()[0]["files"][0]["path"],
+        "evaluation/Dockerfile"
+    );
     Ok(())
 }
 

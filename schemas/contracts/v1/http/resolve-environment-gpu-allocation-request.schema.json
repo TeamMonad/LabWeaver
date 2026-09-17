@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment-owned request to resolve and durably hold one Experiment GPU allocation.\n\nThe caller submits only a policy-catalogued class and count. Resource selects the exact\nallocation binding, mode, and provider binding from its active catalog and current capacity\nobservation; an unknown class, exhausted pool, or stale observation fails closed.",
+  "properties": {
+    "courseId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CourseId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "gpu": {
+      "$ref": "#/$defs/GpuRequest"
+    },
+    "ownerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "providerBinding": {
+      "type": "string"
+    },
+    "traceId": {
+      "type": "string"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "environmentId",
+    "projectId",
+    "ownerActorId",
+    "providerBinding",
+    "gpu",
+    "traceId"
+  ],
+  "title": "ResolveEnvironmentGpuAllocationRequest",
+  "type": "object"
+}

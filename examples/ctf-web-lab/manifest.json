@@ -1,0 +1,105 @@
+{
+  "apiVersion": "labweaver.io/problem-package/v1",
+  "kind": "ProblemPackage",
+  "metadata": {
+    "name": "ctf-web-flag-vault-lab",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "container",
+      "providerBinding": "kubernetes-work-local-hostpath",
+      "runnerImage": "registry.example.invalid/labweaver/evaluation-runner@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "security": {
+      "runAsNonRoot": true,
+      "readOnlyRootFilesystem": true,
+      "allowPrivilegeEscalation": false,
+      "networkPolicyBinding": "ctf-web-lab-restricted-egress-v1"
+    },
+    "files": [
+      {
+        "path": "Dockerfile",
+        "role": "public",
+        "sha256": "84f06108c469b29c0139ed97c218cb9a3b2b82040235e6df0bdd3e86a4b45652"
+      },
+      {
+        "path": "app/server.py",
+        "role": "public",
+        "sha256": "77d6ee479898a4f1d00aed5fe99878eb3dc69e4bc6ddb9373ac086a1410c1089"
+      },
+      {
+        "path": "environment.yaml",
+        "role": "public",
+        "sha256": "62709c9d7891d75e0dc0036d62f56e23f818e0d69f2b7a632b798800dbf6e58b"
+      },
+      {
+        "path": "evaluation.yaml",
+        "role": "public",
+        "sha256": "78547b7f7941c1ec91ba7b0dcf7cffd3a39ccccdd4bb17cbac525249a458f6a5"
+      },
+      {
+        "path": "evaluation/Dockerfile",
+        "role": "controlled",
+        "sha256": "7d4e5119d50ffe806537d038ddfde5eadc0038c363b38c3d7beea47be8a330a6"
+      },
+      {
+        "path": "profiles/ctf-python.json",
+        "role": "public",
+        "sha256": "46d6728e331409d69b476a6ee8d1688e2ac02b28bc7436bf97945709891bc25b"
+      },
+      {
+        "path": "scripts/ctf_check.py",
+        "role": "public",
+        "sha256": "35f3ce712f38b19bc39af291668de63d70c0374a4963697db10484c54c03e94e"
+      },
+      {
+        "path": "scripts/local-test.sh",
+        "role": "public",
+        "sha256": "f0c337b908cf04ff35bb06920ce8b670dd1ff022a873ac58ce25758763f7df98"
+      },
+      {
+        "path": "scripts/local_test.py",
+        "role": "public",
+        "sha256": "07eb0762e9a4c09da1e16df0ffcf3f0ea668aaa31a5af2b6b578297265d21d7a"
+      },
+      {
+        "path": "seed/seed.py",
+        "role": "public",
+        "sha256": "8fd49eb7ea63b32bd367bf83f4bce4bcccf9e8d94caff8d33c35eeefd50c9825"
+      },
+      {
+        "path": "statement.md",
+        "role": "public",
+        "sha256": "fcb1ee553c43ea038dd4f3e1a89c83fddd7243081615ce253a37203a7c03444f"
+      },
+      {
+        "path": "tests/ctf-python/expected_flag.txt",
+        "role": "controlled",
+        "sha256": "f3759a675fcbd2bee0213596af295183532ba5b5c6929b6527a234779eb68cc1"
+      },
+      {
+        "path": "tests/ctf-python/flag.in",
+        "role": "controlled",
+        "sha256": "23e76e83eb98b438cee23d3864c156d1574e07268f5f103614be1b03bf8ec1de"
+      },
+      {
+        "path": "tests/ctf-python/flag.out",
+        "role": "controlled",
+        "sha256": "f3759a675fcbd2bee0213596af295183532ba5b5c6929b6527a234779eb68cc1"
+      }
+    ],
+    "controlledArtifacts": [
+      {
+        "name": "ctf-web-runner-image",
+        "locator": "private://evaluation/ctf-web-lab/runner-image",
+        "binding": "ctf-web-lab-runner-v1"
+      },
+      {
+        "name": "ctf-web-expected-flag",
+        "locator": "private://evaluation/ctf-web-lab/expected-flag",
+        "binding": "ctf-web-lab-expected-v1"
+      }
+    ]
+  }
+}

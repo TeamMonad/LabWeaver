@@ -646,6 +646,66 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
     );
 }
 
+#[test]
+fn experiment_vm_gpu_allocation_renders_vgpu_devices_and_limits() {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(GpuRequest {
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU VM projection");
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(GpuAllocation {
+        entry_id: GpuCatalogEntryId::new(),
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::VmVgpu,
+        provider_binding: "kubevirt-primary-v1".to_owned(),
+        allocation_binding: "nvidia.com/grid-t4-4c".to_owned(),
+        catalog_revision: revision(1),
+    });
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("resolved Experiment VM vGPU allocation is rendered");
+    let virtual_machine = resource(&plan, "VirtualMachine");
+    let gpus = virtual_machine
+        .document
+        .pointer("/spec/template/spec/domain/devices/gpus")
+        .and_then(serde_json::Value::as_array)
+        .expect("VM GPU devices");
+    assert_eq!(gpus.len(), 1);
+    assert_eq!(
+        gpus[0].pointer("/deviceName"),
+        Some(&json!("nvidia.com/grid-t4-4c"))
+    );
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1grid-t4-4c"),
+        Some(&json!("1"))
+    );
+}
+
+#[test]
+fn experiment_vm_gpu_without_a_durable_allocation_fails_closed() {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(GpuRequest {
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU VM projection");
+    let instance = instance_for(&projection);
+    assert!(instance.gpu_allocation.is_none());
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
 #[tokio::test]
 async fn readiness_requires_vm_ssh_and_current_generation() {
     let release_projection = projection();

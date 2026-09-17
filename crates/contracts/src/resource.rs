@@ -44,7 +44,7 @@ pub struct GpuRequest {
 }
 
 impl GpuRequest {
-    fn validate(&self) -> Result<(), ResourceError> {
+    pub fn validate(&self) -> Result<(), ResourceError> {
         if self.class.is_empty()
             || self.class.len() > 63
             || !self

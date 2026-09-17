@@ -1,4 +1,4 @@
-# Issue #48 Control-plane deployment and rollback
+# Issue #48 Control-plane deployment
 
 ## Configuration boundary
 
@@ -45,12 +45,11 @@ hash after freezing every exact MinIO object version. This keeps the client-veri
 contract distinct from the server-owned object-version identity.
 
 After the non-destructive retained-infrastructure inventory confirms that each
-domain has no business relations and an empty migration ledger, apply the
-2 baseline catalog through the controlled entry point before starting the new
-processes:
+domain has no business relations and an empty migration ledger, the application
+profile applies the baseline catalog before starting the new processes. Verify
+the generated contracts remain current:
 
 ```sh
-cargo xtask migrate --yes
 cargo xtask contracts check
 ```
 
@@ -100,19 +99,6 @@ non-root user with a read-only root filesystem, no service-account token and onl
 proxy/registry/model egress CIDRs, and it carries `runtimeClassName: labweaver-sandbox` (see the
 shared runtime prerequisites above). Agent holds a namespaced Role limited to Jobs, Secrets, Pods and
 NetworkPolicies in that single namespace; it never receives cluster-wide permissions.
-
-## Rollback
-
-1. Stop admission of new Control mutations at the trusted Gateway.
-2. Stop new Agent dispatch claims, then allow bounded work to finish or request cancellation.
-3. Confirm immutable packages and the current baseline identity remain present.
-4. Roll back only to an image set verified against the same baseline.
-5. After publication, schema corrections use reviewed forward Migrations;
-   rollback never drops or rewrites retained infrastructure state.
-
-Rollback does not withdraw an EnvironmentTemplateRelease. A withdrawal is a separate append-only
-fact. A functional rollback to older material creates a higher release version referencing a
-still-valid verified candidate and authoritative artifact evidence.
 
 ## Current production blocker
 

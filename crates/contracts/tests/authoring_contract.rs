@@ -1,6 +1,6 @@
 //! Regression coverage for teacher authoring and Claude Code runtime bindings.
 
-use contracts::authoring::{AuthoringError, ProjectLlmEgressPolicy};
+use contracts::authoring::{AuthoringError, EnvironmentSpec, ProjectLlmEgressPolicy};
 use contracts::http::{HttpContractError, InternalImageArtifactResolution};
 use contracts::supply_chain::ImageArtifact;
 use contracts::{BuildRequestId, ImageArtifactId, PolicyId, ProjectId};
@@ -223,4 +223,79 @@ fn internal_artifact_resolution_requires_a_valid_exact_artifact_identity() {
         invalid_digest.validate(),
         Err(HttpContractError::InvalidInternalIdentity)
     ));
+}
+
+fn environment_spec_value(gpu: Option<Value>) -> Value {
+    let mut resources = json!({
+        "cpuMillicores": 1000,
+        "memoryBytes": 1_073_741_824_u64,
+        "storageBytes": 1_073_741_824_u64
+    });
+    if let Some(gpu) = gpu {
+        resources["gpu"] = gpu;
+    }
+    json!({
+        "apiVersion": "environment.labweaver.io/v1",
+        "kind": "EnvironmentSpec",
+        "name": "gpu-experiment",
+        "class": "experiment",
+        "resources": resources,
+        "network": {"mode": "deny_all"},
+        "entries": [{"name": "web", "protocol": "http", "servicePort": 8080}],
+        "security": {
+            "userPolicy": "non_root_required",
+            "rootFilesystemPolicy": "read_only_required",
+            "privilegeEscalationPolicy": "deny",
+            "publicExposurePolicy": "deny",
+            "securityProfileBinding": "restricted-v1"
+        },
+        "runtime": {
+            "kind": "container",
+            "provider_binding": "container-primary-v1",
+            "build_context": {
+                "artifactId": "00000000-0000-7000-8000-000000000001",
+                "storeBinding": "artifact-store-v1",
+                "objectVersion": "version-1",
+                "sizeBytes": 128,
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"
+            },
+            "service_port": 8080
+        },
+        "retention": {
+            "policyId": "00000000-0000-7000-8000-000000000002",
+            "policyRevision": 1,
+            "class": "run_evidence",
+            "retainUntil": "2026-08-16T08:00:00.000Z",
+            "disposition": "delete"
+        }
+    })
+}
+
+#[test]
+fn environment_spec_gpu_is_optional_and_validated() -> Result<(), Box<dyn std::error::Error>> {
+    let absent: EnvironmentSpec = serde_json::from_value(environment_spec_value(None))?;
+    assert!(absent.resources.gpu.is_none());
+
+    let valid: EnvironmentSpec = serde_json::from_value(environment_spec_value(Some(json!({
+        "class": "a100-exclusive",
+        "count": 2
+    }))))?;
+    let gpu = valid.resources.gpu.ok_or("gpu is present")?;
+    assert_eq!(gpu.class, "a100-exclusive");
+    assert_eq!(gpu.count, 2);
+
+    for invalid in [
+        json!({"class": "a100-exclusive", "count": 0}),
+        json!({"class": "A100-Exclusive", "count": 1}),
+        json!({"class": "nvidia.com/gpu", "count": 1}),
+        json!({"class": "", "count": 1}),
+        json!({"class": "-leading", "count": 1}),
+    ] {
+        assert!(
+            serde_json::from_value::<EnvironmentSpec>(environment_spec_value(Some(invalid)))
+                .is_err(),
+            "invalid gpu request must be rejected"
+        );
+    }
+    Ok(())
 }

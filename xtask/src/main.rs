@@ -31,7 +31,6 @@ enum Command {
     Preflight(EnvironmentArgs),
     Deploy(EnvironmentArgs),
     Verify(EnvironmentArgs),
-    Backup(EnvironmentArgs),
     /// Reconcile or verify the private Keycloak identity foundation.
     IdentityFoundation(IdentityFoundationArgs),
     /// Reconcile the persistent `PostgreSQL`, NATS, and `MinIO` Sprint 2 foundation.
@@ -44,7 +43,6 @@ enum Command {
     PlatformApplication(EnvironmentArgs),
     /// Deploy the independently reviewed Resource authority profile.
     ResourceApplication(EnvironmentArgs),
-    Rollback(RollbackArgs),
     Package(PackageArgs),
     PackageValidate(PackageValidateArgs),
     #[command(subcommand)]
@@ -145,16 +143,6 @@ impl IdentityFoundationAction {
             Self::Verify => "92-identity-foundation-verify.yml",
         }
     }
-}
-
-#[derive(Debug, Args)]
-struct RollbackArgs {
-    #[arg(long)]
-    env: String,
-    #[arg(long)]
-    release_revision: String,
-    #[arg(long)]
-    yes: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,19 +316,12 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Command::Preflight(args) => preflight(&args),
         Command::Deploy(args) => deploy(&args),
         Command::Verify(args) => verify(&args),
-        Command::Backup(args) => backup(&args),
         Command::IdentityFoundation(args) => identity_foundation(&args),
         Command::PlatformFoundation(args) => platform_foundation(&args),
         Command::PlatformBuildkit(args) => platform_buildkit(&args),
         Command::PlatformHarborRoute(args) => platform_harbor_route(&args),
         Command::PlatformApplication(args) => platform_application(&args),
         Command::ResourceApplication(args) => resource_application(&args),
-        Command::Rollback(args) => platform_images::rollback(
-            &args.env,
-            &args.release_revision,
-            args.yes,
-            &repository_root(),
-        ),
         Command::Package(args) => package_command(&args),
         Command::PackageValidate(args) => platform_images::validate(
             &args.manifest,
@@ -487,14 +468,6 @@ fn verify(args: &EnvironmentArgs) -> Result<(), AppError> {
     }
     require_infrastructure(args, "verify --infra")?;
     run_infrastructure(&args.env, "90-verify.yml", "verify --infra")
-}
-
-fn backup(args: &EnvironmentArgs) -> Result<(), AppError> {
-    if !args.yes {
-        return Err(AppError::ConfirmationRequired { command: "backup" });
-    }
-    require_infrastructure(args, "backup --infra")?;
-    run_infrastructure(&args.env, "85-backup.yml", "backup --infra")
 }
 
 fn identity_foundation(args: &IdentityFoundationArgs) -> Result<(), AppError> {
@@ -701,7 +674,6 @@ struct InfrastructureInputs {
     ansible_config: String,
     collections_path: String,
     roles_path: String,
-    harbor_data_backup_locator: String,
     identity_secret_locator: String,
 }
 
@@ -763,8 +735,6 @@ impl InfrastructureInputs {
             ansible_config: infrastructure_path(&ansible_config),
             collections_path: infrastructure_path(&collections_path),
             roles_path: infrastructure_path(&roles_path),
-            harbor_data_backup_locator: std::env::var("LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR")
-                .unwrap_or_default(),
             identity_secret_locator,
         })
     }
@@ -927,14 +897,9 @@ fn run_infrastructure_with_package(
         ansible_config,
         collections_path,
         roles_path,
-        harbor_data_backup_locator,
         identity_secret_locator,
     } = InfrastructureInputs::load(environment, playbook_name)?;
     let run_id = required_run_id("LABWEAVER_RUN_ID", "infrastructure run identity")?;
-    let testflight_run_id = required_run_id(
-        "LABWEAVER_TESTFLIGHT_RUN_ID",
-        "infrastructure TestFlight identity",
-    )?;
     let mut runner = Playbook::default();
     runner
         .set_system_envs()
@@ -951,17 +916,8 @@ fn run_infrastructure_with_package(
         .add_env("ANSIBLE_VAULT_PASSWORD_FILE", vault_password)
         .add_env("LABWEAVER_RUN_ID", &run_id)
         .add_env(
-            "LABWEAVER_HARBOR_DATA_BACKUP_LOCATOR",
-            harbor_data_backup_locator,
-        )
-        .add_env("LABWEAVER_TESTFLIGHT_RUN_ID", &testflight_run_id)
-        .add_env(
             "LABWEAVER_PACKAGE_MANIFEST",
             package_manifest.map_or_else(String::new, infrastructure_path),
-        )
-        .add_env(
-            "LABWEAVER_PLATFORM_RESET_CONFIRMATION",
-            std::env::var("LABWEAVER_PLATFORM_RESET_CONFIRMATION").unwrap_or_default(),
         )
         .add_env("LABWEAVER_IDENTITY_SECRET_LOCATOR", identity_secret_locator)
         .set_inventory(&inventory);

@@ -12,9 +12,13 @@ use std::time::Duration;
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
 use contracts::environment::{
     EnvironmentInstance, EnvironmentLeaseAuthorization, ObservedEnvironmentState,
+    ReleaseEnvironmentGpuAllocationRequest, ReleaseEnvironmentGpuAllocationResponse,
+    ResolveEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationResponse,
 };
 use contracts::http::RecordResourceUsageRequest;
-use contracts::resource::{ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement};
+use contracts::resource::{
+    GpuAllocation, ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement,
+};
 use contracts::{EventId, ResourceRequestId, UtcTimestamp};
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -174,20 +178,181 @@ fn validate_authorization(
         .map_err(|_| EnvironmentStoreError::LeaseAuthorizationInvalid)
 }
 
-/// Creates the durable Work metering state in the same transaction as the aggregate.
+/// Durable Experiment GPU meter carried in the Environment schema.
+///
+/// Experiment environments own no Resource request or Lease, so the Work settlement path cannot
+/// deliver their usage. This meter still records real GPU unit seconds from actual Ready and
+/// stop/delete observations and retains them as pending. It never fabricates a zero while a GPU
+/// is attached, and it never reports settlement success. The billing-separation assessment owns
+/// the final Experiment settlement path.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExperimentGpuMeteringState {
+    version: u8,
+    environment_id: contracts::EnvironmentId,
+    project_id: contracts::ProjectId,
+    course_id: Option<contracts::CourseId>,
+    owner_actor_id: contracts::ActorId,
+    gpu_allocation: GpuAllocation,
+    compute_started_at: Option<UtcTimestamp>,
+    /// Real GPU unit seconds observed for this environment and not yet settled.
+    pending_gpu_unit_seconds: u64,
+    /// Explicitly unsettled: no Resource claim exists to settle against.
+    #[serde(default)]
+    settlement_pending: bool,
+}
+
+impl ExperimentGpuMeteringState {
+    fn from_instance(instance: &EnvironmentInstance) -> Result<Self, EnvironmentStoreError> {
+        let allocation = instance
+            .gpu_allocation
+            .clone()
+            .ok_or(EnvironmentStoreError::MeteringInvalid)?;
+        allocation
+            .validate()
+            .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        Ok(Self {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            gpu_allocation: allocation,
+            compute_started_at: None,
+            pending_gpu_unit_seconds: 0,
+            settlement_pending: true,
+        })
+    }
+
+    fn validate_against(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), EnvironmentStoreError> {
+        if self.version != 1
+            || self.environment_id != instance.id
+            || self.project_id != instance.project_id
+            || self.course_id != instance.course_id
+            || self.owner_actor_id != instance.owner_id
+            || !self.settlement_pending
+            || instance
+                .gpu_allocation
+                .as_ref()
+                .is_some_and(|allocation| allocation != &self.gpu_allocation)
+        {
+            return Err(EnvironmentStoreError::MeteringInvalid);
+        }
+        self.gpu_allocation
+            .validate()
+            .map_err(|_| EnvironmentStoreError::MeteringInvalid)
+    }
+
+    fn accumulate(&mut self, occurred_at: UtcTimestamp) -> Result<(), EnvironmentStoreError> {
+        let Some(started_at) = self.compute_started_at.take() else {
+            return Ok(());
+        };
+        if occurred_at <= started_at {
+            return Err(EnvironmentStoreError::MeteringInvalid);
+        }
+        let milliseconds = elapsed_milliseconds(started_at, occurred_at)?;
+        let seconds = multiply_milliseconds(u64::from(self.gpu_allocation.count), milliseconds)?;
+        self.pending_gpu_unit_seconds = self.pending_gpu_unit_seconds.checked_add(seconds).ok_or(
+            EnvironmentStoreError::NumericOverflow("experiment gpu usage quantity"),
+        )?;
+        Ok(())
+    }
+}
+
+/// Applies actual Experiment GPU meter boundaries without touching the database.
+fn apply_experiment_gpu_transition(
+    state: &mut ExperimentGpuMeteringState,
+    previous: &EnvironmentInstance,
+    updated: &EnvironmentInstance,
+    occurred_at: UtcTimestamp,
+) -> Result<(), EnvironmentStoreError> {
+    state.validate_against(previous)?;
+    state.validate_against(updated)?;
+    let previous_state = previous.observed_state;
+    let updated_state = updated.observed_state;
+    if previous_state != ObservedEnvironmentState::Ready
+        && updated_state == ObservedEnvironmentState::Ready
+    {
+        state.compute_started_at = Some(ready_observation_at(previous, updated, occurred_at)?);
+    }
+    let closed = matches!(
+        updated_state,
+        ObservedEnvironmentState::Stopped | ObservedEnvironmentState::Deleted
+    );
+    // A Failed observation proves only that the stop boundary is uncertain. The GPU remains
+    // attached until a later Ready or a real Stopped/Deleted boundary, so no seconds are lost and
+    // none are invented.
+    if closed && previous_state != updated_state {
+        state.accumulate(occurred_at)?;
+    }
+    Ok(())
+}
+
+/// Creates the durable meter state in the same transaction as the aggregate.
 pub(crate) async fn initialize(
     transaction: &mut Transaction<'_, Postgres>,
     instance: &EnvironmentInstance,
 ) -> Result<(), EnvironmentStoreError> {
-    if instance.class != contracts::authoring::EnvironmentClass::Work {
-        return Ok(());
-    }
-    let state = MeteringState::from_authorization(instance)?;
+    let contract = match instance.class {
+        contracts::authoring::EnvironmentClass::Work => {
+            serde_json::to_value(MeteringState::from_authorization(instance)?)?
+        }
+        contracts::authoring::EnvironmentClass::Experiment => {
+            if instance.gpu_allocation.is_none() {
+                return Ok(());
+            }
+            serde_json::to_value(ExperimentGpuMeteringState::from_instance(instance)?)?
+        }
+    };
     sqlx::query(
         "INSERT INTO environment.resource_metering_state (environment_id, contract) \
          VALUES ($1, $2)",
     )
     .bind(instance.id.as_uuid())
+    .bind(contract)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// Records an Experiment GPU boundary and retains the real pending seconds.
+async fn record_experiment_gpu_transition(
+    transaction: &mut Transaction<'_, Postgres>,
+    previous: &EnvironmentInstance,
+    updated: &EnvironmentInstance,
+    occurred_at: UtcTimestamp,
+) -> Result<(), EnvironmentStoreError> {
+    let row = sqlx::query(
+        "SELECT contract FROM environment.resource_metering_state \
+         WHERE environment_id=$1 FOR UPDATE",
+    )
+    .bind(updated.id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let mut state: ExperimentGpuMeteringState = serde_json::from_value(row.try_get("contract")?)?;
+    let before = state.pending_gpu_unit_seconds;
+    apply_experiment_gpu_transition(&mut state, previous, updated, occurred_at)?;
+    if state.pending_gpu_unit_seconds != before {
+        tracing::warn!(
+            event = "environment.experiment_gpu_meter.pending",
+            environment_id = %updated.id,
+            gpu_unit_seconds = state.pending_gpu_unit_seconds,
+            diagnostic_code = "LW_ENVIRONMENT_EXPERIMENT_GPU_SETTLEMENT_PENDING",
+            error_kind = "billing_separation",
+            retryable = false,
+        );
+    }
+    sqlx::query(
+        "UPDATE environment.resource_metering_state SET contract=$2 \
+         WHERE environment_id=$1",
+    )
+    .bind(updated.id.as_uuid())
     .bind(serde_json::to_value(state)?)
     .execute(&mut **transaction)
     .await?;
@@ -206,6 +371,9 @@ pub(crate) async fn record_transition(
     updated: &EnvironmentInstance,
     occurred_at: UtcTimestamp,
 ) -> Result<(), EnvironmentStoreError> {
+    if updated.class == contracts::authoring::EnvironmentClass::Experiment {
+        return record_experiment_gpu_transition(transaction, previous, updated, occurred_at).await;
+    }
     if updated.class != contracts::authoring::EnvironmentClass::Work {
         return Ok(());
     }
@@ -947,6 +1115,73 @@ impl ResourceUsageClient {
         }
         Ok(())
     }
+
+    /// Resolves and reserves one Experiment GPU allocation through the Resource authority.
+    ///
+    /// Resource selects the exact allocation binding, mode, and provider binding from its active
+    /// catalog and current capacity observation. An unknown class, exhausted pool, or stale
+    /// observation is surfaced as a rejection so the environment never renders a GPU it does not own.
+    pub(crate) async fn resolve_gpu_allocation(
+        &self,
+        request: &ResolveEnvironmentGpuAllocationRequest,
+    ) -> Result<GpuAllocation, ResourceUsageClientError> {
+        let response = self
+            .post_json("internal/v1/environment-gpu-allocations", request)
+            .await?;
+        let body: ResolveEnvironmentGpuAllocationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        body.validate_for(request)
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        Ok(body.allocation)
+    }
+
+    /// Releases the durable Experiment GPU reservation through the Resource authority.
+    pub(crate) async fn release_gpu_allocation(
+        &self,
+        request: &ReleaseEnvironmentGpuAllocationRequest,
+    ) -> Result<bool, ResourceUsageClientError> {
+        let response = self
+            .post_json("internal/v1/environment-gpu-allocations/release", request)
+            .await?;
+        let body: ReleaseEnvironmentGpuAllocationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        if body.version != 1 || body.environment_id != request.environment_id {
+            return Err(ResourceUsageClientError::InvalidResponse);
+        }
+        Ok(body.released)
+    }
+
+    async fn post_json<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        self.token_client
+            .bearer_auth(&mut headers)
+            .await
+            .map_err(|_| ResourceUsageClientError::TokenExchange)?;
+        let response = self
+            .client
+            .post(
+                self.base_uri
+                    .join(path)
+                    .map_err(|_| ResourceUsageClientError::Configuration)?,
+            )
+            .headers(headers)
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| ResourceUsageClientError::Transport)?;
+        if !response.status().is_success() {
+            return Err(ResourceUsageClientError::Rejected);
+        }
+        Ok(response)
+    }
 }
 
 pub(crate) async fn delivery_loop(
@@ -1068,9 +1303,9 @@ impl ResourceUsageClientError {
 )]
 mod tests {
     use super::{
-        MeteringState, compute_unknown_boundary, compute_unknown_recovery_boundary,
-        compute_unknown_until, quantities, storage_quantities, storage_ready_boundary,
-        storage_unknown_segment,
+        ExperimentGpuMeteringState, MeteringState, compute_unknown_boundary,
+        compute_unknown_recovery_boundary, compute_unknown_until, quantities, storage_quantities,
+        storage_ready_boundary, storage_unknown_segment,
     };
     use contracts::resource::{GpuAllocation, GpuAllocationMode, WorkloadResources};
     use contracts::{
@@ -1258,6 +1493,38 @@ mod tests {
 
         let storage = storage_quantities(&state.approved_resources, ready, deletion)?;
         assert_eq!(storage.storage_byte_seconds, 20);
+        Ok(())
+    }
+
+    #[test]
+    fn experiment_gpu_meter_accumulates_real_seconds_and_stays_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = ExperimentGpuMeteringState {
+            version: 1,
+            environment_id: EnvironmentId::new(),
+            project_id: ProjectId::new(),
+            course_id: None,
+            owner_actor_id: ActorId::new(),
+            gpu_allocation: GpuAllocation {
+                entry_id: GpuCatalogEntryId::new(),
+                class: "gpu".to_owned(),
+                count: 2,
+                mode: GpuAllocationMode::Exclusive,
+                provider_binding: "provider".to_owned(),
+                allocation_binding: "allocation".to_owned(),
+                catalog_revision: Revision::new(1)?,
+            },
+            compute_started_at: Some(timestamp_millis(0)),
+            pending_gpu_unit_seconds: 0,
+            settlement_pending: true,
+        };
+        state.accumulate(timestamp_millis(1_500))?;
+        assert_eq!(state.pending_gpu_unit_seconds, 3);
+        assert!(state.settlement_pending);
+        assert!(state.compute_started_at.is_none());
+        // A second close with no open interval must not invent or duplicate seconds.
+        state.accumulate(timestamp_millis(2_000))?;
+        assert_eq!(state.pending_gpu_unit_seconds, 3);
         Ok(())
     }
 

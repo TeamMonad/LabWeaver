@@ -14,13 +14,17 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bollard::auth::DockerCredentials;
-use bollard::grpc::build::{ImageBuildFrontendOptions, ImageBuildLoadInput, ImageBuildPlatform};
+use bollard::grpc::build::{
+    ImageBuildFrontendOptions, ImageBuildFrontendOptionsBuilder, ImageBuildLoadInput,
+    ImageBuildNetworkMode, ImageBuildPlatform,
+};
 use bollard::grpc::driver::Image as _;
 use bollard::grpc::driver::buildkitd::BuildkitDaemon;
 use bollard::grpc::registry::ImageRegistryOutputBuilder;
 use bytes::Bytes;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
+use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::BuildSource;
 use flate2::read::GzDecoder;
 use futures::executor::block_on;
@@ -62,6 +66,12 @@ pub struct ProductionBuildExecutorConfig {
     pub harbor_password_file: PathBuf,
     pub project_storage_quota_bytes: u64,
     pub robot_subject: String,
+    /// Platform image containing `/usr/local/bin/labweaver-service`.
+    ///
+    /// When non-empty it is passed to every build as the `LABWEAVER_SERVICE_IMAGE` build argument,
+    /// which generated runner Dockerfiles consume with `COPY --from`.
+    #[serde(default)]
+    pub service_image: String,
 }
 
 impl ProductionBuildExecutorConfig {
@@ -286,7 +296,13 @@ impl ProductionBuildExecutor {
         // digest is read back from the BuildKit history exporter response;
         // Harbor tag association is not guaranteed for BuildKit pushes.
         let digest = self
-            .run_buildkit(context, workspace.path(), dockerfile_path, &tagged)
+            .run_buildkit(
+                context,
+                workspace.path(),
+                dockerfile_path,
+                &tagged,
+                &command.request.network,
+            )
             .await?;
         self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
             .await
@@ -441,6 +457,7 @@ impl ProductionBuildExecutor {
         workspace: &Path,
         dockerfile_path: &str,
         tagged: &str,
+        network: &BuildNetworkPolicy,
     ) -> Result<String, BuildProviderFailure> {
         let context = tar_context(workspace)?;
         let endpoint = self.buildkit_endpoint()?;
@@ -450,14 +467,18 @@ impl ProductionBuildExecutor {
             architecture: String::from("amd64"),
             variant: None,
         };
-        let frontend = ImageBuildFrontendOptions::builder()
-            .dockerfile(Path::new(dockerfile_path))
-            .platforms(&platform)
-            .label(
-                "labweaver.build-request-id",
-                &request_context.build_request_id.to_string(),
-            )
-            .build();
+        let frontend = buildkit_frontend_options(
+            ImageBuildFrontendOptions::builder()
+                .dockerfile(Path::new(dockerfile_path))
+                .platforms(&platform)
+                .label(
+                    "labweaver.build-request-id",
+                    &request_context.build_request_id.to_string(),
+                ),
+            network,
+            &self.config.service_image,
+        )
+        .build();
         let output = ImageRegistryOutputBuilder::new(tagged).push(true).consume();
         let registry_host = self.config.harbor_registry.clone();
         let username = self.harbor_username.clone();
@@ -1061,6 +1082,20 @@ fn candidate_tag(identity: BuildIdentity) -> String {
     format!("candidate-{}", &identity.0.to_string()[..24])
 }
 
+fn buildkit_frontend_options(
+    mut builder: ImageBuildFrontendOptionsBuilder,
+    network: &BuildNetworkPolicy,
+    service_image: &str,
+) -> ImageBuildFrontendOptionsBuilder {
+    if !service_image.is_empty() {
+        builder = builder.buildarg("LABWEAVER_SERVICE_IMAGE", service_image);
+    }
+    match network {
+        BuildNetworkPolicy::DenyAll => builder.force_network_mode(&ImageBuildNetworkMode::None),
+        BuildNetworkPolicy::Restricted { .. } => builder,
+    }
+}
+
 /// Pack the unpacked build workspace into a single tar stream without
 /// following symlinks. `BuildKit` consumes the archive directly as the
 /// dockerfile frontend context.
@@ -1221,6 +1256,61 @@ mod tests {
         ] {
             assert!(buildkit_tls_address(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn buildkit_network_policy_binds_deny_all_to_network_none() {
+        let denied = buildkit_frontend_options(
+            ImageBuildFrontendOptions::builder(),
+            &BuildNetworkPolicy::DenyAll,
+            "",
+        )
+        .build();
+        assert_eq!(
+            denied,
+            ImageBuildFrontendOptions::builder()
+                .force_network_mode(&ImageBuildNetworkMode::None)
+                .build()
+        );
+
+        let restricted = buildkit_frontend_options(
+            ImageBuildFrontendOptions::builder(),
+            &BuildNetworkPolicy::Restricted {
+                allowed_registries: vec!["harbor.internal".to_owned()],
+            },
+            "",
+        )
+        .build();
+        assert_eq!(restricted, ImageBuildFrontendOptions::default());
+    }
+
+    #[test]
+    fn buildkit_service_image_build_arg_is_optional() {
+        let absent = buildkit_frontend_options(
+            ImageBuildFrontendOptions::builder(),
+            &BuildNetworkPolicy::Restricted {
+                allowed_registries: vec!["harbor.internal".to_owned()],
+            },
+            "",
+        )
+        .build();
+        assert_eq!(absent, ImageBuildFrontendOptions::default());
+
+        let service_image = "harbor.internal/labweaver-system/evaluation-service@sha256:abc123";
+        let present = buildkit_frontend_options(
+            ImageBuildFrontendOptions::builder(),
+            &BuildNetworkPolicy::Restricted {
+                allowed_registries: vec!["harbor.internal".to_owned()],
+            },
+            service_image,
+        )
+        .build();
+        assert_eq!(
+            present,
+            ImageBuildFrontendOptions::builder()
+                .buildarg("LABWEAVER_SERVICE_IMAGE", service_image)
+                .build()
+        );
     }
 
     #[test]

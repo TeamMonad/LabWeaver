@@ -33,9 +33,10 @@ use contracts::http::{
     CandidateBuildView, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest, EnvironmentCandidateView,
-    EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactRecord,
-    IdempotencyKey, InternalPublishEvaluationReleaseRequest, PlatformImageEntry, PlatformImageKind,
-    PlatformImageStatus, PlatformImageUploadSession, PlatformImageUploadTarget,
+    EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactKind,
+    GeneratedArtifactRecord, IdempotencyKey, InternalPublishEvaluationReleaseRequest,
+    PlatformImageEntry, PlatformImageKind, PlatformImageStatus, PlatformImageUploadSession,
+    PlatformImageUploadTarget,
     ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
     RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
     WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
@@ -154,6 +155,9 @@ pub struct ContainerBuildPolicy {
     pub output_repository_prefix: String,
     /// Candidate-context-relative Dockerfile path.
     pub dockerfile_path: String,
+    /// Candidate-context-relative Dockerfile path for the per-experiment Evaluation runner image.
+    #[serde(default = "default_runner_dockerfile_path")]
+    pub runner_dockerfile_path: String,
     /// Explicit build-time network posture.
     pub network: BuildNetworkPolicy,
     /// Hard end-to-end build deadline.
@@ -237,6 +241,10 @@ impl ControlConfig {
     }
 }
 
+fn default_runner_dockerfile_path() -> String {
+    "evaluation/Dockerfile".to_owned()
+}
+
 impl ContainerBuildPolicy {
     fn validate(&self) -> bool {
         let prefix = self.output_repository_prefix.trim_end_matches('/');
@@ -259,6 +267,9 @@ impl ContainerBuildPolicy {
             && !prefix.contains("..")
             && repository_scope.is_some()
             && !self.dockerfile_path.trim().is_empty()
+            && contracts::validate_relative_path(&self.dockerfile_path).is_ok()
+            && !self.runner_dockerfile_path.trim().is_empty()
+            && contracts::validate_relative_path(&self.runner_dockerfile_path).is_ok()
             && self.max_duration_milliseconds > 0
             && self.max_cpu_millicores > 0
             && self.max_memory_bytes > 0
@@ -2587,9 +2598,13 @@ impl ControlService {
     ) -> Result<EvaluationCandidateView, ControlError> {
         let candidate = self.evaluation_candidate(course_id, candidate_id).await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        let runner_build = load_evaluation_runner_build(&self.pool, course_id, &candidate).await?;
+        let runner_image_artifact = resolve_runner_image_artifact(runner_build.as_ref())?;
         Ok(EvaluationCandidateView {
             candidate,
             approvals,
+            runner_build,
+            runner_image_artifact,
             trust_revision: self.config.trust_revision,
         })
     }
@@ -2604,9 +2619,14 @@ impl ControlService {
             .project_evaluation_candidate(project_id, candidate_id)
             .await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        let runner_build =
+            load_evaluation_runner_build_project(&self.pool, project_id, &candidate).await?;
+        let runner_image_artifact = resolve_runner_image_artifact(runner_build.as_ref())?;
         Ok(EvaluationCandidateView {
             candidate,
             approvals,
+            runner_build,
+            runner_image_artifact,
             trust_revision: self.config.trust_revision,
         })
     }
@@ -2829,12 +2849,16 @@ impl ControlService {
         evaluation: Option<&EvaluationCandidate>,
         environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
+        evaluation_runner_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<(), ControlError> {
         run.validate().map_err(|_| ControlError::ContractInvalid)?;
         if environment.is_none() && evaluation.is_none() {
             return Err(ControlError::CandidateMissing);
         }
         if generated_context.is_some() && environment.is_none() {
+            return Err(ControlError::ContractInvalid);
+        }
+        if evaluation_runner_context.is_some() && evaluation.is_none() {
             return Err(ControlError::ContractInvalid);
         }
         if let Some(candidate) = environment {
@@ -2920,6 +2944,18 @@ impl ControlService {
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
             )
             .await?;
+            enqueue_evaluation_runner_build(
+                &mut transaction,
+                &self.config,
+                run.project_id,
+                run.course_id,
+                run.package_id,
+                environment,
+                candidate,
+                evaluation_runner_context,
+                candidate.created_at,
+            )
+            .await?;
         }
         transaction.commit().await.map_err(db)?;
         Ok(())
@@ -2934,6 +2970,7 @@ impl ControlService {
         evaluation: Option<&EvaluationCandidate>,
         environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
+        evaluation_runner_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<InboxDecision, ControlError> {
         let contract = EVENT_CONTRACTS
             .iter()
@@ -2953,6 +2990,9 @@ impl ControlService {
             return Err(ControlError::ProjectionConflict);
         }
         if generated_context.is_some() && environment.is_none() {
+            return Err(ControlError::ContractInvalid);
+        }
+        if evaluation_runner_context.is_some() && evaluation.is_none() {
             return Err(ControlError::ContractInvalid);
         }
         if let Some(candidate) = environment {
@@ -3068,6 +3108,18 @@ impl ControlService {
                 self.config.evaluation_schema_sha256,
                 event.id,
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
+            )
+            .await?;
+            enqueue_evaluation_runner_build(
+                &mut transaction,
+                &self.config,
+                run.project_id,
+                run.course_id,
+                run.package_id,
+                environment,
+                candidate,
+                evaluation_runner_context,
+                event.time,
             )
             .await?;
         }
@@ -3822,6 +3874,43 @@ impl ControlService {
             catalog,
         )
         .await?;
+        let (evaluation_runtime_identity, evaluation_runner_image_artifact) =
+            match &environment.spec.runtime {
+                contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                    let runner_artifact = request
+                        .evaluation_runner_image_artifact
+                        .as_ref()
+                        .ok_or(ControlError::EvaluationRunnerArtifactRequired)?;
+                    validate_authoring_runner_artifact(
+                        &mut transaction,
+                        project_id,
+                        project.course_id,
+                        &evaluation,
+                        runner_artifact,
+                    )
+                    .await?;
+                    let ImageArtifact::Container {
+                        repository, digest, ..
+                    } = runner_artifact
+                    else {
+                        return Err(ControlError::ArtifactMismatch);
+                    };
+                    let identity = EvaluationRuntimeIdentity {
+                        provider_binding: self.config.evaluation_runtime.provider_binding.clone(),
+                        runner_image: format!("{repository}@{digest}"),
+                    };
+                    identity
+                        .validate()
+                        .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
+                    (identity, Some(runner_artifact.clone()))
+                }
+                contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+                    if request.evaluation_runner_image_artifact.is_some() {
+                        return Err(ControlError::ArtifactMismatch);
+                    }
+                    (self.config.evaluation_runtime.identity()?, None)
+                }
+            };
 
         let next_revision = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(revision),0)+1 FROM control.authoring_approvals WHERE project_id=$1",
@@ -3844,8 +3933,9 @@ impl ControlService {
             environment_candidate_revision: environment.revision,
             evaluation_candidate_id: evaluation.id,
             evaluation_candidate_revision: evaluation.revision,
-            evaluation_runtime_identity: self.config.evaluation_runtime.identity()?,
+            evaluation_runtime_identity,
             image_artifact: request.image_artifact.clone(),
+            evaluation_runner_image_artifact,
             actor_id,
             reason: request.reason.trim().to_owned(),
             approved_at: now,
@@ -3859,8 +3949,9 @@ impl ControlService {
             "INSERT INTO control.authoring_approvals \
              (approval_id,project_id,course_id,revision,package_id,package_revision, \
               environment_candidate_id,environment_candidate_revision,evaluation_candidate_id, \
-              evaluation_candidate_revision,image_artifact_id,actor_id,reason,contract,approved_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+              evaluation_candidate_revision,image_artifact_id,evaluation_runner_image_artifact_id, \
+              actor_id,reason,contract,approved_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         )
         .bind(approval.id.as_uuid())
         .bind(project_id.as_uuid())
@@ -3873,6 +3964,12 @@ impl ControlService {
         .bind(approval.evaluation_candidate_id.as_uuid())
         .bind(i64_revision(approval.evaluation_candidate_revision)?)
         .bind(approval.image_artifact.id().as_uuid())
+        .bind(
+            approval
+                .evaluation_runner_image_artifact
+                .as_ref()
+                .map(|artifact| artifact.id().as_uuid()),
+        )
         .bind(actor_id.as_uuid())
         .bind(&approval.reason)
         .bind(&approval_contract)
@@ -5038,7 +5135,8 @@ impl ControlService {
                        ON artifacts.image_artifact_id=builds.image_artifact_id \
                       WHERE builds.project_id=$1 AND builds.course_id IS NOT DISTINCT FROM $2 \
                         AND builds.candidate_id=$3 AND builds.candidate_revision=$4 \
-                        AND builds.candidate_sha256=$5 AND builds.state='succeeded' FOR SHARE",
+                        AND builds.candidate_sha256=$5 AND builds.target='environment' \
+                        AND builds.state='succeeded' FOR SHARE",
                 )
                 .bind(project_id.as_uuid())
                 .bind(course_id.map(CourseId::as_uuid))
@@ -6282,12 +6380,13 @@ async fn enqueue_container_build(
         None
     } else {
         Some(
-            resolve_container_context_object_key(
+            resolve_generated_context_object_key(
                 transaction,
                 project_id,
                 course_id,
                 package_id,
                 build_context,
+                GeneratedArtifactKind::BuildContext,
                 generated_context,
             )
             .await?,
@@ -6298,7 +6397,7 @@ async fn enqueue_container_build(
         "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
                 candidate_sha256,command_sha256,state,contract \
          FROM control.container_build_projections \
-         WHERE candidate_id=$1 AND candidate_revision=$2 FOR UPDATE",
+         WHERE candidate_id=$1 AND candidate_revision=$2 AND target='environment' FOR UPDATE",
     )
     .bind(candidate.id.as_uuid())
     .bind(i64_revision(candidate.revision)?)
@@ -6310,7 +6409,10 @@ async fn enqueue_container_build(
             &row,
             project_id,
             course_id,
-            candidate,
+            candidate.id,
+            candidate.revision,
+            canonical_hash(&candidate.spec)?,
+            build_context,
             context_object_key.as_deref(),
             environment_image_export,
         )?;
@@ -6341,6 +6443,7 @@ async fn enqueue_container_build(
             project_id,
             course_id,
             candidate.id,
+            "",
         ),
         network: config.container_build.network.clone(),
         max_duration_milliseconds: config.container_build.max_duration_milliseconds,
@@ -6365,9 +6468,9 @@ async fn enqueue_container_build(
     let inserted = sqlx::query(
         "INSERT INTO control.container_build_projections \
          (build_request_id,project_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
-          command_sha256,state,contract,created_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9) \
-         ON CONFLICT (candidate_id,candidate_revision) DO NOTHING",
+          command_sha256,state,target,contract,created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'requested','environment',$8,$9) \
+         ON CONFLICT (candidate_id,candidate_revision,target) DO NOTHING",
     )
     .bind(command.request.id.as_uuid())
     .bind(project_id.as_uuid())
@@ -6392,7 +6495,7 @@ async fn enqueue_container_build(
             "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
                     candidate_sha256,command_sha256,state,contract \
              FROM control.container_build_projections \
-             WHERE candidate_id=$1 AND candidate_revision=$2 FOR UPDATE",
+             WHERE candidate_id=$1 AND candidate_revision=$2 AND target='environment' FOR UPDATE",
         )
         .bind(candidate.id.as_uuid())
         .bind(i64_revision(candidate.revision)?)
@@ -6404,7 +6507,10 @@ async fn enqueue_container_build(
             &row,
             project_id,
             course_id,
-            candidate,
+            candidate.id,
+            candidate.revision,
+            canonical_hash(&candidate.spec)?,
+            build_context,
             context_object_key.as_deref(),
             environment_image_export,
         )?;
@@ -6459,11 +6565,229 @@ async fn enqueue_container_build(
     Ok(())
 }
 
+/// Enqueues the second, per-experiment Evaluation runner build for a Container experiment.
+///
+/// The runner image is built through the same single-image `BuildKit` pipeline as the environment
+/// image. Deployment-owned VM evaluation has no runner image and is left untouched.
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_evaluation_runner_build(
+    transaction: &mut Transaction<'_, Postgres>,
+    config: &ControlConfig,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
+    package_id: ProblemPackageId,
+    environment: Option<&EnvironmentCandidate>,
+    evaluation: &EvaluationCandidate,
+    evaluation_runner_context: Option<&GeneratedArtifactRecord>,
+    created_at: UtcTimestamp,
+) -> Result<(), ControlError> {
+    evaluation
+        .validate()
+        .map_err(|_| ControlError::ContractInvalid)?;
+    if evaluation.project_id != project_id {
+        return Err(ControlError::ProjectMismatch);
+    }
+    if evaluation.course_id != course_id {
+        return Err(ControlError::CourseMismatch);
+    }
+    let Some(environment) = environment else {
+        return Ok(());
+    };
+    if !matches!(
+        environment.spec.runtime,
+        contracts::authoring::EnvironmentRuntimeSpec::Container { .. }
+    ) {
+        return Ok(());
+    }
+    let Some(runner_build_context) = &evaluation.runner_build_context else {
+        return Ok(());
+    };
+
+    let context_object_key = resolve_generated_context_object_key(
+        transaction,
+        project_id,
+        course_id,
+        package_id,
+        runner_build_context,
+        GeneratedArtifactKind::EvaluationRunnerBuildContext,
+        evaluation_runner_context,
+    )
+    .await?;
+
+    let existing = sqlx::query(
+        "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
+                candidate_sha256,command_sha256,state,contract \
+         FROM control.container_build_projections \
+         WHERE candidate_id=$1 AND candidate_revision=$2 AND target='evaluation_runner' FOR UPDATE",
+    )
+    .bind(evaluation.id.as_uuid())
+    .bind(i64_revision(evaluation.revision)?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(db)?;
+    if let Some(row) = existing {
+        validate_existing_container_build_projection(
+            &row,
+            project_id,
+            course_id,
+            evaluation.id,
+            evaluation.revision,
+            canonical_hash(&evaluation.spec)?,
+            runner_build_context,
+            Some(context_object_key.as_str()),
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let build_request = BuildRequest {
+        id: BuildRequestId::new(),
+        project_id,
+        course_id,
+        candidate_id: evaluation.id,
+        candidate_revision: evaluation.revision,
+        builder_binding: config.container_build.builder_binding.clone(),
+        source: BuildSource::Dockerfile {
+            context: runner_build_context.clone(),
+            context_object_key: context_object_key.clone(),
+            dockerfile_path: config.container_build.runner_dockerfile_path.clone(),
+        },
+        output_repository: container_build_output_repository(
+            config,
+            project_id,
+            course_id,
+            evaluation.id,
+            "-evaluation-runner",
+        ),
+        network: config.container_build.network.clone(),
+        max_duration_milliseconds: config.container_build.max_duration_milliseconds,
+        max_cpu_millicores: config.container_build.max_cpu_millicores,
+        max_memory_bytes: config.container_build.max_memory_bytes,
+        created_at,
+    };
+    build_request
+        .validate()
+        .map_err(|_| ControlError::ContractInvalid)?;
+    let command = AgentBuildRequested {
+        idempotency_key: format!("build:{}", build_request.id),
+        request: build_request,
+    };
+    command
+        .validate()
+        .map_err(|_| ControlError::ContractInvalid)?;
+    let candidate_sha256 = canonical_hash(&evaluation.spec)?;
+    let command_sha256 = canonical_hash(&command)?;
+    let command_contract =
+        serde_json::to_value(&command).map_err(|_| ControlError::ContractInvalid)?;
+    let inserted = sqlx::query(
+        "INSERT INTO control.container_build_projections \
+         (build_request_id,project_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
+          command_sha256,state,target,contract,created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'requested','evaluation_runner',$8,$9) \
+         ON CONFLICT (candidate_id,candidate_revision,target) DO NOTHING",
+    )
+    .bind(command.request.id.as_uuid())
+    .bind(project_id.as_uuid())
+    .bind(course_id.map(CourseId::as_uuid))
+    .bind(evaluation.id.as_uuid())
+    .bind(i64_revision(evaluation.revision)?)
+    .bind(candidate_sha256.to_string())
+    .bind(command_sha256.to_string())
+    .bind(&command_contract)
+    .bind(created_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        if is_unique_violation(&error) {
+            ControlError::ProjectionConflict
+        } else {
+            db(error)
+        }
+    })?;
+    if inserted.rows_affected() == 0 {
+        let row = sqlx::query(
+            "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
+                    candidate_sha256,command_sha256,state,contract \
+             FROM control.container_build_projections \
+             WHERE candidate_id=$1 AND candidate_revision=$2 AND target='evaluation_runner' FOR UPDATE",
+        )
+        .bind(evaluation.id.as_uuid())
+        .bind(i64_revision(evaluation.revision)?)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PersistenceIdentityMismatch)?;
+        validate_existing_container_build_projection(
+            &row,
+            project_id,
+            course_id,
+            evaluation.id,
+            evaluation.revision,
+            canonical_hash(&evaluation.spec)?,
+            runner_build_context,
+            Some(context_object_key.as_str()),
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let event_id = EventId::new();
+    let contract = event_contract(BUILD_REQUEST_SUBJECT)?;
+    let event = CloudEvent {
+        specversion: SPEC_VERSION.to_owned(),
+        id: event_id,
+        source: contract.source().to_owned(),
+        event_type: BUILD_REQUEST_SUBJECT.to_owned(),
+        subject: BUILD_REQUEST_SUBJECT.to_owned(),
+        time: created_at,
+        datacontenttype: "application/json".to_owned(),
+        dataschema: contract.data_schema(),
+        project_id,
+        course_id,
+        aggregate_revision: Revision::new(1).map_err(|_| ControlError::ContractInvalid)?,
+        aggregate_sequence: Sequence(1),
+        trace_id: format!("build:{}", command.request.id),
+        data: command,
+    };
+    event
+        .validate(contract)
+        .map_err(|_| ControlError::ContractInvalid)?;
+    let payload = serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;
+    OutboxStore::enqueue(
+        transaction,
+        Domain::Control,
+        event_id.as_uuid(),
+        BUILD_REQUEST_SUBJECT,
+        BUILD_REQUEST_SUBJECT,
+        event.data.request.id.as_uuid(),
+        1,
+        &payload,
+        canonical_hash(&payload)?,
+    )
+    .await
+    .map_err(|_| ControlError::PersistenceFailed)?;
+    tracing::info!(
+        event = "control.evaluation_runner_build.requested",
+        project_id = %project_id,
+        course_id = ?course_id,
+        run_id = %evaluation.run_id,
+        candidate_id = %evaluation.id,
+        candidate_revision = evaluation.revision.get(),
+        build_request_id = %event.data.request.id,
+        "Evaluation runner build projection enqueued",
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_existing_container_build_projection(
     row: &sqlx::postgres::PgRow,
     project_id: ProjectId,
     course_id: Option<CourseId>,
-    candidate: &EnvironmentCandidate,
+    candidate_id: CandidateId,
+    candidate_revision: Revision,
+    candidate_sha256: Sha256Digest,
+    build_context: &contracts::ArtifactRef,
     context_object_key: Option<&str>,
     environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
 ) -> Result<(), ControlError> {
@@ -6494,24 +6818,19 @@ fn validate_existing_container_build_projection(
         .map_err(db)?
         .parse()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let expected_candidate_sha256 = canonical_hash(&candidate.spec)?;
-    let expected_revision = i64_revision(candidate.revision)?;
+    let expected_candidate_sha256 = candidate_sha256;
+    let expected_revision = i64_revision(candidate_revision)?;
     let expected_course_id = course_id.map(CourseId::as_uuid);
-    let contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } =
-        &candidate.spec.runtime
-    else {
-        return Err(ControlError::PersistenceIdentityMismatch);
-    };
     let request_matches = persisted_project_id == project_id.as_uuid()
         && persisted_course_id == expected_course_id
-        && persisted_candidate_id == candidate.id.as_uuid()
+        && persisted_candidate_id == candidate_id.as_uuid()
         && persisted_candidate_revision == expected_revision
         && persisted_candidate_sha256 == expected_candidate_sha256
         && build_request_id == command.request.id.as_uuid()
         && command.request.project_id == project_id
         && command.request.course_id == course_id
-        && command.request.candidate_id == candidate.id
-        && command.request.candidate_revision == candidate.revision
+        && command.request.candidate_id == candidate_id
+        && command.request.candidate_revision == candidate_revision
         && match (&command.request.source, environment_image_export) {
             (
                 BuildSource::Dockerfile {
@@ -6532,12 +6851,13 @@ fn validate_existing_container_build_projection(
     Ok(())
 }
 
-async fn resolve_container_context_object_key(
+async fn resolve_generated_context_object_key(
     transaction: &mut Transaction<'_, Postgres>,
     project_id: ProjectId,
     course_id: Option<CourseId>,
     package_id: ProblemPackageId,
     build_context: &contracts::ArtifactRef,
+    expected_kind: GeneratedArtifactKind,
     generated_context: Option<&GeneratedArtifactRecord>,
 ) -> Result<String, ControlError> {
     let package_row = sqlx::query(
@@ -6601,7 +6921,7 @@ async fn resolve_container_context_object_key(
     }
 
     let generated = generated_context.ok_or(ControlError::PersistenceIdentityMismatch)?;
-    if generated.kind != contracts::http::GeneratedArtifactKind::BuildContext
+    if generated.kind != expected_kind
         || generated.artifact != *build_context
         || generated.project_id != project_id
         || generated.course_id != course_id
@@ -6626,9 +6946,10 @@ fn container_build_output_repository(
     project_id: ProjectId,
     course_id: Option<CourseId>,
     candidate_id: CandidateId,
+    suffix: &str,
 ) -> String {
     format!(
-        "{}/{}-{candidate_id}",
+        "{}/{}-{candidate_id}{suffix}",
         config
             .container_build
             .output_repository_prefix
@@ -6747,6 +7068,7 @@ async fn validate_authoring_artifact(
                  WHERE builds.build_request_id=$1 AND builds.project_id=$2 \
                    AND builds.course_id IS NOT DISTINCT FROM $3 \
                    AND builds.candidate_id=$4 AND builds.candidate_revision=$5 \
+                   AND builds.target='environment' \
                    AND builds.state='succeeded' FOR SHARE",
             )
             .bind(build_request_id.as_uuid())
@@ -6803,6 +7125,68 @@ async fn validate_authoring_artifact(
         }
         _ => Err(ControlError::ArtifactMismatch),
     }
+}
+
+/// Verifies that a selected Evaluation runner artifact is the exact artifact produced by the
+/// per-experiment runner build of the selected Evaluation candidate.
+///
+/// A Container experiment must carry a resolvable runner build context and a succeeded runner
+/// build projection; anything else fails closed with a stable diagnostic.
+async fn validate_authoring_runner_artifact(
+    transaction: &mut Transaction<'_, Postgres>,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
+    evaluation: &EvaluationCandidate,
+    artifact: &ImageArtifact,
+) -> Result<(), ControlError> {
+    if evaluation.runner_build_context.is_none() {
+        return Err(ControlError::EvaluationRunnerArtifactRequired);
+    }
+    let ImageArtifact::Container {
+        build_request_id, ..
+    } = artifact
+    else {
+        return Err(ControlError::ArtifactMismatch);
+    };
+    let row = sqlx::query(
+        "SELECT builds.build_request_id,builds.candidate_sha256,artifacts.artifact \
+         FROM control.container_build_projections builds \
+         JOIN control.image_artifact_projections artifacts \
+           ON artifacts.image_artifact_id=builds.image_artifact_id \
+         WHERE builds.build_request_id=$1 AND builds.project_id=$2 \
+           AND builds.course_id IS NOT DISTINCT FROM $3 \
+           AND builds.candidate_id=$4 AND builds.candidate_revision=$5 \
+           AND builds.target='evaluation_runner' \
+           AND builds.state='succeeded' FOR SHARE",
+    )
+    .bind(build_request_id.as_uuid())
+    .bind(project_id.as_uuid())
+    .bind(course_id.map(CourseId::as_uuid))
+    .bind(evaluation.id.as_uuid())
+    .bind(i64_revision(evaluation.revision)?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(db)?
+    .ok_or(ControlError::EvaluationRunnerArtifactRequired)?;
+    let persisted_build_request: Uuid = row.try_get("build_request_id").map_err(db)?;
+    if persisted_build_request != build_request_id.as_uuid() {
+        return Err(ControlError::PersistenceIdentityMismatch);
+    }
+    let persisted_candidate_hash: Sha256Digest = row
+        .try_get::<String, _>("candidate_sha256")
+        .map_err(db)?
+        .parse()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    if persisted_candidate_hash != canonical_hash(&evaluation.spec)? {
+        return Err(ControlError::ArtifactMismatch);
+    }
+    let persisted_artifact: ImageArtifact =
+        serde_json::from_value(row.try_get("artifact").map_err(db)?)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    if persisted_artifact != *artifact {
+        return Err(ControlError::ArtifactMismatch);
+    }
+    Ok(())
 }
 
 fn reject_sensitive_payload(value: &Value) -> Result<(), ControlError> {
@@ -7189,8 +7573,92 @@ async fn load_candidate_build(
     course_id: CourseId,
     candidate: &EnvironmentCandidate,
 ) -> Result<Option<CandidateBuildView>, ControlError> {
-    let candidate_sha256 = canonical_hash(&candidate.spec)?;
-    let row = sqlx::query(
+    load_build_view(
+        pool,
+        BuildScope::Course(course_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "environment",
+        "environment",
+    )
+    .await
+}
+
+async fn load_candidate_build_project(
+    pool: &PgPool,
+    project_id: ProjectId,
+    candidate: &EnvironmentCandidate,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    load_build_view(
+        pool,
+        BuildScope::Project(project_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "environment",
+        "environment",
+    )
+    .await
+}
+
+async fn load_evaluation_runner_build(
+    pool: &PgPool,
+    course_id: CourseId,
+    candidate: &EvaluationCandidate,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    load_build_view(
+        pool,
+        BuildScope::Course(course_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "evaluation",
+        "evaluation_runner",
+    )
+    .await
+}
+
+async fn load_evaluation_runner_build_project(
+    pool: &PgPool,
+    project_id: ProjectId,
+    candidate: &EvaluationCandidate,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    load_build_view(
+        pool,
+        BuildScope::Project(project_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "evaluation",
+        "evaluation_runner",
+    )
+    .await
+}
+
+enum BuildScope {
+    Course(CourseId),
+    Project(ProjectId),
+}
+
+async fn load_build_view(
+    pool: &PgPool,
+    scope: BuildScope,
+    candidate_id: CandidateId,
+    candidate_revision: Revision,
+    candidate_sha256: Sha256Digest,
+    candidate_kind: &str,
+    target: &str,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    let scope_column = match scope {
+        BuildScope::Course(_) => "course_id",
+        BuildScope::Project(_) => "project_id",
+    };
+    let scope_id = match scope {
+        BuildScope::Course(course_id) => course_id.as_uuid(),
+        BuildScope::Project(project_id) => project_id.as_uuid(),
+    };
+    let query = format!(
         "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
                 artifacts.artifact \
          FROM control.container_build_projections builds \
@@ -7200,21 +7668,28 @@ async fn load_candidate_build(
           AND candidates.content_sha256=builds.candidate_sha256 \
          LEFT JOIN control.image_artifact_projections artifacts \
            ON artifacts.image_artifact_id=builds.image_artifact_id \
-         WHERE builds.course_id=$1 AND builds.candidate_id=$2 \
-           AND candidates.course_id=$1 AND candidates.candidate_kind='environment' \
+         WHERE builds.{scope_column}=$1 AND builds.candidate_id=$2 AND builds.target=$5 \
+           AND candidates.{scope_column}=$1 AND candidates.candidate_kind=$6 \
            AND candidates.state='validated' AND candidates.revision=$3 \
            AND candidates.content_sha256=$4",
-    )
-    .bind(course_id.as_uuid())
-    .bind(candidate.id.as_uuid())
-    .bind(i64_revision(candidate.revision)?)
-    .bind(candidate_sha256.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(db)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
+    );
+    let row = sqlx::query(&query)
+        .bind(scope_id)
+        .bind(candidate_id.as_uuid())
+        .bind(i64_revision(candidate_revision)?)
+        .bind(candidate_sha256.to_string())
+        .bind(target)
+        .bind(candidate_kind)
+        .fetch_optional(pool)
+        .await
+        .map_err(db)?;
+    row.map(|row| candidate_build_view_from_row(&row))
+        .transpose()
+}
+
+fn candidate_build_view_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<CandidateBuildView, ControlError> {
     let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
         "requested" => CandidateBuildState::Requested,
         "succeeded" => CandidateBuildState::Succeeded,
@@ -7246,83 +7721,31 @@ async fn load_candidate_build(
     {
         return Err(ControlError::PersistenceIdentityMismatch);
     }
-    Ok(Some(CandidateBuildView {
+    Ok(CandidateBuildView {
         state,
         artifact,
         diagnostic_code,
         cleanup_verified,
-    }))
+    })
 }
 
-async fn load_candidate_build_project(
-    pool: &PgPool,
-    project_id: ProjectId,
-    candidate: &EnvironmentCandidate,
-) -> Result<Option<CandidateBuildView>, ControlError> {
-    let candidate_sha256 = canonical_hash(&candidate.spec)?;
-    let row = sqlx::query(
-        "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
-                artifacts.artifact \
-         FROM control.container_build_projections builds \
-         JOIN control.candidates candidates \
-           ON candidates.candidate_id=builds.candidate_id \
-          AND candidates.revision=builds.candidate_revision \
-          AND candidates.content_sha256=builds.candidate_sha256 \
-         LEFT JOIN control.image_artifact_projections artifacts \
-           ON artifacts.image_artifact_id=builds.image_artifact_id \
-         WHERE builds.project_id=$1 AND builds.candidate_id=$2 \
-           AND candidates.project_id=$1 AND candidates.candidate_kind='environment' \
-           AND candidates.state='validated' AND candidates.revision=$3 \
-           AND candidates.content_sha256=$4",
-    )
-    .bind(project_id.as_uuid())
-    .bind(candidate.id.as_uuid())
-    .bind(i64_revision(candidate.revision)?)
-    .bind(candidate_sha256.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(db)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
-        "requested" => CandidateBuildState::Requested,
-        "succeeded" => CandidateBuildState::Succeeded,
-        "failed" => CandidateBuildState::Failed,
-        "cancelled" => CandidateBuildState::Cancelled,
-        _ => return Err(ControlError::PersistenceIdentityMismatch),
-    };
-    let artifact = row
-        .try_get::<Option<Value>, _>("artifact")
-        .map_err(db)?
-        .map(|value| {
-            serde_json::from_value(value).map_err(|_| ControlError::PersistenceIdentityMismatch)
-        })
-        .transpose()?;
-    let diagnostic_code = row
-        .try_get::<Option<String>, _>("terminal_diagnostic")
-        .map_err(db)?
-        .map(DiagnosticCode::parse)
-        .transpose()
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
-    let evidence_is_complete = artifact.is_some();
-    if (state == CandidateBuildState::Succeeded) != evidence_is_complete
-        || (state == CandidateBuildState::Requested
-            && (diagnostic_code.is_some() || cleanup_verified.is_some()))
-        || (matches!(
-            state,
-            CandidateBuildState::Failed | CandidateBuildState::Cancelled
-        ) && diagnostic_code.is_none())
+/// Resolve the per-experiment runner artifact safe to present for an Evaluation candidate.
+///
+/// Only a succeeded, Control-projected runner build presents an artifact. Deployment-owned VM
+/// evaluation has no runner build and therefore returns null.
+fn resolve_runner_image_artifact(
+    build: Option<&CandidateBuildView>,
+) -> Result<Option<ImageArtifact>, ControlError> {
+    let artifact = build
+        .filter(|view| view.state == CandidateBuildState::Succeeded)
+        .and_then(|view| view.artifact.clone());
+    if let Some(artifact) = &artifact
+        && (matches!(artifact, ImageArtifact::VirtualMachine { .. })
+            || artifact.validate().is_err())
     {
         return Err(ControlError::PersistenceIdentityMismatch);
     }
-    Ok(Some(CandidateBuildView {
-        state,
-        diagnostic_code,
-        cleanup_verified,
-        artifact,
-    }))
+    Ok(artifact)
 }
 
 async fn load_contract_tx<T>(
@@ -7748,6 +8171,8 @@ pub enum ControlError {
     ReleaseEvidenceStale,
     #[error("LW_RELEASE_ARTIFACT_NOT_AUTHORITATIVE")]
     ArtifactNotAuthoritative,
+    #[error("LW_EVALUATION_RUNNER_ARTIFACT_REQUIRED")]
+    EvaluationRunnerArtifactRequired,
     #[error("LW_RELEASE_ARTIFACT_MISMATCH")]
     ArtifactMismatch,
     #[error("LW_RELEASE_NOT_FOUND")]
@@ -7807,6 +8232,7 @@ mod tests {
                 builder_binding: "buildkit-primary-v1".to_owned(),
                 output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
                 dockerfile_path: "Dockerfile".to_owned(),
+                runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
                 network: BuildNetworkPolicy::DenyAll,
                 max_duration_milliseconds: 600_000,
                 max_cpu_millicores: 2_000,

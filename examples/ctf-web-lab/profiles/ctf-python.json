@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "evaluation.labweaver.io/program-profile/v1",
+  "compileArgv": [
+    "/usr/bin/python3",
+    "{evaluator_dir}/scripts/ctf_check.py",
+    "compile",
+    "{source}"
+  ],
+  "runArgv": [
+    "/usr/bin/python3",
+    "{evaluator_dir}/scripts/ctf_check.py",
+    "check",
+    "{source}",
+    "{evaluator_dir}/tests/ctf-python/expected_flag.txt"
+  ],
+  "supportFiles": [
+    "scripts/ctf_check.py",
+    "tests/ctf-python/expected_flag.txt"
+  ]
+}

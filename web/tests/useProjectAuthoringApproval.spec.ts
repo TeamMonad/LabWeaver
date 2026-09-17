@@ -52,7 +52,7 @@ function makeEnvironmentCandidate() {
       policyRevision: 1,
       revision: 3,
       createdAt: '2026-07-16T08:00:00.000Z',
-      spec: {},
+      spec: { runtime: { kind: 'container' } },
     },
     approvals: [],
     trustRevision: 1,
@@ -91,6 +91,23 @@ function makeEvaluationCandidate() {
     },
     approvals: [],
     trustRevision: 1,
+    runnerBuild: {
+      state: 'succeeded',
+      artifact: {
+        kind: 'container',
+        id: 'runner-build-only-image',
+        build_request_id: 'runner-build-only',
+        repository: 'registry.labweaver.local/runner-build-only',
+        digest: 'sha256:runner-build-only',
+      },
+    },
+    runnerImageArtifact: {
+      kind: 'container',
+      id: 'runner-image-1',
+      build_request_id: 'runner-build-1',
+      repository: 'registry.labweaver.local/runner-1',
+      digest: 'sha256:runner-image',
+    },
   }
 }
 
@@ -118,6 +135,7 @@ function makeApproval() {
     evaluationCandidateId: 'eval-candidate-1',
     evaluationCandidateRevision: 4,
     imageArtifact: makeEnvironmentCandidate().imageArtifact,
+    evaluationRunnerImageArtifact: makeEvaluationCandidate().runnerImageArtifact,
     evaluationRuntimeIdentity: { providerBinding: 'evaluation-v1', runnerImage: 'runner@sha256:image' },
     actorId: 'teacher-1',
     approvedAt: '2026-07-16T09:00:00.000Z',
@@ -250,12 +268,65 @@ describe('useProjectAuthoringApproval', () => {
         evaluationCandidateId: 'eval-candidate-1',
         evaluationCandidateRevision: 4,
         imageArtifact: expect.objectContaining({ id: 'image-1', digest: 'sha256:image' }),
+        evaluationRunnerImageArtifact: expect.objectContaining({ id: 'runner-image-1', digest: 'sha256:runner-image' }),
         reason: 'reviewed package and both candidates',
       }),
     }))
     expect(approval.approval.kind).toBe('success')
     const firstHeaders = vi.mocked(completeProjectAuthoringApproval).mock.calls[0][0].headers
     expect(firstHeaders?.['Idempotency-Key']).toEqual(expect.any(String))
+  })
+
+  it('fails closed when a container experiment has no resolved runner artifact', async () => {
+    vi.mocked(getProjectEvaluationCandidate).mockResolvedValue({
+      data: {
+        ...makeEvaluationCandidate(),
+        runnerBuild: { state: 'requested', artifact: null },
+        runnerImageArtifact: null,
+      } as never,
+      error: undefined as never,
+    })
+    const approval = useProjectAuthoringApproval(ref<string | null>('project-1'), ref<string | undefined>('run-1'))
+
+    await vi.waitFor(() => expect(approval.evaluationCandidate.kind).toBe('success'))
+    await vi.waitFor(() => expect(approval.problemPackage.kind).toBe('success'))
+    expect(approval.runnerArtifactRequired).toBe(true)
+    expect(approval.runnerImageArtifact).toBeNull()
+    expect(approval.canApprove).toBe(false)
+    await expect(approval.complete('reviewed')).resolves.toBe(false)
+    expect(completeProjectAuthoringApproval).not.toHaveBeenCalled()
+  })
+
+  it('allows a VM experiment to omit the per-experiment runner artifact', async () => {
+    vi.mocked(getProjectEnvironmentCandidate).mockResolvedValue({
+      data: {
+        ...makeEnvironmentCandidate(),
+        candidate: {
+          ...makeEnvironmentCandidate().candidate,
+          spec: { runtime: { kind: 'virtual_machine' } },
+        },
+        imageArtifact: {
+          kind: 'virtual_machine',
+          id: 'vm-image-1',
+          format: 'qcow2',
+          base_disk: { binding: 'base-disk', sourceRegistryDigest: 'sha256:base', capacityBytes: 4096 },
+        },
+      } as never,
+      error: undefined as never,
+    })
+    vi.mocked(getProjectEvaluationCandidate).mockResolvedValue({
+      data: { ...makeEvaluationCandidate(), runnerBuild: null, runnerImageArtifact: null } as never,
+      error: undefined as never,
+    })
+    vi.mocked(completeProjectAuthoringApproval).mockResolvedValue({ data: makeApproval() as never, error: undefined as never })
+    const approval = useProjectAuthoringApproval(ref<string | null>('project-1'), ref<string | undefined>('run-1'))
+
+    await vi.waitFor(() => expect(approval.canApprove).toBe(true))
+    expect(approval.runnerArtifactRequired).toBe(false)
+    await expect(approval.complete('reviewed')).resolves.toBe(true)
+    expect(completeProjectAuthoringApproval).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ evaluationRunnerImageArtifact: null }),
+    }))
   })
 
   it('keeps the loaded review context visible when completion conflicts', async () => {
