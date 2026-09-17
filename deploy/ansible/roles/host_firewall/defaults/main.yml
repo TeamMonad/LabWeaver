@@ -39,6 +39,9 @@ host_firewall_internal_services:
   - ssh
 host_firewall_internal_ports: []
 host_firewall_internal_sources: []
+# Same DNAT contract as host_firewall_public_forward_ports but for cluster
+# source addresses, which firewalld classifies into the internal zone.
+host_firewall_internal_forward_ports: []
 
 # Cluster underlay source addresses. Traffic from these nodes is classified
 # into the internal zone, where the Cilium/Kubernetes ports below are allowed.
@@ -77,6 +80,16 @@ host_firewall_manage_docker: false
 host_firewall_docker_interface: docker0
 host_firewall_manage_docker_policy: false
 host_firewall_docker_policy_name: docker-forwarding
+
+# firewalld 1.x flushes the whole nftables ruleset when it starts. Cilium in
+# legacy host routing keeps its datapath in iptables-nft chains, so a boot
+# race or any firewalld restart removes them and breaks pod/gateway traffic.
+# Order kubelet after firewalld at boot and reinstall the Cilium agent when the
+# chains are found missing after a firewalld start.
+host_firewall_reconcile_cilium: true
+host_firewall_reconcile_script: /usr/local/sbin/labweaver-firewall-reconcile
+host_firewall_reconcile_unit: labweaver-firewall-reconcile
+host_firewall_kubelet_dropin_dir: /etc/systemd/system/kubelet.service.d
 
 # Automatic rollback guard. If a fresh SSH session cannot be confirmed before
 # the deadline, the pre-change firewalld snapshot is restored automatically.

@@ -99,9 +99,16 @@
 - name: Read the internal zone state
   ansible.builtin.command:
     argv: [firewall-cmd, --permanent, "--zone={{ host_firewall_internal_zone }}", "--list-{{ item }}"]
-  loop: [services, interfaces, ports, sources]
+  loop: [services, interfaces, ports, sources, forward-ports]
   changed_when: false
   register: host_firewall_internal_zone_state
+
+- name: Build the effective internal forward-port specs
+  ansible.builtin.set_fact:
+    host_firewall_effective_internal_forward_ports: >-
+      {{ (host_firewall_effective_internal_forward_ports | default([]))
+         + ['port=' ~ item.port ~ ':proto=' ~ item.protocol ~ ':toport=' ~ item.toport ~ ':toaddr=' ~ item.toaddr] }}
+  loop: "{{ host_firewall_internal_forward_ports }}"
 
 - name: Read the docker zone state
   ansible.builtin.command:
@@ -142,6 +149,9 @@
       {{ host_firewall_effective_internal_ports | difference(host_firewall_internal_zone_state.results[2].stdout.split()) }}
     host_firewall_pending_internal_sources: >-
       {{ host_firewall_effective_internal_sources | difference(host_firewall_internal_zone_state.results[3].stdout.split()) }}
+    host_firewall_pending_internal_forward_ports: >-
+      {{ host_firewall_effective_internal_forward_ports | default([])
+         | difference(host_firewall_internal_zone_state.results[4].stdout.split()) }}
 
 - name: Decide whether a guarded firewalld change is required
   ansible.builtin.set_fact:
@@ -149,7 +159,8 @@
       {{ (host_firewall_pending_public_interfaces + host_firewall_pending_public_services
           + host_firewall_pending_public_ports + host_firewall_pending_public_forward_ports
           + host_firewall_pending_internal_interfaces + host_firewall_pending_internal_services
-          + host_firewall_pending_internal_ports + host_firewall_pending_internal_sources) | length > 0
+          + host_firewall_pending_internal_ports + host_firewall_pending_internal_sources
+          + host_firewall_pending_internal_forward_ports) | length > 0
          or (host_firewall_ensure_public_ssh is changed)
          or (host_firewall_manage_docker | bool
              and host_firewall_docker_interface in (ansible_facts.interfaces | default([]))
@@ -292,6 +303,17 @@
   changed_when: true
   notify: Reload the host firewall safely
 
+- name: Forward the internal entry ports for cluster sources
+  ansible.builtin.command:
+    argv:
+      - firewall-cmd
+      - --permanent
+      - "--zone={{ host_firewall_internal_zone }}"
+      - "--add-forward-port={{ item }}"
+  loop: "{{ host_firewall_pending_internal_forward_ports }}"
+  changed_when: true
+  notify: Reload the host firewall safely
+
 - name: Bind the docker bridge to its zone
   ansible.builtin.command:
     argv:
@@ -367,3 +389,120 @@
     name: "{{ host_firewall_rollback_unit }}.timer"
     state: stopped
   when: host_firewall_change_pending | bool
+
+# firewalld flushes the nftables ruleset on start. Cilium in legacy host
+# routing stores its datapath in iptables-nft chains, so a firewalld start
+# removes them and the agent does not reinstall them by itself. Order kubelet
+# after firewalld at boot and reinstall the agent when the chains go missing.
+- name: Disable a full firewalld ruleset flush on reload
+  ansible.builtin.lineinfile:
+    path: /etc/firewalld/firewalld.conf
+    regexp: '^#?FlushAllOnReload='
+    line: FlushAllOnReload=no
+
+- name: Ensure the kubelet drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ host_firewall_kubelet_dropin_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - host_firewall_reconcile_cilium | bool
+    - "'k8s_cluster' in group_names"
+
+- name: Order kubelet after firewalld at boot
+  ansible.builtin.copy:
+    dest: "{{ host_firewall_kubelet_dropin_dir }}/20-labweaver-firewalld-order.conf"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      After=firewalld.service
+      Wants=firewalld.service
+  when:
+    - host_firewall_reconcile_cilium | bool
+    - "'k8s_cluster' in group_names"
+  register: host_firewall_kubelet_dropin
+
+- name: Install the Cilium firewall reconcile script
+  ansible.builtin.copy:
+    dest: "{{ host_firewall_reconcile_script }}"
+    owner: root
+    group: root
+    mode: '0700'
+    content: |
+      #!/bin/bash
+      # Reinstall the Cilium datapath after firewalld (re)starts.
+      #
+      # firewalld flushes the nftables ruleset on start. Cilium in legacy host
+      # routing keeps its rules in iptables-nft chains, so the flush removes
+      # them and the agent does not reinstall them on its own. Restart the
+      # agent only when the chains are actually missing.
+      set -euo pipefail
+
+      export KUBECONFIG=/etc/kubernetes/admin.conf
+      [ -f "$KUBECONFIG" ] || exit 0
+
+      # At boot kubelet is ordered after firewalld, so a firewalld start while
+      # kubelet is still inactive is normal: Cilium will install its rules
+      # afterwards. Only a firewalld restart on a running node needs repair.
+      systemctl is-active --quiet kubelet || exit 0
+
+      # firewalld flushes the ruleset asynchronously after it starts.
+      sleep 20
+      iptables -S 2>/dev/null | grep -q CILIUM && exit 0
+
+      for _ in $(seq 1 30); do
+        kubectl get daemonset -n kube-system cilium >/dev/null 2>&1 && break
+        sleep 2
+      done
+      kubectl get daemonset -n kube-system cilium >/dev/null 2>&1 || exit 0
+
+      logger -t labweaver-firewall-reconcile \
+        "Cilium iptables chains missing after a firewalld start; restarting the agent"
+      kubectl -n kube-system rollout restart daemonset/cilium
+  when:
+    - host_firewall_reconcile_cilium | bool
+    - "'k8s_cluster' in group_names"
+
+- name: Install the Cilium firewall reconcile unit
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ host_firewall_reconcile_unit }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Reinstall the Cilium datapath after firewalld starts
+      Wants=firewalld.service
+      After=firewalld.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ host_firewall_reconcile_script }}
+
+      [Install]
+      WantedBy=firewalld.service
+  when:
+    - host_firewall_reconcile_cilium | bool
+    - "'k8s_cluster' in group_names"
+  register: host_firewall_reconcile_unit_file
+
+- name: Reload systemd after the firewall reconcile changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - host_firewall_reconcile_cilium | bool
+    - "'k8s_cluster' in group_names"
+    - (host_firewall_kubelet_dropin.changed | default(false)) or (host_firewall_reconcile_unit_file.changed | default(false))
+
+- name: Enable the Cilium firewall reconcile unit
+  ansible.builtin.systemd_service:
+    name: "{{ host_firewall_reconcile_unit }}.service"
+    enabled: true
+    state: started
+  when:
+    - host_firewall_reconcile_cilium | bool
+    - "'k8s_cluster' in group_names"
