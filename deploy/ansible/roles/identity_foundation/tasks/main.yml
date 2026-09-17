@@ -292,7 +292,6 @@
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
         definition: "{{ lookup('template', 'provision-job.yml.j2') | from_yaml }}"
-      no_log: true
 
     - name: Wait for workload client provisioning
       ansible.builtin.command:
