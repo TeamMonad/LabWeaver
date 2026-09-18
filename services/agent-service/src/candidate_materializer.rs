@@ -567,6 +567,38 @@ fn pack_recipe(
     Ok(archive)
 }
 
+/// Validates a teacher-facing container build recipe using the exact rules the
+/// materializer enforces, so authoring can retry a rejected plan instead of
+/// failing later at materialization time. Submitted recipes are accepted only
+/// when their relative source path is well formed; the materializer still
+/// verifies that the named package file exists with a build-context media type.
+pub(crate) fn generated_recipe_is_valid(plan: &serde_json::Value, dockerfile_path: &str) -> bool {
+    let Ok(recipe) = serde_json::from_value::<ContainerBuildRecipe>(plan.clone()) else {
+        return false;
+    };
+    match recipe {
+        ContainerBuildRecipe::Generated { files } => {
+            let Some(dockerfile) = files
+                .iter()
+                .find(|file| file.path == dockerfile_path)
+                .map(|file| file.content.as_str())
+            else {
+                return false;
+            };
+            if dockerfile.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("&&") || trimmed.starts_with("||") || trimmed.starts_with(';')
+            }) {
+                return false;
+            }
+            pack_recipe(&files, dockerfile_path).is_ok()
+        }
+        ContainerBuildRecipe::Submitted { source_path } => {
+            contracts::validate_relative_path(&source_path).is_ok()
+        }
+    }
+}
+
 pub(crate) fn validate_dockerfile_copy_sources(
     dockerfile: &str,
     paths: &BTreeSet<String>,

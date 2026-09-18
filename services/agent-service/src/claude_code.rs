@@ -2817,41 +2817,12 @@ fn contains_protected_field(output: &Value) -> bool {
     }
 }
 
-/// Returns true when a generated container build recipe is a complete, locally
-/// valid context: the Dockerfile exists at the required path, no instruction
-/// continuation is broken, and every COPY/ADD source is present in the files.
-/// Submitted recipes are validated separately by the materializer.
+/// Returns true when a generated container build recipe satisfies the exact
+/// rules the candidate materializer enforces. Delegating to the materializer
+/// keeps authoring repair (a retryable schema rejection) in lockstep with
+/// materialization, so a rejected plan never becomes a non-retryable failure.
 fn generated_build_recipe_is_complete(plan: &Value, dockerfile_path: &str) -> bool {
-    if plan.get("mode").and_then(Value::as_str) != Some("generated") {
-        return true;
-    }
-    let Some(files) = plan.get("files").and_then(Value::as_array) else {
-        return false;
-    };
-    let mut paths = BTreeSet::new();
-    let mut dockerfile = None;
-    for file in files {
-        let (Some(path), Some(content)) = (
-            file.get("path").and_then(Value::as_str),
-            file.get("content").and_then(Value::as_str),
-        ) else {
-            return false;
-        };
-        if path == dockerfile_path {
-            dockerfile = Some(content);
-        }
-        paths.insert(path.to_owned());
-    }
-    let Some(dockerfile) = dockerfile else {
-        return false;
-    };
-    if dockerfile.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("&&") || trimmed.starts_with("||") || trimmed.starts_with(';')
-    }) {
-        return false;
-    }
-    crate::candidate_materializer::validate_dockerfile_copy_sources(dockerfile, &paths).is_ok()
+    crate::candidate_materializer::generated_recipe_is_valid(plan, dockerfile_path)
 }
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
