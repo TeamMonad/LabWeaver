@@ -21,7 +21,7 @@ security:
   securityProfileBinding: security-lab-container-v1
 runtime:
   kind: container
-  provider_binding: kubernetes-work-local-hostpath
+  provider_binding: container-primary-v1
   build_context:
     artifactId: 01900000-0000-7000-8000-000000000021
     storeBinding: problem-package-minio-v1
