@@ -56,6 +56,8 @@ Every generated container Dockerfile must create a readable (possibly empty) `/o
 
 When the materials request a container but omit optional presentation choices, generate a valid container object with a generated build_recipe containing a Dockerfile and every file that Dockerfile references. When the materials explicitly require an existing uploaded context, use mode submitted and its exact relative source_path.
 
+Container runtime nesting is exactly this shape and closes only at the end: "runtime":{"kind":"container","provider_binding":"NAME","service_port":8080,"build_recipe":{"mode":"generated","files":[{"path":"Dockerfile","content":"FROM ..."},{"path":"other","content":"..."}]}}. The files array closes with exactly one ], the build_recipe object closes with exactly one }, and the runtime object closes with exactly one }; never emit a second closing ] after the build_recipe object. When both a files array and an entries array appear, close each array independently and do not merge their brackets.
+
 The generated files array must be a self-contained build context: every relative path named by a COPY, ADD, or `COPY --from` source in the Dockerfile must appear as a generated file whose content is the exact material file content. When the materials include a complete Dockerfile, reproduce it verbatim and include every path it copies, including files under directories such as student/, reference/, tests/, scripts/, profiles/, workspace-seed/, and README.md. Never emit a Dockerfile that copies a path you do not also provide as a generated file.
 
 When the materials request a virtual_machine, use this structurally valid shape and change only values needed by the materials while preserving every property name and discriminator:
@@ -1539,7 +1541,10 @@ impl ClaudeCodeRuntime {
                          (LLM_SCHEMA_INVALID). It must be exactly one syntactically valid JSON \
                          object: every {{, [, ] and }} must be balanced and correctly nested, \
                          every string must be quoted with JSON escapes, and there must be no \
-                         trailing text after the closing brace. Return only a corrected single \
+                         trailing text after the closing brace. In particular, a container \
+                         runtime with a generated build_recipe closes as files-array ], \
+                         build_recipe }}, runtime }} with no extra ]; do not emit ]}}]. \
+                         Return only a corrected single \
                          JSON object that strictly satisfies the schema above; do not explain or \
                          repeat prior content. For any generated \
                          container build recipe, the files array must contain the Dockerfile at \
