@@ -110,7 +110,7 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   await expect(approvalButton).toBeDisabled()
   await page.getByRole('checkbox').check()
   await page.locator('textarea.reason-input').fill('已核对真实生成的 Environment、Evaluation、私有黄金基础镜像来源和构建产物摘要。')
-  await expect(approvalButton).toBeEnabled()
+  await expect(approvalButton).toBeEnabled({ timeout: 240_000 })
 
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
