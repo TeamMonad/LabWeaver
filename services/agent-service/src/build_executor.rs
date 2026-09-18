@@ -459,6 +459,9 @@ impl ProductionBuildExecutor {
         tagged: &str,
         network: &BuildNetworkPolicy,
     ) -> Result<String, BuildProviderFailure> {
+        if !self.config.service_image.is_empty() {
+            ensure_global_service_image_arg(workspace, dockerfile_path)?;
+        }
         let context = tar_context(workspace)?;
         let endpoint = self.buildkit_endpoint()?;
         let daemon = BuildkitDaemon::new(endpoint.clone());
@@ -1106,6 +1109,35 @@ fn buildkit_frontend_options(
         BuildNetworkPolicy::DenyAll => builder.force_network_mode(&ImageBuildNetworkMode::None),
         BuildNetworkPolicy::Restricted { .. } => builder,
     }
+}
+
+/// Ensure the platform-injected runner base build argument is globally scoped.
+///
+/// A Dockerfile can only reference a build argument in `FROM` when the `ARG`
+/// is declared before the first `FROM`. Generated runner Dockerfiles are
+/// allowed to declare it, but the platform must not depend on that ordering, so
+/// the declaration is prepended when it is missing.
+fn ensure_global_service_image_arg(
+    workspace: &Path,
+    dockerfile_path: &str,
+) -> Result<(), BuildProviderFailure> {
+    let path = workspace.join(dockerfile_path);
+    let content = std::fs::read_to_string(&path).map_err(|_| rejected())?;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.to_ascii_uppercase().starts_with("FROM ") {
+            break;
+        }
+        if trimmed
+            .to_ascii_uppercase()
+            .starts_with("ARG LABWEAVER_SERVICE_IMAGE")
+        {
+            return Ok(());
+        }
+    }
+    let mut updated = String::from("ARG LABWEAVER_SERVICE_IMAGE\n");
+    updated.push_str(&content);
+    std::fs::write(&path, updated).map_err(|_| rejected())
 }
 
 /// Pack the unpacked build workspace into a single tar stream without
