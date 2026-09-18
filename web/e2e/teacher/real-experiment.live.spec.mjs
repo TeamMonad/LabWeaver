@@ -209,7 +209,14 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
 
 async function editThroughTerminal({ page, input, terminalFrames }) {
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  await expect(page.locator('.xterm-host')).toBeVisible({ timeout: 120_000 })
+  const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端/ })
+  if (await reconnect.count() > 0) {
+    await expect(reconnect).toBeEnabled({ timeout: 120_000 })
+    await reconnect.click()
+  }
+  const host = page.locator('.xterm-host')
+  await expect(host).toBeVisible({ timeout: 120_000 })
+  await host.click()
   await expect(input).toBeAttached({ timeout: 30_000 })
   await input.focus()
   await page.keyboard.type("sed -i 's/password_length == 0/password_length != sizeof(expected_password) - 1/' student/auth.c")
