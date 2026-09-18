@@ -1535,10 +1535,13 @@ impl ClaudeCodeRuntime {
                         retryable = true,
                     );
                     current_prompt = format!(
-                        "{current_prompt}\n\nThe previous response was rejected because it \
-                         did not match the exact JSON Schema (LLM_SCHEMA_INVALID). Return only \
-                         a corrected single JSON object that strictly satisfies the schema \
-                         above; do not explain or repeat prior content. For any generated \
+                        "{current_prompt}\n\nThe previous response was rejected \
+                         (LLM_SCHEMA_INVALID). It must be exactly one syntactically valid JSON \
+                         object: every {{, [, ] and }} must be balanced and correctly nested, \
+                         every string must be quoted with JSON escapes, and there must be no \
+                         trailing text after the closing brace. Return only a corrected single \
+                         JSON object that strictly satisfies the schema above; do not explain or \
+                         repeat prior content. For any generated \
                          container build recipe, the files array must contain the Dockerfile at \
                          the exact required path and every relative path that a COPY or ADD \
                          instruction reads, and no instruction may be continued onto a line \
