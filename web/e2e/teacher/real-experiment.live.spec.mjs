@@ -161,7 +161,10 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.getByRole('heading', { name: environmentId, exact: true })).toBeVisible({ timeout: 120_000 })
+  const environmentIdDetails = page.locator('details.environment-id-details')
+  await expect(environmentIdDetails).toBeVisible({ timeout: 120_000 })
+  await environmentIdDetails.locator('summary').click()
+  await expect(environmentIdDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
   await expect(page.getByRole('button', { name: '概览与访问', exact: true })).toBeVisible()
   const grantButton = page.getByRole('button', { name: '签发访问授权', exact: true })
   const grantCard = page.locator('.grant-card')
