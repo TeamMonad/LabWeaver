@@ -6657,7 +6657,7 @@ async fn enqueue_evaluation_runner_build(
             project_id,
             course_id,
             evaluation.id,
-            "-evaluation-runner",
+            "",
         ),
         network: config.container_build.network.clone(),
         max_duration_milliseconds: config.container_build.max_duration_milliseconds,

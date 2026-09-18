@@ -39,10 +39,10 @@ export function policyFor(projectId, courseId = null, providerModel, budgetOverr
     },
     budget: {
       maxInputTokens: 100000,
-      maxOutputTokens: 20000,
-      maxRequests: 8,
+      maxOutputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_OUTPUT_TOKENS) || 20000,
+      maxRequests: Number(process.env.LABWEAVER_E2E_LLM_MAX_REQUESTS) || 8,
       maxCostMicrousd: 1000000,
-      timeoutMilliseconds: 120000,
+      timeoutMilliseconds: Number(process.env.LABWEAVER_E2E_LLM_TIMEOUT_MS) || 120000,
       maxTransientRetries: 1,
       maxSchemaRepairs: 2,
       ...budgetOverrides,

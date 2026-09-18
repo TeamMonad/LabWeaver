@@ -2,16 +2,39 @@
   "apiVersion": "deploy.labweaver.io/platform-bundle-manifest/v1",
   "namespace": "labweaver-system",
   "configMaps": {
-    "access-service-config": ["config.yaml"],
-    "agent-service-config": ["anthropic-base-url", "anthropic-model", "config.yaml"],
-    "build-executor-config": ["config.yaml"],
-    "container-executor-config": ["config.yaml"],
-    "control-service-config": ["config.yaml"],
-    "environment-service-config": ["providers.json"],
-    "evaluation-service-config": ["config.yaml", "worker.yaml"],
-    "kubevirt-executor-config": ["config.yaml"],
-    "kubevirt-console-executor-config": ["config.yaml"],
-    "web-config": ["deployment.json"]
+    "access-service-config": [
+      "config.yaml"
+    ],
+    "agent-service-config": [
+      "anthropic-base-url",
+      "anthropic-model",
+      "config.yaml"
+    ],
+    "build-executor-config": [
+      "config.yaml"
+    ],
+    "container-executor-config": [
+      "config.yaml"
+    ],
+    "control-service-config": [
+      "config.yaml"
+    ],
+    "environment-service-config": [
+      "providers.json"
+    ],
+    "evaluation-service-config": [
+      "config.yaml",
+      "worker.yaml"
+    ],
+    "kubevirt-executor-config": [
+      "config.yaml"
+    ],
+    "kubevirt-console-executor-config": [
+      "config.yaml"
+    ],
+    "web-config": [
+      "deployment.json"
+    ]
   },
   "secrets": {
     "access-service-secrets": [
@@ -98,7 +121,8 @@
       "postgres-ca.pem",
       "service-client-secret",
       "tls.crt",
-      "tls.key"
+      "tls.key",
+      "portal-ca.pem"
     ],
     "environment-service-secrets": [
       "database-url",

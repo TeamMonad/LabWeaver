@@ -49,6 +49,12 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
       video: 'retain-on-failure',
       actionTimeout: 30_000,
       navigationTimeout: 60_000,
+      ...(process.env.LABWEAVER_BROWSER_CHANNEL
+        ? { channel: process.env.LABWEAVER_BROWSER_CHANNEL }
+        : {}),
+      ...(process.env.LABWEAVER_IGNORE_HTTPS_ERRORS === '1'
+        ? { ignoreHTTPSErrors: true }
+        : {}),
     },
     expect: {
       timeout: 30_000,
