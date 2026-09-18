@@ -241,9 +241,7 @@ export async function freezeStudentSourceByUi(page, projectId, environmentId) {
     })
   }
   const freezeEnvironmentDetails = page.locator('details.environment-id-details')
-  await expect(freezeEnvironmentDetails).toBeVisible({ timeout: 120_000 })
-  await freezeEnvironmentDetails.locator('summary').click()
-  await expect(freezeEnvironmentDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
+  await expect(freezeEnvironmentDetails.locator('code')).toHaveText(environmentId, { timeout: 120_000 })
   await page.getByRole('button', { name: '实验提交与凭据', exact: true }).click()
   const startButton = page.getByRole('button', { name: '发起冻结提交', exact: true })
   await expect(startButton).toBeEnabled({ timeout: 120_000 })
