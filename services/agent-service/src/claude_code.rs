@@ -1542,7 +1542,11 @@ impl ClaudeCodeRuntime {
                          container build recipe, the files array must contain the Dockerfile at \
                          the exact required path and every relative path that a COPY or ADD \
                          instruction reads, and no instruction may be continued onto a line \
-                         that begins with &&, ||, or ; without a trailing backslash."
+                         that begins with &&, ||, or ; without a trailing backslash. A \
+                         submitted recipe is valid only when its source_path names a file \
+                         already present in the supplied package with an archive or \
+                         build-context media type; when the package provides no such archive, \
+                         use mode generated and include every file your Dockerfile references."
                     );
                 }
                 Err(failure) => return Err(failure),
