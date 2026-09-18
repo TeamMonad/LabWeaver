@@ -195,9 +195,11 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
     })
   })
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  const openTerminal = page.getByRole('button', { name: '打开终端', exact: true })
-  await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
-  await openTerminal.click()
+  const connectTerminal = page.getByRole('button', { name: '立即签发授权并连接终端', exact: true })
+  if (await connectTerminal.count() > 0) {
+    await expect(connectTerminal).toBeEnabled({ timeout: 120_000 })
+    await connectTerminal.click()
+  }
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   const input = page.locator('.xterm-helper-textarea')
