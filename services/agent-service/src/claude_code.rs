@@ -1876,12 +1876,6 @@ impl ClaudeCodeRuntime {
                     );
                     failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
                 })?;
-            if !generated_build_recipe_is_complete(&plan, "Dockerfile") {
-                return Err(failure_with_audit(
-                    ClaudeCodeRuntimeError::SchemaInvalid,
-                    audit.clone(),
-                ));
-            }
             let materializer = self.materializer.as_ref().ok_or_else(|| {
                 tracing::error!(
                     event = "agent.candidate_materialization.failed",
@@ -1896,6 +1890,15 @@ impl ClaudeCodeRuntime {
                 );
                 failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
             })?;
+            if materializer
+                .validate_recipe_plan(&plan, "Dockerfile")
+                .is_err()
+            {
+                return Err(failure_with_audit(
+                    ClaudeCodeRuntimeError::SchemaInvalid,
+                    audit.clone(),
+                ));
+            }
             let artifact = materializer
                 .materialize(
                     input.project_id(),
@@ -1975,6 +1978,15 @@ impl ClaudeCodeRuntime {
                 );
                 failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
             })?;
+            if materializer
+                .validate_recipe_plan(&plan, "evaluation/Dockerfile")
+                .is_err()
+            {
+                return Err(failure_with_audit(
+                    ClaudeCodeRuntimeError::SchemaInvalid,
+                    audit.clone(),
+                ));
+            }
             let artifact = materializer
                 .materialize_runner(
                     input.project_id(),
