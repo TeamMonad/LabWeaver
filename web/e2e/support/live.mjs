@@ -44,7 +44,7 @@ export function policyFor(projectId, courseId = null, providerModel, budgetOverr
       maxCostMicrousd: 1000000,
       timeoutMilliseconds: Number(process.env.LABWEAVER_E2E_LLM_TIMEOUT_MS) || 120000,
       maxTransientRetries: 1,
-      maxSchemaRepairs: 2,
+      maxSchemaRepairs: Number(process.env.LABWEAVER_E2E_LLM_MAX_SCHEMA_REPAIRS) || 2,
       ...budgetOverrides,
     },
     deniedDataClasses: [
