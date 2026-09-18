@@ -567,7 +567,7 @@ fn pack_recipe(
     Ok(archive)
 }
 
-fn validate_dockerfile_copy_sources(
+pub(crate) fn validate_dockerfile_copy_sources(
     dockerfile: &str,
     paths: &BTreeSet<String>,
 ) -> Result<(), CandidateMaterializationError> {

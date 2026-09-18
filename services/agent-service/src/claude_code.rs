@@ -1538,7 +1538,11 @@ impl ClaudeCodeRuntime {
                         "{current_prompt}\n\nThe previous response was rejected because it \
                          did not match the exact JSON Schema (LLM_SCHEMA_INVALID). Return only \
                          a corrected single JSON object that strictly satisfies the schema \
-                         above; do not explain or repeat prior content."
+                         above; do not explain or repeat prior content. For any generated \
+                         container build recipe, the files array must contain the Dockerfile at \
+                         the exact required path and every relative path that a COPY or ADD \
+                         instruction reads, and no instruction may be continued onto a line \
+                         that begins with &&, ||, or ; without a trailing backslash."
                     );
                 }
                 Err(failure) => return Err(failure),
@@ -1872,6 +1876,12 @@ impl ClaudeCodeRuntime {
                     );
                     failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
                 })?;
+            if !generated_build_recipe_is_complete(&plan, "Dockerfile") {
+                return Err(failure_with_audit(
+                    ClaudeCodeRuntimeError::SchemaInvalid,
+                    audit.clone(),
+                ));
+            }
             let materializer = self.materializer.as_ref().ok_or_else(|| {
                 tracing::error!(
                     event = "agent.candidate_materialization.failed",
@@ -1945,6 +1955,12 @@ impl ClaudeCodeRuntime {
                 );
                 failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
             })?;
+            if !generated_build_recipe_is_complete(&plan, "evaluation/Dockerfile") {
+                return Err(failure_with_audit(
+                    ClaudeCodeRuntimeError::SchemaInvalid,
+                    audit.clone(),
+                ));
+            }
             let materializer = self.materializer.as_ref().ok_or_else(|| {
                 tracing::error!(
                     event = "agent.candidate_materialization.failed",
@@ -2801,6 +2817,43 @@ fn contains_protected_field(output: &Value) -> bool {
     }
 }
 
+/// Returns true when a generated container build recipe is a complete, locally
+/// valid context: the Dockerfile exists at the required path, no instruction
+/// continuation is broken, and every COPY/ADD source is present in the files.
+/// Submitted recipes are validated separately by the materializer.
+fn generated_build_recipe_is_complete(plan: &Value, dockerfile_path: &str) -> bool {
+    if plan.get("mode").and_then(Value::as_str) != Some("generated") {
+        return true;
+    }
+    let Some(files) = plan.get("files").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut paths = BTreeSet::new();
+    let mut dockerfile = None;
+    for file in files {
+        let (Some(path), Some(content)) = (
+            file.get("path").and_then(Value::as_str),
+            file.get("content").and_then(Value::as_str),
+        ) else {
+            return false;
+        };
+        if path == dockerfile_path {
+            dockerfile = Some(content);
+        }
+        paths.insert(path.to_owned());
+    }
+    let Some(dockerfile) = dockerfile else {
+        return false;
+    };
+    if dockerfile.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("&&") || trimmed.starts_with("||") || trimmed.starts_with(';')
+    }) {
+        return false;
+    }
+    crate::candidate_materializer::validate_dockerfile_copy_sources(dockerfile, &paths).is_ok()
+}
+
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
 
 const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
@@ -2983,8 +3036,8 @@ mod tests {
 
     use super::{
         CLAUDE_RUNTIME_PATH, ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError,
-        TokioClaudeCodeProcess, decimal_to_microusd, microusd_to_usd, platform_image_prompt,
-        read_stream_until_result, usd_number_to_microusd,
+        TokioClaudeCodeProcess, decimal_to_microusd, generated_build_recipe_is_complete,
+        microusd_to_usd, platform_image_prompt, read_stream_until_result, usd_number_to_microusd,
     };
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
 
@@ -3016,6 +3069,37 @@ mod tests {
             entry.resolved_digest
         )));
         assert!(!prompt.contains(":24.04"));
+    }
+
+    #[test]
+    fn generated_build_recipe_completeness_rejects_missing_sources_and_broken_lines() {
+        let complete = json!({
+            "mode": "generated",
+            "files": [
+                {"path": "Dockerfile", "content": "FROM scratch\nCOPY seed /opt/seed\n"},
+                {"path": "seed", "content": "seed\n"}
+            ]
+        });
+        assert!(generated_build_recipe_is_complete(&complete, "Dockerfile"));
+
+        let missing = json!({
+            "mode": "generated",
+            "files": [
+                {"path": "Dockerfile", "content": "FROM scratch\nCOPY seed /opt/seed\n"}
+            ]
+        });
+        assert!(!generated_build_recipe_is_complete(&missing, "Dockerfile"));
+
+        let broken = json!({
+            "mode": "generated",
+            "files": [
+                {"path": "Dockerfile", "content": "FROM scratch\nRUN true\n    && echo ok\n"}
+            ]
+        });
+        assert!(!generated_build_recipe_is_complete(&broken, "Dockerfile"));
+
+        let submitted = json!({"mode": "submitted", "source_path": "context.tar.gz"});
+        assert!(generated_build_recipe_is_complete(&submitted, "Dockerfile"));
     }
 
     #[test]
