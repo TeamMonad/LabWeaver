@@ -203,14 +203,14 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   const input = page.locator('.xterm-helper-textarea')
-  await expect(input).toBeVisible({ timeout: 30_000 })
+  await expect(input).toBeAttached({ timeout: 30_000 })
   return { input, terminalFrames }
 }
 
 async function editThroughTerminal({ page, input, terminalFrames }) {
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
   await expect(page.locator('.xterm-host')).toBeVisible({ timeout: 120_000 })
-  await expect(input).toBeVisible({ timeout: 30_000 })
+  await expect(input).toBeAttached({ timeout: 30_000 })
   await input.focus()
   await page.keyboard.type("sed -i 's/password_length == 0/password_length != sizeof(expected_password) - 1/' student/auth.c")
   await page.keyboard.press('Enter')
