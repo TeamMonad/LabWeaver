@@ -184,7 +184,7 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await pollJson(
     page.request,
     `/api/v1/environments/${environmentId}/access-grants?state=active&includeTerminal=false&limit=2`,
-    (value) => Array.isArray(value.items) && value.items.length === 1,
+    (value) => Array.isArray(value.items) && value.items.filter((item) => item.state === 'active').length === 1,
     'REAL_EXPERIMENT_ACCESS_GRANT_ACTIVE_TIMEOUT',
     120_000,
   )
@@ -398,7 +398,7 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     await pollJson(
       studentContext.request,
       `/api/v1/environments/${environmentId}/access-grants?state=active&includeTerminal=false&limit=10`,
-      (value) => Array.isArray(value.items) && value.items.length === 0,
+      (value) => Array.isArray(value.items) && value.items.every((item) => item.state !== 'active'),
       'REAL_EXPERIMENT_ACCESS_GRANT_REVOKE_TIMEOUT',
       120_000,
     )
