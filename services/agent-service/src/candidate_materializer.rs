@@ -633,12 +633,50 @@ pub(crate) fn generated_recipe_is_valid(plan: &serde_json::Value, dockerfile_pat
                 }
                 previous_continued = line.trim_end().ends_with('\\');
             }
+            if dockerfile_has_self_referential_stage_copy(dockerfile) {
+                return false;
+            }
             pack_recipe(&files, dockerfile_path).is_ok()
         }
         ContainerBuildRecipe::Submitted { source_path } => {
             contracts::validate_relative_path(&source_path).is_ok()
         }
     }
+}
+
+/// Returns true when the Dockerfile copies from the stage it is currently in.
+/// `BuildKit` reports this as a circular dependency, so it must be a repairable
+/// authoring rejection rather than a non-retryable build failure.
+fn dockerfile_has_self_referential_stage_copy(dockerfile: &str) -> bool {
+    let mut current_stage: Option<String> = None;
+    for line in dockerfile.lines() {
+        let trimmed = line.trim();
+        let upper = trimmed.to_ascii_uppercase();
+        if upper.starts_with("FROM ") {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            current_stage = tokens
+                .iter()
+                .position(|token| token.eq_ignore_ascii_case("AS"))
+                .and_then(|index| tokens.get(index + 1))
+                .map(|name| (*name).to_owned());
+            continue;
+        }
+        if !upper.starts_with("COPY ") && !upper.starts_with("ADD ") {
+            continue;
+        }
+        let Some(source_stage) = trimmed
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("--from="))
+        else {
+            continue;
+        };
+        if let Some(stage) = &current_stage
+            && source_stage.eq_ignore_ascii_case(stage)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) fn validate_dockerfile_copy_sources(
@@ -746,7 +784,10 @@ fn current_timestamp() -> Result<UtcTimestamp, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidateMaterializationError, ContainerBuildRecipe, RecipeFile, pack_recipe};
+    use super::{
+        CandidateMaterializationError, ContainerBuildRecipe, RecipeFile, generated_recipe_is_valid,
+        pack_recipe,
+    };
     use serde_json::json;
 
     #[test]
@@ -856,6 +897,22 @@ mod tests {
             },
         ];
         assert!(pack_recipe(&resolved, "Dockerfile").is_ok());
+    }
+
+    #[test]
+    fn generated_recipe_rejects_self_referential_stage_copy() {
+        let plan = serde_json::json!({
+            "mode": "generated",
+            "files": [{
+                "path": "evaluation/Dockerfile",
+                "content": concat!(
+                    "FROM ${LABWEAVER_SERVICE_IMAGE} AS labweaver-service\n",
+                    "COPY --from=labweaver-service /usr/local/bin/labweaver-service /usr/local/bin/labweaver-service\n",
+                    "ENTRYPOINT [\"/usr/local/bin/labweaver-service\"]\n",
+                )
+            }]
+        });
+        assert!(!generated_recipe_is_valid(&plan, "evaluation/Dockerfile"));
     }
 
     #[test]
