@@ -621,11 +621,17 @@ pub(crate) fn generated_recipe_is_valid(plan: &serde_json::Value, dockerfile_pat
             else {
                 return false;
             };
-            if dockerfile.lines().any(|line| {
+            let mut previous_continued = false;
+            for line in dockerfile.lines() {
                 let trimmed = line.trim_start();
-                trimmed.starts_with("&&") || trimmed.starts_with("||") || trimmed.starts_with(';')
-            }) {
-                return false;
+                if !previous_continued
+                    && (trimmed.starts_with("&&")
+                        || trimmed.starts_with("||")
+                        || trimmed.starts_with(';'))
+                {
+                    return false;
+                }
+                previous_continued = line.trim_end().ends_with('\\');
             }
             pack_recipe(&files, dockerfile_path).is_ok()
         }

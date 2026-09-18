@@ -3088,6 +3088,14 @@ mod tests {
         });
         assert!(!generated_build_recipe_is_complete(&broken, "Dockerfile"));
 
+        let continued = json!({
+            "mode": "generated",
+            "files": [
+                {"path": "Dockerfile", "content": "FROM scratch\nRUN true \\\n    && echo ok\n"}
+            ]
+        });
+        assert!(generated_build_recipe_is_complete(&continued, "Dockerfile"));
+
         let submitted = json!({"mode": "submitted", "source_path": "context.tar.gz"});
         assert!(generated_build_recipe_is_complete(&submitted, "Dockerfile"));
     }
