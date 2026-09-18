@@ -395,6 +395,13 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     })
     expect(beforeResult.awardedScore).toBeLessThan(beforeResult.maxScore)
 
+    await pollJson(
+      studentContext.request,
+      `/api/v1/environments/${environmentId}/access-grants?state=active&includeTerminal=false&limit=10`,
+      (value) => Array.isArray(value.items) && value.items.length === 0,
+      'REAL_EXPERIMENT_ACCESS_GRANT_REVOKE_TIMEOUT',
+      120_000,
+    )
     const terminal = await issueTerminalAccessAndConnect(studentPage, projectId, environmentId)
     await editThroughTerminal({ page: studentPage, ...terminal })
     await studentPage.screenshot({ path: testInfo.outputPath('environment-terminal.png'), fullPage: true })
