@@ -62,6 +62,8 @@ export function useProjectAuthoringApproval(
   let evaluationCandidateRetryId: string | null = null
   let environmentCandidateRetryCount = 0
   let evaluationCandidateRetryCount = 0
+  let environmentArtifactRetryCount = 0
+  let evaluationArtifactRetryCount = 0
   let completionIdempotencyKey: string | null = null
   let completionFingerprint: string | null = null
 
@@ -89,6 +91,8 @@ export function useProjectAuthoringApproval(
     evaluationCandidateRetryId = null
     environmentCandidateRetryCount = 0
     evaluationCandidateRetryCount = 0
+    environmentArtifactRetryCount = 0
+    evaluationArtifactRetryCount = 0
   }
 
   function scheduleEnvironmentCandidateRetry(project: string, candidateId: string, generation: number) {
@@ -114,6 +118,7 @@ export function useProjectAuthoringApproval(
     if (!silent || environmentCandidateRetryId !== candidateId) {
       environmentCandidateRetryId = candidateId
       environmentCandidateRetryCount = 0
+      environmentArtifactRetryCount = 0
     }
     if (!silent) environmentCandidate.value = { kind: 'loading', message: '加载 Environment 候选…' }
     const result = await getProjectEnvironmentCandidate({ path: { projectId: project, candidateId } })
@@ -143,6 +148,20 @@ export function useProjectAuthoringApproval(
     }
     environmentCandidateRetryCount = 0
     environmentCandidate.value = { kind: 'success', data: result.data }
+    if (result.data.imageArtifact) {
+      environmentArtifactRetryCount = 0
+    } else if (
+      result.data.build != null
+      && result.data.build.state !== 'failed'
+      && result.data.build.state !== 'cancelled'
+      && environmentArtifactRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES
+    ) {
+      // Control resolves the immutable image artifact slightly after the
+      // candidate projection appears. Keep polling until it is bound so the
+      // approval command is not permanently disabled by a one-shot load.
+      environmentArtifactRetryCount += 1
+      scheduleEnvironmentCandidateRetry(project, candidateId, generation)
+    }
   }
 
   async function loadEvaluationCandidate(project: string, candidateId: string, generation: number, silent = false) {
@@ -150,6 +169,7 @@ export function useProjectAuthoringApproval(
     if (!silent || evaluationCandidateRetryId !== candidateId) {
       evaluationCandidateRetryId = candidateId
       evaluationCandidateRetryCount = 0
+      evaluationArtifactRetryCount = 0
     }
     if (!silent) evaluationCandidate.value = { kind: 'loading', message: '加载 Evaluation 候选…' }
     const result = await getProjectEvaluationCandidate({ path: { projectId: project, candidateId } })
@@ -179,6 +199,19 @@ export function useProjectAuthoringApproval(
     }
     evaluationCandidateRetryCount = 0
     evaluationCandidate.value = { kind: 'success', data: result.data }
+    if (result.data.runnerImageArtifact) {
+      evaluationArtifactRetryCount = 0
+    } else if (
+      result.data.runnerBuild != null
+      && result.data.runnerBuild.state !== 'failed'
+      && result.data.runnerBuild.state !== 'cancelled'
+      && evaluationArtifactRetryCount < CANDIDATE_NOT_FOUND_MAX_RETRIES
+    ) {
+      // The per-experiment runner artifact is resolved after the runner build
+      // projection appears; poll until Control binds it.
+      evaluationArtifactRetryCount += 1
+      scheduleEvaluationCandidateRetry(project, candidateId, generation)
+    }
   }
 
   function schedulePublicationPoll(data: AuthoringApprovalPublicationStatusSchema) {
