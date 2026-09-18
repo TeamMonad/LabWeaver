@@ -529,6 +529,9 @@ fn pack_recipe(
     if !paths.contains(dockerfile_path) {
         return Err(CandidateMaterializationError::InvalidPlan);
     }
+    if let Some(dockerfile) = validated.iter().find(|file| file.path == dockerfile_path) {
+        validate_dockerfile_copy_sources(&dockerfile.content, &paths)?;
+    }
 
     let mut archive = Vec::new();
     {
@@ -562,6 +565,85 @@ fn pack_recipe(
         return Err(CandidateMaterializationError::InvalidPlan);
     }
     Ok(archive)
+}
+
+fn validate_dockerfile_copy_sources(
+    dockerfile: &str,
+    paths: &BTreeSet<String>,
+) -> Result<(), CandidateMaterializationError> {
+    let mut logical_lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for raw_line in dockerfile.lines() {
+        let line = raw_line.trim_end();
+        let continued = line.ends_with('\\');
+        let segment = if continued {
+            line.trim_end_matches('\\')
+        } else {
+            line
+        };
+        current.push(' ');
+        current.push_str(segment);
+        if !continued {
+            logical_lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.trim().is_empty() {
+        logical_lines.push(current);
+    }
+
+    for line in logical_lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        let Some(instruction) = tokens.next() else {
+            continue;
+        };
+        let upper = instruction.to_ascii_uppercase();
+        if upper != "COPY" && upper != "ADD" {
+            continue;
+        }
+        let mut from_stage = false;
+        let mut operands: Vec<&str> = Vec::new();
+        for token in tokens {
+            if token.starts_with("--") {
+                if token.to_ascii_lowercase().starts_with("--from") {
+                    from_stage = true;
+                }
+                continue;
+            }
+            operands.push(token);
+        }
+        if from_stage || operands.len() < 2 {
+            continue;
+        }
+        if operands.iter().any(|operand| operand.starts_with('[')) {
+            continue;
+        }
+        for source in &operands[..operands.len() - 1] {
+            let normalized = source.trim_start_matches("./");
+            if normalized.is_empty()
+                || normalized == "."
+                || source.starts_with("http://")
+                || source.starts_with("https://")
+                || source.starts_with("git@")
+                || normalized.contains('*')
+                || normalized.contains('?')
+                || normalized.contains('[')
+            {
+                continue;
+            }
+            let present = paths.contains(normalized)
+                || paths
+                    .iter()
+                    .any(|path| path.starts_with(&format!("{normalized}/")));
+            if !present {
+                return Err(CandidateMaterializationError::InvalidPlan);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn generated_artifact_diagnostic(error: &GeneratedArtifactStoreError) -> &'static str {
@@ -663,6 +745,43 @@ mod tests {
                 Err(CandidateMaterializationError::InvalidPlan)
             );
         }
+    }
+
+    #[test]
+    fn generated_recipe_rejects_unresolved_copy_sources() {
+        let unresolved = vec![
+            RecipeFile {
+                path: "Dockerfile".to_owned(),
+                content: "FROM scratch\nCOPY workspace-seed/marker.txt /opt/marker.txt\n"
+                    .to_owned(),
+            },
+            RecipeFile {
+                path: "README.md".to_owned(),
+                content: "readme\n".to_owned(),
+            },
+        ];
+        assert_eq!(
+            pack_recipe(&unresolved, "Dockerfile"),
+            Err(CandidateMaterializationError::InvalidPlan)
+        );
+
+        let resolved = vec![
+            RecipeFile {
+                path: "Dockerfile".to_owned(),
+                content: concat!(
+                    "FROM scratch AS base\n",
+                    "FROM scratch\n",
+                    "COPY --from=base /x /y\n",
+                    "COPY workspace-seed /opt/workspace-seed\n",
+                )
+                .to_owned(),
+            },
+            RecipeFile {
+                path: "workspace-seed/marker.txt".to_owned(),
+                content: "marker\n".to_owned(),
+            },
+        ];
+        assert!(pack_recipe(&resolved, "Dockerfile").is_ok());
     }
 
     #[test]
