@@ -126,7 +126,7 @@
       {
         "path": "xv6/README",
         "role": "public",
-        "sha256": "141b9f6b79d050f61ef170525292ce5bda1b3c6f2d0ffad3a7f87b21741690c8"
+        "sha256": "62e7b5718d95ed57222e818e0a4a44cb827b822c89d6da0d682f541222e7b0a1"
       },
       {
         "path": "xv6/kernel/bio.c",
