@@ -107,6 +107,7 @@ execution:
   resourceApprovalTimeoutSeconds: 300
   executionObservePollIntervalMilliseconds: 500
   cleanupTimeoutSeconds: 300
+  orphanReconcilePollIntervalSeconds: 60
   environment:
     baseUri: https://environment-service:9446/
     caFile: /etc/labweaver/secrets/mtls-ca.pem

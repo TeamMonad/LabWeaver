@@ -29,6 +29,7 @@ use contracts::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
         EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,
     },
+    execution::{ExecutionObjectRef, TaskExecutionBinding},
     http::{
         AuthoringPublicationAdmissionBinding, CursorPage, IdempotencyKey,
         InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
@@ -99,7 +100,7 @@ impl EvaluationStepLease {
 /// state.  Recovery uses these references to read the live object, checks its UID and ownership
 /// labels, and only then performs a deletion.
 pub const EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION: &str =
-    "evaluation.labweaver.io/execution-resources/v1";
+    "evaluation.labweaver.io/execution-resources/v2";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,16 +112,6 @@ pub enum EvaluationExecutionKind {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct EvaluationExecutionObjectRef {
-    pub api_version: String,
-    /// Kubernetes collection name, such as `jobs` or `configmaps`.
-    pub resource: String,
-    pub name: String,
-    pub uid: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvaluationExecutionResources {
     pub schema_version: String,
     pub run_id: EvaluationRunId,
@@ -128,11 +119,18 @@ pub struct EvaluationExecutionResources {
     pub task_run_id: TaskRunId,
     pub namespace: String,
     pub kind: EvaluationExecutionKind,
+    /// Admitted Resource binding for a Kubernetes workload attempt.
+    ///
+    /// `Program` and `AnsibleProbe` attempts must carry the exact binding that was
+    /// created from an acknowledged `TaskResourceStatus`; the durable checkpoint
+    /// is the only source of execution identity on recovery. `LlmReview` runs in
+    /// the Agent service without a Resource reservation and therefore has none.
+    pub admission: Option<TaskExecutionBinding>,
     /// Immutable, payload-free request consumed by the concrete executor.
     /// Materializer URLs and SSH private/signed credentials are intentionally
     /// kept out of this checkpoint and remain Kubernetes Secret data.
     pub request: serde_json::Value,
-    pub objects: Vec<EvaluationExecutionObjectRef>,
+    pub objects: Vec<ExecutionObjectRef>,
 }
 
 impl EvaluationExecutionResources {
@@ -155,6 +153,25 @@ impl EvaluationExecutionResources {
             || self.objects.len() > 8
         {
             return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        match self.kind {
+            EvaluationExecutionKind::Program | EvaluationExecutionKind::AnsibleProbe => {
+                let admission = self
+                    .admission
+                    .as_ref()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
+                admission
+                    .validate()
+                    .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+                if admission.task_run_id != task_run_id || admission.namespace != self.namespace {
+                    return Err(EvaluationControlStoreError::ContractInvalid);
+                }
+            }
+            EvaluationExecutionKind::LlmReview => {
+                if self.admission.is_some() {
+                    return Err(EvaluationControlStoreError::ContractInvalid);
+                }
+            }
         }
         let mut identities = BTreeSet::new();
         for object in &self.objects {
@@ -236,6 +253,31 @@ pub struct EvaluationExecutionCheckpoint {
     pub execution_started_at: Option<UtcTimestamp>,
     pub execution_terminated_at: Option<UtcTimestamp>,
     pub terminal_completion: Option<EvaluationStepCompletion>,
+    pub execution_resources: Option<EvaluationExecutionResources>,
+}
+
+/// Durable attempt state used by orphan workload reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvaluationAttemptState {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl EvaluationAttemptState {
+    /// Returns whether the attempt no longer owns a live execution.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+/// Bounded orphan-reconcile projection for one durable attempt.
+#[derive(Clone, Debug)]
+pub struct EvaluationOrphanAttempt {
+    pub state: EvaluationAttemptState,
+    pub cleanup_verified: bool,
     pub execution_resources: Option<EvaluationExecutionResources>,
 }
 
@@ -900,6 +942,60 @@ impl PgEvaluationControlStore {
             execution_started_at,
             execution_terminated_at,
             terminal_completion,
+            execution_resources,
+        }))
+    }
+
+    /// Loads the bounded durable attempt projection used by orphan reconciliation.
+    ///
+    /// A stored checkpoint that no longer matches the current execution-resources contract fails
+    /// closed instead of being interpreted as an orphan cleanup source.
+    pub async fn load_orphan_attempt(
+        &self,
+        step_run_id: EvaluationStepRunId,
+        task_run_id: TaskRunId,
+    ) -> Result<Option<EvaluationOrphanAttempt>, EvaluationControlStoreError> {
+        let row = sqlx::query(
+            "SELECT attempt.state,attempt.cleanup_verified,attempt.execution_resources,step.run_id
+             FROM evaluation.evaluation_step_attempts AS attempt
+             JOIN evaluation.evaluation_step_runs AS step
+               ON step.step_run_id=attempt.step_run_id
+             WHERE attempt.step_run_id=$1 AND attempt.task_run_id=$2",
+        )
+        .bind(step_run_id.as_uuid())
+        .bind(task_run_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let run_id: Uuid = row.try_get("run_id")?;
+        let state: String = row.try_get("state")?;
+        let state = match state.as_str() {
+            "running" => EvaluationAttemptState::Running,
+            "succeeded" => EvaluationAttemptState::Succeeded,
+            "failed" => EvaluationAttemptState::Failed,
+            "cancelled" => EvaluationAttemptState::Cancelled,
+            _ => return Err(EvaluationControlStoreError::ContractInvalid),
+        };
+        let cleanup_verified: bool = row.try_get("cleanup_verified")?;
+        let resources_value: Option<Value> = row.try_get("execution_resources")?;
+        let execution_resources = resources_value
+            .map(|value| {
+                serde_json::from_value::<EvaluationExecutionResources>(value)
+                    .map_err(|_| EvaluationControlStoreError::ContractInvalid)
+            })
+            .transpose()?;
+        if let Some(resources) = &execution_resources {
+            let run_id: EvaluationRunId = run_id
+                .to_string()
+                .parse()
+                .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+            resources.validate_for(run_id, step_run_id, task_run_id)?;
+        }
+        Ok(Some(EvaluationOrphanAttempt {
+            state,
+            cleanup_verified,
             execution_resources,
         }))
     }

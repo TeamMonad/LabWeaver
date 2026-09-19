@@ -14,7 +14,7 @@ Control 的发布入口一次批准完整实验包，绑定环境模板、执行
 
 课程名称不决定执行后端。xv6 使用普通容器中的工具链和 QEMU TCG 系统模拟，构建并启动真实内核与文件系统，不要求 KVM 或 privileged；安全靶场使用明确获准的容器网络和资源边界。二者复用环境与评测路径，不增加课程专用 RuntimeKind。镜像必须绑定 digest，执行参数来自批准包中的结构化配置，不能拼接用户输入生成宿主机命令。
 
-Evaluation 保留现有任务状态与 Reconciler。冻结文件输入绑定不可变提交；实时 Probe 绑定目标环境、实例与观察时间，目标变化后不得将旧结果写到新实例。程序执行与 Probe 可共享真实重复的受限进程、Job 观察、取消与清理代码，输入和结果语义仍分别表达。
+Evaluation 保留现有任务状态与 Reconciler。冻结文件输入绑定不可变提交；实时 Probe 绑定目标环境、实例与观察时间，目标变化后不得将旧结果写到新实例。程序执行与 Probe 共用同一 Kubernetes execution backend 的 Job 创建、观察、取消与清理机制，输入和结果语义仍分别表达；执行准入、执行身份、generation fencing 与清理确认见 [ADR 0016](../adr/0016-task-resource-admission-and-kubernetes-execution.md)。
 
 执行 Job 的工件物化器沿用对象存储配置的 HTTPS 信任根。私有 CA 只挂载到负责下载工件的初始化容器，不交给学生程序或 Probe 脚本；证书链、主机名和工件身份校验失败都会终止执行。未配置私有 CA 时使用 HTTP 客户端的默认信任根。
 
@@ -36,6 +36,8 @@ Environment 为已授权的 Evaluation Probe 和私人 Work 配置签发独立�
 
 一次性任务使用 Resource 的 TaskRunId 租约。Evaluation 将项目、任务、租约与执行代次绑定到持久运行记录，再确认执行意图并启动 Job。取消、恢复和结果写入使用同一代次条件，旧 Worker 不能覆盖新尝试。实际执行对象清理完成后才确认释放；HTTP 接收请求、发出删除或 Worker 失联都不表示资源已经释放。
 
+统一执行绑定只能由已 Active 的请求、已 HandedOff 的 claim、已 Active 的 lease 与一致 namespace/revision 的 Resource 状态构造，并与执行意图一起持久化。无有效绑定时不得创建 workload；恢复时重新读取 Resource 状态确认同一 reservation，租约续期只更新 revision fence，不改变 reservation 身份。清理只区分 Confirmed、Pending 与 Unknown，只有 Confirmed 才能确认释放，Unknown 保留可查询诊断并等待下一轮清理。
+
 每次执行尝试拥有独立的 TaskRunId，由 Evaluation 生成并持久化，用户无需输入内部标识。需要集群执行的尝试以幂等请求交由 Resource 创建真实资源申请，审批前保留可查询的等待状态；同一尝试恢复时复用原申请，新尝试不能复用已释放的租约。用量与清理状态先持久化，再可靠投递；清理不明时可以上报待核实用量，但不能确认释放，不能等释放成功后才记录这类失败。
 
 `FileAssertion` 对已验证的冻结清单进行有界文件项检查时，在 Evaluation 内完成确定性计算并保留执行代次条件，不创建额外 Job，也不生成并不存在的 GPU 或集群资源占用。Program 与 Probe 的实际 Job 继续使用 Resource 租约。
@@ -43,6 +45,10 @@ Environment 为已授权的 Evaluation Probe 和私人 Work 配置签发独立�
 资源申请处于 Reviewing 时等待审批；Allocating 表示批准后可以领取并确认执行资源，确认成功后才启动 Job，不能等待尚未被确认的租约自行变成 Active。确认操作检查批准仍有效，并使用批准时长计算到期时间。任务的实际执行 namespace 与领取记录绑定，恢复时必须一致。审批等待与 Job 执行期间须维护 Worker 租约或持久化让出执行权，不能因调度租约过期而留下并行执行的旧 Worker。
 
 取消或等待审批超时必须结束对应资源申请。Reviewing 请求由 Evaluation 经受限内部接口按 revision 取消；若审批已抢先完成，则读取新的领取状态并释放尚未交接的保留，不为释放而伪造激活。已启动执行对象的尝试仍先确认清理，再释放资源。取消与审批、续租、完成之间的竞态使用同一任务与执行代次条件处理。
+
+Evaluation 周期比对执行 namespace 中带自身管理标签的执行对象与持久 attempt/checkpoint。只有当数据库记录证明对象属于已终态或已放弃的尝试，且标签、request SHA-256 与 UID 归属一致时才按 UID 前置条件自动清理并验证消失；归属不确定时只保留稳定诊断，不删除对象，也不确认释放。
+
+未来引入 Kubernetes 原生 admission（如 Kueue）时，由 Resource 将业务 Resource Policy 映射到集群 admission 绑定；业务服务仍不直接理解 `ClusterQueue`、`LocalQueue` 或 `ResourceFlavor`。Kueue 是后续 admission backend，不是 LabWeaver 业务 Scheduler，本 Issue 不部署或实现它。
 
 私人 Work 仍由 Environment 管理生命周期。Agent 的配置排障只能使用该项目与工作环境允许的工具和预授权范围；需要重启或超出授权范围的改动先呈现影响并取得用户确认，不扩展 Agent 的平台权限。
 

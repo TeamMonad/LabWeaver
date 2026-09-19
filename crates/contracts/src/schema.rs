@@ -108,6 +108,18 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::evaluation::EvaluationStepCompletion
     );
     document!(
+        "schemas/contracts/v1/task-execution-binding.schema.json",
+        crate::execution::TaskExecutionBinding
+    );
+    document!(
+        "schemas/contracts/v1/execution-observation.schema.json",
+        crate::execution::ExecutionObservation
+    );
+    document!(
+        "schemas/contracts/v1/execution-cleanup-status.schema.json",
+        crate::execution::ExecutionCleanupStatus
+    );
+    document!(
         "schemas/contracts/v1/submission-manifest.schema.json",
         crate::submission::SubmissionManifest
     );

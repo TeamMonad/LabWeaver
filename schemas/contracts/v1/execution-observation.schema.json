@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "ExecutionWorkloadState": {
+      "description": "Mechanical state of the Kubernetes workload behind one execution generation.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "The workload object exists but has not started its main container.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "The main container is running.",
+          "type": "string"
+        },
+        {
+          "const": "succeeded",
+          "description": "The main container terminated with a successful exit.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The main container terminated with a non-zero exit or an execution deadline.",
+          "type": "string"
+        },
+        {
+          "const": "missing",
+          "description": "The workload object is absent while the durable attempt still expects it.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The backend could not determine the state; callers must keep the attempt unresolved.",
+          "type": "string"
+        }
+      ]
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded, payload-free observation of one admitted workload.\n\nThe observation never carries container output, terminal text, or role-specific receipts.\nBusiness services map their own receipt format from the execution backend's role adapter.",
+  "properties": {
+    "exitCode": {
+      "description": "Main container exit code, present only for a terminated main container.",
+      "format": "int32",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "podName": {
+      "description": "Deterministic pod name observed for the workload, when one exists.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reasonCode": {
+      "description": "Bounded Kubernetes reason such as `DeadlineExceeded`, `OOMKilled`, or `Error`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "startedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Main container start time as reported by Kubernetes."
+    },
+    "state": {
+      "$ref": "#/$defs/ExecutionWorkloadState"
+    },
+    "terminatedAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Main container termination time as reported by Kubernetes."
+    }
+  },
+  "required": [
+    "state"
+  ],
+  "title": "ExecutionObservation",
+  "type": "object"
+}

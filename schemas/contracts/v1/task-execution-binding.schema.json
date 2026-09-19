@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "CapacityClaimId": {
+      "description": "Strongly typed UUIDv7 identifier for `CapacityClaimId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "ResourceRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `ResourceRequestId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "TaskRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `TaskRunId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Durable identity of one admitted execution generation of a one-shot task.\n\nThe value is created from an authoritative [`TaskResourceStatus`] that is already active and\nhanded off, then persisted in the owning business service's recovery checkpoint. A resumed\nworker proves it still holds the same reservation by matching the identity fields; a new\nexecution generation always has a new [`TaskRunId`] and therefore a new Resource reservation.",
+  "properties": {
+    "capacityClaimId": {
+      "$ref": "#/$defs/CapacityClaimId",
+      "description": "Capacity claim created by Resource approval."
+    },
+    "claimRevision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Claim revision observed when this generation was admitted."
+    },
+    "executionGeneration": {
+      "description": "Monotonic per-task execution generation. A new generation never reuses a released lease.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId",
+      "description": "Active lease that authorizes this exact generation to occupy capacity."
+    },
+    "leaseRevision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Lease revision observed when this generation was admitted."
+    },
+    "namespace": {
+      "description": "Exact namespace in which the admitted workload must execute.",
+      "type": "string"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId",
+      "description": "Project that owns the task."
+    },
+    "providerBinding": {
+      "description": "Capacity provider binding resolved by Resource for this reservation.",
+      "type": "string"
+    },
+    "resourceRequestId": {
+      "$ref": "#/$defs/ResourceRequestId",
+      "description": "Authoritative Resource request that admitted this generation."
+    },
+    "taskRunId": {
+      "$ref": "#/$defs/TaskRunId",
+      "description": "Durable one-shot task identity; unique per execution generation."
+    },
+    "traceId": {
+      "description": "Request correlation identity for diagnostics.",
+      "type": "string"
+    },
+    "workloadName": {
+      "description": "Deterministic workload name owned by this execution generation.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "taskRunId",
+    "executionGeneration",
+    "resourceRequestId",
+    "capacityClaimId",
+    "leaseId",
+    "claimRevision",
+    "leaseRevision",
+    "projectId",
+    "providerBinding",
+    "namespace",
+    "workloadName",
+    "traceId"
+  ],
+  "title": "TaskExecutionBinding",
+  "type": "object"
+}

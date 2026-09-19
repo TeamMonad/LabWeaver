@@ -13,14 +13,17 @@ pub mod control_plane;
 pub mod coordinator;
 pub mod environment_client;
 pub mod execution;
+pub mod execution_backend;
 pub mod freeze;
 pub mod freeze_store;
+pub mod kubernetes_job;
 pub mod kubernetes_runner;
 pub mod materializer;
 pub mod oj;
 pub mod oj_executor;
 pub mod oj_job;
 pub mod oj_worker;
+pub mod orphan_reconcile;
 pub mod outbox;
 pub mod process;
 pub mod resource_client;
@@ -46,8 +49,8 @@ pub use command_store::{
     PgFreezeCommandStore, SubmissionFreezeCommand,
 };
 pub use control_plane::{
-    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
-    EvaluationExecutionCheckpoint, EvaluationExecutionKind, EvaluationExecutionObjectRef,
+    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationAttemptState,
+    EvaluationControlStoreError, EvaluationExecutionCheckpoint, EvaluationExecutionKind,
     EvaluationExecutionResources, EvaluationReleaseReservation, EvaluationRunReservation,
     EvaluationStepLease, PendingResourceMeterDelivery, PgEvaluationControlStore,
 };
@@ -61,6 +64,7 @@ pub use execution::{
     ProgramCommandPaths, StepExecutionPlan, TaskResourceError, TaskResourceLifecycle,
     expand_program_argv, plan_deterministic_step,
 };
+pub use execution_backend::{AdmittedExecution, ExecutionAdmissionError};
 pub use freeze::{FreezeRequest, FreezeService, FreezeServiceError};
 pub use freeze_store::{BeginFreeze, FreezeLease, PgFreezeStore};
 pub use kubernetes_runner::{
@@ -75,6 +79,7 @@ pub use oj_worker::{
     OJ_HELPER_FAILURE_EXIT_CODE, OjWorkerError, run_oj_case_exec, run_oj_compile_exec,
     run_oj_worker,
 };
+pub use orphan_reconcile::{OrphanAttemptLookup, OrphanReconcileError, OrphanReconciler};
 pub use outbox::{EvaluationOutboxDispatcher, EvaluationOutboxError};
 pub use process::{EvaluationProcessError, run_evaluation_service};
 pub use resource_client::{ResourceClient, ResourceClientConfiguration, ResourceClientError};

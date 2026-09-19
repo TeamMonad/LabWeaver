@@ -297,6 +297,11 @@ impl AnsibleProbeJobResources {
     }
 
     #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    #[must_use]
     pub fn materializer_secret_name(&self) -> &str {
         &self.materializer_secret_name
     }
@@ -440,28 +445,6 @@ impl AnsibleProbeJobResources {
             propagation_policy: "Foreground".to_owned(),
         })
         .collect()
-    }
-
-    pub(crate) fn document_for_target(&self, target: &AnsibleProbeCleanupTarget) -> Option<&Value> {
-        match target.resource.as_str() {
-            "jobs" if target.name == self.name => Some(&self.job),
-            "networkpolicies" if target.name == self.name => Some(&self.network_policy),
-            "configmaps" if target.name == self.name => Some(&self.config_map),
-            "secrets" if target.name == self.materializer_secret_name => {
-                Some(&self.materializer_secret)
-            }
-            "secrets"
-                if self.ssh_private_key_secret_name.as_deref() == Some(target.name.as_str()) =>
-            {
-                self.ssh_private_key_secret.as_ref()
-            }
-            "secrets"
-                if self.ssh_certificate_secret_name.as_deref() == Some(target.name.as_str()) =>
-            {
-                self.ssh_certificate_secret.as_ref()
-            }
-            _ => None,
-        }
     }
 }
 

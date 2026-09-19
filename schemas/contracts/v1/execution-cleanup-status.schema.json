@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "ExecutionObjectRef": {
+      "additionalProperties": false,
+      "description": "One Kubernetes object owned by an execution generation.",
+      "properties": {
+        "apiVersion": {
+          "description": "Exact API version used to address the object, such as `batch/v1`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resource": {
+          "description": "Kubernetes collection name, such as `jobs` or `configmaps`.",
+          "type": "string"
+        },
+        "uid": {
+          "description": "Server-assigned UID proving ownership; never reused after deletion.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "resource",
+        "name",
+        "uid"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Deterministic result of one cleanup attempt.\n\nA caller may only confirm Resource release for [`Self::Confirmed`]. `Pending` and `Unknown`\nmust keep the attempt unresolved and must never be rewritten as released.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "Every owned object is verifiably gone.",
+      "properties": {
+        "status": {
+          "const": "confirmed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "At least one owned object still exists; the next cleanup pass continues.",
+      "properties": {
+        "remainingObjects": {
+          "items": {
+            "$ref": "#/$defs/ExecutionObjectRef"
+          },
+          "type": "array"
+        },
+        "status": {
+          "const": "pending",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "remainingObjects"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Cleanup could not be determined; the caller keeps the unresolved diagnostic.",
+      "properties": {
+        "diagnostic": {
+          "$ref": "#/$defs/DiagnosticCode"
+        },
+        "status": {
+          "const": "unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "diagnostic"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ExecutionCleanupStatus"
+}
