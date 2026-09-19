@@ -33,7 +33,6 @@ use crate::timing::ExecutionTiming;
 pub const MAX_BOUND_FILE_BYTES: u64 = 64 * 1024;
 
 const MANAGED_BY_LABEL: &str = "labweaver.io/managed-by";
-const MANAGED_BY_VALUE: &str = "evaluation-service";
 const RUN_ID_LABEL: &str = "labweaver.io/run-id";
 const STEP_RUN_ID_LABEL: &str = "labweaver.io/step-run-id";
 const ATTEMPT_ID_LABEL: &str = "labweaver.io/attempt-id";
@@ -179,6 +178,8 @@ pub struct KubernetesApiClient {
     field_manager: &'static str,
     log_scope: &'static str,
     diagnostic_prefix: &'static str,
+    managed_by: &'static str,
+    event_scope: &'static str,
 }
 
 impl KubernetesApiClient {
@@ -192,12 +193,16 @@ impl KubernetesApiClient {
         field_manager: &'static str,
         log_scope: &'static str,
         diagnostic_prefix: &'static str,
+        managed_by: &'static str,
+        event_scope: &'static str,
     ) -> Result<Self, KubernetesJobError> {
         if configuration.kubernetes_api_server.scheme() != "https"
             || configuration.kubernetes_api_server.host_str().is_none()
             || configuration.runner_namespace.trim().is_empty()
             || configuration.request_timeout_milliseconds == 0
             || configuration.request_timeout_milliseconds > 60_000
+            || !valid_label_value(managed_by)
+            || !valid_event_scope(event_scope)
         {
             return Err(KubernetesJobError::ConfigurationInvalid);
         }
@@ -220,7 +225,13 @@ impl KubernetesApiClient {
             field_manager,
             log_scope,
             diagnostic_prefix,
+            managed_by,
+            event_scope,
         })
+    }
+
+    fn event_name(&self, suffix: &str) -> String {
+        format!("{}.kubernetes.{suffix}", self.event_scope)
     }
 
     /// Returns the namespace this backend is bound to.
@@ -239,6 +250,8 @@ impl KubernetesApiClient {
         field_manager: &'static str,
         log_scope: &'static str,
         diagnostic_prefix: &'static str,
+        managed_by: &'static str,
+        event_scope: &'static str,
     ) -> Self {
         Self {
             configuration,
@@ -246,6 +259,8 @@ impl KubernetesApiClient {
             field_manager,
             log_scope,
             diagnostic_prefix,
+            managed_by,
+            event_scope,
         }
     }
 
@@ -269,7 +284,7 @@ impl KubernetesApiClient {
                 )
                 .await?
             {
-                verify_owned(&current, &bundle.identity.ownership)?;
+                verify_owned(&current, &bundle.identity.ownership, self.managed_by)?;
                 verify_immutable_identity(&current, &object.document)?;
                 existing = existing
                     .checked_add(1)
@@ -353,7 +368,7 @@ impl KubernetesApiClient {
                 )
                 .await?
                 .ok_or(KubernetesJobError::ObservationInvalid)?;
-            verify_owned(&current, &identity.ownership)?;
+            verify_owned(&current, &identity.ownership, self.managed_by)?;
             refs.push(object_ref(api_version(target)?, target, &current)?);
         }
         Ok(refs)
@@ -383,7 +398,7 @@ impl KubernetesApiClient {
             else {
                 continue;
             };
-            verify_owned(&current, &identity.ownership)?;
+            verify_owned(&current, &identity.ownership, self.managed_by)?;
             refs.push(object_ref(api_version(target)?, target, &current)?);
         }
         refs.sort_by(|left, right| {
@@ -422,7 +437,7 @@ impl KubernetesApiClient {
         {
             return Err(KubernetesJobError::IdentityConflict);
         }
-        verify_owned(&job, &identity.ownership)?;
+        verify_owned(&job, &identity.ownership, self.managed_by)?;
         let succeeded = job.pointer("/status/succeeded").and_then(Value::as_u64) == Some(1);
         let failed = job
             .pointer("/status/failed")
@@ -443,10 +458,10 @@ impl KubernetesApiClient {
             return Err(KubernetesJobError::ObservationInvalid);
         }
         let pod = &items[0];
-        verify_owned(pod, &identity.ownership)?;
+        verify_owned(pod, &identity.ownership, self.managed_by)?;
         let container = main_container_status(pod, identity.main_container)?;
         let timing = container
-            .map(execution_timing)
+            .map(|status| execution_timing(status, self.event_scope, self.diagnostic_prefix))
             .transpose()?
             .unwrap_or_else(ExecutionTiming::unknown);
         let terminated = container.and_then(|status| status.pointer("/state/terminated"));
@@ -630,6 +645,7 @@ impl KubernetesApiClient {
                 object,
                 identity.namespace.as_str(),
                 &identity.ownership,
+                self.managed_by,
             )?;
             let preconditions = delete_preconditions(&current)?;
             self.delete_owned(
@@ -643,6 +659,7 @@ impl KubernetesApiClient {
                         object,
                         identity.namespace.as_str(),
                         &identity.ownership,
+                        self.managed_by,
                     )
                 },
             )
@@ -664,6 +681,7 @@ impl KubernetesApiClient {
                     object,
                     identity.namespace.as_str(),
                     &identity.ownership,
+                    self.managed_by,
                 )?;
                 remaining.push(object.clone());
             }
@@ -694,7 +712,7 @@ impl KubernetesApiClient {
             else {
                 continue;
             };
-            verify_owned(&current, &identity.ownership)?;
+            verify_owned(&current, &identity.ownership, self.managed_by)?;
             let preconditions = delete_preconditions(&current)?;
             let expected_uid = preconditions.uid.clone();
             self.delete_owned(
@@ -702,7 +720,7 @@ impl KubernetesApiClient {
                 api_version(target)?,
                 expected_uid.as_str(),
                 preconditions,
-                |current| verify_owned(current, &identity.ownership),
+                |current| verify_owned(current, &identity.ownership, self.managed_by),
             )
             .await?;
         }
@@ -717,7 +735,7 @@ impl KubernetesApiClient {
                 )
                 .await?
             {
-                verify_owned(&current, &identity.ownership)?;
+                verify_owned(&current, &identity.ownership, self.managed_by)?;
                 remaining.push(object_ref(api_version(target)?, target, &current)?);
             }
         }
@@ -801,7 +819,7 @@ impl KubernetesApiClient {
             .await
             .map_err(|error| {
                 tracing::error!(
-                    event = "evaluation.kubernetes.get_failed",
+                    event = %self.event_name("get_failed"),
                     log_scope = self.log_scope,
                     resource_id = %resource_id,
                     failure_stage = "execution.kubernetes.get",
@@ -814,7 +832,7 @@ impl KubernetesApiClient {
         let status = response.status();
         if status == StatusCode::NOT_FOUND {
             tracing::info!(
-                event = "evaluation.kubernetes.get_absent",
+                event = %self.event_name("get_absent"),
                 log_scope = self.log_scope,
                 resource_id = %resource_id,
                 failure_stage = "execution.kubernetes.get",
@@ -826,7 +844,7 @@ impl KubernetesApiClient {
         } else if status.is_success() {
             response.json().await.map(Some).map_err(|error| {
                 tracing::error!(
-                    event = "evaluation.kubernetes.get_decode_failed",
+                    event = %self.event_name("get_decode_failed"),
                     log_scope = self.log_scope,
                     resource_id = %resource_id,
                     failure_stage = "execution.kubernetes.get",
@@ -839,7 +857,7 @@ impl KubernetesApiClient {
             })
         } else {
             tracing::error!(
-                event = "evaluation.kubernetes.get_rejected",
+                event = %self.event_name("get_rejected"),
                 log_scope = self.log_scope,
                 resource_id = %resource_id,
                 failure_stage = "execution.kubernetes.get",
@@ -894,7 +912,7 @@ impl KubernetesApiClient {
             .await
             .map_err(|error| {
                 tracing::error!(
-                    event = "evaluation.kubernetes.delete_failed",
+                    event = %self.event_name("delete_failed"),
                     log_scope = self.log_scope,
                     resource_id = %resource_id,
                     failure_stage = "execution.kubernetes.delete",
@@ -909,7 +927,7 @@ impl KubernetesApiClient {
         match &result {
             Ok(()) => {
                 tracing::info!(
-                    event = "evaluation.kubernetes.delete_accepted",
+                    event = %self.event_name("delete_accepted"),
                     log_scope = self.log_scope,
                     resource_id = %resource_id,
                     failure_stage = "execution.kubernetes.delete",
@@ -925,7 +943,7 @@ impl KubernetesApiClient {
             Err(error) => {
                 if status == StatusCode::CONFLICT {
                     tracing::warn!(
-                        event = "evaluation.kubernetes.delete_precondition_conflict",
+                        event = %self.event_name("delete_precondition_conflict"),
                         log_scope = self.log_scope,
                         resource_id = %resource_id,
                         failure_stage = "execution.kubernetes.delete",
@@ -936,7 +954,7 @@ impl KubernetesApiClient {
                     );
                 } else {
                     tracing::error!(
-                        event = "evaluation.kubernetes.delete_rejected",
+                        event = %self.event_name("delete_rejected"),
                         log_scope = self.log_scope,
                         resource_id = %resource_id,
                         failure_stage = "execution.kubernetes.delete",
@@ -981,7 +999,7 @@ impl KubernetesApiClient {
                         .await?
                     else {
                         tracing::info!(
-                            event = "evaluation.kubernetes.delete_retry_absent",
+                            event = %self.event_name("delete_retry_absent"),
                             log_scope = self.log_scope,
                             resource_id = %resource_id,
                             failure_stage = "execution.kubernetes.delete.retry",
@@ -994,7 +1012,7 @@ impl KubernetesApiClient {
                         != Some(expected_uid)
                     {
                         tracing::error!(
-                            event = "evaluation.kubernetes.delete_retry_identity_changed",
+                            event = %self.event_name("delete_retry_identity_changed"),
                             log_scope = self.log_scope,
                             resource_id = %resource_id,
                             failure_stage = "execution.kubernetes.delete.retry",
@@ -1006,7 +1024,7 @@ impl KubernetesApiClient {
                     }
                     if let Err(error) = verify(&current) {
                         tracing::error!(
-                            event = "evaluation.kubernetes.delete_retry_ownership_failed",
+                            event = %self.event_name("delete_retry_ownership_failed"),
                             log_scope = self.log_scope,
                             resource_id = %resource_id,
                             failure_stage = "execution.kubernetes.delete.retry",
@@ -1018,7 +1036,7 @@ impl KubernetesApiClient {
                     }
                     preconditions = delete_preconditions(&current)?;
                     tracing::warn!(
-                        event = "evaluation.kubernetes.delete_retry",
+                        event = %self.event_name("delete_retry"),
                         log_scope = self.log_scope,
                         resource_id = %resource_id,
                         failure_stage = "execution.kubernetes.delete.retry",
@@ -1030,7 +1048,7 @@ impl KubernetesApiClient {
                 }
                 Err(error @ KubernetesJobError::IdentityConflict) => {
                     tracing::error!(
-                        event = "evaluation.kubernetes.delete_retry_exhausted",
+                        event = %self.event_name("delete_retry_exhausted"),
                         log_scope = self.log_scope,
                         resource_id = %format!(
                             "{}/{}/{}",
@@ -1237,7 +1255,11 @@ fn main_container_status<'a>(
     Ok(matches.into_iter().next())
 }
 
-pub fn execution_timing(status: &Value) -> Result<ExecutionTiming, KubernetesJobError> {
+pub fn execution_timing(
+    status: &Value,
+    event_scope: &str,
+    diagnostic_prefix: &str,
+) -> Result<ExecutionTiming, KubernetesJobError> {
     let terminated = status.pointer("/state/terminated");
     let started = status
         .pointer("/state/terminated/startedAt")
@@ -1257,8 +1279,8 @@ pub fn execution_timing(status: &Value) -> Result<ExecutionTiming, KubernetesJob
         .is_some_and(|(started_at, finished_at)| started_at == finished_at)
     {
         tracing::warn!(
-            event = "evaluation.executor.timing_precision_insufficient",
-            diagnostic_code = "LW_EVALUATION_EXECUTOR_TIMING_PRECISION_INSUFFICIENT",
+            event = %format!("{event_scope}.executor.timing_precision_insufficient"),
+            diagnostic_code = %format!("{diagnostic_prefix}EXECUTOR_TIMING_PRECISION_INSUFFICIENT"),
             timestamp_precision = "seconds",
             started_at = status
                 .pointer("/state/terminated/startedAt")
@@ -1295,6 +1317,7 @@ fn verify_recovery_owned(
     object: &ExecutionObjectRef,
     namespace: &str,
     ownership: &KubernetesOwnership,
+    managed_by: &str,
 ) -> Result<(), KubernetesJobError> {
     let metadata = resource
         .pointer("/metadata")
@@ -1310,7 +1333,7 @@ fn verify_recovery_owned(
         .get("labels")
         .and_then(Value::as_object)
         .ok_or(KubernetesJobError::IdentityConflict)?;
-    let owned = ownership_labels(ownership)
+    let owned = ownership_labels(ownership, managed_by)
         .into_iter()
         .all(|(key, expected)| labels.get(key).and_then(Value::as_str) == Some(expected.as_str()));
     if owned {
@@ -1323,6 +1346,7 @@ fn verify_recovery_owned(
 pub fn verify_owned(
     resource: &Value,
     ownership: &KubernetesOwnership,
+    managed_by: &str,
 ) -> Result<(), KubernetesJobError> {
     if ownership.request_sha256.is_empty() {
         return Err(KubernetesJobError::IdentityConflict);
@@ -1331,7 +1355,7 @@ pub fn verify_owned(
         .pointer("/metadata/labels")
         .and_then(Value::as_object)
         .ok_or(KubernetesJobError::IdentityConflict)?;
-    let labels_match = ownership_labels(ownership)
+    let labels_match = ownership_labels(ownership, managed_by)
         .into_iter()
         .all(|(key, expected)| labels.get(key).and_then(Value::as_str) == Some(expected.as_str()));
     let annotation_matches = resource
@@ -1345,9 +1369,12 @@ pub fn verify_owned(
     }
 }
 
-fn ownership_labels(ownership: &KubernetesOwnership) -> [(&'static str, String); 4] {
+fn ownership_labels(
+    ownership: &KubernetesOwnership,
+    managed_by: &str,
+) -> [(&'static str, String); 4] {
     [
-        (MANAGED_BY_LABEL, MANAGED_BY_VALUE.to_owned()),
+        (MANAGED_BY_LABEL, managed_by.to_owned()),
         (RUN_ID_LABEL, ownership.run_id.to_string()),
         (STEP_RUN_ID_LABEL, ownership.step_run_id.to_string()),
         (ATTEMPT_ID_LABEL, ownership.attempt_id.to_string()),
@@ -1530,6 +1557,30 @@ pub fn safe_segment(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+}
+
+fn valid_label_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn valid_event_scope(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
 }
 
 fn is_stable_diagnostic(value: &str, prefix: &str) -> bool {
@@ -1900,6 +1951,8 @@ mod tests {
             "labweaver-test",
             "test",
             "LW_TEST_",
+            "evaluation-service",
+            "evaluation",
         );
         Ok(FakeCluster {
             api,
@@ -1990,6 +2043,8 @@ mod tests {
             "labweaver-test",
             "test",
             "LW_TEST_",
+            "evaluation-service",
+            "evaluation",
         );
         let bundle = bundle(&ownership("request-sha"));
         assert!(matches!(

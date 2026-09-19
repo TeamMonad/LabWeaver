@@ -108,7 +108,14 @@ async fn live_job_submit_observe_duplicate_cleanup_readback()
         eprintln!("LW_LIVE_KUBERNETES is not enabled; skipping live readback");
         return Ok(());
     };
-    let api = KubernetesApiClient::new(configuration, "labweaver-live-test", "live", "LW_LIVE_")?;
+    let api = KubernetesApiClient::new(
+        configuration,
+        "labweaver-live-test",
+        "live",
+        "LW_LIVE_",
+        "evaluation-service",
+        "evaluation",
+    )?;
     let ownership = KubernetesOwnership {
         run_id: Uuid::now_v7(),
         step_run_id: Uuid::now_v7(),
