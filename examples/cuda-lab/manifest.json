@@ -26,7 +26,7 @@
       {
         "path": "environment.yaml",
         "role": "public",
-        "sha256": "e87b771c548100a07ca065ddba969576582a65ef4383b8aad4384c5748726006"
+        "sha256": "3eeb03fe095927ed6f03a51d67df237fdfc6784ae0468402442a572bee039e8d"
       },
       {
         "path": "evaluation.yaml",
@@ -36,7 +36,7 @@
       {
         "path": "evaluation/Dockerfile",
         "role": "controlled",
-        "sha256": "2fcfdd50f17ed6c79fe92803f28e55e8b15888ba7273cc6f63e0f2dfdf47b7bd"
+        "sha256": "a0d79db23a581599aa109861205ddd7a57ac4098ab134355e3451d5386909127"
       },
       {
         "path": "profiles/cuda-nvcc.json",

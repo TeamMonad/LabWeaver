@@ -3019,7 +3019,9 @@ impl ClaudeCodeRuntimeError {
 /// contexts. These are binary; the LLM receives metadata only.
 fn is_build_context_media_type(media_type: &str) -> bool {
     let normalized = media_type.to_ascii_lowercase();
-    normalized.contains("tar") || normalized.contains("build-context")
+    normalized.contains("tar")
+        || normalized.contains("gzip")
+        || normalized.contains("build-context")
 }
 
 #[cfg(test)]

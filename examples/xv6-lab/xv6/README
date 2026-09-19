@@ -36,7 +36,7 @@ Zhang, Jindong Zhang, Icenowy Zheng, ZhUyU1997, and Zou Chang Wei.
 ERROR REPORTS
 
 Please send errors and suggestions to Frans Kaashoek and Robert Morris
-(kaashoek,rtm@mit.edu).  The main purpose of xv6 is as a teaching
+(kaashoek, rtm at mit dot edu).  The main purpose of xv6 is as a teaching
 operating system for MIT's 6.1810, so we are more interested in
 simplifications and clarifications than new features.
 

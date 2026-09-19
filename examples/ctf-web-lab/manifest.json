@@ -31,7 +31,7 @@
       {
         "path": "environment.yaml",
         "role": "public",
-        "sha256": "62709c9d7891d75e0dc0036d62f56e23f818e0d69f2b7a632b798800dbf6e58b"
+        "sha256": "18cfd79b0a9e6e2d12b227511049c9342c8d20a909acc3fbc26400d4c1629ffb"
       },
       {
         "path": "evaluation.yaml",
@@ -41,7 +41,7 @@
       {
         "path": "evaluation/Dockerfile",
         "role": "controlled",
-        "sha256": "7d4e5119d50ffe806537d038ddfde5eadc0038c363b38c3d7beea47be8a330a6"
+        "sha256": "732734f9b0c83cf748a3253105afb4df7b54146a26d83562b1d36d081e667740"
       },
       {
         "path": "profiles/ctf-python.json",

@@ -26,7 +26,7 @@
       {
         "path": "environment.yaml",
         "role": "public",
-        "sha256": "0722109d85159ef54fd2544c52b346a4eef03cdc78b01b9eb865f2cb18cc747e"
+        "sha256": "70efeaf15d1b07d5d7fd18cbeb555621c74804e254032a608923d50c1418464f"
       },
       {
         "path": "evaluation.yaml",
@@ -36,7 +36,7 @@
       {
         "path": "evaluation/Dockerfile",
         "role": "controlled",
-        "sha256": "9e05aee0f2dcb26692e6e63c6bc77a632c3d2e8f6f5771596b2528f441e0a8ae"
+        "sha256": "eac69bf4929f16319e9a9cb937eca599592d258742918f94d495164b7a23b555"
       },
       {
         "path": "profiles/xv6-riscv64.json",
@@ -126,7 +126,7 @@
       {
         "path": "xv6/README",
         "role": "public",
-        "sha256": "62e7b5718d95ed57222e818e0a4a44cb827b822c89d6da0d682f541222e7b0a1"
+        "sha256": "141b9f6b79d050f61ef170525292ce5bda1b3c6f2d0ffad3a7f87b21741690c8"
       },
       {
         "path": "xv6/kernel/bio.c",
