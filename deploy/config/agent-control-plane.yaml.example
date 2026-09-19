@@ -40,6 +40,31 @@ work_execution:
   environment_scopes:
     - "environment.work.configure"
     - "environment:resolve_work_execution_binding"
+resource:
+  # Resource Service task admission for admitted authoring sandbox attempts.
+  baseUri: "https://resource-service:9448/"
+  caFile: "/etc/labweaver/secrets/mtls-ca.pem"
+  timeoutMilliseconds: 5000
+  maxRequestBytes: 1048576
+  maxResponseBytes: 8388608
+  audience: "labweaver-resource"
+sandbox:
+  # Per-attempt Kubernetes Job that runs the pinned Claude Code CLI with tools.
+  namespace: "labweaver-authoring"
+  image: "harbor.example.invalid/labweaver-system/authoring-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  service_account_name: "authoring-runner"
+  image_pull_secret_name: "harbor-course-pull"
+  cpu_millicores: 2000
+  memory_bytes: 2147483648
+  workspace_bytes: 2147483648
+  wall_time_seconds: 3600
+  allowed_egress_cidrs: ["10.0.0.0/8"]
+  result_max_bytes: 4194304
+  object_prefix: "authoring-sandbox"
+  kubernetes_api_server: "https://kubernetes.default.svc:443/"
+  kubernetes_bearer_token_file: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  kubernetes_ca_file: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  request_timeout_milliseconds: 5000
 build:
   # Served by the deployment-owned executor binding immutable ArtifactRef inputs
   # to restricted BuildKit and private Harbor.

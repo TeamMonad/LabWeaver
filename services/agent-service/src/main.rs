@@ -77,6 +77,59 @@ struct DeploymentFile {
     work_execution: WorkExecutionFileConfig,
     build: BuildFileConfig,
     nats: NatsFileConfig,
+    resource: Option<task_execution::resource::ResourceClientConfiguration>,
+    sandbox: Option<SandboxFileConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxFileConfig {
+    namespace: String,
+    image: String,
+    service_account_name: String,
+    image_pull_secret_name: Option<String>,
+    cpu_millicores: u32,
+    memory_bytes: u64,
+    workspace_bytes: u64,
+    wall_time_seconds: u64,
+    allowed_egress_cidrs: BTreeSet<String>,
+    result_max_bytes: u64,
+    object_prefix: String,
+    kubernetes_api_server: String,
+    kubernetes_bearer_token_file: String,
+    kubernetes_ca_file: String,
+    request_timeout_milliseconds: u64,
+}
+
+impl SandboxFileConfig {
+    fn to_configuration(
+        &self,
+    ) -> Result<agent_service::sandbox::SandboxConfiguration, StartupError> {
+        let configuration = agent_service::sandbox::SandboxConfiguration {
+            namespace: self.namespace.clone(),
+            image: self.image.clone(),
+            service_account_name: self.service_account_name.clone(),
+            image_pull_secret_name: self.image_pull_secret_name.clone(),
+            cpu_millicores: self.cpu_millicores,
+            memory_bytes: self.memory_bytes,
+            workspace_bytes: self.workspace_bytes,
+            wall_time_seconds: self.wall_time_seconds,
+            allowed_egress_cidrs: self.allowed_egress_cidrs.clone(),
+        };
+        configuration
+            .validate()
+            .map_err(|_| StartupError::Configuration)?;
+        if self.object_prefix.trim().is_empty()
+            || !self.kubernetes_api_server.starts_with("https://")
+            || !self.kubernetes_bearer_token_file.starts_with('/')
+            || !self.kubernetes_ca_file.starts_with('/')
+            || !(100..=60_000).contains(&self.request_timeout_milliseconds)
+            || !(1_024..=8 * 1024 * 1024).contains(&self.result_max_bytes)
+        {
+            return Err(StartupError::Configuration);
+        }
+        Ok(configuration)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,7 +229,8 @@ async fn run_agent_service() -> Result<(), StartupError> {
         &deployment.control_tls.server_certificate_file,
         &deployment.control_tls.server_key_file,
     )?;
-    let (service_verifier, service_token_client) = discover_service_auth().await?;
+    let (service_verifier, service_token_client) =
+        discover_service_auth(deployment.sandbox.is_some()).await?;
     let work_execution_configuration = WorkExecutionConfiguration::defaults(
         reqwest::Url::parse(&deployment.work_execution.environment_base_uri)
             .map_err(|_| StartupError::Configuration)?,
@@ -332,14 +386,27 @@ async fn run_agent_service() -> Result<(), StartupError> {
     Ok(())
 }
 
-async fn discover_service_auth()
--> Result<(Arc<ServiceTokenVerifier>, Arc<ServiceTokenClient>), StartupError> {
+async fn discover_service_auth(
+    require_task_resource_scopes: bool,
+) -> Result<(Arc<ServiceTokenVerifier>, Arc<ServiceTokenClient>), StartupError> {
     let issuer = required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?;
     let audience = required_env("LABWEAVER_SERVICE_AUDIENCE")?;
     let allowed_client_ids = required_set("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS")?;
     let scopes = required_set("LABWEAVER_SERVICE_SCOPES")?;
     if !scopes.contains("environment.work.configure")
         || !scopes.contains("environment:resolve_work_execution_binding")
+        || (require_task_resource_scopes
+            && ![
+                "resource.task.create",
+                "resource.task.read",
+                "resource.task.claim",
+                "resource.task.ack",
+                "resource.task.release",
+                "resource.task.cancel",
+                "resource.usage.record",
+            ]
+            .iter()
+            .all(|scope| scopes.contains(*scope)))
     {
         return Err(StartupError::Configuration);
     }
@@ -711,6 +778,18 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
     {
         return Err(StartupError::Configuration);
     }
+    if let Some(sandbox) = &deployment.sandbox {
+        sandbox.to_configuration()?;
+        let Some(resource) = &deployment.resource else {
+            return Err(StartupError::Configuration);
+        };
+        if resource.audience.trim().is_empty()
+            || !resource.ca_file.is_absolute()
+            || resource.base_uri.scheme() != "https"
+        {
+            return Err(StartupError::Configuration);
+        }
+    }
     Ok(())
 }
 
@@ -757,7 +836,8 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
           AND to_regclass('agent.agent_track_work_items') IS NOT NULL \
           AND to_regclass('agent.build_commands') IS NOT NULL \
           AND to_regclass('agent.generated_artifacts') IS NOT NULL \
-          AND to_regclass('agent.llm_review_runs') IS NOT NULL",
+          AND to_regclass('agent.llm_review_runs') IS NOT NULL \
+          AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
