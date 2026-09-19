@@ -3325,6 +3325,138 @@ mod probe_recovery_tests {
     }
 
     #[tokio::test]
+    async fn probe_recovery_after_persisted_terminal_does_not_recreate_job()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let first_lease = fixture
+            .store
+            .claim_next_step("probe-terminal-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("probe step was not claimable")?;
+        let first_context = context(&fixture, &first_lease)?;
+        let request = probe_request(&first_context)?;
+        let resource_status = resource_status(&first_lease, &fixture, false)?;
+        let admission = KubernetesEvaluationRunner::admit_execution(
+            &first_context,
+            &first_context.execution_plan,
+            &resource_status,
+        )?;
+        let intent = super::execution_resources(
+            &first_context,
+            NAMESPACE,
+            EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
+            &request,
+            Vec::new(),
+        )?;
+        fixture
+            .store
+            .persist_execution_intent(&first_lease, &intent)
+            .await?;
+        cluster.install_probe(&request, &resource_status).await?;
+        let objects = probe_entries(&request)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (api_version, resource, name, _))| {
+                contracts::execution::ExecutionObjectRef {
+                    api_version: api_version.to_owned(),
+                    resource: resource.to_owned(),
+                    name,
+                    uid: format!("probe-object-{index}"),
+                }
+            })
+            .collect::<Vec<_>>();
+        let started: UtcTimestamp = "2026-09-09T00:00:00.000Z".parse()?;
+        let terminated: UtcTimestamp = "2026-09-09T00:00:01.000Z".parse()?;
+        let started_resources = super::execution_resources(
+            &first_context,
+            NAMESPACE,
+            EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
+            &request,
+            objects,
+        )?;
+        fixture
+            .store
+            .mark_execution_started(&first_lease, None, &started_resources)
+            .await?;
+        let completion = match &first_context.step {
+            contracts::evaluation::EvaluationStep::Score(_) => super::TerminalResult::Succeeded {
+                score: Some(first_context.lease.max_score),
+            }
+            .into_completion()?,
+            _ => super::TerminalResult::Succeeded { score: None }.into_completion()?,
+        };
+        fixture
+            .store
+            .checkpoint_execution_terminal(
+                &first_lease,
+                Some(started),
+                Some(terminated),
+                &completion,
+                &[],
+            )
+            .await?;
+
+        // The terminal result is already durable and the Job is already gone;
+        // recovery must clean the remaining objects and must never re-execute.
+        {
+            let mut state = cluster.state.lock().await;
+            let job_name = probe_entries(&request)[0].2.clone();
+            state
+                .objects
+                .remove(&kube_path("batch/v1", "jobs", &job_name));
+            state.pods = None;
+        }
+        expire_lease(&fixture.pool, first_lease.step_run_id).await?;
+        let recovered_lease = fixture
+            .store
+            .claim_next_step("probe-terminal-worker-b", Duration::from_secs(30))
+            .await?
+            .ok_or("expired probe step was not reassigned")?;
+        assert_eq!(recovered_lease.task_run_id, first_lease.task_run_id);
+        assert_eq!(recovered_lease.attempt, first_lease.attempt);
+        let recovered_context = context(&fixture, &recovered_lease)?;
+        let recovered_completion = runner.execute(recovered_context).await?;
+        assert_eq!(recovered_completion, completion);
+        assert!(recovered_completion.cleanup_verified);
+
+        let calls = cluster.calls().await;
+        let is_kubernetes_path =
+            |path: &String| path.starts_with("/api/") || path.starts_with("/apis/");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && is_kubernetes_path(path))
+                .count(),
+            0,
+            "a persisted terminal result must not apply a second Kubernetes Job bundle"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::GET && path.ends_with("/pods"))
+                .count(),
+            0,
+            "a persisted terminal result must not re-observe the workload"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::DELETE && is_kubernetes_path(path))
+                .count(),
+            5,
+            "recovery must delete the five remaining persisted objects"
+        );
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn probe_recovery_rejects_stale_step_revision_and_job_uid_before_pod_observation()
     -> Result<(), Box<dyn Error>> {
         let mut cluster = spawn_cluster().await?;
