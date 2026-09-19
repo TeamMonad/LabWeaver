@@ -51,6 +51,7 @@ const LABS = Object.freeze({
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
 const REAL_PROVIDER_BUDGET = Object.freeze({ maxOutputTokens: 220_000, maxRequests: 24 })
+const AGENT_RUN_TIMEOUT_MS = Number(process.env.LABWEAVER_E2E_AGENT_RUN_TIMEOUT_MS) || 1_800_000
 
 test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6 or LABWEAVER_E2E_LAB=cuda for a real lab acceptance run.')
 
@@ -72,7 +73,7 @@ async function waitForExperimentRun(request, projectId, runId) {
     `/api/v1/projects/${projectId}/agent-runs/${runId}`,
     (value) => terminalRunState(value.state),
     'LAB_EXPERIMENT_AGENT_RUN_STATUS_FAILED',
-    600_000,
+    AGENT_RUN_TIMEOUT_MS,
   )
   if (run.state !== 'succeeded') {
     throw new Error(`LAB_EXPERIMENT_AGENT_RUN_FAILED:${run.state}:${diagnosticCodes(run)}`)
