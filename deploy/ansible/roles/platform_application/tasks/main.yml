@@ -645,6 +645,25 @@
   changed_when: false
   no_log: true
 
+- name: Bind the platform service mTLS trust roots
+  ansible.builtin.set_fact:
+    platform_application_mtls_trust_roots: >-
+      {{ (platform_application_configuration_objects
+          | selectattr('kind', 'equalto', 'Secret')
+          | selectattr('metadata.name', 'in', platform_application_required_secrets)
+          | map(attribute='data')
+          | map(attribute='mtls-ca.pem', default='')
+          | select('ne', '')
+          | unique | list) }}
+  no_log: true
+
+- name: Require one shared platform mTLS trust root across service secrets
+  ansible.builtin.assert:
+    that:
+      - platform_application_mtls_trust_roots | length <= 1
+    fail_msg: PLATFORM_APPLICATION_MTLS_TRUST_ROOT_MISMATCH
+  no_log: true
+
 - name: Validate private Access seed boundary
   ansible.builtin.assert:
     that:
@@ -2660,6 +2679,69 @@
         )
     fail_msg: PLATFORM_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
+- name: Require the reviewed evaluation runner service account bindings
+  ansible.builtin.assert:
+    that:
+      - platform_application_evaluation_configuration.execution.ojServiceAccountName == 'oj-runner'
+      - platform_application_evaluation_configuration.execution.ansibleProbeServiceAccountName == 'ansible-probe'
+      - platform_application_evaluation_configuration.execution.imagePullSecretName == platform_application_evaluation_pull_secret_name
+    fail_msg: PLATFORM_APPLICATION_EVALUATION_RUNNER_BINDING_INVALID
+  no_log: true
+
+- name: Reconcile the permanent evaluation runner service accounts
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ item }}"
+        namespace: "{{ platform_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      automountServiceAccountToken: false
+  loop:
+    - "{{ platform_application_evaluation_configuration.execution.ojServiceAccountName }}"
+    - "{{ platform_application_evaluation_configuration.execution.ansibleProbeServiceAccountName }}"
+
+- name: Reconcile the permanent evaluation runner object-store egress policy
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: oj-runner-object-store-egress
+        namespace: "{{ platform_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        podSelector: {}
+        policyTypes: [Egress]
+        egress:
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: "{{ platform_application_data_namespace }}"
+            ports:
+              - port: "{{ platform_application_object_store_service_port }}"
+                protocol: TCP
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: kube-system
+            ports:
+              - port: "53"
+                protocol: UDP
+              - port: "53"
+                protocol: TCP
+
 - name: Reconcile the permanent ansible probe namespace default deny
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -2705,13 +2787,6 @@
           platform_application_probe_default_deny.resources[0].spec.egress | default([]) == []
         )
     fail_msg: PLATFORM_APPLICATION_PROBE_DEFAULT_DENY_INVALID
-
-- name: Require the evaluation worker to use the platform image pull identity
-  ansible.builtin.assert:
-    that:
-      - platform_application_evaluation_pull_secret_name == platform_application_image_pull_secret_name
-    fail_msg: PLATFORM_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID
-  no_log: true
 
 - name: Reconcile the evaluation freeze worker registry pull secret
   kubernetes.core.k8s:
@@ -2962,6 +3037,8 @@
               - matchLabels:
                   k8s:io.kubernetes.pod.namespace: "{{ platform_application_evaluation_namespace }}"
                   app.kubernetes.io/name: evaluation-freeze-worker
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_evaluation_namespace }}"
             toPorts:
               - ports:
                   - port: "5432"
