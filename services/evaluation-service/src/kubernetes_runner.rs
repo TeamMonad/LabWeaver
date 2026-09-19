@@ -56,7 +56,7 @@ use crate::environment_client::{
 };
 use crate::execution::{
     EvaluationAttemptContext, EvaluationAttemptRunner, ExecutionError, ExecutionTiming,
-    StepExecutionPlan, TaskResourceError, TaskResourceLifecycle,
+    StepExecutionPlan, TaskResourceError, TaskResourceFailure, TaskResourceLifecycle,
 };
 use crate::freeze_store::PgFreezeStore;
 use crate::materializer::{
@@ -973,7 +973,7 @@ impl KubernetesEvaluationRunner {
             resources,
             duration_seconds,
         )
-        .map_err(ExecutionError::TaskResource)
+        .map_err(ExecutionError::from)
     }
 
     fn execute_file_assertion(
@@ -2417,7 +2417,7 @@ fn map_task_resource(error: TaskResourceError, stage: &str) -> ExecutionError {
         cleanup_verified = false,
         "Resource lifecycle failed during evaluation",
     );
-    ExecutionError::TaskResource(error)
+    ExecutionError::TaskResource(TaskResourceFailure(error))
 }
 
 fn map_oj_start_error(error: &OjExecutorError) -> ExecutionError {
@@ -2599,8 +2599,8 @@ fn deterministic_usage_event_id(
 mod tests {
     use super::{
         ExecutionError, OjExecutionPhase, OjExecutorError, OjTerminalStatus, TaskResourceError,
-        TerminalResult, map_oj_start_error, map_task_resource, oj_receipt_result,
-        validate_advisory_receipt_hash,
+        TaskResourceFailure, TerminalResult, map_oj_start_error, map_task_resource,
+        oj_receipt_result, validate_advisory_receipt_hash,
     };
     use contracts::authoring::ProjectLlmEgressPolicy;
     use contracts::http::{
@@ -2738,7 +2738,7 @@ mod tests {
         assert_eq!(mapped.to_string(), "LW_EVALUATION_TASK_RESOURCE_TERMINAL");
         assert!(matches!(
             mapped,
-            ExecutionError::TaskResource(TaskResourceError::ResourceTerminal)
+            ExecutionError::TaskResource(TaskResourceFailure(TaskResourceError::ResourceTerminal))
         ));
     }
 

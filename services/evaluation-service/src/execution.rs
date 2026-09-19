@@ -12,27 +12,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use contracts::{
-    ActorId, CourseId, ProjectId, TaskRunId,
-    evaluation::{
-        AdvisoryOutputMode, AdvisoryRunnerSpec, ApprovedProgramProfile, DeterministicRunnerSpec,
-        EvaluationRelease, EvaluationRun, EvaluationStep, EvaluationStepCompletion,
-        EvaluationStepRunState, ProgramPhase,
-    },
-    http::{
-        AcknowledgeTaskResourceRequest, InternalCreateTaskResourceRequest,
-        ReleaseTaskResourceRequest, ResourceRequestMutation,
-    },
-    resource::{
-        CapacityClaimState, ResourceLeaseState, ResourceRequest, ResourceRequestState,
-        ResourceTarget, WorkloadResources,
-    },
+use contracts::evaluation::{
+    AdvisoryOutputMode, AdvisoryRunnerSpec, ApprovedProgramProfile, DeterministicRunnerSpec,
+    EvaluationRelease, EvaluationRun, EvaluationStep, EvaluationStepCompletion,
+    EvaluationStepRunState, ProgramPhase,
 };
 use thiserror::Error;
-use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::{EvaluationStepLease, PgEvaluationControlStore, ResourceClient, ResourceClientError};
+use crate::{EvaluationStepLease, PgEvaluationControlStore};
 
 /// The execution identity used by every direct argv expansion.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,384 +197,10 @@ pub fn plan_deterministic_step(step: &EvaluationStep) -> Result<StepExecutionPla
     }
 }
 
-/// A Resource reservation bound to one durable Evaluation attempt.
-#[derive(Clone)]
-pub struct TaskResourceLifecycle {
-    client: ResourceClient,
-    task_run_id: TaskRunId,
-    project_id: ProjectId,
-    course_id: Option<CourseId>,
-    owner_id: ActorId,
-    request_key: String,
-    resources: WorkloadResources,
-    duration_seconds: u64,
-}
-
-impl std::fmt::Debug for TaskResourceLifecycle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TaskResourceLifecycle")
-            .field("task_run_id", &self.task_run_id)
-            .field("project_id", &self.project_id)
-            .field("course_id", &self.course_id)
-            .field("owner_id", &self.owner_id)
-            .field("request_key", &self.request_key)
-            .field("resources", &self.resources)
-            .field("duration_seconds", &self.duration_seconds)
-            .finish_non_exhaustive()
-    }
-}
-
-impl TaskResourceLifecycle {
-    /// The Resource client has a bounded HTTP timeout, but this explicit ceiling also protects
-    /// callers that construct the client with a custom `reqwest::Client`.  A timeout is an
-    /// uncertain outcome: the server may have committed the request after the client stopped
-    /// waiting.  The durable `TaskRunId` and idempotency key let the next worker reconcile it.
-    const CREATE_SETTLE_TIMEOUT: Duration = Duration::from_mins(1);
-
-    /// Builds an attempt-scoped reservation coordinator.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the constructor binds one durable reservation to its complete ownership identity"
-    )]
-    pub fn new(
-        client: ResourceClient,
-        task_run_id: TaskRunId,
-        project_id: ProjectId,
-        course_id: Option<CourseId>,
-        owner_id: ActorId,
-        request_key: String,
-        resources: WorkloadResources,
-        duration_seconds: u64,
-    ) -> Result<Self, TaskResourceError> {
-        if !(16..=96).contains(&request_key.len())
-            || !request_key.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
-            })
-            || duration_seconds == 0
-        {
-            return Err(TaskResourceError::RequestInvalid);
-        }
-        resources
-            .validate()
-            .map_err(|_| TaskResourceError::RequestInvalid)?;
-        Ok(Self {
-            client,
-            task_run_id,
-            project_id,
-            course_id,
-            owner_id,
-            request_key,
-            resources,
-            duration_seconds,
-        })
-    }
-
-    /// Creates the request once, or verifies the same request after an idempotent retry.
-    ///
-    /// This operation intentionally does not race the cancellation token.  Dropping an in-flight
-    /// POST and then treating a transient GET-missing response as proof that no request exists can
-    /// leave a Resource reservation behind when the server commits the POST later.  The bounded
-    /// wait below either settles the call or returns an explicit uncertain result; an uncertain
-    /// result remains a worker error and therefore cannot complete the Evaluation step or claim
-    /// cleanup was confirmed.
-    pub async fn create(&self) -> Result<ResourceRequest, TaskResourceError> {
-        let request = InternalCreateTaskResourceRequest {
-            task_run_id: self.task_run_id,
-            project_id: self.project_id,
-            course_id: self.course_id,
-            owner_id: self.owner_id,
-            request_key: self.request_key.clone(),
-            resources: self.resources.clone(),
-            duration_seconds: self.duration_seconds,
-        };
-        let result = timeout(
-            Self::CREATE_SETTLE_TIMEOUT,
-            self.client.create_task_resource(&request),
-        )
-        .await
-        .map_err(|_| TaskResourceError::CreateUncertain)?;
-        match result {
-            Ok(created) => Ok(created),
-            Err(ResourceClientError::Conflict) => {
-                let current = match self
-                    .client
-                    .get_task_resource_request(self.task_run_id)
-                    .await
-                {
-                    Ok(current) => current,
-                    // A conflict can mean that the original idempotent POST is still in
-                    // progress.  A missing read at this point is therefore uncertain, not a
-                    // proof that the reservation never existed.
-                    Err(ResourceClientError::RequestMissing) => {
-                        return Err(TaskResourceError::CreateUncertain);
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                validate_request(&current, &request)?;
-                Ok(current)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Waits for Resource approval/allocation and then claims the task reservation.
-    pub async fn claim_after_approval(
-        &self,
-        poll_interval: Duration,
-        timeout: Duration,
-        cancellation: &CancellationToken,
-    ) -> Result<contracts::http::TaskResourceStatus, TaskResourceError> {
-        if poll_interval.is_zero() || timeout.is_zero() {
-            return Err(TaskResourceError::RequestInvalid);
-        }
-        let deadline = Instant::now() + timeout;
-        loop {
-            if cancellation.is_cancelled() {
-                self.cancel_or_release_request(
-                    "evaluation step lease cancelled before resource claim",
-                )
-                .await?;
-                return Err(TaskResourceError::Cancelled);
-            }
-            let request = tokio::select! {
-                result = self.client.get_task_resource_request(self.task_run_id) => result?,
-                () = cancellation.cancelled() => {
-                    self.cancel_or_release_request("evaluation step lease cancelled before resource claim")
-                        .await?;
-                    return Err(TaskResourceError::Cancelled);
-                }
-            };
-            match request.state {
-                ResourceRequestState::Reviewing => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        self.cancel_or_release_request(
-                            "evaluation resource approval deadline exceeded",
-                        )
-                        .await?;
-                        return Err(TaskResourceError::ResourceApprovalTimeout);
-                    }
-                    tokio::select! {
-                        () = cancellation.cancelled() => {
-                            self.cancel_or_release_request("evaluation step lease cancelled before resource claim")
-                                .await?;
-                            return Err(TaskResourceError::Cancelled);
-                        }
-                        () = tokio::time::sleep(poll_interval.min(deadline - now)) => {}
-                    }
-                }
-                ResourceRequestState::Allocating | ResourceRequestState::Active => {
-                    let status = tokio::select! {
-                        result = self.client.claim_task_resource(self.task_run_id) => result?,
-                        () = cancellation.cancelled() => {
-                            self.cancel_or_release_request("evaluation step lease cancelled before resource claim")
-                                .await?;
-                            return Err(TaskResourceError::Cancelled);
-                        }
-                    };
-                    if cancellation.is_cancelled() {
-                        self.release(&status).await?;
-                        return Err(TaskResourceError::Cancelled);
-                    }
-                    return Ok(status);
-                }
-                ResourceRequestState::Expiring
-                | ResourceRequestState::Expired
-                | ResourceRequestState::Rejected
-                | ResourceRequestState::Cancelled => {
-                    return Err(TaskResourceError::ResourceTerminal);
-                }
-            }
-        }
-    }
-
-    /// Cancels a pending request or releases a claim observed during a cancellation race.
-    pub async fn cancel(&self, reason: &str) -> Result<(), TaskResourceError> {
-        self.cancel_or_release_request(reason).await
-    }
-
-    async fn cancel_or_release_request(&self, reason: &str) -> Result<(), TaskResourceError> {
-        let mut request = match self
-            .client
-            .get_task_resource_request(self.task_run_id)
-            .await
-        {
-            Ok(request) => request,
-            // This method is only called after the create operation has been settled or while
-            // reconciling the same durable attempt.  A missing read can still race an earlier
-            // POST, so it must stay non-terminal until a later worker retries the exact
-            // TaskRunId/idempotency key.
-            Err(ResourceClientError::RequestMissing) => {
-                return Err(TaskResourceError::CreateUncertain);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let idempotency_key = format!("{}-cancel", self.request_key);
-        for _ in 0..4 {
-            match request.state {
-                ResourceRequestState::Reviewing => {
-                    let mutation = ResourceRequestMutation {
-                        expected_revision: request.revision,
-                        reason: reason.to_owned(),
-                    };
-                    match self
-                        .client
-                        .cancel_task_resource(self.task_run_id, &mutation, &idempotency_key)
-                        .await
-                    {
-                        Ok(cancelled) => {
-                            if cancelled.state != ResourceRequestState::Cancelled {
-                                return Err(TaskResourceError::ResponseInvalid);
-                            }
-                            return Ok(());
-                        }
-                        Err(ResourceClientError::Conflict) => {
-                            request = self
-                                .client
-                                .get_task_resource_request(self.task_run_id)
-                                .await?;
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                ResourceRequestState::Allocating | ResourceRequestState::Active => {
-                    let status = self.client.claim_task_resource(self.task_run_id).await?;
-                    let released = self.release(&status).await?;
-                    if !released.cleanup_confirmed {
-                        return Err(TaskResourceError::ResponseInvalid);
-                    }
-                    return Ok(());
-                }
-                ResourceRequestState::Expiring
-                | ResourceRequestState::Expired
-                | ResourceRequestState::Rejected
-                | ResourceRequestState::Cancelled => return Ok(()),
-            }
-        }
-        Err(TaskResourceError::Client(ResourceClientError::Conflict))
-    }
-
-    /// Activates and hands off the exact claim after validating the namespace
-    /// selected by the scheduler for the real execution Job.
-    pub async fn acknowledge(
-        &self,
-        status: &contracts::http::TaskResourceStatus,
-        execution_namespace: &str,
-    ) -> Result<contracts::http::TaskResourceStatus, TaskResourceError> {
-        if status.task_run_id != self.task_run_id
-            || status.project_id != self.project_id
-            || status.owner_id != self.owner_id
-        {
-            return Err(TaskResourceError::IdentityMismatch);
-        }
-        if !valid_execution_namespace(execution_namespace) {
-            return Err(TaskResourceError::RequestInvalid);
-        }
-        if status
-            .execution_namespace
-            .as_deref()
-            .is_some_and(|known| known != execution_namespace)
-        {
-            return Err(TaskResourceError::IdentityMismatch);
-        }
-        // A worker can crash after Resource commits the handoff and before the
-        // Evaluation execution checkpoint is written.  Reconcile that durable
-        // state instead of attempting the one-way Allocating -> Active
-        // transition a second time.
-        if status.execution_namespace.as_deref() == Some(execution_namespace)
-            && status.request.state == ResourceRequestState::Active
-            && status.claim.state == CapacityClaimState::HandedOff
-            && status.lease.state == ResourceLeaseState::Active
-        {
-            return Ok(status.clone());
-        }
-        let request = AcknowledgeTaskResourceRequest {
-            expected_claim_revision: status.claim_revision,
-            expected_lease_revision: status.lease_revision,
-            execution_namespace: execution_namespace.to_owned(),
-        };
-        self.client
-            .acknowledge_task_resource(self.task_run_id, &request)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Loads the authoritative task resource state while resuming an attempt.
-    ///
-    /// A resumed attempt must inspect this state before deciding whether a
-    /// release is needed.  In particular, an earlier worker may have already
-    /// released the claim after its cleanup commit became durable.
-    pub async fn load_status(
-        &self,
-    ) -> Result<contracts::http::TaskResourceStatus, TaskResourceError> {
-        let status = self.client.get_task_resource(self.task_run_id).await?;
-        if status.project_id != self.project_id
-            || status.owner_id != self.owner_id
-            || !matches!(
-                status.request.target,
-                ResourceTarget::Task { task_run_id } if task_run_id == self.task_run_id
-            )
-        {
-            return Err(TaskResourceError::IdentityMismatch);
-        }
-        Ok(status)
-    }
-
-    /// Releases the Resource claim using the latest revision fence.
-    pub async fn release(
-        &self,
-        status: &contracts::http::TaskResourceStatus,
-    ) -> Result<contracts::http::TaskResourceStatus, TaskResourceError> {
-        if status.task_run_id != self.task_run_id
-            || status.project_id != self.project_id
-            || status.owner_id != self.owner_id
-        {
-            return Err(TaskResourceError::IdentityMismatch);
-        }
-        let request = ReleaseTaskResourceRequest {
-            expected_claim_revision: status.claim_revision,
-            expected_lease_revision: status.lease_revision,
-        };
-        self.client
-            .release_task_resource(self.task_run_id, &request)
-            .await
-            .map_err(Into::into)
-    }
-}
-
-fn valid_execution_namespace(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 63
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-}
-
-fn validate_request(
-    current: &ResourceRequest,
-    expected: &InternalCreateTaskResourceRequest,
-) -> Result<(), TaskResourceError> {
-    current
-        .validate()
-        .map_err(|_| TaskResourceError::ResponseInvalid)?;
-    if current.request_key != expected.request_key
-        || current.requester_id != expected.owner_id
-        || current.project_id != expected.project_id
-        || current.course_id != expected.course_id
-        || current.requested_resources != expected.resources
-        || current.requested_duration_seconds != expected.duration_seconds
-        || !matches!(
-            current.target,
-            ResourceTarget::Task { task_run_id } if task_run_id == expected.task_run_id
-        )
-    {
-        return Err(TaskResourceError::IdentityMismatch);
-    }
-    Ok(())
-}
+pub use task_execution::resource::{
+    ResourceClient, ResourceClientConfiguration, ResourceClientError, TaskResourceError,
+    TaskResourceLifecycle, required_scopes_for_diagnostics,
+};
 
 /// Context passed to one attempt runner after the durable lease is acquired.
 #[derive(Clone, Debug)]
@@ -831,28 +445,60 @@ pub enum ExecutionError {
     #[error(transparent)]
     Control(#[from] crate::EvaluationControlStoreError),
     #[error(transparent)]
-    TaskResource(#[from] TaskResourceError),
+    TaskResource(TaskResourceFailure),
 }
 
-/// Failures at a Resource task reservation boundary.
-#[derive(Debug, Error)]
-pub enum TaskResourceError {
-    #[error("LW_EVALUATION_TASK_RESOURCE_REQUEST_INVALID")]
-    RequestInvalid,
-    #[error("LW_EVALUATION_TASK_RESOURCE_RESPONSE_INVALID")]
-    ResponseInvalid,
-    #[error("LW_EVALUATION_TASK_RESOURCE_IDENTITY_MISMATCH")]
-    IdentityMismatch,
-    #[error("LW_EVALUATION_TASK_RESOURCE_TERMINAL")]
-    ResourceTerminal,
-    #[error("LW_EVALUATION_TASK_RESOURCE_APPROVAL_TIMEOUT")]
-    ResourceApprovalTimeout,
-    #[error("LW_EVALUATION_TASK_RESOURCE_CANCELLED")]
-    Cancelled,
-    #[error("LW_EVALUATION_TASK_RESOURCE_CREATE_UNCERTAIN")]
-    CreateUncertain,
-    #[error(transparent)]
-    Client(#[from] ResourceClientError),
+impl From<TaskResourceError> for ExecutionError {
+    fn from(error: TaskResourceError) -> Self {
+        Self::TaskResource(TaskResourceFailure(error))
+    }
+}
+
+/// Evaluation-stable diagnostic for a shared task resource failure.
+///
+/// The shared lifecycle reports neutral `LW_TASK_RESOURCE_*` codes; Evaluation keeps its
+/// published `LW_EVALUATION_*` diagnostics for the operations and runbook evidence that predate
+/// the extraction.
+#[derive(Debug)]
+pub struct TaskResourceFailure(pub TaskResourceError);
+
+impl std::fmt::Display for TaskResourceFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match &self.0 {
+            TaskResourceError::RequestInvalid => "LW_EVALUATION_TASK_RESOURCE_REQUEST_INVALID",
+            TaskResourceError::ResponseInvalid => "LW_EVALUATION_TASK_RESOURCE_RESPONSE_INVALID",
+            TaskResourceError::IdentityMismatch => "LW_EVALUATION_TASK_RESOURCE_IDENTITY_MISMATCH",
+            TaskResourceError::ResourceTerminal => "LW_EVALUATION_TASK_RESOURCE_TERMINAL",
+            TaskResourceError::ResourceApprovalTimeout => {
+                "LW_EVALUATION_TASK_RESOURCE_APPROVAL_TIMEOUT"
+            }
+            TaskResourceError::Cancelled => "LW_EVALUATION_TASK_RESOURCE_CANCELLED",
+            TaskResourceError::CreateUncertain => "LW_EVALUATION_TASK_RESOURCE_CREATE_UNCERTAIN",
+            TaskResourceError::Client(source) => match source {
+                ResourceClientError::Configuration => "LW_EVALUATION_RESOURCE_CONFIG_INVALID",
+                ResourceClientError::Token(_) => "LW_EVALUATION_RESOURCE_TOKEN_FAILED",
+                ResourceClientError::Transport => "LW_EVALUATION_RESOURCE_TRANSPORT_FAILED",
+                ResourceClientError::RequestInvalid => "LW_EVALUATION_RESOURCE_REQUEST_INVALID",
+                ResourceClientError::RequestTooLarge => "LW_EVALUATION_RESOURCE_REQUEST_TOO_LARGE",
+                ResourceClientError::ResponseTooLarge => {
+                    "LW_EVALUATION_RESOURCE_RESPONSE_TOO_LARGE"
+                }
+                ResourceClientError::ResponseInvalid => "LW_EVALUATION_RESOURCE_RESPONSE_INVALID",
+                ResourceClientError::RequestMissing => "LW_EVALUATION_RESOURCE_REQUEST_MISSING",
+                ResourceClientError::TaskResourceMissing => "LW_EVALUATION_RESOURCE_TASK_MISSING",
+                ResourceClientError::Denied => "LW_EVALUATION_RESOURCE_DENIED",
+                ResourceClientError::Conflict => "LW_EVALUATION_RESOURCE_CONFLICT",
+                ResourceClientError::Rejected => "LW_EVALUATION_RESOURCE_REJECTED",
+                ResourceClientError::Unavailable => "LW_EVALUATION_RESOURCE_UNAVAILABLE",
+            },
+        })
+    }
+}
+
+impl std::error::Error for TaskResourceFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
 }
 
 #[cfg(test)]

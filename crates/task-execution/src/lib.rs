@@ -16,6 +16,7 @@
 
 pub mod admission;
 pub mod kubernetes;
+pub mod resource;
 pub mod timing;
 
 pub use admission::{
