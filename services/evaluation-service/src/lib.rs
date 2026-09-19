@@ -23,6 +23,7 @@ pub mod oj;
 pub mod oj_executor;
 pub mod oj_job;
 pub mod oj_worker;
+pub mod orphan_reconcile;
 pub mod outbox;
 pub mod process;
 pub mod resource_client;
@@ -48,10 +49,10 @@ pub use command_store::{
     PgFreezeCommandStore, SubmissionFreezeCommand,
 };
 pub use control_plane::{
-    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
-    EvaluationExecutionCheckpoint, EvaluationExecutionKind, EvaluationExecutionResources,
-    EvaluationReleaseReservation, EvaluationRunReservation, EvaluationStepLease,
-    PendingResourceMeterDelivery, PgEvaluationControlStore,
+    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationAttemptState,
+    EvaluationControlStoreError, EvaluationExecutionCheckpoint, EvaluationExecutionKind,
+    EvaluationExecutionResources, EvaluationReleaseReservation, EvaluationRunReservation,
+    EvaluationStepLease, PendingResourceMeterDelivery, PgEvaluationControlStore,
 };
 pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
 pub use environment_client::{
@@ -78,6 +79,7 @@ pub use oj_worker::{
     OJ_HELPER_FAILURE_EXIT_CODE, OjWorkerError, run_oj_case_exec, run_oj_compile_exec,
     run_oj_worker,
 };
+pub use orphan_reconcile::{OrphanAttemptLookup, OrphanReconcileError, OrphanReconciler};
 pub use outbox::{EvaluationOutboxDispatcher, EvaluationOutboxError};
 pub use process::{EvaluationProcessError, run_evaluation_service};
 pub use resource_client::{ResourceClient, ResourceClientConfiguration, ResourceClientError};

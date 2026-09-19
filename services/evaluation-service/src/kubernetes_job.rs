@@ -275,8 +275,13 @@ impl KubernetesApiClient {
             }
         }
         let complete_existing_bundle = existing == bundle.objects.len();
+        if complete_existing_bundle {
+            // The exact owned bundle already exists. Re-applying would only
+            // churn resource versions; the deterministic identity is already
+            // proven, so a duplicate submit is a no-op.
+            return Ok(());
+        }
         if existing != 0
-            && !complete_existing_bundle
             && !self
                 .cleanup(
                     &bundle.identity.namespace,
@@ -489,6 +494,49 @@ impl KubernetesApiClient {
             diagnostic_code: diagnostic_code.to_owned(),
             observation,
         })
+    }
+
+    /// Lists one collection in the bound namespace with an exact label selector.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error when Kubernetes is unavailable or the response is malformed.
+    pub async fn list(
+        &self,
+        namespace: &str,
+        api_version: &str,
+        plural: &str,
+        label_selector: &str,
+    ) -> Result<Vec<Value>, KubernetesJobError> {
+        if namespace != self.configuration.runner_namespace
+            || !safe_segment(plural)
+            || label_selector.is_empty()
+            || label_selector.len() > 512
+            || label_selector.chars().any(char::is_control)
+        {
+            return Err(KubernetesJobError::BindingInvalid);
+        }
+        let response = self
+            .authorized(
+                self.client
+                    .get(self.collection_url(namespace, api_version, plural)?),
+            )?
+            .query(&[("labelSelector", label_selector)])
+            .send()
+            .await
+            .map_err(|_| KubernetesJobError::KubernetesUnavailable)?;
+        if !response.status().is_success() {
+            return Err(KubernetesJobError::KubernetesRejected);
+        }
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|_| KubernetesJobError::ObservationInvalid)?;
+        let items = value
+            .pointer("/items")
+            .and_then(Value::as_array)
+            .ok_or(KubernetesJobError::ObservationInvalid)?;
+        Ok(items.clone())
     }
 
     /// Deletes and verifies absence of only the attempt-owned objects.
@@ -1544,4 +1592,495 @@ pub fn read_bound_text(path: &Path) -> Result<String, KubernetesJobError> {
         return Err(KubernetesJobError::ConfigurationInvalid);
     }
     Ok(value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+
+    use reqwest::Client;
+    use serde_json::{Value, json};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        task::JoinHandle,
+    };
+    use uuid::Uuid;
+
+    use super::{
+        ExecutionObservation, ExecutionWorkloadState, KubernetesApiClient,
+        KubernetesApiConfiguration, KubernetesCleanupTarget, KubernetesJobBundle,
+        KubernetesJobError, KubernetesJobIdentity, KubernetesJobObservation, KubernetesObject,
+        KubernetesOwnership, cleanup_status,
+    };
+
+    const NAMESPACE: &str = "labweaver-evaluation";
+    const JOB_NAME: &str = "lw-oj-0123456789abcdef0123";
+
+    fn ownership(request_sha256: &str) -> KubernetesOwnership {
+        KubernetesOwnership {
+            run_id: Uuid::now_v7(),
+            step_run_id: Uuid::now_v7(),
+            attempt_id: Uuid::now_v7(),
+            request_sha256: request_sha256.to_owned(),
+        }
+    }
+
+    fn job_document(ownership: &KubernetesOwnership, name: &str) -> Value {
+        json!({
+            "apiVersion":"batch/v1",
+            "kind":"Job",
+            "metadata":{
+                "name":name,
+                "namespace":NAMESPACE,
+                "labels":{
+                    "labweaver.io/managed-by":"evaluation-service",
+                    "labweaver.io/run-id":ownership.run_id.to_string(),
+                    "labweaver.io/step-run-id":ownership.step_run_id.to_string(),
+                    "labweaver.io/attempt-id":ownership.attempt_id.to_string(),
+                },
+                "annotations":{
+                    "labweaver.io/request-sha256":ownership.request_sha256,
+                },
+            },
+            "spec":{},
+        })
+    }
+
+    fn identity(ownership: KubernetesOwnership) -> KubernetesJobIdentity {
+        KubernetesJobIdentity {
+            namespace: NAMESPACE.to_owned(),
+            job_name: JOB_NAME.to_owned(),
+            main_container: "program-runner",
+            default_deny_policy: "oj-runner-default-deny",
+            deadline_diagnostic_code: "LW_OJ_JOB_DEADLINE_EXCEEDED",
+            failed_diagnostic_code: "LW_OJ_JOB_FAILED",
+            oom_diagnostic_code: "LW_OJ_MEMORY_LIMIT",
+            stable_diagnostic_prefix: "LW_OJ_",
+            ownership,
+            trace_id: "trace".to_owned(),
+        }
+    }
+
+    fn bundle(ownership: &KubernetesOwnership) -> KubernetesJobBundle {
+        KubernetesJobBundle {
+            identity: identity(ownership.clone()),
+            objects: vec![KubernetesObject {
+                api_version: "batch/v1",
+                plural: "jobs",
+                name: JOB_NAME.to_owned(),
+                document: job_document(ownership, JOB_NAME),
+            }],
+            cleanup_plan: vec![KubernetesCleanupTarget {
+                namespace: NAMESPACE.to_owned(),
+                resource: "jobs".to_owned(),
+                name: JOB_NAME.to_owned(),
+                propagation_policy: "Foreground".to_owned(),
+            }],
+        }
+    }
+
+    struct FakeCluster {
+        api: KubernetesApiClient,
+        objects: Arc<Mutex<BTreeMap<String, Value>>>,
+        patches: Arc<AtomicUsize>,
+        retain_on_delete: Arc<AtomicBool>,
+        server: JoinHandle<()>,
+        _token: tempfile::NamedTempFile,
+    }
+
+    impl Drop for FakeCluster {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    fn split_path(target: &str) -> (&str, &str) {
+        match target.split_once('?') {
+            Some((path, query)) => (path, query),
+            None => (target, ""),
+        }
+    }
+
+    async fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {
+        let body = serde_json::to_vec(body).map_err(std::io::Error::other)?;
+        let header = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).await?;
+        stream.write_all(&body).await
+    }
+
+    async fn connection(
+        mut stream: TcpStream,
+        objects: Arc<Mutex<BTreeMap<String, Value>>>,
+        patches: Arc<AtomicUsize>,
+        retain_on_delete: Arc<AtomicBool>,
+    ) -> std::io::Result<()> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4 * 1024];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok(());
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            if request.len() > 64 * 1024 {
+                return respond(&mut stream, 413, &json!({})).await;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+            })
+            .flatten()
+            .unwrap_or(0);
+        let line_end = request[..header_end]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .unwrap_or(0);
+        let line = String::from_utf8_lossy(&request[..line_end]);
+        let mut fields = line.split_ascii_whitespace();
+        let method = fields.next().unwrap_or_default();
+        let target = fields.next().unwrap_or_default();
+        let (path, _query) = split_path(target);
+        let outcome = match method {
+            "PATCH" => {
+                let body = request.get(header_end..header_end + content_length);
+                let Some(body) = body else {
+                    return respond(&mut stream, 400, &json!({})).await;
+                };
+                let Ok(mut document) = serde_json::from_slice::<Value>(body) else {
+                    return respond(&mut stream, 400, &json!({})).await;
+                };
+                let stored = {
+                    let mut state = objects
+                        .lock()
+                        .map_err(|_| std::io::Error::other("fake state poisoned"))?;
+                    if let Some(current) = state.get(path) {
+                        document["metadata"]["uid"] = current["metadata"]["uid"].clone();
+                    } else {
+                        document["metadata"]["uid"] = json!(format!("uid-{}", state.len()));
+                    }
+                    document["metadata"]["resourceVersion"] = json!("rv-1");
+                    state.insert(path.to_owned(), document.clone());
+                    document
+                };
+                patches.fetch_add(1, Ordering::Relaxed);
+                (200, stored)
+            }
+            "GET" => {
+                let state = objects
+                    .lock()
+                    .map_err(|_| std::io::Error::other("fake state poisoned"))?;
+                if path.ends_with("/jobs") || path.ends_with("/pods") {
+                    let items = state
+                        .iter()
+                        .filter(|(key, _)| key.starts_with(path) && key.len() > path.len())
+                        .map(|(_, value)| value.clone())
+                        .collect::<Vec<_>>();
+                    (200, json!({"items": items}))
+                } else {
+                    match state.get(path) {
+                        Some(value) => (200, value.clone()),
+                        None => (404, json!({})),
+                    }
+                }
+            }
+            "DELETE" => {
+                if retain_on_delete.load(Ordering::Relaxed) {
+                    (200, json!({}))
+                } else {
+                    let body = request
+                        .get(header_end..header_end + content_length)
+                        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+                    let expected_uid = body
+                        .as_ref()
+                        .and_then(|body| body.pointer("/preconditions/uid"))
+                        .and_then(Value::as_str);
+                    let expected_version = body
+                        .as_ref()
+                        .and_then(|body| body.pointer("/preconditions/resourceVersion"))
+                        .and_then(Value::as_str);
+                    let mut state = objects
+                        .lock()
+                        .map_err(|_| std::io::Error::other("fake state poisoned"))?;
+                    match state.get(path) {
+                        None => (404, json!({})),
+                        Some(current) => {
+                            let matches = current.pointer("/metadata/uid").and_then(Value::as_str)
+                                == expected_uid
+                                && current
+                                    .pointer("/metadata/resourceVersion")
+                                    .and_then(Value::as_str)
+                                    == expected_version;
+                            if matches {
+                                state.remove(path);
+                                (200, json!({}))
+                            } else {
+                                (409, json!({}))
+                            }
+                        }
+                    }
+                }
+            }
+            _ => (405, json!({})),
+        };
+        respond(&mut stream, outcome.0, &outcome.1).await
+    }
+
+    async fn fake_cluster() -> Result<FakeCluster, Box<dyn std::error::Error>> {
+        let token = tempfile::NamedTempFile::new()?;
+        fs::write(token.path(), b"fake-token")?;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let mut initial = BTreeMap::new();
+        initial.insert(
+            format!(
+                "/apis/networking.k8s.io/v1/namespaces/{NAMESPACE}/networkpolicies/oj-runner-default-deny"
+            ),
+            json!({
+                "apiVersion":"networking.k8s.io/v1",
+                "kind":"NetworkPolicy",
+                "metadata":{
+                    "name":"oj-runner-default-deny",
+                    "namespace":NAMESPACE,
+                },
+                "spec":{
+                    "podSelector":{},
+                    "policyTypes":["Ingress","Egress"],
+                    "ingress":[],
+                    "egress":[],
+                },
+            }),
+        );
+        let objects = Arc::new(Mutex::new(initial));
+        let patches = Arc::new(AtomicUsize::new(0));
+        let retain_on_delete = Arc::new(AtomicBool::new(false));
+        let server_objects = Arc::clone(&objects);
+        let server_patches = Arc::clone(&patches);
+        let server_retain = Arc::clone(&retain_on_delete);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let objects = Arc::clone(&server_objects);
+                let patches = Arc::clone(&server_patches);
+                let retain = Arc::clone(&server_retain);
+                tokio::spawn(async move {
+                    let _ = connection(stream, objects, patches, retain).await;
+                });
+            }
+        });
+        let api = KubernetesApiClient::for_test(
+            KubernetesApiConfiguration {
+                kubernetes_api_server: reqwest::Url::parse(&format!("http://{address}/"))?,
+                kubernetes_bearer_token_file: token.path().to_owned(),
+                kubernetes_ca_file: PathBuf::from("unused-ca"),
+                runner_namespace: NAMESPACE.to_owned(),
+                request_timeout_milliseconds: 2_000,
+            },
+            Client::builder().no_proxy().build()?,
+            "labweaver-test",
+            "test",
+            "LW_TEST_",
+        );
+        Ok(FakeCluster {
+            api,
+            objects,
+            patches,
+            retain_on_delete,
+            server,
+            _token: token,
+        })
+    }
+
+    #[tokio::test]
+    async fn duplicate_submit_reuses_the_complete_bundle() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cluster = fake_cluster().await?;
+        let bundle = bundle(&ownership("request-sha"));
+        cluster.api.start(&bundle).await?;
+        assert_eq!(cluster.patches.load(Ordering::Relaxed), 1);
+        let listed = cluster
+            .api
+            .list(
+                NAMESPACE,
+                "batch/v1",
+                "jobs",
+                "labweaver.io/managed-by=evaluation-service",
+            )
+            .await?;
+        assert_eq!(listed.len(), 1, "applied Job must be listable");
+        cluster.api.start(&bundle).await?;
+        assert_eq!(
+            cluster.patches.load(Ordering::Relaxed),
+            1,
+            "a complete owned bundle must not be applied twice"
+        );
+        let job_path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        assert!(
+            cluster
+                .objects
+                .lock()
+                .map_err(|_| "fake state poisoned")?
+                .contains_key(&job_path),
+            "the single Job identity must remain"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_pending_until_objects_disappear()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let bundle = bundle(&ownership("request-sha"));
+        cluster.api.start(&bundle).await?;
+        cluster.retain_on_delete.store(true, Ordering::Relaxed);
+        let pending = cluster
+            .api
+            .cleanup(NAMESPACE, JOB_NAME, &bundle.objects, &bundle.cleanup_plan)
+            .await?;
+        assert!(matches!(
+            pending,
+            super::ExecutionCleanupStatus::Pending { .. }
+        ));
+        assert!(!pending.is_confirmed());
+        cluster.retain_on_delete.store(false, Ordering::Relaxed);
+        let confirmed = cluster
+            .api
+            .cleanup(NAMESPACE, JOB_NAME, &bundle.objects, &bundle.cleanup_plan)
+            .await?;
+        assert!(confirmed.is_confirmed());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unavailable_api_is_a_stable_error() -> Result<(), Box<dyn std::error::Error>> {
+        let token = tempfile::NamedTempFile::new()?;
+        fs::write(token.path(), b"fake-token")?;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let api = KubernetesApiClient::for_test(
+            KubernetesApiConfiguration {
+                kubernetes_api_server: reqwest::Url::parse(&format!("http://{address}/"))?,
+                kubernetes_bearer_token_file: token.path().to_owned(),
+                kubernetes_ca_file: PathBuf::from("unused-ca"),
+                runner_namespace: NAMESPACE.to_owned(),
+                request_timeout_milliseconds: 500,
+            },
+            Client::builder().no_proxy().build()?,
+            "labweaver-test",
+            "test",
+            "LW_TEST_",
+        );
+        let bundle = bundle(&ownership("request-sha"));
+        assert!(matches!(
+            api.start(&bundle).await,
+            Err(KubernetesJobError::KubernetesUnavailable)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_maps_missing_and_completed_states() -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let ownership = ownership("request-sha");
+        let bundle = bundle(&ownership);
+        let missing = cluster.api.observe(&bundle.identity, None).await?;
+        assert_eq!(missing, KubernetesJobObservation::Missing);
+
+        cluster.api.start(&bundle).await?;
+        let running = cluster.api.observe(&bundle.identity, None).await?;
+        assert_eq!(running, KubernetesJobObservation::Running);
+
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            let job_path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+            let job = state.get_mut(&job_path).ok_or("applied Job must exist")?;
+            job["status"]["succeeded"] = json!(1);
+            let pod_path = format!("/api/v1/namespaces/{NAMESPACE}/pods/pod-1");
+            state.insert(
+                pod_path,
+                json!({
+                    "apiVersion":"v1",
+                    "kind":"Pod",
+                    "metadata":{
+                        "name":"pod-1",
+                        "namespace":NAMESPACE,
+                        "labels":{
+                            "labweaver.io/managed-by":"evaluation-service",
+                            "labweaver.io/run-id":ownership.run_id.to_string(),
+                            "labweaver.io/step-run-id":ownership.step_run_id.to_string(),
+                            "labweaver.io/attempt-id":ownership.attempt_id.to_string(),
+                        },
+                        "annotations":{
+                            "labweaver.io/request-sha256":"request-sha",
+                        },
+                    },
+                    "status":{
+                        "containerStatuses":[{
+                            "name":"program-runner",
+                            "state":{"terminated":{
+                                "exitCode":0,
+                                "reason":"Completed",
+                                "message":"{\"schemaVersion\":\"evaluation.labweaver.io/oj-evidence/v1\"}",
+                                "startedAt":"2026-09-19T07:00:01Z",
+                                "finishedAt":"2026-09-19T07:00:02Z",
+                            }},
+                        }],
+                    },
+                }),
+            );
+        }
+        let completed = cluster.api.observe(&bundle.identity, None).await?;
+        let KubernetesJobObservation::Completed {
+            message,
+            observation,
+        } = completed
+        else {
+            return Err("expected a completed observation".into());
+        };
+        assert!(message.contains("oj-evidence"));
+        assert_eq!(observation.state, ExecutionWorkloadState::Succeeded);
+        assert_eq!(observation.exit_code, Some(0));
+        assert_eq!(observation.pod_name.as_deref(), Some("pod-1"));
+        observation
+            .validate()
+            .map_err(|_| "observation must validate")?;
+        let _ = ExecutionObservation::clone(&observation);
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_status_helper_is_total() {
+        assert!(cleanup_status(Vec::new()).is_confirmed());
+        assert!(
+            !cleanup_status(vec![contracts::execution::ExecutionObjectRef {
+                api_version: "batch/v1".to_owned(),
+                resource: "jobs".to_owned(),
+                name: JOB_NAME.to_owned(),
+                uid: "uid".to_owned(),
+            }])
+            .is_confirmed()
+        );
+    }
 }

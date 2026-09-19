@@ -22,15 +22,16 @@ use auth::{
 };
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentClient, AgentClientConfiguration, AuthoringAdmissionClient,
     AuthoringAdmissionClientConfiguration, EnvironmentExecutionBindingClient, EvaluationApiState,
     EvaluationExecutionConfiguration, EvaluationOutboxDispatcher, EvaluationOutboxError,
     EvaluationWorker, FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError,
-    KubernetesEvaluationRunner, PgEvaluationControlStore, PgFreezeCommandStore, PgFreezeStore,
-    ResourceClient, ResourceClientConfiguration, SubmissionConsumerError, SubmissionFrozenConsumer,
-    evaluation_api_router, with_service_auth,
+    KubernetesEvaluationRunner, OrphanReconciler, PgEvaluationControlStore, PgFreezeCommandStore,
+    PgFreezeStore, ResourceClient, ResourceClientConfiguration, SubmissionConsumerError,
+    SubmissionFrozenConsumer, evaluation_api_router, with_service_auth,
 };
 
 const CONFIG_PATH: &str = "LABWEAVER_EVALUATION_CONFIG_FILE";
@@ -157,6 +158,14 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     let command_store = PgFreezeCommandStore::new(pool.clone());
     let freeze_store = PgFreezeStore::new(pool.clone());
     let control_store = PgEvaluationControlStore::new(pool.clone());
+    let orphan_reconciler = OrphanReconciler::new(
+        &configuration.execution,
+        configuration
+            .execution
+            .orphan_reconcile_poll_interval_seconds,
+        Arc::new(control_store.clone()),
+    )
+    .map_err(|_| EvaluationProcessError::ConfigurationInvalid)?;
     let mut submission_consumer = SubmissionFrozenConsumer::bind(
         nats.clone(),
         &configuration.nats.submission_stream_name,
@@ -228,6 +237,9 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         }
         result = evaluation_worker.run() => {
             result.map_err(EvaluationProcessError::Execution)?;
+        }
+        () = orphan_reconciler.run(CancellationToken::new()) => {
+            tracing::info!(event = "evaluation.orphan.stopped");
         }
         result = resource_meter_loop(meter_control, meter_resource, meter_poll_interval) => {
             result?;

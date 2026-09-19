@@ -177,6 +177,7 @@ pub struct EvaluationExecutionConfiguration {
     pub resource_approval_timeout_seconds: u64,
     pub execution_observe_poll_interval_milliseconds: u64,
     pub cleanup_timeout_seconds: u64,
+    pub orphan_reconcile_poll_interval_seconds: u64,
     pub environment: crate::environment_client::EnvironmentExecutionBindingClientConfiguration,
     pub ansible_probe: AnsibleProbeTargetConfiguration,
     pub oj: OjExecutorConfiguration,
@@ -198,6 +199,7 @@ impl EvaluationExecutionConfiguration {
             || !(1..=3_600).contains(&self.resource_approval_timeout_seconds)
             || !(100..=30_000).contains(&self.execution_observe_poll_interval_milliseconds)
             || !(1..=3_600).contains(&self.cleanup_timeout_seconds)
+            || !(1..=3_600).contains(&self.orphan_reconcile_poll_interval_seconds)
             || self.oj.runner_namespace != self.runner_namespace
             || self.ansible_probe_executor.runner_namespace != self.runner_namespace
         {
@@ -3780,6 +3782,7 @@ mod probe_recovery_tests {
             resource_approval_timeout_seconds: 10,
             execution_observe_poll_interval_milliseconds: 100,
             cleanup_timeout_seconds: 5,
+            orphan_reconcile_poll_interval_seconds: 60,
             environment: EnvironmentExecutionBindingClientConfiguration {
                 base_uri: base.clone(),
                 ca_file: ca_file.clone(),

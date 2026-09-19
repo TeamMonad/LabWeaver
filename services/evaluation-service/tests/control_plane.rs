@@ -28,9 +28,10 @@ use contracts::{
     submission::{FrozenEnvironmentIdentity, FrozenFile, FrozenSubmission},
 };
 use evaluation_service::{
-    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
-    EvaluationExecutionKind, EvaluationExecutionResources, EvaluationReleaseReservation,
-    EvaluationRunReservation, EvaluationStepLease, PgEvaluationControlStore,
+    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationAttemptState,
+    EvaluationControlStoreError, EvaluationExecutionKind, EvaluationExecutionResources,
+    EvaluationReleaseReservation, EvaluationRunReservation, EvaluationStepLease,
+    PgEvaluationControlStore,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::Row;
@@ -1071,6 +1072,70 @@ async fn program_checkpoint_keeps_strict_terminal_timing() -> Result<(), Box<dyn
             EvaluationControlStoreError::ContractInvalid
         ));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn orphan_attempt_lookup_reads_back_the_durable_checkpoint()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let run = fixture.create_seeded_run("trace-orphan-lookup").await?;
+    let lease = fixture
+        .store
+        .claim_next_step("worker-orphan", Duration::from_secs(30))
+        .await?
+        .expect("orphan lookup step must be claimable");
+    let resources = EvaluationExecutionResources {
+        schema_version: EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
+        run_id: run.id,
+        step_run_id: lease.step_run_id,
+        task_run_id: lease.task_run_id,
+        namespace: "evaluation".to_owned(),
+        kind: EvaluationExecutionKind::Program,
+        admission: Some(contracts::execution::TaskExecutionBinding {
+            task_run_id: lease.task_run_id,
+            execution_generation: u64::from(lease.attempt),
+            resource_request_id: contracts::ResourceRequestId::new(),
+            capacity_claim_id: contracts::CapacityClaimId::new(),
+            lease_id: contracts::LeaseId::new(),
+            claim_revision: contracts::Revision::new(1)?,
+            lease_revision: contracts::Revision::new(1)?,
+            project_id: contracts::ProjectId::new(),
+            provider_binding: "kubernetes-job".to_owned(),
+            namespace: "evaluation".to_owned(),
+            workload_name: format!(
+                "lw-oj-{}",
+                &lease.task_run_id.as_uuid().simple().to_string()[..20]
+            ),
+            trace_id: "trace-orphan-lookup".to_owned(),
+        }),
+        request: serde_json::json!({"taskRunId": lease.task_run_id}),
+        objects: Vec::new(),
+    };
+    fixture
+        .store
+        .persist_execution_intent(&lease, &resources)
+        .await?;
+
+    let orphan = fixture
+        .store
+        .load_orphan_attempt(lease.step_run_id, lease.task_run_id)
+        .await?
+        .expect("durable attempt must be visible to orphan reconciliation");
+    assert_eq!(orphan.state, EvaluationAttemptState::Running);
+    assert!(!orphan.cleanup_verified);
+    let checkpoint = orphan
+        .execution_resources
+        .expect("persisted checkpoint must round-trip");
+    assert_eq!(checkpoint.kind, EvaluationExecutionKind::Program);
+    assert_eq!(checkpoint.task_run_id, lease.task_run_id);
+    assert!(checkpoint.admission.is_some());
+
+    let unknown = fixture
+        .store
+        .load_orphan_attempt(lease.step_run_id, contracts::TaskRunId::new())
+        .await?;
+    assert!(unknown.is_none());
     Ok(())
 }
 
