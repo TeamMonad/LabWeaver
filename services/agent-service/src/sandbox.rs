@@ -112,6 +112,8 @@ pub struct SandboxAttemptSpec {
     pub trace_id: String,
     /// Exact Claude Code argv executed inside the sandbox.
     pub command: Vec<String>,
+    /// Pinned Claude Code version the sandbox CLI must report before executing.
+    pub expected_claude_version: String,
     /// Environment entries visible to the Claude Code process.
     pub command_environment: BTreeMap<String, String>,
     /// Presigned material download URL.
@@ -155,6 +157,12 @@ pub fn build_sandbox_bundle(
 ) -> Result<SandboxBundle, SandboxBundleError> {
     configuration.validate()?;
     if spec.command.is_empty()
+        || spec.expected_claude_version.is_empty()
+        || spec.expected_claude_version.len() > 64
+        || spec
+            .expected_claude_version
+            .chars()
+            .any(|character| character.is_control() || character == '"' || character == '\'')
         || spec.command.len() > 32
         || spec.command.iter().any(|value| value.len() > 4_096)
         || spec.trace_id.trim().is_empty()
@@ -205,6 +213,10 @@ pub fn build_sandbox_bundle(
     secret_data.insert(
         "RESULT_MAX_BYTES".to_owned(),
         spec.result_max_bytes.to_string(),
+    );
+    secret_data.insert(
+        "CLAUDE_CODE_VERSION".to_owned(),
+        spec.expected_claude_version.clone(),
     );
     for (name, value) in &spec.command_environment {
         secret_data.insert(name.clone(), value.clone());
@@ -397,6 +409,13 @@ fn job_document(
             "printf '%s' \"$OBJECT_STORE_CA_BASE64\" | base64 -d > {ATTEMPT_DIR}/ca.pem"
         );
     }
+    script.push_str(
+        "version=$(claude --version)\n\
+         case \"$version\" in \"$CLAUDE_CODE_VERSION\"*) ;; *)\n\
+         \x20 printf '{\"failure\":\"LW_AGENT_SANDBOX_VERSION_MISMATCH\"}' > /dev/termination-log\n\
+         \x20 exit 75\n\
+         ;; esac\n",
+    );
     script.push_str("set +e\n");
     let _ = writeln!(
         script,
@@ -425,7 +444,7 @@ fn job_document(
         "sum=$(sha256sum {ATTEMPT_DIR}/result.json | cut -d' ' -f1)"
     );
     script.push_str(
-        "printf '{\"resultSizeBytes\":%s,\"resultSha256\":\"%s\",\"exitCode\":%s}' \"$size\" \"$sum\" \"$code\" > /dev/termination-log\nexit \"$code\"\n",
+        "printf '{\"resultSizeBytes\":%s,\"resultSha256\":\"%s\",\"exitCode\":%s,\"claudeVersion\":\"%s\"}' \"$size\" \"$sum\" \"$code\" \"$CLAUDE_CODE_VERSION\" > /dev/termination-log\nexit \"$code\"\n",
     );
 
     let container_security = json!({
@@ -670,6 +689,7 @@ mod tests {
             },
             trace_id: "trace-1".to_owned(),
             command: vec!["claude".to_owned(), "--bare".to_owned()],
+            expected_claude_version: "2.1.215".to_owned(),
             command_environment: BTreeMap::from([
                 (
                     "ANTHROPIC_BASE_URL".to_owned(),
@@ -757,6 +777,8 @@ mod tests {
         assert!(script.contains("--upload-file /run/labweaver/result.json"));
         assert!(script.contains("RESULT_HEADER_0"));
         assert!(script.contains("resultSha256"));
+        assert!(script.contains("claude --version"));
+        assert!(script.contains("claudeVersion"));
         Ok(())
     }
 
