@@ -35,6 +35,7 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::cmp::{max, min};
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use crate::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
@@ -131,7 +132,7 @@ pub struct PgResourceStore {
 struct UsageAuthority<'a> {
     caller: &'a auth::ServiceIdentity,
     environment_service_client_id: &'a str,
-    evaluation_service_client_id: &'a str,
+    task_service_client_ids: &'a BTreeSet<String>,
 }
 
 impl PgResourceStore {
@@ -428,12 +429,12 @@ impl PgResourceStore {
         observed_at: UtcTimestamp,
         caller: &auth::ServiceIdentity,
         environment_service_client_id: &str,
-        evaluation_service_client_id: &str,
+        task_service_client_ids: &BTreeSet<String>,
     ) -> Result<ResourceUsageRecord, ResourceStoreError> {
         let authority = UsageAuthority {
             caller,
             environment_service_client_id,
-            evaluation_service_client_id,
+            task_service_client_ids,
         };
         self.record_usage_with_authority(input, observed_at, Some(&authority))
             .await
@@ -486,12 +487,16 @@ impl PgResourceStore {
             return Err(ResourceStoreError::ScopeConflict);
         }
         if let Some(authority) = authority {
-            let expected_client_id = match target_kind.as_str() {
-                "environment" => authority.environment_service_client_id,
-                "task" => authority.evaluation_service_client_id,
+            let authorized = match target_kind.as_str() {
+                "environment" => {
+                    authority.caller.client_id == authority.environment_service_client_id
+                }
+                "task" => authority
+                    .task_service_client_ids
+                    .contains(&authority.caller.client_id),
                 _ => return Err(ResourceStoreError::ScopeConflict),
             };
-            if authority.caller.client_id != expected_client_id {
+            if !authorized {
                 tracing::warn!(
                     event = "resource.usage.authority_mismatch",
                     request_id = %usage.request_id,

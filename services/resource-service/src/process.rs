@@ -40,7 +40,7 @@ const SERVICE_SCOPES: &str = "LABWEAVER_SERVICE_SCOPES";
 const SERVICE_TOKEN_REFRESH_SKEW_SECONDS: &str = "LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS";
 const ACCESS_SERVICE_CLIENT_ID: &str = "LABWEAVER_ACCESS_SERVICE_CLIENT_ID";
 const ENVIRONMENT_SERVICE_CLIENT_ID: &str = "LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID";
-const EVALUATION_SERVICE_CLIENT_ID: &str = "LABWEAVER_EVALUATION_SERVICE_CLIENT_ID";
+const TASK_SERVICE_CLIENT_IDS: &str = "LABWEAVER_TASK_SERVICE_CLIENT_IDS";
 const ENVIRONMENT_SERVICE_AUDIENCE: &str = "labweaver-environment";
 const OUTBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const OUTBOX_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -52,7 +52,7 @@ pub struct ResourceProcessRuntime {
     service_verifier: Arc<ServiceTokenVerifier>,
     access_service_client_id: String,
     environment_service_client_id: String,
-    evaluation_service_client_id: String,
+    task_service_client_ids: BTreeSet<String>,
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
@@ -95,7 +95,7 @@ impl ResourceProcessRuntime {
         let environment_token_client = discover_environment_token_client().await?;
         let access_service_client_id = required(ACCESS_SERVICE_CLIENT_ID)?;
         let environment_service_client_id = required(ENVIRONMENT_SERVICE_CLIENT_ID)?;
-        let evaluation_service_client_id = required(EVALUATION_SERVICE_CLIENT_ID)?;
+        let task_service_client_ids = required_set(TASK_SERVICE_CLIENT_IDS)?;
         let store = PgResourceStore::new(pool);
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;
@@ -109,7 +109,7 @@ impl ResourceProcessRuntime {
             service_verifier,
             access_service_client_id,
             environment_service_client_id,
-            evaluation_service_client_id,
+            task_service_client_ids,
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
@@ -129,7 +129,7 @@ impl ResourceProcessRuntime {
             .with_service_verifier(Arc::clone(&self.service_verifier))
             .with_access_service_client_id(self.access_service_client_id.clone())
             .with_environment_service_client_id(self.environment_service_client_id.clone())
-            .with_evaluation_service_client_id(self.evaluation_service_client_id.clone())
+            .with_task_service_client_ids(self.task_service_client_ids.clone())
     }
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
@@ -143,7 +143,7 @@ impl ResourceProcessRuntime {
             service_verifier: _service_verifier,
             access_service_client_id: _access_service_client_id,
             environment_service_client_id: _environment_service_client_id,
-            evaluation_service_client_id: _evaluation_service_client_id,
+            task_service_client_ids: _task_service_client_ids,
             _shutdown_sender,
             shutdown,
         } = self;

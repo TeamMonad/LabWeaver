@@ -1903,11 +1903,12 @@ const RESOURCE_AUTH_AUDIENCE: &str = "labweaver-resource";
 const RESOURCE_ACCESS_CLIENT_ID: &str = "labweaver-access-test";
 const RESOURCE_ENVIRONMENT_CLIENT_ID: &str = "labweaver-environment-test";
 const RESOURCE_EVALUATION_CLIENT_ID: &str = "labweaver-evaluation-test";
+const RESOURCE_AGENT_CLIENT_ID: &str = "labweaver-agent-test";
 const RESOURCE_TASK_PERMISSION: &str = "resource.task.create";
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn resource_http_auth_binds_task_routes_to_evaluation_client()
+async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_postgres, pool) = migrated_pool().await?;
     let authority =
@@ -1920,7 +1921,14 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
         .with_service_verifier(Arc::new(verifier))
         .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.to_owned())
         .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.to_owned())
-        .with_evaluation_service_client_id(RESOURCE_EVALUATION_CLIENT_ID.to_owned());
+        .with_task_service_client_ids(
+            [
+                RESOURCE_EVALUATION_CLIENT_ID.to_owned(),
+                RESOURCE_AGENT_CLIENT_ID.to_owned(),
+            ]
+            .into_iter()
+            .collect(),
+        );
     let router = resource_service::api::with_delegation(
         resource_service::api::resource_api_router(state),
         Arc::new(delegation_key.to_vec()),
@@ -1950,7 +1958,7 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
     assert_eq!(environment_response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         to_bytes(environment_response.into_body(), 1024 * 1024).await?,
-        "LW_AUTH_EVALUATION_CLIENT_ID_MISMATCH"
+        "LW_AUTH_TASK_CLIENT_ID_MISMATCH"
     );
 
     let missing_permission_token = signed_resource_token(
@@ -2005,6 +2013,33 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
     .await?;
     assert_eq!(persisted_count, 1);
 
+    let agent_task_run_id = TaskRunId::new();
+    let agent_token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_AGENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &[RESOURCE_TASK_PERMISSION],
+    )?;
+    let agent_response = router
+        .clone()
+        .oneshot(task_request(
+            &agent_token,
+            &task_input(agent_task_run_id, owner_id, project_id, "agent-authorized"),
+            "resource-auth-agent",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(agent_response.status(), StatusCode::CREATED);
+    let agent_created: ResourceRequest =
+        serde_json::from_slice(&to_bytes(agent_response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(
+        agent_created.target,
+        ResourceTarget::Task {
+            task_run_id: agent_task_run_id
+        }
+    );
+
     let now = time::OffsetDateTime::now_utc();
     let session = auth::BffSession {
         session_id: Uuid::now_v7(),
@@ -2030,8 +2065,15 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
     assert_eq!(public_response.status(), StatusCode::OK);
     let public_requests: Vec<ResourceRequest> =
         serde_json::from_slice(&to_bytes(public_response.into_body(), 1024 * 1024).await?)?;
-    assert_eq!(public_requests.len(), 1);
-    assert_eq!(public_requests[0].request_key, "evaluation-authorized");
+    assert_eq!(public_requests.len(), 2);
+    let keys = public_requests
+        .iter()
+        .map(|request| request.request_key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from(["agent-authorized", "evaluation-authorized"])
+    );
     Ok(())
 }
 
@@ -2073,6 +2115,7 @@ async fn build_resource_verifier(
             RESOURCE_ACCESS_CLIENT_ID.to_owned(),
             RESOURCE_ENVIRONMENT_CLIENT_ID.to_owned(),
             RESOURCE_EVALUATION_CLIENT_ID.to_owned(),
+            RESOURCE_AGENT_CLIENT_ID.to_owned(),
         ]),
         BTreeSet::new(),
         BTreeSet::from(["ES256".to_owned()]),

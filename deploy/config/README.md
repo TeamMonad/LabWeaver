@@ -56,8 +56,8 @@ carry a short-lived signed user delegation for user scope. The Access and Resour
 must contain the same generated `resource-delegation-key` under their respective Secret objects;
 the key is a root-owned `0600` input and is never written to this repository, a report or a log.
 Actor and role HTTP headers are not an identity mechanism. Internal Resource routes require a
-service JWT with the route permission; Task resource routes additionally require the configured
-Evaluation client ID.
+service JWT with the route permission; Task resource routes additionally require a configured task
+owner client ID (Evaluation and Agent authoring share the one-shot Task boundary).
 
 The deployment binds the pinned Claude Code CLI to the reviewed Anthropic-compatible endpoint using
 only the three generic provider fields. Put the operator-provided auth token value in
