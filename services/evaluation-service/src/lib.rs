@@ -49,10 +49,10 @@ pub use command_store::{
     PgFreezeCommandStore, SubmissionFreezeCommand,
 };
 pub use control_plane::{
-    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
-    EvaluationExecutionCheckpoint, EvaluationExecutionKind, EvaluationExecutionResources,
-    EvaluationReleaseReservation, EvaluationRunReservation, EvaluationStepLease,
-    PendingResourceMeterDelivery, PgEvaluationControlStore,
+    EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationAttemptState,
+    EvaluationControlStoreError, EvaluationExecutionCheckpoint, EvaluationExecutionKind,
+    EvaluationExecutionResources, EvaluationReleaseReservation, EvaluationRunReservation,
+    EvaluationStepLease, PendingResourceMeterDelivery, PgEvaluationControlStore,
 };
 pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
 pub use environment_client::{
