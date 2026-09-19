@@ -2264,6 +2264,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sqlx",
+ "task-execution",
  "telemetry",
  "tempfile",
  "testcontainers",
@@ -6571,6 +6572,21 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "task-execution"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

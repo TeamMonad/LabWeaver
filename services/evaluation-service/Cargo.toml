@@ -31,6 +31,7 @@ serde_jcs.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sqlx.workspace = true
+task-execution = { path = "../../crates/task-execution" }
 telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true
 time.workspace = true
@@ -46,6 +47,7 @@ landlock.workspace = true
 seccompiler.workspace = true
 
 [dev-dependencies]
+task-execution = { path = "../../crates/task-execution", features = ["test-support"] }
 tempfile.workspace = true
 testcontainers = "=0.25.0"
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }

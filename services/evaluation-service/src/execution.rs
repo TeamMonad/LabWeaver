@@ -13,7 +13,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use contracts::{
-    ActorId, CourseId, ProjectId, TaskRunId, UtcTimestamp,
+    ActorId, CourseId, ProjectId, TaskRunId,
     evaluation::{
         AdvisoryOutputMode, AdvisoryRunnerSpec, ApprovedProgramProfile, DeterministicRunnerSpec,
         EvaluationRelease, EvaluationRun, EvaluationStep, EvaluationStepCompletion,
@@ -604,40 +604,7 @@ pub struct EvaluationAttemptContext {
     pub lease_lost: CancellationToken,
 }
 
-/// Actual Kubernetes main-container timing observed from Pod status.
-///
-/// Kubernetes may omit either boundary while a Job is being deleted or when the
-/// kubelet did not publish a complete status.  Callers must preserve that
-/// uncertainty as an unknown usage measurement instead of inventing an interval.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExecutionTiming {
-    pub started_at: Option<UtcTimestamp>,
-    pub terminated_at: Option<UtcTimestamp>,
-}
-
-impl ExecutionTiming {
-    #[must_use]
-    pub const fn unknown() -> Self {
-        Self {
-            started_at: None,
-            terminated_at: None,
-        }
-    }
-
-    pub fn validate(self) -> Result<(), ExecutionError> {
-        if self.started_at.is_some() != self.terminated_at.is_some()
-            || self
-                .started_at
-                .zip(self.terminated_at)
-                .is_some_and(|(started, terminated)| terminated <= started)
-        {
-            return Err(ExecutionError::Backend(
-                "execution_timing_invalid".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
+pub use task_execution::timing::ExecutionTiming;
 
 /// Runner boundary for Kubernetes Jobs, local deterministic checks, or another approved backend.
 #[async_trait]

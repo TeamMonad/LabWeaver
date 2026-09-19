@@ -114,19 +114,19 @@ impl StartedExecution {
     }
 }
 
-impl ExecutionTiming {
-    fn boundaries(
-        self,
-    ) -> Result<
-        (
-            Option<contracts::UtcTimestamp>,
-            Option<contracts::UtcTimestamp>,
-        ),
-        ExecutionError,
-    > {
-        self.validate()?;
-        Ok((self.started_at, self.terminated_at))
-    }
+fn timing_boundaries(
+    timing: ExecutionTiming,
+) -> Result<
+    (
+        Option<contracts::UtcTimestamp>,
+        Option<contracts::UtcTimestamp>,
+    ),
+    ExecutionError,
+> {
+    timing
+        .validate()
+        .map_err(|_| ExecutionError::Backend("execution_timing_invalid".to_owned()))?;
+    Ok((timing.started_at, timing.terminated_at))
 }
 
 /// Resource limits for a read-only Ansible probe.
@@ -498,7 +498,7 @@ impl KubernetesEvaluationRunner {
             .authority_now()
             .await
             .map_err(ExecutionError::Control)?;
-        let (execution_started_at, execution_terminated_at) = observed.timing.boundaries()?;
+        let (execution_started_at, execution_terminated_at) = timing_boundaries(observed.timing)?;
         let deliveries = Self::usage_deliveries(
             &resource_status,
             observed.timing,
@@ -641,7 +641,7 @@ impl KubernetesEvaluationRunner {
             .authority_now()
             .await
             .map_err(ExecutionError::Control)?;
-        let (observed_started_at, observed_terminated_at) = observed.timing.boundaries()?;
+        let (observed_started_at, observed_terminated_at) = timing_boundaries(observed.timing)?;
         let execution_started_at = checkpoint.execution_started_at.or(observed_started_at);
         let execution_terminated_at = checkpoint
             .execution_terminated_at
@@ -734,7 +734,7 @@ impl KubernetesEvaluationRunner {
                 ));
             }
         };
-        let (execution_started_at, execution_terminated_at) = timing.boundaries()?;
+        let (execution_started_at, execution_terminated_at) = timing_boundaries(timing)?;
         let deliveries = Self::usage_deliveries(
             &status,
             timing,
@@ -2143,8 +2143,7 @@ impl KubernetesEvaluationRunner {
         timing: ExecutionTiming,
         fallback_until: contracts::UtcTimestamp,
     ) -> Result<Vec<RecordResourceUsageRequest>, ExecutionError> {
-        timing.validate()?;
-        let (measured_from, measured_until, measurement) = match timing.boundaries()? {
+        let (measured_from, measured_until, measurement) = match timing_boundaries(timing)? {
             (Some(started), Some(terminated)) => {
                 let milliseconds = usage_milliseconds(started, terminated)?;
                 let resources = &status.claim.workload_resources;
