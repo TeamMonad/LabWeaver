@@ -60,6 +60,8 @@ domains:
         file: agent/0009_work_execution_intent.sql
       - id: 10
         file: agent/0010_llm_review_runs.sql
+      - id: 11
+        file: agent/0011_authoring_sandbox.sql
   - name: evaluation
     migrations:
       - id: 1

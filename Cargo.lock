@@ -146,6 +146,7 @@ dependencies = [
  "serde_yaml",
  "sqlx",
  "tar",
+ "task-execution",
  "telemetry",
  "tempfile",
  "testcontainers",

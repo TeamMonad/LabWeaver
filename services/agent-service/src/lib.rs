@@ -17,4 +17,5 @@ pub mod generated_artifacts;
 pub mod llm_review;
 pub mod messaging;
 pub mod run_store;
+pub mod sandbox;
 pub mod work_execution;
