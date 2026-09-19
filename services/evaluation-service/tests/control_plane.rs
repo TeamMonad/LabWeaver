@@ -852,6 +852,7 @@ async fn llm_review_checkpoint_accepts_equal_or_prestart_terminal_time_and_rejec
         task_run_id: lease.task_run_id,
         namespace: "evaluation".to_owned(),
         kind: EvaluationExecutionKind::LlmReview,
+        admission: None,
         request: serde_json::json!({"taskRunId": lease.task_run_id}),
         objects: Vec::new(),
     };
@@ -908,6 +909,7 @@ async fn llm_review_checkpoint_accepts_equal_or_prestart_terminal_time_and_rejec
         task_run_id: second_lease.task_run_id,
         namespace: "evaluation".to_owned(),
         kind: EvaluationExecutionKind::LlmReview,
+        admission: None,
         request: serde_json::json!({"taskRunId": second_lease.task_run_id}),
         objects: Vec::new(),
     };
@@ -1023,6 +1025,23 @@ async fn program_checkpoint_keeps_strict_terminal_timing() -> Result<(), Box<dyn
         task_run_id: lease.task_run_id,
         namespace: "evaluation".to_owned(),
         kind: EvaluationExecutionKind::Program,
+        admission: Some(contracts::execution::TaskExecutionBinding {
+            task_run_id: lease.task_run_id,
+            execution_generation: u64::from(lease.attempt),
+            resource_request_id: contracts::ResourceRequestId::new(),
+            capacity_claim_id: contracts::CapacityClaimId::new(),
+            lease_id: contracts::LeaseId::new(),
+            claim_revision: contracts::Revision::new(1)?,
+            lease_revision: contracts::Revision::new(1)?,
+            project_id: contracts::ProjectId::new(),
+            provider_binding: "kubernetes-job".to_owned(),
+            namespace: "evaluation".to_owned(),
+            workload_name: format!(
+                "lw-oj-{}",
+                &lease.task_run_id.as_uuid().simple().to_string()[..20]
+            ),
+            trace_id: "trace-program-timing".to_owned(),
+        }),
         request: serde_json::json!({"taskRunId": lease.task_run_id}),
         objects: Vec::new(),
     };

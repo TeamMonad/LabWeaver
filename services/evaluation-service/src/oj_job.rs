@@ -287,6 +287,11 @@ impl OjJobResources {
     }
 
     #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    #[must_use]
     pub fn materializer_secret_name(&self) -> &str {
         &self.materializer_secret_name
     }
@@ -307,16 +312,6 @@ impl OjJobResources {
             propagation_policy: "Foreground".to_owned(),
         })
         .collect()
-    }
-
-    pub(crate) fn document_for(&self, resource: &str) -> Option<&Value> {
-        match resource {
-            "jobs" => Some(&self.job),
-            "networkpolicies" => Some(&self.network_policy),
-            "configmaps" => Some(&self.config_map),
-            "secrets" => Some(&self.materializer_secret),
-            _ => None,
-        }
     }
 }
 

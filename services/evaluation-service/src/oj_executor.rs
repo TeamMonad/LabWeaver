@@ -1,34 +1,41 @@
 //! Attempt-scoped Kubernetes executor for isolated OJ resources.
+//!
+//! The shared mutation, observation, and cleanup mechanics live in
+//! [`crate::kubernetes_job`]; this module owns only the OJ resource documents, the evidence
+//! receipt, and the stable OJ diagnostics.
 #![allow(
     missing_docs,
     clippy::too_many_lines,
-    reason = "the exact Kubernetes mutation and cleanup boundary is intentionally colocated"
+    reason = "the OJ role adapter keeps its exact diagnostics and receipt semantics auditable"
 )]
 
-use std::{
-    fs,
-    io::Read,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::PathBuf;
 
-use contracts::UtcTimestamp;
-use reqwest::{Certificate, Client, Method, StatusCode, Url};
+use contracts::execution::{ExecutionCleanupStatus, ExecutionObjectRef, ExecutionObservation};
+use reqwest::Url;
 use serde::Deserialize;
-use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::{
-    control_plane::EvaluationExecutionResources,
-    execution::ExecutionTiming,
+    control_plane::{EvaluationExecutionKind, EvaluationExecutionResources},
+    kubernetes_job::{
+        KubernetesApiClient, KubernetesApiConfiguration, KubernetesCleanupTarget,
+        KubernetesJobBundle, KubernetesJobError, KubernetesJobIdentity, KubernetesJobObservation,
+        KubernetesObject, KubernetesOwnership,
+    },
     oj::{OjEvidenceReceipt, OjExecutionRequest},
-    oj_job::{OjCleanupTarget, OjJobBinding, OjJobError, OjJobResources},
+    oj_job::{OjJobBinding, OjJobError, OjJobResources},
 };
 
 const FIELD_MANAGER: &str = "labweaver-oj-executor";
-const MAX_BOUND_FILE_BYTES: u64 = 64 * 1024;
+const LOG_SCOPE: &str = "program.oj";
+const DIAGNOSTIC_PREFIX: &str = "LW_OJ_";
 const RUNNER_DEFAULT_DENY_POLICY: &str = "oj-runner-default-deny";
-const MAX_DELETE_CONFLICT_RETRIES: usize = 2;
+const MAIN_CONTAINER: &str = "program-runner";
+const DEADLINE_DIAGNOSTIC_CODE: &str = "LW_OJ_JOB_DEADLINE_EXCEEDED";
+const FAILED_DIAGNOSTIC_CODE: &str = "LW_OJ_JOB_FAILED";
+const OOM_DIAGNOSTIC_CODE: &str = "LW_OJ_MEMORY_LIMIT";
+const STABLE_DIAGNOSTIC_PREFIX: &str = "LW_OJ_";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -42,8 +49,7 @@ pub struct OjExecutorConfiguration {
 
 #[derive(Clone)]
 pub struct OjKubernetesExecutor {
-    configuration: OjExecutorConfiguration,
-    client: Client,
+    api: KubernetesApiClient,
 }
 
 impl OjKubernetesExecutor {
@@ -53,31 +59,13 @@ impl OjKubernetesExecutor {
     ///
     /// Returns a stable configuration error for invalid or unavailable credentials.
     pub fn new(configuration: OjExecutorConfiguration) -> Result<Self, OjExecutorError> {
-        if configuration.kubernetes_api_server.scheme() != "https"
-            || configuration.kubernetes_api_server.host_str().is_none()
-            || configuration.runner_namespace.trim().is_empty()
-            || configuration.request_timeout_milliseconds == 0
-            || configuration.request_timeout_milliseconds > 60_000
-        {
-            return Err(OjExecutorError::ConfigurationInvalid);
-        }
-        read_bound_text(&configuration.kubernetes_bearer_token_file)?;
-        let ca = Certificate::from_pem(&read_bound_file(&configuration.kubernetes_ca_file)?)
-            .map_err(|_| OjExecutorError::ConfigurationInvalid)?;
-        let client = Client::builder()
-            .https_only(true)
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(ca)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_millis(
-                configuration.request_timeout_milliseconds,
-            ))
-            .build()
-            .map_err(|_| OjExecutorError::ConfigurationInvalid)?;
-        Ok(Self {
-            configuration,
-            client,
-        })
+        let api = KubernetesApiClient::new(
+            api_configuration(configuration),
+            FIELD_MANAGER,
+            LOG_SCOPE,
+            DIAGNOSTIC_PREFIX,
+        )?;
+        Ok(Self { api })
     }
 
     /// Applies the exact attempt-scoped network policy, command, and Job bundle.
@@ -87,88 +75,9 @@ impl OjKubernetesExecutor {
     /// Fails closed on invalid ownership, a partial old bundle that cannot be removed, or an API
     /// rejection.
     pub async fn start(&self, binding: &OjJobBinding) -> Result<OjJobResources, OjExecutorError> {
-        if binding.namespace != self.configuration.runner_namespace {
-            return Err(OjExecutorError::BindingInvalid);
-        }
-        self.require_runner_default_deny().await?;
         let resources = OjJobResources::build(binding)?;
-        let expected = [
-            ("v1", "configmaps", &resources.config_map),
-            ("v1", "secrets", &resources.materializer_secret),
-            (
-                "networking.k8s.io/v1",
-                "networkpolicies",
-                &resources.network_policy,
-            ),
-            ("batch/v1", "jobs", &resources.job),
-        ];
-        let mut existing = 0_usize;
-        for (api_version, plural, document) in expected {
-            if let Some(current) = self
-                .get(
-                    binding.namespace.as_str(),
-                    api_version,
-                    plural,
-                    resources.name(),
-                )
-                .await?
-            {
-                verify_owned(&current, &binding.request)?;
-                verify_immutable_identity(&current, document)?;
-                existing = existing
-                    .checked_add(1)
-                    .ok_or(OjExecutorError::IdentityConflict)?;
-            }
-        }
-        let complete_existing_bundle = existing == expected.len();
-        if existing != 0 && !complete_existing_bundle && !self.cleanup(&resources).await? {
-            return Err(OjExecutorError::CleanupPending);
-        }
-
-        let apply_result = async {
-            self.apply(
-                binding.namespace.as_str(),
-                "networking.k8s.io/v1",
-                "networkpolicies",
-                resources.name(),
-                &resources.network_policy,
-            )
-            .await?;
-            self.apply(
-                binding.namespace.as_str(),
-                "v1",
-                "configmaps",
-                resources.name(),
-                &resources.config_map,
-            )
-            .await?;
-            self.apply(
-                binding.namespace.as_str(),
-                "v1",
-                "secrets",
-                resources.materializer_secret_name(),
-                &resources.materializer_secret,
-            )
-            .await?;
-            self.apply(
-                binding.namespace.as_str(),
-                "batch/v1",
-                "jobs",
-                resources.name(),
-                &resources.job,
-            )
-            .await
-        }
-        .await;
-        if let Err(error) = apply_result {
-            if !complete_existing_bundle {
-                let cleanup = self.cleanup(&resources).await;
-                if !matches!(cleanup, Ok(true)) {
-                    return Err(OjExecutorError::CleanupPending);
-                }
-            }
-            return Err(error);
-        }
+        let bundle = job_bundle(&binding.namespace, &resources, &binding.request)?;
+        self.api.start(&bundle).await?;
         Ok(resources)
     }
 
@@ -187,21 +96,17 @@ impl OjKubernetesExecutor {
 
     /// Observes a recovered attempt using only its durable object references.
     ///
-    /// The rendered Job bundle is intentionally unavailable on this path: it
-    /// contains signed materializer URLs and is never reconstructed for
-    /// cleanup.  The persisted UID is checked before accepting any status.
-    ///
     /// # Errors
     ///
-    /// Returns an error when the recovered resource identity or observed
-    /// Kubernetes state is invalid or unavailable.
+    /// Returns an error when the recovered resource identity or observed Kubernetes state is
+    /// invalid or unavailable.
     pub async fn observe_recovery(
         &self,
         resources: &EvaluationExecutionResources,
         request: &OjExecutionRequest,
     ) -> Result<OjJobObservation, OjExecutorError> {
-        if resources.namespace != self.configuration.runner_namespace
-            || resources.kind != crate::control_plane::EvaluationExecutionKind::Program
+        if resources.namespace != self.api.runner_namespace()
+            || resources.kind != EvaluationExecutionKind::Program
         {
             return Err(OjExecutorError::BindingInvalid);
         }
@@ -227,139 +132,66 @@ impl OjKubernetesExecutor {
         expected_uid: Option<&str>,
         request: &OjExecutionRequest,
     ) -> Result<OjJobObservation, OjExecutorError> {
-        let Some(job) = self
-            .get(
-                self.configuration.runner_namespace.as_str(),
-                "batch/v1",
-                "jobs",
-                job_name,
-            )
-            .await?
-        else {
-            return Ok(OjJobObservation::Missing);
-        };
-        if expected_uid
-            .is_some_and(|uid| job.pointer("/metadata/uid").and_then(Value::as_str) != Some(uid))
-        {
-            return Err(OjExecutorError::IdentityConflict);
-        }
-        verify_owned(&job, request)?;
-        let succeeded = job.pointer("/status/succeeded").and_then(Value::as_u64) == Some(1);
-        let failed = job
-            .pointer("/status/failed")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            > 0;
-        if !succeeded && !failed {
-            return Ok(OjJobObservation::Running);
-        }
-        let pods = self.list_pods(request).await?;
-        let items = pods
-            .pointer("/items")
-            .and_then(Value::as_array)
-            .ok_or(OjExecutorError::ObservationInvalid)?;
-        if items.len() != 1 {
-            return Err(OjExecutorError::ObservationInvalid);
-        }
-        let pod = &items[0];
-        verify_owned(pod, request)?;
-        let container = main_container_status(pod)?;
-        let timing = container
-            .map(execution_timing)
-            .transpose()?
-            .unwrap_or_else(ExecutionTiming::unknown);
-        let terminated = container.and_then(|status| status.pointer("/state/terminated"));
-        if succeeded {
-            let message = terminated
-                .ok_or(OjExecutorError::ObservationInvalid)?
-                .pointer("/message")
-                .and_then(Value::as_str)
-                .ok_or(OjExecutorError::ReceiptInvalid)?;
-            let receipt: OjEvidenceReceipt =
-                serde_json::from_str(message).map_err(|_| OjExecutorError::ReceiptInvalid)?;
-            receipt
-                .validate_for(request)
-                .map_err(|_| OjExecutorError::ReceiptInvalid)?;
-            return Ok(OjJobObservation::Completed { receipt, timing });
-        }
-        let job_reason = job
-            .pointer("/status/conditions")
-            .and_then(Value::as_array)
-            .and_then(|conditions| {
-                conditions.iter().find(|condition| {
-                    condition.pointer("/type").and_then(Value::as_str) == Some("Failed")
-                        && condition.pointer("/status").and_then(Value::as_str) == Some("True")
+        let identity = request_identity(self.api.runner_namespace(), job_name, request)?;
+        match self.api.observe(&identity, expected_uid).await? {
+            KubernetesJobObservation::Missing => Ok(OjJobObservation::Missing),
+            KubernetesJobObservation::Running => Ok(OjJobObservation::Running),
+            KubernetesJobObservation::Completed {
+                message,
+                observation,
+            } => {
+                let receipt: OjEvidenceReceipt =
+                    serde_json::from_str(&message).map_err(|_| OjExecutorError::ReceiptInvalid)?;
+                receipt
+                    .validate_for(request)
+                    .map_err(|_| OjExecutorError::ReceiptInvalid)?;
+                Ok(OjJobObservation::Completed {
+                    receipt,
+                    observation,
                 })
-            })
-            .and_then(|condition| condition.pointer("/reason").and_then(Value::as_str));
-        if job_reason == Some("DeadlineExceeded") {
-            return Ok(OjJobObservation::Failed {
-                diagnostic_code: "LW_OJ_JOB_DEADLINE_EXCEEDED".to_owned(),
-                timing,
-            });
+            }
+            KubernetesJobObservation::Failed {
+                diagnostic_code,
+                observation,
+            } => Ok(OjJobObservation::Failed {
+                diagnostic_code,
+                observation,
+            }),
         }
-        let diagnostic_code = terminated.map_or("LW_OJ_JOB_FAILED", failed_container_diagnostic);
-        Ok(OjJobObservation::Failed {
-            diagnostic_code: diagnostic_code.to_owned(),
-            timing,
-        })
     }
 
     /// Captures the immutable object identities after the bundle is applied.
     ///
-    /// The caller persists these references before observing the Job.  UID and
-    /// ownership checks make a later recovery unable to delete a replacement
-    /// object with the same name.
-    ///
     /// # Errors
     ///
-    /// Returns an error when an expected object is unavailable, not owned by
-    /// this attempt, or has an invalid identity.
+    /// Returns an error when an expected object is unavailable, not owned by this attempt, or has
+    /// an invalid identity.
     pub async fn capture_object_refs(
         &self,
         resources: &OjJobResources,
         request: &OjExecutionRequest,
-    ) -> Result<Vec<(String, String, String, String)>, OjExecutorError> {
-        let mut refs = Vec::with_capacity(resources.cleanup_plan().len());
-        for target in resources.cleanup_plan() {
-            let api_version = api_version(&target)?.to_owned();
-            let current = self
-                .get(
-                    target.namespace.as_str(),
-                    api_version.as_str(),
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?
-                .ok_or(OjExecutorError::ObservationInvalid)?;
-            verify_owned(&current, request)?;
-            let uid = current
-                .pointer("/metadata/uid")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or(OjExecutorError::IdentityConflict)?;
-            refs.push((api_version, target.resource, target.name, uid.to_owned()));
-        }
-        Ok(refs)
+    ) -> Result<Vec<ExecutionObjectRef>, OjExecutorError> {
+        let identity = request_identity(self.api.runner_namespace(), resources.name(), request)?;
+        let cleanup_plan = cleanup_targets(resources);
+        Ok(self
+            .api
+            .capture_object_refs(&identity, &cleanup_plan)
+            .await?)
     }
 
-    /// Captures a pending intent's object identities without rebuilding the
-    /// materializer command.  A complete bundle is promoted to a normal
-    /// recovery checkpoint; an absent or partial bundle returns `None` so the
-    /// caller can clean the deterministic names before retrying the same
-    /// attempt.
+    /// Captures a pending intent's object identities without rebuilding the bundle.
     ///
     /// # Errors
     ///
-    /// Returns an error when the pending request or any observed object fails
-    /// identity or ownership validation.
+    /// Returns an error when the pending request or any observed object fails identity or
+    /// ownership validation.
     pub async fn capture_intent_object_refs(
         &self,
         resources: &EvaluationExecutionResources,
         request: &OjExecutionRequest,
-    ) -> Result<Option<Vec<(String, String, String, String)>>, OjExecutorError> {
-        if resources.namespace != self.configuration.runner_namespace
-            || resources.kind != crate::control_plane::EvaluationExecutionKind::Program
+    ) -> Result<Option<Vec<ExecutionObjectRef>>, OjExecutorError> {
+        if resources.namespace != self.api.runner_namespace()
+            || resources.kind != EvaluationExecutionKind::Program
             || !resources.objects.is_empty()
         {
             return Err(OjExecutorError::BindingInvalid);
@@ -374,54 +206,29 @@ impl OjKubernetesExecutor {
             return Err(OjExecutorError::IdentityConflict);
         }
         let targets = recovery_cleanup_plan(resources.namespace.as_str(), request);
-        let mut refs = Vec::with_capacity(targets.len());
-        for target in &targets {
-            let api_version = api_version(target)?.to_owned();
-            let Some(current) = self
-                .get(
-                    target.namespace.as_str(),
-                    api_version.as_str(),
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?
-            else {
-                continue;
-            };
-            verify_owned(&current, request)?;
-            let uid = current
-                .pointer("/metadata/uid")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or(OjExecutorError::IdentityConflict)?;
-            refs.push((
-                api_version,
-                target.resource.clone(),
-                target.name.clone(),
-                uid.to_owned(),
-            ));
-        }
-        refs.sort_by(|left, right| {
-            left.1
-                .cmp(&right.1)
-                .then_with(|| left.2.cmp(&right.2))
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        Ok((!refs.is_empty()).then_some(refs))
+        let identity = request_identity(
+            resources.namespace.as_str(),
+            &attempt_job_name(request.attempt_id),
+            request,
+        )?;
+        Ok(self
+            .api
+            .capture_intent_object_refs(&identity, &targets)
+            .await?)
     }
 
     /// Deletes and verifies a recovered attempt from persisted references.
     ///
     /// # Errors
     ///
-    /// Returns an error when the recovered identity is invalid or Kubernetes
-    /// cannot delete or verify one of the owned objects.
+    /// Returns an error when the recovered identity is invalid or Kubernetes cannot delete or
+    /// verify one of the owned objects.
     pub async fn cleanup_recovery(
         &self,
         resources: &EvaluationExecutionResources,
-    ) -> Result<bool, OjExecutorError> {
-        if resources.namespace != self.configuration.runner_namespace
-            || resources.kind != crate::control_plane::EvaluationExecutionKind::Program
+    ) -> Result<ExecutionCleanupStatus, OjExecutorError> {
+        if resources.namespace != self.api.runner_namespace()
+            || resources.kind != EvaluationExecutionKind::Program
         {
             return Err(OjExecutorError::BindingInvalid);
         }
@@ -437,99 +244,19 @@ impl OjKubernetesExecutor {
             {
                 return Err(OjExecutorError::IdentityConflict);
             }
-            return self
-                .cleanup_intent(resources.namespace.as_str(), &request)
-                .await;
+            let targets = recovery_cleanup_plan(resources.namespace.as_str(), &request);
+            let identity = request_identity(
+                resources.namespace.as_str(),
+                &attempt_job_name(request.attempt_id),
+                &request,
+            )?;
+            return Ok(self.api.cleanup_intent(&identity, &targets).await?);
         }
-        for object in &resources.objects {
-            let target = OjCleanupTarget {
-                namespace: resources.namespace.clone(),
-                resource: object.resource.clone(),
-                name: object.name.clone(),
-                propagation_policy: "Foreground".to_owned(),
-            };
-            let current = self
-                .get(
-                    target.namespace.as_str(),
-                    object.api_version.as_str(),
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?;
-            let Some(current) = current else { continue };
-            verify_recovery_owned(&current, object, resources)?;
-            let preconditions = delete_preconditions(&current)?;
-            self.delete_owned(
-                &target,
-                object.api_version.as_str(),
-                object.uid.as_str(),
-                preconditions,
-                |current| verify_recovery_owned(current, object, resources),
-            )
-            .await?;
-        }
-        for object in &resources.objects {
-            let current = self
-                .get(
-                    resources.namespace.as_str(),
-                    object.api_version.as_str(),
-                    object.resource.as_str(),
-                    object.name.as_str(),
-                )
-                .await?;
-            if let Some(current) = current {
-                verify_recovery_owned(&current, object, resources)?;
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    async fn cleanup_intent(
-        &self,
-        namespace: &str,
-        request: &OjExecutionRequest,
-    ) -> Result<bool, OjExecutorError> {
-        let targets = recovery_cleanup_plan(namespace, request);
-        for target in &targets {
-            let Some(current) = self
-                .get(
-                    target.namespace.as_str(),
-                    api_version(target)?,
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?
-            else {
-                continue;
-            };
-            verify_owned(&current, request)?;
-            let preconditions = delete_preconditions(&current)?;
-            let uid = preconditions.uid.clone();
-            self.delete_owned(
-                target,
-                api_version(target)?,
-                uid.as_str(),
-                preconditions,
-                |current| verify_owned(current, request),
-            )
-            .await?;
-        }
-        for target in &targets {
-            if let Some(current) = self
-                .get(
-                    target.namespace.as_str(),
-                    api_version(target)?,
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?
-            {
-                verify_owned(&current, request)?;
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        let identity = recovery_identity(resources)?;
+        Ok(self
+            .api
+            .cleanup_recovery(&identity, &resources.objects)
+            .await?)
     }
 
     /// Cancels an attempt by invoking the same exact cleanup boundary.
@@ -542,7 +269,9 @@ impl OjKubernetesExecutor {
         &self,
         resources: &OjJobResources,
     ) -> Result<OjCancellationObservation, OjExecutorError> {
-        self.cleanup(resources).await.map(cancellation_observation)
+        self.cleanup(resources)
+            .await
+            .map(|status| cancellation_observation(status.is_confirmed()))
     }
 
     /// Deletes and verifies absence of only the attempt-owned Job, policy, and command object.
@@ -550,431 +279,154 @@ impl OjKubernetesExecutor {
     /// # Errors
     ///
     /// Returns a stable Kubernetes or ownership error; `Ok(false)` means deletion is still pending.
-    pub async fn cleanup(&self, resources: &OjJobResources) -> Result<bool, OjExecutorError> {
-        for target in resources.cleanup_plan() {
-            if let Some(current) = self
-                .get(
-                    target.namespace.as_str(),
-                    api_version(&target)?,
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?
-            {
-                let expected = resources
-                    .document_for(target.resource.as_str())
-                    .ok_or(OjExecutorError::BindingInvalid)?;
-                verify_cleanup_owned(&current, expected)?;
-                let preconditions = delete_preconditions(&current)?;
-                let uid = preconditions.uid.clone();
-                self.delete_owned(
-                    &target,
-                    api_version(&target)?,
-                    uid.as_str(),
-                    preconditions,
-                    |current| verify_cleanup_owned(current, expected),
-                )
-                .await?;
-            }
-        }
-        for target in resources.cleanup_plan() {
-            if let Some(resource) = self
-                .get(
-                    target.namespace.as_str(),
-                    api_version(&target)?,
-                    target.resource.as_str(),
-                    target.name.as_str(),
-                )
-                .await?
-            {
-                let expected = resources
-                    .document_for(target.resource.as_str())
-                    .ok_or(OjExecutorError::BindingInvalid)?;
-                verify_cleanup_owned(&resource, expected)?;
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    async fn require_runner_default_deny(&self) -> Result<(), OjExecutorError> {
-        let policy = self
-            .get(
-                self.configuration.runner_namespace.as_str(),
-                "networking.k8s.io/v1",
-                "networkpolicies",
-                RUNNER_DEFAULT_DENY_POLICY,
+    pub async fn cleanup(
+        &self,
+        resources: &OjJobResources,
+    ) -> Result<ExecutionCleanupStatus, OjExecutorError> {
+        let objects = oj_objects(resources);
+        let cleanup_plan = cleanup_targets(resources);
+        Ok(self
+            .api
+            .cleanup(
+                resources.namespace(),
+                resources.name(),
+                &objects,
+                &cleanup_plan,
             )
-            .await?
-            .ok_or(OjExecutorError::NetworkIsolationUnavailable)?;
-        verify_runner_default_deny(&policy, self.configuration.runner_namespace.as_str())
-    }
-
-    async fn apply(
-        &self,
-        namespace: &str,
-        api_version: &str,
-        plural: &str,
-        name: &str,
-        document: &Value,
-    ) -> Result<(), OjExecutorError> {
-        let response = self
-            .authorized(self.client.request(
-                Method::PATCH,
-                self.resource_url(namespace, api_version, plural, name)?,
-            ))?
-            .query(&[("fieldManager", FIELD_MANAGER)])
-            .header("content-type", "application/apply-patch+yaml")
-            .body(serde_json::to_vec(document).map_err(|_| OjExecutorError::BindingInvalid)?)
-            .send()
-            .await
-            .map_err(|_| OjExecutorError::KubernetesUnavailable)?;
-        if response.status().is_success() {
-            Ok(())
-        } else if response.status() == StatusCode::CONFLICT {
-            Err(OjExecutorError::IdentityConflict)
-        } else {
-            Err(OjExecutorError::KubernetesRejected)
-        }
-    }
-
-    async fn get(
-        &self,
-        namespace: &str,
-        api_version: &str,
-        plural: &str,
-        name: &str,
-    ) -> Result<Option<Value>, OjExecutorError> {
-        let resource_id = format!("{namespace}/{plural}/{name}");
-        let response = self
-            .authorized(self.client.get(self.resource_url(
-                namespace,
-                api_version,
-                plural,
-                name,
-            )?))?
-            .send()
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    event = "evaluation.oj.kubernetes.get_failed",
-                    resource_id = %resource_id,
-                    failure_stage = "program.oj.kubernetes.get",
-                    diagnostic_code = "LW_OJ_KUBERNETES_UNAVAILABLE",
-                    error_kind = reqwest_error_kind(&error),
-                    "OJ Kubernetes GET transport failed",
-                );
-                OjExecutorError::KubernetesUnavailable
-            })?;
-        let status = response.status();
-        if status == StatusCode::NOT_FOUND {
-            tracing::info!(
-                event = "evaluation.oj.kubernetes.get_absent",
-                resource_id = %resource_id,
-                failure_stage = "program.oj.kubernetes.get",
-                outcome = "absent",
-                http_status = status.as_u16(),
-                "OJ Kubernetes resource is already absent",
-            );
-            Ok(None)
-        } else if status.is_success() {
-            response.json().await.map(Some).map_err(|error| {
-                tracing::error!(
-                    event = "evaluation.oj.kubernetes.get_decode_failed",
-                    resource_id = %resource_id,
-                    failure_stage = "program.oj.kubernetes.get",
-                    diagnostic_code = "LW_OJ_OBSERVATION_INVALID",
-                    error_kind = reqwest_error_kind(&error),
-                    http_status = status.as_u16(),
-                    "OJ Kubernetes GET response could not be decoded",
-                );
-                OjExecutorError::ObservationInvalid
-            })
-        } else {
-            tracing::error!(
-                event = "evaluation.oj.kubernetes.get_rejected",
-                resource_id = %resource_id,
-                failure_stage = "program.oj.kubernetes.get",
-                diagnostic_code = "LW_OJ_KUBERNETES_REJECTED",
-                error_kind = "api_rejected",
-                http_status = status.as_u16(),
-                "OJ Kubernetes GET was rejected",
-            );
-            Err(OjExecutorError::KubernetesRejected)
-        }
-    }
-
-    async fn list_pods(&self, request: &OjExecutionRequest) -> Result<Value, OjExecutorError> {
-        let response = self
-            .authorized(self.client.get(self.collection_url(
-                self.configuration.runner_namespace.as_str(),
-                "v1",
-                "pods",
-            )?))?
-            .query(&[(
-                "labelSelector",
-                format!("labweaver.io/attempt-id={}", request.attempt_id),
-            )])
-            .send()
-            .await
-            .map_err(|_| OjExecutorError::KubernetesUnavailable)?;
-        if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(|_| OjExecutorError::ObservationInvalid)
-        } else {
-            Err(OjExecutorError::KubernetesRejected)
-        }
-    }
-
-    async fn delete(
-        &self,
-        target: &OjCleanupTarget,
-        preconditions: &OjDeletePreconditions,
-    ) -> Result<(), OjExecutorError> {
-        let resource_id = format!("{}/{}/{}", target.namespace, target.resource, target.name);
-        let response = self
-            .authorized(self.client.delete(self.resource_url(
-                target.namespace.as_str(),
-                api_version(target)?,
-                target.resource.as_str(),
-                target.name.as_str(),
-            )?))?
-            .json(&delete_options(target, preconditions))
-            .send()
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    event = "evaluation.oj.kubernetes.delete_failed",
-                    resource_id = %resource_id,
-                    failure_stage = "program.oj.kubernetes.delete",
-                    diagnostic_code = "LW_OJ_KUBERNETES_UNAVAILABLE",
-                    error_kind = reqwest_error_kind(&error),
-                    "OJ Kubernetes DELETE transport failed",
-                );
-                OjExecutorError::KubernetesUnavailable
-            })?;
-        let status = response.status();
-        let result = classify_delete_status(status);
-        match &result {
-            Ok(()) => {
-                tracing::info!(
-                    event = "evaluation.oj.kubernetes.delete_accepted",
-                    resource_id = %resource_id,
-                    failure_stage = "program.oj.kubernetes.delete",
-                    outcome = if status == StatusCode::NOT_FOUND {
-                        "already_absent"
-                    } else {
-                        "accepted"
-                    },
-                    http_status = status.as_u16(),
-                    "OJ Kubernetes DELETE completed",
-                );
-            }
-            Err(error) => {
-                if status == StatusCode::CONFLICT {
-                    tracing::warn!(
-                        event = "evaluation.oj.kubernetes.delete_precondition_conflict",
-                        resource_id = %resource_id,
-                        failure_stage = "program.oj.kubernetes.delete",
-                        diagnostic_code = error.diagnostic_code(),
-                        error_kind = "precondition_conflict",
-                        http_status = status.as_u16(),
-                        "OJ Kubernetes DELETE precondition conflicted; identity is rechecked before retry",
-                    );
-                } else {
-                    tracing::error!(
-                        event = "evaluation.oj.kubernetes.delete_rejected",
-                        resource_id = %resource_id,
-                        failure_stage = "program.oj.kubernetes.delete",
-                        diagnostic_code = error.diagnostic_code(),
-                        error_kind = "api_rejected",
-                        http_status = status.as_u16(),
-                        "OJ Kubernetes DELETE was rejected",
-                    );
-                }
-            }
-        }
-        result
-    }
-
-    async fn delete_owned<F>(
-        &self,
-        target: &OjCleanupTarget,
-        api_version: &str,
-        expected_uid: &str,
-        mut preconditions: OjDeletePreconditions,
-        verify: F,
-    ) -> Result<(), OjExecutorError>
-    where
-        F: Fn(&Value) -> Result<(), OjExecutorError>,
-    {
-        let mut retry = 0;
-        loop {
-            match self.delete(target, &preconditions).await {
-                Ok(()) => return Ok(()),
-                Err(OjExecutorError::IdentityConflict) if retry < MAX_DELETE_CONFLICT_RETRIES => {
-                    let Some(current) = self
-                        .get(
-                            target.namespace.as_str(),
-                            api_version,
-                            target.resource.as_str(),
-                            target.name.as_str(),
-                        )
-                        .await?
-                    else {
-                        tracing::info!(
-                            event = "evaluation.oj.kubernetes.delete_retry_absent",
-                            resource_id =
-                                format!("{}/{}/{}", target.namespace, target.resource, target.name),
-                            failure_stage = "program.oj.kubernetes.delete.retry",
-                            outcome = "already_absent",
-                            "OJ Kubernetes resource disappeared after delete conflict",
-                        );
-                        return Ok(());
-                    };
-                    if current.pointer("/metadata/uid").and_then(Value::as_str)
-                        != Some(expected_uid)
-                    {
-                        tracing::error!(
-                            event = "evaluation.oj.kubernetes.delete_retry_identity_changed",
-                            resource_id =
-                                format!("{}/{}/{}", target.namespace, target.resource, target.name),
-                            failure_stage = "program.oj.kubernetes.delete.retry",
-                            diagnostic_code = OjExecutorError::IdentityConflict.diagnostic_code(),
-                            error_kind = OjExecutorError::IdentityConflict.error_kind(),
-                            outcome = "uid_changed",
-                            "OJ Kubernetes resource UID changed after delete precondition conflict",
-                        );
-                        return Err(OjExecutorError::IdentityConflict);
-                    }
-                    if let Err(error) = verify(&current) {
-                        tracing::error!(
-                            event = "evaluation.oj.kubernetes.delete_retry_ownership_failed",
-                            resource_id =
-                                format!("{}/{}/{}", target.namespace, target.resource, target.name),
-                            failure_stage = "program.oj.kubernetes.delete.retry",
-                            diagnostic_code = error.diagnostic_code(),
-                            error_kind = error.error_kind(),
-                            outcome = "ownership_rejected",
-                            "OJ Kubernetes resource ownership failed after delete precondition conflict",
-                        );
-                        return Err(error);
-                    }
-                    preconditions = delete_preconditions(&current)?;
-                    tracing::warn!(
-                        event = "evaluation.oj.kubernetes.delete_retry",
-                        resource_id =
-                            format!("{}/{}/{}", target.namespace, target.resource, target.name),
-                        failure_stage = "program.oj.kubernetes.delete.retry",
-                        diagnostic_code = OjExecutorError::IdentityConflict.diagnostic_code(),
-                        error_kind = OjExecutorError::IdentityConflict.error_kind(),
-                        outcome = "same_uid_refresh",
-                        "retrying OJ Kubernetes DELETE after same-UID resource-version conflict",
-                    );
-                    retry += 1;
-                }
-                Err(error @ OjExecutorError::IdentityConflict) => {
-                    tracing::error!(
-                        event = "evaluation.oj.kubernetes.delete_retry_exhausted",
-                        resource_id =
-                            format!("{}/{}/{}", target.namespace, target.resource, target.name),
-                        failure_stage = "program.oj.kubernetes.delete.retry",
-                        diagnostic_code = error.diagnostic_code(),
-                        error_kind = error.error_kind(),
-                        outcome = "retry_exhausted",
-                        "OJ Kubernetes DELETE precondition conflicts exceeded the bounded retry limit",
-                    );
-                    return Err(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn authorized(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, OjExecutorError> {
-        let token = read_bound_text(&self.configuration.kubernetes_bearer_token_file)?;
-        Ok(request.bearer_auth(token))
-    }
-
-    fn resource_url(
-        &self,
-        namespace: &str,
-        api_version: &str,
-        plural: &str,
-        name: &str,
-    ) -> Result<Url, OjExecutorError> {
-        if !safe_segment(namespace) || !safe_segment(plural) || !safe_segment(name) {
-            return Err(OjExecutorError::BindingInvalid);
-        }
-        self.configuration
-            .kubernetes_api_server
-            .join(&format!(
-                "{}/namespaces/{namespace}/{plural}/{name}",
-                api_prefix(api_version)
-            ))
-            .map_err(|_| OjExecutorError::ConfigurationInvalid)
-    }
-
-    fn collection_url(
-        &self,
-        namespace: &str,
-        api_version: &str,
-        plural: &str,
-    ) -> Result<Url, OjExecutorError> {
-        if !safe_segment(namespace) || !safe_segment(plural) {
-            return Err(OjExecutorError::BindingInvalid);
-        }
-        self.configuration
-            .kubernetes_api_server
-            .join(&format!(
-                "{}/namespaces/{namespace}/{plural}",
-                api_prefix(api_version)
-            ))
-            .map_err(|_| OjExecutorError::ConfigurationInvalid)
+            .await?)
     }
 }
 
-fn classify_delete_status(status: StatusCode) -> Result<(), OjExecutorError> {
-    if status.is_success() || status == StatusCode::NOT_FOUND {
-        Ok(())
-    } else if status == StatusCode::CONFLICT {
-        Err(OjExecutorError::IdentityConflict)
-    } else {
-        Err(OjExecutorError::KubernetesRejected)
+fn api_configuration(configuration: OjExecutorConfiguration) -> KubernetesApiConfiguration {
+    KubernetesApiConfiguration {
+        kubernetes_api_server: configuration.kubernetes_api_server,
+        kubernetes_bearer_token_file: configuration.kubernetes_bearer_token_file,
+        kubernetes_ca_file: configuration.kubernetes_ca_file,
+        runner_namespace: configuration.runner_namespace,
+        request_timeout_milliseconds: configuration.request_timeout_milliseconds,
     }
 }
 
-fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connect"
-    } else if error.is_request() {
-        "request"
-    } else if error.is_body() {
-        "body"
-    } else if error.is_decode() {
-        "decode"
-    } else {
-        "other"
-    }
+fn request_identity(
+    namespace: &str,
+    job_name: &str,
+    request: &OjExecutionRequest,
+) -> Result<KubernetesJobIdentity, OjExecutorError> {
+    let request_sha256 = request
+        .request_sha256()
+        .map_err(|_| OjExecutorError::IdentityConflict)?
+        .to_string();
+    Ok(KubernetesJobIdentity {
+        namespace: namespace.to_owned(),
+        job_name: job_name.to_owned(),
+        main_container: MAIN_CONTAINER,
+        default_deny_policy: RUNNER_DEFAULT_DENY_POLICY,
+        deadline_diagnostic_code: DEADLINE_DIAGNOSTIC_CODE,
+        failed_diagnostic_code: FAILED_DIAGNOSTIC_CODE,
+        oom_diagnostic_code: OOM_DIAGNOSTIC_CODE,
+        stable_diagnostic_prefix: STABLE_DIAGNOSTIC_PREFIX,
+        ownership: KubernetesOwnership {
+            run_id: request.run_id,
+            step_run_id: request.step_run_id,
+            attempt_id: request.attempt_id,
+            request_sha256,
+        },
+        trace_id: request.trace_id.clone(),
+    })
 }
 
-fn failed_container_diagnostic(terminated: &Value) -> &str {
-    if terminated.pointer("/reason").and_then(Value::as_str) == Some("OOMKilled") {
-        "LW_OJ_MEMORY_LIMIT"
-    } else {
-        terminated
-            .pointer("/message")
-            .and_then(Value::as_str)
-            .filter(|message| is_stable_diagnostic(message))
-            .unwrap_or("LW_OJ_JOB_FAILED")
-    }
+fn recovery_identity(
+    resources: &EvaluationExecutionResources,
+) -> Result<KubernetesJobIdentity, OjExecutorError> {
+    let admission = resources
+        .admission
+        .as_ref()
+        .ok_or(OjExecutorError::BindingInvalid)?;
+    Ok(KubernetesJobIdentity {
+        namespace: resources.namespace.clone(),
+        job_name: resources
+            .objects
+            .iter()
+            .find(|object| object.resource == "jobs")
+            .map_or_else(
+                || {
+                    format!(
+                        "lw-oj-{}",
+                        &resources.task_run_id.as_uuid().simple().to_string()[..20]
+                    )
+                },
+                |object| object.name.clone(),
+            ),
+        main_container: MAIN_CONTAINER,
+        default_deny_policy: RUNNER_DEFAULT_DENY_POLICY,
+        deadline_diagnostic_code: DEADLINE_DIAGNOSTIC_CODE,
+        failed_diagnostic_code: FAILED_DIAGNOSTIC_CODE,
+        oom_diagnostic_code: OOM_DIAGNOSTIC_CODE,
+        stable_diagnostic_prefix: STABLE_DIAGNOSTIC_PREFIX,
+        ownership: KubernetesOwnership {
+            run_id: resources.run_id.as_uuid(),
+            step_run_id: resources.step_run_id.as_uuid(),
+            attempt_id: resources.task_run_id.as_uuid(),
+            // Recovery ownership verifies labels and UID only; the persisted
+            // annotation is checked against the rendered bundle during cleanup.
+            request_sha256: String::new(),
+        },
+        trace_id: admission.trace_id.clone(),
+    })
+}
+
+fn job_bundle(
+    namespace: &str,
+    resources: &OjJobResources,
+    request: &OjExecutionRequest,
+) -> Result<KubernetesJobBundle, OjExecutorError> {
+    Ok(KubernetesJobBundle {
+        identity: request_identity(namespace, resources.name(), request)?,
+        objects: oj_objects(resources),
+        cleanup_plan: cleanup_targets(resources),
+    })
+}
+
+fn oj_objects(resources: &OjJobResources) -> Vec<KubernetesObject> {
+    vec![
+        KubernetesObject {
+            api_version: "networking.k8s.io/v1",
+            plural: "networkpolicies",
+            name: resources.name().to_owned(),
+            document: resources.network_policy.clone(),
+        },
+        KubernetesObject {
+            api_version: "v1",
+            plural: "configmaps",
+            name: resources.name().to_owned(),
+            document: resources.config_map.clone(),
+        },
+        KubernetesObject {
+            api_version: "v1",
+            plural: "secrets",
+            name: resources.materializer_secret_name().to_owned(),
+            document: resources.materializer_secret.clone(),
+        },
+        KubernetesObject {
+            api_version: "batch/v1",
+            plural: "jobs",
+            name: resources.name().to_owned(),
+            document: resources.job.clone(),
+        },
+    ]
+}
+
+fn cleanup_targets(resources: &OjJobResources) -> Vec<KubernetesCleanupTarget> {
+    resources
+        .cleanup_plan()
+        .into_iter()
+        .map(|target| KubernetesCleanupTarget {
+            namespace: target.namespace,
+            resource: target.resource,
+            name: target.name,
+            propagation_policy: target.propagation_policy,
+        })
+        .collect()
 }
 
 const fn cancellation_observation(cleanup_complete: bool) -> OjCancellationObservation {
@@ -997,287 +449,22 @@ pub enum OjJobObservation {
     Running,
     Completed {
         receipt: OjEvidenceReceipt,
-        timing: ExecutionTiming,
+        observation: ExecutionObservation,
     },
     Failed {
         diagnostic_code: String,
-        timing: ExecutionTiming,
+        observation: ExecutionObservation,
     },
-}
-
-fn main_container_status(pod: &Value) -> Result<Option<&Value>, OjExecutorError> {
-    let statuses = pod
-        .pointer("/status/containerStatuses")
-        .and_then(Value::as_array)
-        .ok_or(OjExecutorError::ObservationInvalid)?;
-    let matches = statuses
-        .iter()
-        .filter(|status| status.pointer("/name").and_then(Value::as_str) == Some("program-runner"))
-        .collect::<Vec<_>>();
-    if matches.len() > 1 {
-        return Err(OjExecutorError::ObservationInvalid);
-    }
-    Ok(matches.into_iter().next())
-}
-
-fn execution_timing(status: &Value) -> Result<ExecutionTiming, OjExecutorError> {
-    let terminated = status.pointer("/state/terminated");
-    let started = status
-        .pointer("/state/terminated/startedAt")
-        .and_then(Value::as_str)
-        .map(parse_kubernetes_timestamp)
-        .transpose()?;
-    let finished = terminated
-        .and_then(|value| value.pointer("/finishedAt"))
-        .and_then(Value::as_str)
-        .map(parse_kubernetes_timestamp)
-        .transpose()?;
-    if started.is_some() != finished.is_some() {
-        return Ok(ExecutionTiming::unknown());
-    }
-    if started
-        .zip(finished)
-        .is_some_and(|(started_at, finished_at)| started_at == finished_at)
-    {
-        tracing::warn!(
-            event = "evaluation.executor.timing_precision_insufficient",
-            diagnostic_code = "LW_EVALUATION_EXECUTOR_TIMING_PRECISION_INSUFFICIENT",
-            timestamp_precision = "seconds",
-            started_at = status
-                .pointer("/state/terminated/startedAt")
-                .and_then(serde_json::Value::as_str),
-            finished_at = status
-                .pointer("/state/terminated/finishedAt")
-                .and_then(serde_json::Value::as_str),
-        );
-        return Ok(ExecutionTiming::unknown());
-    }
-    let timing = ExecutionTiming {
-        started_at: started,
-        terminated_at: finished,
-    };
-    timing
-        .validate()
-        .map_err(|_| OjExecutorError::ObservationInvalid)?;
-    Ok(timing)
-}
-
-fn parse_kubernetes_timestamp(value: &str) -> Result<UtcTimestamp, OjExecutorError> {
-    let parsed = time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
-        .map_err(|_| OjExecutorError::ObservationInvalid)?
-        .to_offset(time::UtcOffset::UTC);
-    let milliseconds = parsed.nanosecond() / 1_000_000 * 1_000_000;
-    let normalized = parsed
-        .replace_nanosecond(milliseconds)
-        .map_err(|_| OjExecutorError::ObservationInvalid)?;
-    UtcTimestamp::from_utc(normalized).map_err(|_| OjExecutorError::ObservationInvalid)
-}
-
-fn verify_recovery_owned(
-    resource: &Value,
-    object: &crate::control_plane::EvaluationExecutionObjectRef,
-    resources: &EvaluationExecutionResources,
-) -> Result<(), OjExecutorError> {
-    let metadata = resource
-        .pointer("/metadata")
-        .and_then(Value::as_object)
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    if metadata.get("name").and_then(Value::as_str) != Some(object.name.as_str())
-        || metadata.get("namespace").and_then(Value::as_str) != Some(resources.namespace.as_str())
-        || metadata.get("uid").and_then(Value::as_str) != Some(object.uid.as_str())
-    {
-        return Err(OjExecutorError::IdentityConflict);
-    }
-    let labels = metadata
-        .get("labels")
-        .and_then(Value::as_object)
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    let owned = [
-        ("labweaver.io/managed-by", "evaluation-service".to_owned()),
-        ("labweaver.io/run-id", resources.run_id.to_string()),
-        (
-            "labweaver.io/step-run-id",
-            resources.step_run_id.to_string(),
-        ),
-        ("labweaver.io/attempt-id", resources.task_run_id.to_string()),
-    ]
-    .into_iter()
-    .all(|(key, expected)| labels.get(key).and_then(Value::as_str) == Some(expected.as_str()));
-    if owned {
-        Ok(())
-    } else {
-        Err(OjExecutorError::IdentityConflict)
-    }
-}
-
-fn verify_owned(resource: &Value, request: &OjExecutionRequest) -> Result<(), OjExecutorError> {
-    let labels = resource
-        .pointer("/metadata/labels")
-        .and_then(Value::as_object)
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    let request_sha256 = request
-        .request_sha256()
-        .map_err(|_| OjExecutorError::IdentityConflict)?
-        .to_string();
-    let labels_match = [
-        ("labweaver.io/managed-by", "evaluation-service".to_owned()),
-        ("labweaver.io/run-id", request.run_id.to_string()),
-        ("labweaver.io/step-run-id", request.step_run_id.to_string()),
-        ("labweaver.io/attempt-id", request.attempt_id.to_string()),
-    ]
-    .into_iter()
-    .all(|(key, expected)| labels.get(key).and_then(Value::as_str) == Some(expected.as_str()));
-    let annotation_matches = resource
-        .pointer("/metadata/annotations/labweaver.io~1request-sha256")
-        .and_then(Value::as_str)
-        == Some(request_sha256.as_str());
-    if labels_match && annotation_matches {
-        Ok(())
-    } else {
-        Err(OjExecutorError::IdentityConflict)
-    }
-}
-
-fn verify_immutable_identity(current: &Value, expected: &Value) -> Result<(), OjExecutorError> {
-    let current_kind = current.pointer("/kind").and_then(Value::as_str);
-    let expected_kind = expected.pointer("/kind").and_then(Value::as_str);
-    let current_name = current.pointer("/metadata/name").and_then(Value::as_str);
-    let expected_name = expected.pointer("/metadata/name").and_then(Value::as_str);
-    if current_kind == expected_kind && current_name == expected_name {
-        Ok(())
-    } else {
-        Err(OjExecutorError::IdentityConflict)
-    }
-}
-
-fn verify_cleanup_owned(current: &Value, expected: &Value) -> Result<(), OjExecutorError> {
-    verify_immutable_identity(current, expected)?;
-    let current_namespace = current
-        .pointer("/metadata/namespace")
-        .and_then(Value::as_str);
-    let expected_namespace = expected
-        .pointer("/metadata/namespace")
-        .and_then(Value::as_str);
-    let current_labels = current
-        .pointer("/metadata/labels")
-        .and_then(Value::as_object)
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    let expected_labels = expected
-        .pointer("/metadata/labels")
-        .and_then(Value::as_object)
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    let labels_owned = [
-        "labweaver.io/managed-by",
-        "labweaver.io/run-id",
-        "labweaver.io/step-run-id",
-        "labweaver.io/attempt-id",
-    ]
-    .into_iter()
-    .all(|key| current_labels.get(key) == expected_labels.get(key));
-    let request_identity_owned = current
-        .pointer("/metadata/annotations/labweaver.io~1request-sha256")
-        == expected.pointer("/metadata/annotations/labweaver.io~1request-sha256");
-    if current_namespace == expected_namespace && labels_owned && request_identity_owned {
-        Ok(())
-    } else {
-        Err(OjExecutorError::IdentityConflict)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct OjDeletePreconditions {
-    uid: String,
-    resource_version: String,
-}
-
-fn delete_options(target: &OjCleanupTarget, preconditions: &OjDeletePreconditions) -> Value {
-    json!({
-        "apiVersion":"v1",
-        "kind":"DeleteOptions",
-        "propagationPolicy":target.propagation_policy,
-        "preconditions":{
-            "uid":preconditions.uid,
-            "resourceVersion":preconditions.resource_version,
-        },
-    })
-}
-
-fn delete_preconditions(resource: &Value) -> Result<OjDeletePreconditions, OjExecutorError> {
-    let uid = resource
-        .pointer("/metadata/uid")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    let resource_version = resource
-        .pointer("/metadata/resourceVersion")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(OjExecutorError::IdentityConflict)?;
-    Ok(OjDeletePreconditions {
-        uid: uid.to_owned(),
-        resource_version: resource_version.to_owned(),
-    })
-}
-
-fn verify_runner_default_deny(
-    policy: &Value,
-    expected_namespace: &str,
-) -> Result<(), OjExecutorError> {
-    let policy_types = policy
-        .pointer("/spec/policyTypes")
-        .and_then(Value::as_array)
-        .ok_or(OjExecutorError::NetworkIsolationUnavailable)?;
-    let has_policy_type = |expected| {
-        policy_types
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|value| *value == expected)
-            .count()
-            == 1
-    };
-    let valid = policy.pointer("/kind").and_then(Value::as_str) == Some("NetworkPolicy")
-        && policy.pointer("/metadata/name").and_then(Value::as_str)
-            == Some(RUNNER_DEFAULT_DENY_POLICY)
-        && policy
-            .pointer("/metadata/namespace")
-            .and_then(Value::as_str)
-            == Some(expected_namespace)
-        && policy
-            .pointer("/spec/podSelector")
-            .and_then(Value::as_object)
-            .is_some_and(serde_json::Map::is_empty)
-        && has_policy_type("Ingress")
-        && has_policy_type("Egress")
-        && policy_types.len() == 2
-        && is_missing_or_empty_rule_list(policy, "/spec/ingress")
-        && is_missing_or_empty_rule_list(policy, "/spec/egress");
-    if valid {
-        Ok(())
-    } else {
-        Err(OjExecutorError::NetworkIsolationUnavailable)
-    }
-}
-
-fn is_missing_or_empty_rule_list(policy: &Value, path: &str) -> bool {
-    match policy.pointer(path) {
-        None => true,
-        Some(value) => value.as_array().is_some_and(Vec::is_empty),
-    }
-}
-
-fn api_prefix(api_version: &str) -> String {
-    if api_version == "v1" {
-        "/api/v1".to_owned()
-    } else {
-        format!("/apis/{api_version}")
-    }
 }
 
 fn attempt_job_name(attempt_id: uuid::Uuid) -> String {
     format!("lw-oj-{}", &attempt_id.simple().to_string()[..20])
 }
 
-fn recovery_cleanup_plan(namespace: &str, request: &OjExecutionRequest) -> Vec<OjCleanupTarget> {
+fn recovery_cleanup_plan(
+    namespace: &str,
+    request: &OjExecutionRequest,
+) -> Vec<KubernetesCleanupTarget> {
     let name = attempt_job_name(request.attempt_id);
     let materializer = format!("{name}-materializer");
     [
@@ -1287,80 +474,13 @@ fn recovery_cleanup_plan(namespace: &str, request: &OjExecutionRequest) -> Vec<O
         ("secrets", materializer),
     ]
     .into_iter()
-    .map(|(resource, name)| OjCleanupTarget {
+    .map(|(resource, name)| KubernetesCleanupTarget {
         namespace: namespace.to_owned(),
         resource: resource.to_owned(),
         name,
         propagation_policy: "Foreground".to_owned(),
     })
     .collect()
-}
-
-fn api_version(target: &OjCleanupTarget) -> Result<&'static str, OjExecutorError> {
-    match target.resource.as_str() {
-        "jobs" => Ok("batch/v1"),
-        "networkpolicies" => Ok("networking.k8s.io/v1"),
-        "configmaps" | "secrets" => Ok("v1"),
-        _ => Err(OjExecutorError::BindingInvalid),
-    }
-}
-
-fn safe_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
-}
-
-fn is_stable_diagnostic(value: &str) -> bool {
-    value.starts_with("LW_OJ_")
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-fn read_bound_file(path: &Path) -> Result<Vec<u8>, OjExecutorError> {
-    let file =
-        fs::File::open(path).map_err(|source| OjExecutorError::ConfigurationUnavailable {
-            operation: "open",
-            source,
-        })?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| OjExecutorError::ConfigurationUnavailable {
-            operation: "metadata",
-            source,
-        })?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BOUND_FILE_BYTES {
-        return Err(OjExecutorError::ConfigurationInvalid);
-    }
-    let mut bytes = Vec::with_capacity(
-        usize::try_from(metadata.len()).map_err(|_| OjExecutorError::ConfigurationInvalid)?,
-    );
-    file.take(MAX_BOUND_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|source| OjExecutorError::ConfigurationUnavailable {
-            operation: "read",
-            source,
-        })?;
-    if u64::try_from(bytes.len()).map_err(|_| OjExecutorError::ConfigurationInvalid)?
-        != metadata.len()
-        || bytes.len() as u64 > MAX_BOUND_FILE_BYTES
-    {
-        return Err(OjExecutorError::ConfigurationInvalid);
-    }
-    Ok(bytes)
-}
-
-fn read_bound_text(path: &Path) -> Result<String, OjExecutorError> {
-    let bytes = read_bound_file(path)?;
-    let value = String::from_utf8(bytes).map_err(|_| OjExecutorError::ConfigurationInvalid)?;
-    let value = value.trim();
-    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
-        return Err(OjExecutorError::ConfigurationInvalid);
-    }
-    Ok(value.to_owned())
 }
 
 #[derive(Debug, Error)]
@@ -1391,6 +511,25 @@ pub enum OjExecutorError {
     ReceiptInvalid,
     #[error(transparent)]
     Job(#[from] OjJobError),
+}
+
+impl From<KubernetesJobError> for OjExecutorError {
+    fn from(error: KubernetesJobError) -> Self {
+        match error {
+            KubernetesJobError::ConfigurationUnavailable { operation, source } => {
+                Self::ConfigurationUnavailable { operation, source }
+            }
+            KubernetesJobError::ConfigurationInvalid => Self::ConfigurationInvalid,
+            KubernetesJobError::BindingInvalid => Self::BindingInvalid,
+            KubernetesJobError::KubernetesUnavailable => Self::KubernetesUnavailable,
+            KubernetesJobError::KubernetesRejected => Self::KubernetesRejected,
+            KubernetesJobError::NetworkIsolationUnavailable => Self::NetworkIsolationUnavailable,
+            KubernetesJobError::IdentityConflict => Self::IdentityConflict,
+            KubernetesJobError::CleanupPending => Self::CleanupPending,
+            KubernetesJobError::ObservationInvalid => Self::ObservationInvalid,
+            KubernetesJobError::ReceiptInvalid => Self::ReceiptInvalid,
+        }
+    }
 }
 
 impl OjExecutorError {
@@ -1438,25 +577,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use super::{
-        OjCancellationObservation, OjDeletePreconditions, OjExecutorConfiguration, OjExecutorError,
-        OjJobObservation, OjKubernetesExecutor, api_version, attempt_job_name,
-        cancellation_observation, classify_delete_status, delete_options, delete_preconditions,
-        execution_timing, failed_container_diagnostic, read_bound_file, recovery_cleanup_plan,
-        verify_cleanup_owned, verify_runner_default_deny,
-    };
-    use crate::execution::ExecutionTiming;
-    use crate::oj_job::OjCleanupTarget;
-    use crate::{
-        EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION,
-        control_plane::{
-            EvaluationExecutionKind, EvaluationExecutionObjectRef, EvaluationExecutionResources,
-        },
-        oj::{
-            OJ_EXECUTION_SCHEMA_VERSION, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,
-            OjFileBinding,
-        },
-    };
+    use contracts::execution::ExecutionObjectRef;
     use contracts::{EvaluationRunId, EvaluationStepRunId, TaskRunId};
     use persistence_sqlx::Sha256Digest;
     use reqwest::{Client, StatusCode, Url};
@@ -1466,8 +587,49 @@ mod tests {
         net::{TcpListener, TcpStream},
         task::JoinHandle,
     };
+    use uuid::Uuid;
+
+    use super::{
+        OjCancellationObservation, OjExecutorError, OjJobObservation, OjKubernetesExecutor,
+        attempt_job_name, cancellation_observation, recovery_cleanup_plan,
+    };
+    use crate::kubernetes_job::{
+        KubernetesApiClient, KubernetesApiConfiguration, KubernetesCleanupTarget,
+        KubernetesDeletePreconditions, KubernetesJobError, KubernetesJobIdentity,
+        KubernetesOwnership, api_version, classify_delete_status, delete_options,
+        delete_preconditions, execution_timing, failed_container_diagnostic, read_bound_file,
+        verify_cleanup_owned, verify_runner_default_deny,
+    };
+    use crate::{
+        control_plane::{EvaluationExecutionKind, EvaluationExecutionResources},
+        execution::ExecutionTiming,
+        oj::{
+            OJ_EXECUTION_SCHEMA_VERSION, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,
+            OjFileBinding,
+        },
+    };
 
     const TEST_NAMESPACE: &str = "labweaver-evaluation-runs";
+
+    fn test_identity() -> KubernetesJobIdentity {
+        KubernetesJobIdentity {
+            namespace: TEST_NAMESPACE.to_owned(),
+            job_name: "lw-oj-attempt".to_owned(),
+            main_container: "program-runner",
+            default_deny_policy: "oj-runner-default-deny",
+            deadline_diagnostic_code: "LW_OJ_JOB_DEADLINE_EXCEEDED",
+            failed_diagnostic_code: "LW_OJ_JOB_FAILED",
+            oom_diagnostic_code: "LW_OJ_MEMORY_LIMIT",
+            stable_diagnostic_prefix: "LW_OJ_",
+            ownership: KubernetesOwnership {
+                run_id: Uuid::nil(),
+                step_run_id: Uuid::nil(),
+                attempt_id: Uuid::nil(),
+                request_sha256: "request".to_owned(),
+            },
+            trace_id: "trace".to_owned(),
+        }
+    }
 
     #[test]
     fn execution_timing_handles_second_precision_without_inventing_duration()
@@ -1488,7 +650,7 @@ mod tests {
         });
         assert!(matches!(
             execution_timing(&reversed),
-            Err(OjExecutorError::ObservationInvalid)
+            Err(KubernetesJobError::ObservationInvalid)
         ));
 
         let positive = json!({
@@ -1529,17 +691,17 @@ mod tests {
         fs::write(&empty, [])?;
         assert!(matches!(
             read_bound_file(&empty),
-            Err(OjExecutorError::ConfigurationInvalid)
+            Err(KubernetesJobError::ConfigurationInvalid)
         ));
 
         let oversized = directory.path().join("oversized");
         fs::write(
             &oversized,
-            vec![b'x'; usize::try_from(super::MAX_BOUND_FILE_BYTES + 1)?],
+            vec![b'x'; usize::try_from(crate::kubernetes_job::MAX_BOUND_FILE_BYTES + 1)?],
         )?;
         assert!(matches!(
             read_bound_file(&oversized),
-            Err(OjExecutorError::ConfigurationInvalid)
+            Err(KubernetesJobError::ConfigurationInvalid)
         ));
         Ok(())
     }
@@ -1551,55 +713,8 @@ mod tests {
         let missing = directory.path().join("missing");
         assert!(matches!(
             read_bound_file(&missing),
-            Err(OjExecutorError::ConfigurationUnavailable { .. })
+            Err(KubernetesJobError::ConfigurationUnavailable { .. })
         ));
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn authorized_reads_a_rotated_projected_token_for_each_request()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir()?;
-        let first_revision = directory.path().join("..2026_09_09_00_00_00.000000001");
-        let second_revision = directory.path().join("..2026_09_09_00_00_01.000000001");
-        fs::create_dir(&first_revision)?;
-        fs::create_dir(&second_revision)?;
-        fs::write(first_revision.join("token"), b"first-token")?;
-        fs::write(second_revision.join("token"), b"second-token")?;
-        symlink(&first_revision, directory.path().join("..data"))?;
-        let projected = directory.path().join("token");
-        symlink("..data/token", &projected)?;
-        let executor = OjKubernetesExecutor {
-            configuration: OjExecutorConfiguration {
-                kubernetes_api_server: Url::parse("https://kubernetes.example.test/")?,
-                kubernetes_bearer_token_file: projected,
-                kubernetes_ca_file: directory.path().join("ca.crt"),
-                runner_namespace: TEST_NAMESPACE.to_owned(),
-                request_timeout_milliseconds: 2_000,
-            },
-            client: Client::new(),
-        };
-
-        let first = executor
-            .authorized(executor.client.get("https://kubernetes.example.test/"))?
-            .build()?;
-        assert_eq!(
-            first.headers()[reqwest::header::AUTHORIZATION],
-            "Bearer first-token"
-        );
-
-        fs::remove_file(directory.path().join("..data"))?;
-        symlink(&second_revision, directory.path().join("..data"))?;
-        let second = executor
-            .authorized(executor.client.get("https://kubernetes.example.test/"))?
-            .build()?;
-        assert_eq!(
-            second.headers()[reqwest::header::AUTHORIZATION],
-            "Bearer second-token"
-        );
         Ok(())
     }
 
@@ -1656,13 +771,29 @@ mod tests {
             },
         };
         request.validate()?;
+        let admission = contracts::execution::TaskExecutionBinding {
+            task_run_id,
+            execution_generation: 1,
+            resource_request_id: contracts::ResourceRequestId::new(),
+            capacity_claim_id: contracts::CapacityClaimId::new(),
+            lease_id: contracts::LeaseId::new(),
+            claim_revision: contracts::Revision::new(1)?,
+            lease_revision: contracts::Revision::new(1)?,
+            project_id: contracts::ProjectId::new(),
+            provider_binding: "kubernetes-job".to_owned(),
+            namespace: TEST_NAMESPACE.to_owned(),
+            workload_name: attempt_job_name(request.attempt_id),
+            trace_id: request.trace_id.clone(),
+        };
+        admission.validate()?;
         let intent = EvaluationExecutionResources {
-            schema_version: EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
+            schema_version: crate::EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION.to_owned(),
             run_id,
             step_run_id,
             task_run_id,
             namespace: TEST_NAMESPACE.to_owned(),
             kind: EvaluationExecutionKind::Program,
+            admission: Some(admission),
             request: serde_json::to_value(&request)?,
             objects: Vec::new(),
         };
@@ -1890,8 +1021,8 @@ mod tests {
             }
         });
         let client = Client::builder().no_proxy().build()?;
-        let executor = OjKubernetesExecutor {
-            configuration: OjExecutorConfiguration {
+        let api = KubernetesApiClient::for_test(
+            KubernetesApiConfiguration {
                 kubernetes_api_server: Url::parse(&format!("http://{address}/"))?,
                 kubernetes_bearer_token_file: token_file.path().to_owned(),
                 kubernetes_ca_file: PathBuf::from("unused-ca"),
@@ -1899,7 +1030,11 @@ mod tests {
                 request_timeout_milliseconds: 2_000,
             },
             client,
-        };
+            "labweaver-oj-executor",
+            "program.oj",
+            "LW_OJ_",
+        );
+        let executor = OjKubernetesExecutor { api };
         Ok(FakeExecutor {
             executor,
             objects,
@@ -1911,21 +1046,25 @@ mod tests {
 
     fn hydrated(
         intent: &EvaluationExecutionResources,
-        refs: Vec<(String, String, String, String)>,
+        refs: Vec<ExecutionObjectRef>,
     ) -> EvaluationExecutionResources {
         EvaluationExecutionResources {
-            objects: refs
-                .into_iter()
-                .map(
-                    |(api_version, resource, name, uid)| EvaluationExecutionObjectRef {
-                        api_version,
-                        resource,
-                        name,
-                        uid,
-                    },
-                )
-                .collect(),
+            objects: refs,
             ..intent.clone()
+        }
+    }
+
+    fn execution_ref(resource: &str, name: &str, uid: &str) -> ExecutionObjectRef {
+        let api_version = match resource {
+            "jobs" => "batch/v1",
+            "networkpolicies" => "networking.k8s.io/v1",
+            _ => "v1",
+        };
+        ExecutionObjectRef {
+            api_version: api_version.to_owned(),
+            resource: resource.to_owned(),
+            name: name.to_owned(),
+            uid: uid.to_owned(),
         }
     }
 
@@ -1963,9 +1102,9 @@ mod tests {
             .await?
             .ok_or("partial bundle must be discoverable")?;
         assert_eq!(refs.len(), 3);
-        assert_eq!(refs[0].1, "configmaps");
-        assert_eq!(refs[1].1, "networkpolicies");
-        assert_eq!(refs[2].1, "secrets");
+        assert_eq!(refs[0].resource, "configmaps");
+        assert_eq!(refs[1].resource, "networkpolicies");
+        assert_eq!(refs[2].resource, "secrets");
         let recovered = hydrated(&intent, refs);
         recovered.validate_for(intent.run_id, intent.step_run_id, intent.task_run_id)?;
 
@@ -1975,7 +1114,12 @@ mod tests {
             fake.executor.observe_recovery(&recovered, &request).await?,
             OjJobObservation::Missing
         ));
-        assert!(fake.executor.cleanup_recovery(&recovered).await?);
+        assert!(
+            fake.executor
+                .cleanup_recovery(&recovered)
+                .await?
+                .is_confirmed()
+        );
         assert!(
             fake.objects
                 .lock()
@@ -2009,13 +1153,18 @@ mod tests {
         // exact attempt object and returns a terminal cancellation only after
         // the second GET confirms absence.
         let cleanup_complete = fake.executor.cleanup_recovery(&intent).await?;
-        assert!(cleanup_complete);
+        assert!(cleanup_complete.is_confirmed());
         assert_eq!(
-            cancellation_observation(cleanup_complete),
+            cancellation_observation(cleanup_complete.is_confirmed()),
             OjCancellationObservation::Cancelled
         );
         // A replay is finite and idempotent; it never starts a new Job.
-        assert!(fake.executor.cleanup_recovery(&intent).await?);
+        assert!(
+            fake.executor
+                .cleanup_recovery(&intent)
+                .await?
+                .is_confirmed()
+        );
         assert!(
             fake.objects
                 .lock()
@@ -2044,17 +1193,14 @@ mod tests {
             path,
             replacement_uid: None,
         });
-        let recovered = hydrated(
-            &intent,
-            vec![(
-                "batch/v1".to_owned(),
-                "jobs".to_owned(),
-                job_name,
-                "uid-job".to_owned(),
-            )],
-        );
+        let recovered = hydrated(&intent, vec![execution_ref("jobs", &job_name, "uid-job")]);
 
-        assert!(fake.executor.cleanup_recovery(&recovered).await?);
+        assert!(
+            fake.executor
+                .cleanup_recovery(&recovered)
+                .await?
+                .is_confirmed()
+        );
         assert!(
             fake.objects
                 .lock()
@@ -2083,15 +1229,7 @@ mod tests {
             path: path.clone(),
             replacement_uid: Some("uid-replacement".to_owned()),
         });
-        let recovered = hydrated(
-            &intent,
-            vec![(
-                "batch/v1".to_owned(),
-                "jobs".to_owned(),
-                job_name,
-                "uid-job".to_owned(),
-            )],
-        );
+        let recovered = hydrated(&intent, vec![execution_ref("jobs", &job_name, "uid-job")]);
 
         assert!(matches!(
             fake.executor.cleanup_recovery(&recovered).await,
@@ -2138,14 +1276,14 @@ mod tests {
         drifted["metadata"]["annotations"]["labweaver.io/request-sha256"] = json!("different");
         assert!(matches!(
             verify_cleanup_owned(&drifted, &expected),
-            Err(OjExecutorError::IdentityConflict)
+            Err(KubernetesJobError::IdentityConflict)
         ));
 
         let mut drifted = resource();
         drifted["metadata"]["namespace"] = json!("another-namespace");
         assert!(matches!(
             verify_cleanup_owned(&drifted, &expected),
-            Err(OjExecutorError::IdentityConflict)
+            Err(KubernetesJobError::IdentityConflict)
         ));
     }
 
@@ -2156,12 +1294,12 @@ mod tests {
         let preconditions = delete_preconditions(&current)?;
         assert_eq!(
             preconditions,
-            OjDeletePreconditions {
+            KubernetesDeletePreconditions {
                 uid: "f7780f4c-e8db-4f35-82d1-bc56b5652830".to_owned(),
                 resource_version: "1042".to_owned(),
             }
         );
-        let target = OjCleanupTarget {
+        let target = KubernetesCleanupTarget {
             namespace: "labweaver-evaluation-runs".to_owned(),
             resource: "jobs".to_owned(),
             name: "lw-oj-attempt".to_owned(),
@@ -2182,7 +1320,7 @@ mod tests {
         );
         assert!(matches!(
             classify_delete_status(StatusCode::CONFLICT),
-            Err(OjExecutorError::IdentityConflict)
+            Err(KubernetesJobError::IdentityConflict)
         ));
         Ok(())
     }
@@ -2203,7 +1341,14 @@ mod tests {
                 "egress":[],
             },
         });
-        assert!(verify_runner_default_deny(&policy, "labweaver-evaluation-runs").is_ok());
+        assert!(
+            verify_runner_default_deny(
+                &policy,
+                "labweaver-evaluation-runs",
+                "oj-runner-default-deny"
+            )
+            .is_ok()
+        );
 
         let normalized = json!({
             "apiVersion":"networking.k8s.io/v1",
@@ -2217,35 +1362,57 @@ mod tests {
                 "policyTypes":["Ingress","Egress"],
             },
         });
-        assert!(verify_runner_default_deny(&normalized, "labweaver-evaluation-runs").is_ok());
+        assert!(
+            verify_runner_default_deny(
+                &normalized,
+                "labweaver-evaluation-runs",
+                "oj-runner-default-deny"
+            )
+            .is_ok()
+        );
 
         let mut allows_egress = policy.clone();
         allows_egress["spec"]["egress"] = json!([{}]);
         assert!(matches!(
-            verify_runner_default_deny(&allows_egress, "labweaver-evaluation-runs"),
-            Err(OjExecutorError::NetworkIsolationUnavailable)
+            verify_runner_default_deny(
+                &allows_egress,
+                "labweaver-evaluation-runs",
+                "oj-runner-default-deny"
+            ),
+            Err(KubernetesJobError::NetworkIsolationUnavailable)
         ));
 
         let mut wrong_rule_type = normalized;
         wrong_rule_type["spec"]["egress"] = json!({});
         assert!(matches!(
-            verify_runner_default_deny(&wrong_rule_type, "labweaver-evaluation-runs"),
-            Err(OjExecutorError::NetworkIsolationUnavailable)
+            verify_runner_default_deny(
+                &wrong_rule_type,
+                "labweaver-evaluation-runs",
+                "oj-runner-default-deny"
+            ),
+            Err(KubernetesJobError::NetworkIsolationUnavailable)
         ));
 
         let mut selected_only = policy;
         selected_only["spec"]["podSelector"] =
             json!({"matchLabels":{"labweaver.io/attempt-id":"attempt"}});
         assert!(matches!(
-            verify_runner_default_deny(&selected_only, "labweaver-evaluation-runs"),
-            Err(OjExecutorError::NetworkIsolationUnavailable)
+            verify_runner_default_deny(
+                &selected_only,
+                "labweaver-evaluation-runs",
+                "oj-runner-default-deny"
+            ),
+            Err(KubernetesJobError::NetworkIsolationUnavailable)
         ));
     }
 
     #[test]
     fn pod_oom_and_explicit_cancel_have_distinct_terminal_outcomes() {
         assert_eq!(
-            failed_container_diagnostic(&json!({"reason":"OOMKilled","exitCode":137})),
+            failed_container_diagnostic(
+                &json!({"reason":"OOMKilled","exitCode":137}),
+                &test_identity()
+            ),
             "LW_OJ_MEMORY_LIMIT"
         );
         assert_eq!(

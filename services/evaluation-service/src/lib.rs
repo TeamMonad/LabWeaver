@@ -13,8 +13,10 @@ pub mod control_plane;
 pub mod coordinator;
 pub mod environment_client;
 pub mod execution;
+pub mod execution_backend;
 pub mod freeze;
 pub mod freeze_store;
+pub mod kubernetes_job;
 pub mod kubernetes_runner;
 pub mod materializer;
 pub mod oj;
@@ -47,9 +49,9 @@ pub use command_store::{
 };
 pub use control_plane::{
     EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION, EvaluationControlStoreError,
-    EvaluationExecutionCheckpoint, EvaluationExecutionKind, EvaluationExecutionObjectRef,
-    EvaluationExecutionResources, EvaluationReleaseReservation, EvaluationRunReservation,
-    EvaluationStepLease, PendingResourceMeterDelivery, PgEvaluationControlStore,
+    EvaluationExecutionCheckpoint, EvaluationExecutionKind, EvaluationExecutionResources,
+    EvaluationReleaseReservation, EvaluationRunReservation, EvaluationStepLease,
+    PendingResourceMeterDelivery, PgEvaluationControlStore,
 };
 pub use coordinator::{FreezeCoordinator, FreezeCoordinatorConfiguration, FreezeCoordinatorError};
 pub use environment_client::{
@@ -61,6 +63,7 @@ pub use execution::{
     ProgramCommandPaths, StepExecutionPlan, TaskResourceError, TaskResourceLifecycle,
     expand_program_argv, plan_deterministic_step,
 };
+pub use execution_backend::{AdmittedExecution, ExecutionAdmissionError};
 pub use freeze::{FreezeRequest, FreezeService, FreezeServiceError};
 pub use freeze_store::{BeginFreeze, FreezeLease, PgFreezeStore};
 pub use kubernetes_runner::{

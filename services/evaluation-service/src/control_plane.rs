@@ -29,6 +29,7 @@ use contracts::{
         CloudEvent, EVENT_CONTRACTS, EvaluationReleasePublished, EvaluationRunEvent,
         EvaluationStepRunEvent, EventContract, SPEC_VERSION, subjects,
     },
+    execution::{ExecutionObjectRef, TaskExecutionBinding},
     http::{
         AuthoringPublicationAdmissionBinding, CursorPage, IdempotencyKey,
         InternalCreateEvaluationRunRequest, InternalEvaluationRunMutationRequest,
@@ -99,7 +100,7 @@ impl EvaluationStepLease {
 /// state.  Recovery uses these references to read the live object, checks its UID and ownership
 /// labels, and only then performs a deletion.
 pub const EVALUATION_EXECUTION_RESOURCES_SCHEMA_VERSION: &str =
-    "evaluation.labweaver.io/execution-resources/v1";
+    "evaluation.labweaver.io/execution-resources/v2";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,16 +112,6 @@ pub enum EvaluationExecutionKind {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct EvaluationExecutionObjectRef {
-    pub api_version: String,
-    /// Kubernetes collection name, such as `jobs` or `configmaps`.
-    pub resource: String,
-    pub name: String,
-    pub uid: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvaluationExecutionResources {
     pub schema_version: String,
     pub run_id: EvaluationRunId,
@@ -128,11 +119,18 @@ pub struct EvaluationExecutionResources {
     pub task_run_id: TaskRunId,
     pub namespace: String,
     pub kind: EvaluationExecutionKind,
+    /// Admitted Resource binding for a Kubernetes workload attempt.
+    ///
+    /// `Program` and `AnsibleProbe` attempts must carry the exact binding that was
+    /// created from an acknowledged `TaskResourceStatus`; the durable checkpoint
+    /// is the only source of execution identity on recovery. `LlmReview` runs in
+    /// the Agent service without a Resource reservation and therefore has none.
+    pub admission: Option<TaskExecutionBinding>,
     /// Immutable, payload-free request consumed by the concrete executor.
     /// Materializer URLs and SSH private/signed credentials are intentionally
     /// kept out of this checkpoint and remain Kubernetes Secret data.
     pub request: serde_json::Value,
-    pub objects: Vec<EvaluationExecutionObjectRef>,
+    pub objects: Vec<ExecutionObjectRef>,
 }
 
 impl EvaluationExecutionResources {
@@ -155,6 +153,25 @@ impl EvaluationExecutionResources {
             || self.objects.len() > 8
         {
             return Err(EvaluationControlStoreError::ContractInvalid);
+        }
+        match self.kind {
+            EvaluationExecutionKind::Program | EvaluationExecutionKind::AnsibleProbe => {
+                let admission = self
+                    .admission
+                    .as_ref()
+                    .ok_or(EvaluationControlStoreError::ContractInvalid)?;
+                admission
+                    .validate()
+                    .map_err(|_| EvaluationControlStoreError::ContractInvalid)?;
+                if admission.task_run_id != task_run_id || admission.namespace != self.namespace {
+                    return Err(EvaluationControlStoreError::ContractInvalid);
+                }
+            }
+            EvaluationExecutionKind::LlmReview => {
+                if self.admission.is_some() {
+                    return Err(EvaluationControlStoreError::ContractInvalid);
+                }
+            }
         }
         let mut identities = BTreeSet::new();
         for object in &self.objects {

@@ -49,9 +49,7 @@ use crate::ansible_probe_job::AnsibleProbeJobBinding;
 use crate::ansible_probe_job::AnsibleProbeJobResources;
 use crate::authoring_client::AuthoringAdmissionClient;
 use crate::control_plane::PgEvaluationControlStore;
-use crate::control_plane::{
-    EvaluationExecutionKind, EvaluationExecutionObjectRef, EvaluationExecutionResources,
-};
+use crate::control_plane::{EvaluationExecutionKind, EvaluationExecutionResources};
 use crate::environment_client::{
     EnvironmentExecutionBindingClient, EnvironmentExecutionBindingClientError,
     ResolvedEnvironmentExecutionBinding,
@@ -433,6 +431,11 @@ impl KubernetesEvaluationRunner {
             }
             return TerminalResult::Cancelled.into_completion();
         }
+        // The admitted binding is the only execution identity that can reach
+        // `submit`. It is created from the acknowledged Resource status and
+        // persisted with the execution intent before any Kubernetes object is
+        // applied, so a recovery can never invent a new reservation.
+        let admission = Self::admit_execution(&context, &plan, &resource_status)?;
         let started = match plan {
             StepExecutionPlan::Program {
                 toolchain_profile,
@@ -449,6 +452,7 @@ impl KubernetesEvaluationRunner {
                     &input,
                     &test_groups,
                     limits,
+                    &admission,
                 )
                 .await?
             }
@@ -463,6 +467,7 @@ impl KubernetesEvaluationRunner {
                     &playbook_profile,
                     &module_allowlist,
                     &assertions,
+                    &admission,
                 )
                 .await?
             }
@@ -521,6 +526,30 @@ impl KubernetesEvaluationRunner {
         Ok(completion)
     }
 
+    fn admit_execution(
+        context: &EvaluationAttemptContext,
+        plan: &StepExecutionPlan,
+        status: &contracts::http::TaskResourceStatus,
+    ) -> Result<crate::execution_backend::AdmittedExecution, ExecutionError> {
+        let attempt = &context.lease.task_run_id.as_uuid().simple().to_string()[..20];
+        let workload_name = match plan {
+            StepExecutionPlan::Program { .. } => format!("lw-oj-{attempt}"),
+            StepExecutionPlan::AnsibleProbe { .. } => format!("lw-ap-{attempt}"),
+            StepExecutionPlan::Advisory { .. } | StepExecutionPlan::FileAssertion { .. } => {
+                return Err(ExecutionError::Backend(
+                    "execution_admission_mismatch".to_owned(),
+                ));
+            }
+        };
+        crate::execution_backend::AdmittedExecution::admit(
+            status,
+            u64::from(context.lease.attempt),
+            workload_name,
+            context.lease.trace_id.clone(),
+        )
+        .map_err(|_| ExecutionError::Backend("execution_admission_rejected".to_owned()))
+    }
+
     async fn resume_attempt(
         &self,
         context: &EvaluationAttemptContext,
@@ -563,6 +592,19 @@ impl KubernetesEvaluationRunner {
             .load_status()
             .await
             .map_err(|error| map_task_resource(error, "load"))?;
+        // The durable admission must still name the exact reservation and
+        // generation held by this lease. A lease renewal may advance revisions,
+        // but a different reservation or generation is a stale worker.
+        let admission = recovery
+            .admission
+            .clone()
+            .ok_or_else(|| ExecutionError::Backend("execution_admission_missing".to_owned()))?;
+        crate::execution_backend::AdmittedExecution::recover(
+            admission,
+            &status,
+            u64::from(context.lease.attempt),
+        )
+        .map_err(|_| ExecutionError::IdentityMismatch)?;
         if let Some(completion) = checkpoint.terminal_completion {
             self.cleanup_recovery(context, &recovery).await?;
             if !status.cleanup_confirmed {
@@ -747,17 +789,7 @@ impl KubernetesEvaluationRunner {
             return Ok(None);
         };
         let mut hydrated = recovery.clone();
-        hydrated.objects = objects
-            .into_iter()
-            .map(
-                |(api_version, resource, name, uid)| EvaluationExecutionObjectRef {
-                    api_version,
-                    resource,
-                    name,
-                    uid,
-                },
-            )
-            .collect();
+        hydrated.objects = objects;
         hydrated
             .validate_for(
                 context.lease.run_id,
@@ -847,7 +879,7 @@ impl KubernetesEvaluationRunner {
             if context.lease_lost.is_cancelled() {
                 return Err(ExecutionError::LeaseLost);
             }
-            let complete = match recovery.kind {
+            let status = match recovery.kind {
                 EvaluationExecutionKind::Program => self
                     .oj
                     .cleanup_recovery(recovery)
@@ -858,15 +890,19 @@ impl KubernetesEvaluationRunner {
                     .cleanup_recovery(recovery)
                     .await
                     .map_err(|_| ExecutionError::Backend("probe_cleanup_failed".to_owned()))?,
-                EvaluationExecutionKind::LlmReview => true,
+                EvaluationExecutionKind::LlmReview => {
+                    contracts::execution::ExecutionCleanupStatus::Confirmed
+                }
             };
-            if complete {
-                return Ok(());
+            match status {
+                contracts::execution::ExecutionCleanupStatus::Confirmed => return Ok(()),
+                contracts::execution::ExecutionCleanupStatus::Pending { .. } => {}
+                contracts::execution::ExecutionCleanupStatus::Unknown { diagnostic } => {
+                    return Err(ExecutionError::Backend(diagnostic.as_str().to_owned()));
+                }
             }
             if Instant::now() >= deadline {
-                return Err(ExecutionError::Backend(
-                    "execution_cleanup_pending".to_owned(),
-                ));
+                return Err(Self::unresolved_cleanup("LW_EXECUTION_CLEANUP_UNKNOWN"));
             }
             tokio::time::sleep(Duration::from_millis(
                 self.configuration
@@ -988,6 +1024,7 @@ impl KubernetesEvaluationRunner {
                 context,
                 self.configuration.runner_namespace.as_str(),
                 EvaluationExecutionKind::LlmReview,
+                None,
                 &request,
                 Vec::new(),
             )?;
@@ -1021,6 +1058,7 @@ impl KubernetesEvaluationRunner {
             context,
             self.configuration.runner_namespace.as_str(),
             EvaluationExecutionKind::LlmReview,
+            None,
             &request,
             Vec::new(),
         )?;
@@ -1234,6 +1272,7 @@ impl KubernetesEvaluationRunner {
         input: &str,
         test_groups: &[contracts::evaluation::TestGroup],
         limits: contracts::evaluation::ExecutionLimits,
+        admission: &crate::execution_backend::AdmittedExecution,
     ) -> Result<StartedExecution, ExecutionError> {
         let (request, package, package_bytes, profile_file, profile) = self
             .build_program_request(
@@ -1250,6 +1289,7 @@ impl KubernetesEvaluationRunner {
             context,
             self.configuration.runner_namespace.as_str(),
             EvaluationExecutionKind::Program,
+            Some(admission.binding().clone()),
             &request,
             Vec::new(),
         )?;
@@ -1318,6 +1358,7 @@ impl KubernetesEvaluationRunner {
             context,
             self.configuration.runner_namespace.as_str(),
             EvaluationExecutionKind::Program,
+            Some(admission.binding().clone()),
             &request,
             objects,
         )?;
@@ -1476,6 +1517,7 @@ impl KubernetesEvaluationRunner {
         playbook_profile: &str,
         module_allowlist: &[String],
         assertions: &[contracts::evaluation::FactAssertion],
+        admission: &crate::execution_backend::AdmittedExecution,
     ) -> Result<StartedExecution, ExecutionError> {
         let (request, package, package_bytes, profile_file, credentials) = self
             .build_ansible_probe_request(
@@ -1490,6 +1532,7 @@ impl KubernetesEvaluationRunner {
             context,
             self.configuration.runner_namespace.as_str(),
             EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
             &request,
             Vec::new(),
         )?;
@@ -1535,6 +1578,7 @@ impl KubernetesEvaluationRunner {
             context,
             self.configuration.runner_namespace.as_str(),
             EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
             &request,
             objects,
         )?;
@@ -1696,7 +1740,10 @@ impl KubernetesEvaluationRunner {
                         ExecutionTiming::unknown(),
                     ));
                 }
-                OjJobObservation::Completed { receipt, timing } => {
+                OjJobObservation::Completed {
+                    receipt,
+                    observation,
+                } => {
                     return Ok((
                         oj_receipt_result(
                             request.phase,
@@ -1704,14 +1751,17 @@ impl KubernetesEvaluationRunner {
                             receipt.awarded_points,
                             receipt.diagnostic_code,
                         ),
-                        timing,
+                        crate::execution_backend::observation_timing(&observation),
                     ));
                 }
                 OjJobObservation::Failed {
                     diagnostic_code,
-                    timing,
+                    observation,
                 } => {
-                    return Ok((TerminalResult::Failed(diagnostic_code), timing));
+                    return Ok((
+                        TerminalResult::Failed(diagnostic_code),
+                        crate::execution_backend::observation_timing(&observation),
+                    ));
                 }
             }
         }
@@ -1758,7 +1808,11 @@ impl KubernetesEvaluationRunner {
                         ExecutionTiming::unknown(),
                     ));
                 }
-                AnsibleProbeJobObservation::Completed { receipt, timing } => {
+                AnsibleProbeJobObservation::Completed {
+                    receipt,
+                    observation,
+                } => {
+                    let timing = crate::execution_backend::observation_timing(&observation);
                     if receipt.terminal_status
                         == crate::ansible_probe::AnsibleProbeTerminalStatus::Succeeded
                     {
@@ -1768,9 +1822,12 @@ impl KubernetesEvaluationRunner {
                 }
                 AnsibleProbeJobObservation::Failed {
                     diagnostic_code,
-                    timing,
+                    observation,
                 } => {
-                    return Ok((TerminalResult::Failed(diagnostic_code), timing));
+                    return Ok((
+                        TerminalResult::Failed(diagnostic_code),
+                        crate::execution_backend::observation_timing(&observation),
+                    ));
                 }
             }
         }
@@ -1787,16 +1844,20 @@ impl KubernetesEvaluationRunner {
             if Self::cleanup_must_stop(context) {
                 return Err(ExecutionError::LeaseLost);
             }
-            let complete = self
+            let status = self
                 .oj
                 .cleanup(resources)
                 .await
                 .map_err(|error| map_oj_cleanup_error(&error, context, "cleanup"))?;
-            if complete {
-                return Ok(());
+            match status {
+                contracts::execution::ExecutionCleanupStatus::Confirmed => return Ok(()),
+                contracts::execution::ExecutionCleanupStatus::Pending { .. } => {}
+                contracts::execution::ExecutionCleanupStatus::Unknown { diagnostic } => {
+                    return Err(ExecutionError::Backend(diagnostic.as_str().to_owned()));
+                }
             }
             if Self::cleanup_must_stop(context) || Instant::now() >= deadline {
-                return Err(ExecutionError::Backend("oj_cleanup_pending".to_owned()));
+                return Err(Self::unresolved_cleanup("LW_OJ_CLEANUP_UNKNOWN"));
             }
             tokio::time::sleep(Duration::from_millis(
                 self.configuration
@@ -1817,16 +1878,20 @@ impl KubernetesEvaluationRunner {
             if Self::cleanup_must_stop(context) {
                 return Err(ExecutionError::LeaseLost);
             }
-            let complete = self
+            let status = self
                 .ansible_probe
                 .cleanup(resources)
                 .await
                 .map_err(|_| ExecutionError::Backend("probe_cleanup_failed".to_owned()))?;
-            if complete {
-                return Ok(());
+            match status {
+                contracts::execution::ExecutionCleanupStatus::Confirmed => return Ok(()),
+                contracts::execution::ExecutionCleanupStatus::Pending { .. } => {}
+                contracts::execution::ExecutionCleanupStatus::Unknown { diagnostic } => {
+                    return Err(ExecutionError::Backend(diagnostic.as_str().to_owned()));
+                }
             }
             if Self::cleanup_must_stop(context) || Instant::now() >= deadline {
-                return Err(ExecutionError::Backend("probe_cleanup_pending".to_owned()));
+                return Err(Self::unresolved_cleanup("LW_AP_CLEANUP_UNKNOWN"));
             }
             tokio::time::sleep(Duration::from_millis(
                 self.configuration
@@ -1838,6 +1903,15 @@ impl KubernetesEvaluationRunner {
 
     fn cleanup_must_stop(context: &EvaluationAttemptContext) -> bool {
         context.lease_lost.is_cancelled()
+    }
+
+    fn unresolved_cleanup(diagnostic_code: &str) -> ExecutionError {
+        match crate::execution_backend::cleanup_unknown(diagnostic_code) {
+            contracts::execution::ExecutionCleanupStatus::Unknown { diagnostic } => {
+                ExecutionError::Backend(diagnostic.as_str().to_owned())
+            }
+            _ => ExecutionError::Backend(diagnostic_code.to_owned()),
+        }
     }
 
     async fn load_execution_binding(
@@ -2388,8 +2462,9 @@ fn execution_resources<T: Serialize>(
     context: &EvaluationAttemptContext,
     namespace: &str,
     kind: EvaluationExecutionKind,
+    admission: Option<contracts::execution::TaskExecutionBinding>,
     request: &T,
-    objects: Vec<(String, String, String, String)>,
+    objects: Vec<contracts::execution::ExecutionObjectRef>,
 ) -> Result<EvaluationExecutionResources, ExecutionError> {
     let request = serde_json::to_value(request)
         .map_err(|_| ExecutionError::Backend("execution_request_invalid".to_owned()))?;
@@ -2401,18 +2476,9 @@ fn execution_resources<T: Serialize>(
         task_run_id: context.lease.task_run_id,
         namespace: namespace.to_owned(),
         kind,
+        admission,
         request,
-        objects: objects
-            .into_iter()
-            .map(
-                |(api_version, resource, name, uid)| EvaluationExecutionObjectRef {
-                    api_version,
-                    resource,
-                    name,
-                    uid,
-                },
-            )
-            .collect(),
+        objects,
     };
     resources
         .validate_for(
@@ -3140,10 +3206,17 @@ mod probe_recovery_tests {
             .ok_or("probe step was not claimable")?;
         let first_context = context(&fixture, &first_lease)?;
         let request = probe_request(&first_context)?;
+        let resource_status = resource_status(&first_lease, &fixture, false)?;
+        let admission = KubernetesEvaluationRunner::admit_execution(
+            &first_context,
+            &first_context.execution_plan,
+            &resource_status,
+        )?;
         let intent = super::execution_resources(
             &first_context,
             NAMESPACE,
             EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
             &request,
             Vec::new(),
         )?;
@@ -3151,7 +3224,6 @@ mod probe_recovery_tests {
             .store
             .persist_execution_intent(&first_lease, &intent)
             .await?;
-        let resource_status = resource_status(&first_lease, &fixture, false)?;
         cluster.install_probe(&request, &resource_status).await?;
         expire_lease(&fixture.pool, first_lease.step_run_id).await?;
         let recovered_lease = fixture
@@ -3265,10 +3337,17 @@ mod probe_recovery_tests {
             .ok_or("probe step was not claimable")?;
         let valid_context = context(&fixture, &lease)?;
         let request = probe_request(&valid_context)?;
+        let resource_status = resource_status(&lease, &fixture, false)?;
+        let admission = KubernetesEvaluationRunner::admit_execution(
+            &valid_context,
+            &valid_context.execution_plan,
+            &resource_status,
+        )?;
         let intent = super::execution_resources(
             &valid_context,
             NAMESPACE,
             EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
             &request,
             Vec::new(),
         )?;
@@ -3276,7 +3355,6 @@ mod probe_recovery_tests {
             .store
             .persist_execution_intent(&lease, &intent)
             .await?;
-        let resource_status = resource_status(&lease, &fixture, false)?;
         cluster.install_probe(&request, &resource_status).await?;
 
         let mut stale_lease = lease.clone();
@@ -3297,22 +3375,23 @@ mod probe_recovery_tests {
             .into_iter()
             .enumerate()
             .map(|(index, (api_version, resource, name, _))| {
-                (
-                    api_version.to_owned(),
-                    resource.to_owned(),
+                contracts::execution::ExecutionObjectRef {
+                    api_version: api_version.to_owned(),
+                    resource: resource.to_owned(),
                     name,
-                    if index == 0 {
+                    uid: if index == 0 {
                         "stale-job-uid".to_owned()
                     } else {
                         format!("probe-object-{index}")
                     },
-                )
+                }
             })
             .collect();
         let recovered_resources = super::execution_resources(
             &valid_context,
             NAMESPACE,
             EvaluationExecutionKind::AnsibleProbe,
+            Some(admission.binding().clone()),
             &request,
             wrong_objects,
         )?;

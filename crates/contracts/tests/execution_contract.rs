@@ -246,13 +246,11 @@ fn observation_requires_consistent_terminal_state() -> TestResult {
     succeeded.validate()?;
     assert!(succeeded.state.is_terminal());
 
+    // A Job deadline can be reported without a terminated main container.
     let mut failed_without_exit = succeeded.clone();
     failed_without_exit.state = ExecutionWorkloadState::Failed;
     failed_without_exit.exit_code = None;
-    assert!(matches!(
-        failed_without_exit.validate(),
-        Err(ExecutionContractError::InvalidObservation)
-    ));
+    failed_without_exit.validate()?;
 
     let mut running_with_exit = succeeded.clone();
     running_with_exit.state = ExecutionWorkloadState::Running;
