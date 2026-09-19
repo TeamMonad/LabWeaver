@@ -824,6 +824,7 @@ impl Worker {
                 Arc::clone(&self.objects),
                 lease.package.clone(),
                 self.generated_artifacts.clone(),
+                lease.object_locators.clone(),
             ));
             let runtime = agent_service::claude_code::ClaudeCodeRuntime::new_with_materializer(
                 lease.policy.clone(),
