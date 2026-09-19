@@ -13,7 +13,7 @@
 
 Project 是基本归属，Course 为可选教学关联。Work 与 Experiment 使用同一 Environment 生命周期；用途、执行后端、资源与权限组合表达。一次性任务不需要创建长期环境。
 
-Resource 持久化分配决定和租约；Environment 唯一管理环境 Namespace、Quota、PVC、容器与 VM 对象。Evaluation 管理其获授权执行范围内的 Job。不得由两个服务竞争写同一 Kubernetes 对象字段。
+Resource 持久化分配决定和租约；Environment 唯一管理环境 Namespace、Quota、PVC、容器与 VM 对象。Evaluation 管理其获授权执行范围内的一次性任务 Job，并通过统一 execution backend 创建、观察、取消与清理；准入来自 Resource 的 Task 租约，执行身份与清理确认见 [ADR 0016](../adr/0016-task-resource-admission-and-kubernetes-execution.md)。不得由两个服务竞争写同一 Kubernetes 对象字段。
 
 同步查询和即时授权直接调用所属服务。长任务使用所属领域的持久状态、Outbox、幂等与条件更新。复用现有操作 DTO、SSE 和页面组件，不增加 Operation Service 或通用 Saga。
 

@@ -24,6 +24,7 @@ pub mod diagnostic;
 pub mod environment;
 pub mod evaluation;
 pub mod events;
+pub mod execution;
 pub mod foundation;
 pub mod http;
 pub mod project;
