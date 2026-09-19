@@ -206,7 +206,9 @@ impl ExecutionObservation {
             self.state,
             ExecutionWorkloadState::Succeeded | ExecutionWorkloadState::Failed
         );
-        if self.exit_code.is_some() != terminated
+        // A failed Job may report a deadline without a terminated container, so
+        // an exit code is only rejected outside a terminal state.
+        if (self.exit_code.is_some() && !terminated)
             || self
                 .reason_code
                 .as_deref()
