@@ -363,7 +363,7 @@ test('student completes a published lab experiment through the browser terminal'
     await createProjectPolicy(request, baseURL, project.id, REAL_PROVIDER_BUDGET)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    const packageData = await uploadPackageDirectoryByUi(page, packageCopy)
+    const packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.frozenPath)
     const run = await startExperimentRunByUi(page, project.id)
     const completed = await waitForExperimentRun(request, project.id, run.id)
     const built = await waitForBuiltCandidate(request, project.id, completed.environmentCandidateId)

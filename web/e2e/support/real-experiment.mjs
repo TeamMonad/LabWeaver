@@ -123,11 +123,11 @@ export async function createSecurityControlledPackage(goldenBaseImage) {
   }
 }
 
-export async function uploadPackageDirectoryByUi(page, directory) {
+export async function uploadPackageDirectoryByUi(page, directory, expectedPath = 'student/auth.c') {
   const fileInput = page.locator('input[type=file][webkitdirectory]')
   await fileInput.setInputFiles(directory)
   const fileRegion = page.getByRole('region', { name: '待上传材料文件', exact: true })
-  await expect(fileRegion).toContainText('student/auth.c')
+  await expect(fileRegion).toContainText(expectedPath)
   const visiblePaths = new Set(await fileRegion.locator('.file-path').allTextContents())
   const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
   const expectedPaths = [
