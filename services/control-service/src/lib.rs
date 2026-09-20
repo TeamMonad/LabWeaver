@@ -7351,7 +7351,7 @@ mod tests {
     #[test]
     fn virtual_machine_base_catalog_resolves_reviewed_bindings_only()
     -> Result<(), Box<dyn std::error::Error>> {
-        let catalog = multi_base_catalog()?;
+        let catalog = multi_base_catalog();
         assert!(catalog.validate());
         let ubuntu = &catalog.bases[0].base_disk;
         let cirros = &catalog.bases[1].base_disk;
@@ -7414,8 +7414,8 @@ mod tests {
         Ok(())
     }
 
-    fn multi_base_catalog() -> Result<VirtualMachineBaseCatalog, Box<dyn std::error::Error>> {
-        Ok(VirtualMachineBaseCatalog {
+    fn multi_base_catalog() -> VirtualMachineBaseCatalog {
+        VirtualMachineBaseCatalog {
             provider_binding: "kubevirt-primary-v1".to_owned(),
             storage_class_binding: "vm-rwo-primary-v1".to_owned(),
             max_bases: 8,
@@ -7448,7 +7448,7 @@ mod tests {
                     format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
                 },
             ],
-        })
+        }
     }
 
     fn vm_candidate(
