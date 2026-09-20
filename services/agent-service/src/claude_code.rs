@@ -1164,6 +1164,7 @@ pub struct ClaudeCodeReviewFailure {
 
 struct AuditContext<'a> {
     track: AgentTrackKind,
+    tool_policy_sha256: Sha256Digest,
     input: &'a ImmutableEgressInput,
     schema: &'a Value,
     prompt: &'a str,
@@ -1308,6 +1309,8 @@ impl ClaudeCodeRuntime {
         cancellation: RunCancellation,
         expected_environment_class: EnvironmentClass,
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        let authoring = matches!(scope, ExecutionScope::Authoring(_));
+        let tool_policy = tool_policy_sha256(authoring);
         let (schema, prompt) = match track {
             AgentTrackKind::Environment => (
                 provider_environment_schema().map_err(|()| {
@@ -1316,6 +1319,7 @@ impl ClaudeCodeRuntime {
                         &input,
                         &Value::Null,
                         "",
+                        tool_policy,
                         ClaudeCodeRuntimeError::ProtocolInvalid,
                         None,
                     )
@@ -1329,6 +1333,7 @@ impl ClaudeCodeRuntime {
                         &input,
                         &Value::Null,
                         "",
+                        tool_policy,
                         ClaudeCodeRuntimeError::ProtocolInvalid,
                         None,
                     )
@@ -1340,12 +1345,18 @@ impl ClaudeCodeRuntime {
                 WORK_CONFIGURATION_PROMPT.to_owned(),
             ),
         };
+        let prompt = if authoring {
+            format!("{prompt}\n\n{AUTHORING_SANDBOX_PROMPT}")
+        } else {
+            prompt
+        };
         let schema_text = serde_json::to_string(&schema).map_err(|_| {
             self.failure(
                 track,
                 &input,
                 &schema,
                 &prompt,
+                tool_policy,
                 ClaudeCodeRuntimeError::ProtocolInvalid,
                 None,
             )
@@ -1357,6 +1368,7 @@ impl ClaudeCodeRuntime {
                 &input,
                 &schema,
                 &prompt,
+                tool_policy,
                 ClaudeCodeRuntimeError::Cancelled,
                 None,
             ));
@@ -1369,6 +1381,7 @@ impl ClaudeCodeRuntime {
                         &input,
                         &schema,
                         &prompt,
+                        tool_policy,
                         ClaudeCodeRuntimeError::Cancelled,
                         None,
                     ));
@@ -1379,20 +1392,21 @@ impl ClaudeCodeRuntime {
                         &input,
                         &schema,
                         &prompt,
+                        tool_policy,
                         ClaudeCodeRuntimeError::RuntimeUnavailable,
                         None,
                     ))?
                 }
             }
         };
-        self.verify_runtime_identity()
-            .await
-            .map_err(|error| self.failure(track, &input, &schema, &prompt, error, None))?;
+        self.verify_runtime_identity().await.map_err(|error| {
+            self.failure(track, &input, &schema, &prompt, tool_policy, error, None)
+        })?;
         let max_repairs = self.policy.budget.max_schema_repairs;
         let mut repairs = 0_u8;
         let mut current_prompt = prompt.clone();
         loop {
-            let command = build_command(&self.policy, &input, &current_prompt);
+            let command = build_command(&self.policy, &input, &current_prompt, authoring);
             let process_output = self
                 .process
                 .execute(scope, command, cancellation.clone())
@@ -1409,7 +1423,15 @@ impl ClaudeCodeRuntime {
                         }
                         ClaudeCodeProcessError::Io => ClaudeCodeRuntimeError::ExecutionFailed,
                     };
-                    self.failure(track, &input, &schema, &current_prompt, runtime_error, None)
+                    self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &current_prompt,
+                        tool_policy,
+                        runtime_error,
+                        None,
+                    )
                 })?;
             let parsed = self
                 .parse_result(
@@ -1417,6 +1439,7 @@ impl ClaudeCodeRuntime {
                     &input,
                     &schema,
                     &current_prompt,
+                    tool_policy,
                     &process_output,
                     expected_environment_class,
                 )
@@ -1565,6 +1588,7 @@ impl ClaudeCodeRuntime {
                 Arc::clone(&input),
                 input_sha256,
                 &prompt,
+                false,
             );
             let process_output = self
                 .process
@@ -1682,12 +1706,17 @@ impl ClaudeCodeRuntime {
         clippy::too_many_lines,
         reason = "candidate parsing applies schema, policy, and materialization gates in order"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one parse boundary carries the immutable candidate, policy and audit identity"
+    )]
     async fn parse_result(
         &self,
         track: AgentTrackKind,
         input: &ImmutableEgressInput,
         schema: &Value,
         prompt: &str,
+        tool_policy: Sha256Digest,
         process_output: &ClaudeCodeProcessOutput,
         expected_environment_class: EnvironmentClass,
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
@@ -1699,6 +1728,7 @@ impl ClaudeCodeRuntime {
                     input,
                     schema,
                     prompt,
+                    tool_policy,
                     process_output.classified_error().unwrap_or_else(|| {
                         if process_output.is_success() {
                             parse_error
@@ -1712,10 +1742,19 @@ impl ClaudeCodeRuntime {
         };
         let envelope = stream.envelope;
         let usage = envelope.usage().map_err(|error| {
-            self.failure(track, input, schema, prompt, error, Some(process_output))
+            self.failure(
+                track,
+                input,
+                schema,
+                prompt,
+                tool_policy,
+                error,
+                Some(process_output),
+            )
         })?;
         let mut audit = self.audit(AuditContext {
             track,
+            tool_policy_sha256: tool_policy,
             input,
             schema,
             prompt,
@@ -1929,17 +1968,23 @@ impl ClaudeCodeRuntime {
         Ok(ClaudeCodeExecution { document, audit })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one failure boundary carries the immutable candidate, policy and audit identity"
+    )]
     fn failure(
         &self,
         track: AgentTrackKind,
         input: &ImmutableEgressInput,
         schema: &Value,
         prompt: &str,
+        tool_policy_sha256: Sha256Digest,
         error: ClaudeCodeRuntimeError,
         process_output: Option<&ClaudeCodeProcessOutput>,
     ) -> ClaudeCodeFailure {
         let audit = self.audit(AuditContext {
             track,
+            tool_policy_sha256,
             input,
             schema,
             prompt,
@@ -1979,7 +2024,7 @@ impl ClaudeCodeRuntime {
             claude_code_version: binding.claude_code_version.clone(),
             prompt_sha256: Sha256Digest::of_bytes(context.prompt.as_bytes()),
             schema_sha256,
-            tool_policy_sha256: tool_policy_sha256(),
+            tool_policy_sha256: context.tool_policy_sha256,
             input_sha256: context.input.sha256(),
             output_sha256: None,
             session_id: context.session_id,
@@ -2137,8 +2182,16 @@ fn build_command(
     policy: &ProjectLlmEgressPolicy,
     input: &ImmutableEgressInput,
     prompt: &str,
+    authoring: bool,
 ) -> ClaudeCodeCommand {
-    build_command_from_bytes(policy, policy.budget, input.bytes(), input.sha256(), prompt)
+    build_command_from_bytes(
+        policy,
+        policy.budget,
+        input.bytes(),
+        input.sha256(),
+        prompt,
+        authoring,
+    )
 }
 
 fn build_command_from_bytes(
@@ -2147,7 +2200,17 @@ fn build_command_from_bytes(
     stdin: Arc<[u8]>,
     stdin_sha256: Sha256Digest,
     prompt: &str,
+    authoring: bool,
 ) -> ClaudeCodeCommand {
+    let (max_turns, tools, permission_mode) = if authoring {
+        (
+            AUTHORING_MAX_TURNS.to_string(),
+            AUTHORING_TOOLS.to_owned(),
+            "bypassPermissions",
+        )
+    } else {
+        ("1".to_owned(), String::new(), "dontAsk")
+    };
     let args = vec![
         "--bare".to_owned(),
         "--print".to_owned(),
@@ -2157,7 +2220,7 @@ fn build_command_from_bytes(
         "--model".to_owned(),
         policy.binding.model.clone(),
         "--max-turns".to_owned(),
-        "1".to_owned(),
+        max_turns,
         "--max-budget-usd".to_owned(),
         microusd_to_usd(budget.max_cost_microusd),
         "--no-session-persistence".to_owned(),
@@ -2167,9 +2230,9 @@ fn build_command_from_bytes(
         "--disable-slash-commands".to_owned(),
         "--strict-mcp-config".to_owned(),
         "--tools".to_owned(),
-        String::new(),
+        tools,
         "--permission-mode".to_owned(),
-        "dontAsk".to_owned(),
+        permission_mode.to_owned(),
         "--system-prompt".to_owned(),
         SYSTEM_PROMPT.to_owned(),
         prompt.to_owned(),
@@ -2583,8 +2646,18 @@ fn contains_protected_field(output: &Value) -> bool {
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
 
-fn tool_policy_sha256() -> Sha256Digest {
-    Sha256Digest::of_bytes(TOOL_POLICY_CANONICAL_JSON)
+const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
+
+const AUTHORING_MAX_TURNS: u32 = 60;
+const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
+const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. The final response must still be exactly one JSON object satisfying the required schema.";
+
+fn tool_policy_sha256(authoring: bool) -> Sha256Digest {
+    if authoring {
+        Sha256Digest::of_bytes(AUTHORING_TOOL_POLICY_CANONICAL_JSON)
+    } else {
+        Sha256Digest::of_bytes(TOOL_POLICY_CANONICAL_JSON)
+    }
 }
 
 fn microusd_to_usd(value: u64) -> String {
@@ -2781,7 +2854,7 @@ mod tests {
             "sessionPersistence": false
         });
         assert_eq!(
-            super::tool_policy_sha256(),
+            super::tool_policy_sha256(false),
             Sha256Digest::of_canonical(&document)?
         );
         Ok(())

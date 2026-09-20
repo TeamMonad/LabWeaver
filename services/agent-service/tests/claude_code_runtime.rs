@@ -3237,6 +3237,59 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
 }
 
 #[tokio::test]
+async fn authoring_invocation_runs_with_tools_inside_the_sandbox_scope()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::Success)?;
+    let scope = agent_service::claude_code::AuthoringAttemptScope {
+        run_id: contracts::AgentRunId::new(),
+        project_id: policy.project_id,
+        course_id: policy.course_id,
+        actor_id: ActorId::new(),
+        track: AgentTrackKind::Environment,
+        attempt: 1,
+        trace_id: "trace-authoring-scope".to_owned(),
+        claude_code_version: policy.binding.claude_code_version.clone(),
+    };
+    let execution = runtime
+        .generate_authoring(
+            &scope,
+            input(&policy).await?,
+            RunCancellation::new(),
+            EnvironmentClass::Experiment,
+        )
+        .await?;
+
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Environment(_)
+    ));
+    let commands = process.commands();
+    assert_eq!(commands.len(), 1);
+    let args = commands[0].args();
+    let max_turns = args
+        .windows(2)
+        .find(|window| window[0] == "--max-turns")
+        .map(|window| window[1].as_str());
+    assert_eq!(max_turns, Some("60"));
+    let tools = args
+        .windows(2)
+        .find(|window| window[0] == "--tools")
+        .map(|window| window[1].as_str());
+    assert_eq!(tools, Some("Bash,Edit,Glob,Grep,Read,Write"));
+    let permission = args
+        .windows(2)
+        .find(|window| window[0] == "--permission-mode")
+        .map(|window| window[1].as_str());
+    assert_eq!(permission, Some("bypassPermissions"));
+    let prompt = args
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    assert!(prompt.contains("LABWEAVER SANDBOX EXECUTION"));
+    assert!(prompt.contains("/materials/"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn work_intent_rejects_an_experiment_candidate_without_defaulting()
 -> Result<(), Box<dyn Error>> {
     let (runtime, _process, policy) = runtime(FakeMode::Success)?;

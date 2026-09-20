@@ -32,9 +32,12 @@ const ATTEMPT_ID_LABEL: &str = "labweaver.io/attempt-id";
 const REQUEST_SHA_ANNOTATION: &str = "labweaver.io/request-sha256";
 const ATTEMPT_VOLUME: &str = "attempt";
 const WORKSPACE_VOLUME: &str = "workspace";
+const MATERIALS_VOLUME: &str = "materials";
 const ATTEMPT_DIR: &str = "/run/labweaver";
 const WORKSPACE_DIR: &str = "/workspace";
+const MATERIALS_DIR: &str = "/materials";
 const ATTEMPT_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
+const MATERIALS_VOLUME_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Rejected sandbox configuration or attempt specification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -549,6 +552,7 @@ fn job_document(
                         },
                         "volumeMounts": [
                             {"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false},
+                            {"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": false},
                         ],
                     }],
                     "containers": [{
@@ -574,6 +578,7 @@ fn job_document(
                         "volumeMounts": [
                             {"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false},
                             {"name": WORKSPACE_VOLUME, "mountPath": WORKSPACE_DIR, "readOnly": false},
+                            {"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": true},
                         ],
                     }],
                     "volumes": [
@@ -584,6 +589,10 @@ fn job_document(
                         {
                             "name": WORKSPACE_VOLUME,
                             "emptyDir": {"sizeLimit": configuration.workspace_bytes.to_string()},
+                        },
+                        {
+                            "name": MATERIALS_VOLUME,
+                            "emptyDir": {"sizeLimit": MATERIALS_VOLUME_BYTES.to_string()},
                         },
                     ],
                 },
@@ -599,7 +608,17 @@ fn materialize_script() -> &'static str {
      -o /run/labweaver/input.json \"$MATERIAL_DOWNLOAD_URL\"\n\
      size=$(wc -c < /run/labweaver/input.json | tr -d ' ')\n\
      if [ \"$size\" != \"$MATERIAL_SIZE_BYTES\" ]; then exit 74; fi\n\
-     printf '%s  /run/labweaver/input.json\\n' \"$MATERIAL_SHA256\" | sha256sum --check --strict\n"
+     printf '%s  /run/labweaver/input.json\\n' \"$MATERIAL_SHA256\" | sha256sum --check --strict\n\
+     python3 -c \"import json,os\n\
+     root='/materials'\n\
+     envelope=json.load(open('/run/labweaver/input.json'))\n\
+     for entry in envelope.get('files',[]):\n\
+     \x20   content=entry.get('content','')\n\
+     \x20   if not content: continue\n\
+     \x20   path=os.path.normpath(os.path.join(root, entry['path']))\n\
+     \x20   if not path.startswith(root + os.sep): continue\n\
+     \x20   os.makedirs(os.path.dirname(path), exist_ok=True)\n\
+     \x20   open(path,'w',encoding='utf-8').write(content)\n\"\n"
 }
 
 fn ownership_labels(ownership: &KubernetesOwnership) -> Value {
@@ -788,10 +807,22 @@ mod tests {
             serde_json::json!(["ALL"])
         );
         assert_eq!(container["securityContext"]["readOnlyRootFilesystem"], true);
+        assert!(container["volumeMounts"].as_array().is_some_and(|mounts| {
+            mounts
+                .iter()
+                .any(|mount| mount["name"] == "materials" && mount["readOnly"] == true)
+        }));
+        assert!(
+            job.document["spec"]["template"]["spec"]["volumes"]
+                .as_array()
+                .is_some_and(|volumes| volumes.iter().any(|volume| volume["name"] == "materials"))
+        );
         let init = &job.document["spec"]["template"]["spec"]["initContainers"][0];
         assert_eq!(init["name"], "materialize");
         assert!(init["command"][2].as_str().is_some_and(|script| {
-            script.contains("sha256sum --check --strict") && script.contains("MATERIAL_SIZE_BYTES")
+            script.contains("sha256sum --check --strict")
+                && script.contains("MATERIAL_SIZE_BYTES")
+                && script.contains("/materials")
         }));
         assert_eq!(
             job.document
