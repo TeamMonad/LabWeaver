@@ -157,6 +157,33 @@ impl BuildSupplyChainProvider for NatsBuildSupplyChainProvider {
         }
     }
 
+    async fn import_candidate(
+        &self,
+        context: &BuildProviderRequestContext,
+        command: &AgentBuildRequested,
+        identity: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        match self
+            .request(
+                context,
+                BuildExecutorRequest::Import {
+                    command: command.clone(),
+                    identity,
+                },
+            )
+            .await?
+        {
+            BuildExecutorResponse::Built { candidate }
+                if candidate.build_request_id == command.request.id
+                    && candidate.build_identity == identity =>
+            {
+                Ok(candidate)
+            }
+            BuildExecutorResponse::Failed { failure } => Err(failure),
+            _ => Err(identity_mismatch()),
+        }
+    }
+
     async fn publish_immutable(
         &self,
         context: &BuildProviderRequestContext,
@@ -232,6 +259,10 @@ pub enum BuildExecutorRequest {
         command: AgentBuildRequested,
         identity: BuildIdentity,
     },
+    Import {
+        command: AgentBuildRequested,
+        identity: BuildIdentity,
+    },
     Publish {
         candidate: BuiltCandidate,
     },
@@ -246,6 +277,7 @@ impl BuildExecutorRequest {
         match self {
             Self::EnsurePrivateProject { .. } => BuildProviderStage::EnsurePrivateProject,
             Self::Build { .. } => BuildProviderStage::Build,
+            Self::Import { .. } => BuildProviderStage::Import,
             Self::Publish { .. } => BuildProviderStage::Publish,
             Self::Cleanup { .. } => BuildProviderStage::Cleanup,
         }
@@ -638,7 +670,8 @@ fn validate_executor_request(
 fn executor_request_identity_valid(request: &BuildExecutorRequest) -> bool {
     match request {
         BuildExecutorRequest::EnsurePrivateProject { command, identity }
-        | BuildExecutorRequest::Build { command, identity } => {
+        | BuildExecutorRequest::Build { command, identity }
+        | BuildExecutorRequest::Import { command, identity } => {
             command.validate().is_ok()
                 && *identity
                     == BuildIdentity(Sha256Digest::of_bytes(
@@ -685,7 +718,8 @@ fn build_executor_request_id(
 const fn executor_request_build_id(request: &BuildExecutorRequest) -> BuildRequestId {
     match request {
         BuildExecutorRequest::EnsurePrivateProject { command, .. }
-        | BuildExecutorRequest::Build { command, .. } => command.request.id,
+        | BuildExecutorRequest::Build { command, .. }
+        | BuildExecutorRequest::Import { command, .. } => command.request.id,
         BuildExecutorRequest::Publish { candidate } => candidate.build_request_id,
         BuildExecutorRequest::Cleanup {
             build_request_id, ..
@@ -696,7 +730,7 @@ const fn executor_request_build_id(request: &BuildExecutorRequest) -> BuildReque
 const fn build_stage_rank(stage: BuildProviderStage) -> i16 {
     match stage {
         BuildProviderStage::EnsurePrivateProject => 1,
-        BuildProviderStage::Build => 2,
+        BuildProviderStage::Build | BuildProviderStage::Import => 2,
         BuildProviderStage::Publish => 3,
         BuildProviderStage::Cleanup => 4,
     }
@@ -706,6 +740,7 @@ const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
     match stage {
         BuildProviderStage::EnsurePrivateProject => "ensure_private_project",
         BuildProviderStage::Build => "build",
+        BuildProviderStage::Import => "import",
         BuildProviderStage::Publish => "publish",
         BuildProviderStage::Cleanup => "cleanup",
     }

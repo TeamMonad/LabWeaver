@@ -22,7 +22,7 @@ use agent_service::build_pipeline::{
 };
 use async_trait::async_trait;
 use contracts::events::AgentBuildRequested;
-use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, ImageArtifact};
+use contracts::supply_chain::{BuildNetworkPolicy, BuildRequest, BuildSource, ImageArtifact};
 use contracts::{
     ArtifactId, ArtifactRef, BuildRequestId, CandidateId, CourseId, ProjectId, Revision,
     UtcTimestamp,
@@ -36,6 +36,7 @@ const DIGEST_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 enum Call {
     EnsurePrivate,
     Build,
+    Import,
     Publish,
     Cleanup,
 }
@@ -134,6 +135,24 @@ impl BuildSupplyChainProvider for FakeProvider {
         })
     }
 
+    async fn import_candidate(
+        &self,
+        context: &BuildProviderRequestContext,
+        command: &AgentBuildRequested,
+        identity: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        self.record(Call::Import, context);
+        if !self.build_delay.is_zero() {
+            tokio::time::sleep(self.build_delay).await;
+        }
+        Ok(BuiltCandidate {
+            build_request_id: command.request.id,
+            build_identity: identity,
+            repository: command.request.output_repository.clone(),
+            digest: digest(),
+        })
+    }
+
     async fn publish_immutable(
         &self,
         context: &BuildProviderRequestContext,
@@ -211,6 +230,29 @@ async fn successful_build_preserves_digest_identity() {
             .collect::<std::collections::HashSet<_>>()
             .len(),
         4
+    );
+}
+
+#[tokio::test]
+async fn exported_oci_import_uses_the_import_stage_without_buildkit() {
+    let provider = FakeProvider::default();
+    let calls = provider.clone();
+    let pipeline = pipeline(provider);
+    let command = import_command(60_000);
+
+    let output = pipeline
+        .execute(&command, now(), fence(60_000), &BuildCancellation::new())
+        .await
+        .expect("import succeeds");
+    assert!(matches!(output.artifact, ImageArtifact::Container { .. }));
+    assert_eq!(
+        calls.calls(),
+        vec![
+            Call::EnsurePrivate,
+            Call::Import,
+            Call::Publish,
+            Call::Cleanup
+        ]
     );
 }
 
@@ -407,9 +449,11 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
         candidate_id,
         candidate_revision: revision(1),
         builder_binding: "buildkit-primary-v1".to_owned(),
-        context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
-        context_object_key: "build-contexts/context.tar.gz".to_owned(),
-        dockerfile_path: "Dockerfile".to_owned(),
+        source: BuildSource::Dockerfile {
+            context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
+            context_object_key: "build-contexts/context.tar.gz".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+        },
         output_repository: format!(
             "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
         ),
@@ -426,6 +470,16 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
         request,
         idempotency_key,
     }
+}
+
+fn import_command(max_duration_milliseconds: u64) -> AgentBuildRequested {
+    let mut command = command(max_duration_milliseconds);
+    command.request.source = BuildSource::ExportedOci {
+        layout: artifact_ref("application/vnd.oci.image.layout.v1+tar"),
+        layout_object_key: "sandbox-exports/attempt-1/layout.tar".to_owned(),
+    };
+    command.request.network = BuildNetworkPolicy::DenyAll;
+    command
 }
 
 fn artifact_ref(media_type: &str) -> ArtifactRef {

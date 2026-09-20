@@ -40,8 +40,9 @@ use contracts::http::{
     WorkConfigurationRecoveryIdentity,
 };
 use contracts::supply_chain::{
-    BuildNetworkPolicy, BuildRequest, EnvironmentTemplateRelease, EnvironmentTemplateReleaseView,
-    ImageArtifact, ReleaseWithdrawal, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
+    BuildNetworkPolicy, BuildRequest, BuildSource, EnvironmentTemplateRelease,
+    EnvironmentTemplateReleaseView, ImageArtifact, ReleaseWithdrawal, VirtualMachineBaseDisk,
+    VirtualMachineDiskFormat,
 };
 use contracts::{
     ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode, EventId,
@@ -5663,9 +5664,11 @@ async fn enqueue_container_build(
         candidate_id: candidate.id,
         candidate_revision: candidate.revision,
         builder_binding: config.container_build.builder_binding.clone(),
-        context: build_context.clone(),
-        context_object_key: context_object_key.clone(),
-        dockerfile_path: config.container_build.dockerfile_path.clone(),
+        source: BuildSource::Dockerfile {
+            context: build_context.clone(),
+            context_object_key: context_object_key.clone(),
+            dockerfile_path: config.container_build.dockerfile_path.clone(),
+        },
         output_repository: container_build_output_repository(
             config,
             project_id,
@@ -5840,8 +5843,11 @@ fn validate_existing_container_build_projection(
         && command.request.course_id == course_id
         && command.request.candidate_id == candidate.id
         && command.request.candidate_revision == candidate.revision
-        && command.request.context == *build_context
-        && command.request.context_object_key == context_object_key
+        && matches!(
+            &command.request.source,
+            BuildSource::Dockerfile { context, context_object_key: key, .. }
+                if context == build_context && key == context_object_key
+        )
         && command.idempotency_key == format!("build:{}", command.request.id)
         && command_sha256 == canonical_hash(&command)?;
     if !request_matches {

@@ -561,10 +561,15 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         )
     );
     assert_eq!(
-        build_event.data.request.context,
+        match &build_event.data.request.source {
+            contracts::supply_chain::BuildSource::Dockerfile { context, .. } => context,
+            contracts::supply_chain::BuildSource::ExportedOci { .. } => {
+                return Err("fixture must use the Dockerfile source".into());
+            }
+        },
         match &environment_candidate.spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
-                build_context.clone()
+                build_context
             }
             contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
                 return Err("fixture must be Container".into());
@@ -867,7 +872,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
         )
         .await?;
     let object_key: String = sqlx::query_scalar(
-        "SELECT contract->'request'->>'contextObjectKey' \
+        "SELECT contract->'request'->'source'->>'contextObjectKey' \
          FROM control.container_build_projections WHERE candidate_id=$1",
     )
     .bind(environment.id.as_uuid())
@@ -918,7 +923,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
         1
     );
     let persisted_key: String = sqlx::query_scalar(
-        "SELECT contract->'request'->>'contextObjectKey' \
+        "SELECT contract->'request'->'source'->>'contextObjectKey' \
          FROM control.container_build_projections WHERE candidate_id=$1",
     )
     .bind(environment.id.as_uuid())
