@@ -940,6 +940,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn exported_sandbox_image_is_enqueued_as_an_import_source()
 -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
