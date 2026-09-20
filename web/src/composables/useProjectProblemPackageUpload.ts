@@ -10,6 +10,7 @@ import type {
 } from '@/generated/contracts'
 import { sha256File } from '@/utils/crypto'
 import { formatBytes, idempotencyKey, ifMatch } from '@/utils/format'
+import { putFileWithProgress } from '@/utils/upload'
 import { extractProblemDetails, makeDiagnostic } from '@/types/async'
 
 export type UploadFile = {
@@ -274,24 +275,6 @@ export function useProjectProblemPackageUpload(
       session.value = null
       await createSession()
     }
-  }
-
-  function putFileWithProgress(file: File, url: string, headers: Record<string, string>, onProgress: (progress: number) => void): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('PUT', url, true)
-      Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value))
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100))
-      })
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) resolve()
-        else reject(new Error(`上传失败：${xhr.status} ${xhr.statusText}`))
-      })
-      xhr.addEventListener('error', () => reject(new Error('上传网络错误')))
-      xhr.addEventListener('abort', () => reject(new Error('上传已取消')))
-      xhr.send(file)
-    })
   }
 
   async function complete(generation: number, id: string) {

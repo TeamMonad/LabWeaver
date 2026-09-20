@@ -14,6 +14,7 @@ import type {
   EnvironmentTemplateReleaseViewSchema,
   ProjectMembershipSchema,
   ProjectSchema,
+  PlatformImageCatalogViewSchema,
   ProblemDetails,
   ResourceLeaseSchema,
   ResourceLeaseState,
@@ -339,6 +340,62 @@ function approvalLeases(): ResourceLeaseSchema[] {
     : []
 }
 
+/**
+ * Administrator platform image catalog preview.
+ *
+ * The catalog is Agent-owned and Control adds the release impact hint, so the
+ * fixture renders exactly the gateway projection the page consumes.
+ */
+const platformImageCatalog = {
+  entries: [
+    {
+      catalogId: '0197f0e0-0000-7000-8000-000000000001',
+      kind: 'container',
+      binding: 'ubuntu-24.04-v1',
+      sourceReference: 'registry.labweaver.local/labweaver-system/ubuntu:24.04',
+      resolvedDigest: 'sha256:9a3e7c6d1f2b4a8d3e6f7a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1',
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      sizeBytes: 268435456,
+      status: 'active',
+      trustRevision: 4,
+      repinGeneration: 2,
+      pinnedAt: now,
+      updatedAt: later,
+      releaseReferenceCount: 2,
+    },
+    {
+      catalogId: '0197f0e0-0000-7000-8000-000000000002',
+      kind: 'virtual_machine',
+      binding: 'ubuntu-24.04-vm-v1',
+      sourceReference: 'registry.labweaver.local/labweaver-system/ubuntu-vm:24.04',
+      resolvedDigest: 'sha256:4b1d2f8a6c0e9d7b5a3f1e8c6d4b2a0f9e7c5d3b1a8f6e4c2d0b9a7f5e3c1d0b',
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      sizeBytes: 6442450944,
+      status: 'active',
+      trustRevision: 2,
+      repinGeneration: 1,
+      pinnedAt: now,
+      updatedAt: now,
+      releaseReferenceCount: 1,
+    },
+    {
+      catalogId: '0197f0e0-0000-7000-8000-000000000003',
+      kind: 'container',
+      binding: 'alpine-3.20-v1',
+      sourceReference: 'registry.labweaver.local/labweaver-system/alpine:3.20',
+      resolvedDigest: 'sha256:7c5e3a1b9d8f6e4c2a0b8d7f5e3c1a9b7d6f4e2c0a8b6d5f3e1c9a7b5d4f2e0c',
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      sizeBytes: 8388608,
+      status: 'disabled',
+      trustRevision: 1,
+      repinGeneration: 1,
+      pinnedAt: now,
+      updatedAt: later,
+      releaseReferenceCount: 0,
+    },
+  ],
+} satisfies PlatformImageCatalogViewSchema
+
 function fixtureResponse<T>(data: T): Promise<FixtureSuccess<T>> {
   return Promise.resolve({ data, error: undefined })
 }
@@ -575,3 +632,12 @@ export async function deleteSshPublicKey() { return unsupportedResponse('删除 
 export async function listEnvironmentAccessGrantsForFixture() { return fixtureResponse({ items: [] }) }
 export async function freezeSubmission() { return unsupportedResponse('冻结提交') }
 export async function getFrozenSubmission(): Promise<FixtureError> { return unsupportedResponse('读取冻结提交') }
+
+export async function listPlatformImages(): Promise<FixtureResult<PlatformImageCatalogViewSchema>> {
+  return fixtureResponse(platformImageCatalog)
+}
+export async function registerPlatformImage() { return unsupportedResponse('注册平台镜像') }
+export async function repinPlatformImage() { return unsupportedResponse('重新固定平台镜像') }
+export async function disablePlatformImage() { return unsupportedResponse('停用平台镜像') }
+export async function createPlatformImageUpload() { return unsupportedResponse('创建平台镜像上传会话') }
+export async function completePlatformImageUpload() { return unsupportedResponse('完成平台镜像导入') }

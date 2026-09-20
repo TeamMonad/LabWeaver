@@ -48,7 +48,7 @@ describe('NavigationDrawer', () => {
     expect(wrapper.text()).toContain('项目与工作')
     expect(wrapper.text()).toContain('平台管理')
     expect(wrapper.text()).not.toContain('工作台角色')
-    expect(wrapper.findAll('.drawer-item')).toHaveLength(17)
+    expect(wrapper.findAll('.drawer-item')).toHaveLength(18)
   })
 
   it('uses project context only for project-scoped destinations', async () => {

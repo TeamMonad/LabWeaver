@@ -19,6 +19,7 @@ const paths = [
   '/researcher/resources',
   '/admin/resource-approval',
   '/admin/resource-finance',
+  '/admin/platform-images',
   '/admin/policies',
   '/admin/audit',
 ]
