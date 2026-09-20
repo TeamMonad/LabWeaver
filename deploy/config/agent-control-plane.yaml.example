@@ -53,7 +53,7 @@ sandbox:
   namespace: "labweaver-authoring"
   image: "harbor.example.invalid/labweaver-system/authoring-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
   service_account_name: "authoring-runner"
-  image_pull_secret_name: "harbor-course-pull"
+  image_pull_secret_name: "harbor-labweaver-system-pull"
   cpu_millicores: 2000
   memory_bytes: 2147483648
   workspace_bytes: 2147483648

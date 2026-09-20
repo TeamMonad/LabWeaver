@@ -86,3 +86,16 @@ COPY --from=trivy-tools /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=claude-tools-fixture --chown=65532:65532 /out/claude /usr/local/bin/claude
 
 FROM runtime-base AS runtime
+
+# Shell-capable sandbox runtime for admitted authoring attempts.  Unlike
+# agent-runtime this keeps a real userland (bash, python3, git, curl) because
+# the pinned Claude Code CLI runs its local tools inside the attempt Job.
+FROM ${NODE_BUILDER} AS authoring-sandbox
+COPY --from=claude-tools --chown=65532:65532 /out/claude /usr/local/bin/claude
+COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends \
+        bash ca-certificates coreutils curl git python3 && \
+    rm -rf /var/lib/apt/lists/*
+USER 65532:65532
+CMD ["/bin/sh"]

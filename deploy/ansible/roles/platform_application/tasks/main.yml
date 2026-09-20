@@ -2473,6 +2473,116 @@
                  | b64encode}}} | to_json | b64encode }}
   no_log: true
 
+- name: Reconcile the authoring sandbox namespace without deleting retained state
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/managed: "true"
+          pod-security.kubernetes.io/enforce: restricted
+          pod-security.kubernetes.io/audit: restricted
+          pod-security.kubernetes.io/warn: restricted
+
+- name: Reconcile the permanent authoring sandbox namespace default deny
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: authoring-default-deny
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress, Egress]
+        ingress: []
+        egress: []
+
+- name: Read back the permanent authoring sandbox namespace default deny
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{ platform_application_authoring_namespace }}"
+    name: authoring-default-deny
+  register: platform_application_authoring_default_deny
+
+- name: Require the permanent authoring sandbox namespace default deny
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_authoring_default_deny.resources | length == 0
+        ) or
+        (
+          platform_application_authoring_default_deny.resources | length == 1 and
+          platform_application_authoring_default_deny.resources[0].spec.podSelector == {} and
+          platform_application_authoring_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress'] and
+          platform_application_authoring_default_deny.resources[0].spec.ingress | default([]) == [] and
+          platform_application_authoring_default_deny.resources[0].spec.egress | default([]) == []
+        )
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_DEFAULT_DENY_INVALID
+
+- name: Reconcile the tokenless authoring runner service account
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ platform_application_authoring_service_account_name }}"
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      automountServiceAccountToken: false
+
+- name: Require the authoring sandbox to use the platform image pull identity
+  ansible.builtin.assert:
+    that:
+      - platform_application_authoring_pull_secret_name == platform_application_image_pull_secret_name
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_REGISTRY_PULL_CONFIG_INVALID
+  no_log: true
+
+- name: Reconcile the authoring sandbox registry pull secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ platform_application_authoring_pull_secret_name }}"
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: >-
+          {{ {'auths': {platform_application_harbor_registry: {
+               'username': platform_application_harbor_username,
+               'password': platform_application_harbor_password,
+               'auth': (platform_application_harbor_username + ':' + platform_application_harbor_password)
+                 | b64encode}}} | to_json | b64encode }}
+  no_log: true
+
 - name: Reconcile the retained MinIO transport policy for platform clients
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"

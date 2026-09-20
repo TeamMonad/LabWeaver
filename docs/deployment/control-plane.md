@@ -70,6 +70,18 @@ handler is unavailable, OJ scheduling must fail closed. Keep the existing seccom
 no-new-privileges and other sandbox controls unchanged; do not weaken them to make the runtime
 available.
 
+## Authoring sandbox prerequisites
+
+Admitted authoring attempts run one Kubernetes Job per attempt in the fixed `labweaver-authoring`
+namespace. Ansible reconciles the namespace, the `authoring-default-deny` namespace-wide
+NetworkPolicy, the tokenless `authoring-runner` ServiceAccount and the platform registry pull
+secret; the Agent executor verifies the default-deny policy before it applies any attempt bundle.
+The attempt Pod runs the digest-pinned sandbox image built from the `authoring-sandbox` target of
+`containers/Containerfile.rust` (Claude Code CLI plus bash, python3, git, curl and buildctl), as a
+non-root user with a read-only root filesystem, no service-account token and only the configured
+proxy/registry/model egress CIDRs. Agent holds a namespaced Role limited to Jobs, Secrets, Pods and
+NetworkPolicies in that single namespace; it never receives cluster-wide permissions.
+
 ## Rollback
 
 1. Stop admission of new Control mutations at the trusted Gateway.

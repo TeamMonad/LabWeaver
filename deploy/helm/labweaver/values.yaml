@@ -106,6 +106,8 @@ workloads:
     args: ["--mode", "agent-service"]
     configMap: agent-service-config
     secret: agent-service-secrets
+    rbacProfile: authoring
+    kubernetesApi: true
     env:
       LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
       # Acceptance-only VM candidate diagnostics. The directory is backed by

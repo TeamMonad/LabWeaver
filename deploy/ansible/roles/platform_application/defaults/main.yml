@@ -214,6 +214,9 @@ platform_application_release_name: labweaver
 platform_application_namespace: labweaver-system
 platform_application_evaluation_namespace: labweaver-evaluation
 platform_application_evaluation_pull_secret_name: harbor-labweaver-system-pull
+platform_application_authoring_namespace: labweaver-authoring
+platform_application_authoring_pull_secret_name: harbor-labweaver-system-pull
+platform_application_authoring_service_account_name: authoring-runner
 platform_application_rollout_timeout: 10m
 platform_application_portal_route_namespace: ""
 platform_application_portal_route_name: ""
