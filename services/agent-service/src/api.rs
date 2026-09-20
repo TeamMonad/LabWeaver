@@ -267,10 +267,12 @@ async fn get_outcome(
     let run = state.store.load(run_id).await?;
     let checkpoints = state.store.load_checkpoints(run_id).await?;
     let mut environment_candidate = None;
+    let mut environment_image_export = None;
     let mut evaluation_candidate = None;
     for checkpoint in checkpoints {
         match checkpoint.candidate {
             Some(StoredCandidate::Environment(candidate)) => {
+                environment_image_export.clone_from(&checkpoint.audit.image_export);
                 environment_candidate = Some(candidate);
             }
             Some(StoredCandidate::Evaluation(candidate)) => evaluation_candidate = Some(candidate),
@@ -281,6 +283,7 @@ async fn get_outcome(
         plan: run.plan.clone(),
         run,
         environment_candidate,
+        environment_image_export,
         evaluation_candidate,
     };
     outcome.validate().map_err(|_| AgentApiError::contract())?;

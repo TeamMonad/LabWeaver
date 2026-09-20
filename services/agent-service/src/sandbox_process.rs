@@ -43,6 +43,7 @@ const DIAGNOSTIC_PREFIX: &str = "LW_AGENT_";
 const MATERIAL_MEDIA_TYPE: &str = "application/json";
 const RESULT_MEDIA_TYPE: &str = "application/json";
 const STDERR_MEDIA_TYPE: &str = "text/plain";
+const EXPORT_MEDIA_TYPE: &str = "application/vnd.oci.image.layout.v1+tar";
 const SANDBOX_DEADLINE_SLACK_SECONDS: u64 = 300;
 const OBSERVE_POLL: Duration = Duration::from_secs(2);
 
@@ -228,6 +229,22 @@ impl SandboxAuthoringProcess {
             )
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
+        let export_key = object_key(&self.configuration.object_prefix, task_run_id, "export.tar");
+        let export_upload = if self.configuration.sandbox.buildkit_image.is_some() {
+            Some(
+                self.objects
+                    .presign_upload(
+                        export_key.as_str(),
+                        self.configuration.sandbox.workspace_bytes.max(1),
+                        EXPORT_MEDIA_TYPE,
+                        now,
+                    )
+                    .await
+                    .map_err(|_| ClaudeCodeProcessError::Io)?,
+            )
+        } else {
+            None
+        };
         let stderr_key = object_key(&self.configuration.object_prefix, task_run_id, "stderr.log");
         let stderr_upload = self
             .objects
@@ -256,6 +273,10 @@ impl SandboxAuthoringProcess {
             stderr_upload_headers: stderr_upload.required_headers,
             result_max_bytes: self.configuration.result_max_bytes,
             stderr_max_bytes: self.configuration.stderr_max_bytes,
+            export_upload_url: export_upload.as_ref().map(|upload| upload.url.clone()),
+            export_upload_headers: export_upload
+                .map(|upload| upload.required_headers)
+                .unwrap_or_default(),
             object_store_ca_base64: None,
         };
         let sandbox_bundle = build_sandbox_bundle(&self.configuration.sandbox, &spec)
@@ -303,10 +324,16 @@ impl SandboxAuthoringProcess {
                             scope,
                             self.configuration.result_max_bytes,
                             self.configuration.stderr_max_bytes,
+                            self.configuration.sandbox.workspace_bytes,
                         )
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let output = self
-                        .assemble_output(&receipt, result_key.as_str(), stderr_key.as_str())
+                        .assemble_output(
+                            &receipt,
+                            result_key.as_str(),
+                            stderr_key.as_str(),
+                            export_key.as_str(),
+                        )
                         .await?;
                     self.store
                         .complete_sandbox_attempt(
@@ -448,6 +475,7 @@ impl SandboxAuthoringProcess {
         receipt: &SandboxReceipt,
         result_key: &str,
         stderr_key: &str,
+        export_key: &str,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
         let result = if receipt.result_size_bytes == 0 {
             Vec::new()
@@ -475,11 +503,24 @@ impl SandboxAuthoringProcess {
             }
             frozen.bytes
         };
-        Ok(ClaudeCodeProcessOutput::from_raw(
-            Some(receipt.exit_code),
-            result,
-            &stderr,
-        ))
+        let output = ClaudeCodeProcessOutput::from_raw(Some(receipt.exit_code), result, &stderr);
+        if receipt.export_size_bytes == 0 {
+            return Ok(output);
+        }
+        let frozen = self
+            .objects
+            .freeze_current(export_key, receipt.export_size_bytes, EXPORT_MEDIA_TYPE)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if Sha256Digest::of_bytes(&frozen.bytes).to_string() != receipt.export_sha256 {
+            return Err(ClaudeCodeProcessError::Io);
+        }
+        Ok(
+            output.with_image_export(contracts::supply_chain::ExportedOciImage {
+                layout: frozen.reference,
+                layout_object_key: export_key.to_owned(),
+            }),
+        )
     }
 
     async fn cleanup_and_release(
@@ -522,6 +563,12 @@ pub struct SandboxReceipt {
     pub stderr_sha256: String,
     pub exit_code: i32,
     pub claude_version: String,
+    /// Zero when the attempt exported no OCI layout.
+    #[serde(default)]
+    pub export_size_bytes: u64,
+    /// Empty when the attempt exported no OCI layout.
+    #[serde(default)]
+    pub export_sha256: String,
 }
 
 impl SandboxReceipt {
@@ -530,11 +577,14 @@ impl SandboxReceipt {
         scope: &AuthoringAttemptScope,
         result_max_bytes: u64,
         stderr_max_bytes: u64,
+        export_max_bytes: u64,
     ) -> Result<(), SandboxReceiptError> {
         if self.result_size_bytes > result_max_bytes
             || self.stderr_size_bytes > stderr_max_bytes
+            || self.export_size_bytes > export_max_bytes
             || (self.result_size_bytes > 0 && !valid_sha256(&self.result_sha256))
             || (self.stderr_size_bytes > 0 && !valid_sha256(&self.stderr_sha256))
+            || (self.export_size_bytes > 0 && !valid_sha256(&self.export_sha256))
             || self.claude_version != scope.claude_code_version
         {
             return Err(SandboxReceiptError::Invalid);

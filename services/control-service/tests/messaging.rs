@@ -308,6 +308,7 @@ fn failed_outcome(
     let outcome = InternalAgentRunOutcome {
         run,
         environment_candidate: None,
+        environment_image_export: None,
         evaluation_candidate: None,
         plan: None,
     };

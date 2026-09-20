@@ -51,6 +51,8 @@ const BUILDKIT_SOCKET: &str = "/run/buildkit/buildkitd.sock";
 const BUILDKIT_STATE_DIR: &str = "/home/user/.local/share/buildkit";
 const BUILDKIT_CONFIG_PATH: &str = "/etc/buildkit/buildkitd.toml";
 const BUILDKIT_CA_PATH: &str = "/etc/buildkit/registry-ca.crt";
+/// Fixed workspace path the sandbox must export its OCI layout archive to.
+const EXPORT_OUTPUT_PATH: &str = "/workspace/labweaver-export.tar";
 const BUILDKIT_RUNTIME_DIR: &str = "/run/user/1000";
 const BUILDKIT_DOCKER_CONFIG_DIR: &str = "/home/user/.docker";
 const BUILDKIT_RUN_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
@@ -174,6 +176,10 @@ pub struct SandboxAttemptSpec {
     pub result_max_bytes: u64,
     /// Maximum uploaded stderr size.
     pub stderr_max_bytes: u64,
+    /// Optional presigned upload URL for the attempt-built OCI layout archive.
+    pub export_upload_url: Option<String>,
+    /// Headers required by the layout upload.
+    pub export_upload_headers: BTreeMap<String, String>,
     /// Optional base64-encoded object-store CA bundle mounted for curl.
     pub object_store_ca_base64: Option<String>,
 }
@@ -237,6 +243,17 @@ pub fn build_sandbox_bundle(
             .object_store_ca_base64
             .as_ref()
             .is_some_and(|ca| ca.is_empty() || ca.len() > 256 * 1024)
+        || spec
+            .export_upload_url
+            .as_ref()
+            .is_some_and(|url| !url.starts_with("https://"))
+        || (spec.export_upload_url.is_some()
+            && (configuration.buildkit_image.is_none()
+                || spec
+                    .export_upload_headers
+                    .iter()
+                    .any(|(name, value)| !valid_header(name, value))))
+        || (spec.export_upload_url.is_none() && !spec.export_upload_headers.is_empty())
     {
         return Err(SandboxBundleError::Invalid);
     }
@@ -283,6 +300,16 @@ pub fn build_sandbox_bundle(
     }
     for (index, (name, value)) in spec.stderr_upload_headers.iter().enumerate() {
         secret_data.insert(format!("STDERR_HEADER_{index}"), format!("{name}: {value}"));
+    }
+    if let Some(url) = &spec.export_upload_url {
+        secret_data.insert("EXPORT_UPLOAD_URL".to_owned(), url.clone());
+        secret_data.insert(
+            "EXPORT_MAX_BYTES".to_owned(),
+            configuration.workspace_bytes.to_string(),
+        );
+        for (index, (name, value)) in spec.export_upload_headers.iter().enumerate() {
+            secret_data.insert(format!("EXPORT_HEADER_{index}"), format!("{name}: {value}"));
+        }
     }
     if let Some(ca) = &spec.object_store_ca_base64 {
         secret_data.insert("OBJECT_STORE_CA_BASE64".to_owned(), ca.clone());
@@ -673,8 +700,34 @@ fn job_document(
     script.push_str(
         "if [ \"$stderr_size\" -gt 0 ]; then stderr_sum=$(sha256sum {ATTEMPT_DIR}/stderr.upload | cut -d' ' -f1); fi\n",
     );
+    if spec.export_upload_url.is_some() {
+        script.push_str("export_size=0\nexport_sum=$(sha256sum /dev/null | cut -d' ' -f1)\n");
+        let _ = writeln!(script, "if [ -f {EXPORT_OUTPUT_PATH} ]; then");
+        let _ = writeln!(
+            script,
+            "  export_size=$(wc -c < {EXPORT_OUTPUT_PATH} | tr -d ' ')"
+        );
+        script.push_str(
+            "  if [ \"$export_size\" -gt \"$EXPORT_MAX_BYTES\" ]; then\n\
+             \x20   printf 'LW_AGENT_SANDBOX_EXPORT_TOO_LARGE' > /dev/termination-log\n\
+             \x20   exit 78\n\
+             fi\n",
+        );
+        let _ = writeln!(
+            script,
+            "  export_sum=$(sha256sum {EXPORT_OUTPUT_PATH} | cut -d' ' -f1)"
+        );
+        script.push_str(
+            "  curl --fail --silent --show-error --location --retry 2 --max-time 600 --request PUT --upload-file",
+        );
+        let _ = write!(script, " {EXPORT_OUTPUT_PATH}");
+        for index in 0..spec.export_upload_headers.len() {
+            let _ = write!(script, " --header \"$EXPORT_HEADER_{index}\"");
+        }
+        script.push_str(" \"$EXPORT_UPLOAD_URL\"\nfi\n");
+    }
     script.push_str(
-        "printf '{\"resultSizeBytes\":%s,\"resultSha256\":\"%s\",\"stderrSizeBytes\":%s,\"stderrSha256\":\"%s\",\"exitCode\":%s,\"claudeVersion\":\"%s\"}' \"$size\" \"$sum\" \"$stderr_size\" \"$stderr_sum\" \"$code\" \"$CLAUDE_CODE_VERSION\" > /dev/termination-log\nexit 0\n",
+        "printf '{\"resultSizeBytes\":%s,\"resultSha256\":\"%s\",\"stderrSizeBytes\":%s,\"stderrSha256\":\"%s\",\"exitCode\":%s,\"claudeVersion\":\"%s\",\"exportSizeBytes\":%s,\"exportSha256\":\"%s\"}' \"$size\" \"$sum\" \"$stderr_size\" \"$stderr_sum\" \"$code\" \"$CLAUDE_CODE_VERSION\" \"$export_size\" \"$export_sum\" > /dev/termination-log\nexit 0\n",
     );
 
     let container_security = json!({
@@ -943,6 +996,8 @@ mod tests {
             stderr_upload_headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
             result_max_bytes: 4 * 1024 * 1024,
             stderr_max_bytes: 1024 * 1024,
+            export_upload_url: None,
+            export_upload_headers: BTreeMap::new(),
             object_store_ca_base64: Some("Q0E=".to_owned()),
         }
     }
@@ -1010,6 +1065,49 @@ mod tests {
                     && mount["subPath"] == "registry-ca.crt"
             })
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn buildkit_export_channel_is_rendered_only_with_the_sidecar()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut spec = spec();
+        spec.export_upload_url = Some("https://objects.example.invalid/export".to_owned());
+        spec.export_upload_headers =
+            BTreeMap::from([("x-upload-token".to_owned(), "t".to_owned())]);
+        assert!(matches!(
+            build_sandbox_bundle(&configuration(), &spec),
+            Err(SandboxBundleError::Invalid)
+        ));
+        let bundle = build_sandbox_bundle(&buildkit_configuration(), &spec)?;
+        let job = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "jobs")
+            .ok_or(SandboxBundleError::Invalid)?;
+        let script = job.document["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .and_then(|containers| containers.iter().find(|item| item["name"] == "claude-code"))
+            .and_then(|container| container["command"][2].as_str())
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert!(script.contains("/workspace/labweaver-export.tar"));
+        assert!(script.contains("EXPORT_UPLOAD_URL"));
+        assert!(script.contains("exportSizeBytes"));
+        let secret = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "secrets")
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert_eq!(
+            secret.document["stringData"]["EXPORT_UPLOAD_URL"],
+            "https://objects.example.invalid/export"
+        );
+        assert_eq!(
+            secret.document["stringData"]["EXPORT_MAX_BYTES"],
+            "2147483648"
+        );
         Ok(())
     }
 

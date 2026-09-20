@@ -114,22 +114,17 @@
         {
           "additionalProperties": false,
           "properties": {
+            "image": {
+              "$ref": "#/$defs/ExportedOciImage"
+            },
             "kind": {
               "const": "exported_oci",
-              "type": "string"
-            },
-            "layout": {
-              "$ref": "#/$defs/ArtifactRef"
-            },
-            "layoutObjectKey": {
-              "description": "Object-store key resolved by Control for the admitted sandbox export.",
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "layout",
-            "layoutObjectKey"
+            "image"
           ],
           "type": "object"
         }
@@ -142,6 +137,25 @@
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
+    },
+    "ExportedOciImage": {
+      "additionalProperties": false,
+      "description": "Frozen sandbox-exported OCI layout archive.\n\nThe agent freezes and hashes the exact uploaded version before Control may bind it into a\nbuild request, so the executor re-reads that immutable version instead of a current key.",
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/ArtifactRef",
+          "description": "Immutable object-store identity of the layout archive."
+        },
+        "layoutObjectKey": {
+          "description": "Object-store key of the layout archive.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "layout",
+        "layoutObjectKey"
+      ],
+      "type": "object"
     },
     "ProjectId": {
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",

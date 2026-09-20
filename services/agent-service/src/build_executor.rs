@@ -302,13 +302,10 @@ impl ProductionBuildExecutor {
         command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
-        let BuildSource::ExportedOci {
-            layout,
-            layout_object_key,
-        } = &command.request.source
-        else {
+        let BuildSource::ExportedOci { image } = &command.request.source else {
             return Err(identity_mismatch());
         };
+        let (layout, layout_object_key) = (&image.layout, &image.layout_object_key);
         let repository = RepositoryIdentity::parse(
             &command.request.output_repository,
             &self.config.harbor_registry,

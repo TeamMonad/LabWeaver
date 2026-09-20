@@ -39,10 +39,21 @@ pub enum BuildSource {
         dockerfile_path: String,
     },
     ExportedOci {
-        layout: ArtifactRef,
-        /// Object-store key resolved by Control for the admitted sandbox export.
-        layout_object_key: String,
+        image: ExportedOciImage,
     },
+}
+
+/// Frozen sandbox-exported OCI layout archive.
+///
+/// The agent freezes and hashes the exact uploaded version before Control may bind it into a
+/// build request, so the executor re-reads that immutable version instead of a current key.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedOciImage {
+    /// Immutable object-store identity of the layout archive.
+    pub layout: ArtifactRef,
+    /// Object-store key of the layout archive.
+    pub layout_object_key: String,
 }
 
 impl BuildSource {
@@ -70,14 +81,9 @@ impl BuildSource {
                 }
                 Ok(())
             }
-            Self::ExportedOci {
-                layout,
-                layout_object_key,
-            } => {
-                if layout.size_bytes == 0
-                    || crate::validate_relative_path(layout_object_key).is_err()
-                    || !matches!(network, BuildNetworkPolicy::DenyAll)
-                {
+            Self::ExportedOci { image } => {
+                image.validate()?;
+                if !matches!(network, BuildNetworkPolicy::DenyAll) {
                     return Err(SupplyChainError::IncompleteBuildRequest);
                 }
                 Ok(())
@@ -320,6 +326,20 @@ fn validate_oci_digest(value: &str) -> Result<(), SupplyChainError> {
         return Err(SupplyChainError::DigestMismatch);
     }
     Ok(())
+}
+
+impl ExportedOciImage {
+    /// Validates the frozen layout identity and object key.
+    pub fn validate(&self) -> Result<(), SupplyChainError> {
+        if self.layout.size_bytes == 0
+            || self.layout.object_version.trim().is_empty()
+            || self.layout.store_binding.trim().is_empty()
+            || crate::validate_relative_path(&self.layout_object_key).is_err()
+        {
+            return Err(SupplyChainError::IncompleteArtifact);
+        }
+        Ok(())
+    }
 }
 
 /// Supply-chain contract failure.

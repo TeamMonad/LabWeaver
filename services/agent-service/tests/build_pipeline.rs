@@ -475,8 +475,10 @@ fn command(max_duration_milliseconds: u64) -> AgentBuildRequested {
 fn import_command(max_duration_milliseconds: u64) -> AgentBuildRequested {
     let mut command = command(max_duration_milliseconds);
     command.request.source = BuildSource::ExportedOci {
-        layout: artifact_ref("application/vnd.oci.image.layout.v1+tar"),
-        layout_object_key: "sandbox-exports/attempt-1/layout.tar".to_owned(),
+        image: contracts::supply_chain::ExportedOciImage {
+            layout: artifact_ref("application/vnd.oci.image.layout.v1+tar"),
+            layout_object_key: "sandbox-exports/attempt-1/layout.tar".to_owned(),
+        },
     };
     command.request.network = BuildNetworkPolicy::DenyAll;
     command

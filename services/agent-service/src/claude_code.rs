@@ -613,6 +613,7 @@ pub struct ClaudeCodeProcessOutput {
     stderr_sha256: Option<Sha256Digest>,
     stderr_bytes: u64,
     failure_class: Option<RuntimeFailureClass>,
+    image_export: Option<contracts::supply_chain::ExportedOciImage>,
 }
 
 impl ClaudeCodeProcessOutput {
@@ -625,7 +626,24 @@ impl ClaudeCodeProcessOutput {
             stderr_sha256: (!stderr.is_empty()).then(|| Sha256Digest::of_bytes(stderr)),
             stderr_bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
             failure_class: classify_runtime_stderr(stderr),
+            image_export: None,
         }
+    }
+
+    /// Attaches the frozen sandbox layout export to a successful attempt output.
+    #[must_use]
+    pub fn with_image_export(
+        mut self,
+        image_export: contracts::supply_chain::ExportedOciImage,
+    ) -> Self {
+        self.image_export = Some(image_export);
+        self
+    }
+
+    /// Returns the frozen sandbox layout export, when the attempt built one.
+    #[must_use]
+    pub const fn image_export(&self) -> Option<&contracts::supply_chain::ExportedOciImage> {
+        self.image_export.as_ref()
     }
 
     /// Reports successful process exit.
@@ -655,6 +673,7 @@ impl Debug for ClaudeCodeProcessOutput {
             .field("stderr_sha256", &self.stderr_sha256)
             .field("stderr_bytes", &self.stderr_bytes)
             .field("failure_class", &self.failure_class)
+            .field("has_image_export", &self.image_export.is_some())
             .finish()
     }
 }
@@ -1086,6 +1105,8 @@ pub struct ClaudeCodeAudit {
     pub usage_observed: bool,
     /// Raw stderr identity without its content.
     pub stderr_sha256: Option<Sha256Digest>,
+    /// Frozen sandbox layout export produced by this exact attempt, when present.
+    pub image_export: Option<contracts::supply_chain::ExportedOciImage>,
     /// Final outcome.
     pub outcome: RuntimeAuditOutcome,
     /// Stable root-cause diagnostic.
@@ -2033,6 +2054,9 @@ impl ClaudeCodeRuntime {
             stderr_sha256: context
                 .process_output
                 .and_then(|output| output.stderr_sha256),
+            image_export: context
+                .process_output
+                .and_then(|output| output.image_export().cloned()),
             outcome: RuntimeAuditOutcome::Failed,
             diagnostic_code: None,
         }

@@ -858,6 +858,9 @@ pub struct InternalAgentRunOutcome {
     pub run: crate::authoring::AgentRun,
     /// Validated Environment candidate, if that track succeeded.
     pub environment_candidate: Option<crate::authoring::EnvironmentCandidate>,
+    /// Frozen sandbox layout export produced by the successful Environment attempt, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_image_export: Option<crate::supply_chain::ExportedOciImage>,
     /// Validated Evaluation candidate, if that track succeeded.
     pub evaluation_candidate: Option<crate::authoring::EvaluationCandidate>,
     /// Generated Work configuration plan, if this run has the WorkConfiguration purpose.
@@ -868,13 +871,19 @@ impl InternalAgentRunOutcome {
     /// Validates parent identities.
     pub fn validate(&self) -> Result<(), HttpContractError> {
         if self
-            .environment_candidate
+            .environment_image_export
             .as_ref()
-            .is_some_and(|candidate| {
-                candidate.run_id != self.run.id
-                    || candidate.project_id != self.run.project_id
-                    || candidate.course_id != self.run.course_id
+            .is_some_and(|export| {
+                self.environment_candidate.is_none() || export.validate().is_err()
             })
+            || self
+                .environment_candidate
+                .as_ref()
+                .is_some_and(|candidate| {
+                    candidate.run_id != self.run.id
+                        || candidate.project_id != self.run.project_id
+                        || candidate.course_id != self.run.course_id
+                })
             || self.evaluation_candidate.as_ref().is_some_and(|candidate| {
                 candidate.run_id != self.run.id
                     || candidate.project_id != self.run.project_id
