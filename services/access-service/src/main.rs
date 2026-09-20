@@ -286,6 +286,33 @@ fn control_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(project_browser_router())
         .merge(course_browser_router())
+        .merge(admin_browser_router())
+}
+
+/// Administrator platform-image routes. Every path is proxied to Control, which performs the
+/// platform-admin authorization decision; the gateway only bounds the accepted paths.
+fn admin_browser_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/v1/admin/images",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/images/uploads",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}/complete",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/images/{catalog_id}/repin",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/images/{catalog_id}/disable",
+            axum::routing::any(proxy::forward_control),
+        )
 }
 
 #[allow(

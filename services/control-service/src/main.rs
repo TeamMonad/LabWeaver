@@ -360,7 +360,8 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
          AND to_regclass('control.sse_project_events') IS NOT NULL \
          AND to_regclass('control.image_artifact_projections') IS NOT NULL \
          AND to_regclass('control.container_build_projections') IS NOT NULL \
-         AND to_regclass('control.authoring_approval_publications') IS NOT NULL",
+         AND to_regclass('control.authoring_approval_publications') IS NOT NULL \
+         AND to_regclass('control.platform_image_upload_sessions') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;

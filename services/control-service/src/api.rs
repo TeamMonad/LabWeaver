@@ -5,6 +5,7 @@
     reason = "HTTP boundary functions keep validation adjacent to each route"
 )]
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -21,21 +22,26 @@ use contracts::authoring::{AgentRun, AgentRunPurpose, AgentTrackKind, ProjectLlm
 use contracts::http::{
     AddProjectMembershipRequest, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
     AuthoringPublicationAdmissionQuery, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
-    CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
+    CompletePlatformImageUploadRequest, CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
-    CreateProblemPackageUploadRequest, CreateWorkConfigurationRunRequest, CursorPage,
+    CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest,
+    CreateWorkConfigurationRunRequest, CursorPage, DisablePlatformImageRequest,
     EnvironmentPublicationAdmissionQuery, EvaluationReleaseListQuery, GeneratedArtifactKind,
     GeneratedArtifactQuery, IdempotencyKey, InternalAgentRunMutationRequest,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
-    InternalWithdrawEvaluationReleaseRequest, OperationAccepted, RemoveProjectMembershipRequest,
-    StrongEtag, WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
+    InternalPlatformImageDisableRequest, InternalPlatformImageImportRequest,
+    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
+    InternalWithdrawEvaluationReleaseRequest, OperationAccepted, PlatformImageCatalogView,
+    PlatformImageEntry, PlatformImageEntryView, RegisterPlatformImageRequest,
+    RemoveProjectMembershipRequest, RepinPlatformImageRequest, StrongEtag,
+    WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
     WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
-    CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId, EventId, OperationId, PlatformRole,
-    ProblemDetails, ProblemPackageId, ProjectId, ReleaseId, Revision, StreamSequence,
-    UploadSessionId, UtcTimestamp,
+    CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId, EventId, OperationId,
+    PlatformImageId, PlatformRole, ProblemDetails, ProblemPackageId, ProjectId, ReleaseId,
+    Revision, StreamSequence, UploadSessionId, UtcTimestamp,
 };
 use futures_util::stream;
 use persistence_sqlx::Sha256Digest;
@@ -43,7 +49,8 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::clients::{
-    AccessClient, AgentClient, DownstreamError, EnvironmentClient, EvaluationClient,
+    AccessClient, AdminDownstreamError, AgentClient, DownstreamError, EnvironmentClient,
+    EvaluationClient,
 };
 use crate::{ControlError, ControlService};
 use auth::ServiceTokenVerifier;
@@ -228,6 +235,26 @@ pub fn router(state: Arc<ApiState>) -> Router {
             post(withdraw_evaluation_release),
         )
         .route("/api/v1/courses/{course_id}/events", get(events))
+        .route(
+            "/api/v1/admin/images",
+            get(list_admin_images).post(register_admin_image),
+        )
+        .route(
+            "/api/v1/admin/images/uploads",
+            post(create_admin_image_upload),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}/complete",
+            post(complete_admin_image_upload),
+        )
+        .route(
+            "/api/v1/admin/images/{catalog_id}/repin",
+            post(repin_admin_image),
+        )
+        .route(
+            "/api/v1/admin/images/{catalog_id}/disable",
+            post(disable_admin_image),
+        )
         .with_state(state);
     telemetry::instrument_http(router, "control-service", "control-api")
 }
@@ -2337,6 +2364,195 @@ fn current_timestamp() -> Result<UtcTimestamp, ()> {
     UtcTimestamp::from_utc(value).map_err(|_| ())
 }
 
+/// Rejects every administrator platform-image request whose decision is not a platform admin.
+fn require_platform_admin(decision: &contracts::AuthorizationDecision) -> Result<(), ApiError> {
+    if decision.actor.roles.contains(&PlatformRole::PlatformAdmin) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))
+    }
+}
+
+/// Adds the Control-owned release impact hint to one Agent-authoritative catalog entry.
+fn entry_view(
+    entry: PlatformImageEntry,
+    references: &BTreeMap<String, u64>,
+) -> PlatformImageEntryView {
+    let count = references.get(&entry.resolved_digest).copied().unwrap_or(0);
+    PlatformImageEntryView {
+        entry,
+        release_reference_count: count,
+    }
+}
+
+async fn list_admin_images(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_global(&state, &principal, &headers, "listPlatformImages").await?;
+    require_platform_admin(&decision)?;
+    let catalog = state.agent.list_platform_images(&headers).await?;
+    let references = state.control.platform_image_release_references().await?;
+    let entries = catalog
+        .entries
+        .into_iter()
+        .map(|entry| entry_view(entry, &references))
+        .collect();
+    Ok(Json(PlatformImageCatalogView { entries }).into_response())
+}
+
+async fn register_admin_image(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    headers: HeaderMap,
+    Json(request): Json<RegisterPlatformImageRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_global(&state, &principal, &headers, "registerPlatformImage").await?;
+    require_platform_admin(&decision)?;
+    let entry = state
+        .agent
+        .register_platform_image(
+            &InternalPlatformImageRegistrationRequest {
+                kind: request.kind,
+                binding: request.binding,
+                source_reference: request.source_reference,
+                trust_revision: request.trust_revision,
+                actor_id: decision.actor.actor_id,
+                reason: request.reason,
+            },
+            &idempotency(&headers)?,
+            &headers,
+        )
+        .await?;
+    let references = state.control.platform_image_release_references().await?;
+    Ok((StatusCode::CREATED, Json(entry_view(entry, &references))).into_response())
+}
+
+async fn repin_admin_image(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(catalog_id): Path<PlatformImageId>,
+    headers: HeaderMap,
+    Json(request): Json<RepinPlatformImageRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_global(&state, &principal, &headers, "repinPlatformImage").await?;
+    require_platform_admin(&decision)?;
+    let entry = state
+        .agent
+        .repin_platform_image(
+            catalog_id,
+            &InternalPlatformImageRepinRequest {
+                expected_digest: request.expected_digest,
+                trust_revision: request.trust_revision,
+                actor_id: decision.actor.actor_id,
+                reason: request.reason,
+            },
+            &idempotency(&headers)?,
+            &headers,
+        )
+        .await?;
+    let references = state.control.platform_image_release_references().await?;
+    Ok(Json(entry_view(entry, &references)).into_response())
+}
+
+async fn disable_admin_image(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(catalog_id): Path<PlatformImageId>,
+    headers: HeaderMap,
+    Json(request): Json<DisablePlatformImageRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_global(&state, &principal, &headers, "disablePlatformImage").await?;
+    require_platform_admin(&decision)?;
+    let entry = state
+        .agent
+        .disable_platform_image(
+            catalog_id,
+            &InternalPlatformImageDisableRequest {
+                expected_digest: request.expected_digest,
+                actor_id: decision.actor.actor_id,
+                reason: request.reason,
+            },
+            &idempotency(&headers)?,
+            &headers,
+        )
+        .await?;
+    let references = state.control.platform_image_release_references().await?;
+    Ok(Json(entry_view(entry, &references)).into_response())
+}
+
+async fn create_admin_image_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePlatformImageUploadRequest>,
+) -> Result<Response, ApiError> {
+    let decision =
+        authorize_global(&state, &principal, &headers, "createPlatformImageUpload").await?;
+    require_platform_admin(&decision)?;
+    let session = state
+        .control
+        .create_platform_image_upload(
+            decision.actor.actor_id,
+            &request,
+            &idempotency(&headers)?,
+            now()?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::CREATED, &session, session.revision))
+}
+
+async fn complete_admin_image_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(upload_id): Path<UploadSessionId>,
+    headers: HeaderMap,
+    Json(_request): Json<CompletePlatformImageUploadRequest>,
+) -> Result<Response, ApiError> {
+    let decision =
+        authorize_global(&state, &principal, &headers, "completePlatformImageUpload").await?;
+    require_platform_admin(&decision)?;
+    let key = idempotency(&headers)?;
+    let staging = state
+        .control
+        .begin_platform_image_completion(decision.actor.actor_id, upload_id, &key, now()?)
+        .await?;
+    let import = InternalPlatformImageImportRequest {
+        kind: staging.kind,
+        binding: staging.binding,
+        target_reference: staging.target_reference,
+        archive: staging.archive,
+        archive_object_key: staging.archive_object_key,
+        trust_revision: staging.trust_revision,
+        actor_id: staging.actor_id,
+        reason: staging.reason,
+    };
+    let entry = match state
+        .agent
+        .import_platform_image(&import, &key, &headers)
+        .await
+    {
+        Ok(entry) => entry,
+        Err(error) => {
+            // The upstream diagnostic and status must survive to the browser, so the staging
+            // session is closed as failed before the original failure is propagated.
+            let api_error = ApiError::from(error);
+            state
+                .control
+                .fail_platform_image_import(upload_id, &api_error.diagnostic, now()?)
+                .await?;
+            return Err(api_error);
+        }
+    };
+    state
+        .control
+        .finish_platform_image_import(upload_id, entry.catalog_id, now()?)
+        .await?;
+    let references = state.control.platform_image_release_references().await?;
+    Ok((StatusCode::CREATED, Json(entry_view(entry, &references))).into_response())
+}
+
 fn accepted(run: &AgentRun) -> Response {
     (StatusCode::ACCEPTED, Json(run)).into_response()
 }
@@ -2436,6 +2652,19 @@ impl From<DownstreamError> for ApiError {
             DownstreamError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, true),
         };
         Self::new(status, &error.to_string(), retryable)
+    }
+}
+
+impl From<AdminDownstreamError> for ApiError {
+    fn from(error: AdminDownstreamError) -> Self {
+        match error {
+            AdminDownstreamError::Transport(error) => Self::from(error),
+            AdminDownstreamError::Problem(problem) => Self::new(
+                StatusCode::from_u16(problem.status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                problem.diagnostic.as_str(),
+                problem.retryable,
+            ),
+        }
     }
 }
 

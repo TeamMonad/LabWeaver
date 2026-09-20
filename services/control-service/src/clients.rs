@@ -25,12 +25,14 @@ use contracts::http::{
     InternalAgentBuildCancellationRequest, InternalAgentBuildCancellationResult,
     InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
-    InternalImageArtifactResolution, InternalPublishEvaluationReleaseRequest,
-    InternalWithdrawEvaluationReleaseRequest,
+    InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
+    InternalPlatformImageImportRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, InternalPublishEvaluationReleaseRequest,
+    InternalWithdrawEvaluationReleaseRequest, PlatformImageCatalog, PlatformImageEntry,
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
-    EvaluationReleaseId, ImageArtifactId,
+    EvaluationReleaseId, ImageArtifactId, PlatformImageId, ProblemDetails,
 };
 use reqwest::{Certificate, StatusCode, Url};
 use serde::Deserialize;
@@ -432,6 +434,119 @@ impl AgentClient {
             .map_err(|_| DownstreamError::IdentityMismatch)?;
         Ok(resolution)
     }
+
+    /// Reads the Agent-owned platform image catalog; the release impact hint stays Control-owned.
+    pub async fn list_platform_images(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<PlatformImageCatalog, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client
+                    .get(self.config.endpoint("internal/v1/platform-images")?),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Registers one administrator-pinned registry reference in the Agent-owned catalog.
+    pub async fn register_platform_image(
+        &self,
+        request: &InternalPlatformImageRegistrationRequest,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<PlatformImageEntry, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client
+                    .post(self.config.endpoint("internal/v1/platform-images")?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Re-resolves one stored reference and replaces the pinned digest.
+    pub async fn repin_platform_image(
+        &self,
+        catalog_id: PlatformImageId,
+        request: &InternalPlatformImageRepinRequest,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<PlatformImageEntry, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client
+                    .post(
+                        self.config
+                            .endpoint(&format!("internal/v1/platform-images/{catalog_id}/repin"))?,
+                    )
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Disables one catalog entry without touching already published digests.
+    pub async fn disable_platform_image(
+        &self,
+        catalog_id: PlatformImageId,
+        request: &InternalPlatformImageDisableRequest,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<PlatformImageEntry, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client
+                    .post(
+                        self.config.endpoint(&format!(
+                            "internal/v1/platform-images/{catalog_id}/disable"
+                        ))?,
+                    )
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Imports one Control-frozen OCI layout archive into the platform registry and catalog.
+    pub async fn import_platform_image(
+        &self,
+        request: &InternalPlatformImageImportRequest,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<PlatformImageEntry, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client
+                    .post(
+                        self.config
+                            .endpoint("internal/v1/platform-images/imports")?,
+                    )
+                    .header("Idempotency-Key", key.as_str())
+                    .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
 }
 
 /// Evaluation authority adapter. All targets are fixed by deployment configuration.
@@ -748,6 +863,120 @@ async fn send_json<T: serde::de::DeserializeOwned>(
         );
         DownstreamError::ProtocolInvalid
     })
+}
+
+/// Administrator-facing variant of [`send_json`] that preserves an upstream RFC 9457 diagnostic.
+///
+/// The administrator gateway must not replace the Agent's stable diagnostic with a locally
+/// inferred status class, so a decodable `application/problem+json` response is carried through
+/// payload-free. Any other failure keeps exactly the local classification of [`send_json`].
+async fn send_json_admin<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    service_token_client: &ServiceTokenClient,
+    target: ServiceTokenTarget,
+) -> Result<T, AdminDownstreamError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let scopes = target.scopes();
+    service_token_client
+        .bearer_auth_for(&mut headers, target.audience, &scopes)
+        .await
+        .map_err(|_| DownstreamError::Unavailable)?;
+    let request = request.headers(headers);
+    let started = Instant::now();
+    let response = request.send().await.map_err(|error| {
+        tracing::warn!(
+            event = "control.downstream.request_failed",
+            component = "downstream-client",
+            operation = "http.request",
+            outcome = "failed",
+            duration_ms = elapsed_millis(started),
+            binding = target.audience,
+            error_kind = reqwest_error_kind(&error),
+            failure_stage = "control.downstream.request",
+            retryable = error.is_timeout() || error.is_connect(),
+            safe_detail = "redacted_unclassified",
+        );
+        DownstreamError::Unavailable
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        tracing::warn!(
+            event = "control.downstream.response_rejected",
+            component = "downstream-client",
+            operation = "http.response",
+            outcome = "rejected",
+            duration_ms = elapsed_millis(started),
+            binding = target.audience,
+            http_status = status.as_u16(),
+            error_kind = "upstream_http",
+            failure_stage = "control.downstream.response",
+            retryable = status.is_server_error(),
+            safe_detail = "redacted_unclassified",
+        );
+        if let Ok(problem) = response.json::<ProblemDetails>().await {
+            return Err(AdminDownstreamError::Problem(DownstreamProblem {
+                status,
+                diagnostic: problem.diagnostic_code,
+                retryable: problem.retryable,
+            }));
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(AdminDownstreamError::Transport(DownstreamError::NotFound));
+        }
+        if status == StatusCode::CONFLICT || status == StatusCode::PRECONDITION_FAILED {
+            return Err(AdminDownstreamError::Transport(DownstreamError::Conflict));
+        }
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(AdminDownstreamError::Transport(DownstreamError::Denied));
+        }
+        return Err(AdminDownstreamError::Transport(
+            DownstreamError::Unavailable,
+        ));
+    }
+    response.json().await.map_err(|error| {
+        tracing::warn!(
+            event = "control.downstream.response_invalid",
+            component = "downstream-client",
+            operation = "http.response.decode",
+            outcome = "failed",
+            duration_ms = elapsed_millis(started),
+            binding = target.audience,
+            http_status = status.as_u16(),
+            error_kind = reqwest_error_kind(&error),
+            failure_stage = "control.downstream.response.decode",
+            retryable = false,
+            safe_detail = "redacted_unclassified",
+        );
+        AdminDownstreamError::Transport(DownstreamError::ProtocolInvalid)
+    })
+}
+
+/// Upstream RFC 9457 failure preserved for administrator gateways.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownstreamProblem {
+    /// Upstream HTTP status.
+    pub status: StatusCode,
+    /// Upstream stable `LabWeaver` diagnostic.
+    pub diagnostic: contracts::DiagnosticCode,
+    /// Upstream retryability.
+    pub retryable: bool,
+}
+
+impl fmt::Display for DownstreamProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.diagnostic.as_str())
+    }
+}
+
+/// Gateway failure that either keeps the local classification or the upstream diagnostic.
+#[derive(Debug, Error)]
+pub enum AdminDownstreamError {
+    /// Payload-free local classification.
+    #[error(transparent)]
+    Transport(#[from] DownstreamError),
+    /// Preserved upstream diagnostic for the administrator boundary.
+    #[error("{0}")]
+    Problem(DownstreamProblem),
 }
 
 fn elapsed_millis(started: Instant) -> u64 {
