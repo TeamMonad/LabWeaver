@@ -457,6 +457,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             Some(&environment_candidate),
             None,
             None,
+            None,
         )
         .await;
     assert!(matches!(
@@ -481,6 +482,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             &run,
             Some(&environment_candidate),
+            None,
             None,
             None,
         )
@@ -859,6 +861,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             Some(&generated),
         )
         .await?;
@@ -868,6 +871,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             Some(&generated),
         )
         .await?;
@@ -894,6 +898,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
                 &run,
                 Some(&environment),
                 Some(&evaluation),
+                None,
                 Some(&wrong_revision),
             )
             .await,
@@ -908,6 +913,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
                 &run,
                 Some(&environment),
                 Some(&evaluation),
+                None,
                 Some(&changed_key),
             )
             .await,
@@ -930,6 +936,127 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
     .fetch_one(&pool)
     .await?;
     assert_eq!(persisted_key, generated.object_key);
+    Ok(())
+}
+
+#[tokio::test]
+async fn exported_sandbox_image_is_enqueued_as_an_import_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+    let project_id = ProjectId::new();
+    let course_id = CourseId::new();
+    let owner = ActorId::new();
+    insert_project(&pool, &project_fixture(project_id, owner, Some(course_id))?).await?;
+    let now: UtcTimestamp = "2026-07-16T08:00:00.000Z".parse()?;
+    let environment = environment_candidate(
+        project_id,
+        Some(course_id),
+        Sha256Digest::of_bytes(b"exported"),
+    )?;
+    let evaluation = evaluation_candidate(project_id, Some(course_id), environment.run_id, now)?;
+    let run = succeeded_agent_run(
+        project_id,
+        Some(course_id),
+        ProblemPackageId::new(),
+        PolicyId::new(),
+        environment.run_id,
+        environment.id,
+        Some(evaluation.id),
+        EnvironmentClass::Experiment,
+    )?;
+    let export = contracts::supply_chain::ExportedOciImage {
+        layout: ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "object-store-v1".to_owned(),
+            object_version: "sandbox-export-version-1".to_owned(),
+            size_bytes: 4_096,
+            media_type: "application/vnd.oci.image.layout.v1+tar".to_owned(),
+        },
+        layout_object_key: format!("authoring-sandbox/{}/export.tar", environment.run_id),
+    };
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            Some(&export),
+            None,
+        )
+        .await?;
+    let source_kind: String = sqlx::query_scalar(
+        "SELECT contract->'request'->'source'->>'kind' \
+         FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(source_kind, "exported_oci");
+    let persisted_key: String = sqlx::query_scalar(
+        "SELECT contract->'request'->'source'->'image'->>'layoutObjectKey' \
+         FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_key, export.layout_object_key);
+    let object_version: String = sqlx::query_scalar(
+        "SELECT contract->'request'->'source'->'image'->'layout'->>'objectVersion' \
+         FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(object_version, export.layout.object_version);
+
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            Some(&export),
+            None,
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.outbox_events WHERE subject=$1",
+        )
+        .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED)
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    let mut changed_key = export.clone();
+    changed_key.layout_object_key.push_str("-changed");
+    assert!(matches!(
+        service
+            .project_candidates(
+                EventId::new(),
+                &run,
+                Some(&environment),
+                Some(&evaluation),
+                Some(&changed_key),
+                None,
+            )
+            .await,
+        Err(ControlError::ProjectionConflict)
+    ));
     Ok(())
 }
 
@@ -1021,6 +1148,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             None,
         )
         .await?;
@@ -1474,7 +1602,7 @@ async fn private_work_environment_approval_requires_project_owner()
         EnvironmentClass::Work,
     )?;
     service
-        .project_candidates(EventId::new(), &run, Some(&environment), None, None)
+        .project_candidates(EventId::new(), &run, Some(&environment), None, None, None)
         .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: environment.revision,

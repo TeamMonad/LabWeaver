@@ -2305,6 +2305,7 @@ impl ControlService {
         run: &contracts::authoring::AgentRun,
         environment: Option<&EnvironmentCandidate>,
         evaluation: Option<&EvaluationCandidate>,
+        environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<(), ControlError> {
         run.validate().map_err(|_| ControlError::ContractInvalid)?;
@@ -2372,7 +2373,7 @@ impl ControlService {
                 run.course_id,
                 run.package_id,
                 candidate,
-                None,
+                environment_image_export,
                 generated_context,
                 candidate.created_at,
             )
