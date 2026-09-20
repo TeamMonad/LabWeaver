@@ -64,6 +64,8 @@ domains:
         file: agent/0011_authoring_sandbox.sql
       - id: 12
         file: agent/0012_dispatch_actor.sql
+      - id: 13
+        file: agent/0013_platform_image_catalog.sql
   - name: evaluation
     migrations:
       - id: 1

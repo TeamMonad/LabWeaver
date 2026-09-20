@@ -17,7 +17,7 @@ use thiserror::Error;
 
 const OCI_LAYOUT_VERSION: &str = "1.0.0";
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
-const MANIFEST_MEDIA_TYPES: [&str; 2] = [
+pub(crate) const MANIFEST_MEDIA_TYPES: [&str; 2] = [
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 ];

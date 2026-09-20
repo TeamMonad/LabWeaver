@@ -11,7 +11,9 @@ use reqwest::{
 };
 use thiserror::Error;
 
-use crate::oci_import::{OciBlob, OciImage};
+use persistence_sqlx::Sha256Digest;
+
+use crate::oci_import::{MANIFEST_MEDIA_TYPES, OciBlob, OciImage};
 
 const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
 const ACCEPTED_MANIFEST_TYPES: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
@@ -27,6 +29,17 @@ impl std::fmt::Debug for RegistryCredentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("RegistryCredentials([REDACTED])")
     }
+}
+
+/// Immutable identity resolved from one mutable tag reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRegistryImage {
+    /// Confirmed manifest digest; the only identity persisted downstream.
+    pub digest: String,
+    /// Manifest media type observed at resolution time.
+    pub media_type: String,
+    /// Sum of the config and layer sizes.
+    pub size_bytes: u64,
 }
 
 /// Stable fail-closed publication errors.
@@ -228,6 +241,100 @@ impl OciRegistryPublisher {
         Ok(())
     }
 
+    /// Resolves one tag reference into the immutable manifest identity it currently points at.
+    ///
+    /// The administrator enters a tag; only the digest returned here is persisted and used
+    /// downstream. Multi-architecture indexes are rejected so a pin is always one concrete
+    /// image manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable registry failure; an index, an unparsable manifest or a digest the
+    /// registry does not confirm is [`OciRegistryError::Rejected`] or
+    /// [`OciRegistryError::DigestMismatch`].
+    pub async fn resolve_tag(
+        &self,
+        reference: &str,
+    ) -> Result<ResolvedRegistryImage, OciRegistryError> {
+        let (tag, declared_digest) = match reference.split_once('@') {
+            Some((tag, digest)) => (tag, Some(validate_declared_digest(digest)?)),
+            None => (reference, None),
+        };
+        if !valid_tag(tag) {
+            return Err(OciRegistryError::Configuration);
+        }
+        let path = format!("v2/{}/manifests/{tag}", self.repository);
+        let response = self
+            .request(Method::GET, &path)
+            .header(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))
+            .send()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        let status = response.status();
+        if denied(status) {
+            return Err(OciRegistryError::Denied);
+        }
+        if status != StatusCode::OK {
+            return Err(OciRegistryError::Rejected);
+        }
+        let media_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(OciRegistryError::Rejected)?
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if !MANIFEST_MEDIA_TYPES.contains(&media_type.as_str()) {
+            return Err(OciRegistryError::Rejected);
+        }
+        let observed_header = response
+            .headers()
+            .get("docker-content-digest")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response
+            .bytes()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        let observed_digest = format!("sha256:{}", Sha256Digest::of_bytes(&body));
+        if observed_header.is_some_and(|header| header != observed_digest) {
+            return Err(OciRegistryError::DigestMismatch);
+        }
+        if declared_digest.is_some_and(|declared| declared != observed_digest) {
+            return Err(OciRegistryError::DigestMismatch);
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| OciRegistryError::Rejected)?;
+        if manifest.get("manifests").is_some() {
+            return Err(OciRegistryError::Rejected);
+        }
+        let config_size = manifest
+            .pointer("/config/size")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(OciRegistryError::Rejected)?;
+        let layers = manifest
+            .get("layers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(OciRegistryError::Rejected)?;
+        let layer_bytes = layers.iter().try_fold(0_u64, |total, layer| {
+            total.checked_add(layer.get("size").and_then(serde_json::Value::as_u64)?)
+        });
+        let size_bytes = config_size
+            .checked_add(layer_bytes.ok_or(OciRegistryError::Rejected)?)
+            .ok_or(OciRegistryError::Rejected)?;
+        if size_bytes == 0 {
+            return Err(OciRegistryError::Rejected);
+        }
+        Ok(ResolvedRegistryImage {
+            digest: observed_digest,
+            media_type,
+            size_bytes,
+        })
+    }
+
     async fn verify_manifest(&self, digest: &str) -> Result<String, OciRegistryError> {
         let path = format!("v2/{}/manifests/{}", self.repository, digest);
         let response = self
@@ -270,6 +377,31 @@ impl OciRegistryPublisher {
 
 fn denied(status: StatusCode) -> bool {
     status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN
+}
+
+fn valid_tag(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    match bytes.next() {
+        Some(byte) if byte.is_ascii_alphanumeric() || byte == b'_' => {}
+        _ => return false,
+    }
+    value.len() <= 128
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_declared_digest(value: &str) -> Result<String, OciRegistryError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(OciRegistryError::Configuration);
+    };
+    if hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err(OciRegistryError::Configuration)
+    }
 }
 
 fn valid_repository(value: &str) -> bool {
@@ -380,10 +512,16 @@ mod tests {
                 .unwrap_or_else(|| stored_reference.clone());
             return (
                 StatusCode::OK,
-                [(
-                    header::HeaderName::from_static("docker-content-digest"),
-                    digest,
-                )],
+                [
+                    (
+                        header::HeaderName::from_static("docker-content-digest"),
+                        digest,
+                    ),
+                    (
+                        header::CONTENT_TYPE,
+                        "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                    ),
+                ],
                 bytes,
             )
                 .into_response();
@@ -458,6 +596,53 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_tag_pins_the_current_manifest_digest() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (state, base) = registry().await;
+        let image = image();
+        let digest = {
+            let mut state = state.lock().expect("state lock");
+            state.manifest = Some(("24.04".to_owned(), image.manifest_bytes.clone()));
+            state.digest_header = Some(image.manifest_digest.clone());
+            image.manifest_digest.clone()
+        };
+        let publisher = OciRegistryPublisher::for_test(
+            reqwest::Url::parse(&base.0)?,
+            "labweaver-system/platform-build",
+            Client::builder().no_proxy().build()?,
+            RegistryCredentials {
+                username: "robot$build".to_owned(),
+                password: "secret".to_owned(),
+            },
+        );
+        let resolved = publisher.resolve_tag("24.04").await?;
+        assert_eq!(resolved.digest, digest);
+        assert_eq!(
+            resolved.media_type,
+            "application/vnd.oci.image.manifest.v1+json"
+        );
+        assert_eq!(resolved.size_bytes, 29);
+        assert_eq!(
+            publisher
+                .resolve_tag(&format!("24.04@{digest}"))
+                .await?
+                .digest,
+            digest
+        );
+        assert!(matches!(
+            publisher
+                .resolve_tag(&format!("24.04@sha256:{}", "a".repeat(64)))
+                .await,
+            Err(OciRegistryError::DigestMismatch)
+        ));
+        assert!(matches!(
+            publisher.resolve_tag("not a tag").await,
+            Err(OciRegistryError::Configuration)
+        ));
+        Ok(())
     }
 
     #[tokio::test]
