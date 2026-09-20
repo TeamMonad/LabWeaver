@@ -78,8 +78,8 @@ struct DeploymentFile {
     work_execution: WorkExecutionFileConfig,
     build: BuildFileConfig,
     nats: NatsFileConfig,
-    resource: Option<task_execution::resource::ResourceClientConfiguration>,
-    sandbox: Option<SandboxFileConfig>,
+    resource: task_execution::resource::ResourceClientConfiguration,
+    sandbox: SandboxFileConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,8 +232,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         &deployment.control_tls.server_certificate_file,
         &deployment.control_tls.server_key_file,
     )?;
-    let (service_verifier, service_token_client) =
-        discover_service_auth(deployment.sandbox.is_some()).await?;
+    let (service_verifier, service_token_client) = discover_service_auth(true).await?;
     let work_execution_configuration = WorkExecutionConfiguration::defaults(
         reqwest::Url::parse(&deployment.work_execution.environment_base_uri)
             .map_err(|_| StartupError::Configuration)?,
@@ -329,31 +328,27 @@ async fn run_agent_service() -> Result<(), StartupError> {
         &deployment.worker_environment_files,
     )?));
     let review_process: Arc<dyn ClaudeCodeProcess> = local_process.clone();
-    let process: Arc<dyn ClaudeCodeProcess> = match (&deployment.sandbox, &deployment.resource) {
-        (Some(sandbox), Some(resource)) => {
-            let resource_client = task_execution::resource::ResourceClient::from_configuration(
-                resource.clone(),
-                Arc::clone(&service_token_client),
-                required_set("LABWEAVER_SERVICE_SCOPES")?,
-            )?;
-            Arc::new(SandboxAuthoringProcess::new(
-                SandboxProcessConfiguration {
-                    sandbox: sandbox.to_configuration()?,
-                    object_prefix: sandbox.object_prefix.clone(),
-                    result_max_bytes: sandbox.result_max_bytes,
-                    stderr_max_bytes: sandbox.stderr_max_bytes,
-                    kubernetes_api_server: sandbox.kubernetes_api_server.clone(),
-                    kubernetes_bearer_token_file: sandbox.kubernetes_bearer_token_file.clone(),
-                    kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
-                    request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
-                },
-                resource_client,
-                store.clone(),
-                Arc::clone(&objects),
-            )?)
-        }
-        _ => local_process.clone(),
-    };
+    let sandbox = &deployment.sandbox;
+    let resource_client = task_execution::resource::ResourceClient::from_configuration(
+        deployment.resource.clone(),
+        Arc::clone(&service_token_client),
+        required_set("LABWEAVER_SERVICE_SCOPES")?,
+    )?;
+    let process: Arc<dyn ClaudeCodeProcess> = Arc::new(SandboxAuthoringProcess::new(
+        SandboxProcessConfiguration {
+            sandbox: sandbox.to_configuration()?,
+            object_prefix: sandbox.object_prefix.clone(),
+            result_max_bytes: sandbox.result_max_bytes,
+            stderr_max_bytes: sandbox.stderr_max_bytes,
+            kubernetes_api_server: sandbox.kubernetes_api_server.clone(),
+            kubernetes_bearer_token_file: sandbox.kubernetes_bearer_token_file.clone(),
+            kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
+            request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
+        },
+        resource_client,
+        store.clone(),
+        Arc::clone(&objects),
+    )?);
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
@@ -806,17 +801,13 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
     {
         return Err(StartupError::Configuration);
     }
-    if let Some(sandbox) = &deployment.sandbox {
-        sandbox.to_configuration()?;
-        let Some(resource) = &deployment.resource else {
-            return Err(StartupError::Configuration);
-        };
-        if resource.audience.trim().is_empty()
-            || !resource.ca_file.is_absolute()
-            || resource.base_uri.scheme() != "https"
-        {
-            return Err(StartupError::Configuration);
-        }
+    deployment.sandbox.to_configuration()?;
+    let resource = &deployment.resource;
+    if resource.audience.trim().is_empty()
+        || !resource.ca_file.is_absolute()
+        || resource.base_uri.scheme() != "https"
+    {
+        return Err(StartupError::Configuration);
     }
     Ok(())
 }
