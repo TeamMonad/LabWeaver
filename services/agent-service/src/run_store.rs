@@ -2623,6 +2623,7 @@ impl AgentRunService {
         lease: &AgentTrackLease,
         actor_id: contracts::ActorId,
         trace_id: &str,
+        claude_code_version: String,
     ) -> AuthoringAttemptScope {
         AuthoringAttemptScope {
             run_id: lease.run_id,
@@ -2632,6 +2633,7 @@ impl AgentRunService {
             track: lease.track,
             attempt: lease.attempt,
             trace_id: trace_id.to_owned(),
+            claude_code_version,
         }
     }
 
@@ -2655,7 +2657,12 @@ impl AgentRunService {
         if lease.cancellation_requested {
             cancellation.cancel();
         }
-        let scope = Self::authoring_scope(&lease, actor_id, trace_id);
+        let scope = Self::authoring_scope(
+            &lease,
+            actor_id,
+            trace_id,
+            self.runtime.policy().binding.claude_code_version.clone(),
+        );
         let generation = self.runtime.generate_authoring(
             &scope,
             input,
@@ -2711,7 +2718,12 @@ impl AgentRunService {
         if lease.cancellation_requested {
             cancellation.cancel();
         }
-        let scope = Self::authoring_scope(&lease, actor_id, trace_id);
+        let scope = Self::authoring_scope(
+            &lease,
+            actor_id,
+            trace_id,
+            self.runtime.policy().binding.claude_code_version.clone(),
+        );
         let generation = self.runtime.generate_authoring(
             &scope,
             input,

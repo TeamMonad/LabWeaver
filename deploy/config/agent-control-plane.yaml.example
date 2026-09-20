@@ -60,6 +60,7 @@ sandbox:
   wall_time_seconds: 3600
   allowed_egress_cidrs: ["10.0.0.0/8"]
   result_max_bytes: 4194304
+  stderr_max_bytes: 262144
   object_prefix: "authoring-sandbox"
   kubernetes_api_server: "https://kubernetes.default.svc:443/"
   kubernetes_bearer_token_file: "/var/run/secrets/kubernetes.io/serviceaccount/token"

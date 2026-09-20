@@ -155,6 +155,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tonic",
  "tracing",
  "uuid",

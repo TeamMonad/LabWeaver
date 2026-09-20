@@ -18,4 +18,5 @@ pub mod llm_review;
 pub mod messaging;
 pub mod run_store;
 pub mod sandbox;
+pub mod sandbox_process;
 pub mod work_execution;

@@ -26,6 +26,7 @@ use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
 use agent_service::run_store::{AgentRunService, PostgresAgentRunStore};
+use agent_service::sandbox_process::{SandboxAuthoringProcess, SandboxProcessConfiguration};
 use agent_service::work_execution::{
     WorkExecutionClient, WorkExecutionConfiguration, WorkExecutionWorker,
 };
@@ -94,6 +95,7 @@ struct SandboxFileConfig {
     wall_time_seconds: u64,
     allowed_egress_cidrs: BTreeSet<String>,
     result_max_bytes: u64,
+    stderr_max_bytes: u64,
     object_prefix: String,
     kubernetes_api_server: String,
     kubernetes_bearer_token_file: String,
@@ -125,6 +127,7 @@ impl SandboxFileConfig {
             || !self.kubernetes_ca_file.starts_with('/')
             || !(100..=60_000).contains(&self.request_timeout_milliseconds)
             || !(1_024..=8 * 1024 * 1024).contains(&self.result_max_bytes)
+            || self.stderr_max_bytes > 1024 * 1024
         {
             return Err(StartupError::Configuration);
         }
@@ -240,7 +243,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     );
     let environment = WorkExecutionClient::from_configuration(
         &work_execution_configuration,
-        service_token_client,
+        Arc::clone(&service_token_client),
     )
     .map_err(StartupError::WorkExecutionClient)?;
     let pool = PgPoolOptions::new()
@@ -322,10 +325,35 @@ async fn run_agent_service() -> Result<(), StartupError> {
         )
         .map_err(|_| StartupError::Configuration)?,
     );
-    let process = Arc::new(TokioClaudeCodeProcess::new(read_worker_environment(
+    let local_process = Arc::new(TokioClaudeCodeProcess::new(read_worker_environment(
         &deployment.worker_environment_files,
     )?));
-    let review_process: Arc<dyn ClaudeCodeProcess> = process.clone();
+    let review_process: Arc<dyn ClaudeCodeProcess> = local_process.clone();
+    let process: Arc<dyn ClaudeCodeProcess> = match (&deployment.sandbox, &deployment.resource) {
+        (Some(sandbox), Some(resource)) => {
+            let resource_client = task_execution::resource::ResourceClient::from_configuration(
+                resource.clone(),
+                Arc::clone(&service_token_client),
+                required_set("LABWEAVER_SERVICE_SCOPES")?,
+            )?;
+            Arc::new(SandboxAuthoringProcess::new(
+                SandboxProcessConfiguration {
+                    sandbox: sandbox.to_configuration()?,
+                    object_prefix: sandbox.object_prefix.clone(),
+                    result_max_bytes: sandbox.result_max_bytes,
+                    stderr_max_bytes: sandbox.stderr_max_bytes,
+                    kubernetes_api_server: sandbox.kubernetes_api_server.clone(),
+                    kubernetes_bearer_token_file: sandbox.kubernetes_bearer_token_file.clone(),
+                    kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
+                    request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
+                },
+                resource_client,
+                store.clone(),
+                Arc::clone(&objects),
+            )?)
+        }
+        _ => local_process.clone(),
+    };
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
@@ -598,7 +626,7 @@ struct Worker {
     objects: Arc<S3ImmutableObjectStore>,
     generated_artifacts: GeneratedArtifactStore,
     classifier: Arc<dyn EgressClassifier>,
-    process: Arc<TokioClaudeCodeProcess>,
+    process: Arc<dyn ClaudeCodeProcess>,
     runtime_identity: String,
     dispatch_lease: Duration,
     track_lease: Duration,
@@ -885,6 +913,10 @@ enum StartupError {
     Store(#[from] agent_service::run_store::AgentRunStoreError),
     #[error(transparent)]
     LlmReview(#[from] agent_service::llm_review::LlmReviewStoreError),
+    #[error(transparent)]
+    Sandbox(#[from] agent_service::sandbox::SandboxBundleError),
+    #[error(transparent)]
+    ResourceClient(#[from] task_execution::resource::ResourceClientError),
     #[error(transparent)]
     BuildStore(#[from] agent_service::build_store::BuildStoreError),
     #[error(transparent)]

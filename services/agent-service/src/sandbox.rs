@@ -126,8 +126,14 @@ pub struct SandboxAttemptSpec {
     pub result_upload_url: String,
     /// Headers required by the result upload.
     pub result_upload_headers: BTreeMap<String, String>,
+    /// Presigned stderr upload URL.
+    pub stderr_upload_url: String,
+    /// Headers required by the stderr upload.
+    pub stderr_upload_headers: BTreeMap<String, String>,
     /// Maximum accepted result size.
     pub result_max_bytes: u64,
+    /// Maximum uploaded stderr size.
+    pub stderr_max_bytes: u64,
     /// Optional base64-encoded object-store CA bundle mounted for curl.
     pub object_store_ca_base64: Option<String>,
 }
@@ -172,7 +178,9 @@ pub fn build_sandbox_bundle(
         || spec.material_size_bytes > 16 * 1024 * 1024
         || !spec.material_download_url.starts_with("https://")
         || !spec.result_upload_url.starts_with("https://")
+        || !spec.stderr_upload_url.starts_with("https://")
         || !(1_024..=8 * 1024 * 1024).contains(&spec.result_max_bytes)
+        || spec.stderr_max_bytes > 1024 * 1024
         || spec
             .command_environment
             .keys()
@@ -183,6 +191,7 @@ pub fn build_sandbox_bundle(
         || spec
             .result_upload_headers
             .iter()
+            .chain(spec.stderr_upload_headers.iter())
             .any(|(name, value)| !valid_header(name, value))
         || spec
             .object_store_ca_base64
@@ -215,6 +224,14 @@ pub fn build_sandbox_bundle(
         spec.result_max_bytes.to_string(),
     );
     secret_data.insert(
+        "STDERR_UPLOAD_URL".to_owned(),
+        spec.stderr_upload_url.clone(),
+    );
+    secret_data.insert(
+        "STDERR_MAX_BYTES".to_owned(),
+        spec.stderr_max_bytes.to_string(),
+    );
+    secret_data.insert(
         "CLAUDE_CODE_VERSION".to_owned(),
         spec.expected_claude_version.clone(),
     );
@@ -223,6 +240,9 @@ pub fn build_sandbox_bundle(
     }
     for (index, (name, value)) in spec.result_upload_headers.iter().enumerate() {
         secret_data.insert(format!("RESULT_HEADER_{index}"), format!("{name}: {value}"));
+    }
+    for (index, (name, value)) in spec.stderr_upload_headers.iter().enumerate() {
+        secret_data.insert(format!("STDERR_HEADER_{index}"), format!("{name}: {value}"));
     }
     if let Some(ca) = &spec.object_store_ca_base64 {
         secret_data.insert("OBJECT_STORE_CA_BASE64".to_owned(), ca.clone());
@@ -412,7 +432,7 @@ fn job_document(
     script.push_str(
         "version=$(claude --version)\n\
          case \"$version\" in \"$CLAUDE_CODE_VERSION\"*) ;; *)\n\
-         \x20 printf '{\"failure\":\"LW_AGENT_SANDBOX_VERSION_MISMATCH\"}' > /dev/termination-log\n\
+         \x20 printf 'LW_AGENT_SANDBOX_VERSION_MISMATCH' > /dev/termination-log\n\
          \x20 exit 75\n\
          ;; esac\n",
     );
@@ -429,22 +449,45 @@ fn job_document(
     );
     script.push_str("if [ \"$size\" -gt \"$RESULT_MAX_BYTES\" ]; then\n");
     script.push_str(
-        "  printf '{\"failure\":\"LW_AGENT_SANDBOX_RESULT_TOO_LARGE\"}' > /dev/termination-log\n  exit 78\nfi\n",
+        "  printf 'LW_AGENT_SANDBOX_RESULT_TOO_LARGE' > /dev/termination-log\n  exit 78\nfi\n",
     );
+    script.push_str("if [ \"$size\" -gt 0 ]; then\n");
     script.push_str(
-        "curl --fail --silent --show-error --location --retry 2 --max-time 300 --request PUT --upload-file",
+        "  curl --fail --silent --show-error --location --retry 2 --max-time 300 --request PUT --upload-file",
     );
     let _ = write!(script, " {ATTEMPT_DIR}/result.json");
     for index in 0..spec.result_upload_headers.len() {
         let _ = write!(script, " --header \"$RESULT_HEADER_{index}\"");
     }
-    script.push_str(" \"$RESULT_UPLOAD_URL\"\n");
+    script.push_str(" \"$RESULT_UPLOAD_URL\"\nfi\n");
+    let _ = writeln!(
+        script,
+        "stderr_size=$(wc -c < {ATTEMPT_DIR}/stderr.log | tr -d ' ')"
+    );
+    script.push_str(
+        "if [ \"$stderr_size\" -gt \"$STDERR_MAX_BYTES\" ]; then stderr_size=$STDERR_MAX_BYTES; fi\n",
+    );
+    script.push_str(
+        "if [ \"$stderr_size\" -gt 0 ]; then\n  head -c \"$stderr_size\" {ATTEMPT_DIR}/stderr.log > {ATTEMPT_DIR}/stderr.upload\n",
+    );
+    script.push_str(
+        "  curl --fail --silent --show-error --location --retry 2 --max-time 300 --request PUT --upload-file",
+    );
+    let _ = write!(script, " {ATTEMPT_DIR}/stderr.upload");
+    for index in 0..spec.stderr_upload_headers.len() {
+        let _ = write!(script, " --header \"$STDERR_HEADER_{index}\"");
+    }
+    script.push_str(" \"$STDERR_UPLOAD_URL\"\nfi\n");
     let _ = writeln!(
         script,
         "sum=$(sha256sum {ATTEMPT_DIR}/result.json | cut -d' ' -f1)"
     );
+    script.push_str("stderr_sum=$(sha256sum /dev/null | cut -d' ' -f1)\n");
     script.push_str(
-        "printf '{\"resultSizeBytes\":%s,\"resultSha256\":\"%s\",\"exitCode\":%s,\"claudeVersion\":\"%s\"}' \"$size\" \"$sum\" \"$code\" \"$CLAUDE_CODE_VERSION\" > /dev/termination-log\nexit \"$code\"\n",
+        "if [ \"$stderr_size\" -gt 0 ]; then stderr_sum=$(sha256sum {ATTEMPT_DIR}/stderr.upload | cut -d' ' -f1); fi\n",
+    );
+    script.push_str(
+        "printf '{\"resultSizeBytes\":%s,\"resultSha256\":\"%s\",\"stderrSizeBytes\":%s,\"stderrSha256\":\"%s\",\"exitCode\":%s,\"claudeVersion\":\"%s\"}' \"$size\" \"$sum\" \"$stderr_size\" \"$stderr_sum\" \"$code\" \"$CLAUDE_CODE_VERSION\" > /dev/termination-log\nexit 0\n",
     );
 
     let container_security = json!({
@@ -703,7 +746,10 @@ mod tests {
             material_size_bytes: 1_024,
             result_upload_url: "https://objects.example/result?sig=2".to_owned(),
             result_upload_headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
+            stderr_upload_url: "https://objects.example/stderr?sig=3".to_owned(),
+            stderr_upload_headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
             result_max_bytes: 4 * 1024 * 1024,
+            stderr_max_bytes: 1024 * 1024,
             object_store_ca_base64: Some("Q0E=".to_owned()),
         }
     }
@@ -779,6 +825,11 @@ mod tests {
         assert!(script.contains("resultSha256"));
         assert!(script.contains("claude --version"));
         assert!(script.contains("claudeVersion"));
+        assert!(script.contains("STDERR_HEADER_0"));
+        assert!(script.contains("stderr.upload"));
+        assert!(script.contains("LW_AGENT_SANDBOX_RESULT_TOO_LARGE"));
+        assert!(script.contains("LW_AGENT_SANDBOX_VERSION_MISMATCH"));
+        assert!(script.contains("exit 0"));
         Ok(())
     }
 

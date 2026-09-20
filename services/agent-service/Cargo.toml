@@ -40,6 +40,7 @@ tempfile.workspace = true
 tar = "=0.4.46"
 time.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tokio-rustls.workspace = true
 tonic = { version = "=0.13.1", default-features = false, features = ["transport", "channel", "tls-ring"] }
 tracing.workspace = true

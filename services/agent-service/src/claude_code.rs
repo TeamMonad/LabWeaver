@@ -538,6 +538,8 @@ pub struct AuthoringAttemptScope {
     pub attempt: u32,
     /// Sanitized distributed trace identity.
     pub trace_id: String,
+    /// Pinned Claude Code version the sandbox CLI must verify before executing.
+    pub claude_code_version: String,
 }
 
 /// A shell-free Claude Code process request.
@@ -574,6 +576,12 @@ impl ClaudeCodeCommand {
     #[must_use]
     pub const fn stdin_sha256(&self) -> Sha256Digest {
         self.stdin_sha256
+    }
+
+    /// Returns the exact stdin envelope transferred to the process.
+    #[must_use]
+    pub fn stdin(&self) -> &[u8] {
+        &self.stdin
     }
 
     /// Returns the bounded invocation timeout.
