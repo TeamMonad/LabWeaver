@@ -32,8 +32,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::claude_code::{
-    CandidateDocument, ClaudeCodeAudit, ClaudeCodeExecution, ClaudeCodeFailure, ClaudeCodeRuntime,
-    ImmutableEgressInput, RunCancellation, RuntimeAuditOutcome,
+    AuthoringAttemptScope, CandidateDocument, ClaudeCodeAudit, ClaudeCodeExecution,
+    ClaudeCodeFailure, ClaudeCodeRuntime, ImmutableEgressInput, RunCancellation,
+    RuntimeAuditOutcome,
 };
 
 const CREATE_OPERATION: &str = "create_agent_run_v1";
@@ -80,6 +81,8 @@ pub struct AgentRunDispatchLease {
     pub policy: ProjectLlmEgressPolicy,
     /// Original request key used only for exact reservation replay.
     pub idempotency_key: IdempotencyKey,
+    /// Control-authenticated actor that authorized this dispatch.
+    pub actor_id: contracts::ActorId,
     /// Sanitized distributed trace identity.
     pub trace_id: String,
     /// Canonical pre-preparation dispatch identity.
@@ -341,6 +344,7 @@ impl PostgresAgentRunStore {
         let run = requested_internal_run(&command.request, command.purpose)?;
         let contract =
             serde_json::to_value(&run).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let actor_id = command.actor_id;
         let purpose = serde_json::to_value(command.purpose)
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
         let preauthorization = command
@@ -396,8 +400,8 @@ impl PostgresAgentRunStore {
         }
         sqlx::query(
             "INSERT INTO agent.agent_run_dispatches \
-             (run_id,dispatch_sha256,idempotency_key,request,purpose,preauthorization,package,object_locators,policy,trace_id,state) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')",
+             (run_id,dispatch_sha256,idempotency_key,request,purpose,preauthorization,package,object_locators,policy,actor_id,trace_id,state) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')",
         )
         .bind(run.id.as_uuid())
         .bind(dispatch_sha256.to_string())
@@ -408,6 +412,7 @@ impl PostgresAgentRunStore {
         .bind(serde_json::to_value(&command.package).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .bind(serde_json::to_value(&command.object_locators).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .bind(serde_json::to_value(&command.policy).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .bind(actor_id.as_uuid())
         .bind(trace_id)
         .execute(&mut *transaction)
         .await
@@ -462,6 +467,10 @@ impl PostgresAgentRunStore {
     /// # Errors
     ///
     /// Returns an error when the lease is invalid or persistence fails.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "dispatch claim binds the durable lease, authority and dispatch identity together"
+    )]
     pub async fn claim_dispatch(
         &self,
         lease_duration: Duration,
@@ -473,7 +482,7 @@ impl PostgresAgentRunStore {
             .await
             .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let row = sqlx::query(
-            "SELECT run_id,dispatch_sha256,idempotency_key,request,purpose,preauthorization,package,object_locators,policy,trace_id \
+            "SELECT run_id,dispatch_sha256,idempotency_key,request,purpose,preauthorization,package,object_locators,policy,actor_id,trace_id \
              FROM agent.agent_run_dispatches \
              WHERE (state IN ('pending','prepared') OR (state='preparing' AND lease_expires_at <= now())) \
                AND EXISTS (SELECT 1 FROM agent.agent_track_work_items work \
@@ -541,6 +550,13 @@ impl PostgresAgentRunStore {
             idempotency_key: IdempotencyKey::parse(
                 &row.try_get::<String, _>("idempotency_key")
                     .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            actor_id: contracts::ActorId::from_str(
+                &row.try_get::<Option<Uuid>, _>("actor_id")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?
+                    .ok_or(AgentRunStoreError::InvalidContract)?
+                    .to_string(),
             )
             .map_err(|_| AgentRunStoreError::InvalidContract)?,
             trace_id: row
@@ -2353,6 +2369,8 @@ pub struct AgentRunService {
 pub struct ExecuteAgentRun<'a> {
     /// Authoritative project route scope.
     pub project_id: ProjectId,
+    /// Control-authenticated actor that authorized the dispatch.
+    pub actor_id: contracts::ActorId,
     /// Optional teaching course route scope.
     pub course_id: Option<CourseId>,
     /// Immutable public create request.
@@ -2488,6 +2506,7 @@ impl AgentRunService {
         };
         let environment_execution = self.execute_track(
             environment,
+            command.actor_id,
             command.input.clone(),
             command.cancellation.clone(),
             command.now,
@@ -2496,6 +2515,7 @@ impl AgentRunService {
         );
         let evaluation_execution = self.execute_track(
             evaluation,
+            command.actor_id,
             command.input,
             command.cancellation,
             command.now,
@@ -2549,6 +2569,7 @@ impl AgentRunService {
                 self.execute_reserved(
                     ExecuteAgentRun {
                         project_id: lease.run.project_id,
+                        actor_id: lease.actor_id,
                         course_id: lease.run.course_id,
                         request: &request,
                         expected_environment_class: environment_class,
@@ -2579,6 +2600,7 @@ impl AgentRunService {
                 let executed = self
                     .execute_work_track(
                         track,
+                        lease.actor_id,
                         input,
                         cancellation,
                         now,
@@ -2597,9 +2619,30 @@ impl AgentRunService {
         }
     }
 
+    fn authoring_scope(
+        lease: &AgentTrackLease,
+        actor_id: contracts::ActorId,
+        trace_id: &str,
+    ) -> AuthoringAttemptScope {
+        AuthoringAttemptScope {
+            run_id: lease.run_id,
+            project_id: lease.run.project_id,
+            course_id: lease.run.course_id,
+            actor_id,
+            track: lease.track,
+            attempt: lease.attempt,
+            trace_id: trace_id.to_owned(),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one attempt carries its lease, authority, input, cancellation and clock"
+    )]
     async fn execute_track(
         &self,
         lease: Option<AgentTrackLease>,
+        actor_id: contracts::ActorId,
         input: ImmutableEgressInput,
         cancellation: RunCancellation,
         now: UtcTimestamp,
@@ -2612,8 +2655,9 @@ impl AgentRunService {
         if lease.cancellation_requested {
             cancellation.cancel();
         }
-        let generation = self.runtime.generate_for_class(
-            lease.track,
+        let scope = Self::authoring_scope(&lease, actor_id, trace_id);
+        let generation = self.runtime.generate_authoring(
+            &scope,
             input,
             cancellation.clone(),
             expected_environment_class,
@@ -2653,6 +2697,7 @@ impl AgentRunService {
     async fn execute_work_track(
         &self,
         lease: Option<AgentTrackLease>,
+        actor_id: contracts::ActorId,
         input: ImmutableEgressInput,
         cancellation: RunCancellation,
         now: UtcTimestamp,
@@ -2666,8 +2711,9 @@ impl AgentRunService {
         if lease.cancellation_requested {
             cancellation.cancel();
         }
-        let generation = self.runtime.generate_for_class(
-            lease.track,
+        let scope = Self::authoring_scope(&lease, actor_id, trace_id);
+        let generation = self.runtime.generate_authoring(
+            &scope,
             input,
             cancellation.clone(),
             EnvironmentClass::Work,

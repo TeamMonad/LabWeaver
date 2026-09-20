@@ -1176,6 +1176,7 @@ mod tests {
 
         async fn execute(
             &self,
+            _scope: &crate::claude_code::ExecutionScope,
             _command: ClaudeCodeCommand,
             _cancellation: RunCancellation,
         ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
@@ -1198,6 +1199,7 @@ mod tests {
 
         async fn execute(
             &self,
+            _scope: &crate::claude_code::ExecutionScope,
             _command: ClaudeCodeCommand,
             _cancellation: RunCancellation,
         ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {

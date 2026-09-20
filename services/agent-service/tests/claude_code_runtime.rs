@@ -297,6 +297,7 @@ impl ClaudeCodeProcess for FakeProcess {
 
     async fn execute(
         &self,
+        _scope: &agent_service::claude_code::ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
@@ -2220,6 +2221,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     let result = service
         .execute_reserved(
             ExecuteAgentRun {
+                actor_id: ActorId::new(),
                 project_id: policy.project_id,
                 course_id: policy.course_id,
                 expected_environment_class: environment_class,
@@ -2713,6 +2715,7 @@ async fn assert_exact_replay(
     )?;
     let first = service
         .execute(ExecuteAgentRun {
+            actor_id: ActorId::new(),
             project_id: policy.project_id,
             course_id: policy.course_id,
             expected_environment_class: EnvironmentClass::Work,
@@ -2738,6 +2741,7 @@ async fn assert_exact_replay(
         .collect::<Vec<_>>();
     let second = service
         .execute(ExecuteAgentRun {
+            actor_id: ActorId::new(),
             project_id: policy.project_id,
             course_id: policy.course_id,
             expected_environment_class: EnvironmentClass::Work,
@@ -2980,6 +2984,7 @@ async fn assert_concurrent_idempotency(
             let trace_id = format!("trace-agent-concurrent-{request_number}");
             service
                 .execute(ExecuteAgentRun {
+                    actor_id: ActorId::new(),
                     project_id,
                     course_id,
                     expected_environment_class: EnvironmentClass::Experiment,
@@ -3022,6 +3027,7 @@ async fn assert_distinct_runs(
             let trace_id = format!("trace-agent-distinct-{request_number}");
             service
                 .execute(ExecuteAgentRun {
+                    actor_id: ActorId::new(),
                     project_id,
                     course_id,
                     expected_environment_class: EnvironmentClass::Experiment,

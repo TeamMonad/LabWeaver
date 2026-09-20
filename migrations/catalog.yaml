@@ -62,6 +62,8 @@ domains:
         file: agent/0010_llm_review_runs.sql
       - id: 11
         file: agent/0011_authoring_sandbox.sql
+      - id: 12
+        file: agent/0012_dispatch_actor.sql
   - name: evaluation
     migrations:
       - id: 1

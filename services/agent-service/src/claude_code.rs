@@ -15,7 +15,9 @@ use contracts::diagnostic;
 use contracts::evaluation::{
     EvaluationSpec, GoalReview, evaluation_spec_schema, goal_review_schema,
 };
-use contracts::{ArtifactRef, PolicyId, ProblemPackageId, ProjectId, Revision};
+use contracts::{
+    ActorId, AgentRunId, ArtifactRef, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision,
+};
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
@@ -510,6 +512,34 @@ impl Default for RunCancellation {
     }
 }
 
+/// Authority under which one Claude Code invocation executes.
+#[derive(Clone, Debug)]
+pub enum ExecutionScope {
+    /// In-process advisory review that holds no Resource reservation.
+    Advisory,
+    /// One admitted authoring attempt generation with a Resource task reservation.
+    Authoring(AuthoringAttemptScope),
+}
+
+/// Identity of one admitted authoring attempt generation.
+#[derive(Clone, Debug)]
+pub struct AuthoringAttemptScope {
+    /// Parent `AgentRun`.
+    pub run_id: AgentRunId,
+    /// Authoritative project of the run.
+    pub project_id: ProjectId,
+    /// Optional teaching course of the run.
+    pub course_id: Option<CourseId>,
+    /// Control-authenticated actor that authorized the run.
+    pub actor_id: ActorId,
+    /// Independently leased candidate track.
+    pub track: AgentTrackKind,
+    /// Monotonic track-local attempt number.
+    pub attempt: u32,
+    /// Sanitized distributed trace identity.
+    pub trace_id: String,
+}
+
 /// A shell-free Claude Code process request.
 #[derive(Clone)]
 pub struct ClaudeCodeCommand {
@@ -681,9 +711,18 @@ pub trait ClaudeCodeProcess: Send + Sync {
     /// Returns the exact CLI version from the fixed worker executable.
     async fn version(&self) -> Result<String, ClaudeCodeProcessError>;
 
-    /// Executes exactly one Claude Code invocation.
+    /// Reports whether the executable verifies its exact version inside the execution itself.
+    ///
+    /// A sandbox backend runs the pinned CLI inside one admitted workload and validates the
+    /// reported version in the execution receipt, so the pre-execution probe is skipped.
+    fn verifies_identity_in_execution(&self) -> bool {
+        false
+    }
+
+    /// Executes exactly one Claude Code invocation under the given authority.
     async fn execute(
         &self,
+        scope: &ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError>;
@@ -754,6 +793,7 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
 
     async fn execute(
         &self,
+        _scope: &ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
@@ -1211,10 +1251,51 @@ impl ClaudeCodeRuntime {
     }
 
     /// Generates one candidate constrained by the Control-authoritative Environment class.
-    #[allow(clippy::too_many_lines)]
     pub async fn generate_for_class(
         &self,
         track: AgentTrackKind,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        expected_environment_class: EnvironmentClass,
+    ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        self.generate_scoped(
+            track,
+            &ExecutionScope::Advisory,
+            input,
+            cancellation,
+            expected_environment_class,
+        )
+        .await
+    }
+
+    /// Generates one candidate for an admitted authoring attempt generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a payload-free failure with hash-only audit evidence.
+    pub async fn generate_authoring(
+        &self,
+        scope: &AuthoringAttemptScope,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        expected_environment_class: EnvironmentClass,
+    ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        let execution_scope = ExecutionScope::Authoring(scope.clone());
+        self.generate_scoped(
+            scope.track,
+            &execution_scope,
+            input,
+            cancellation,
+            expected_environment_class,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn generate_scoped(
+        &self,
+        track: AgentTrackKind,
+        scope: &ExecutionScope,
         input: ImmutableEgressInput,
         cancellation: RunCancellation,
         expected_environment_class: EnvironmentClass,
@@ -1306,7 +1387,7 @@ impl ClaudeCodeRuntime {
             let command = build_command(&self.policy, &input, &current_prompt);
             let process_output = self
                 .process
-                .execute(command, cancellation.clone())
+                .execute(scope, command, cancellation.clone())
                 .await
                 .map_err(|error| {
                     let runtime_error = match error {
@@ -1479,7 +1560,7 @@ impl ClaudeCodeRuntime {
             );
             let process_output = self
                 .process
-                .execute(command, cancellation.clone())
+                .execute(&ExecutionScope::Advisory, command, cancellation.clone())
                 .await
                 .map_err(|error| match error {
                     ClaudeCodeProcessError::Unavailable => review_failure(
@@ -1905,6 +1986,9 @@ impl ClaudeCodeRuntime {
     }
 
     async fn verify_runtime_identity(&self) -> Result<(), ClaudeCodeRuntimeError> {
+        if self.process.verifies_identity_in_execution() {
+            return Ok(());
+        }
         *self
             .version_check
             .get_or_init(|| async {
