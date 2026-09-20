@@ -16,6 +16,7 @@ pub mod claude_code;
 pub mod generated_artifacts;
 pub mod llm_review;
 pub mod messaging;
+pub mod oci_import;
 pub mod run_store;
 pub mod sandbox;
 pub mod sandbox_process;
