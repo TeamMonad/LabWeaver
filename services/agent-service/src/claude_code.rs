@@ -2868,7 +2868,7 @@ mod tests {
     fn platform_image_prompt_lists_only_digest_pinned_reviewed_entries() {
         assert_eq!(platform_image_prompt(&[]), "");
         let entry = PlatformImageEntry {
-            catalog_id: uuid::Uuid::new_v4(),
+            catalog_id: contracts::PlatformImageId::new(),
             kind: PlatformImageKind::Container,
             binding: "ubuntu-24.04".to_owned(),
             source_reference: "harbor.internal/labweaver-system/ubuntu:24.04".to_owned(),

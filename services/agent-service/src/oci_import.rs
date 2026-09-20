@@ -98,6 +98,19 @@ pub enum OciImportError {
     TooLarge,
 }
 
+impl OciImportError {
+    /// Stable diagnostic code for API error mapping.
+    #[must_use]
+    pub const fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::Invalid => "LW_AGENT_OCI_LAYOUT_INVALID",
+            Self::UnsupportedMediaType => "LW_AGENT_OCI_MEDIA_TYPE_UNSUPPORTED",
+            Self::BlobMismatch => "LW_AGENT_OCI_BLOB_MISMATCH",
+            Self::TooLarge => "LW_AGENT_OCI_LAYOUT_TOO_LARGE",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LayoutFile {

@@ -152,7 +152,26 @@ impl OciRegistryPublisher {
             &image.manifest_bytes,
         )
         .await?;
-        self.verify_manifest(&image.manifest_digest).await
+        self.read_manifest_digest(&image.manifest_digest, &image.manifest_digest)
+            .await
+    }
+
+    /// Publishes the manifest under one mutable tag so the reviewed reference stays resolvable.
+    ///
+    /// The immutable identity is still the digest: the tag is written last and only after the
+    /// registry has confirmed the exact manifest the caller verified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OciRegistryError::Configuration`] for an unusable tag and the mapped registry
+    /// failure otherwise.
+    pub async fn tag(&self, tag: &str, image: &OciImage) -> Result<String, OciRegistryError> {
+        if !valid_tag(tag) {
+            return Err(OciRegistryError::Configuration);
+        }
+        self.put_manifest(tag, &image.manifest_media_type, &image.manifest_bytes)
+            .await?;
+        self.read_manifest_digest(tag, &image.manifest_digest).await
     }
 
     async fn ensure_blob(&self, blob: &OciBlob) -> Result<(), OciRegistryError> {
@@ -335,8 +354,13 @@ impl OciRegistryPublisher {
         })
     }
 
-    async fn verify_manifest(&self, digest: &str) -> Result<String, OciRegistryError> {
-        let path = format!("v2/{}/manifests/{}", self.repository, digest);
+    /// Reads one manifest back at `reference` and requires the registry to confirm `expected`.
+    async fn read_manifest_digest(
+        &self,
+        reference: &str,
+        expected: &str,
+    ) -> Result<String, OciRegistryError> {
+        let path = format!("v2/{}/manifests/{reference}", self.repository);
         let response = self
             .request(Method::GET, &path)
             .header(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))
@@ -355,7 +379,7 @@ impl OciRegistryPublisher {
             .get("docker-content-digest")
             .and_then(|value| value.to_str().ok())
             .ok_or(OciRegistryError::DigestMismatch)?;
-        if observed != digest {
+        if observed != expected {
             return Err(OciRegistryError::DigestMismatch);
         }
         Ok(observed.to_owned())
@@ -506,10 +530,11 @@ mod tests {
             if stored_reference != reference {
                 return StatusCode::NOT_FOUND.into_response();
             }
-            let digest = state
-                .digest_header
-                .clone()
-                .unwrap_or_else(|| stored_reference.clone());
+            let computed = format!(
+                "sha256:{}",
+                persistence_sqlx::Sha256Digest::of_bytes(&bytes)
+            );
+            let digest = state.digest_header.clone().unwrap_or(computed);
             return (
                 StatusCode::OK,
                 [
@@ -671,6 +696,46 @@ mod tests {
                 .as_ref()
                 .map(|(reference, _)| reference.clone()),
             Some(image.manifest_digest)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tag_writes_the_reviewed_reference_and_confirms_the_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, base) = registry().await;
+        let publisher = OciRegistryPublisher::for_test(
+            reqwest::Url::parse(&base.0)?,
+            "labweaver-system/platform-build",
+            Client::builder().no_proxy().build()?,
+            RegistryCredentials {
+                username: "robot$build".to_owned(),
+                password: "secret".to_owned(),
+            },
+        );
+        let image = image();
+        assert_eq!(publisher.tag("24.04", &image).await?, image.manifest_digest);
+        assert_eq!(
+            state
+                .lock()
+                .expect("state lock")
+                .manifest
+                .as_ref()
+                .map(|(reference, _)| reference.clone()),
+            Some("24.04".to_owned())
+        );
+
+        {
+            let mut state = state.lock().expect("state lock");
+            state.digest_header = Some(format!("sha256:{}", "0".repeat(64)));
+        }
+        assert_eq!(
+            publisher.tag("24.04", &image).await.err(),
+            Some(OciRegistryError::DigestMismatch)
+        );
+        assert_eq!(
+            publisher.tag("not a tag", &image).await.err(),
+            Some(OciRegistryError::Configuration)
         );
         Ok(())
     }

@@ -17,15 +17,13 @@ use agent_service::platform_images::{
     PlatformImageStatus, PlatformImageStoreError, RegisterPlatformImage, RepinPlatformImage,
 };
 use agent_service::run_store::PostgresAgentRunStore;
-use axum::extract::State;
-use axum::response::IntoResponse;
 use contracts::{ActorId, UtcTimestamp};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
 mod support;
-use support::apply_agent_migrations;
+use support::{FakeObjects, FakeRegistry, apply_agent_migrations};
 
 fn timestamp(value: &str) -> UtcTimestamp {
     value.parse().expect("fixture timestamp")
@@ -201,7 +199,7 @@ async fn catalog_pins_resolves_and_audits_every_mutation() -> Result<(), Box<dyn
         "SELECT action, from_digest, to_digest, repin_generation \
          FROM agent.platform_image_catalog_audit WHERE catalog_id=$1 ORDER BY created_at, audit_id",
     )
-    .bind(ubuntu.catalog_id)
+    .bind(ubuntu.catalog_id.as_uuid())
     .fetch_all(&pool)
     .await?;
     assert_eq!(audit.len(), 3);
@@ -214,34 +212,6 @@ async fn catalog_pins_resolves_and_audits_every_mutation() -> Result<(), Box<dyn
     assert_eq!(audit[2].0, "disabled");
     assert_eq!(audit[2].1.as_deref(), Some(repinned_digest.as_str()));
     Ok(())
-}
-
-#[derive(Clone)]
-struct RegistryFixture {
-    manifest: Arc<std::sync::Mutex<Vec<u8>>>,
-}
-
-async fn registry_manifest(State(fixture): State<RegistryFixture>) -> axum::response::Response {
-    let body = fixture
-        .manifest
-        .lock()
-        .expect("registry fixture lock")
-        .clone();
-    let digest = format!("sha256:{}", persistence_sqlx::Sha256Digest::of_bytes(&body));
-    (
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/vnd.oci.image.manifest.v1+json",
-            ),
-            (
-                axum::http::header::HeaderName::from_static("docker-content-digest"),
-                digest.as_str(),
-            ),
-        ],
-        body,
-    )
-        .into_response()
 }
 
 fn registry_manifest_bytes(config_size: u64, layer_size: u64) -> Vec<u8> {
@@ -293,6 +263,7 @@ async fn spawn_api(
                 password: "secret".to_owned(),
             },
         )),
+        objects: Arc::new(FakeObjects::new(Vec::new())),
     });
     let router = router(state).layer(axum::middleware::from_fn(inject_control_identity));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -317,25 +288,19 @@ async fn admin_http_api_resolves_pins_repins_and_disables() -> Result<(), Box<dy
         .await?;
     apply_agent_migrations(&pool).await?;
 
-    let fixture = RegistryFixture {
-        manifest: Arc::new(std::sync::Mutex::new(registry_manifest_bytes(128, 256))),
-    };
-    let registry_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let registry_address = registry_listener.local_addr()?;
-    let registry_router = axum::Router::new()
-        .route("/v2/{*path}", axum::routing::get(registry_manifest))
-        .with_state(fixture.clone());
-    tokio::spawn(async move {
-        let _ = axum::serve(registry_listener, registry_router).await;
-    });
-    let reference = format!("{registry_address}/labweaver-system/ubuntu:24.04");
-    let registry_base = format!("http://{registry_address}");
+    let (registry, registry_base) = FakeRegistry::spawn().await?;
+    let first_manifest = registry_manifest_bytes(128, 256);
+    registry.set_manifest("24.04", first_manifest.clone());
+    let reference = format!(
+        "{}/labweaver-system/ubuntu:24.04",
+        FakeRegistry::authority(&registry_base)
+    );
 
     let api = spawn_api(pool.clone(), &registry_base).await?;
     let client = reqwest::Client::new();
     let first_digest = format!(
         "sha256:{}",
-        persistence_sqlx::Sha256Digest::of_bytes(&fixture.manifest.lock().expect("lock"))
+        persistence_sqlx::Sha256Digest::of_bytes(&first_manifest)
     );
 
     let created = client
@@ -405,10 +370,11 @@ async fn admin_http_api_resolves_pins_repins_and_disables() -> Result<(), Box<dy
         .await?;
     assert_eq!(listed["entries"].as_array().expect("entries").len(), 1);
 
-    *fixture.manifest.lock().expect("lock") = registry_manifest_bytes(256, 512);
+    let second_manifest = registry_manifest_bytes(256, 512);
+    registry.set_manifest("24.04", second_manifest.clone());
     let second_digest = format!(
         "sha256:{}",
-        persistence_sqlx::Sha256Digest::of_bytes(&fixture.manifest.lock().expect("lock"))
+        persistence_sqlx::Sha256Digest::of_bytes(&second_manifest)
     );
     let repinned = client
         .post(format!(

@@ -43,7 +43,7 @@ const DIAGNOSTIC_PREFIX: &str = "LW_AGENT_";
 const MATERIAL_MEDIA_TYPE: &str = "application/json";
 const RESULT_MEDIA_TYPE: &str = "application/json";
 const STDERR_MEDIA_TYPE: &str = "text/plain";
-const EXPORT_MEDIA_TYPE: &str = "application/vnd.oci.image.layout.v1+tar";
+const EXPORT_MEDIA_TYPE: &str = contracts::http::PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE;
 const SANDBOX_DEADLINE_SLACK_SECONDS: u64 = 300;
 const OBSERVE_POLL: Duration = Duration::from_secs(2);
 

@@ -15,24 +15,25 @@ use contracts::http::{
     InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
     InternalAgentLlmReviewRequest, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
-    InternalImageArtifactResolution,
+    InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
+    InternalPlatformImageImportRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, PlatformImageCatalog,
 };
 use contracts::{
-    AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp,
+    AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, PlatformImageId, ProblemDetails,
+    UtcTimestamp,
 };
 use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::build_store::{BuildStoreError, PgBuildStore};
 use crate::generated_artifacts::{GeneratedArtifactStore, GeneratedArtifactStoreError};
 use crate::llm_review::{LlmReviewStore, LlmReviewStoreError};
+use crate::platform_image_import::{self, PlatformImageImportError};
 use crate::platform_images::{
-    DisablePlatformImage, DisablePlatformImageRequest, PgPlatformImageCatalog, PlatformImageList,
-    PlatformImageRegistry, PlatformImageRegistryError, PlatformImageStoreError,
-    RegisterPlatformImage, RegisterPlatformImageRequest, RepinPlatformImage,
-    RepinPlatformImageRequest,
+    DisablePlatformImage, PgPlatformImageCatalog, PlatformImageRegistry,
+    PlatformImageRegistryError, PlatformImageStoreError, RegisterPlatformImage, RepinPlatformImage,
 };
 use crate::run_store::{
     AgentRunReservation, AgentRunStoreError, PostgresAgentRunStore, StoredCandidate,
@@ -48,7 +49,7 @@ pub const LLM_REVIEW_READ_PERMISSION: &str = "agent.llm_review.read";
 pub const LLM_REVIEW_CANCEL_PERMISSION: &str = "agent.llm_review.cancel";
 
 /// Agent internal API state.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AgentApiState {
     /// Agent-owned run repository.
     pub store: PostgresAgentRunStore,
@@ -62,6 +63,16 @@ pub struct AgentApiState {
     pub platform_images: PgPlatformImageCatalog,
     /// Optional platform registry resolver; catalog mutations fail closed without it.
     pub platform_registry: Option<PlatformImageRegistry>,
+    /// Immutable object store holding the Control-staged image archives.
+    pub objects: Arc<dyn artifact_store::ImmutableObjectStore>,
+}
+
+impl std::fmt::Debug for AgentApiState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentApiState")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Builds all Control-to-Agent routes.
@@ -119,6 +130,10 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
         .route(
             "/internal/v1/platform-images/{catalog_id}/disable",
             post(disable_platform_image),
+        )
+        .route(
+            "/internal/v1/platform-images/imports",
+            post(import_platform_image),
         )
         .with_state(state);
     telemetry::instrument_http(router, "agent-service", "agent-api")
@@ -406,7 +421,7 @@ async fn cancel_llm_review(
 async fn register_platform_image(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
-    Json(request): Json<RegisterPlatformImageRequest>,
+    Json(request): Json<InternalPlatformImageRegistrationRequest>,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
     let resolved = state
@@ -437,17 +452,33 @@ async fn list_platform_images(
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
     let entries = state.platform_images.list(None).await?;
-    Ok(Json(PlatformImageList { entries }).into_response())
+    Ok(Json(PlatformImageCatalog { entries }).into_response())
+}
+
+async fn import_platform_image(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Json(request): Json<InternalPlatformImageImportRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let entry = platform_image_import::import_platform_image(
+        state.platform_registry()?,
+        &state.platform_images,
+        state.objects.as_ref(),
+        &request,
+        now()?,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(entry)).into_response())
 }
 
 async fn repin_platform_image(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
-    Path(catalog_id): Path<String>,
-    Json(request): Json<RepinPlatformImageRequest>,
+    Path(catalog_id): Path<PlatformImageId>,
+    Json(request): Json<InternalPlatformImageRepinRequest>,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
-    let catalog_id = Uuid::parse_str(&catalog_id).map_err(|_| AgentApiError::contract())?;
     let current = state
         .platform_images
         .list(None)
@@ -484,11 +515,10 @@ async fn repin_platform_image(
 async fn disable_platform_image(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
-    Path(catalog_id): Path<String>,
-    Json(request): Json<DisablePlatformImageRequest>,
+    Path(catalog_id): Path<PlatformImageId>,
+    Json(request): Json<InternalPlatformImageDisableRequest>,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
-    let catalog_id = Uuid::parse_str(&catalog_id).map_err(|_| AgentApiError::contract())?;
     let entry = state
         .platform_images
         .disable(
@@ -675,6 +705,21 @@ impl From<PlatformImageStoreError> for AgentApiError {
             status,
             diagnostic: error.diagnostic_code(),
             retryable: matches!(error, PlatformImageStoreError::Persistence),
+        }
+    }
+}
+
+impl From<PlatformImageImportError> for AgentApiError {
+    fn from(error: PlatformImageImportError) -> Self {
+        match error {
+            PlatformImageImportError::ObjectStore(_) => Self::persistence(),
+            PlatformImageImportError::Layout(error) => Self {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                diagnostic: error.diagnostic_code(),
+                retryable: false,
+            },
+            PlatformImageImportError::Registry(error) => error.into(),
+            PlatformImageImportError::Catalog(error) => error.into(),
         }
     }
 }

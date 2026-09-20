@@ -371,6 +371,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         Arc::clone(&objects),
     )?);
     let platform_registry = load_platform_registry(deployment.platform_registry.as_ref())?;
+    let api_objects: Arc<dyn ImmutableObjectStore> = objects.clone();
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
@@ -378,6 +379,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         llm_reviews: llm_reviews.clone(),
         platform_images: PgPlatformImageCatalog::new(store.pool().clone()),
         platform_registry,
+        objects: api_objects,
     });
     let bind = SocketAddr::from_str(&deployment.control_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;

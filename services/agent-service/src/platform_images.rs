@@ -5,75 +5,25 @@
 //! repins and disables are compare-and-set on the observed digest and append an audit row in
 //! the same transaction. Referenced entries are disabled, never deleted.
 
-use contracts::{ActorId, UtcTimestamp};
+use std::str::FromStr;
+
+use contracts::{ActorId, PlatformImageId, UtcTimestamp};
 use reqwest::{Client, Url};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::oci_import::OciImage;
 use crate::oci_registry::{
     OciRegistryError, OciRegistryPublisher, RegistryCredentials, ResolvedRegistryImage,
 };
 
-/// Reviewed image kinds.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlatformImageKind {
-    /// Container base image for sandbox builds.
-    Container,
-    /// Virtual machine base disk template.
-    VirtualMachine,
-}
-
-impl PlatformImageKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Container => "container",
-            Self::VirtualMachine => "virtual_machine",
-        }
-    }
-}
-
-/// Catalog lifecycle status.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlatformImageStatus {
-    /// Listed for authoring and usable by the sandbox prompt.
-    Active,
-    /// Hidden from new authoring; retained while a release still references it.
-    Disabled,
-}
-
-/// One pinned platform image identity.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlatformImageEntry {
-    /// Catalog row identity.
-    pub catalog_id: Uuid,
-    /// Reviewed kind.
-    pub kind: PlatformImageKind,
-    /// Stable resolution key used by authoring templates.
-    pub binding: String,
-    /// Administrator-provided reference; the tag is only a resolution entry point.
-    pub source_reference: String,
-    /// Persisted immutable identity; downstream consumers use only this digest.
-    pub resolved_digest: String,
-    /// Manifest media type observed at resolution time.
-    pub media_type: String,
-    /// Reviewed content size in bytes.
-    pub size_bytes: u64,
-    /// Lifecycle status.
-    pub status: PlatformImageStatus,
-    /// Trust revision the administrator pinned under.
-    pub trust_revision: u64,
-    /// Monotonic repin generation, incremented on every repin.
-    pub repin_generation: u64,
-    /// Time the current digest was pinned.
-    pub pinned_at: UtcTimestamp,
-    /// Last mutation time.
-    pub updated_at: UtcTimestamp,
-}
+pub use contracts::http::{
+    InternalPlatformImageDisableRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, PlatformImageCatalog, PlatformImageEntry, PlatformImageKind,
+    PlatformImageStatus,
+};
 
 /// Registration input with an already resolved digest.
 #[derive(Clone, Debug, Deserialize)]
@@ -192,7 +142,7 @@ impl PgPlatformImageCatalog {
         request: &RegisterPlatformImage,
     ) -> Result<PlatformImageEntry, PlatformImageStoreError> {
         request.validate()?;
-        let catalog_id = Uuid::new_v4();
+        let catalog_id = Uuid::now_v7();
         let mut transaction = self
             .pool
             .begin()
@@ -256,7 +206,7 @@ impl PgPlatformImageCatalog {
     /// changed, and [`PlatformImageStoreError::Persistence`] when the durable write fails.
     pub async fn repin(
         &self,
-        catalog_id: Uuid,
+        catalog_id: PlatformImageId,
         request: &RepinPlatformImage,
     ) -> Result<PlatformImageEntry, PlatformImageStoreError> {
         validate_digest(&request.resolved_digest)?;
@@ -268,6 +218,7 @@ impl PgPlatformImageCatalog {
         {
             return Err(PlatformImageStoreError::InvalidRequest);
         }
+        let catalog_id = catalog_id.as_uuid();
         let mut transaction = self
             .pool
             .begin()
@@ -327,11 +278,12 @@ impl PgPlatformImageCatalog {
     /// digest changed, and [`PlatformImageStoreError::Persistence`] when the write fails.
     pub async fn disable(
         &self,
-        catalog_id: Uuid,
+        catalog_id: PlatformImageId,
         request: &DisablePlatformImage,
     ) -> Result<PlatformImageEntry, PlatformImageStoreError> {
         validate_digest(&request.expected_digest)?;
         validate_reason(&request.reason)?;
+        let catalog_id = catalog_id.as_uuid();
         let mut transaction = self
             .pool
             .begin()
@@ -407,7 +359,7 @@ impl RegisterPlatformImage {
     fn validate(&self) -> Result<(), PlatformImageStoreError> {
         validate_digest(&self.resolved_digest)?;
         validate_reason(&self.reason)?;
-        if !valid_binding(&self.binding)
+        if !contracts::http::valid_platform_image_binding(&self.binding)
             || self.source_reference.trim().is_empty()
             || self.source_reference.len() > 512
             || self.media_type.trim().is_empty()
@@ -511,9 +463,12 @@ fn entry_from_row(
         .try_get("status")
         .map_err(|_| PlatformImageStoreError::Persistence)?;
     Ok(PlatformImageEntry {
-        catalog_id: row
-            .try_get("catalog_id")
-            .map_err(|_| PlatformImageStoreError::Persistence)?,
+        catalog_id: PlatformImageId::from_str(
+            &row.try_get::<Uuid, _>("catalog_id")
+                .map_err(|_| PlatformImageStoreError::Persistence)?
+                .to_string(),
+        )
+        .map_err(|_| PlatformImageStoreError::Persistence)?,
         kind: match kind.as_str() {
             "container" => PlatformImageKind::Container,
             "virtual_machine" => PlatformImageKind::VirtualMachine,
@@ -566,18 +521,6 @@ fn parse_timestamp(value: time::OffsetDateTime) -> Result<UtcTimestamp, Platform
     UtcTimestamp::from_utc(value).map_err(|_| PlatformImageStoreError::Persistence)
 }
 
-fn valid_binding(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    match bytes.next() {
-        Some(byte) if byte.is_ascii_lowercase() || byte.is_ascii_digit() => {}
-        _ => return false,
-    }
-    value.len() <= 128
-        && bytes.all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        })
-}
-
 fn validate_digest(value: &str) -> Result<(), PlatformImageStoreError> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return Err(PlatformImageStoreError::InvalidRequest);
@@ -598,58 +541,6 @@ fn validate_reason(value: &str) -> Result<(), PlatformImageStoreError> {
         return Err(PlatformImageStoreError::InvalidRequest);
     }
     Ok(())
-}
-
-/// Administrator registration request accepted by the Agent HTTP API.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RegisterPlatformImageRequest {
-    /// Reviewed kind.
-    pub kind: PlatformImageKind,
-    /// Stable resolution key.
-    pub binding: String,
-    /// Tag reference the administrator entered; resolved before persisting.
-    pub source_reference: String,
-    /// Trust revision the administrator pinned under.
-    pub trust_revision: u64,
-    /// Authenticated administrator.
-    pub actor_id: ActorId,
-    /// Human-readable change reason.
-    pub reason: String,
-}
-
-/// Administrator repin request accepted by the Agent HTTP API.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RepinPlatformImageRequest {
-    /// Digest the administrator observed before repinning.
-    pub expected_digest: String,
-    /// Trust revision the administrator pinned under.
-    pub trust_revision: u64,
-    /// Authenticated administrator.
-    pub actor_id: ActorId,
-    /// Human-readable change reason.
-    pub reason: String,
-}
-
-/// Administrator disable request accepted by the Agent HTTP API.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DisablePlatformImageRequest {
-    /// Digest the administrator observed before disabling.
-    pub expected_digest: String,
-    /// Authenticated administrator.
-    pub actor_id: ActorId,
-    /// Human-readable change reason.
-    pub reason: String,
-}
-
-/// Catalog listing response.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlatformImageList {
-    /// Catalog entries in stable `(kind, binding)` order.
-    pub entries: Vec<PlatformImageEntry>,
 }
 
 /// Fail-closed resolution errors for administrator-entered image references.
@@ -739,27 +630,60 @@ impl PlatformImageRegistry {
         &self,
         reference: &str,
     ) -> Result<ResolvedRegistryImage, PlatformImageRegistryError> {
-        let (repository, tag) = self.split(reference)?;
-        let publisher = if self.base.scheme() == "https" {
+        let (repository, tag) = self.parse_reference(reference)?;
+        let publisher = self.publisher(repository)?;
+        publisher.resolve_tag(tag).await.map_err(map_registry_error)
+    }
+
+    /// Pushes one verified OCI image by digest and tags it as the reviewed reference.
+    ///
+    /// The immutable identity is the digest: the manifest is pushed by digest, confirmed by
+    /// readback and only then tagged, so a tag can never become the runtime identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformImageRegistryError::InvalidReference`] when the reference leaves the
+    /// configured registry host, and the mapped registry failure otherwise.
+    pub async fn publish(
+        &self,
+        reference: &str,
+        image: &OciImage,
+    ) -> Result<String, PlatformImageRegistryError> {
+        let (repository, tag) = self.parse_reference(reference)?;
+        let publisher = self.publisher(repository)?;
+        publisher.publish(image).await.map_err(map_registry_error)?;
+        publisher.tag(tag, image).await.map_err(map_registry_error)
+    }
+
+    fn publisher(
+        &self,
+        repository: String,
+    ) -> Result<OciRegistryPublisher, PlatformImageRegistryError> {
+        if self.base.scheme() == "https" {
             OciRegistryPublisher::new(
                 self.base.clone(),
                 repository,
                 self.client.clone(),
                 self.credentials.clone(),
             )
-            .map_err(|_| PlatformImageRegistryError::InvalidReference)?
+            .map_err(|_| PlatformImageRegistryError::InvalidReference)
         } else {
-            OciRegistryPublisher::for_test(
+            Ok(OciRegistryPublisher::for_test(
                 self.base.clone(),
                 repository,
                 self.client.clone(),
                 self.credentials.clone(),
-            )
-        };
-        publisher.resolve_tag(tag).await.map_err(map_registry_error)
+            ))
+        }
     }
 
-    fn split<'a>(
+    /// Splits one reviewed reference into its repository and tag inside this registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformImageRegistryError::InvalidReference`] unless the reference names this
+    /// exact registry host with a non-empty repository and tag.
+    pub fn parse_reference<'a>(
         &self,
         reference: &'a str,
     ) -> Result<(String, &'a str), PlatformImageRegistryError> {
@@ -869,10 +793,10 @@ mod tests {
     }
 
     #[test]
-    fn split_scopes_references_to_the_configured_registry_host() {
+    fn parse_reference_scopes_references_to_the_configured_registry_host() {
         let registry = resolver("https://harbor.internal");
         let (repository, tag) = registry
-            .split("harbor.internal/labweaver-system/ubuntu:24.04")
+            .parse_reference("harbor.internal/labweaver-system/ubuntu:24.04")
             .expect("valid reference");
         assert_eq!(repository, "labweaver-system/ubuntu");
         assert_eq!(tag, "24.04");
@@ -888,7 +812,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    registry.split(rejected),
+                    registry.parse_reference(rejected),
                     Err(PlatformImageRegistryError::InvalidReference)
                 ),
                 "{rejected} must be rejected"

@@ -36,7 +36,7 @@ use crate::build_pipeline::{
     BuiltCandidate, PrivateRegistryProject, PublishedImage,
 };
 use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse};
-use crate::oci_import::{OciImportError, parse_oci_layout};
+use crate::oci_import::parse_oci_layout;
 use crate::oci_registry::{OciRegistryError, OciRegistryPublisher, RegistryCredentials};
 
 const MAX_DOCKERFILE_BYTES: u64 = 256 * 1024;
@@ -339,7 +339,7 @@ impl ProductionBuildExecutor {
                     outcome = "rejected",
                     duration_ms = 0_u64,
                     build_request_id = %context.build_request_id,
-                    diagnostic_code = import_error_code(error),
+                    diagnostic_code = error.diagnostic_code(),
                     error_kind = "import_layout_invalid",
                     failure_stage = "import.verify",
                     retryable = false,
@@ -1087,15 +1087,6 @@ fn buildkit_tls_address(address: &str) -> Result<String, BuildProviderFailure> {
         })
         .ok_or_else(rejected)?;
     Ok(format!("https://{host}"))
-}
-
-const fn import_error_code(error: OciImportError) -> &'static str {
-    match error {
-        OciImportError::Invalid => "LW_AGENT_OCI_LAYOUT_INVALID",
-        OciImportError::UnsupportedMediaType => "LW_AGENT_OCI_MEDIA_TYPE_UNSUPPORTED",
-        OciImportError::BlobMismatch => "LW_AGENT_OCI_BLOB_MISMATCH",
-        OciImportError::TooLarge => "LW_AGENT_OCI_LAYOUT_TOO_LARGE",
-    }
 }
 
 const fn registry_error_code(error: OciRegistryError) -> &'static str {
