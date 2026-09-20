@@ -36,6 +36,7 @@ use crate::claude_code::{
     ClaudeCodeFailure, ClaudeCodeRuntime, ImmutableEgressInput, RunCancellation,
     RuntimeAuditOutcome,
 };
+use crate::platform_images::PgPlatformImageCatalog;
 
 const CREATE_OPERATION: &str = "create_agent_run_v1";
 const CANCEL_OPERATION: &str = "cancel_agent_run_v1";
@@ -2681,11 +2682,16 @@ impl AgentRunService {
             trace_id,
             self.runtime.policy().binding.claude_code_version.clone(),
         );
+        let platform_images = PgPlatformImageCatalog::new(self.store.pool.clone())
+            .active_list()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let generation = self.runtime.generate_authoring(
             &scope,
             input,
             cancellation.clone(),
             expected_environment_class,
+            &platform_images,
         );
         tokio::pin!(generation);
         let heartbeat_period = self
@@ -2742,11 +2748,16 @@ impl AgentRunService {
             trace_id,
             self.runtime.policy().binding.claude_code_version.clone(),
         );
+        let platform_images = PgPlatformImageCatalog::new(self.store.pool.clone())
+            .active_list()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let generation = self.runtime.generate_authoring(
             &scope,
             input,
             cancellation.clone(),
             EnvironmentClass::Work,
+            &platform_images,
         );
         tokio::pin!(generation);
         let heartbeat_period = self

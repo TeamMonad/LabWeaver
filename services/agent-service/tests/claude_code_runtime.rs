@@ -3256,6 +3256,7 @@ async fn authoring_invocation_runs_with_tools_inside_the_sandbox_scope()
             input(&policy).await?,
             RunCancellation::new(),
             EnvironmentClass::Experiment,
+            &[],
         )
         .await?;
 

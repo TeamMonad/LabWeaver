@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::candidate_materializer::{
     EnvironmentCandidateMaterializer, WorkConfigurationArtifactMaterializer, recipe_schema,
 };
+use crate::platform_images::{PlatformImageEntry, PlatformImageKind};
 
 /// Claude Code's documented stdin cap is 10 MB. `LabWeaver` leaves headroom and rejects larger
 /// egress before starting a billable invocation.
@@ -1294,6 +1295,7 @@ impl ClaudeCodeRuntime {
             input,
             cancellation,
             expected_environment_class,
+            &[],
         )
         .await
     }
@@ -1309,6 +1311,7 @@ impl ClaudeCodeRuntime {
         input: ImmutableEgressInput,
         cancellation: RunCancellation,
         expected_environment_class: EnvironmentClass,
+        platform_images: &[PlatformImageEntry],
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
         let execution_scope = ExecutionScope::Authoring(scope.clone());
         self.generate_scoped(
@@ -1317,6 +1320,7 @@ impl ClaudeCodeRuntime {
             input,
             cancellation,
             expected_environment_class,
+            platform_images,
         )
         .await
     }
@@ -1329,6 +1333,7 @@ impl ClaudeCodeRuntime {
         input: ImmutableEgressInput,
         cancellation: RunCancellation,
         expected_environment_class: EnvironmentClass,
+        platform_images: &[PlatformImageEntry],
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
         let authoring = matches!(scope, ExecutionScope::Authoring(_));
         let tool_policy = tool_policy_sha256(authoring);
@@ -1367,7 +1372,10 @@ impl ClaudeCodeRuntime {
             ),
         };
         let prompt = if authoring {
-            format!("{prompt}\n\n{AUTHORING_SANDBOX_PROMPT}")
+            format!(
+                "{prompt}\n\n{AUTHORING_SANDBOX_PROMPT}{}",
+                platform_image_prompt(platform_images)
+            )
         } else {
             prompt
         };
@@ -2676,6 +2684,29 @@ const AUTHORING_MAX_TURNS: u32 = 60;
 const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
 const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. A rootless BuildKit daemon is reachable through BUILDKIT_HOST for image builds and may only pull from the platform Harbor registry; when you build a container image, export its OCI layout to exactly /workspace/labweaver-export.tar (for example: buildctl build --frontend dockerfile.v0 --local context=/workspace/context --local dockerfile=/workspace/context --output type=oci,dest=/workspace/labweaver-export.tar). Only that exact exported layout is imported and published by the platform. The final response must still be exactly one JSON object satisfying the required schema.";
 
+fn platform_image_prompt(images: &[PlatformImageEntry]) -> String {
+    use std::fmt::Write as _;
+    if images.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "\n\nPLATFORM IMAGE CATALOG (prefer these reviewed, digest-pinned base images and pull only from the platform Harbor registry):",
+    );
+    for image in images {
+        let _ = write!(
+            text,
+            "\n- {} ({}) @ {}",
+            image.binding,
+            match image.kind {
+                PlatformImageKind::Container => "container",
+                PlatformImageKind::VirtualMachine => "vm",
+            },
+            image.resolved_digest
+        );
+    }
+    text
+}
+
 fn tool_policy_sha256(authoring: bool) -> Sha256Digest {
     if authoring {
         Sha256Digest::of_bytes(AUTHORING_TOOL_POLICY_CANONICAL_JSON)
@@ -2827,9 +2858,37 @@ mod tests {
 
     use super::{
         CLAUDE_RUNTIME_PATH, ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError,
-        TokioClaudeCodeProcess, decimal_to_microusd, microusd_to_usd, read_stream_until_result,
-        usd_number_to_microusd,
+        TokioClaudeCodeProcess, decimal_to_microusd, microusd_to_usd, platform_image_prompt,
+        read_stream_until_result, usd_number_to_microusd,
     };
+    use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn platform_image_prompt_lists_only_digest_pinned_reviewed_entries() {
+        assert_eq!(platform_image_prompt(&[]), "");
+        let entry = PlatformImageEntry {
+            catalog_id: uuid::Uuid::new_v4(),
+            kind: PlatformImageKind::Container,
+            binding: "ubuntu-24.04".to_owned(),
+            source_reference: "harbor.internal/labweaver-system/ubuntu:24.04".to_owned(),
+            resolved_digest: format!("sha256:{}", "a".repeat(64)),
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            size_bytes: 4_096,
+            status: PlatformImageStatus::Active,
+            trust_revision: 1,
+            repin_generation: 1,
+            pinned_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+            updated_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+        };
+        let prompt = platform_image_prompt(std::slice::from_ref(&entry));
+        assert!(prompt.contains("PLATFORM IMAGE CATALOG"));
+        assert!(prompt.contains(&format!(
+            "- ubuntu-24.04 (container) @ {}",
+            entry.resolved_digest
+        )));
+        assert!(!prompt.contains(":24.04"));
+    }
 
     #[test]
     fn process_environment_has_a_fixed_runtime_path() {
