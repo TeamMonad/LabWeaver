@@ -68,6 +68,16 @@ files. Operator-specific variable names are not read, and there is no compatibil
 ambient credential fallback or alternate provider route; startup fails closed when the
 mounted set differs from these three fields.
 
+The administrator image catalog binds exactly one platform registry. Put the operator-provided CA,
+robot username and robot password values in
+`secrets/agent-service-secrets/{harbor-ca.crt,harbor-username,harbor-password}` with mode `0600`;
+`agent-control-plane.yaml.example` reads them through `platform_registry.ca_file`,
+`platform_registry.username_file` and `platform_registry.password_file` and accepts no other
+registry host than `platform_registry.registry`. The robot account needs pull on the reviewed base
+images and push on the import target project. Startup fails closed when the mounted files are
+missing, and a deployment without the `platform_registry` block keeps catalog writes disabled with
+`LW_PLATFORM_IMAGE_REGISTRY_NOT_CONFIGURED`.
+
 Environment-specific Helm values must explicitly bind existing infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under
 `network.externalServiceEndpoints`, an opt-in `portalRoute`, and the reviewed shared MetalLB VIP

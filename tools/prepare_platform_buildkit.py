@@ -161,6 +161,53 @@ def _issue(
     return key, certificate
 
 
+def buildkitd_configuration(
+    registry_host: str,
+    dns_nameserver: str | None,
+    grpc_tls: bool,
+    registry_ca_path: str,
+) -> str:
+    """Render the reviewed rootless ``buildkitd.toml`` for one registry host.
+
+    The standalone deployment enables the mutual-TLS ``[grpc]`` listener and
+    pins the cluster nameserver. The authoring sandbox sidecar omits the
+    listener because the attempt reaches the daemon over the local unix socket,
+    and inherits the pod resolver instead of a pinned nameserver.
+    """
+
+    grpc = (
+        '[grpc]\n'
+        '  address = ["tcp://0.0.0.0:1234"]\n'
+        '  [grpc.tls]\n'
+        '    cert = "/etc/buildkit/tls/tls.crt"\n'
+        '    key = "/etc/buildkit/tls/tls.key"\n'
+        '    ca = "/etc/buildkit/tls/ca.crt"\n'
+        '\n'
+        if grpc_tls
+        else ""
+    )
+    dns = (
+        f'[dns]\n  nameservers = ["{dns_nameserver}"]\n\n'
+        if dns_nameserver is not None
+        else ""
+    )
+    return (
+        'debug = false\n'
+        'root = "/home/user/.local/share/buildkit"\n'
+        '\n'
+        f'{grpc}'
+        f'[registry."{registry_host}"]\n'
+        f'  ca = ["{registry_ca_path}"]\n'
+        '\n'
+        f'{dns}'
+        '[worker.oci]\n'
+        '  enabled = true\n'
+        '  rootless = true\n'
+        '  noProcessSandbox = true\n'
+        '  gc = true\n'
+    )
+
+
 def prepare(
     output: Path,
     openssl: Path,
@@ -228,28 +275,12 @@ def prepare(
     ):
         _copy(source, client / name)
 
-    configuration = f'''debug = false
-root = "/home/user/.local/share/buildkit"
-
-[grpc]
-  address = ["tcp://0.0.0.0:1234"]
-  [grpc.tls]
-    cert = "/etc/buildkit/tls/tls.crt"
-    key = "/etc/buildkit/tls/tls.key"
-    ca = "/etc/buildkit/tls/ca.crt"
-
-[registry."{registry_host}"]
-  ca = ["/etc/buildkit/tls/registry-ca.crt"]
-
-[dns]
-  nameservers = ["{nameserver}"]
-
-[worker.oci]
-  enabled = true
-  rootless = true
-  noProcessSandbox = true
-  gc = true
-'''.encode()
+    configuration = buildkitd_configuration(
+        registry_host,
+        nameserver,
+        True,
+        "/etc/buildkit/tls/registry-ca.crt",
+    ).encode()
     _write(render_input / "configmaps" / "buildkit-config" / "buildkitd.toml", configuration)
 
     return {

@@ -1306,6 +1306,10 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertIn(required, fixture)
 
     def test_local_kind_bundle_covers_enabled_workloads_and_identity_bindings(self) -> None:
+        # The Agent platform registry is part of the reviewed bundle contract, so
+        # only the profile that provisions the run-owned Harbor and BuildKit
+        # provider can render every declared secret; the fixture profile fails
+        # closed in test_local_fixture_profile_requires_the_real_build_provider.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             work = root / "work"
@@ -1330,9 +1334,14 @@ class LocalDevBundleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self._write_foundation_fixture(foundation)
+            build_nats = foundation / "nats-clients" / "build-executor"
+            build_nats.mkdir(parents=True)
+            for name in ("nats.creds", "nats-client.crt", "nats-client.key"):
+                (build_nats / name).write_bytes(f"build-{name}".encode())
             for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
                 (work / name).write_bytes(name.encode())
 
+            provider = self._write_real_build_provider(root)
             images = {
                 "evaluation_service": (
                     f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
@@ -1356,6 +1365,7 @@ class LocalDevBundleTests(unittest.TestCase):
                     "ANTHROPIC_AUTH_TOKEN": "test-provider-token",
                     "ANTHROPIC_MODEL": "test-model",
                 },
+                provider,
             )
 
             platform_documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
@@ -1363,8 +1373,8 @@ class LocalDevBundleTests(unittest.TestCase):
                 (document["kind"], document["metadata"]["name"])
                 for document in platform_documents
             }
-            self.assertNotIn(("ConfigMap", "build-executor-config"), platform_names)
-            self.assertNotIn(("Secret", "build-executor-secrets"), platform_names)
+            self.assertIn(("ConfigMap", "build-executor-config"), platform_names)
+            self.assertIn(("Secret", "build-executor-secrets"), platform_names)
             self.assertNotIn(("ConfigMap", "kubevirt-executor-config"), platform_names)
             self.assertNotIn(("Secret", "kubevirt-executor-secrets"), platform_names)
             self.assertNotIn(("ConfigMap", "kubevirt-console-executor-config"), platform_names)
@@ -1451,7 +1461,7 @@ class LocalDevBundleTests(unittest.TestCase):
             )
             self.assertEqual(
                 container_provider["imageRepositoryPrefix"],
-                f"localhost:{local_dev.REGISTRY_PORT}/labweaver-system",
+                f"{provider.registry_host}/labweaver-system",
             )
             self.assertEqual(container_provider["imagePullSecretName"], "harbor-course-pull")
             self.assertEqual(container_provider["workspaceStorageClassName"], "standard")
@@ -1465,7 +1475,7 @@ class LocalDevBundleTests(unittest.TestCase):
             pull_config = json.loads(
                 base64.b64decode(pull_secret["data"]["registry-pull-config.json"])
             )
-            self.assertIn(f"localhost:{local_dev.REGISTRY_PORT}", pull_config["auths"])
+            self.assertIn(provider.registry_host, pull_config["auths"])
 
             resource_documents = list(yaml.safe_load_all(resource_bundle.read_text(encoding="utf-8")))
             resource_names = {
@@ -1481,14 +1491,148 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertFalse((app_input / "secrets" / "kubevirt-executor-secrets").exists())
             self.assertFalse((app_input / "secrets" / "kubevirt-console-executor-secrets").exists())
 
+    def test_local_fixture_profile_binds_fixture_platform_registry_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            foundation = root / "foundation"
+            work.mkdir()
+            client_names = ("web", "access", "agent", "control", "environment", "evaluation", "resource")
+            (work / "client-secrets.json").write_text(
+                json.dumps({name: f"{name}-secret" for name in client_names}),
+                encoding="utf-8",
+            )
+            database_names = (
+                "control-service",
+                "access-service",
+                "agent-service",
+                "environment-service",
+                "evaluation-service",
+                "resource-service",
+            )
+            (work / "database-passwords.json").write_text(
+                json.dumps({name: f"{name}-password" for name in database_names}),
+                encoding="utf-8",
+            )
+            self._write_foundation_fixture(foundation)
+            for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
+                (work / name).write_bytes(name.encode())
+
+            bundle, _resource_bundle, _ = local_dev.make_app_input(
+                work,
+                foundation,
+                {
+                    "evaluation_service": (
+                        f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                        "evaluation-service@sha256:" + "a" * 64
+                    ),
+                    "evaluation_runner": (
+                        f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                        "evaluation-runner@sha256:" + "b" * 64
+                    ),
+                    "authoring_sandbox": (
+                        f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                        "authoring-sandbox@sha256:" + "c" * 64
+                    ),
+                },
+                {
+                    "ANTHROPIC_BASE_URL": "https://provider.example.test/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": "test-provider-token",
+                    "ANTHROPIC_MODEL": "test-model",
+                },
+            )
+
+            documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
+            agent_config = next(
+                document
+                for document in documents
+                if document["kind"] == "ConfigMap"
+                and document["metadata"]["name"] == "agent-service-config"
+            )
+            platform_registry = yaml.safe_load(agent_config["data"]["config.yaml"])[
+                "platform_registry"
+            ]
+            self.assertEqual(
+                platform_registry["registry"], f"localhost:{local_dev.REGISTRY_PORT}"
+            )
+            self.assertEqual(
+                platform_registry["ca_file"], "/etc/labweaver/secrets/harbor-ca.crt"
+            )
+            agent_secret = next(
+                document
+                for document in documents
+                if document["kind"] == "Secret"
+                and document["metadata"]["name"] == "agent-service-secrets"
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["harbor-ca.crt"]),
+                (foundation / "authority" / "ca.crt").read_bytes(),
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["harbor-username"]), b"local-dev"
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["harbor-password"]), b"local-dev"
+            )
+            build_executor_secret = next(
+                (
+                    document
+                    for document in documents
+                    if document["kind"] == "Secret"
+                    and document["metadata"]["name"] == "build-executor-secrets"
+                ),
+                None,
+            )
+            self.assertIsNone(build_executor_secret)
+
+    @staticmethod
+    def _write_real_build_provider(root: Path) -> local_dev.local_dev_build.RealBuildProvider:
+        """Write the private Harbor and BuildKit provider files for one bundle render."""
+
+        provider_root = root / "provider"
+        provider_root.mkdir()
+        files = {
+            "harbor-ca.crt": b"harbor-ca",
+            "builder-username": b"robot$labweaver-system+platform-build-executor\n",
+            "builder-password": b"builder-token\n",
+            "runtime-username": b"robot$labweaver-system+runtime-puller\n",
+            "runtime-password": b"runtime-token\n",
+            "registry-pull-config.json": b'{"auths": {"harbor.lab.lan": {"auth": "runtime"}}}\n',
+            "buildkit-ca.crt": b"buildkit-ca",
+            "buildkit-client.crt": b"buildkit-client-crt",
+            "buildkit-client.key": b"buildkit-client-key",
+            "chart.tgz": b"chart",
+        }
+        paths = {}
+        for name, value in files.items():
+            path = provider_root / name
+            path.write_bytes(value)
+            paths[name] = path
+        return local_dev.local_dev_build.RealBuildProvider(
+            registry_host="harbor.lab.lan",
+            registry_service_ip="10.96.0.42",
+            harbor_api="https://harbor.lab.lan/",
+            buildkit_address="tcp://buildkit.labweaver-build.svc:1234",
+            harbor_ca_file=paths["harbor-ca.crt"],
+            builder_username_file=paths["builder-username"],
+            builder_password_file=paths["builder-password"],
+            runtime_username_file=paths["runtime-username"],
+            runtime_password_file=paths["runtime-password"],
+            registry_pull_config_file=paths["registry-pull-config.json"],
+            buildkit_ca_file=paths["buildkit-ca.crt"],
+            buildkit_client_certificate_file=paths["buildkit-client.crt"],
+            buildkit_client_private_key_file=paths["buildkit-client.key"],
+            chart_archive=paths["chart.tgz"],
+            project_storage_quota_bytes=4 * 1024 * 1024 * 1024,
+            buildkit_network_policy_mode="kindnet-network-policy-unenforced;cilium-unavailable",
+        )
+
     def test_real_provider_bundle_uses_harbor_buildkit_inputs_and_quota(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             work = root / "work"
             foundation = root / "foundation"
-            provider_root = root / "provider"
             work.mkdir()
-            provider_root.mkdir()
 
             client_names = ("web", "access", "agent", "control", "environment", "evaluation", "resource")
             (work / "client-secrets.json").write_text(
@@ -1515,41 +1659,7 @@ class LocalDevBundleTests(unittest.TestCase):
             for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
                 (work / name).write_bytes(name.encode())
 
-            files = {
-                "harbor-ca.crt": b"harbor-ca",
-                "builder-username": b"robot$labweaver-system+platform-build-executor\n",
-                "builder-password": b"builder-token\n",
-                "runtime-username": b"robot$labweaver-system+runtime-puller\n",
-                "runtime-password": b"runtime-token\n",
-                "registry-pull-config.json": b'{"auths": {"harbor.lab.lan": {"auth": "runtime"}}}\n',
-                "buildkit-ca.crt": b"buildkit-ca",
-                "buildkit-client.crt": b"buildkit-client-crt",
-                "buildkit-client.key": b"buildkit-client-key",
-                "chart.tgz": b"chart",
-            }
-            paths = {}
-            for name, value in files.items():
-                path = provider_root / name
-                path.write_bytes(value)
-                paths[name] = path
-            provider = local_dev.local_dev_build.RealBuildProvider(
-                registry_host="harbor.lab.lan",
-                registry_service_ip="10.96.0.42",
-                harbor_api="https://harbor.lab.lan/",
-                buildkit_address="tcp://buildkit.labweaver-build.svc:1234",
-                harbor_ca_file=paths["harbor-ca.crt"],
-                builder_username_file=paths["builder-username"],
-                builder_password_file=paths["builder-password"],
-                runtime_username_file=paths["runtime-username"],
-                runtime_password_file=paths["runtime-password"],
-                registry_pull_config_file=paths["registry-pull-config.json"],
-                buildkit_ca_file=paths["buildkit-ca.crt"],
-                buildkit_client_certificate_file=paths["buildkit-client.crt"],
-                buildkit_client_private_key_file=paths["buildkit-client.key"],
-                chart_archive=paths["chart.tgz"],
-                project_storage_quota_bytes=4 * 1024 * 1024 * 1024,
-                buildkit_network_policy_mode="kindnet-network-policy-unenforced;cilium-unavailable",
-            )
+            provider = self._write_real_build_provider(root)
             images = {
                 "evaluation_service": "localhost:5001/labweaver/local/evaluation-service@sha256:" + "a" * 64,
                 "evaluation_runner": "localhost:5001/labweaver/local/evaluation-runner@sha256:" + "b" * 64,
@@ -1607,6 +1717,52 @@ class LocalDevBundleTests(unittest.TestCase):
                         }
                     }
                 },
+            )
+
+    def test_authoring_buildkit_sidecar_activates_only_the_two_reviewed_keys(self) -> None:
+        example = ROOT / "deploy/config/agent-control-plane.yaml.example"
+        original = example.read_text(encoding="utf-8")
+        self.assertIn('  # buildkit_image: "', original)
+        self.assertIn('  # buildkit_config_map_name: "authoring-buildkit-config"', original)
+        image = "docker.io/moby/buildkit:v0.31.1-rootless@sha256:" + "d" * 64
+
+        rendered = local_dev.render_authoring_buildkit_sidecar(original, image)
+
+        original_lines = original.splitlines()
+        rendered_lines = rendered.splitlines()
+        self.assertEqual(len(original_lines), len(rendered_lines))
+        changed = [
+            (before, after)
+            for before, after in zip(original_lines, rendered_lines)
+            if before != after
+        ]
+        self.assertEqual(len(changed), 2)
+        self.assertTrue(changed[0][0].startswith("  # buildkit_image: "))
+        self.assertEqual(changed[0][1], f'  buildkit_image: "{image}"')
+        self.assertEqual(
+            changed[1],
+            (
+                '  # buildkit_config_map_name: "authoring-buildkit-config"',
+                '  buildkit_config_map_name: "authoring-buildkit-config"',
+            ),
+        )
+        sandbox = yaml.safe_load(rendered)["sandbox"]
+        self.assertEqual(sandbox["buildkit_image"], image)
+        self.assertEqual(sandbox["buildkit_config_map_name"], "authoring-buildkit-config")
+
+    def test_authoring_buildkit_sidecar_requires_both_commented_anchors(self) -> None:
+        image = "docker.io/moby/buildkit:v0.31.1-rootless@sha256:" + "d" * 64
+        with self.assertRaisesRegex(
+            local_dev.LocalDevError,
+            r"no commented sandbox\.buildkit_image anchor",
+        ):
+            local_dev.render_authoring_buildkit_sidecar('sandbox:\n  image: "pinned"\n', image)
+        with self.assertRaisesRegex(
+            local_dev.LocalDevError,
+            r"no commented sandbox\.buildkit_config_map_name anchor",
+        ):
+            local_dev.render_authoring_buildkit_sidecar(
+                'sandbox:\n  # buildkit_image: "old"\n', image
             )
 
     @staticmethod

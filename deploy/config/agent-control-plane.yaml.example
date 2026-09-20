@@ -96,3 +96,12 @@ nats:
   build_command_quarantine_subject: "labweaver.agent.quarantine.build_command.v1"
   publish_timeout_milliseconds: 5000
   outbox_poll_milliseconds: 250
+platform_registry:
+  # Single platform registry the administrator image catalog may resolve and push
+  # inside. The robot account needs pull on the reviewed base images and push on
+  # the import target project; no other host is accepted, and a missing block
+  # keeps catalog writes fail closed (503).
+  registry: "harbor.example.invalid"
+  ca_file: "/etc/labweaver/secrets/harbor-ca.crt"
+  username_file: "/etc/labweaver/secrets/harbor-username"
+  password_file: "/etc/labweaver/secrets/harbor-password"

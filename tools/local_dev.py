@@ -54,6 +54,10 @@ ACCESS_PORT = "38081"
 WEB_PORT = "38082"
 RUN_ID = "bootstrap"
 KUBERNETES_OWNER_LABEL_VALUE = "tools.local_dev.py"
+# The optional authoring sandbox BuildKit sidecar is bound to one ConfigMap the
+# attempt mounts as its BuildKit configuration and registry CA bundle.
+AUTHORING_BUILDKIT_CONFIG_MAP = "authoring-buildkit-config"
+AUTHORING_BUILDKIT_CA_PATH = "/etc/buildkit/registry-ca.crt"
 # The local Kind profile points every OIDC caller at the local Keycloak issuer
 # through the portal edge. Keep this list limited to workloads that actually
 # use that path; the BuildKit and KubeVirt executors do not call the portal,
@@ -292,6 +296,102 @@ def real_build_helm_values(
             }
         }
     }
+
+def _buildkit_authoring_module() -> Any:
+    """Load the shared rootless BuildKit configuration renderer."""
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_platform_buildkit", ROOT / "tools" / "prepare_platform_buildkit.py"
+    )
+    if spec is None or spec.loader is None:
+        fail("cannot load the platform BuildKit authoring module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def platform_buildkit_image() -> str:
+    """Return the locked rootless BuildKit image pinned for the sandbox sidecar."""
+
+    lock = load_yaml(ROOT / "deploy" / "versions.lock.yml")
+    foundation = lock.get("platform_foundation") if isinstance(lock, dict) else None
+    image = foundation.get("buildkit_rootless") if isinstance(foundation, dict) else None
+    if not isinstance(image, str) or re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", image
+    ) is None:
+        fail("versions lock has no platform_foundation.buildkit_rootless digest image")
+    return image
+
+
+def render_authoring_buildkit_sidecar(data: str, buildkit_image: str) -> str:
+    """Activate the reviewed optional sandbox BuildKit sidecar keys.
+
+    The checked-in example leaves ``sandbox.buildkit_image`` and
+    ``sandbox.buildkit_config_map_name`` commented so the default local profile
+    runs attempts without an image-build capability. Enabling the sidecar
+    replaces exactly those two anchors and leaves the rest of the document
+    untouched; a missing anchor is a hard failure rather than a silent partial
+    activation.
+    """
+
+    for key, value in (
+        ("buildkit_image", buildkit_image),
+        ("buildkit_config_map_name", AUTHORING_BUILDKIT_CONFIG_MAP),
+    ):
+        anchor = re.compile(rf"(?m)^(\s*)#\s*{key}:\s*[^\r\n]+$")
+        replacement = f'{key}: "{value}"'
+        data, replacements = anchor.subn(
+            lambda match, replacement=replacement: match.group(1) + replacement,
+            data,
+            count=1,
+        )
+        if replacements != 1:
+            fail(f"agent configuration has no commented sandbox.{key} anchor")
+    return data
+
+
+def authoring_buildkit_config_map(
+    namespace: str,
+    labels: dict[str, str],
+    real_build_provider: local_dev_build.RealBuildProvider | None,
+) -> dict[str, Any]:
+    """Build the ConfigMap the authoring attempt mounts as its BuildKit binding.
+
+    The sidecar reaches BuildKit over the attempt-local unix socket, so the
+    rendered configuration omits the standalone mutual-TLS listener while
+    keeping the reviewed rootless worker settings and the Harbor registry CA.
+    """
+
+    if real_build_provider is None:
+        fail("the authoring BuildKit sidecar requires the real Harbor and BuildKit provider")
+    if re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", real_build_provider.registry_host
+    ) is None:
+        fail("real build provider returned an invalid Harbor registry hostname")
+    registry_ca = _read_real_build_file(
+        real_build_provider, real_build_provider.harbor_ca_file, "Harbor CA"
+    )
+    try:
+        registry_ca_text = registry_ca.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("real build provider Harbor CA is not a UTF-8 certificate bundle")
+    configuration = _buildkit_authoring_module().buildkitd_configuration(
+        real_build_provider.registry_host,
+        None,
+        False,
+        AUTHORING_BUILDKIT_CA_PATH,
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": AUTHORING_BUILDKIT_CONFIG_MAP,
+            "namespace": namespace,
+            "labels": labels,
+        },
+        "data": {"buildkitd.toml": configuration, "registry-ca.crt": registry_ca_text},
+    }
+
 
 def digest(path: Path) -> str:
     h = hashlib.sha256()
@@ -1793,6 +1893,9 @@ def bootstrap_authoring_sandbox_resources(
     kubeconfig: Path,
     app_input: Path,
     registry_pull_config: Path,
+    *,
+    authoring_buildkit_sidecar: bool = False,
+    real_build_provider: local_dev_build.RealBuildProvider | None = None,
 ) -> None:
     """Provision the permanent authoring sandbox objects from final config."""
 
@@ -1817,6 +1920,14 @@ def bootstrap_authoring_sandbox_resources(
     namespace = required_name("namespace")
     service_account = required_name("service_account_name")
     image_pull_secret = required_name("image_pull_secret_name")
+    if (
+        authoring_buildkit_sidecar
+        and sandbox.get("buildkit_config_map_name") != AUTHORING_BUILDKIT_CONFIG_MAP
+    ):
+        fail(
+            "local agent sandbox.buildkit_config_map_name must select the "
+            "authoring BuildKit ConfigMap"
+        )
     try:
         pull_config = registry_pull_config.read_bytes()
     except (OSError, UnicodeError) as error:
@@ -1880,6 +1991,10 @@ def bootstrap_authoring_sandbox_resources(
             "data": {".dockerconfigjson": encode(pull_config)},
         },
     ]
+    if authoring_buildkit_sidecar:
+        objects.append(
+            authoring_buildkit_config_map(namespace, policy_labels, real_build_provider)
+        )
     apply(kubeconfig, objects)
 
 
@@ -2546,6 +2661,8 @@ def make_app_input(
     images: dict[str, str],
     provider_environment: dict[str, str],
     real_build_provider: local_dev_build.RealBuildProvider | None = None,
+    *,
+    authoring_buildkit_sidecar: bool = False,
 ) -> tuple[Path, Path, str]:
     provider_environment = validate_provider_environment(provider_environment)
     manifest = _local_platform_manifest(real_build_provider)
@@ -2619,6 +2736,10 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("agent configuration has no sandbox.image")
+            if authoring_buildkit_sidecar:
+                data = render_authoring_buildkit_sidecar(
+                    data, platform_buildkit_image()
+                )
         if source == "evaluation-service.yaml.example":
             evaluation_image = images.get("evaluation_service")
             if not isinstance(evaluation_image, str) or not re.fullmatch(
@@ -2734,29 +2855,42 @@ def make_app_input(
                 "harbor-username",
             }:
                 if real_build_provider is None:
-                    fail(f"real build provider is required for build executor secret {key}")
-                provider_files = {
-                    "buildkit-ca.pem": (real_build_provider.buildkit_ca_file, "BuildKit CA"),
-                    "buildkit-client.crt": (
-                        real_build_provider.buildkit_client_certificate_file,
-                        "BuildKit client certificate",
-                    ),
-                    "buildkit-client.key": (
-                        real_build_provider.buildkit_client_private_key_file,
-                        "BuildKit client private key",
-                    ),
-                    "harbor-ca.crt": (real_build_provider.harbor_ca_file, "Harbor CA"),
-                    "harbor-password": (
-                        real_build_provider.builder_password_file,
-                        "Harbor builder password",
-                    ),
-                    "harbor-username": (
-                        real_build_provider.builder_username_file,
-                        "Harbor builder username",
-                    ),
-                }
-                provider_file, label = provider_files[key]
-                values[key] = _read_real_build_file(real_build_provider, provider_file, label)
+                    if key not in ("harbor-ca.crt", "harbor-password", "harbor-username"):
+                        fail(f"real build provider is required for platform registry secret {key}")
+                    # The fixture profile has no Harbor and points the platform
+                    # registry at the run-local registry host, so the catalog
+                    # stays unusable there and every write fails closed against a
+                    # real transport error. The mounted files only have to
+                    # satisfy the Agent startup validation, exactly like the
+                    # fixture registry pull configuration above.
+                    values[key] = {
+                        "harbor-ca.crt": ca,
+                        "harbor-password": b"local-dev",
+                        "harbor-username": b"local-dev",
+                    }[key]
+                else:
+                    provider_files = {
+                        "buildkit-ca.pem": (real_build_provider.buildkit_ca_file, "BuildKit CA"),
+                        "buildkit-client.crt": (
+                            real_build_provider.buildkit_client_certificate_file,
+                            "BuildKit client certificate",
+                        ),
+                        "buildkit-client.key": (
+                            real_build_provider.buildkit_client_private_key_file,
+                            "BuildKit client private key",
+                        ),
+                        "harbor-ca.crt": (real_build_provider.harbor_ca_file, "Harbor CA"),
+                        "harbor-password": (
+                            real_build_provider.builder_password_file,
+                            "Harbor builder password",
+                        ),
+                        "harbor-username": (
+                            real_build_provider.builder_username_file,
+                            "Harbor builder username",
+                        ),
+                    }
+                    provider_file, label = provider_files[key]
+                    values[key] = _read_real_build_file(real_build_provider, provider_file, label)
             elif key=="system-actor-id": values[key]="00000000-0000-7000-8000-000000000001"
             elif key=="collector-ssh-user-ca-key": values[key]=(foundation/"ssh-authority/collector-ca").read_bytes()
             elif key in ("mtls.crt","mtls.key"): values[key]=(identities/"openssh-gateway"/("certificate.pem" if key=="mtls.crt" else "key.pem")).read_bytes()
@@ -3092,12 +3226,19 @@ http {
     apply(kubeconfig, objects)
     wait_rollout(kubeconfig, "deployment", "local-dev-portal", NAMESPACE)
 
-def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> None:
+def up(
+    *,
+    external_fixtures: bool = False,
+    provider_env: Path | None = None,
+    authoring_buildkit_sidecar: bool = False,
+) -> None:
     global CLUSTER, REGISTRY, REGISTRY_PORT, PORTAL_PORT, ACCESS_PORT, WEB_PORT, RUN_ID
     provider_environment = resolve_provider_environment(
         external_fixtures=external_fixtures,
         provider_env=provider_env,
     )
+    if authoring_buildkit_sidecar and external_fixtures:
+        fail("--authoring-buildkit-sidecar requires the real Harbor and BuildKit provider")
     need_tools(["docker","kind","kubectl","helm","openssl","ssh-keygen"])
     require_psutil()
     verify_loopback_nip_io()
@@ -3158,7 +3299,8 @@ def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> 
             source_image = build_work_runtime_fixture()
             start_build_executor_fixture(kubeconfig, foundation, source_image)
         bundle,resource_bundle,bundle_sha=make_app_input(
-            work, foundation, images, provider_environment, real_build_provider
+            work, foundation, images, provider_environment, real_build_provider,
+            authoring_buildkit_sidecar=authoring_buildkit_sidecar,
         )
         real_build_values: Path | None = None
         if real_build_provider is not None:
@@ -3181,6 +3323,8 @@ def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> 
             kubeconfig,
             work / "app-input",
             evaluation_pull_config,
+            authoring_buildkit_sidecar=authoring_buildkit_sidecar,
+            real_build_provider=real_build_provider,
         )
         kubectl(kubeconfig, ["create", "namespace", NAMESPACE], check=False)
         kubectl(kubeconfig, ["label", "namespace", NAMESPACE, "labweaver.io/edge=true",
@@ -3419,14 +3563,25 @@ def main() -> int:
         type=Path,
         help="dotenv file containing ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_MODEL",
     )
+    parser.add_argument(
+        "--authoring-buildkit-sidecar",
+        action="store_true",
+        help=(
+            "enable the optional rootless BuildKit sidecar of the local authoring "
+            "sandbox and provision its BuildKit configuration ConfigMap"
+        ),
+    )
     args=parser.parse_args()
     if args.external_fixtures and args.command != "up":
         parser.error("--external-fixtures is valid only with the up command")
     if args.provider_env is not None and args.command != "up":
         parser.error("--provider-env is valid only with the up command")
+    if args.authoring_buildkit_sidecar and args.command != "up":
+        parser.error("--authoring-buildkit-sidecar is valid only with the up command")
     try:
         if args.command == "up":
-            up(external_fixtures=args.external_fixtures, provider_env=args.provider_env)
+            up(external_fixtures=args.external_fixtures, provider_env=args.provider_env,
+               authoring_buildkit_sidecar=args.authoring_buildkit_sidecar)
         elif args.command == "status":
             status()
         else:
