@@ -59,10 +59,11 @@ sandbox:
   workspace_bytes: 2147483648
   wall_time_seconds: 3600
   allowed_egress_cidrs: ["10.0.0.0/8"]
-  # Optional rootless BuildKit sidecar. Set together with the reviewed
-  # buildkitd.toml ConfigMap so the attempt can build only against Harbor.
-  buildkit_image: "harbor.example.invalid/labweaver-system/buildkit-rootless@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-  buildkit_config_map_name: "authoring-buildkit-config"
+  # Optional rootless BuildKit sidecar; deployment binds both keys together with
+  # the reviewed buildkitd.toml ConfigMap so the attempt can build only against
+  # Harbor. Leave unset to run attempts without an image-build capability.
+  # buildkit_image: "harbor.example.invalid/labweaver-system/buildkit-rootless@sha256:0000...0000"
+  # buildkit_config_map_name: "authoring-buildkit-config"
   result_max_bytes: 4194304
   stderr_max_bytes: 262144
   object_prefix: "authoring-sandbox"

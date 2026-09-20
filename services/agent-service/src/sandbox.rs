@@ -50,6 +50,7 @@ const BUILDKIT_RUN_DIR: &str = "/run/buildkit";
 const BUILDKIT_SOCKET: &str = "/run/buildkit/buildkitd.sock";
 const BUILDKIT_STATE_DIR: &str = "/home/user/.local/share/buildkit";
 const BUILDKIT_CONFIG_PATH: &str = "/etc/buildkit/buildkitd.toml";
+const BUILDKIT_CA_PATH: &str = "/etc/buildkit/registry-ca.crt";
 const BUILDKIT_RUNTIME_DIR: &str = "/run/user/1000";
 const BUILDKIT_DOCKER_CONFIG_DIR: &str = "/home/user/.docker";
 const BUILDKIT_RUN_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
@@ -530,6 +531,12 @@ fn buildkit_sidecar(configuration: &SandboxConfiguration, image: &str) -> Value 
                 "subPath": "buildkitd.toml",
                 "readOnly": true,
             },
+            {
+                "name": BUILDKIT_CONFIG_VOLUME,
+                "mountPath": BUILDKIT_CA_PATH,
+                "subPath": "registry-ca.crt",
+                "readOnly": true,
+            },
             {"name": BUILDKIT_AUTH_VOLUME, "mountPath": BUILDKIT_DOCKER_CONFIG_DIR, "readOnly": true},
         ],
     })
@@ -996,6 +1003,12 @@ mod tests {
         assert!(volumes.iter().any(|volume| {
             volume["name"] == "buildkit-auth"
                 && volume["projected"]["sources"][0]["secret"]["name"] == "harbor-course-pull"
+        }));
+        assert!(sidecar["volumeMounts"].as_array().is_some_and(|mounts| {
+            mounts.iter().any(|mount| {
+                mount["mountPath"] == "/etc/buildkit/registry-ca.crt"
+                    && mount["subPath"] == "registry-ca.crt"
+            })
         }));
         Ok(())
     }

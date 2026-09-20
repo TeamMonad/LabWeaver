@@ -2350,12 +2350,15 @@
           | first
         ).reference
       }}
+    platform_application_authoring_buildkit_image: >-
+      {{ platform_application_lock.platform_foundation.buildkit_rootless }}
   no_log: true
 
 - name: Require the authoring sandbox package binding
   ansible.builtin.assert:
     that:
       - platform_application_authoring_sandbox_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - platform_application_authoring_buildkit_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
       - >-
         (
           platform_application_agent_configuration_object.data['config.yaml']
@@ -2392,7 +2395,9 @@
                             ).sandbox
                             | combine(
                                 {
-                                  'image': platform_application_authoring_sandbox_image
+                                  'image': platform_application_authoring_sandbox_image,
+                                  'buildkit_image': platform_application_authoring_buildkit_image,
+                                  'buildkit_config_map_name': platform_application_authoring_buildkit_config_name
                                 }
                               )
                           )
@@ -2559,7 +2564,8 @@
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
-          pod-security.kubernetes.io/enforce: restricted
+          labweaver.io/security-exception: rootless-buildkit-no-process-sandbox
+          pod-security.kubernetes.io/enforce: privileged
           pod-security.kubernetes.io/audit: restricted
           pod-security.kubernetes.io/warn: restricted
 
@@ -2654,6 +2660,62 @@
                'password': platform_application_harbor_password,
                'auth': (platform_application_harbor_username + ':' + platform_application_harbor_password)
                  | b64encode}}} | to_json | b64encode }}
+  no_log: true
+
+- name: Reconcile the reviewed authoring BuildKit configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ platform_application_authoring_buildkit_config_name }}"
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      data:
+        buildkitd.toml: |
+          rootless = true
+          [worker.oci]
+            enabled = true
+            noProcessSandbox = true
+          [registry."{{ platform_application_harbor_registry }}"]
+            ca = ["/etc/buildkit/registry-ca.crt"]
+        registry-ca.crt: "{{ platform_application_harbor_ca_bundle.content | b64decode }}"
+  no_log: true
+
+- name: Read back the reviewed authoring BuildKit configuration
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ platform_application_authoring_namespace }}"
+    name: "{{ platform_application_authoring_buildkit_config_name }}"
+  register: platform_application_authoring_buildkit_config
+  no_log: true
+
+- name: Require the reviewed authoring BuildKit configuration
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_authoring_buildkit_config.resources | length == 0
+        ) or
+        (
+          platform_application_authoring_buildkit_config.resources | length == 1 and
+          'noProcessSandbox = true' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          'rootless = true' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          '/etc/buildkit/registry-ca.crt' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          platform_application_authoring_buildkit_config.resources[0].data['registry-ca.crt'] is match('-----BEGIN CERTIFICATE-----')
+        )
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_BUILDKIT_CONFIGURATION_INVALID
   no_log: true
 
 - name: Reconcile the retained MinIO transport policy for platform clients
