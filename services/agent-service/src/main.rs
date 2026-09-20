@@ -94,6 +94,8 @@ struct SandboxFileConfig {
     workspace_bytes: u64,
     wall_time_seconds: u64,
     allowed_egress_cidrs: BTreeSet<String>,
+    buildkit_image: Option<String>,
+    buildkit_config_map_name: Option<String>,
     result_max_bytes: u64,
     stderr_max_bytes: u64,
     object_prefix: String,
@@ -117,6 +119,8 @@ impl SandboxFileConfig {
             workspace_bytes: self.workspace_bytes,
             wall_time_seconds: self.wall_time_seconds,
             allowed_egress_cidrs: self.allowed_egress_cidrs.clone(),
+            buildkit_image: self.buildkit_image.clone(),
+            buildkit_config_map_name: self.buildkit_config_map_name.clone(),
         };
         configuration
             .validate()

@@ -35,7 +35,7 @@
 
 - Agent 服务进程需要访问 Kubernetes API（namespace 级 Role，仅该 namespace 的 Job/Secret/Pod/NetworkPolicy），并持有模型凭据；沙箱通过 NetworkPolicy 与无推送凭据的容器限制其能力。真实 gVisor/Kata 隔离不在本轮部署范围，需实机验证；本轮验证 runc + 容器级 seccomp/capability 限制。
 - 每次 attempt 进入 Resource 审批链；批量审批 UI 已存在，但高频 authoring 的预授权策略是后续产品决定，本 ADR 不引入自动审批。
-- rootless BuildKit 需要受控的 seccomp/capability 例外，命名空间按 baseline 策略而不是 restricted 准入；该例外与 `labweaver-build` 同类，需在部署文档保持显式。
+- rootless BuildKit 需要受控的 seccomp/capability 例外（`seccompProfile`/`appArmorProfile` Unconfined、`SETUID`/`SETGID`、`seLinuxOptions: spc_t`），与既有 `platform_buildkit` 角色同类。`labweaver-authoring` 命名空间按既有 builder 的方式使用 `pod-security.kubernetes.io/enforce: privileged` 与 restricted 审计/告警，并标注 `labweaver.io/security-exception`；例外只落在无 token、资源受限、仅可经 attempt 本地 socket 访问的 sidecar 上。该能力当前通过可选 `sandbox.buildkit_image`/`sandbox.buildkit_config_map_name` 启用，部署侧仍需把 rootless 镜像与 Harbor CA ConfigMap 绑定进该命名空间并联调。
 
 ## 验证边界
 

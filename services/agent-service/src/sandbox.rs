@@ -24,6 +24,8 @@ pub const SANDBOX_EVENT_SCOPE: &str = "agent";
 pub const SANDBOX_DEFAULT_DENY_POLICY: &str = "authoring-default-deny";
 /// Main container that runs the pinned Claude Code CLI.
 pub const SANDBOX_MAIN_CONTAINER: &str = "claude-code";
+/// Rootless `BuildKit` sidecar that serves the attempt-local build socket.
+pub const SANDBOX_BUILDKIT_CONTAINER: &str = "buildkit";
 
 const MANAGED_BY_LABEL: &str = "labweaver.io/managed-by";
 const RUN_ID_LABEL: &str = "labweaver.io/run-id";
@@ -33,11 +35,25 @@ const REQUEST_SHA_ANNOTATION: &str = "labweaver.io/request-sha256";
 const ATTEMPT_VOLUME: &str = "attempt";
 const WORKSPACE_VOLUME: &str = "workspace";
 const MATERIALS_VOLUME: &str = "materials";
+const BUILDKIT_RUN_VOLUME: &str = "buildkit-run";
+const BUILDKIT_STATE_VOLUME: &str = "buildkit-state";
+const BUILDKIT_CONFIG_VOLUME: &str = "buildkit-config";
+const BUILDKIT_AUTH_VOLUME: &str = "buildkit-auth";
+const BUILDKIT_RUNTIME_VOLUME: &str = "buildkit-runtime";
+const BUILDKIT_TMP_VOLUME: &str = "buildkit-tmp";
 const ATTEMPT_DIR: &str = "/run/labweaver";
 const WORKSPACE_DIR: &str = "/workspace";
 const MATERIALS_DIR: &str = "/materials";
 const ATTEMPT_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
 const MATERIALS_VOLUME_BYTES: u64 = 32 * 1024 * 1024;
+const BUILDKIT_RUN_DIR: &str = "/run/buildkit";
+const BUILDKIT_SOCKET: &str = "/run/buildkit/buildkitd.sock";
+const BUILDKIT_STATE_DIR: &str = "/home/user/.local/share/buildkit";
+const BUILDKIT_CONFIG_PATH: &str = "/etc/buildkit/buildkitd.toml";
+const BUILDKIT_RUNTIME_DIR: &str = "/run/user/1000";
+const BUILDKIT_DOCKER_CONFIG_DIR: &str = "/home/user/.docker";
+const BUILDKIT_RUN_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
+const BUILDKIT_TMP_VOLUME_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Rejected sandbox configuration or attempt specification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +91,14 @@ pub struct SandboxConfiguration {
     pub wall_time_seconds: u64,
     /// Allowed non-DNS egress destinations (Harbor, object store, model endpoint).
     pub allowed_egress_cidrs: BTreeSet<String>,
+    /// Optional digest-pinned rootless `BuildKit` sidecar image.
+    ///
+    /// When set together with the `ConfigMap`, the attempt pod gains a tokenless rootless
+    /// `BuildKit` daemon that may only pull from and push to the configured Harbor registry;
+    /// the sandbox still never receives registry push credentials for the platform.
+    pub buildkit_image: Option<String>,
+    /// Optional `ConfigMap` holding the reviewed `buildkitd.toml` with the Harbor registry CA.
+    pub buildkit_config_map_name: Option<String>,
 }
 
 impl SandboxConfiguration {
@@ -99,6 +123,18 @@ impl SandboxConfiguration {
                 .any(|cidr| !valid_cidr(cidr))
         {
             return Err(SandboxBundleError::Invalid);
+        }
+        match (&self.buildkit_image, &self.buildkit_config_map_name) {
+            (None, None) => {}
+            (Some(image), Some(config_map)) => {
+                if !digest_pinned(image)
+                    || !valid_dns_label(config_map)
+                    || self.image_pull_secret_name.is_none()
+                {
+                    return Err(SandboxBundleError::Invalid);
+                }
+            }
+            _ => return Err(SandboxBundleError::Invalid),
         }
         Ok(())
     }
@@ -402,6 +438,142 @@ fn network_policy_document(
     })
 }
 
+fn containers(
+    configuration: &SandboxConfiguration,
+    secret_name: &str,
+    script: &str,
+    environment: &[Value],
+    container_security: &Value,
+    buildkit_image: Option<&str>,
+) -> Vec<Value> {
+    let requests = json!({
+        "cpu": format!("{}m", configuration.cpu_millicores),
+        "memory": configuration.memory_bytes.to_string(),
+        "ephemeral-storage": configuration.workspace_bytes.to_string(),
+    });
+    let mut main_mounts = vec![
+        json!({"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false}),
+        json!({"name": WORKSPACE_VOLUME, "mountPath": WORKSPACE_DIR, "readOnly": false}),
+        json!({"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": true}),
+    ];
+    if buildkit_image.is_some() {
+        main_mounts.push(
+            json!({"name": BUILDKIT_RUN_VOLUME, "mountPath": BUILDKIT_RUN_DIR, "readOnly": true}),
+        );
+    }
+    let main = json!({
+        "name": SANDBOX_MAIN_CONTAINER,
+        "image": configuration.image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["/bin/sh", "-c", script],
+        "env": environment,
+        "envFrom": [{"secretRef": {"name": secret_name, "optional": false}}],
+        "resources": {"requests": requests, "limits": requests},
+        "securityContext": container_security,
+        "volumeMounts": main_mounts,
+    });
+    let mut containers = Vec::new();
+    if let Some(image) = buildkit_image {
+        containers.push(buildkit_sidecar(configuration, image));
+    }
+    containers.push(main);
+    containers
+}
+
+fn buildkit_sidecar(configuration: &SandboxConfiguration, image: &str) -> Value {
+    // Rootless BuildKit needs the exceptions proven by the platform builder: an
+    // unconfined seccomp/AppArmor profile, the setuid helpers for the nested user
+    // namespace and an SELinux type that may mount snapshot content. The sidecar is
+    // tokenless, bounded by the same resources as the attempt and only reachable
+    // through the attempt-local socket directory.
+    json!({
+        "name": SANDBOX_BUILDKIT_CONTAINER,
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "args": ["--config", BUILDKIT_CONFIG_PATH, "--oci-worker-no-process-sandbox"],
+        "env": [
+            {"name": "XDG_RUNTIME_DIR", "value": BUILDKIT_RUNTIME_DIR},
+            {"name": "TMPDIR", "value": "/tmp"},
+            {"name": "HOME", "value": "/home/user"},
+        ],
+        "resources": {
+            "requests": {
+                "cpu": format!("{}m", configuration.cpu_millicores),
+                "memory": configuration.memory_bytes.to_string(),
+                "ephemeral-storage": configuration.workspace_bytes.to_string(),
+            },
+            "limits": {
+                "cpu": format!("{}m", configuration.cpu_millicores),
+                "memory": configuration.memory_bytes.to_string(),
+                "ephemeral-storage": configuration.workspace_bytes.to_string(),
+            },
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": true,
+            "capabilities": {"drop": ["ALL"], "add": ["SETUID", "SETGID"]},
+            "readOnlyRootFilesystem": true,
+            "runAsNonRoot": true,
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+            "seccompProfile": {"type": "Unconfined"},
+            "appArmorProfile": {"type": "Unconfined"},
+            "seLinuxOptions": {"type": "spc_t"},
+        },
+        "volumeMounts": [
+            {"name": BUILDKIT_RUN_VOLUME, "mountPath": BUILDKIT_RUN_DIR, "readOnly": false},
+            {"name": BUILDKIT_STATE_VOLUME, "mountPath": BUILDKIT_STATE_DIR, "readOnly": false},
+            {"name": BUILDKIT_RUNTIME_VOLUME, "mountPath": BUILDKIT_RUNTIME_DIR, "readOnly": false},
+            {"name": BUILDKIT_TMP_VOLUME, "mountPath": "/tmp", "readOnly": false},
+            {
+                "name": BUILDKIT_CONFIG_VOLUME,
+                "mountPath": BUILDKIT_CONFIG_PATH,
+                "subPath": "buildkitd.toml",
+                "readOnly": true,
+            },
+            {"name": BUILDKIT_AUTH_VOLUME, "mountPath": BUILDKIT_DOCKER_CONFIG_DIR, "readOnly": true},
+        ],
+    })
+}
+
+fn volumes(configuration: &SandboxConfiguration, secret_name: &str, buildkit: bool) -> Value {
+    let mut volumes = vec![
+        json!({"name": ATTEMPT_VOLUME, "emptyDir": {"sizeLimit": ATTEMPT_VOLUME_BYTES.to_string()}}),
+        json!({"name": WORKSPACE_VOLUME, "emptyDir": {"sizeLimit": configuration.workspace_bytes.to_string()}}),
+        json!({"name": MATERIALS_VOLUME, "emptyDir": {"sizeLimit": MATERIALS_VOLUME_BYTES.to_string()}}),
+    ];
+    if buildkit {
+        let config_map = configuration
+            .buildkit_config_map_name
+            .as_deref()
+            .unwrap_or_default();
+        let pull_secret = configuration
+            .image_pull_secret_name
+            .as_deref()
+            .unwrap_or_default();
+        volumes.extend([
+            json!({"name": BUILDKIT_RUN_VOLUME, "emptyDir": {"sizeLimit": BUILDKIT_RUN_VOLUME_BYTES.to_string()}}),
+            json!({"name": BUILDKIT_STATE_VOLUME, "emptyDir": {"sizeLimit": configuration.workspace_bytes.to_string()}}),
+            json!({"name": BUILDKIT_RUNTIME_VOLUME, "emptyDir": {"sizeLimit": BUILDKIT_RUN_VOLUME_BYTES.to_string()}}),
+            json!({"name": BUILDKIT_TMP_VOLUME, "emptyDir": {"sizeLimit": BUILDKIT_TMP_VOLUME_BYTES.to_string()}}),
+            json!({"name": BUILDKIT_CONFIG_VOLUME, "configMap": {"name": config_map}}),
+            json!({
+                "name": BUILDKIT_AUTH_VOLUME,
+                "projected": {
+                    "defaultMode": 0o400,
+                    "sources": [{
+                        "secret": {
+                            "name": pull_secret,
+                            "items": [{"key": ".dockerconfigjson", "path": "config.json"}],
+                        },
+                    }],
+                },
+            }),
+        ]);
+    }
+    let _ = secret_name;
+    Value::Array(volumes)
+}
+
 #[allow(clippy::too_many_lines)]
 fn job_document(
     configuration: &SandboxConfiguration,
@@ -421,6 +593,11 @@ fn job_document(
     ];
     if spec.object_store_ca_base64.is_none() {
         environment.pop();
+    }
+    let buildkit_image = configuration.buildkit_image.as_deref();
+    if buildkit_image.is_some() {
+        environment
+            .push(json!({"name": "BUILDKIT_HOST", "value": format!("unix://{BUILDKIT_SOCKET}")}));
     }
 
     let mut script = String::new();
@@ -555,46 +732,15 @@ fn job_document(
                             {"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": false},
                         ],
                     }],
-                    "containers": [{
-                        "name": SANDBOX_MAIN_CONTAINER,
-                        "image": configuration.image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["/bin/sh", "-c", script],
-                        "env": environment,
-                        "envFrom": [{"secretRef": {"name": secret_name, "optional": false}}],
-                        "resources": {
-                            "requests": {
-                                "cpu": format!("{}m", configuration.cpu_millicores),
-                                "memory": configuration.memory_bytes.to_string(),
-                                "ephemeral-storage": configuration.workspace_bytes.to_string(),
-                            },
-                            "limits": {
-                                "cpu": format!("{}m", configuration.cpu_millicores),
-                                "memory": configuration.memory_bytes.to_string(),
-                                "ephemeral-storage": configuration.workspace_bytes.to_string(),
-                            },
-                        },
-                        "securityContext": container_security,
-                        "volumeMounts": [
-                            {"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false},
-                            {"name": WORKSPACE_VOLUME, "mountPath": WORKSPACE_DIR, "readOnly": false},
-                            {"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": true},
-                        ],
-                    }],
-                    "volumes": [
-                        {
-                            "name": ATTEMPT_VOLUME,
-                            "emptyDir": {"sizeLimit": ATTEMPT_VOLUME_BYTES.to_string()},
-                        },
-                        {
-                            "name": WORKSPACE_VOLUME,
-                            "emptyDir": {"sizeLimit": configuration.workspace_bytes.to_string()},
-                        },
-                        {
-                            "name": MATERIALS_VOLUME,
-                            "emptyDir": {"sizeLimit": MATERIALS_VOLUME_BYTES.to_string()},
-                        },
-                    ],
+                    "containers": containers(
+                        configuration,
+                        secret_name,
+                        &script,
+                        &environment,
+                        &container_security,
+                        buildkit_image,
+                    ),
+                    "volumes": volumes(configuration, secret_name, buildkit_image.is_some()),
                 },
             },
         },
@@ -693,6 +839,16 @@ fn valid_cidr(value: &str) -> bool {
     }
 }
 
+fn valid_dns_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+
 fn valid_env_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -737,7 +893,18 @@ mod tests {
             workspace_bytes: 2 * 1024 * 1024 * 1024,
             wall_time_seconds: 3_600,
             allowed_egress_cidrs: BTreeSet::from(["10.0.0.0/8".to_owned()]),
+            buildkit_image: None,
+            buildkit_config_map_name: None,
         }
+    }
+
+    fn buildkit_configuration() -> SandboxConfiguration {
+        let mut configuration = configuration();
+        configuration.buildkit_image = Some(
+            "harbor.lab.lan/labweaver-system/buildkit@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        );
+        configuration.buildkit_config_map_name = Some("authoring-buildkit-config".to_owned());
+        configuration
     }
 
     fn spec() -> SandboxAttemptSpec {
@@ -771,6 +938,84 @@ mod tests {
             stderr_max_bytes: 1024 * 1024,
             object_store_ca_base64: Some("Q0E=".to_owned()),
         }
+    }
+
+    #[test]
+    fn buildkit_sidecar_uses_rootless_exceptions_and_attempt_local_socket()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = build_sandbox_bundle(&buildkit_configuration(), &spec())?;
+        let job = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "jobs")
+            .ok_or(SandboxBundleError::Invalid)?;
+        let containers = job.document["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert_eq!(containers.len(), 2);
+        let sidecar = containers
+            .iter()
+            .find(|container| container["name"] == "buildkit")
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert_eq!(
+            sidecar["securityContext"]["seccompProfile"]["type"],
+            "Unconfined"
+        );
+        assert_eq!(
+            sidecar["securityContext"]["appArmorProfile"]["type"],
+            "Unconfined"
+        );
+        assert_eq!(sidecar["securityContext"]["runAsUser"], 1000);
+        assert_eq!(
+            sidecar["securityContext"]["capabilities"]["add"],
+            serde_json::json!(["SETUID", "SETGID"])
+        );
+        let main = containers
+            .iter()
+            .find(|container| container["name"] == "claude-code")
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert!(main["env"].as_array().is_some_and(|env| {
+            env.iter().any(|entry| {
+                entry["name"] == "BUILDKIT_HOST"
+                    && entry["value"] == "unix:///run/buildkit/buildkitd.sock"
+            })
+        }));
+        assert!(main["volumeMounts"].as_array().is_some_and(|mounts| {
+            mounts
+                .iter()
+                .any(|mount| mount["name"] == "buildkit-run" && mount["readOnly"] == true)
+        }));
+        let volumes = job.document["spec"]["template"]["spec"]["volumes"]
+            .as_array()
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert!(volumes.iter().any(|volume| {
+            volume["name"] == "buildkit-config"
+                && volume["configMap"]["name"] == "authoring-buildkit-config"
+        }));
+        assert!(volumes.iter().any(|volume| {
+            volume["name"] == "buildkit-auth"
+                && volume["projected"]["sources"][0]["secret"]["name"] == "harbor-course-pull"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn partial_buildkit_configuration_is_rejected() {
+        let mut configuration = configuration();
+        configuration.buildkit_image = Some(
+            "harbor.lab.lan/labweaver-system/buildkit@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        );
+        assert!(matches!(
+            build_sandbox_bundle(&configuration, &spec()),
+            Err(SandboxBundleError::Invalid)
+        ));
+        let mut configuration = buildkit_configuration();
+        configuration.image_pull_secret_name = None;
+        assert!(matches!(
+            build_sandbox_bundle(&configuration, &spec()),
+            Err(SandboxBundleError::Invalid)
+        ));
     }
 
     #[test]
