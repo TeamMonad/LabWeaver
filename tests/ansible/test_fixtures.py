@@ -388,8 +388,16 @@ class AnsibleFixtureTests(unittest.TestCase):
             "Reconcile immediate binding on the immutable VM base claim",
             tasks,
         )
+        self.assertIn("platform_vm_bases:", lock)
         self.assertIn("docker://quay.io/containerdisks/ubuntu@sha256:", lock)
+        self.assertIn("cirros-0.6-v1", lock)
         self.assertIn("data_source_name: ubuntu-lab-base-v1", lock)
+        defaults = (
+            ROOT / "deploy/ansible/roles/platform_application/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("platform_application_vm_base_max_count", defaults)
+        self.assertIn("platform_application_vm_base_max_capacity_bytes", defaults)
+        self.assertIn("PLATFORM_VM_BASE_CATALOG_MISMATCH", tasks)
         self.assertIn("Remove temporary application work material", tasks)
         self.assertIn("Remove temporary database reconciliation material", tasks)
         self.assertIn("Remove the temporary MinIO administration material", tasks)
@@ -1516,14 +1524,35 @@ class AnsibleFixtureTests(unittest.TestCase):
 
         control_config = yaml.safe_load(control)
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text(encoding="utf-8"))
-        vm_policy = control_config["control"]["virtualMachineBase"]
-        vm_lock = lock["platform_vm_base"]
-        self.assertEqual(vm_policy["providerBinding"], virtual_machine["binding"])
-        self.assertEqual(vm_policy["storageClassBinding"], virtual_machine["storageClassBinding"])
-        self.assertEqual(vm_policy["artifactId"], vm_lock["artifact_id"])
-        self.assertEqual(vm_policy["baseDisk"]["binding"], vm_lock["binding"])
-        self.assertEqual(vm_policy["baseDisk"]["sourceRegistryDigest"], vm_lock["registry_url"])
-        self.assertEqual(vm_policy["baseDisk"]["capacityBytes"], vm_lock["capacity_bytes"])
+        catalog = control_config["control"]["virtualMachineBases"]
+        bases = lock["platform_vm_bases"]
+        self.assertGreaterEqual(len(bases), 2)
+        self.assertEqual(catalog["providerBinding"], virtual_machine["binding"])
+        self.assertEqual(catalog["storageClassBinding"], virtual_machine["storageClassBinding"])
+        self.assertLessEqual(len(catalog["bases"]), catalog["maxBases"])
+        control_bases = {base["baseDisk"]["binding"]: base for base in catalog["bases"]}
+        lock_bases = {base["binding"]: base for base in bases}
+        self.assertEqual(sorted(control_bases), sorted(lock_bases))
+        self.assertEqual(
+            sorted(base["binding"] for base in virtual_machine["baseDisks"]),
+            sorted(lock_bases),
+        )
+        for binding, lock_base in lock_bases.items():
+            control_base = control_bases[binding]
+            provider_base = next(
+                base for base in virtual_machine["baseDisks"] if base["binding"] == binding
+            )
+            self.assertEqual(control_base["artifactId"], lock_base["artifact_id"])
+            self.assertEqual(control_base["baseDisk"]["sourceRegistryDigest"], lock_base["registry_url"])
+            self.assertEqual(control_base["baseDisk"]["capacityBytes"], lock_base["capacity_bytes"])
+            self.assertEqual(control_base["format"], lock_base["format"])
+            self.assertLessEqual(control_base["baseDisk"]["capacityBytes"], catalog["maxCapacityBytes"])
+            self.assertEqual(provider_base["sourceRegistryDigest"], lock_base["registry_url"])
+            self.assertEqual(provider_base["diskSha256"], lock_base["disk_sha256"])
+            self.assertEqual(provider_base["capacityBytes"], lock_base["capacity_bytes"])
+            self.assertEqual(provider_base["format"], lock_base["format"])
+            self.assertEqual(provider_base["storageClassBinding"], catalog["storageClassBinding"])
+            self.assertEqual(provider_base["dataSourceName"], lock_base["data_source_name"])
 
     def test_control_quarantine_subjects_belong_to_the_retained_agent_stream(self) -> None:
         control = yaml.safe_load(
