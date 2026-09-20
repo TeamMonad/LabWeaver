@@ -329,6 +329,18 @@ fn container<'a>(pod: &'a Value, name: &str) -> Result<&'a Value, Box<dyn Error>
         .ok_or_else(|| format!("the live attempt pod template has no {name} container").into())
 }
 
+/// Returns the group of the configured `BuildKit` sidecar, when the attempt has one.
+fn environment_buildkit_group(pod: &Value) -> Result<Option<u64>, Box<dyn Error>> {
+    let Ok(sidecar) = container(pod, SANDBOX_BUILDKIT_CONTAINER) else {
+        return Ok(None);
+    };
+    sidecar
+        .pointer("/securityContext/runAsGroup")
+        .and_then(Value::as_u64)
+        .map(Some)
+        .ok_or_else(|| "the live BuildKit sidecar has no group".into())
+}
+
 /// Asserts the applied pod and main container hardening of one live Job.
 fn assert_job_security_context(job: &Value) -> Result<(), Box<dyn Error>> {
     let pod = pod_template(job)?;
@@ -340,13 +352,21 @@ fn assert_job_security_context(job: &Value) -> Result<(), Box<dyn Error>> {
     let security = pod
         .get("securityContext")
         .ok_or("the live attempt pod template has no securityContext")?;
-    for field in ["runAsUser", "runAsGroup", "fsGroup"] {
+    for field in ["runAsUser", "runAsGroup"] {
         assert_eq!(
             security.get(field).and_then(Value::as_u64),
             Some(65_532),
             "the attempt pod {field} must be the unprivileged sandbox identity"
         );
     }
+    // With a BuildKit sidecar the pod must join the sidecar's group so the unprivileged
+    // sandbox can reach the attempt-local socket the sidecar owns.
+    let expected_group = environment_buildkit_group(pod)?.unwrap_or(65_532);
+    assert_eq!(
+        security.get("fsGroup").and_then(Value::as_u64),
+        Some(expected_group),
+        "the attempt pod fsGroup must match the shared BuildKit group"
+    );
     let main = container(pod, SANDBOX_MAIN_CONTAINER)?;
     let main_security = main
         .get("securityContext")
@@ -400,6 +420,11 @@ fn assert_buildkit_sidecar(job: &Value) -> Result<(), Box<dyn Error>> {
         security.get("runAsUser").and_then(Value::as_u64),
         Some(1_000),
         "the rootless BuildKit sidecar must run as its own unprivileged user"
+    );
+    assert_eq!(
+        security.get("runAsGroup").and_then(Value::as_u64),
+        Some(1_000),
+        "the rootless BuildKit sidecar must keep its own group for the attempt-local socket"
     );
     let added: Vec<&str> = security
         .pointer("/capabilities/add")

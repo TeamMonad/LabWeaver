@@ -55,6 +55,10 @@ const BUILDKIT_CA_PATH: &str = "/etc/buildkit/registry-ca.crt";
 const EXPORT_OUTPUT_PATH: &str = "/workspace/labweaver-export.tar";
 const BUILDKIT_RUNTIME_DIR: &str = "/run/user/1000";
 const BUILDKIT_DOCKER_CONFIG_DIR: &str = "/home/user/.docker";
+/// Unprivileged identity every attempt container runs as.
+const SANDBOX_ATTEMPT_USER: u64 = 65_532;
+/// Group of the rootless `BuildKit` sidecar that owns the attempt-local socket.
+const BUILDKIT_SIDECAR_GROUP: u64 = 1_000;
 const BUILDKIT_RUN_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
 const BUILDKIT_TMP_VOLUME_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -735,8 +739,8 @@ fn job_document(
         "capabilities": {"drop": ["ALL"]},
         "readOnlyRootFilesystem": true,
         "runAsNonRoot": true,
-        "runAsUser": 65532,
-        "runAsGroup": 65532,
+        "runAsUser": SANDBOX_ATTEMPT_USER,
+        "runAsGroup": SANDBOX_ATTEMPT_USER,
         "seccompProfile": {"type": "RuntimeDefault"},
     });
     json!({
@@ -754,7 +758,11 @@ fn job_document(
             "ttlSecondsAfterFinished": 300,
             "template": {
                 "metadata": {
-                    "labels": pod_selector_labels(&spec.ownership),
+                    // The shared observation verifies the complete attempt ownership on the pod,
+                    // so the pod carries the same identity labels as the Job.
+                    "labels": ownership_labels(&spec.ownership),
+                    // The Job controller never copies Job annotations onto its pods.
+                    "annotations": { REQUEST_SHA_ANNOTATION: spec.ownership.request_sha256 },
                 },
                 "spec": {
                     "automountServiceAccountToken": false,
@@ -762,9 +770,12 @@ fn job_document(
                     "serviceAccountName": configuration.service_account_name,
                     "securityContext": {
                         "runAsNonRoot": true,
-                        "runAsUser": 65532,
-                        "runAsGroup": 65532,
-                        "fsGroup": 65532,
+                        "runAsUser": SANDBOX_ATTEMPT_USER,
+                        "runAsGroup": SANDBOX_ATTEMPT_USER,
+                        // The rootless sidecar owns the attempt-local socket with its own group,
+                        // so the pod shares that group and the unprivileged sandbox can reach
+                        // the daemon. Without the sidecar there is nothing to share.
+                        "fsGroup": attempt_fs_group(configuration),
                         "seccompProfile": {"type": "RuntimeDefault"},
                     },
                     "imagePullSecrets": configuration
@@ -783,8 +794,8 @@ fn job_document(
                             "capabilities": {"drop": ["ALL"]},
                             "readOnlyRootFilesystem": true,
                             "runAsNonRoot": true,
-                            "runAsUser": 65532,
-                            "runAsGroup": 65532,
+                            "runAsUser": SANDBOX_ATTEMPT_USER,
+                            "runAsGroup": SANDBOX_ATTEMPT_USER,
                             "seccompProfile": {"type": "RuntimeDefault"},
                         },
                         "volumeMounts": [
@@ -841,6 +852,19 @@ fn pod_selector_labels(ownership: &KubernetesOwnership) -> Value {
         MANAGED_BY_LABEL: SANDBOX_MANAGED_BY,
         ATTEMPT_ID_LABEL: ownership.attempt_id.to_string(),
     })
+}
+
+/// Returns the group the attempt pod shares with its `BuildKit` sidecar, when present.
+///
+/// The rootless sidecar creates the attempt-local socket with its own group and the sandbox
+/// container runs as a different unprivileged user, so the pod must join that group for the
+/// daemon to be reachable at all.
+fn attempt_fs_group(configuration: &SandboxConfiguration) -> u64 {
+    if configuration.buildkit_image.is_some() {
+        BUILDKIT_SIDECAR_GROUP
+    } else {
+        SANDBOX_ATTEMPT_USER
+    }
 }
 
 fn cleanup_target(namespace: &str, resource: &str, name: &str) -> KubernetesCleanupTarget {
@@ -938,8 +962,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        SandboxAttemptSpec, SandboxBundleError, SandboxConfiguration, build_sandbox_bundle,
-        shell_quote,
+        SANDBOX_BUILDKIT_CONTAINER, SandboxAttemptSpec, SandboxBundleError, SandboxConfiguration,
+        build_sandbox_bundle, shell_quote,
     };
 
     fn configuration() -> SandboxConfiguration {
@@ -1189,6 +1213,64 @@ mod tests {
             job.document
                 .pointer("/metadata/labels/labweaver.io~1managed-by"),
             Some(&serde_json::json!("agent-service"))
+        );
+        // The shared observation verifies the complete attempt ownership on the pod itself, and
+        // the Job controller does not copy Job annotations onto its pods.
+        for label in [
+            "labweaver.io~1managed-by",
+            "labweaver.io~1run-id",
+            "labweaver.io~1step-run-id",
+            "labweaver.io~1attempt-id",
+        ] {
+            assert_eq!(
+                job.document
+                    .pointer(&format!("/spec/template/metadata/labels/{label}")),
+                job.document.pointer(&format!("/metadata/labels/{label}")),
+                "{label} must match on the pod template"
+            );
+        }
+        assert_eq!(
+            job.document
+                .pointer("/spec/template/metadata/annotations/labweaver.io~1request-sha256"),
+            job.document
+                .pointer("/metadata/annotations/labweaver.io~1request-sha256")
+        );
+        // Without a BuildKit sidecar there is no shared socket to reach.
+        assert_eq!(
+            job.document
+                .pointer("/spec/template/spec/securityContext/fsGroup"),
+            Some(&serde_json::json!(65_532))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_pod_shares_the_buildkit_sidecar_group() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = build_sandbox_bundle(&buildkit_configuration(), &spec())?;
+        let job = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "jobs")
+            .ok_or(SandboxBundleError::Invalid)?;
+        let sidecar = job.document["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .ok_or(SandboxBundleError::Invalid)?
+            .iter()
+            .find(|container| container["name"] == SANDBOX_BUILDKIT_CONTAINER)
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert_eq!(sidecar["securityContext"]["runAsUser"], 1_000);
+        // The sidecar owns the attempt-local socket with its own group, so the pod must join
+        // that group or the unprivileged sandbox cannot reach the daemon.
+        assert_eq!(
+            job.document
+                .pointer("/spec/template/spec/securityContext/fsGroup"),
+            Some(&sidecar["securityContext"]["runAsGroup"])
+        );
+        assert_eq!(
+            job.document
+                .pointer("/spec/template/spec/securityContext/runAsUser"),
+            Some(&serde_json::json!(65_532))
         );
         Ok(())
     }
