@@ -25,6 +25,8 @@ use agent_service::llm_review::{LlmReviewStore, LlmReviewWorker};
 use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
+use agent_service::oci_registry::RegistryCredentials;
+use agent_service::platform_images::{PgPlatformImageCatalog, PlatformImageRegistry};
 use agent_service::run_store::{AgentRunService, PostgresAgentRunStore};
 use agent_service::sandbox_process::{SandboxAuthoringProcess, SandboxProcessConfiguration};
 use agent_service::work_execution::{
@@ -80,6 +82,21 @@ struct DeploymentFile {
     nats: NatsFileConfig,
     resource: task_execution::resource::ResourceClientConfiguration,
     sandbox: SandboxFileConfig,
+    /// Optional platform registry used by the administrator image catalog.
+    platform_registry: Option<PlatformRegistryFileConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformRegistryFileConfig {
+    /// Registry host name, for example `harbor.internal`.
+    registry: String,
+    /// Mounted CA bundle used to verify the registry TLS endpoint.
+    ca_file: String,
+    /// Mounted file holding the platform robot account username.
+    username_file: String,
+    /// Mounted file holding the platform robot account password.
+    password_file: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,11 +370,14 @@ async fn run_agent_service() -> Result<(), StartupError> {
         store.clone(),
         Arc::clone(&objects),
     )?);
+    let platform_registry = load_platform_registry(deployment.platform_registry.as_ref())?;
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
         generated_artifacts: generated_artifacts.clone(),
         llm_reviews: llm_reviews.clone(),
+        platform_images: PgPlatformImageCatalog::new(store.pool().clone()),
+        platform_registry,
     });
     let bind = SocketAddr::from_str(&deployment.control_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
@@ -732,6 +752,51 @@ fn load_deployment() -> Result<DeploymentFile, StartupError> {
     let path =
         std::env::var("LABWEAVER_AGENT_CONFIG_FILE").map_err(|_| StartupError::Configuration)?;
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
+}
+
+fn load_platform_registry(
+    config: Option<&PlatformRegistryFileConfig>,
+) -> Result<Option<PlatformImageRegistry>, StartupError> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if config.registry.is_empty()
+        || config.registry.contains('/')
+        || config.registry.contains("://")
+        || config
+            .registry
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace())
+        || !config.ca_file.starts_with('/')
+        || !config.username_file.starts_with('/')
+        || !config.password_file.starts_with('/')
+    {
+        return Err(StartupError::Configuration);
+    }
+    let base = reqwest::Url::parse(&format!("https://{}", config.registry))
+        .map_err(|_| StartupError::Configuration)?;
+    let ca = std::fs::read(&config.ca_file).map_err(|_| StartupError::Configuration)?;
+    let ca = reqwest::Certificate::from_pem(&ca).map_err(|_| StartupError::Configuration)?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(30))
+        .add_root_certificate(ca)
+        .build()
+        .map_err(|_| StartupError::Configuration)?;
+    let username = read_platform_secret(&config.username_file)?;
+    let password = read_platform_secret(&config.password_file)?;
+    PlatformImageRegistry::new(base, client, RegistryCredentials { username, password })
+        .map(Some)
+        .map_err(|_| StartupError::Configuration)
+}
+
+fn read_platform_secret(path: &str) -> Result<String, StartupError> {
+    let value = std::fs::read_to_string(path).map_err(|_| StartupError::Configuration)?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(value)
 }
 
 fn load_build_executor_deployment() -> Result<BuildExecutorDeploymentFile, StartupError> {

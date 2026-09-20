@@ -6,9 +6,15 @@
 //! the same transaction. Referenced entries are disabled, never deleted.
 
 use contracts::{ActorId, UtcTimestamp};
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use thiserror::Error;
 use uuid::Uuid;
+
+use crate::oci_registry::{
+    OciRegistryError, OciRegistryPublisher, RegistryCredentials, ResolvedRegistryImage,
+};
 
 /// Reviewed image kinds.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -146,6 +152,19 @@ pub enum PlatformImageStoreError {
     /// The durable store failed.
     #[error("LW_PLATFORM_IMAGE_PERSISTENCE_FAILED")]
     Persistence,
+}
+
+impl PlatformImageStoreError {
+    /// Stable diagnostic code for API error mapping.
+    #[must_use]
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "LW_PLATFORM_IMAGE_REQUEST_INVALID",
+            Self::NotFound => "LW_PLATFORM_IMAGE_NOT_FOUND",
+            Self::Conflict => "LW_PLATFORM_IMAGE_STATE_CONFLICT",
+            Self::Persistence => "LW_PLATFORM_IMAGE_PERSISTENCE_FAILED",
+        }
+    }
 }
 
 /// Durable platform image catalog.
@@ -579,4 +598,323 @@ fn validate_reason(value: &str) -> Result<(), PlatformImageStoreError> {
         return Err(PlatformImageStoreError::InvalidRequest);
     }
     Ok(())
+}
+
+/// Administrator registration request accepted by the Agent HTTP API.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisterPlatformImageRequest {
+    /// Reviewed kind.
+    pub kind: PlatformImageKind,
+    /// Stable resolution key.
+    pub binding: String,
+    /// Tag reference the administrator entered; resolved before persisting.
+    pub source_reference: String,
+    /// Trust revision the administrator pinned under.
+    pub trust_revision: u64,
+    /// Authenticated administrator.
+    pub actor_id: ActorId,
+    /// Human-readable change reason.
+    pub reason: String,
+}
+
+/// Administrator repin request accepted by the Agent HTTP API.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepinPlatformImageRequest {
+    /// Digest the administrator observed before repinning.
+    pub expected_digest: String,
+    /// Trust revision the administrator pinned under.
+    pub trust_revision: u64,
+    /// Authenticated administrator.
+    pub actor_id: ActorId,
+    /// Human-readable change reason.
+    pub reason: String,
+}
+
+/// Administrator disable request accepted by the Agent HTTP API.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisablePlatformImageRequest {
+    /// Digest the administrator observed before disabling.
+    pub expected_digest: String,
+    /// Authenticated administrator.
+    pub actor_id: ActorId,
+    /// Human-readable change reason.
+    pub reason: String,
+}
+
+/// Catalog listing response.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageList {
+    /// Catalog entries in stable `(kind, binding)` order.
+    pub entries: Vec<PlatformImageEntry>,
+}
+
+/// Fail-closed resolution errors for administrator-entered image references.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum PlatformImageRegistryError {
+    /// The reference does not name a repository in the configured registry, or its tag is unusable.
+    #[error("LW_PLATFORM_IMAGE_REFERENCE_INVALID")]
+    InvalidReference,
+    /// The registry denied the request, rejected the manifest, or confirmed another digest.
+    #[error("LW_PLATFORM_IMAGE_REGISTRY_REJECTED")]
+    RegistryRejected,
+    /// The registry transport failed or the endpoint is unavailable.
+    #[error("LW_PLATFORM_IMAGE_REGISTRY_UNAVAILABLE")]
+    RegistryUnavailable,
+}
+
+/// Resolves administrator references against the one configured platform registry.
+///
+/// The resolver is scoped to a single registry host: a reference naming any other host is
+/// rejected before a request is made, so the catalog can only pin platform-approved content.
+#[derive(Clone)]
+pub struct PlatformImageRegistry {
+    base: Url,
+    host: String,
+    client: Client,
+    credentials: RegistryCredentials,
+}
+
+impl std::fmt::Debug for PlatformImageRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlatformImageRegistry")
+            .field("base", &self.base)
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PlatformImageRegistry {
+    /// Binds the resolver to the platform registry base URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformImageRegistryError::InvalidReference`] unless the base is an HTTPS
+    /// origin without path, query or fragment.
+    pub fn new(
+        base: Url,
+        client: Client,
+        credentials: RegistryCredentials,
+    ) -> Result<Self, PlatformImageRegistryError> {
+        if base.scheme() != "https"
+            || base.path() != "/"
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(PlatformImageRegistryError::InvalidReference);
+        }
+        let host = authority(&base).ok_or(PlatformImageRegistryError::InvalidReference)?;
+        Ok(Self {
+            base,
+            host,
+            client,
+            credentials,
+        })
+    }
+
+    /// Builds a resolver for local contract tests that does not require HTTPS.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_test(base: Url, client: Client, credentials: RegistryCredentials) -> Self {
+        let host = authority(&base).unwrap_or_default();
+        Self {
+            base,
+            host,
+            client,
+            credentials,
+        }
+    }
+
+    /// Resolves one `registry/repository:tag` reference into its immutable manifest identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformImageRegistryError::InvalidReference`] when the reference names another
+    /// registry or has no usable tag, and the mapped registry failure otherwise.
+    pub async fn resolve(
+        &self,
+        reference: &str,
+    ) -> Result<ResolvedRegistryImage, PlatformImageRegistryError> {
+        let (repository, tag) = self.split(reference)?;
+        let publisher = if self.base.scheme() == "https" {
+            OciRegistryPublisher::new(
+                self.base.clone(),
+                repository,
+                self.client.clone(),
+                self.credentials.clone(),
+            )
+            .map_err(|_| PlatformImageRegistryError::InvalidReference)?
+        } else {
+            OciRegistryPublisher::for_test(
+                self.base.clone(),
+                repository,
+                self.client.clone(),
+                self.credentials.clone(),
+            )
+        };
+        publisher.resolve_tag(tag).await.map_err(map_registry_error)
+    }
+
+    fn split<'a>(
+        &self,
+        reference: &'a str,
+    ) -> Result<(String, &'a str), PlatformImageRegistryError> {
+        let reference = reference.trim();
+        if reference.is_empty()
+            || reference.len() > 512
+            || reference.contains("://")
+            || reference.contains('@')
+            || reference.bytes().any(|byte| byte.is_ascii_whitespace())
+        {
+            return Err(PlatformImageRegistryError::InvalidReference);
+        }
+        let (host, remainder) = reference
+            .split_once('/')
+            .ok_or(PlatformImageRegistryError::InvalidReference)?;
+        if host != self.host
+            || remainder.is_empty()
+            || remainder.starts_with('/')
+            || remainder.ends_with('/')
+        {
+            return Err(PlatformImageRegistryError::InvalidReference);
+        }
+        let (repository, tag) = remainder
+            .rsplit_once(':')
+            .ok_or(PlatformImageRegistryError::InvalidReference)?;
+        if repository.is_empty() || repository.contains(':') || tag.is_empty() {
+            return Err(PlatformImageRegistryError::InvalidReference);
+        }
+        Ok((repository.to_owned(), tag))
+    }
+}
+
+impl PlatformImageRegistryError {
+    /// Stable diagnostic code for API error mapping.
+    #[must_use]
+    pub fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::InvalidReference => "LW_PLATFORM_IMAGE_REFERENCE_INVALID",
+            Self::RegistryRejected => "LW_PLATFORM_IMAGE_REGISTRY_REJECTED",
+            Self::RegistryUnavailable => "LW_PLATFORM_IMAGE_REGISTRY_UNAVAILABLE",
+        }
+    }
+}
+
+fn authority(base: &Url) -> Option<String> {
+    let host = base.host_str()?;
+    Some(match base.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
+fn map_registry_error(error: OciRegistryError) -> PlatformImageRegistryError {
+    match error {
+        OciRegistryError::Configuration => PlatformImageRegistryError::InvalidReference,
+        OciRegistryError::Unavailable => PlatformImageRegistryError::RegistryUnavailable,
+        OciRegistryError::Denied
+        | OciRegistryError::Rejected
+        | OciRegistryError::DigestMismatch => PlatformImageRegistryError::RegistryRejected,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use reqwest::{Client, Url};
+
+    use super::{
+        PlatformImageRegistry, PlatformImageRegistryError, RegistryCredentials, map_registry_error,
+    };
+    use crate::oci_registry::OciRegistryError;
+
+    fn resolver(base: &str) -> PlatformImageRegistry {
+        PlatformImageRegistry::for_test(
+            Url::parse(base).expect("base url"),
+            Client::builder().no_proxy().build().expect("client"),
+            RegistryCredentials {
+                username: "robot$platform".to_owned(),
+                password: "secret".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn new_rejects_non_https_and_path_bearing_bases() {
+        let client = Client::builder().no_proxy().build().expect("client");
+        let credentials = RegistryCredentials {
+            username: "robot$platform".to_owned(),
+            password: "secret".to_owned(),
+        };
+        assert!(matches!(
+            PlatformImageRegistry::new(
+                Url::parse("http://harbor.internal").expect("url"),
+                client.clone(),
+                credentials.clone()
+            ),
+            Err(PlatformImageRegistryError::InvalidReference)
+        ));
+        assert!(matches!(
+            PlatformImageRegistry::new(
+                Url::parse("https://harbor.internal/v2").expect("url"),
+                client,
+                credentials
+            ),
+            Err(PlatformImageRegistryError::InvalidReference)
+        ));
+    }
+
+    #[test]
+    fn split_scopes_references_to_the_configured_registry_host() {
+        let registry = resolver("https://harbor.internal");
+        let (repository, tag) = registry
+            .split("harbor.internal/labweaver-system/ubuntu:24.04")
+            .expect("valid reference");
+        assert_eq!(repository, "labweaver-system/ubuntu");
+        assert_eq!(tag, "24.04");
+
+        for rejected in [
+            "quay.io/labweaver-system/ubuntu:24.04",
+            "harbor.internal/labweaver-system/ubuntu",
+            "harbor.internal/:24.04",
+            "harbor.internal/labweaver-system/ubuntu:",
+            "https://harbor.internal/labweaver-system/ubuntu:24.04",
+            "harbor.internal/labweaver-system/ubuntu:24.04@sha256:deadbeef",
+            "harbor.internal/labweaver-system/ ubuntu:24.04",
+        ] {
+            assert!(
+                matches!(
+                    registry.split(rejected),
+                    Err(PlatformImageRegistryError::InvalidReference)
+                ),
+                "{rejected} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_failures_map_to_stable_categories() {
+        assert_eq!(
+            map_registry_error(OciRegistryError::Configuration),
+            PlatformImageRegistryError::InvalidReference
+        );
+        assert_eq!(
+            map_registry_error(OciRegistryError::Unavailable),
+            PlatformImageRegistryError::RegistryUnavailable
+        );
+        for rejected in [
+            OciRegistryError::Denied,
+            OciRegistryError::Rejected,
+            OciRegistryError::DigestMismatch,
+        ] {
+            assert_eq!(
+                map_registry_error(rejected),
+                PlatformImageRegistryError::RegistryRejected
+            );
+        }
+    }
 }

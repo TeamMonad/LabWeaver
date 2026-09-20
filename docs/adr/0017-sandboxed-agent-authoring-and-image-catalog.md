@@ -30,6 +30,8 @@
 
 - 平台维护内置 Harbor 基础镜像清单与 VM base 目录；`deploy/versions.lock.yml` 的 VM base 由单条改为列表，provider 配置以 `baseDisks[]` 按 binding 解析，digest/容量/`disk_sha256`/格式必须与条目一致，否则 fail closed。
 - tag 只在导入/发布边界解析一次并落库；管理员显式“重新固定”并留 append-only 审计，下游只认 digest，不自动跟随 tag。管理员上传 OCI tar/layout 或 registry reference，经校验、配额与影响提示后进入目录；被 release 引用的条目只能停用不能删除。
+- 管理员目录 API 位于 Agent 内部 API（`/internal/v1/platform-images`，沿用 `agent.control.invoke` 服务权限）：注册时服务端解析 tag 为 digest/媒体类型/大小后落库，repin 复用已存 reference（不接受调用方换仓库），disable 不依赖 registry；比较基准为管理员观察到的 digest，冲突返回 409。reference 必须属于配置的单一 registry host，否则 422；未配置 registry 时目录写操作 fail closed（503），只读列表仍可用。
+- API 模式部署新增可选 `platform_registry`（`registry`/`ca_file`/`username_file`/`password_file`），TLS 与机器人凭据在启动时校验。`deploy/config/agent-control-plane.yaml.example` 尚未加入该块，部署方需把 Harbor CA 与凭据文件挂入 agent API Pod；在此之前目录写操作保持不可用。
 
 ## 代价与边界
 
