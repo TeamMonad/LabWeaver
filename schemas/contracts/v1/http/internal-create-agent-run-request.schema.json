@@ -638,6 +638,10 @@
   "additionalProperties": false,
   "description": "Control-to-Agent command carried only over an allowlisted mTLS service identity.",
   "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId",
+      "description": "Control-authenticated actor that initiated this run.\n\nThe actor authorizes and is attributed for the one-shot Resource task reservation that a\nsandboxed authoring attempt creates; it is never derived from browser input."
+    },
     "courseId": {
       "anyOf": [
         {
@@ -689,6 +693,7 @@
   },
   "required": [
     "projectId",
+    "actorId",
     "request",
     "purpose",
     "package",

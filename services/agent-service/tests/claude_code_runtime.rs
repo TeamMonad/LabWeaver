@@ -2095,6 +2095,7 @@ async fn assert_dispatch_does_not_replay_live_tracks(
     let command = InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
+        actor_id: ActorId::new(),
         request: InternalAgentRunRequest::Authoring(request.clone()),
         purpose: AgentRunPurpose::Authoring {
             environment_class: request.environment_class,
@@ -2189,6 +2190,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     let command = InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
+        actor_id: ActorId::new(),
         request: InternalAgentRunRequest::Authoring(request.clone()),
         purpose: AgentRunPurpose::Authoring { environment_class },
         package: package.clone(),
@@ -2313,6 +2315,7 @@ fn work_dispatch_command_with_runtime(
     InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
+        actor_id,
         request: InternalAgentRunRequest::WorkConfiguration(request),
         purpose: AgentRunPurpose::WorkConfiguration {
             environment_id,

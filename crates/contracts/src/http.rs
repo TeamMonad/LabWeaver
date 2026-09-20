@@ -475,6 +475,11 @@ pub struct InternalCreateAgentRunRequest {
     /// Authoritative Project ownership and optional teaching association.
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
+    /// Control-authenticated actor that initiated this run.
+    ///
+    /// The actor authorizes and is attributed for the one-shot Resource task reservation that a
+    /// sandboxed authoring attempt creates; it is never derived from browser input.
+    pub actor_id: ActorId,
     /// Public immutable request whose idempotency key remains an HTTP header.
     pub request: InternalAgentRunRequest,
     /// Control-derived immutable purpose. Agent rejects a request whose purpose does not agree
@@ -546,6 +551,14 @@ impl InternalCreateAgentRunRequest {
             }
             _ => return Err(HttpContractError::InvalidInternalIdentity),
         };
+        let actor_matches = match self.purpose {
+            crate::authoring::AgentRunPurpose::Authoring { .. } => {
+                self.actor_id.as_uuid() != uuid::Uuid::nil()
+            }
+            crate::authoring::AgentRunPurpose::WorkConfiguration { actor_id, .. } => {
+                actor_id == self.actor_id
+            }
+        };
         if request_identity.0 != self.project_id
             || request_identity.1 != self.course_id
             || self.package.project_id != self.project_id
@@ -555,6 +568,7 @@ impl InternalCreateAgentRunRequest {
             || request_identity.2 != self.package.id
             || request_identity.4 != self.policy.revision
             || request_identity.3 != self.policy.id
+            || !actor_matches
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }

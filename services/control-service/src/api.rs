@@ -741,6 +741,7 @@ async fn create_project_work_configuration_run(
             &InternalCreateAgentRunRequest {
                 project_id,
                 course_id: project.course_id,
+                actor_id: decision.actor.actor_id,
                 request: contracts::http::InternalAgentRunRequest::WorkConfiguration(
                     request.clone(),
                 ),
@@ -778,7 +779,7 @@ async fn create_project_agent_run_for_class(
     expected_environment_class: contracts::authoring::EnvironmentClass,
     authorization_operation: &'static str,
 ) -> Result<Response, ApiError> {
-    authorize_project(
+    let decision = authorize_project(
         &state,
         &principal,
         &headers,
@@ -815,6 +816,7 @@ async fn create_project_agent_run_for_class(
             &InternalCreateAgentRunRequest {
                 project_id,
                 course_id: project.course_id,
+                actor_id: decision.actor.actor_id,
                 request: contracts::http::InternalAgentRunRequest::Authoring(request),
                 purpose: AgentRunPurpose::Authoring {
                     environment_class: expected_environment_class,
@@ -1496,7 +1498,7 @@ async fn create_agent_run_for_class(
     expected_environment_class: contracts::authoring::EnvironmentClass,
     authorization_operation: &'static str,
 ) -> Result<Response, ApiError> {
-    authorize(
+    let actor_id = authorize(
         &state,
         &principal,
         &headers,
@@ -1523,6 +1525,7 @@ async fn create_agent_run_for_class(
             &InternalCreateAgentRunRequest {
                 project_id: request.project_id,
                 course_id: request.course_id,
+                actor_id,
                 request: contracts::http::InternalAgentRunRequest::Authoring(request),
                 purpose: AgentRunPurpose::Authoring {
                     environment_class: expected_environment_class,
