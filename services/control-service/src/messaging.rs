@@ -399,7 +399,7 @@ impl AgentRunConsumer {
                 .map_err(|_| MessagingError::Ack)?;
             return Ok(());
         }
-        let (run, environment, evaluation) = if matches!(
+        let (run, environment, evaluation, environment_image_export) = if matches!(
             event.subject.as_str(),
             subjects::AGENT_RUN_COMPLETED | subjects::AGENT_RUN_FAILED
         ) {
@@ -427,6 +427,7 @@ impl AgentRunConsumer {
                 outcome.run,
                 outcome.environment_candidate,
                 outcome.evaluation_candidate,
+                outcome.environment_image_export,
             )
         } else if event.subject == subjects::AGENT_RUN_REQUESTED {
             match control.agent_run_event_duplicate(&event).await {
@@ -493,7 +494,7 @@ impl AgentRunConsumer {
                     .map_err(|_| MessagingError::Ack)?;
                 return Ok(());
             }
-            (run, None, None)
+            (run, None, None, None)
         } else {
             self.quarantine(&message, Some(event.id), "LW_EVENT_SUBJECT_MISMATCH")
                 .await?;
@@ -503,47 +504,44 @@ impl AgentRunConsumer {
                 .map_err(|_| MessagingError::Ack)?;
             return Ok(());
         };
-        let generated_context = match resolve_generated_context(
-            control,
-            agent,
-            &run,
-            environment.as_ref(),
-        )
-        .await
-        {
-            Ok(record) => record,
-            Err(ContextResolutionError::Retryable) => {
-                message
-                    .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
-                    .await
-                    .map_err(|_| MessagingError::Ack)?;
-                return Ok(());
-            }
-            Err(ContextResolutionError::Rejected) => {
-                tracing::error!(
-                    event = "control.agent_run_context_resolution_rejected",
-                    component = "control-service",
-                    operation = "agent_run.context.resolve",
-                    outcome = "quarantined",
-                    duration_ms = 0_u64,
-                    event_id = %event.id,
-                    run_id = %run.id,
-                    candidate_id = environment.as_ref().map(|candidate| candidate.id.to_string()),
-                    diagnostic_code = "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
-                    failure_stage = "agent_run.context.resolve",
-                    retryable = false,
-                );
-                self.quarantine(
-                    &message,
-                    Some(event.id),
-                    "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
-                )
-                .await?;
-                message
-                    .double_ack_with(AckKind::Term)
-                    .await
-                    .map_err(|_| MessagingError::Ack)?;
-                return Ok(());
+        let generated_context = if environment_image_export.is_some() {
+            None
+        } else {
+            match resolve_generated_context(control, agent, &run, environment.as_ref()).await {
+                Ok(record) => record,
+                Err(ContextResolutionError::Retryable) => {
+                    message
+                        .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
+                Err(ContextResolutionError::Rejected) => {
+                    tracing::error!(
+                        event = "control.agent_run_context_resolution_rejected",
+                        component = "control-service",
+                        operation = "agent_run.context.resolve",
+                        outcome = "quarantined",
+                        duration_ms = 0_u64,
+                        event_id = %event.id,
+                        run_id = %run.id,
+                        candidate_id = environment.as_ref().map(|candidate| candidate.id.to_string()),
+                        diagnostic_code = "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
+                        failure_stage = "agent_run.context.resolve",
+                        retryable = false,
+                    );
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
             }
         };
         match control
@@ -552,6 +550,7 @@ impl AgentRunConsumer {
                 &run,
                 environment.as_ref(),
                 evaluation.as_ref(),
+                environment_image_export.as_ref(),
                 generated_context.as_ref(),
             )
             .await

@@ -2372,6 +2372,7 @@ impl ControlService {
                 run.course_id,
                 run.package_id,
                 candidate,
+                None,
                 generated_context,
                 candidate.created_at,
             )
@@ -2408,6 +2409,7 @@ impl ControlService {
         run: &contracts::authoring::AgentRun,
         environment: Option<&EnvironmentCandidate>,
         evaluation: Option<&EvaluationCandidate>,
+        environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<InboxDecision, ControlError> {
         let contract = EVENT_CONTRACTS
@@ -2523,6 +2525,7 @@ impl ControlService {
                 run.course_id,
                 run.package_id,
                 candidate,
+                environment_image_export,
                 generated_context,
                 event.time,
             )
@@ -5604,6 +5607,7 @@ async fn enqueue_container_build(
     course_id: Option<CourseId>,
     package_id: ProblemPackageId,
     candidate: &EnvironmentCandidate,
+    environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
     generated_context: Option<&GeneratedArtifactRecord>,
     created_at: UtcTimestamp,
 ) -> Result<(), ControlError> {
@@ -5619,21 +5623,32 @@ async fn enqueue_container_build(
     let contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } =
         &candidate.spec.runtime
     else {
-        if generated_context.is_some() {
+        if generated_context.is_some() || environment_image_export.is_some() {
             return Err(ControlError::PersistenceIdentityMismatch);
         }
         return Ok(());
     };
+    if let Some(image) = environment_image_export {
+        image
+            .validate()
+            .map_err(|_| ControlError::ContractInvalid)?;
+    }
 
-    let context_object_key = resolve_container_context_object_key(
-        transaction,
-        project_id,
-        course_id,
-        package_id,
-        build_context,
-        generated_context,
-    )
-    .await?;
+    let context_object_key = if environment_image_export.is_some() {
+        None
+    } else {
+        Some(
+            resolve_container_context_object_key(
+                transaction,
+                project_id,
+                course_id,
+                package_id,
+                build_context,
+                generated_context,
+            )
+            .await?,
+        )
+    };
 
     let existing = sqlx::query(
         "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
@@ -5652,7 +5667,8 @@ async fn enqueue_container_build(
             project_id,
             course_id,
             candidate,
-            &context_object_key,
+            context_object_key.as_deref(),
+            environment_image_export,
         )?;
         return Ok(());
     }
@@ -5664,10 +5680,17 @@ async fn enqueue_container_build(
         candidate_id: candidate.id,
         candidate_revision: candidate.revision,
         builder_binding: config.container_build.builder_binding.clone(),
-        source: BuildSource::Dockerfile {
-            context: build_context.clone(),
-            context_object_key: context_object_key.clone(),
-            dockerfile_path: config.container_build.dockerfile_path.clone(),
+        source: match environment_image_export {
+            Some(image) => BuildSource::ExportedOci {
+                image: image.clone(),
+            },
+            None => BuildSource::Dockerfile {
+                context: build_context.clone(),
+                context_object_key: context_object_key
+                    .clone()
+                    .ok_or(ControlError::ContractInvalid)?,
+                dockerfile_path: config.container_build.dockerfile_path.clone(),
+            },
         },
         output_repository: container_build_output_repository(
             config,
@@ -5738,7 +5761,8 @@ async fn enqueue_container_build(
             project_id,
             course_id,
             candidate,
-            &context_object_key,
+            context_object_key.as_deref(),
+            environment_image_export,
         )?;
         return Ok(());
     }
@@ -5796,7 +5820,8 @@ fn validate_existing_container_build_projection(
     project_id: ProjectId,
     course_id: Option<CourseId>,
     candidate: &EnvironmentCandidate,
-    context_object_key: &str,
+    context_object_key: Option<&str>,
+    environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
 ) -> Result<(), ControlError> {
     let build_request_id: Uuid = row.try_get("build_request_id").map_err(db)?;
     let persisted_project_id: Uuid = row.try_get("project_id").map_err(db)?;
@@ -5843,11 +5868,18 @@ fn validate_existing_container_build_projection(
         && command.request.course_id == course_id
         && command.request.candidate_id == candidate.id
         && command.request.candidate_revision == candidate.revision
-        && matches!(
-            &command.request.source,
-            BuildSource::Dockerfile { context, context_object_key: key, .. }
-                if context == build_context && key == context_object_key
-        )
+        && match (&command.request.source, environment_image_export) {
+            (
+                BuildSource::Dockerfile {
+                    context,
+                    context_object_key: key,
+                    ..
+                },
+                None,
+            ) => context == build_context && context_object_key == Some(key.as_str()),
+            (BuildSource::ExportedOci { image }, Some(export)) => image == export,
+            _ => false,
+        }
         && command.idempotency_key == format!("build:{}", command.request.id)
         && command_sha256 == canonical_hash(&command)?;
     if !request_matches {
