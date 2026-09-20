@@ -32,12 +32,11 @@ use contracts::{
 };
 use environment_service::{
     ContainerReleaseResolver, EnvironmentProvider, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
-    KubeVirtBackendFence, KubeVirtCleanupPlan, KubeVirtObservationStore,
+    KubeVirtBackendFence, KubeVirtBaseDiskBinding, KubeVirtCleanupPlan, KubeVirtObservationStore,
     KubeVirtObservationStoreError, KubeVirtProvider, KubeVirtProviderBackend,
     KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation,
-    KubeVirtStorageBinding, ProviderFailure, ReconcileAction, ReleaseProjectionError,
-    ResolvedContainerRelease,
+    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation, ProviderFailure,
+    ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::json;
@@ -265,6 +264,34 @@ impl KubeVirtProviderBackend for FixtureBackend {
 }
 
 #[test]
+fn plan_rejects_unlisted_bindings_and_reviewed_base_drift() {
+    for mutate in [
+        |base_disk: &mut VirtualMachineBaseDisk| base_disk.binding = "cirros-0.6-v1".to_owned(),
+        |base_disk: &mut VirtualMachineBaseDisk| {
+            base_disk.source_registry_digest = format!(
+                "docker://quay.io/containerdisks/ubuntu@sha256:{}",
+                "a".repeat(64)
+            );
+        },
+        |base_disk: &mut VirtualMachineBaseDisk| base_disk.capacity_bytes = 20_000_000_000,
+    ] {
+        let mut projection = projection();
+        let ImageArtifact::VirtualMachine { base_disk, .. } = &mut projection.release.artifact
+        else {
+            panic!("VM fixture artifact");
+        };
+        mutate(base_disk);
+        let instance = instance_for(&projection);
+        let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+        let resolved = resolved(projection);
+        assert!(matches!(
+            provider.plan(&instance, &resolved, ReconcileAction::Provision),
+            Err(ReleaseProjectionError::SecurityPostureInvalid)
+        ));
+    }
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "the resource-plan test audits the complete security bundle in one place"
@@ -315,7 +342,9 @@ fn plan_is_deterministic_private_and_digest_bound() {
         data_volume
             .document
             .pointer("/metadata/annotations/labweaver.io~1base-disk-sha256"),
-        Some(&json!(first.base_disk.capacity_bytes.to_string()))
+        Some(&json!(
+            "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
+        ))
     );
     assert_eq!(
         data_volume
@@ -859,22 +888,13 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
         Err(ReleaseProjectionError::Withdrawn)
     ));
 
-    assert!(
-        KubeVirtStorageBinding::new(
-            "vm-rwo-primary-v1".to_owned(),
-            "INVALID".to_owned(),
-            "labweaver-system".to_owned(),
-            "ubuntu-lab-base-v1".to_owned(),
-        )
-        .is_err()
-    );
+    assert!(ubuntu_base_disk("INVALID".to_owned()).is_err());
     assert!(
         KubeVirtSshBootstrap::new(
             "access-system".to_owned(),
             "openssh-gateway".to_owned(),
             "labweaver-evaluation".to_owned(),
             "evaluation-freeze-worker".to_owned(),
-            "lab".to_owned(),
             "not-a-public-key",
         )
         .is_err()
@@ -969,26 +989,42 @@ fn provider_with_budget(
         Arc::new(FixtureObservationStore::default()),
         KubeVirtProviderConfiguration::new(
             revision(1),
-            KubeVirtStorageBinding::new(
-                "vm-rwo-primary-v1".to_owned(),
-                "local-path".to_owned(),
-                "labweaver-system".to_owned(),
-                "ubuntu-lab-base-v1".to_owned(),
-            )
-            .expect("storage binding"),
+            vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
             KubeVirtSshBootstrap::new(
                 "access-system".to_owned(),
                 "openssh-gateway".to_owned(),
                 "labweaver-evaluation".to_owned(),
                 "evaluation-freeze-worker".to_owned(),
-                "lab".to_owned(),
                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
             )
             .expect("SSH bootstrap"),
             resource_budget,
-        ),
+        )
+        .expect("provider configuration"),
     )
     .expect("provider configuration")
+}
+
+fn ubuntu_base_disk(
+    storage_class_name: String,
+) -> Result<KubeVirtBaseDiskBinding, ReleaseProjectionError> {
+    KubeVirtBaseDiskBinding::new(
+        "ubuntu-24.04-v1".to_owned(),
+        concat!(
+            "docker://quay.io/containerdisks/ubuntu@",
+            "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+        )
+        .to_owned(),
+        "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6".to_owned(),
+        10_737_418_240,
+        contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+        "vm-rwo-primary-v1".to_owned(),
+        storage_class_name,
+        "labweaver-system".to_owned(),
+        "ubuntu-lab-base-v1".to_owned(),
+        "lab".to_owned(),
+        22,
+    )
 }
 
 fn resolved(projection: ReleasePublished) -> ResolvedContainerRelease {

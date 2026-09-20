@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
 use contracts::environment::EnvironmentOperationKind;
+use contracts::supply_chain::VirtualMachineDiskFormat;
 use contracts::{ActorId, PolicyId, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -15,9 +16,9 @@ use crate::{
     ContainerProvider, ContainerProviderConfiguration, ContainerReleasePolicy,
     ContainerWorkExecutionService, ContainerWorkspaceAccessMode, EnvironmentStoreError,
     FreezeBindingConfiguration, FreezeBindingService, JetStreamCommandConsumer,
-    JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtProvider,
+    JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtBaseDiskBinding, KubeVirtProvider,
     KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtSshBootstrap,
-    KubeVirtStorageBinding, KubernetesWorkExecutionBackend, LifecycleCommand, NatsAccessRevoker,
+    KubernetesWorkExecutionBackend, LifecycleCommand, NatsAccessRevoker,
     NatsContainerProviderBackend, NatsEnvironmentProvider, NatsKubeVirtProviderBackend,
     NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher,
     PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry,
@@ -238,24 +239,7 @@ impl EnvironmentProcessRuntime {
                         Arc::new(PgKubeVirtObservationStore::new(pool.clone())),
                         KubeVirtProviderConfiguration::new(
                             configuration.trust_revision()?,
-                            KubeVirtStorageBinding::new(
-                                configuration
-                                    .storage_class_binding
-                                    .clone()
-                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                configuration
-                                    .storage_class_name
-                                    .clone()
-                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                configuration
-                                    .data_source_namespace
-                                    .clone()
-                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                configuration
-                                    .data_source_name
-                                    .clone()
-                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            )?,
+                            configuration.base_disk_bindings()?,
                             KubeVirtSshBootstrap::new(
                                 configuration
                                     .gateway_namespace
@@ -271,10 +255,6 @@ impl EnvironmentProcessRuntime {
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                                 configuration
                                     .collector_pod_label
-                                    .clone()
-                                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                                configuration
-                                    .guest_user
                                     .clone()
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                                 configuration
@@ -312,7 +292,7 @@ impl EnvironmentProcessRuntime {
                                     .cdi_scratch_storage_bytes
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             )?,
-                        ),
+                        )?,
                     )?;
                     registry.register(Arc::new(provider))?;
                 }
@@ -793,16 +773,12 @@ struct ProviderBindingConfiguration {
     active_image_policy_id: Option<String>,
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
-    storage_class_binding: Option<String>,
-    storage_class_name: Option<String>,
-    data_source_namespace: Option<String>,
-    data_source_name: Option<String>,
+    base_disks: Option<Vec<BaseDiskConfiguration>>,
     gateway_pod_label: Option<String>,
     collector_namespace: Option<String>,
     collector_pod_label: Option<String>,
     evaluation_namespace: Option<String>,
     evaluation_pod_label: Option<String>,
-    guest_user: Option<String>,
     ssh_user_ca_public_key: Option<String>,
     ssh_user_ca_private_key_path: Option<PathBuf>,
     collector_workspace_root: Option<String>,
@@ -812,6 +788,22 @@ struct ProviderBindingConfiguration {
     cdi_importer_memory_request_bytes: Option<u64>,
     cdi_importer_memory_limit_bytes: Option<u64>,
     cdi_scratch_storage_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaseDiskConfiguration {
+    binding: String,
+    source_registry_digest: String,
+    disk_sha256: String,
+    capacity_bytes: u64,
+    format: VirtualMachineDiskFormat,
+    storage_class_binding: String,
+    storage_class_name: String,
+    data_source_namespace: String,
+    data_source_name: String,
+    guest_user: String,
+    ssh_port: u16,
 }
 
 impl ProviderBindingConfiguration {
@@ -845,6 +837,49 @@ impl ProviderBindingConfiguration {
         .map_err(EnvironmentProcessRuntimeError::from)
     }
 
+    fn base_disk_bindings(
+        &self,
+    ) -> Result<Vec<KubeVirtBaseDiskBinding>, EnvironmentProcessRuntimeError> {
+        self.base_disks
+            .as_deref()
+            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?
+            .iter()
+            .map(|entry| {
+                KubeVirtBaseDiskBinding::new(
+                    entry.binding.clone(),
+                    entry.source_registry_digest.clone(),
+                    entry.disk_sha256.clone(),
+                    entry.capacity_bytes,
+                    entry.format,
+                    entry.storage_class_binding.clone(),
+                    entry.storage_class_name.clone(),
+                    entry.data_source_namespace.clone(),
+                    entry.data_source_name.clone(),
+                    entry.guest_user.clone(),
+                    entry.ssh_port,
+                )
+                .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)
+            })
+            .collect()
+    }
+
+    fn vm_guest_user(&self) -> Result<String, EnvironmentProcessRuntimeError> {
+        let bases = self
+            .base_disks
+            .as_deref()
+            .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?;
+        let Some(first) = bases.first() else {
+            return Err(EnvironmentProcessRuntimeError::ConfigParse);
+        };
+        if bases
+            .iter()
+            .any(|entry| entry.guest_user != first.guest_user)
+        {
+            return Err(EnvironmentProcessRuntimeError::ConfigParse);
+        }
+        Ok(first.guest_user.clone())
+    }
+
     fn has_container_only_fields(&self) -> bool {
         self.access_namespace.is_some()
             || self.access_pod_label.is_some()
@@ -871,16 +906,12 @@ impl ProviderBindingConfiguration {
     }
 
     fn has_kubevirt_fields(&self) -> bool {
-        self.storage_class_binding.is_some()
-            || self.storage_class_name.is_some()
-            || self.data_source_namespace.is_some()
-            || self.data_source_name.is_some()
+        self.base_disks.is_some()
             || self.gateway_pod_label.is_some()
             || self.collector_namespace.is_some()
             || self.collector_pod_label.is_some()
             || self.evaluation_namespace.is_some()
             || self.evaluation_pod_label.is_some()
-            || self.guest_user.is_some()
             || self.ssh_user_ca_public_key.is_some()
             || self.ssh_user_ca_private_key_path.is_some()
             || self.collector_workspace_root.is_some()
@@ -894,16 +925,15 @@ impl ProviderBindingConfiguration {
 
     fn has_complete_kubevirt_fields(&self) -> bool {
         self.gateway_namespace.is_some()
-            && self.storage_class_binding.is_some()
-            && self.storage_class_name.is_some()
-            && self.data_source_namespace.is_some()
-            && self.data_source_name.is_some()
+            && self
+                .base_disks
+                .as_ref()
+                .is_some_and(|bases| !bases.is_empty())
             && self.gateway_pod_label.is_some()
             && self.collector_namespace.is_some()
             && self.collector_pod_label.is_some()
             && self.evaluation_namespace.is_some()
             && self.evaluation_pod_label.is_some()
-            && self.guest_user.is_some()
             && self.ssh_user_ca_public_key.is_some()
             && self.ssh_user_ca_private_key_path.is_some()
             && self.collector_workspace_root.is_some()
@@ -989,10 +1019,7 @@ fn freeze_binding_configuration(
                 return Err(EnvironmentProcessRuntimeError::ConfigParse);
             }
             Ok(VmFreezeBindingConfiguration {
-                username: configuration
-                    .guest_user
-                    .clone()
-                    .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+                username: configuration.vm_guest_user()?,
                 workspace_root: configuration
                     .collector_workspace_root
                     .clone()
@@ -1108,7 +1135,7 @@ mod deployment_contract_tests {
                     "binding": "kubevirt-primary-v1",
                     "subject": "labweaver.provider.kubevirt.vm.v1",
                     "providerKind": "kubevirt",
-                    "guestUser": "lab"
+                    "baseDisks": []
                 }
             ]))
             .expect("provider fixture must deserialize");

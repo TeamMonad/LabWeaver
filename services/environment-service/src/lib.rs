@@ -49,13 +49,14 @@ pub use kubevirt_console_executor::{
 };
 pub use kubevirt_provider::{
     FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
-    KubeVirtCleanupPlan, KubeVirtExecutorBackend, KubeVirtExecutorFenceError,
-    KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse,
-    KubeVirtExecutorResponseEnvelope, KubeVirtObservationStore, KubeVirtObservationStoreError,
-    KubeVirtProvider, KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
-    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, KubeVirtStorageBinding, NatsKubeVirtExecutorServer,
-    NatsKubeVirtProviderBackend, PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore,
+    KubeVirtBaseDiskBinding, KubeVirtCleanupPlan, KubeVirtExecutorBackend,
+    KubeVirtExecutorFenceError, KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope,
+    KubeVirtExecutorResponse, KubeVirtExecutorResponseEnvelope, KubeVirtObservationStore,
+    KubeVirtObservationStoreError, KubeVirtProvider, KubeVirtProviderBackend,
+    KubeVirtProviderConfiguration, KubeVirtResource, KubeVirtResourceBudget, KubeVirtResourcePlan,
+    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation,
+    NatsKubeVirtExecutorServer, NatsKubeVirtProviderBackend, PgKubeVirtExecutorFenceStore,
+    PgKubeVirtObservationStore,
 };
 pub use lifecycle::{
     LifecycleCommand, LifecycleError, apply_provider_failure, apply_provider_observation,

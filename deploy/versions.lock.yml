@@ -111,15 +111,26 @@ test_images:
   cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
   kind_node: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
   registry: docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
-platform_vm_base:
-  binding: ubuntu-24.04-v1
-  release: ubuntu-24.04
-  registry_url: docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5
-  disk_sha256: ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6
-  artifact_id: 00000000-0000-7000-8000-000000000003
-  format: qcow2
-  capacity_bytes: 10737418240
-  data_source_name: ubuntu-lab-base-v1
-  seed_data_volume_name: ubuntu-lab-base-v1-seed
-  storage_class_name: local-path
-  storage_request: 10Gi
+platform_vm_bases:
+  - binding: ubuntu-24.04-v1
+    release: ubuntu-24.04
+    registry_url: docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5
+    disk_sha256: ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6
+    artifact_id: 00000000-0000-7000-8000-000000000003
+    format: qcow2
+    capacity_bytes: 10737418240
+    data_source_name: ubuntu-lab-base-v1
+    seed_data_volume_name: ubuntu-lab-base-v1-seed
+    storage_class_name: local-path
+    storage_request: 10Gi
+  - binding: cirros-0.6-v1
+    release: cirros-0.6
+    registry_url: docker://quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
+    disk_sha256: 932fcae93574e242dc3d772d5235061747dfe537668443a1f0567d893614b464
+    artifact_id: 00000000-0000-7000-8000-000000000004
+    format: qcow2
+    capacity_bytes: 1073741824
+    data_source_name: cirros-0-6-v1
+    seed_data_volume_name: cirros-0-6-v1-seed
+    storage_class_name: local-path
+    storage_request: 1Gi
