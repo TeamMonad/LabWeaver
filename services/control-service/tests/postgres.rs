@@ -1082,7 +1082,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             .await?,
     )?;
     let config = control_config()?;
-    let vm_base = config.virtual_machine_base.clone();
+    let vm_base = config.virtual_machine_bases.clone();
     let evaluation_runtime = EvaluationRuntimeIdentity {
         provider_binding: config.evaluation_runtime.provider_binding.clone(),
         runner_image: config.evaluation_runtime.runner_image.clone(),
@@ -1155,9 +1155,9 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
         .await?;
 
     let image_artifact = ImageArtifact::VirtualMachine {
-        id: vm_base.artifact_id,
-        base_disk: vm_base.base_disk.clone(),
-        format: vm_base.format,
+        id: vm_base.bases[0].artifact_id,
+        base_disk: vm_base.bases[0].base_disk.clone(),
+        format: vm_base.bases[0].format,
     };
     let request = CompleteAuthoringApprovalRequest {
         project_id,
@@ -1442,9 +1442,9 @@ async fn authoring_publication_failure_is_durable_and_not_admissible()
             runner_image: config.evaluation_runtime.runner_image.clone(),
         },
         image_artifact: ImageArtifact::VirtualMachine {
-            id: config.virtual_machine_base.artifact_id,
-            base_disk: config.virtual_machine_base.base_disk.clone(),
-            format: config.virtual_machine_base.format,
+            id: config.virtual_machine_bases.bases[0].artifact_id,
+            base_disk: config.virtual_machine_bases.bases[0].base_disk.clone(),
+            format: config.virtual_machine_bases.bases[0].format,
         },
         actor_id,
         reason: "fixture approval for durable publication failure".to_owned(),
@@ -1572,7 +1572,7 @@ async fn private_work_environment_approval_requires_project_owner()
 
     let now: UtcTimestamp = "2026-09-08T10:00:00.000Z".parse()?;
     let config = control_config()?;
-    let vm_base = config.virtual_machine_base.clone();
+    let vm_base = config.virtual_machine_bases.clone();
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -2113,7 +2113,7 @@ fn authoring_policy(
 fn vm_environment_candidate(
     project_id: ProjectId,
     course_id: Option<CourseId>,
-    base: &control_service::VirtualMachineBasePolicy,
+    base: &control_service::VirtualMachineBaseCatalog,
     class: EnvironmentClass,
     now: UtcTimestamp,
 ) -> Result<EnvironmentCandidate, Box<dyn std::error::Error>> {
@@ -2131,7 +2131,7 @@ fn vm_environment_candidate(
     value["spec"]["runtime"] = serde_json::json!({
         "kind":"virtual_machine",
         "provider_binding":base.provider_binding,
-        "base_disk":base.base_disk,
+        "base_disk":base.bases[0].base_disk,
         "storage_class_binding":base.storage_class_binding,
         "ssh_port":22
     });
@@ -2360,21 +2360,25 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             max_cpu_millicores: 2_000,
             max_memory_bytes: 2_147_483_648,
         },
-        virtual_machine_base: control_service::VirtualMachineBasePolicy {
+        virtual_machine_bases: control_service::VirtualMachineBaseCatalog {
             provider_binding: "kubevirt-primary-v1".to_owned(),
             storage_class_binding: "vm-rwo-primary-v1".to_owned(),
-            artifact_id: contracts::ImageArtifactId::new(),
-            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
-                binding: "ubuntu-24.04-v1".to_owned(),
-                source_registry_digest: concat!(
-                    "docker://quay.io/containerdisks/ubuntu@",
-                    "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                )
-                .to_owned(),
+            max_bases: 8,
+            max_capacity_bytes: 137_438_953_472,
+            bases: vec![control_service::VirtualMachineBasePolicy {
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                    binding: "ubuntu-24.04-v1".to_owned(),
+                    source_registry_digest: concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    )
+                    .to_owned(),
 
-                capacity_bytes: 10_737_418_240,
-            },
-            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                    capacity_bytes: 10_737_418_240,
+                },
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            }],
         },
         evaluation_runtime: control_service::EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),

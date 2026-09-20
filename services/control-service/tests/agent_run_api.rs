@@ -362,20 +362,24 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             max_cpu_millicores: 2_000,
             max_memory_bytes: 2_147_483_648,
         },
-        virtual_machine_base: VirtualMachineBasePolicy {
+        virtual_machine_bases: control_service::VirtualMachineBaseCatalog {
             provider_binding: "kubevirt-primary-v1".to_owned(),
             storage_class_binding: "vm-rwo-primary-v1".to_owned(),
-            artifact_id: contracts::ImageArtifactId::new(),
-            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
-                binding: "ubuntu-24.04-v1".to_owned(),
-                source_registry_digest: concat!(
-                    "docker://quay.io/containerdisks/ubuntu@",
-                    "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                )
-                .to_owned(),
-                capacity_bytes: 10_737_418_240,
-            },
-            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            max_bases: 8,
+            max_capacity_bytes: 137_438_953_472,
+            bases: vec![control_service::VirtualMachineBasePolicy {
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                    binding: "ubuntu-24.04-v1".to_owned(),
+                    source_registry_digest: concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    )
+                    .to_owned(),
+                    capacity_bytes: 10_737_418_240,
+                },
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            }],
         },
         evaluation_runtime: EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),

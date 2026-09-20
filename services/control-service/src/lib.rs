@@ -112,8 +112,8 @@ pub struct ControlConfig {
     pub evaluation_schema_sha256: Sha256Digest,
     /// Exact build execution policy used to turn an approved Container candidate into a command.
     pub container_build: ContainerBuildPolicy,
-    /// Exact deployment-owned `KubeVirt` base disk accepted for VM publication.
-    pub virtual_machine_base: VirtualMachineBasePolicy,
+    /// Deployment-owned `KubeVirt` base disk catalog accepted for VM publication.
+    pub virtual_machine_bases: VirtualMachineBaseCatalog,
     /// Single deployment-owned Evaluation runtime identity template.
     pub evaluation_runtime: EvaluationRuntimePolicy,
 }
@@ -161,14 +161,30 @@ pub struct ContainerBuildPolicy {
     pub max_memory_bytes: u64,
 }
 
-/// Deployment-owned fixed `KubeVirt` artifact and provider bindings.
+/// Deployment-owned reviewed `KubeVirt` base disk catalog.
+///
+/// Candidates resolve one entry by their declared `base_disk.binding`; the declared source
+/// digest and capacity must equal the reviewed entry. Entries are bounded in count and
+/// capacity so an unreviewed base can never be published.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VirtualMachineBasePolicy {
+pub struct VirtualMachineBaseCatalog {
     /// Exact Environment provider binding accepted in the candidate.
     pub provider_binding: String,
     /// Exact reviewed storage binding accepted in the candidate.
     pub storage_class_binding: String,
+    /// Maximum number of reviewed base disks in this deployment.
+    pub max_bases: u32,
+    /// Maximum reviewed capacity of one base disk in bytes.
+    pub max_capacity_bytes: u64,
+    /// Reviewed base disks keyed by their stable binding.
+    pub bases: Vec<VirtualMachineBasePolicy>,
+}
+
+/// One reviewed deployment-owned `KubeVirt` base disk.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualMachineBasePolicy {
     /// Stable release artifact identity assigned to this deployment-owned disk.
     pub artifact_id: ImageArtifactId,
     /// Immutable CDI source and imported disk identity.
@@ -187,7 +203,7 @@ impl ControlConfig {
         let package_bytes_valid = self.max_package_bytes != 0;
         let retention_valid = self.retention_seconds != 0 && self.sse_retention_seconds != 0;
         let container_build_valid = self.container_build.validate();
-        let virtual_machine_base_valid = self.virtual_machine_base.validate();
+        let virtual_machine_base_valid = self.virtual_machine_bases.validate();
         let evaluation_runtime_valid = self.evaluation_runtime.identity().is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
@@ -257,11 +273,38 @@ impl ContainerBuildPolicy {
     }
 }
 
-impl VirtualMachineBasePolicy {
+impl VirtualMachineBaseCatalog {
     fn validate(&self) -> bool {
         !self.provider_binding.trim().is_empty()
             && !self.storage_class_binding.trim().is_empty()
-            && self.base_disk.validate().is_ok()
+            && self.max_bases > 0
+            && self.max_capacity_bytes > 0
+            && !self.bases.is_empty()
+            && self.bases.len() <= usize::try_from(self.max_bases).unwrap_or(usize::MAX)
+            && self.bases.iter().enumerate().all(|(index, entry)| {
+                entry.base_disk.validate().is_ok()
+                    && entry.base_disk.capacity_bytes <= self.max_capacity_bytes
+                    && !self.bases[..index]
+                        .iter()
+                        .any(|other| other.base_disk.binding == entry.base_disk.binding)
+            })
+    }
+
+    /// Resolves the exact reviewed entry named by the candidate bindings.
+    fn resolve(
+        &self,
+        provider_binding: &str,
+        storage_class_binding: &str,
+        base_disk: &VirtualMachineBaseDisk,
+    ) -> Option<&VirtualMachineBasePolicy> {
+        if provider_binding != self.provider_binding
+            || storage_class_binding != self.storage_class_binding
+        {
+            return None;
+        }
+        self.bases
+            .iter()
+            .find(|entry| &entry.base_disk == base_disk)
     }
 }
 
@@ -2003,7 +2046,7 @@ impl ControlService {
         let image_artifact = resolve_candidate_image_artifact(
             &candidate,
             build.as_ref(),
-            &self.config.virtual_machine_base,
+            &self.config.virtual_machine_bases,
         );
         Ok(EnvironmentCandidateView {
             candidate,
@@ -2028,7 +2071,7 @@ impl ControlService {
         let image_artifact = resolve_candidate_image_artifact(
             &candidate,
             build.as_ref(),
-            &self.config.virtual_machine_base,
+            &self.config.virtual_machine_bases,
         );
         Ok(EnvironmentCandidateView {
             candidate,
@@ -4540,13 +4583,11 @@ impl ControlService {
                 storage_class_binding,
                 ..
             } => {
-                let policy = &self.config.virtual_machine_base;
-                if provider_binding != &policy.provider_binding
-                    || storage_class_binding != &policy.storage_class_binding
-                    || base_disk != &policy.base_disk
-                {
-                    return Err(ControlError::ArtifactMismatch);
-                }
+                let policy = self
+                    .config
+                    .virtual_machine_bases
+                    .resolve(provider_binding, storage_class_binding, base_disk)
+                    .ok_or(ControlError::ArtifactMismatch)?;
                 ImageArtifact::VirtualMachine {
                     id: policy.artifact_id,
                     base_disk: policy.base_disk.clone(),
@@ -6142,13 +6183,10 @@ async fn validate_authoring_artifact(
             },
             ImageArtifact::VirtualMachine { .. },
         ) => {
-            let policy = &config.virtual_machine_base;
-            if provider_binding != &policy.provider_binding
-                || storage_class_binding != &policy.storage_class_binding
-                || base_disk != &policy.base_disk
-            {
-                return Err(ControlError::ArtifactMismatch);
-            }
+            let policy = config
+                .virtual_machine_bases
+                .resolve(provider_binding, storage_class_binding, base_disk)
+                .ok_or(ControlError::ArtifactMismatch)?;
             let expected = ImageArtifact::VirtualMachine {
                 id: policy.artifact_id,
                 base_disk: policy.base_disk.clone(),
@@ -6513,7 +6551,7 @@ async fn load_candidate_approvals(
 fn resolve_candidate_image_artifact(
     candidate: &EnvironmentCandidate,
     build: Option<&CandidateBuildView>,
-    virtual_machine_base: &VirtualMachineBasePolicy,
+    virtual_machine_bases: &VirtualMachineBaseCatalog,
 ) -> Result<Option<ImageArtifact>, ControlError> {
     let artifact = match &candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => build
@@ -6524,17 +6562,13 @@ fn resolve_candidate_image_artifact(
             base_disk,
             storage_class_binding,
             ..
-        } if provider_binding == &virtual_machine_base.provider_binding
-            && base_disk == &virtual_machine_base.base_disk
-            && storage_class_binding == &virtual_machine_base.storage_class_binding =>
-        {
-            Some(ImageArtifact::VirtualMachine {
-                id: virtual_machine_base.artifact_id,
-                base_disk: virtual_machine_base.base_disk.clone(),
-                format: virtual_machine_base.format,
-            })
-        }
-        contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => None,
+        } => virtual_machine_bases
+            .resolve(provider_binding, storage_class_binding, base_disk)
+            .map(|policy| ImageArtifact::VirtualMachine {
+                id: policy.artifact_id,
+                base_disk: policy.base_disk.clone(),
+                format: policy.format,
+            }),
     };
 
     if let Some(artifact) = &artifact
@@ -7140,8 +7174,8 @@ mod tests {
 
     use super::{
         ContainerBuildPolicy, ControlConfig, ControlError, EvaluationRuntimePolicy,
-        VirtualMachineBasePolicy, authoring_submission_manifest, reject_sensitive_payload,
-        resolve_candidate_image_artifact, validate_upload_request,
+        VirtualMachineBaseCatalog, VirtualMachineBasePolicy, authoring_submission_manifest,
+        reject_sensitive_payload, resolve_candidate_image_artifact, validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -7168,20 +7202,24 @@ mod tests {
                 max_cpu_millicores: 2_000,
                 max_memory_bytes: 2_147_483_648,
             },
-            virtual_machine_base: VirtualMachineBasePolicy {
+            virtual_machine_bases: VirtualMachineBaseCatalog {
                 provider_binding: "kubevirt-primary-v1".to_owned(),
                 storage_class_binding: "vm-rwo-primary-v1".to_owned(),
-                artifact_id: contracts::ImageArtifactId::new(),
-                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
-                    binding: "ubuntu-24.04-v1".to_owned(),
-                    source_registry_digest: concat!(
-                        "docker://quay.io/containerdisks/ubuntu@",
-                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                    )
-                    .to_owned(),
-                    capacity_bytes: 10_737_418_240,
-                },
-                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                max_bases: 8,
+                max_capacity_bytes: 137_438_953_472,
+                bases: vec![VirtualMachineBasePolicy {
+                    artifact_id: contracts::ImageArtifactId::new(),
+                    base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                        binding: "ubuntu-24.04-v1".to_owned(),
+                        source_registry_digest: concat!(
+                            "docker://quay.io/containerdisks/ubuntu@",
+                            "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                        )
+                        .to_owned(),
+                        capacity_bytes: 10_737_418_240,
+                    },
+                    format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                }],
             },
             evaluation_runtime: EvaluationRuntimePolicy {
                 provider_binding: "evaluation-primary-v1".to_owned(),
@@ -7247,17 +7285,17 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let config = config()?;
         let candidate = vm_candidate(
-            &config.virtual_machine_base.provider_binding,
-            &config.virtual_machine_base.storage_class_binding,
-            &config.virtual_machine_base.base_disk,
+            &config.virtual_machine_bases.provider_binding,
+            &config.virtual_machine_bases.storage_class_binding,
+            &config.virtual_machine_bases.bases[0].base_disk,
         )?;
         let expected = ImageArtifact::VirtualMachine {
-            id: config.virtual_machine_base.artifact_id,
-            base_disk: config.virtual_machine_base.base_disk.clone(),
-            format: config.virtual_machine_base.format,
+            id: config.virtual_machine_bases.bases[0].artifact_id,
+            base_disk: config.virtual_machine_bases.bases[0].base_disk.clone(),
+            format: config.virtual_machine_bases.bases[0].format,
         };
         assert_eq!(
-            resolve_candidate_image_artifact(&candidate, None, &config.virtual_machine_base,)?,
+            resolve_candidate_image_artifact(&candidate, None, &config.virtual_machine_bases,)?,
             Some(expected.clone())
         );
 
@@ -7272,7 +7310,7 @@ mod tests {
             resolve_candidate_image_artifact(
                 &provider_mismatch,
                 None,
-                &config.virtual_machine_base,
+                &config.virtual_machine_bases,
             )?,
             None
         );
@@ -7289,7 +7327,7 @@ mod tests {
             resolve_candidate_image_artifact(
                 &storage_mismatch,
                 None,
-                &config.virtual_machine_base,
+                &config.virtual_machine_bases,
             )?,
             None
         );
@@ -7304,10 +7342,113 @@ mod tests {
             );
         }
         assert_eq!(
-            resolve_candidate_image_artifact(&disk_mismatch, None, &config.virtual_machine_base)?,
+            resolve_candidate_image_artifact(&disk_mismatch, None, &config.virtual_machine_bases)?,
             None
         );
         Ok(())
+    }
+
+    #[test]
+    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalog = multi_base_catalog()?;
+        assert!(catalog.validate());
+        let ubuntu = &catalog.bases[0].base_disk;
+        let cirros = &catalog.bases[1].base_disk;
+        assert_eq!(
+            catalog
+                .resolve(
+                    &catalog.provider_binding,
+                    &catalog.storage_class_binding,
+                    cirros,
+                )
+                .map(|entry| entry.base_disk.binding.as_str()),
+            Some("cirros-0.6-v1")
+        );
+
+        let mut unknown = cirros.clone();
+        unknown.binding = "alpine-3.22-v1".to_owned();
+        assert!(
+            catalog
+                .resolve(
+                    &catalog.provider_binding,
+                    &catalog.storage_class_binding,
+                    &unknown,
+                )
+                .is_none()
+        );
+
+        let mut drift = cirros.clone();
+        drift.source_registry_digest = format!(
+            "docker://quay.io/kubevirt/cirros-container-disk-demo@sha256:{}",
+            "b".repeat(64)
+        );
+        assert!(
+            catalog
+                .resolve(
+                    &catalog.provider_binding,
+                    &catalog.storage_class_binding,
+                    &drift,
+                )
+                .is_none()
+        );
+
+        let mut count_bounded = catalog.clone();
+        count_bounded.max_bases = 1;
+        assert!(!count_bounded.validate());
+
+        let mut capacity_bounded = catalog.clone();
+        capacity_bounded.max_capacity_bytes = cirros.capacity_bytes - 1;
+        assert!(!capacity_bounded.validate());
+
+        let mut duplicate = catalog.clone();
+        duplicate.bases = vec![
+            catalog.bases[0].clone(),
+            VirtualMachineBasePolicy {
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: ubuntu.clone(),
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            },
+        ];
+        assert!(!duplicate.validate());
+        Ok(())
+    }
+
+    fn multi_base_catalog() -> Result<VirtualMachineBaseCatalog, Box<dyn std::error::Error>> {
+        Ok(VirtualMachineBaseCatalog {
+            provider_binding: "kubevirt-primary-v1".to_owned(),
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+            max_bases: 8,
+            max_capacity_bytes: 137_438_953_472,
+            bases: vec![
+                VirtualMachineBasePolicy {
+                    artifact_id: contracts::ImageArtifactId::new(),
+                    base_disk: VirtualMachineBaseDisk {
+                        binding: "ubuntu-24.04-v1".to_owned(),
+                        source_registry_digest: concat!(
+                            "docker://quay.io/containerdisks/ubuntu@",
+                            "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                        )
+                        .to_owned(),
+                        capacity_bytes: 10_737_418_240,
+                    },
+                    format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                },
+                VirtualMachineBasePolicy {
+                    artifact_id: contracts::ImageArtifactId::new(),
+                    base_disk: VirtualMachineBaseDisk {
+                        binding: "cirros-0.6-v1".to_owned(),
+                        source_registry_digest: concat!(
+                            "docker://quay.io/kubevirt/cirros-container-disk-demo@",
+                            "sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe"
+                        )
+                        .to_owned(),
+                        capacity_bytes: 1_073_741_824,
+                    },
+                    format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                },
+            ],
+        })
     }
 
     fn vm_candidate(
