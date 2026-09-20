@@ -1,0 +1,44 @@
+{
+  "$defs": {
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Administrator registration of one registry reference. The actor is supplied by the gateway.",
+  "properties": {
+    "binding": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "sourceReference": {
+      "description": "`<registry-host>/<repository>:<tag>` inside the configured platform registry.",
+      "type": "string"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "kind",
+    "binding",
+    "sourceReference",
+    "trustRevision",
+    "reason"
+  ],
+  "title": "RegisterPlatformImageRequest",
+  "type": "object"
+}

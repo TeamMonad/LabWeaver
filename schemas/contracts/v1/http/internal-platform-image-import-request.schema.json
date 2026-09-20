@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Internal Agent request that imports one frozen OCI archive into the platform registry.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "archive": {
+      "$ref": "#/$defs/ArtifactRef",
+      "description": "Frozen object identity of the uploaded archive."
+    },
+    "archiveObjectKey": {
+      "description": "Object-store key of the frozen archive.",
+      "type": "string"
+    },
+    "binding": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "targetReference": {
+      "description": "Target `<registry-host>/<repository>:<tag>` inside the configured platform registry.",
+      "type": "string"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "kind",
+    "binding",
+    "targetReference",
+    "archive",
+    "archiveObjectKey",
+    "trustRevision",
+    "actorId",
+    "reason"
+  ],
+  "title": "InternalPlatformImageImportRequest",
+  "type": "object"
+}

@@ -687,6 +687,50 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         "schemas/contracts/v1/http/issue-console-capability-request.schema.json",
         crate::http::IssueConsoleCapabilityRequest
     );
+    document!(
+        "schemas/contracts/v1/http/platform-image-entry.schema.json",
+        crate::http::PlatformImageEntry
+    );
+    document!(
+        "schemas/contracts/v1/http/platform-image-catalog.schema.json",
+        crate::http::PlatformImageCatalog
+    );
+    document!(
+        "schemas/contracts/v1/http/platform-image-entry-view.schema.json",
+        crate::http::PlatformImageEntryView
+    );
+    document!(
+        "schemas/contracts/v1/http/platform-image-catalog-view.schema.json",
+        crate::http::PlatformImageCatalogView
+    );
+    document!(
+        "schemas/contracts/v1/http/register-platform-image-request.schema.json",
+        crate::http::RegisterPlatformImageRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/repin-platform-image-request.schema.json",
+        crate::http::RepinPlatformImageRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/disable-platform-image-request.schema.json",
+        crate::http::DisablePlatformImageRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-platform-image-upload-request.schema.json",
+        crate::http::CreatePlatformImageUploadRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/platform-image-upload-session.schema.json",
+        crate::http::PlatformImageUploadSession
+    );
+    document!(
+        "schemas/contracts/v1/http/complete-platform-image-upload-request.schema.json",
+        crate::http::CompletePlatformImageUploadRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-request.schema.json",
+        crate::http::InternalPlatformImageImportRequest
+    );
 
     document!(
         "schemas/contracts/v1/events/agent-run-requested.schema.json",
@@ -1129,6 +1173,11 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"InternalCompleteEvaluationStepRequest": contract_ref("http/internal-complete-evaluation-step-request")
                 ,"EnvironmentExecutionBindingRequest": contract_ref("internal/environment-execution-binding-request")
                 ,"EnvironmentExecutionBinding": contract_ref("internal/environment-execution-binding")
+                ,"PlatformImageEntry": contract_ref("http/platform-image-entry")
+                ,"PlatformImageEntryView": contract_ref("http/platform-image-entry-view")
+                ,"PlatformImageCatalog": contract_ref("http/platform-image-catalog")
+                ,"PlatformImageCatalogView": contract_ref("http/platform-image-catalog-view")
+                ,"PlatformImageUploadSession": contract_ref("http/platform-image-upload-session")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -1456,6 +1505,12 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createGatewaySession" => "create-gateway-session-request",
         "heartbeatGatewaySession" => "heartbeat-gateway-session-request",
         "closeGatewaySession" => "close-gateway-session-request",
+        "registerPlatformImage" => "http/register-platform-image-request",
+        "repinPlatformImage" => "http/repin-platform-image-request",
+        "disablePlatformImage" => "http/disable-platform-image-request",
+        "createPlatformImageUpload" => "http/create-platform-image-upload-request",
+        "completePlatformImageUpload" => "http/complete-platform-image-upload-request",
+        "importPlatformImage" => "http/internal-platform-image-import-request",
         _ => return None,
     };
     Some(contract_ref(name))
@@ -1586,6 +1641,13 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createGatewaySession" | "heartbeatGatewaySession" | "closeGatewaySession" => {
             contract_ref("gateway-session")
         }
+        "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
+        "registerPlatformImage"
+        | "repinPlatformImage"
+        | "disablePlatformImage"
+        | "completePlatformImageUpload" => contract_ref("http/platform-image-entry-view"),
+        "createPlatformImageUpload" => contract_ref("http/platform-image-upload-session"),
+        "importPlatformImage" => contract_ref("http/platform-image-entry"),
         id if [
             "createEnvironmentTemplateRelease",
             "createEnvironment",

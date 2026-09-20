@@ -20,6 +20,8 @@ domains:
         file: control/0006_authoring_publication.sql
       - id: 7
         file: control/0007_work_configuration_preauthorizations.sql
+      - id: 8
+        file: control/0008_platform_image_uploads.sql
   - name: access
     migrations:
       - id: 1

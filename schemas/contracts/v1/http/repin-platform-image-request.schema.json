@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Administrator repin of one catalog entry.",
+  "properties": {
+    "expectedDigest": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "expectedDigest",
+    "trustRevision",
+    "reason"
+  ],
+  "title": "RepinPlatformImageRequest",
+  "type": "object"
+}

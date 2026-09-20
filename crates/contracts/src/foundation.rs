@@ -108,6 +108,7 @@ typed_id!(ResourceRequestId);
 typed_id!(CapacityClaimId);
 typed_id!(TaskRunId);
 typed_id!(GpuCatalogEntryId);
+typed_id!(PlatformImageId);
 typed_id!(RateId);
 typed_id!(UsageRecordId);
 typed_id!(ChargeId);

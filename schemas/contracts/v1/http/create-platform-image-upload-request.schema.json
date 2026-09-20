@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Administrator request for one OCI archive upload authority.",
+  "properties": {
+    "archiveBytes": {
+      "description": "Exact archive size the client will upload.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "archiveMediaType": {
+      "description": "Archive media type; must equal `PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE`.",
+      "type": "string"
+    },
+    "binding": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "targetReference": {
+      "description": "Target `<registry-host>/<repository>:<tag>` the imported archive is tagged as.",
+      "type": "string"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "kind",
+    "binding",
+    "targetReference",
+    "archiveBytes",
+    "archiveMediaType",
+    "trustRevision",
+    "reason"
+  ],
+  "title": "CreatePlatformImageUploadRequest",
+  "type": "object"
+}

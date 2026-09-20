@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
+    },
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "PlatformImageStatus": {
+      "description": "Catalog lifecycle status.",
+      "enum": [
+        "active",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One catalog entry with the Control-owned release impact hint.",
+  "properties": {
+    "binding": {
+      "type": "string"
+    },
+    "catalogId": {
+      "$ref": "#/$defs/PlatformImageId"
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "mediaType": {
+      "type": "string"
+    },
+    "pinnedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "releaseReferenceCount": {
+      "description": "Non-withdrawn Environment template releases that pin this exact digest.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "repinGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "resolvedDigest": {
+      "type": "string"
+    },
+    "sizeBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sourceReference": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/PlatformImageStatus"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "catalogId",
+    "kind",
+    "binding",
+    "sourceReference",
+    "resolvedDigest",
+    "mediaType",
+    "sizeBytes",
+    "status",
+    "trustRevision",
+    "repinGeneration",
+    "pinnedAt",
+    "updatedAt",
+    "releaseReferenceCount"
+  ],
+  "title": "PlatformImageEntryView",
+  "type": "object"
+}
