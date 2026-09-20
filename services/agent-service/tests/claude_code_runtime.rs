@@ -3286,6 +3286,8 @@ async fn authoring_invocation_runs_with_tools_inside_the_sandbox_scope()
         .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
     assert!(prompt.contains("LABWEAVER SANDBOX EXECUTION"));
     assert!(prompt.contains("/materials/"));
+    assert!(prompt.contains("BUILDKIT_HOST"));
+    assert!(prompt.contains("/workspace/labweaver-export.tar"));
     Ok(())
 }
 

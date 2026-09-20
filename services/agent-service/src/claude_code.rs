@@ -2674,7 +2674,7 @@ const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinToo
 
 const AUTHORING_MAX_TURNS: u32 = 60;
 const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
-const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. The final response must still be exactly one JSON object satisfying the required schema.";
+const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. A rootless BuildKit daemon is reachable through BUILDKIT_HOST for image builds and may only pull from the platform Harbor registry; when you build a container image, export its OCI layout to exactly /workspace/labweaver-export.tar (for example: buildctl build --frontend dockerfile.v0 --local context=/workspace/context --local dockerfile=/workspace/context --output type=oci,dest=/workspace/labweaver-export.tar). Only that exact exported layout is imported and published by the platform. The final response must still be exactly one JSON object satisfying the required schema.";
 
 fn tool_policy_sha256(authoring: bool) -> Sha256Digest {
     if authoring {
