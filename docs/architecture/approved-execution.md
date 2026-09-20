@@ -14,7 +14,7 @@ Control 的发布入口一次批准完整实验包，绑定环境模板、执行
 
 课程名称不决定执行后端。xv6 使用普通容器中的工具链和 QEMU TCG 系统模拟，构建并启动真实内核与文件系统，不要求 KVM 或 privileged；安全靶场使用明确获准的容器网络和资源边界。二者复用环境与评测路径，不增加课程专用 RuntimeKind。镜像必须绑定 digest，执行参数来自批准包中的结构化配置，不能拼接用户输入生成宿主机命令。
 
-Evaluation 保留现有任务状态与 Reconciler。冻结文件输入绑定不可变提交；实时 Probe 绑定目标环境、实例与观察时间，目标变化后不得将旧结果写到新实例。程序执行与 Probe 共用同一 Kubernetes execution backend 的 Job 创建、观察、取消与清理机制，输入和结果语义仍分别表达；执行准入、执行身份、generation fencing 与清理确认见 [ADR 0016](../adr/0016-task-resource-admission-and-kubernetes-execution.md)。
+Evaluation 保留现有任务状态与 Reconciler。冻结文件输入绑定不可变提交；实时 Probe 绑定目标环境、实例与观察时间，目标变化后不得将旧结果写到新实例。程序执行与 Probe 共用同一 Kubernetes execution backend 的 Job 创建、观察、取消与清理机制，输入和结果语义仍分别表达；执行准入、执行身份、generation fencing 与清理确认见 [ADR 0016](../adr/0016-task-resource-admission-and-kubernetes-execution.md)。Agent 生成候选的执行形态、材料注入、构建权威与镜像/模板目录见 [ADR 0017](../adr/0017-sandboxed-agent-authoring-and-image-catalog.md)。
 
 执行 Job 的工件物化器沿用对象存储配置的 HTTPS 信任根。私有 CA 只挂载到负责下载工件的初始化容器，不交给学生程序或 Probe 脚本；证书链、主机名和工件身份校验失败都会终止执行。未配置私有 CA 时使用 HTTP 客户端的默认信任根。
 
