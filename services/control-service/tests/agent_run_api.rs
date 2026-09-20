@@ -36,7 +36,6 @@ use control_service::api::{ApiState, GatewayPrincipal, router};
 use control_service::clients::ServiceHttpClientConfig;
 use control_service::{
     ContainerBuildPolicy, ControlConfig, ControlService, EvaluationRuntimePolicy,
-    VirtualMachineBasePolicy,
 };
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},

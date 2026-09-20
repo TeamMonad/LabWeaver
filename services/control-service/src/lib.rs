@@ -7349,8 +7349,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only() {
         let catalog = multi_base_catalog();
         assert!(catalog.validate());
         let ubuntu = &catalog.bases[0].base_disk;
@@ -7411,7 +7410,6 @@ mod tests {
             },
         ];
         assert!(!duplicate.validate());
-        Ok(())
     }
 
     fn multi_base_catalog() -> VirtualMachineBaseCatalog {
