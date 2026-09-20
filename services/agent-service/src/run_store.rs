@@ -2090,6 +2090,12 @@ pub struct SandboxAttemptCheckpoint {
     pub state: String,
     /// Uploaded result object key, present after a successful attempt.
     pub result_object_key: Option<String>,
+    /// Result sha256 written with the terminal observation.
+    pub result_sha256: Option<String>,
+    /// Result size written with the terminal observation.
+    pub result_size_bytes: Option<u64>,
+    /// Claude Code exit code written with the terminal observation.
+    pub exit_code: Option<i32>,
 }
 
 impl PostgresAgentRunStore {
@@ -2312,7 +2318,7 @@ impl PostgresAgentRunStore {
     ) -> Result<Option<SandboxAttemptCheckpoint>, AgentRunStoreError> {
         let row = sqlx::query(
             "SELECT task_run_id, execution_generation, namespace, workload_name, binding, objects, \
-                    state, result_object_key \
+                    state, result_object_key, result_sha256, result_size_bytes, exit_code \
              FROM agent.authoring_sandbox_attempts \
              WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
         )
@@ -2351,6 +2357,18 @@ impl PostgresAgentRunStore {
                 .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
             result_object_key: row
                 .try_get("result_object_key")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            result_sha256: row
+                .try_get("result_sha256")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            result_size_bytes: row
+                .try_get::<Option<i64>, _>("result_size_bytes")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            exit_code: row
+                .try_get::<Option<i32>, _>("exit_code")
                 .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
         }))
     }
