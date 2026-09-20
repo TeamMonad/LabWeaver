@@ -55,16 +55,10 @@ struct PlatformImageLock {
     helm: String,
     claude_code: String,
     claude_code_linux_x64_sha512: String,
-    ci_images: CiImageLock,
     bases: BaseImageLock,
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Deserialize)]
-struct CiImageLock {
-    trivy: String,
-}
-
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize)]
 struct BaseImageLock {
@@ -644,7 +638,6 @@ fn build_base_images<'a>(
             ("RUST_RUNTIME", lock.bases.rust_runtime.as_str()),
             ("NODE_BUILDER", lock.bases.node_builder.as_str()),
             ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
-            ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
         ],
         "authoring-sandbox" => vec![
             ("NODE_BUILDER", lock.bases.node_builder.as_str()),
@@ -654,7 +647,6 @@ fn build_base_images<'a>(
             ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
             ("RUST_RUNTIME", lock.bases.rust_runtime.as_str()),
             ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
-            ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
         ],
     }
 }

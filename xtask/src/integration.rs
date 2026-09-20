@@ -1217,7 +1217,6 @@ fn load_images(root: &Path) -> Result<BTreeMap<String, String>, AppError> {
             &["identity_foundation", "images", "keycloak"][..],
         ),
         ("buildkit", &["platform_images", "buildkit_image"][..]),
-        ("trivy", &["platform_images", "ci_images", "trivy"][..]),
         ("registry", &["test_images", "registry"][..]),
     ] {
         images.insert(name.to_owned(), lock_image(root, path)?);

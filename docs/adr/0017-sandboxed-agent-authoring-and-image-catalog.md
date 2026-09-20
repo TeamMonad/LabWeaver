@@ -18,7 +18,8 @@
 
 ### 构建权威
 
-- 沙箱内 BuildKit 只使用内置 Harbor 中已上传的基础镜像构建，产出 OCI layout/tar 导出到对象存储；构建权威仍在 `build-executor`：导入前先在同一边界完成 OCI 校验（条目/路径/媒体类型/大小/逐 blob digest），再按 digest 推送 Harbor、扫描并注册 `agent.image_artifacts`。沙箱不持有 Harbor 推送凭据。
+- 沙箱内 BuildKit 只使用内置 Harbor 中已上传的基础镜像构建，产出 OCI layout/tar 导出到对象存储；构建权威仍在 `build-executor`：导入前先在同一边界完成 OCI 校验（条目/路径/媒体类型/大小/逐 blob digest），再按 digest 推送 Harbor 并注册 `agent.image_artifacts`。沙箱不持有 Harbor 推送凭据。
+- 漏洞扫描不重新进入服务契约：ARC-09（#176）已删除 `ImagePolicyEvaluation`/扫描链，本决定不恢复。需要扫描时使用 Harbor 自身在部署侧配置的扫描能力；是否阻断发布由部署策略决定，不产生第二套服务端扫描判定。
 - 不引入第二套构建或镜像权威；外部 registry 引用必须先经管理员导入并固定 digest。
 
 ### 工具策略与审计
@@ -28,7 +29,7 @@
 ### 镜像与模板目录
 
 - 平台维护内置 Harbor 基础镜像清单与 VM base 目录；`deploy/versions.lock.yml` 的 VM base 由单条改为列表，provider 配置以 `baseDisks[]` 按 binding 解析，digest/容量/`disk_sha256`/格式必须与条目一致，否则 fail closed。
-- tag 只在导入/发布边界解析一次并落库；管理员显式“重新固定”并留 append-only 审计，下游只认 digest，不自动跟随 tag。管理员上传 OCI tar/layout 或 registry reference，经校验、扫描、配额与影响提示后进入目录；被 release 引用的条目只能停用不能删除。
+- tag 只在导入/发布边界解析一次并落库；管理员显式“重新固定”并留 append-only 审计，下游只认 digest，不自动跟随 tag。管理员上传 OCI tar/layout 或 registry reference，经校验、配额与影响提示后进入目录；被 release 引用的条目只能停用不能删除。
 
 ## 代价与边界
 
