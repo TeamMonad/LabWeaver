@@ -249,6 +249,7 @@ platform_application_workloads:
 platform_application_components:
   - access-service
   - agent-service
+  - authoring-sandbox
   - control-service
   - environment-service
   - evaluation-service

@@ -1342,6 +1342,10 @@ class LocalDevBundleTests(unittest.TestCase):
                     f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
                     "evaluation-runner@sha256:" + "b" * 64
                 ),
+                "authoring_sandbox": (
+                    f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                    "authoring-sandbox@sha256:" + "c" * 64
+                ),
             }
             bundle, resource_bundle, _ = local_dev.make_app_input(
                 work,
@@ -1549,6 +1553,7 @@ class LocalDevBundleTests(unittest.TestCase):
             images = {
                 "evaluation_service": "localhost:5001/labweaver/local/evaluation-service@sha256:" + "a" * 64,
                 "evaluation_runner": "localhost:5001/labweaver/local/evaluation-runner@sha256:" + "b" * 64,
+                "authoring_sandbox": "localhost:5001/labweaver/local/authoring-sandbox@sha256:" + "c" * 64,
             }
             bundle, _resource_bundle, _ = local_dev.make_app_input(
                 work,

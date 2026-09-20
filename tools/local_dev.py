@@ -1789,6 +1789,100 @@ def bootstrap_evaluation_runner_resources(
     apply(kubeconfig, objects)
 
 
+def bootstrap_authoring_sandbox_resources(
+    kubeconfig: Path,
+    app_input: Path,
+    registry_pull_config: Path,
+) -> None:
+    """Provision the permanent authoring sandbox objects from final config."""
+
+    configuration_path = app_input / "configmaps" / "agent-service-config" / "config.yaml"
+    configuration = load_yaml(configuration_path)
+    if not isinstance(configuration, dict):
+        fail("local agent service configuration must be a mapping")
+    sandbox = configuration.get("sandbox")
+    if not isinstance(sandbox, dict):
+        fail("local agent service configuration has no sandbox mapping")
+
+    def required_name(key: str) -> str:
+        value = sandbox.get(key)
+        if (
+            not isinstance(value, str)
+            or DNS_SUBDOMAIN_LABEL_PATTERN.fullmatch(value) is None
+            or len(value) > 63
+        ):
+            fail(f"local agent sandbox.{key} must be a DNS label")
+        return value
+
+    namespace = required_name("namespace")
+    service_account = required_name("service_account_name")
+    image_pull_secret = required_name("image_pull_secret_name")
+    try:
+        pull_config = registry_pull_config.read_bytes()
+    except (OSError, UnicodeError) as error:
+        fail(f"local authoring image pull configuration is unavailable: {type(error).__name__}")
+    if not pull_config.strip():
+        fail("local authoring image pull configuration is empty")
+    try:
+        json.loads(pull_config)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        fail("local authoring image pull configuration is invalid JSON")
+    policy_labels = {
+        "app.kubernetes.io/part-of": "labweaver",
+        "labweaver.io/managed": "true",
+    }
+    objects = [
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace,
+                "labels": {
+                    "app.kubernetes.io/part-of": "labweaver",
+                    "labweaver.io/managed": "true",
+                },
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": "authoring-default-deny",
+                "namespace": namespace,
+                "labels": policy_labels,
+            },
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [],
+                "egress": [],
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {
+                "name": service_account,
+                "namespace": namespace,
+                "labels": policy_labels,
+            },
+            "automountServiceAccountToken": False,
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": image_pull_secret,
+                "namespace": namespace,
+                "labels": policy_labels,
+            },
+            "type": "kubernetes.io/dockerconfigjson",
+            "data": {".dockerconfigjson": encode(pull_config)},
+        },
+    ]
+    apply(kubeconfig, objects)
+
+
 def foundation_objects(foundation: Path) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for group, kind in (("configmaps", "ConfigMap"), ("secrets", "Secret")):
@@ -2258,6 +2352,19 @@ def build_images(*, external_fixtures: bool) -> dict[str, str]:
     if not match:
         fail("registry did not return an immutable digest for evaluation-runner")
     images["evaluation_runner"] = f"{root}/evaluation-runner{match.group(0)}"
+    sandbox_target = "authoring-sandbox-fixture" if external_fixtures else "authoring-sandbox"
+    sandbox_tag = f"{root}/authoring-sandbox:{commit}"
+    run(["docker", "buildx", "build", "--load", "--target", sandbox_target,
+         "--build-arg", f"CLAUDE_CODE_VERSION={CLAUDE_CODE_VERSION}",
+         "--build-arg", f"CLAUDE_CODE_LINUX_X64_SHA512={CLAUDE_CODE_LINUX_X64_SHA512}",
+         "--tag", sandbox_tag, "--file", "containers/Containerfile.rust", "."])
+    run(["docker", "push", sandbox_tag])
+    ref = run(["docker", "inspect", "--format", "{{index .RepoDigests 0}}",
+               sandbox_tag], capture=True).stdout.strip()
+    match = re.search(r"@sha256:[0-9a-f]{64}$", ref)
+    if not match:
+        fail("registry did not return an immutable digest for authoring-sandbox")
+    images["authoring_sandbox"] = f"{root}/authoring-sandbox{match.group(0)}"
     for key, name, file in (("web","web","containers/Containerfile.web"),
                             ("openssh_gateway","openssh-gateway","access-gateway/Dockerfile")):
         tag=f"{root}/{name}:{commit}"
@@ -2500,6 +2607,18 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("control plane configuration has no evaluationRuntime.runnerImage")
+        if source == "agent-control-plane.yaml.example":
+            sandbox_image = images.get("authoring_sandbox")
+            if not isinstance(sandbox_image, str) or not re.fullmatch(
+                r"[^\s@]+(?:/[^\s@]+)*@sha256:[0-9a-f]{64}", sandbox_image
+            ):
+                fail("local authoring sandbox image must be an immutable image")
+            sandbox_image_pattern = re.compile(r"(?m)^(\s*image:\s*)[^\r\n]+$")
+            data, replacements = sandbox_image_pattern.subn(
+                rf"\g<1>{sandbox_image}", data, count=1
+            )
+            if replacements != 1:
+                fail("agent configuration has no sandbox.image")
         if source == "evaluation-service.yaml.example":
             evaluation_image = images.get("evaluation_service")
             if not isinstance(evaluation_image, str) or not re.fullmatch(
@@ -3054,6 +3173,11 @@ def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> 
             else work / "app-input" / "secrets" / "evaluation-service-secrets" / "registry-pull-config.json"
         )
         bootstrap_evaluation_runner_resources(
+            kubeconfig,
+            work / "app-input",
+            evaluation_pull_config,
+        )
+        bootstrap_authoring_sandbox_resources(
             kubeconfig,
             work / "app-input",
             evaluation_pull_config,

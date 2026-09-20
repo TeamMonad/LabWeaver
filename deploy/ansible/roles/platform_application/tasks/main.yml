@@ -2333,6 +2333,79 @@
           }}
   no_log: true
 
+- name: Bind the authoring sandbox to the immutable package image
+  ansible.builtin.set_fact:
+    platform_application_agent_configuration_object: >-
+      {{
+        platform_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'agent-service-config')
+        | first
+      }}
+    platform_application_authoring_sandbox_image: >-
+      {{
+        (
+          platform_application_package.images
+          | selectattr('component', 'equalto', 'authoring-sandbox')
+          | first
+        ).reference
+      }}
+  no_log: true
+
+- name: Require the authoring sandbox package binding
+  ansible.builtin.assert:
+    that:
+      - platform_application_authoring_sandbox_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - >-
+        (
+          platform_application_agent_configuration_object.data['config.yaml']
+          | from_yaml
+        ).sandbox.image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_SANDBOX_IMAGE_INVALID
+  no_log: true
+
+- name: Apply the package-bound agent configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: >-
+        {{ platform_application_agent_configuration_object.metadata }}
+      data: >-
+        {{
+          platform_application_agent_configuration_object.data
+          | combine(
+              {
+                'config.yaml': (
+                  (
+                    platform_application_agent_configuration_object.data['config.yaml']
+                    | from_yaml
+                    | combine(
+                        {
+                          'sandbox': (
+                            (
+                              platform_application_agent_configuration_object.data['config.yaml']
+                              | from_yaml
+                            ).sandbox
+                            | combine(
+                                {
+                                  'image': platform_application_authoring_sandbox_image
+                                }
+                              )
+                          )
+                        }
+                      )
+                    | to_nice_yaml(indent=2, sort_keys=false)
+                  )
+                )
+              }
+            )
+        }}
+  no_log: true
+
 - name: Reconcile the evaluation worker namespace without deleting retained state
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"

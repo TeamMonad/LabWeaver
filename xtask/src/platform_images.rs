@@ -14,9 +14,10 @@ use sha2::{Digest, Sha256};
 
 use super::AppError;
 
-const IMAGE_COMPONENTS: [&str; 8] = [
+const IMAGE_COMPONENTS: [&str; 9] = [
     "access-service",
     "agent-service",
+    "authoring-sandbox",
     "control-service",
     "environment-service",
     "evaluation-service",
@@ -583,7 +584,9 @@ fn build_image(
         "--build-arg",
         &format!("SOURCE_DATE_EPOCH={source_date_epoch}"),
     ]);
-    if component != "web" && component != "openssh-gateway" {
+    if component == "authoring-sandbox" {
+        command.args(["--target", "authoring-sandbox"]);
+    } else if component != "web" && component != "openssh-gateway" {
         command.args(["--build-arg", &format!("SERVICE={component}")]);
         command.args([
             "--target",
@@ -594,13 +597,13 @@ fn build_image(
             },
         ]);
     }
-    if component != "web" {
+    if component != "web" && component != "authoring-sandbox" {
         command.args([
             "--build-arg",
             &format!("RUST_TOOLCHAIN={}", lock.rust_toolchain),
         ]);
     }
-    if component == "agent-service" {
+    if component == "agent-service" || component == "authoring-sandbox" {
         command.args([
             "--build-arg",
             &format!("CLAUDE_CODE_VERSION={}", lock.claude_code),
@@ -642,6 +645,10 @@ fn build_base_images<'a>(
             ("NODE_BUILDER", lock.bases.node_builder.as_str()),
             ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
             ("TRIVY_IMAGE", lock.ci_images.trivy.as_str()),
+        ],
+        "authoring-sandbox" => vec![
+            ("NODE_BUILDER", lock.bases.node_builder.as_str()),
+            ("BUILDKIT_IMAGE", lock.buildkit_image.as_str()),
         ],
         _ => vec![
             ("RUST_BUILDER", lock.bases.rust_builder.as_str()),
@@ -1164,7 +1171,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(index, component)| {
-                    let digest_char = ['3', '4', '5', '6', '7', '8', '9'][index];
+                    let digest_char = ['3', '4', '5', '6', '7', '8', '9', 'a'][index];
                     let image_digest = digest(digest_char);
                     let reference = format!(
                         "harbor.internal.example/labweaver-system/{component}@{image_digest}"

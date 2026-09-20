@@ -99,3 +99,13 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 USER 65532:65532
 CMD ["/bin/sh"]
+
+FROM ${NODE_BUILDER} AS authoring-sandbox-fixture
+COPY --from=claude-tools-fixture --chown=65532:65532 /out/claude /usr/local/bin/claude
+COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends \
+        bash ca-certificates coreutils curl git python3 && \
+    rm -rf /var/lib/apt/lists/*
+USER 65532:65532
+CMD ["/bin/sh"]
