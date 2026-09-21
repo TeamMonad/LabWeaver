@@ -32,6 +32,34 @@ use crate::timing::ExecutionTiming;
 /// Maximum size of a bound projected token or CA file.
 pub const MAX_BOUND_FILE_BYTES: u64 = 64 * 1024;
 
+/// `RuntimeClass` every platform one-shot workload must be scheduled with.
+///
+/// Agent authoring attempts, OJ runs, and Ansible probes all execute untrusted, possibly
+/// hostile programs. A shared `RuntimeClass` keeps one hardened, non-default runtime
+/// authoritative for all of them instead of letting each role pick its own isolation.
+pub const SANDBOX_RUNTIME_CLASS: &str = "labweaver-sandbox";
+
+/// Reports whether one reviewed egress CIDR is well formed.
+///
+/// Every per-attempt `NetworkPolicy` narrows its egress to reviewed CIDRs, so the check is
+/// shared instead of re-implemented per workload role.
+#[must_use]
+pub fn valid_cidr(value: &str) -> bool {
+    let Some((address, prefix)) = value.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return false;
+    };
+    if address.contains(':') {
+        !address.is_empty() && prefix <= 128
+    } else {
+        address.split('.').count() == 4
+            && address.split('.').all(|part| part.parse::<u8>().is_ok())
+            && prefix <= 32
+    }
+}
+
 const MANAGED_BY_LABEL: &str = "labweaver.io/managed-by";
 const RUN_ID_LABEL: &str = "labweaver.io/run-id";
 const STEP_RUN_ID_LABEL: &str = "labweaver.io/step-run-id";

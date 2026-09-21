@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -21,7 +25,41 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import local_dev  # noqa: E402
+
+
+def make_app_input_with_local_cidrs(*args: object, **kwargs: object) -> tuple[Path, Path, str]:
+    """Render the local app input with the CIDRs the owned cluster reports.
+
+    The renderer resolves the Service CIDR and the Kind network from the owned
+    cluster; these tests exercise the rendering, not the cluster readback.
+    """
+
+    with (
+        patch.object(local_dev, "local_service_cidr", return_value="10.201.0.0/16"),
+        patch.object(local_dev, "local_kind_network_cidr", return_value="172.18.0.0/16"),
+    ):
+        return local_dev.make_app_input(*args, **kwargs)
 import local_dev_e2e  # noqa: E402
+
+
+class _FakeDownloadResponse:
+    """Context manager standing in for a urlopen response body."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeDownloadResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            block, self._payload = self._payload, b""
+            return block
+        block, self._payload = self._payload[:size], self._payload[size:]
+        return block
 
 
 class LocalDevBundleTests(unittest.TestCase):
@@ -82,6 +120,71 @@ class LocalDevBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(local_dev.LocalDevError, "absolute HTTPS URL") as invalid:
                 local_dev.load_provider_environment(invalid_port)
             self.assertNotIn("private-token", str(invalid.exception))
+
+    def test_provider_environment_accepts_plain_http_only_for_local_endpoints(self) -> None:
+        def provider(base_url: str) -> dict[str, str]:
+            return local_dev.validate_provider_environment(
+                {
+                    "ANTHROPIC_BASE_URL": base_url,
+                    "ANTHROPIC_AUTH_TOKEN": "local-token",
+                    "ANTHROPIC_MODEL": "local-model",
+                }
+            )
+
+        for base_url in (
+            "http://127.0.0.1:11434",
+            "http://localhost:11434/v1",
+            "http://10.201.0.1:11434",
+            "http://172.18.0.1:11434",
+            "http://192.168.56.10:11434",
+            "http://[::1]:11434",
+            "http://169.254.10.10:11434",
+            "https://provider.example.test/anthropic",
+        ):
+            with self.subTest(base_url=base_url):
+                self.assertEqual(provider(base_url)["ANTHROPIC_BASE_URL"], base_url)
+
+        for base_url in (
+            "http://provider.example.test/anthropic",
+            "http://8.8.8.8:11434",
+            "ftp://127.0.0.1:11434",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    provider(base_url)
+                self.assertIn("absolute HTTPS URL", str(context.exception))
+
+    def test_local_service_cidr_reads_the_apiserver_range(self) -> None:
+        manifest = (
+            "apiVersion: v1\n"
+            "kind: Pod\n"
+            "spec:\n"
+            "  containers:\n"
+            "  - command:\n"
+            "    - kube-apiserver\n"
+            "    - --service-cluster-ip-range=10.201.0.0/16\n"
+        )
+
+        def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, stdout=manifest)
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(local_dev, "run", side_effect=capture_run),
+        ):
+            self.assertEqual(local_dev.local_service_cidr(), "10.201.0.0/16")
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(
+                local_dev,
+                "run",
+                side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout=""),
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_service_cidr()
+            self.assertIn("service-cluster-ip-range", str(context.exception))
 
     def test_provider_environment_rejects_extra_fields_and_path_is_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -359,24 +462,52 @@ class LocalDevBundleTests(unittest.TestCase):
         )
         wait.assert_called_once_with(kubeconfig, "daemonset", "kindnet", "kube-system")
 
-    def test_kind_oj_runtime_preserves_base_spec_and_installs_dedicated_handler(self) -> None:
-        base_spec = {
-            "ociVersion": "1.0.2",
-            "process": {"args": ["/pause"]},
-            "linux": {
-                "resources": {
-                    "devices": [{"allow": False}],
-                    "pids": {"existing": "preserved", "limit": 57793},
-                }
-            },
-        }
-        base_spec_text = json.dumps(base_spec)
+    def test_kind_cluster_config_applies_the_reviewed_pod_process_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            calls: list[list[str]] = []
+
+            def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout="")
+
+            with (
+                patch.object(local_dev, "STATE_DIR", state),
+                patch.object(local_dev, "CLUSTER", "kind-config-cluster"),
+                patch.object(local_dev, "REGISTRY", "kind-config-registry"),
+                patch.object(local_dev, "REGISTRY_PORT", 5001),
+                patch.object(local_dev, "RUN_ID", "kindconfig"),
+                patch.object(local_dev, "run", side_effect=capture_run),
+                patch.object(local_dev, "configure_kind_sandbox_runtime"),
+                patch.object(local_dev, "configure_kindnet_resources"),
+                patch.object(local_dev, "kind_nodes", return_value=[]),
+            ):
+                local_dev.create_cluster(state / "kubeconfig", expose_registry=False)
+
+            kind_config = yaml.safe_load((state / "kind-config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(kind_config["name"], "kind-config-cluster")
+        self.assertEqual(
+            kind_config["kubeadmConfigPatches"],
+            [
+                "kind: KubeletConfiguration\n"
+                f"podPidsLimit: {local_dev.SANDBOX_PIDS_LIMIT}\n"
+            ],
+        )
+        self.assertEqual(
+            kind_config["nodes"],
+            [{"role": "control-plane", "image": local_dev.KIND_IMAGE}],
+        )
+        self.assertEqual(
+            calls[0][:3], ["kind", "create", "cluster"]
+        )
+
+    def test_kind_sandbox_runtime_installs_gvisor_handler_without_a_base_spec(self) -> None:
         containerd_config = (
             '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
             '  runtime_type = "io.containerd.runc.v2"\n'
         )
         calls: list[tuple[list[str], bytes | None]] = []
-        applied: list[list[dict[str, object]]] = []
+        applied: list[tuple[Path, list[dict[str, object]]]] = []
 
         def capture_run(
             argv: list[str],
@@ -387,14 +518,6 @@ class LocalDevBundleTests(unittest.TestCase):
         ) -> subprocess.CompletedProcess[str]:
             del capture, check
             calls.append((argv, input_bytes))
-            if argv == [
-                "docker",
-                "exec",
-                "kind-control-plane",
-                "cat",
-                local_dev.KIND_CONTAINERD_BASE_RUNTIME_SPEC,
-            ]:
-                return subprocess.CompletedProcess(argv, 0, stdout=base_spec_text)
             if argv == [
                 "docker",
                 "exec",
@@ -405,34 +528,33 @@ class LocalDevBundleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
             return subprocess.CompletedProcess(argv, 0, stdout="")
 
-        def capture_apply(_kubeconfig: Path, objects: list[dict[str, object]]) -> None:
-            applied.append(objects)
+        def capture_apply(kubeconfig: Path, objects: list[dict[str, object]]) -> None:
+            applied.append((kubeconfig, objects))
 
-        with (
-            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
-            patch.object(local_dev, "run", side_effect=capture_run),
-            patch.object(local_dev, "apply", side_effect=capture_apply),
-        ):
-            kubeconfig = Path(".tmp/local-dev/owned-kubeconfig")
-            local_dev.configure_kind_oj_runtime(kubeconfig)
-
-        runtime_writes = [
-            payload
-            for argv, payload in calls
-            if payload is not None and argv[-1] == f"cat > {local_dev.KIND_OJ_RUNTIME_SPEC}"
-        ]
-        self.assertEqual(len(runtime_writes), 1)
-        written_spec = json.loads(runtime_writes[0])
-        self.assertEqual(written_spec["ociVersion"], base_spec["ociVersion"])
-        self.assertEqual(written_spec["process"], base_spec["process"])
-        self.assertEqual(
-            written_spec["linux"]["resources"]["devices"],
-            base_spec["linux"]["resources"]["devices"],
-        )
-        self.assertEqual(
-            written_spec["linux"]["resources"]["pids"],
-            {"existing": "preserved", "limit": local_dev.KIND_OJ_PIDS_LIMIT},
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            binaries: dict[str, Path] = {}
+            for name in (
+                "runsc",
+                "containerd-shim-runsc-v1",
+                "gvisor-bin/gvisor_sentry",
+            ):
+                (cache / name).parent.mkdir(parents=True, exist_ok=True)
+                (cache / name).write_bytes(f"{name} bytes".encode())
+                binaries[name] = cache / name
+            with (
+                patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+                patch.object(local_dev, "run", side_effect=capture_run),
+                patch.object(local_dev, "apply", side_effect=capture_apply),
+                patch.object(
+                    local_dev,
+                    "_sandbox_runsc_archive",
+                    return_value=cache / "gvisor.tar.bz2",
+                ),
+                patch.object(local_dev, "_extract_sandbox_runsc", return_value=binaries),
+            ):
+                kubeconfig = Path(".tmp/local-dev/owned-kubeconfig")
+                local_dev.configure_kind_sandbox_runtime(kubeconfig)
 
         config_writes = [
             payload
@@ -443,12 +565,61 @@ class LocalDevBundleTests(unittest.TestCase):
         written_config = config_writes[0].decode("utf-8")
         self.assertTrue(written_config.startswith(containerd_config))
         self.assertIn(
-            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj]\n'
-            '  runtime_type = "io.containerd.runc.v2"\n'
-            '  base_runtime_spec = "/etc/containerd/labweaver-oj-base.json"\n'
-            '\n[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj.options]\n'
-            '  SystemdCgroup = true\n',
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox]\n'
+            '  runtime_type = "io.containerd.runsc.v1"\n',
             written_config,
+        )
+        # gVisor's containerd runtime plugin rejects unknown option keys, and a
+        # base OCI spec without a mounts array makes runsc refuse to start a
+        # container, so the installed table carries neither.
+        self.assertNotIn(".options]", written_config)
+        self.assertNotIn("base_runtime_spec", written_config)
+        self.assertEqual(
+            [argv for argv, _payload in calls if argv[:2] == ["docker", "cp"]],
+            [
+                [
+                    "docker",
+                    "cp",
+                    str(binaries[name]),
+                    f"kind-control-plane:{local_dev.SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+                for name in sorted(binaries)
+            ],
+        )
+        self.assertEqual(
+            [
+                argv
+                for argv, _payload in calls
+                if argv[:3] == ["docker", "exec", "kind-control-plane"] and "mkdir" in argv
+            ],
+            [
+                [
+                    "docker",
+                    "exec",
+                    "kind-control-plane",
+                    "mkdir",
+                    "-p",
+                    f"{local_dev.SANDBOX_RUNSC_INSTALL_DIR}/gvisor-bin",
+                ]
+            ],
+        )
+        self.assertEqual(
+            [
+                argv
+                for argv, _payload in calls
+                if argv[:3] == ["docker", "exec", "kind-control-plane"] and "chmod" in argv
+            ],
+            [
+                [
+                    "docker",
+                    "exec",
+                    "kind-control-plane",
+                    "chmod",
+                    "0755",
+                    f"{local_dev.SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+                for name in local_dev.SANDBOX_RUNSC_REQUIRED_MEMBERS
+            ],
         )
         self.assertEqual(
             [argv for argv, _payload in calls if argv[-3:] == ["systemctl", "restart", "containerd"]],
@@ -457,34 +628,33 @@ class LocalDevBundleTests(unittest.TestCase):
         self.assertEqual(
             applied,
             [
-                [
-                    {
-                        "apiVersion": "node.k8s.io/v1",
-                        "kind": "RuntimeClass",
-                        "metadata": {
-                            "name": "labweaver-oj",
-                            "labels": {
-                                "labweaver.local-dev.owner": local_dev.KUBERNETES_OWNER_LABEL_VALUE
+                (
+                    Path(".tmp/local-dev/owned-kubeconfig"),
+                    [
+                        {
+                            "apiVersion": "node.k8s.io/v1",
+                            "kind": "RuntimeClass",
+                            "metadata": {
+                                "name": "labweaver-sandbox",
+                                "labels": {
+                                    "labweaver.local-dev.owner": (
+                                        local_dev.KUBERNETES_OWNER_LABEL_VALUE
+                                    )
+                                },
                             },
-                        },
-                        "handler": "labweaver-oj",
-                    }
-                ]
+                            "handler": "labweaver-sandbox",
+                        }
+                    ],
+                )
             ],
         )
 
-    def test_kind_oj_runtime_accepts_existing_handler_without_duplicate_config(self) -> None:
-        base_spec_text = json.dumps(
-            {"linux": {"resources": {"devices": [{"allow": False}]}}}
-        )
+    def test_kind_sandbox_runtime_accepts_existing_handler_without_duplicate_config(self) -> None:
         containerd_config = (
             '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
             '  runtime_type = "io.containerd.runc.v2"\n'
-            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj]\n'
-            '  runtime_type = "io.containerd.runc.v2"\n'
-            '  base_runtime_spec = "/etc/containerd/labweaver-oj-base.json"\n'
-            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj.options]\n'
-            '  SystemdCgroup = true\n'
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox]\n'
+            '  runtime_type = "io.containerd.runsc.v1"\n'
         )
         calls: list[tuple[list[str], bytes | None]] = []
 
@@ -497,8 +667,6 @@ class LocalDevBundleTests(unittest.TestCase):
         ) -> subprocess.CompletedProcess[str]:
             del capture, check
             calls.append((argv, input_bytes))
-            if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_BASE_RUNTIME_SPEC]:
-                return subprocess.CompletedProcess(argv, 0, stdout=base_spec_text)
             if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_CONFIG]:
                 return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
             return subprocess.CompletedProcess(argv, 0, stdout="")
@@ -507,8 +675,18 @@ class LocalDevBundleTests(unittest.TestCase):
             patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
             patch.object(local_dev, "run", side_effect=capture_run),
             patch.object(local_dev, "apply"),
+            patch.object(local_dev, "_sandbox_runsc_archive", return_value=Path("gvisor.tar.bz2")),
+            patch.object(
+                local_dev,
+                "_extract_sandbox_runsc",
+                return_value={
+                    "runsc": Path("/cache/runsc"),
+                    "containerd-shim-runsc-v1": Path("/cache/containerd-shim-runsc-v1"),
+                    "gvisor-bin/gvisor_sentry": Path("/cache/gvisor-bin/gvisor_sentry"),
+                },
+            ),
         ):
-            local_dev.configure_kind_oj_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
+            local_dev.configure_kind_sandbox_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
 
         self.assertFalse(
             any(
@@ -520,6 +698,178 @@ class LocalDevBundleTests(unittest.TestCase):
             sum(argv[-3:] == ["systemctl", "restart", "containerd"] for argv, _payload in calls),
             1,
         )
+
+    def test_kind_sandbox_runtime_rejects_unexpected_existing_handler(self) -> None:
+        containerd_config = (
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox]\n'
+            '  runtime_type = "io.containerd.runsc.v1"\n'
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox.options]\n'
+            '  SystemdCgroup = true\n'
+        )
+
+        def capture_run(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            capture: bool = False,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            del input_bytes, capture, check
+            if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_CONFIG]:
+                return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(local_dev, "run", side_effect=capture_run),
+            patch.object(local_dev, "apply"),
+            patch.object(local_dev, "_sandbox_runsc_archive", return_value=Path("gvisor.tar.bz2")),
+            patch.object(
+                local_dev,
+                "_extract_sandbox_runsc",
+                return_value={
+                    "runsc": Path("/cache/runsc"),
+                    "containerd-shim-runsc-v1": Path("/cache/containerd-shim-runsc-v1"),
+                    "gvisor-bin/gvisor_sentry": Path("/cache/gvisor-bin/gvisor_sentry"),
+                },
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.configure_kind_sandbox_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
+        self.assertIn("unexpected settings", str(context.exception))
+
+    def test_sandbox_runtime_lock_requires_every_gvisor_key(self) -> None:
+        complete = {
+            "gvisor": {
+                "version": "release-20260914.0",
+                "linux_amd64_url": "https://example.invalid/gvisor.tar.bz2",
+                "linux_amd64_sha512": "a" * 128,
+            }
+        }
+        with patch.object(local_dev, "load_yaml", return_value=complete):
+            self.assertEqual(
+                local_dev._sandbox_runtime_lock()["version"], "release-20260914.0"
+            )
+        for key in ("version", "linux_amd64_url", "linux_amd64_sha512"):
+            incomplete = {"gvisor": {k: v for k, v in complete["gvisor"].items() if k != key}}
+            with patch.object(local_dev, "load_yaml", return_value=incomplete):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._sandbox_runtime_lock()
+            self.assertIn(f"gvisor.{key}", str(context.exception))
+        empty = {"gvisor": {**complete["gvisor"], "linux_amd64_sha512": "  "}}
+        with patch.object(local_dev, "load_yaml", return_value=empty):
+            with self.assertRaises(local_dev.LocalDevError):
+                local_dev._sandbox_runtime_lock()
+        with patch.object(local_dev, "load_yaml", return_value={"gvisor": None}):
+            with self.assertRaises(local_dev.LocalDevError):
+                local_dev._sandbox_runtime_lock()
+
+    def test_sandbox_runsc_archive_verifies_the_locked_sha512(self) -> None:
+        payload = b"locked gvisor release payload"
+        correct = hashlib.sha512(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "gvisor.tar.bz2"
+            archive.write_bytes(payload)
+            wrong = {
+                "version": "release-test",
+                "linux_amd64_url": "https://example.invalid/gvisor.tar.bz2",
+                "linux_amd64_sha512": "0" * 128,
+            }
+            with patch.object(local_dev, "SANDBOX_RUNSC_ARCHIVE", archive):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._sandbox_runsc_archive(wrong)
+                self.assertIn("sha512", str(context.exception))
+                cached = local_dev._sandbox_runsc_archive(
+                    {**wrong, "linux_amd64_sha512": correct}
+                )
+            self.assertEqual(cached, archive)
+
+            fresh = root / "fresh.tar.bz2"
+
+            def fake_urlopen(_request: object, **_kwargs: object) -> _FakeDownloadResponse:
+                return _FakeDownloadResponse(payload)
+
+            with (
+                patch.object(local_dev, "SANDBOX_RUNSC_ARCHIVE", fresh),
+                patch.object(local_dev, "urlopen", side_effect=fake_urlopen),
+            ):
+                with self.assertRaises(local_dev.LocalDevError):
+                    local_dev._sandbox_runsc_archive(wrong)
+            self.assertFalse(fresh.exists())
+            self.assertFalse(fresh.with_name(fresh.name + ".part").exists())
+
+            with (
+                patch.object(local_dev, "SANDBOX_RUNSC_ARCHIVE", fresh),
+                patch.object(local_dev, "urlopen", side_effect=fake_urlopen),
+            ):
+                downloaded = local_dev._sandbox_runsc_archive(
+                    {**wrong, "linux_amd64_sha512": correct}
+                )
+            self.assertEqual(downloaded.read_bytes(), payload)
+
+    def test_sandbox_runsc_extraction_requires_the_reviewed_members(self) -> None:
+        runsc = b"runsc binary"
+        shim = b"shim binary"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "gvisor.tar.bz2"
+            self._write_tarball(archive, {"runsc": runsc})
+            cache = root / "extracted"
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._extract_sandbox_runsc(archive)
+                self.assertIn("containerd-shim-runsc-v1", str(context.exception))
+
+            self._write_tarball(
+                archive, {"runsc": runsc, "containerd-shim-runsc-v1": shim}
+            )
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                extracted = local_dev._extract_sandbox_runsc(archive)
+            self.assertEqual(extracted["runsc"].read_bytes(), runsc)
+            self.assertEqual(extracted["containerd-shim-runsc-v1"].read_bytes(), shim)
+            for target in extracted.values():
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
+            sentry = b"sentry sidecar"
+            self._write_tarball(
+                archive,
+                {
+                    "runsc": runsc,
+                    "containerd-shim-runsc-v1": shim,
+                    "gvisor-bin/gvisor_sentry": sentry,
+                },
+            )
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                extracted = local_dev._extract_sandbox_runsc(archive)
+            self.assertEqual(
+                extracted["gvisor-bin/gvisor_sentry"].read_bytes(), sentry
+            )
+            self.assertEqual(
+                stat.S_IMODE(extracted["gvisor-bin/gvisor_sentry"].stat().st_mode),
+                0o755,
+            )
+
+            self._write_tarball(
+                archive,
+                {
+                    "runsc": runsc,
+                    "containerd-shim-runsc-v1": shim,
+                    "../escape": b"escape",
+                },
+            )
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._extract_sandbox_runsc(archive)
+            self.assertIn("plain path", str(context.exception))
+            self.assertFalse((root / "escape").exists())
+
+    def _write_tarball(self, path: Path, members: dict[str, bytes]) -> None:
+        with tarfile.open(path, "w:bz2") as bundle:
+            for name, payload in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                bundle.addfile(info, io.BytesIO(payload))
 
     def test_cert_creates_nested_output_and_verifies_chain(self) -> None:
         openssl = shutil.which("openssl")
@@ -1356,7 +1706,7 @@ class LocalDevBundleTests(unittest.TestCase):
                     "authoring-sandbox@sha256:" + "c" * 64
                 ),
             }
-            bundle, resource_bundle, _ = local_dev.make_app_input(
+            bundle, resource_bundle, _ = make_app_input_with_local_cidrs(
                 work,
                 foundation,
                 images,
@@ -1518,7 +1868,7 @@ class LocalDevBundleTests(unittest.TestCase):
             for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
                 (work / name).write_bytes(name.encode())
 
-            bundle, _resource_bundle, _ = local_dev.make_app_input(
+            bundle, _resource_bundle, _ = make_app_input_with_local_cidrs(
                 work,
                 foundation,
                 {
@@ -1665,7 +2015,7 @@ class LocalDevBundleTests(unittest.TestCase):
                 "evaluation_runner": "localhost:5001/labweaver/local/evaluation-runner@sha256:" + "b" * 64,
                 "authoring_sandbox": "localhost:5001/labweaver/local/authoring-sandbox@sha256:" + "c" * 64,
             }
-            bundle, _resource_bundle, _ = local_dev.make_app_input(
+            bundle, _resource_bundle, _ = make_app_input_with_local_cidrs(
                 work,
                 foundation,
                 images,

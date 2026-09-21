@@ -76,6 +76,10 @@ nfs_csi:
 cert_manager: v1.21.0
 kubevirt: v1.8.4
 cdi: v1.65.0
+gvisor:
+  version: release-20260914.0
+  linux_amd64_url: https://storage.googleapis.com/gvisor/releases/release/20260914.0/x86_64/gvisor.tar.bz2
+  linux_amd64_sha512: ff1c0577c8daa0e3511aedad554c3d5e20fa184b4ddd422454f573d60a8b9774f972755ca5c7f56588c5b4f42345b60b2ead077f35d7d3235e23f57c0fa194ca
 etcd: 3.6.6
 harbor:
   chart: 1.19.1
@@ -111,6 +115,31 @@ test_images:
   cirros: quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe
   kind_node: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
   registry: docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
+# Reviewed container base images the deployment requires in Harbor and
+# registers in the Agent platform image catalog at startup. The binding is the
+# authoring binding a generated Dockerfile may name; the reviewed digest is the
+# exact content the deployment asserts is present, so a later tag move cannot
+# change what authoring sees. Mirroring the digests into Harbor is an operator
+# step: this repository ships no image-copy tooling, and the deployment fails
+# when a reviewed digest is absent instead of importing something else.
+platform_container_images:
+  - binding: rust-builder-v1
+    name: rust
+    tag: 1.97.1-bookworm
+    reviewed_digest: sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
+  - binding: distroless-runtime-v1
+    name: distroless-cc
+    tag: nonroot
+    reviewed_digest: sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
+# Reviewed GPU classes offered by Resource. The catalog is authoritative at
+# runtime; these entries are the deployment-seeded reviewed starting point and
+# must stay within the provider's observed capacity.
+platform_gpu_classes:
+  - class: nvidia-cuda
+    mode: exclusive
+    provider_binding: gpu-primary-v1
+    capacity_units: 1
+    allocation_binding: nvidia-cuda-primary-v1
 platform_vm_bases:
   - binding: ubuntu-24.04-v1
     release: ubuntu-24.04

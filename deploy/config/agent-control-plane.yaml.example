@@ -50,6 +50,9 @@ resource:
   audience: "labweaver-resource"
 sandbox:
   # Per-attempt Kubernetes Job that runs the pinned Claude Code CLI with tools.
+  # The attempt Pod always carries runtimeClassName "labweaver-sandbox"; the node
+  # must expose that RuntimeClass (gVisor runsc handler) or the Pod stays
+  # unschedulable, which is the intended fail-closed behaviour.
   namespace: "labweaver-authoring"
   image: "harbor.example.invalid/labweaver-system/authoring-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
   service_account_name: "authoring-runner"
@@ -108,3 +111,17 @@ platform_registry:
   ca_file: "/etc/labweaver/secrets/harbor-ca.crt"
   username_file: "/etc/labweaver/secrets/harbor-username"
   password_file: "/etc/labweaver/secrets/harbor-password"
+  # Reviewed container base images the deployment copied into Harbor. Agent
+  # resolves each tag once at startup, registers the exact digest in the
+  # platform image catalog, and logs LW_PLATFORM_IMAGE_SEED_FAILED for an entry
+  # it cannot register. A missing or failed entry stays absent from the catalog
+  # instead of being replaced by a weaker identity.
+  seed_images:
+    - kind: "container"
+      binding: "rust-builder-v1"
+      source_reference: "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm"
+      trust_revision: 1
+    - kind: "container"
+      binding: "distroless-runtime-v1"
+      source_reference: "harbor.example.invalid/labweaver-system/distroless-cc:nonroot"
+      trust_revision: 1

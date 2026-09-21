@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import ipaddress
 import importlib.util
 import json
 import math
@@ -15,12 +16,15 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 import tomllib
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import SplitResult, urlsplit
+from urllib.request import Request, urlopen
 
 import local_dev_build
 
@@ -77,11 +81,28 @@ DNS_SUBDOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 REGISTRY_IMAGE = "docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e"
 KIND_IMAGE = "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
 KIND_CONTAINERD_CONFIG = "/etc/containerd/config.toml"
-KIND_CONTAINERD_BASE_RUNTIME_SPEC = "/etc/containerd/cri-base.json"
-KIND_OJ_RUNTIME_SPEC = "/etc/containerd/labweaver-oj-base.json"
-KIND_OJ_RUNTIME_HANDLER = "labweaver-oj"
-KIND_OJ_RUNTIME_CLASS = "labweaver-oj"
-KIND_OJ_PIDS_LIMIT = 128
+# Every platform one-shot workload (agent authoring, OJ run, Ansible probe)
+# runs under this single gVisor RuntimeClass.
+SANDBOX_RUNTIME_CLASS = "labweaver-sandbox"
+SANDBOX_RUNTIME_HANDLER = "labweaver-sandbox"
+SANDBOX_CONTAINERD_RUNTIME_TYPE = "io.containerd.runsc.v1"
+SANDBOX_RUNSC_INSTALL_DIR = "/usr/local/bin"
+SANDBOX_RUNSC_PATH = f"{SANDBOX_RUNSC_INSTALL_DIR}/runsc"
+SANDBOX_SHIM_PATH = f"{SANDBOX_RUNSC_INSTALL_DIR}/containerd-shim-runsc-v1"
+# A reviewed release installs as a whole tree, not only as its two entry
+# points: `runsc` looks for its sentry sidecar tree under
+# `<install dir>/gvisor-bin/` and refuses to create a sandbox when it is
+# missing.
+SANDBOX_RUNSC_REQUIRED_MEMBERS = ("runsc", "containerd-shim-runsc-v1")
+# Node-wide kubelet process bound. gVisor cannot enforce a per-container
+# `linux.resources.pids` cap (runsc ignores it and rejects a base runtime spec
+# without a mounts array), so the reviewed bound is applied to the pod cgroup
+# by the kubelet. The local single node also runs Keycloak, Harbor and
+# PostgreSQL, so the value has to leave room for those workloads; a deployment
+# with a dedicated one-shot node pool can review a much smaller number.
+SANDBOX_PIDS_LIMIT = 4096
+SANDBOX_RUNSC_ARCHIVE = STATE_DIR / "gvisor-runsc.tar.bz2"
+SANDBOX_RUNSC_CACHE_DIR = STATE_DIR / "gvisor-runsc"
 POSTGRES_IMAGE = "docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be"
 NATS_IMAGE = "docker.io/library/nats:2.14.1-scratch@sha256:4223c8fa116891628611e154fb66570cad599d8f8b3b131b82caf10f378e9dcf"
 NATS_BOX_IMAGE = "docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6"
@@ -163,6 +184,81 @@ def _provider_path_label(path: Path) -> str:
         return path.name or "provider environment file"
 
 
+def _permitted_provider_scheme(base_url: SplitResult) -> bool:
+    """Accept HTTPS anywhere and HTTP only for a local or private endpoint host.
+
+    The model credential travels in a header, so a public endpoint must stay
+    TLS. A loopback, private or link-local host is the documented local
+    development case: the model runs on this machine or on the private network
+    the operator already controls, and no public path can downgrade the scheme.
+    """
+
+    if base_url.scheme == "https":
+        return True
+    if base_url.scheme != "http" or not base_url.hostname:
+        return False
+    host = base_url.hostname
+    if host.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A DNS name cannot be verified as private before the request is made.
+        return False
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
+def local_service_cidr() -> str:
+    """Return the Service CIDR of the owned cluster for reviewed egress rules.
+
+    Per-attempt NetworkPolicies name the exact object-store destination instead
+    of admitting HTTPS anywhere, so the local stack renders the run's real
+    Service CIDR into the evaluation configuration.
+    """
+
+    nodes = kind_nodes()
+    if not nodes:
+        fail("Kind did not return the owned node list")
+    manifest = run(
+        [
+            "docker",
+            "exec",
+            nodes[0],
+            "cat",
+            "/etc/kubernetes/manifests/kube-apiserver.yaml",
+        ],
+        capture=True,
+    ).stdout
+    if not isinstance(manifest, str):
+        fail("Kind node kube-apiserver manifest was not returned as text")
+    match = re.search(r"--service-cluster-ip-range=([0-9a-fA-F:./]+)", manifest)
+    if match is None:
+        fail("Kind node kube-apiserver manifest has no service-cluster-ip-range")
+    return match.group(1)
+
+
+def local_kind_network_cidr() -> str:
+    """Return the Docker network CIDR that carries the Kind nodes.
+
+    A local model server runs on this host, which the sandbox reaches through
+    the network gateway, so the reviewed sandbox egress list has to name that
+    network.
+    """
+
+    result = run(
+        ["docker", "network", "inspect", "kind", "--format", "{{(index .IPAM.Config 0).Subnet}}"],
+        capture=True,
+    ).stdout
+    if not isinstance(result, str) or not result.strip():
+        fail("Kind network did not return an IPAM subnet")
+    subnet = result.strip()
+    if re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}", subnet) is None:
+        fail("Kind network returned an invalid IPv4 subnet")
+    return subnet
+
+
 def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:
     """Validate and copy the exact provider environment passed to the worker."""
 
@@ -184,13 +280,16 @@ def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:
     except ValueError:
         fail("provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL")
     if (
-        base_url.scheme != "https"
+        not _permitted_provider_scheme(base_url)
         or not base_url.netloc
         or not base_url.hostname
         or (base_url.netloc.endswith(":") and parsed_port is None)
         or any(character.isspace() for character in normalized["ANTHROPIC_BASE_URL"])
     ):
-        fail("provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL")
+        fail(
+            "provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL "
+            "(plain HTTP is accepted only for loopback or private endpoint hosts)"
+        )
     if base_url.username or base_url.password or base_url.query or base_url.fragment:
         fail("provider configuration ANTHROPIC_BASE_URL must not contain credentials or query data")
     if any(character.isspace() for character in normalized["ANTHROPIC_MODEL"]):
@@ -1338,10 +1437,20 @@ def verify_loopback_nip_io() -> None:
 
 def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
     kind_config = STATE_DIR / "kind-config.yaml"
-    write(kind_config, f"""kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: {CLUSTER}\nnodes:\n- role: control-plane\n  image: {KIND_IMAGE}\n""")
+    # gVisor keeps every guest process inside the sandbox's own host threads, so
+    # the reviewed process bound is enforced on the pod cgroup by the kubelet
+    # rather than through an OCI runtime spec. The patch is applied at cluster
+    # creation so a fork bomb can never exhaust the node pid space.
+    kubelet_patch = (
+        "kubeadmConfigPatches:\n"
+        "- |\n"
+        "  kind: KubeletConfiguration\n"
+        f"  podPidsLimit: {SANDBOX_PIDS_LIMIT}\n"
+    )
+    write(kind_config, f"""kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: {CLUSTER}\n{kubelet_patch}nodes:\n- role: control-plane\n  image: {KIND_IMAGE}\n""")
     run(["kind", "create", "cluster", "--name", CLUSTER, "--config",
          str(kind_config), "--kubeconfig", str(kubeconfig), "--wait", "120s"])
-    configure_kind_oj_runtime(kubeconfig)
+    configure_kind_sandbox_runtime(kubeconfig)
     configure_kindnet_resources(kubeconfig)
     run(["docker", "run", "-d", "--restart=always", "--name", REGISTRY,
          "--label", f"labweaver.local-dev.run-id={RUN_ID}",
@@ -1406,71 +1515,164 @@ def kind_nodes() -> list[str]:
     return nodes
 
 
-def configure_kind_oj_runtime(kubeconfig: Path) -> None:
-    """Install the dedicated process-limited runtime used by OJ Jobs."""
+def _sandbox_runtime_lock() -> dict[str, str]:
+    """Read the locked gVisor release with fail-closed validation."""
 
+    lock = load_yaml(ROOT / "deploy" / "versions.lock.yml")
+    gvisor = lock.get("gvisor") if isinstance(lock, dict) else None
+    if not isinstance(gvisor, dict):
+        fail("versions lock has no gvisor block")
+    resolved: dict[str, str] = {}
+    for key in ("version", "linux_amd64_url", "linux_amd64_sha512"):
+        value = gvisor.get(key)
+        if not isinstance(value, str) or not value.strip():
+            fail(f"versions lock gvisor.{key} is missing or empty")
+        resolved[key] = value.strip()
+    return resolved
+
+
+def _sha512_digest(path: Path) -> str:
+    digest = hashlib.sha512()
+    try:
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as error:
+        fail(f"cannot read the cached gVisor release: {type(error).__name__}")
+    return digest.hexdigest()
+
+
+def _sandbox_runsc_archive(lock: dict[str, str]) -> Path:
+    """Return the sha512-verified gVisor release archive, downloading it once."""
+
+    archive = SANDBOX_RUNSC_ARCHIVE
+    if not archive.is_file():
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        partial = archive.with_name(archive.name + ".part")
+        try:
+            request = Request(
+                lock["linux_amd64_url"],
+                headers={"User-Agent": "LabWeaver-local-dev/1"},
+            )
+            with urlopen(request, timeout=300) as response, partial.open("wb") as handle:
+                shutil.copyfileobj(response, handle, 1024 * 1024)
+        except (OSError, HTTPError, URLError, TimeoutError) as error:
+            partial.unlink(missing_ok=True)
+            fail(
+                f"cannot download the locked gVisor {lock['version']}: {type(error).__name__}"
+            )
+        if _sha512_digest(partial) != lock["linux_amd64_sha512"]:
+            partial.unlink(missing_ok=True)
+            fail("downloaded gVisor release does not match the locked sha512")
+        partial.replace(archive)
+    if _sha512_digest(archive) != lock["linux_amd64_sha512"]:
+        fail("cached gVisor release does not match the locked sha512")
+    return archive
+
+
+def _extract_sandbox_runsc(archive: Path) -> dict[str, Path]:
+    """Extract the sha512-verified gVisor release into the local state cache.
+
+    The reviewed tree is extracted as a whole because ``runsc`` resolves its
+    sentry sidecar tree relative to its own directory. Member names are
+    validated first, so a hostile archive cannot escape the cache directory.
+    """
+
+    cache = SANDBOX_RUNSC_CACHE_DIR
+    extracted: dict[str, Path] = {}
+    try:
+        with tarfile.open(archive, "r:bz2") as bundle:
+            for member in bundle.getmembers():
+                name = member.name.rstrip("/")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or ".." in name.split("/")
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    fail(f"locked gVisor release member {member.name!r} is not a plain path")
+                if member.isdir():
+                    (cache / name).mkdir(parents=True, exist_ok=True)
+                    continue
+                stream = bundle.extractfile(member)
+                if stream is None:
+                    fail(f"locked gVisor release member {name} is not readable")
+                target = cache / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                write(target, stream.read(), 0o755)
+                extracted[name] = target
+    except (OSError, tarfile.TarError) as error:
+        fail(f"cannot extract the locked gVisor release: {type(error).__name__}")
+    for name in SANDBOX_RUNSC_REQUIRED_MEMBERS:
+        if name not in extracted:
+            fail(f"locked gVisor release has no {name} member")
+    return extracted
+
+
+def configure_kind_sandbox_runtime(kubeconfig: Path) -> None:
+    """Install the gVisor RuntimeClass shared by every platform sandbox workload."""
+
+    lock = _sandbox_runtime_lock()
+    binaries = _extract_sandbox_runsc(_sandbox_runsc_archive(lock))
     handler_header = (
         '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.'
-        f"{KIND_OJ_RUNTIME_HANDLER}]"
+        f"{SANDBOX_RUNTIME_HANDLER}]"
     )
-    handler_options_header = handler_header[:-1] + ".options]"
+    # gVisor's containerd runtime plugin rejects unknown option keys, so this
+    # table must stay free of an options sub-table (for example SystemdCgroup).
+    # It also must not set `base_runtime_spec`: runsc cannot start a container
+    # from a spec that carries no `mounts` array, and the process bound is
+    # enforced on the pod cgroup instead of through the OCI spec.
     handler_block = (
         f"{handler_header}\n"
-        '  runtime_type = "io.containerd.runc.v2"\n'
-        f'  base_runtime_spec = "{KIND_OJ_RUNTIME_SPEC}"\n'
-        f"\n{handler_options_header}\n"
-        "  SystemdCgroup = true\n"
+        f'  runtime_type = "{SANDBOX_CONTAINERD_RUNTIME_TYPE}"\n'
     )
     runtime_class = {
         "apiVersion": "node.k8s.io/v1",
         "kind": "RuntimeClass",
         "metadata": {
-            "name": KIND_OJ_RUNTIME_CLASS,
+            "name": SANDBOX_RUNTIME_CLASS,
             "labels": {"labweaver.local-dev.owner": KUBERNETES_OWNER_LABEL_VALUE},
         },
-        "handler": KIND_OJ_RUNTIME_HANDLER,
+        "handler": SANDBOX_RUNTIME_HANDLER,
     }
 
     for node in kind_nodes():
-        base_spec_result = run(
-            ["docker", "exec", node, "cat", KIND_CONTAINERD_BASE_RUNTIME_SPEC],
-            capture=True,
-        )
-        raw_base_spec = base_spec_result.stdout
-        if not isinstance(raw_base_spec, str):
-            fail("Kind node containerd base runtime spec was not returned as text")
-        try:
-            base_spec = json.loads(raw_base_spec)
-        except json.JSONDecodeError as error:
-            fail(f"Kind node containerd base runtime spec is invalid JSON: {error.msg}")
-        if not isinstance(base_spec, dict):
-            fail("Kind node containerd base runtime spec must be a JSON object")
-        linux = base_spec.get("linux")
-        if not isinstance(linux, dict):
-            fail("Kind node containerd base runtime spec has no linux object")
-        resources = linux.get("resources")
-        if not isinstance(resources, dict):
-            fail("Kind node containerd base runtime spec has invalid linux.resources")
-        pids = resources.get("pids")
-        if pids is None:
-            pids = {}
-            resources["pids"] = pids
-        if not isinstance(pids, dict):
-            fail("Kind node containerd base runtime spec has invalid linux.resources.pids")
-        pids["limit"] = KIND_OJ_PIDS_LIMIT
-        runtime_spec_payload = (json.dumps(base_spec, indent=2) + "\n").encode("utf-8")
-        run(
-            [
-                "docker",
-                "exec",
-                "-i",
-                node,
-                "sh",
-                "-c",
-                f"cat > {KIND_OJ_RUNTIME_SPEC}",
-            ],
-            input_bytes=runtime_spec_payload,
-        )
+        for directory in sorted(
+            {name.rsplit("/", 1)[0] for name in binaries if "/" in name}
+        ):
+            run(
+                [
+                    "docker",
+                    "exec",
+                    node,
+                    "mkdir",
+                    "-p",
+                    f"{SANDBOX_RUNSC_INSTALL_DIR}/{directory}",
+                ]
+            )
+        for name, local_path in sorted(binaries.items()):
+            run(
+                [
+                    "docker",
+                    "cp",
+                    str(local_path),
+                    f"{node}:{SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+            )
+        for name in SANDBOX_RUNSC_REQUIRED_MEMBERS:
+            run(
+                [
+                    "docker",
+                    "exec",
+                    node,
+                    "chmod",
+                    "0755",
+                    f"{SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+            )
 
         config_result = run(
             ["docker", "exec", node, "cat", KIND_CONTAINERD_CONFIG],
@@ -1489,7 +1691,7 @@ def configure_kind_oj_runtime(kubeconfig: Path) -> None:
         runtimes = containerd_plugin.get("runtimes") if isinstance(containerd_plugin, dict) else None
         if not isinstance(runtimes, dict):
             fail("Kind node containerd config has no CRI runtime table")
-        existing_handler = runtimes.get(KIND_OJ_RUNTIME_HANDLER)
+        existing_handler = runtimes.get(SANDBOX_RUNTIME_HANDLER)
         if existing_handler is None:
             config_payload = (raw_config.rstrip("\n") + "\n\n" + handler_block).encode("utf-8")
             run(
@@ -1504,16 +1706,8 @@ def configure_kind_oj_runtime(kubeconfig: Path) -> None:
                 ],
                 input_bytes=config_payload,
             )
-        else:
-            options = existing_handler.get("options") if isinstance(existing_handler, dict) else None
-            if (
-                not isinstance(existing_handler, dict)
-                or existing_handler.get("runtime_type") != "io.containerd.runc.v2"
-                or existing_handler.get("base_runtime_spec") != KIND_OJ_RUNTIME_SPEC
-                or not isinstance(options, dict)
-                or options.get("SystemdCgroup") is not True
-            ):
-                fail("Kind node containerd OJ runtime handler has unexpected settings")
+        elif existing_handler != {"runtime_type": SANDBOX_CONTAINERD_RUNTIME_TYPE}:
+            fail("Kind node containerd gVisor runtime handler has unexpected settings")
         run(["docker", "exec", node, "systemctl", "restart", "containerd"])
 
     apply(kubeconfig, [runtime_class])
@@ -2663,6 +2857,8 @@ def make_app_input(
     real_build_provider: local_dev_build.RealBuildProvider | None = None,
     *,
     authoring_buildkit_sidecar: bool = False,
+    service_cidr: str | None = None,
+    kind_network_cidr: str | None = None,
 ) -> tuple[Path, Path, str]:
     provider_environment = validate_provider_environment(provider_environment)
     manifest = _local_platform_manifest(real_build_provider)
@@ -2677,6 +2873,11 @@ def make_app_input(
         real_build_provider.registry_host if real_build_provider is not None else None
     )
     root=work/"app-input"
+    # Reviewed egress rules name exact destinations, so the run's real Service
+    # CIDR and Kind network are resolved from the owned cluster unless the
+    # caller already observed them.
+    service_cidr = service_cidr or local_service_cidr()
+    kind_network_cidr = kind_network_cidr or local_kind_network_cidr()
     for section, manifest_key in (("configmaps", "configMaps"), ("secrets", "secrets")):
         for name in manifest[manifest_key]:
             (root/section/name).mkdir(parents=True,exist_ok=True)
@@ -2736,6 +2937,15 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("agent configuration has no sandbox.image")
+            # Per-attempt NetworkPolicies name exact destinations, so the local
+            # stack renders the run's real Service CIDR and Kind network instead
+            # of the production placeholders.
+            egress_pattern = re.compile(r'(?m)^(\s*allowed_egress_cidrs:\s*)\[[^\]]*\]$')
+            data, replacements = egress_pattern.subn(
+                rf'\g<1>["{service_cidr}", "{kind_network_cidr}"]', data, count=1
+            )
+            if replacements != 1:
+                fail("agent configuration has no sandbox.allowed_egress_cidrs")
             if authoring_buildkit_sidecar:
                 data = render_authoring_buildkit_sidecar(
                     data, platform_buildkit_image()
@@ -2754,6 +2964,14 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("evaluation service configuration has no coordinator.workerImage")
+            egress_pattern = re.compile(
+                r"(?m)^(\s*objectStoreEgressCidr:\s*)[^\r\n]+$"
+            )
+            data, replacements = egress_pattern.subn(
+                rf'\g<1>"{service_cidr}"', data, count=1
+            )
+            if replacements != 1:
+                fail("evaluation service configuration has no execution.objectStoreEgressCidr")
         if source == "build-executor.yaml.example" and real_build_provider is not None:
             quota_pattern = re.compile(r"(?m)^(\s*projectStorageQuotaBytes:\s*)\d+\s*$")
             data, replacements = quota_pattern.subn(

@@ -33,9 +33,25 @@
 - 管理员目录 API 位于 Agent 内部 API（`/internal/v1/platform-images`，沿用 `agent.control.invoke` 服务权限）：注册时服务端解析 tag 为 digest/媒体类型/大小后落库，repin 复用已存 reference（不接受调用方换仓库），disable 不依赖 registry；比较基准为管理员观察到的 digest，冲突返回 409。reference 必须属于配置的单一 registry host，否则 422；未配置 registry 时目录写操作 fail closed（503），只读列表仍可用。
 - API 模式部署新增可选 `platform_registry`（`registry`/`ca_file`/`username_file`/`password_file`），TLS 与机器人凭据在启动时校验。`deploy/config/agent-control-plane.yaml.example` 尚未加入该块，部署方需把 Harbor CA 与凭据文件挂入 agent API Pod；在此之前目录写操作保持不可用。
 
+### 一次性负载的出网与进程上限
+
+- OJ run 与 Ansible probe 的 per-attempt `NetworkPolicy` 与 authoring 同形：只放行到 `kube-system` 的 DNS，再按 reviewed CIDR 放行对象存储（probe 另加精确 SSH 目标）。原先把 HTTPS 放行到任意地址的规则删除，`execution.objectStoreEgressCidr` 成为必填项，非法值启动失败。评测输入不进入 LLM 出网，因此不引入评测侧 DLP 分类。
+- gVisor 下进程上限不再由 OCI base spec 表达（`runsc` 无法从缺少 `mounts` 的 base spec 启动容器，且忽略 `linux.resources.pids`），改由节点的 kubelet `podPidsLimit` 在 Pod cgroup 上生效；本地 kind 在集群创建时写入该值。上限因此覆盖整个一次性 Pod 的每个容器，而不是单容器。
+
+### VM 模板目录与按需 CDI 导入
+
+- VM 条目身份的唯一权威是 Agent 平台镜像目录：管理员上传 qcow2/raw 后由 Agent 包成 containerdisk 镜像、按 digest 推送并登记 `capacity_bytes`/`disk_sha256`/`format`；只登记 registry reference 而不带磁盘描述的条目仅作目录清单，不可被解析使用。
+- Control 保留策略：`virtualMachineBases` 的 provider/storage 绑定与 `maxBases`/`maxCapacityBytes` 同时约束静态条目与目录条目；候选声明的 digest/容量/格式必须与目录条目逐项一致，否则以 artifact mismatch 失败。
+- Environment 负责 CDI：release 声明的 binding 先按部署期 `baseDisks[]` 解析，未声明时按可选 `runtimeVmBase` 策略解析并懒建 `DataVolume`/`DataSource`，再用 reviewed 身份注解校验；身份漂移、容量超限与导入失败各自明确失败，保留对象供诊断，不静默重建。部署期种子仍由 `deploy/versions.lock.yml` 的 `platform_vm_bases` 提供。
+
+### 容器基础镜像与 GPU 目录种子
+
+- `deploy/versions.lock.yml` 的 `platform_container_images` 是 reviewed 基础镜像清单：部署断言精确 digest 已在 Harbor 中存在（同步镜像由运维完成，仓库不含镜像复制工具），并渲染进 `platform_registry.seed_images`；Agent 启动时把每个 tag 解析一次并登记目录，失败只记录 `LW_PLATFORM_IMAGE_SEED_FAILED` 并让条目缺席，不以更弱身份补位。
+- GPU class 目录由 `platform_gpu_classes` 渲染进 `capacity.json` 的 `gpuCatalogSeed`，Resource 启动时只创建缺失的 class，不覆盖、不提升 revision、不复活停用条目；没有对应 observer 的 GPU 请求以 `GpuObservationStale` 失败关闭。
+
 ## 代价与边界
 
-- Agent 服务进程需要访问 Kubernetes API（namespace 级 Role，仅该 namespace 的 Job/Secret/Pod/NetworkPolicy），并持有模型凭据；沙箱通过 NetworkPolicy 与无推送凭据的容器限制其能力。真实 gVisor/Kata 隔离不在本轮部署范围，需实机验证；本轮验证 runc + 容器级 seccomp/capability 限制。
+- Agent 服务进程需要访问 Kubernetes API（namespace 级 Role，仅该 namespace 的 Job/Secret/Pod/NetworkPolicy），并持有模型凭据；沙箱通过 NetworkPolicy 与无推送凭据的容器限制其能力。隔离边界统一为 gVisor `runsc`：authoring attempt、OJ run 与 Ansible probe 三类一次性负载都使用同一 `RuntimeClass`（handler `labweaver-sandbox`，containerd 运行时类型 `io.containerd.runsc.v1`），不由各服务各选一套运行时；本地 kind 由 bootstrap 安装锁定版本并校验 sha512 的 runsc，生产节点须注册同名 handler，缺失时调度失败关闭。seccomp/capability/非 root/只读 rootfs 等容器级限制保持不变，不因引入 gVisor 而放宽。
 - 每次 attempt 进入 Resource 审批链；批量审批 UI 已存在，但高频 authoring 的预授权策略是后续产品决定，本 ADR 不引入自动审批。
 - rootless BuildKit 需要受控的 seccomp/capability 例外（`seccompProfile`/`appArmorProfile` Unconfined、`SETUID`/`SETGID`、`seLinuxOptions: spc_t`），与既有 `platform_buildkit` 角色同类。`labweaver-authoring` 命名空间按既有 builder 的方式使用 `pod-security.kubernetes.io/enforce: privileged` 与 restricted 审计/告警，并标注 `labweaver.io/security-exception`；例外只落在无 token、资源受限、仅可经 attempt 本地 socket 访问的 sidecar 上。该能力当前通过可选 `sandbox.buildkit_image`/`sandbox.buildkit_config_map_name` 启用，部署侧仍需把 rootless 镜像与 Harbor CA ConfigMap 绑定进该命名空间并联调。
 

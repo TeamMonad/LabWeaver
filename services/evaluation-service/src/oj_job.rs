@@ -10,6 +10,8 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use task_execution::SANDBOX_RUNTIME_CLASS;
+use task_execution::kubernetes::valid_cidr;
 use thiserror::Error;
 
 use crate::{
@@ -38,6 +40,12 @@ pub struct OjJobBinding {
     pub image_pull_secret_name: String,
     pub worker_image: String,
     pub request: OjExecutionRequest,
+    /// Reviewed CIDR that contains the object store the materializer downloads from.
+    ///
+    /// The per-attempt policy admits DNS and exactly this destination, so the attempt
+    /// cannot reach any other network even though the signed URL is the only credential
+    /// it holds.
+    pub object_store_egress_cidr: String,
     /// Short-lived signed downloads and their destination roots. This command
     /// is mounted only by the init container.
     pub materializer: MaterializeCommand,
@@ -173,10 +181,16 @@ impl OjJobResources {
                 "policyTypes":["Ingress","Egress"],
                 "ingress":[],
                 // The init container requires HTTPS to the exact object store
-                // URL signed by the scheduler. The worker has no URL Secret,
-                // and the platform's namespace policy must constrain this
-                // egress to the configured object-store endpoint.
-                "egress":[{"ports":[{"protocol":"TCP","port":443}]}],
+                // URL signed by the scheduler and DNS to resolve it; the worker
+                // has no URL Secret. Both destinations are reviewed: the
+                // namespace default deny admits nothing on its own, so this
+                // policy is the only egress the attempt can use.
+                "egress":[
+                    {"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
+                     "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},
+                    {"to":[{"ipBlock":{"cidr":binding.object_store_egress_cidr}}],
+                     "ports":[{"protocol":"TCP","port":443}]},
+                ],
             },
         });
         let job = json!({
@@ -191,7 +205,7 @@ impl OjJobResources {
                     "metadata":{"labels":labels,"annotations":annotations},
                     "spec":{
                         "restartPolicy":"Never",
-                        "runtimeClassName":"labweaver-oj",
+                        "runtimeClassName":SANDBOX_RUNTIME_CLASS,
                         "serviceAccountName":binding.service_account_name,
                         "automountServiceAccountToken":false,
                         "terminationGracePeriodSeconds":5,
@@ -342,6 +356,7 @@ fn validate_binding(binding: &OjJobBinding) -> Result<(), OjJobError> {
         || !is_dns_name(&binding.service_account_name)
         || !is_dns_name(&binding.image_pull_secret_name)
         || !is_sha256_image(&binding.worker_image)
+        || !valid_cidr(&binding.object_store_egress_cidr)
         || !binding
             .worker_image
             .ends_with(&binding.request.toolchain_image_digest)

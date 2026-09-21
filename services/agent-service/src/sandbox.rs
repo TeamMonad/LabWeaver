@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use task_execution::kubernetes::{
     KubernetesCleanupTarget, KubernetesJobBundle, KubernetesJobIdentity, KubernetesObject,
-    KubernetesOwnership,
+    KubernetesOwnership, SANDBOX_RUNTIME_CLASS, valid_cidr,
 };
 use uuid::Uuid;
 
@@ -768,6 +768,8 @@ fn job_document(
                     "automountServiceAccountToken": false,
                     "restartPolicy": "Never",
                     "serviceAccountName": configuration.service_account_name,
+                    // The one-shot workload always runs under the shared gVisor RuntimeClass.
+                    "runtimeClassName": SANDBOX_RUNTIME_CLASS,
                     "securityContext": {
                         "runAsNonRoot": true,
                         "runAsUser": SANDBOX_ATTEMPT_USER,
@@ -907,22 +909,6 @@ fn digest_pinned(value: &str) -> bool {
         .is_some_and(|(_, digest)| digest.starts_with("sha256:") && valid_sha256(&digest[7..]))
 }
 
-fn valid_cidr(value: &str) -> bool {
-    let Some((address, prefix)) = value.split_once('/') else {
-        return false;
-    };
-    let Ok(prefix) = prefix.parse::<u8>() else {
-        return false;
-    };
-    if address.contains(':') {
-        !address.is_empty() && prefix <= 128
-    } else {
-        address.split('.').count() == 4
-            && address.split('.').all(|part| part.parse::<u8>().is_ok())
-            && prefix <= 32
-    }
-}
-
 fn valid_dns_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
@@ -962,9 +948,20 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        SANDBOX_BUILDKIT_CONTAINER, SandboxAttemptSpec, SandboxBundleError, SandboxConfiguration,
+        SANDBOX_BUILDKIT_CONTAINER, SANDBOX_MAIN_CONTAINER, SANDBOX_RUNTIME_CLASS,
+        SandboxAttemptSpec, SandboxBundle, SandboxBundleError, SandboxConfiguration,
         build_sandbox_bundle, shell_quote,
     };
+
+    fn job_of(bundle: &SandboxBundle) -> Result<&serde_json::Value, Box<dyn std::error::Error>> {
+        Ok(&bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "jobs")
+            .ok_or(SandboxBundleError::Invalid)?
+            .document)
+    }
 
     fn configuration() -> SandboxConfiguration {
         SandboxConfiguration {
@@ -1168,6 +1165,10 @@ mod tests {
             Some(&serde_json::Value::Bool(false))
         );
         assert_eq!(
+            job.document.pointer("/spec/template/spec/runtimeClassName"),
+            Some(&serde_json::Value::String(SANDBOX_RUNTIME_CLASS.to_owned()))
+        );
+        assert_eq!(
             job.document.pointer("/spec/activeDeadlineSeconds"),
             Some(&serde_json::json!(3_600))
         );
@@ -1317,9 +1318,33 @@ mod tests {
             policy.document["spec"]["policyTypes"],
             serde_json::json!(["Ingress", "Egress"])
         );
+        // Egress is exactly the cluster DNS rule followed by the reviewed CIDR rule.
+        assert_eq!(
+            policy.document["spec"]["egress"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            policy.document["spec"]["egress"][0]["to"],
+            serde_json::json!([{
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                }
+            }])
+        );
+        assert_eq!(
+            policy.document["spec"]["egress"][0]["ports"],
+            serde_json::json!([
+                {"protocol": "UDP", "port": 53},
+                {"protocol": "TCP", "port": 53},
+            ])
+        );
         assert_eq!(
             policy.document["spec"]["egress"][1]["to"][0]["ipBlock"]["cidr"],
             "10.0.0.0/8"
+        );
+        assert_eq!(
+            policy.document["spec"]["egress"][1]["ports"],
+            serde_json::json!([{"protocol": "TCP", "port": 443}])
         );
         Ok(())
     }
@@ -1387,5 +1412,161 @@ mod tests {
         assert_eq!(shell_quote("plain"), "'plain'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
         assert_eq!(shell_quote("; rm -rf /"), "'; rm -rf /'");
+    }
+
+    #[test]
+    fn attempt_job_renders_the_configured_resource_bounds() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for (configuration, expected_empty_dirs) in [
+            (
+                configuration(),
+                vec![
+                    ("attempt", "67108864"),
+                    ("workspace", "2147483648"),
+                    ("materials", "33554432"),
+                ],
+            ),
+            (
+                buildkit_configuration(),
+                vec![
+                    ("attempt", "67108864"),
+                    ("workspace", "2147483648"),
+                    ("materials", "33554432"),
+                    ("buildkit-run", "67108864"),
+                    ("buildkit-state", "2147483648"),
+                    ("buildkit-runtime", "67108864"),
+                    ("buildkit-tmp", "268435456"),
+                ],
+            ),
+        ] {
+            let bundle = build_sandbox_bundle(&configuration, &spec())?;
+            let job = job_of(&bundle)?;
+            let pod = &job["spec"]["template"]["spec"];
+            let main = pod["containers"]
+                .as_array()
+                .ok_or(SandboxBundleError::Invalid)?
+                .iter()
+                .find(|container| container["name"] == SANDBOX_MAIN_CONTAINER)
+                .ok_or(SandboxBundleError::Invalid)?;
+            // The main container is bounded by exactly the reviewed configuration, on both the
+            // request and the limit side.
+            let expected = serde_json::json!({
+                "cpu": format!("{}m", configuration.cpu_millicores),
+                "memory": configuration.memory_bytes.to_string(),
+                "ephemeral-storage": configuration.workspace_bytes.to_string(),
+            });
+            assert_eq!(main["resources"]["requests"], expected);
+            assert_eq!(main["resources"]["limits"], expected);
+
+            let mut empty_dirs = pod["volumes"]
+                .as_array()
+                .ok_or(SandboxBundleError::Invalid)?
+                .iter()
+                .filter_map(|volume| {
+                    let limit = volume["emptyDir"]["sizeLimit"].as_str()?;
+                    Some((
+                        volume["name"].as_str().unwrap_or_default().to_owned(),
+                        limit.to_owned(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (_, limit) in &empty_dirs {
+                assert!(
+                    limit.parse::<u64>().is_ok_and(|bytes| bytes > 0),
+                    "every emptyDir must carry a finite sizeLimit, found {limit}"
+                );
+            }
+            empty_dirs.sort();
+            let mut expected_empty_dirs = expected_empty_dirs
+                .iter()
+                .map(|(name, limit)| ((*name).to_owned(), (*limit).to_owned()))
+                .collect::<Vec<_>>();
+            expected_empty_dirs.sort();
+            assert_eq!(empty_dirs, expected_empty_dirs);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_secret_carries_only_attempt_inputs_and_no_registry_credential()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let attempt = spec();
+        let bundle = build_sandbox_bundle(&configuration(), &attempt)?;
+        let secret = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "secrets")
+            .ok_or(SandboxBundleError::Invalid)?;
+        // The attempt Secret holds exactly the input keys the bundle itself builds for this
+        // attempt, and nothing else.
+        let mut expected = BTreeSet::from([
+            "MATERIAL_DOWNLOAD_URL".to_owned(),
+            "MATERIAL_SHA256".to_owned(),
+            "MATERIAL_SIZE_BYTES".to_owned(),
+            "RESULT_UPLOAD_URL".to_owned(),
+            "RESULT_MAX_BYTES".to_owned(),
+            "STDERR_UPLOAD_URL".to_owned(),
+            "STDERR_MAX_BYTES".to_owned(),
+            "CLAUDE_CODE_VERSION".to_owned(),
+        ]);
+        expected.extend(attempt.command_environment.keys().cloned());
+        for index in 0..attempt.result_upload_headers.len() {
+            expected.insert(format!("RESULT_HEADER_{index}"));
+        }
+        for index in 0..attempt.stderr_upload_headers.len() {
+            expected.insert(format!("STDERR_HEADER_{index}"));
+        }
+        if attempt.object_store_ca_base64.is_some() {
+            expected.insert("OBJECT_STORE_CA_BASE64".to_owned());
+        }
+        let rendered = secret.document["stringData"]
+            .as_object()
+            .ok_or(SandboxBundleError::Invalid)?;
+        let actual = rendered.keys().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        for forbidden in [
+            "username",
+            "password",
+            "auth",
+            "dockercfg",
+            ".dockerconfigjson",
+            "token",
+            "registry",
+        ] {
+            assert!(
+                !actual.contains(forbidden),
+                "{forbidden} must never be an attempt Secret key"
+            );
+        }
+        // The bundle renders no second, base64 credential blob beside the input payload.
+        assert!(secret.document.get("data").is_none());
+
+        let job = job_of(&bundle)?;
+        let pod = &job["spec"]["template"]["spec"];
+        let volumes = pod["volumes"]
+            .as_array()
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert_eq!(
+            volumes
+                .iter()
+                .map(|volume| volume["name"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["attempt", "workspace", "materials"]
+        );
+        for volume in volumes {
+            // Every attempt volume is a plain emptyDir: none of them mounts a docker config or
+            // any other credential-bearing source.
+            assert!(volume.get("emptyDir").is_some(), "{volume}");
+            assert!(volume.get("projected").is_none(), "{volume}");
+            assert!(volume.get("secret").is_none(), "{volume}");
+            assert!(volume.get("configMap").is_none(), "{volume}");
+        }
+        // The only pull-credential reference in the attempt is the configured pull secret.
+        assert_eq!(
+            pod["imagePullSecrets"],
+            serde_json::json!([{"name": "harbor-course-pull"}])
+        );
+        Ok(())
     }
 }
