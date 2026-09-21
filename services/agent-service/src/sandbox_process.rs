@@ -6,6 +6,7 @@
 //! egress envelope through short-lived object-store URLs, observes the Job and then persists the
 //! terminal receipt before cleaning up and releasing the reservation.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -67,6 +68,13 @@ pub struct SandboxProcessConfiguration {
     /// Absent means the object store is trusted by the image trust store. The file is read once at
     /// startup so an attempt never depends on a path inside its own pod.
     pub object_store_ca_file: Option<PathBuf>,
+    /// Reviewed provider environment every attempt process runs with.
+    ///
+    /// The sandboxed Claude Code CLI is a separate process in a separate pod, so the provider
+    /// endpoint, model and credential have to travel with the attempt instead of being inherited
+    /// from the service environment. Entries are rendered into the per-attempt Secret, which the
+    /// attempt owns and deletes with its bundle.
+    pub worker_environment: BTreeMap<String, String>,
 }
 
 /// Admitted Kubernetes execution backend for authoring attempts.
@@ -148,7 +156,15 @@ impl SandboxAuthoringProcess {
             .store
             .load_sandbox_attempt(scope.run_id, scope.track, scope.attempt)
             .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?
+            .map_err(|error| {
+                tracing::error!(
+                    event = "agent.authoring.sandbox.stage_failed",
+                    failure_stage = "sandbox.checkpoint",
+                    error_kind = ?error,
+                    "authoring attempt could not read its durable checkpoint",
+                );
+                ClaudeCodeProcessError::Io
+            })?
         {
             return self.finish_recovered_attempt(scope, &checkpoint).await;
         }
@@ -180,8 +196,39 @@ impl SandboxAuthoringProcess {
             },
             self.configuration.sandbox.wall_time_seconds,
         )
-        .map_err(|_| ClaudeCodeProcessError::Io)?;
+        .map_err(|error| {
+            tracing::error!(
+                event = "agent.authoring.sandbox.stage_failed",
+                failure_stage = "sandbox.lifecycle",
+                error_kind = ?error,
+                task_run_id = %task_run_id.as_uuid(),
+                "authoring attempt could not build its Resource lifecycle",
+            );
+            ClaudeCodeProcessError::Io
+        })?;
         let (cancel_token, _bridge) = bridge_cancellation(&cancellation);
+        // The reservation has to exist before it can be claimed: the claim path reads the
+        // authoritative request projection and never invents one, so an attempt that skipped this
+        // step would fail before any cluster object existed. The POST is awaited before
+        // cancellation is observed so an in-flight request cannot be dropped and then commit after
+        // the attempt already stopped.
+        lifecycle.create().await.map_err(|error| {
+            tracing::error!(
+                event = "agent.authoring.sandbox.stage_failed",
+                failure_stage = "sandbox.resource.create",
+                error_kind = ?error,
+                task_run_id = %task_run_id.as_uuid(),
+                "authoring attempt could not create its Resource request",
+            );
+            map_task_resource(&error)
+        })?;
+        if cancellation.is_cancelled() {
+            lifecycle
+                .cancel("authoring attempt cancelled before resource claim")
+                .await
+                .map_err(|error| map_task_resource(&error))?;
+            return Err(ClaudeCodeProcessError::Cancelled);
+        }
         let approval_timeout = Duration::from_secs(self.configuration.sandbox.wall_time_seconds);
         let approval = lifecycle
             .claim_after_approval(OBSERVE_POLL, approval_timeout, &cancel_token)
@@ -221,7 +268,7 @@ impl SandboxAuthoringProcess {
             .objects
             .put_versioned_immutable(material_key.as_str(), command.stdin(), MATERIAL_MEDIA_TYPE)
             .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
+            .map_err(|error| stage_failure("sandbox.material", &error))?;
         let material_download = self
             .objects
             .presign_download(
@@ -281,7 +328,10 @@ impl SandboxAuthoringProcess {
             ownership,
             trace_id: scope.trace_id.clone(),
             command: command_argv(&command),
-            command_environment: command.env().clone(),
+            command_environment: attempt_environment(
+                &self.configuration.worker_environment,
+                command.env(),
+            ),
             expected_claude_version: scope.claude_code_version.clone(),
             material_download_url: material_download.url,
             material_sha256: command.stdin_sha256().to_string(),
@@ -299,24 +349,25 @@ impl SandboxAuthoringProcess {
             object_store_ca_base64: self.object_store_ca_base64.clone(),
         };
         let sandbox_bundle = build_sandbox_bundle(&self.configuration.sandbox, &spec)
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
+            .map_err(|error| stage_failure("sandbox.bundle", &error))?;
         let bundle = sandbox_bundle.bundle;
         self.api
             .start(&bundle)
             .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
+            .map_err(|error| stage_failure("sandbox.apply", &error))?;
         let refs = self
             .api
             .capture_object_refs(&bundle.identity, &bundle.cleanup_plan)
             .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
+            .map_err(|error| stage_failure("sandbox.capture", &error))?;
         self.store
             .record_sandbox_objects(
                 &intent,
-                &serde_json::to_value(&refs).map_err(|_| ClaudeCodeProcessError::Io)?,
+                &serde_json::to_value(&refs)
+                    .map_err(|error| stage_failure("sandbox.serialize", &error))?,
             )
             .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
+            .map_err(|error| stage_failure("sandbox.record", &error))?;
 
         let expected_uid = job_uid(&refs);
         let deadline = tokio::time::Instant::now()
@@ -572,6 +623,28 @@ impl SandboxAuthoringProcess {
     }
 }
 
+/// Reports one failed authoring stage with the exact stage and cause.
+///
+/// The sandbox boundary collapses every internal failure into one process error, so the stage has
+/// to be recorded where it happens or an attempt is indistinguishable from a provider outage.
+/// Reports one failed attempt stage and fails the attempt closed.
+///
+/// Every step between the persisted attempt intent and the observed terminal Job reports its own
+/// stage, so an operator can tell an unreachable object store from a rejected bundle or a refused
+/// cluster apply without reading the attempt's pod.
+fn stage_failure<E>(stage: &'static str, error: &E) -> ClaudeCodeProcessError
+where
+    E: std::fmt::Debug,
+{
+    tracing::error!(
+        event = "agent.authoring.sandbox.stage_failed",
+        failure_stage = stage,
+        error_kind = ?error,
+        "authoring attempt stage failed",
+    );
+    ClaudeCodeProcessError::Io
+}
+
 /// Reads the reviewed object-store trust root once, bounded like every other deployment input.
 ///
 /// # Errors
@@ -721,6 +794,23 @@ fn object_key(prefix: &str, task_run_id: TaskRunId, name: &str) -> String {
     format!("{prefix}/{}/{name}", task_run_id.as_uuid().simple())
 }
 
+/// Merges the reviewed provider environment with the per-command CLI overrides.
+///
+/// Command entries win, because the runtime owns the CLI switches it sets; every other reviewed
+/// entry (provider endpoint, model, credential) is required for the CLI to reach the model at all.
+fn attempt_environment(
+    worker_environment: &BTreeMap<String, String>,
+    command_environment: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut environment = worker_environment.clone();
+    environment.extend(
+        command_environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    environment
+}
+
 fn command_argv(command: &ClaudeCodeCommand) -> Vec<String> {
     let mut argv = Vec::with_capacity(command.args().len() + 1);
     argv.push(command.program().to_owned());
@@ -767,10 +857,45 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxReceipt, SandboxReceiptError, parse_receipt};
+    use super::{SandboxReceipt, SandboxReceiptError, attempt_environment, parse_receipt};
+    use std::collections::BTreeMap;
+
     use crate::claude_code::AuthoringAttemptScope;
     use contracts::authoring::AgentTrackKind;
     use contracts::{ActorId, AgentRunId, CourseId, ProjectId};
+
+    #[test]
+    fn attempt_environment_always_carries_the_reviewed_provider_environment() {
+        // The sandboxed CLI runs in its own pod, so the reviewed provider endpoint, model and
+        // credential must travel with the attempt; the per-command CLI switches still win.
+        let worker = BTreeMap::from([
+            (
+                "ANTHROPIC_BASE_URL".to_owned(),
+                "https://model.example".to_owned(),
+            ),
+            ("ANTHROPIC_MODEL".to_owned(), "model-1".to_owned()),
+            ("ANTHROPIC_AUTH_TOKEN".to_owned(), "token-1".to_owned()),
+            ("API_TIMEOUT_MS".to_owned(), "1".to_owned()),
+        ]);
+        let command = BTreeMap::from([("API_TIMEOUT_MS".to_owned(), "120000".to_owned())]);
+        let environment = attempt_environment(&worker, &command);
+        assert_eq!(
+            environment.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://model.example")
+        );
+        assert_eq!(
+            environment.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some("model-1")
+        );
+        assert_eq!(
+            environment.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("token-1")
+        );
+        assert_eq!(
+            environment.get("API_TIMEOUT_MS").map(String::as_str),
+            Some("120000")
+        );
+    }
 
     const RESULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
     const STDERR_MAX_BYTES: u64 = 1024 * 1024;

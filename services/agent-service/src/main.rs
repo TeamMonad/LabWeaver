@@ -43,6 +43,7 @@ use auth::{
 use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
+use task_execution::kubernetes::parse_egress_destination;
 use time::OffsetDateTime;
 
 #[path = "../../http_transport.rs"]
@@ -119,7 +120,7 @@ struct SandboxFileConfig {
     memory_bytes: u64,
     workspace_bytes: u64,
     wall_time_seconds: u64,
-    allowed_egress_cidrs: BTreeSet<String>,
+    allowed_egress: BTreeSet<String>,
     buildkit_image: Option<String>,
     buildkit_config_map_name: Option<String>,
     result_max_bytes: u64,
@@ -135,8 +136,17 @@ struct SandboxFileConfig {
 }
 
 impl SandboxFileConfig {
+    /// Validates the deployment configuration against the object store it writes through.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartupError::Configuration`] when the sandbox object prefix, the attempt transfer
+    /// bounds or the reviewed egress would be rejected by the configured object store.
     fn to_configuration(
         &self,
+        store_prefix: &str,
+        store_max_object_bytes: u64,
+        store_port: u16,
     ) -> Result<agent_service::sandbox::SandboxConfiguration, StartupError> {
         let configuration = agent_service::sandbox::SandboxConfiguration {
             namespace: self.namespace.clone(),
@@ -147,7 +157,7 @@ impl SandboxFileConfig {
             memory_bytes: self.memory_bytes,
             workspace_bytes: self.workspace_bytes,
             wall_time_seconds: self.wall_time_seconds,
-            allowed_egress_cidrs: self.allowed_egress_cidrs.clone(),
+            allowed_egress: self.allowed_egress.clone(),
             buildkit_image: self.buildkit_image.clone(),
             buildkit_config_map_name: self.buildkit_config_map_name.clone(),
         };
@@ -155,6 +165,13 @@ impl SandboxFileConfig {
             .validate()
             .map_err(|_| StartupError::Configuration)?;
         if self.object_prefix.trim().is_empty()
+            || !self.object_prefix.starts_with(store_prefix)
+            || self.workspace_bytes > store_max_object_bytes
+            || self.result_max_bytes > store_max_object_bytes
+            || self.stderr_max_bytes > store_max_object_bytes
+            || !self.allowed_egress.iter().any(|destination| {
+                parse_egress_destination(destination).is_some_and(|(_, port)| port == store_port)
+            })
             || !self.kubernetes_api_server.starts_with("https://")
             || !self.kubernetes_bearer_token_file.starts_with('/')
             || !self.kubernetes_ca_file.starts_with('/')
@@ -339,6 +356,17 @@ async fn run_agent_service() -> Result<(), StartupError> {
     )
     .map_err(|_| StartupError::Configuration)?;
     let outbox_poll = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
+    let object_store_prefix = deployment
+        .object_store
+        .object_prefix
+        .trim_matches('/')
+        .to_owned();
+    let object_store_max_object_bytes = deployment.object_store.max_object_bytes;
+    let object_store_port = deployment
+        .object_store
+        .endpoint
+        .port_or_known_default()
+        .ok_or(StartupError::Configuration)?;
     let objects = Arc::new(
         S3ImmutableObjectStore::new(
             deployment.object_store,
@@ -361,9 +389,8 @@ async fn run_agent_service() -> Result<(), StartupError> {
         )
         .map_err(|_| StartupError::Configuration)?,
     );
-    let local_process = Arc::new(TokioClaudeCodeProcess::new(read_worker_environment(
-        &deployment.worker_environment_files,
-    )?));
+    let worker_environment = read_worker_environment(&deployment.worker_environment_files)?;
+    let local_process = Arc::new(TokioClaudeCodeProcess::new(worker_environment.clone()));
     let review_process: Arc<dyn ClaudeCodeProcess> = local_process.clone();
     let sandbox = &deployment.sandbox;
     let resource_client = task_execution::resource::ResourceClient::from_configuration(
@@ -373,7 +400,11 @@ async fn run_agent_service() -> Result<(), StartupError> {
     )?;
     let process: Arc<dyn ClaudeCodeProcess> = Arc::new(SandboxAuthoringProcess::new(
         SandboxProcessConfiguration {
-            sandbox: sandbox.to_configuration()?,
+            sandbox: sandbox.to_configuration(
+                &object_store_prefix,
+                object_store_max_object_bytes,
+                object_store_port,
+            )?,
             object_prefix: sandbox.object_prefix.clone(),
             result_max_bytes: sandbox.result_max_bytes,
             stderr_max_bytes: sandbox.stderr_max_bytes,
@@ -382,6 +413,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
             kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
             request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
             object_store_ca_file: sandbox.object_store_ca_file.clone().map(Into::into),
+            worker_environment: worker_environment.clone(),
         },
         resource_client,
         store.clone(),
@@ -973,7 +1005,15 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
     {
         return Err(StartupError::Configuration);
     }
-    deployment.sandbox.to_configuration()?;
+    deployment.sandbox.to_configuration(
+        deployment.object_store.object_prefix.trim_matches('/'),
+        deployment.object_store.max_object_bytes,
+        deployment
+            .object_store
+            .endpoint
+            .port_or_known_default()
+            .ok_or(StartupError::Configuration)?,
+    )?;
     let resource = &deployment.resource;
     if resource.audience.trim().is_empty()
         || !resource.ca_file.is_absolute()

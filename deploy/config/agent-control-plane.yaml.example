@@ -12,7 +12,10 @@ object_store:
   region: "labweaver-internal-1"
   objectPrefix: "problem-packages"
   uploadTtlSeconds: 900
-  maxObjectBytes: 67108864
+  # This binding also carries sandbox attempt material, results and image-layout
+  # exports, so the bound has to cover the largest presigned transfer below.
+  # Startup rejects a deployment whose sandbox bounds exceed it.
+  maxObjectBytes: 2147483648
   forcePathStyle: true
 object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
 object_store_secret_key_file: "/etc/labweaver/secrets/minio-secret-key"
@@ -61,7 +64,10 @@ sandbox:
   memory_bytes: 2147483648
   workspace_bytes: 2147483648
   wall_time_seconds: 3600
-  allowed_egress_cidrs: ["10.0.0.0/8"]
+  # Reviewed attempt egress destinations as "<cidr>:<port>": the object store and
+  # the model endpoint. The attempt reaches nothing else; startup rejects a
+  # deployment that omits the configured object-store port.
+  allowed_egress: ["10.0.0.0/8:443"]
   # Optional rootless BuildKit sidecar; deployment binds both keys together with
   # the reviewed buildkitd.toml ConfigMap so the attempt can build only against
   # Harbor. Leave unset to run attempts without an image-build capability.
@@ -72,7 +78,11 @@ sandbox:
   # buildkit_config_map_name: "authoring-buildkit-config"
   result_max_bytes: 4194304
   stderr_max_bytes: 262144
-  object_prefix: "authoring-sandbox"
+  # Attempt material, result, stderr and export keys. They must stay inside the
+  # configured `object_store.objectPrefix`, because the immutable object store
+  # rejects every key outside its own prefix; the deployment fails at startup
+  # when they disagree.
+  object_prefix: "problem-packages/authoring-sandbox"
   # Reviewed object-store trust root the materializer and the attempt read signed
   # URLs with. Omit it when the object store is trusted by the sandbox image
   # trust store; the deployment mounts this file into the agent API Pod.

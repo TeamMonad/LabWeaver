@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use task_execution::kubernetes::{
     KubernetesCleanupTarget, KubernetesJobBundle, KubernetesJobIdentity, KubernetesObject,
-    KubernetesOwnership, SANDBOX_RUNTIME_CLASS, valid_cidr,
+    KubernetesOwnership, SANDBOX_RUNTIME_CLASS, parse_egress_destination,
 };
 use uuid::Uuid;
 
@@ -96,8 +96,11 @@ pub struct SandboxConfiguration {
     pub workspace_bytes: u64,
     /// Wall-clock deadline for the attempt Job.
     pub wall_time_seconds: u64,
-    /// Allowed non-DNS egress destinations (Harbor, object store, model endpoint).
-    pub allowed_egress_cidrs: BTreeSet<String>,
+    /// Reviewed non-DNS egress destinations as `"<cidr>:<port>"` (object store, model endpoint).
+    ///
+    /// The port is part of the reviewed destination: an object store or model endpoint is not
+    /// always HTTPS on 443, and the attempt must reach exactly the reviewed services.
+    pub allowed_egress: BTreeSet<String>,
     /// Optional digest-pinned rootless `BuildKit` sidecar image.
     ///
     /// When set together with the `ConfigMap`, the attempt pod gains a tokenless rootless
@@ -123,11 +126,11 @@ impl SandboxConfiguration {
             || self.memory_bytes == 0
             || self.workspace_bytes == 0
             || !(60..=86_400).contains(&self.wall_time_seconds)
-            || self.allowed_egress_cidrs.is_empty()
+            || self.allowed_egress.is_empty()
             || self
-                .allowed_egress_cidrs
+                .allowed_egress
                 .iter()
-                .any(|cidr| !valid_cidr(cidr))
+                .any(|destination| parse_egress_destination(destination).is_none())
         {
             return Err(SandboxBundleError::Invalid);
         }
@@ -201,6 +204,19 @@ pub struct SandboxBundle {
     pub job_name: String,
 }
 
+/// Upper bound on the number of argv entries of one sandbox attempt.
+const MAX_COMMAND_ARGUMENTS: usize = 32;
+/// Upper bound on one argv entry.
+///
+/// Instructions travel as argv entries, while the bulk material (the egress envelope with verified
+/// teacher files) is transferred separately and bounded by [`MAX_MATERIAL_BYTES`]. Generated
+/// instruction prompts are a few kilobytes, so this bound keeps the rendered Job manifest small.
+const MAX_COMMAND_ARGUMENT_BYTES: usize = 64 * 1024;
+/// Upper bound on the total rendered argv of one sandbox attempt.
+const MAX_COMMAND_BYTES: usize = 256 * 1024;
+/// Upper bound on the transferred material envelope.
+const MAX_MATERIAL_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Renders the immutable attempt bundle for one admitted sandbox attempt.
 ///
 /// # Errors
@@ -219,13 +235,17 @@ pub fn build_sandbox_bundle(
             .expected_claude_version
             .chars()
             .any(|character| character.is_control() || character == '"' || character == '\'')
-        || spec.command.len() > 32
-        || spec.command.iter().any(|value| value.len() > 4_096)
+        || spec.command.len() > MAX_COMMAND_ARGUMENTS
+        || spec
+            .command
+            .iter()
+            .any(|value| value.len() > MAX_COMMAND_ARGUMENT_BYTES)
+        || spec.command.iter().map(String::len).sum::<usize>() > MAX_COMMAND_BYTES
         || spec.trace_id.trim().is_empty()
         || spec.trace_id.len() > 128
         || !valid_sha256(&spec.material_sha256)
         || spec.material_size_bytes == 0
-        || spec.material_size_bytes > 16 * 1024 * 1024
+        || spec.material_size_bytes > MAX_MATERIAL_BYTES
         || !spec.material_download_url.starts_with("https://")
         || !spec.result_upload_url.starts_with("https://")
         || !spec.stderr_upload_url.starts_with("https://")
@@ -442,14 +462,13 @@ fn network_policy_document(
             {"protocol": "TCP", "port": 53},
         ],
     })];
-    if !configuration.allowed_egress_cidrs.is_empty() {
+    for destination in &configuration.allowed_egress {
+        let Some((cidr, port)) = parse_egress_destination(destination) else {
+            continue;
+        };
         egress.push(json!({
-            "to": configuration
-                .allowed_egress_cidrs
-                .iter()
-                .map(|cidr| json!({"ipBlock": {"cidr": cidr}}))
-                .collect::<Vec<_>>(),
-            "ports": [{"protocol": "TCP", "port": 443}],
+            "to": [{"ipBlock": {"cidr": cidr}}],
+            "ports": [{"protocol": "TCP", "port": port}],
         }));
     }
     json!({
@@ -972,6 +991,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
+        MAX_COMMAND_ARGUMENT_BYTES, MAX_COMMAND_BYTES, MAX_MATERIAL_BYTES,
         SANDBOX_BUILDKIT_CONTAINER, SANDBOX_MAIN_CONTAINER, SANDBOX_RUNTIME_CLASS,
         SandboxAttemptSpec, SandboxBundle, SandboxBundleError, SandboxConfiguration,
         build_sandbox_bundle, shell_quote,
@@ -997,7 +1017,7 @@ mod tests {
             memory_bytes: 2 * 1024 * 1024 * 1024,
             workspace_bytes: 2 * 1024 * 1024 * 1024,
             wall_time_seconds: 3_600,
-            allowed_egress_cidrs: BTreeSet::from(["10.0.0.0/8".to_owned()]),
+            allowed_egress: BTreeSet::from(["10.0.0.0/8:443".to_owned()]),
             buildkit_image: None,
             buildkit_config_map_name: None,
         }
@@ -1420,6 +1440,60 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_egress_keeps_the_reviewed_port_per_destination()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A deployment may run its object store and model endpoint off 443, so every reviewed
+        // destination carries its own port and no rule admits a port the deployment did not review.
+        let mut configuration = configuration();
+        configuration.allowed_egress = BTreeSet::from([
+            "10.201.0.0/16:9000".to_owned(),
+            "172.18.0.0/16:11434".to_owned(),
+        ]);
+        let bundle = build_sandbox_bundle(&configuration, &spec())?;
+        let policy = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "networkpolicies")
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert_eq!(
+            policy.document["spec"]["egress"]
+                .as_array()
+                .map(|egress| egress[1..].to_vec()),
+            Some(vec![
+                serde_json::json!({
+                    "to": [{"ipBlock": {"cidr": "10.201.0.0/16"}}],
+                    "ports": [{"protocol": "TCP", "port": 9000}],
+                }),
+                serde_json::json!({
+                    "to": [{"ipBlock": {"cidr": "172.18.0.0/16"}}],
+                    "ports": [{"protocol": "TCP", "port": 11434}],
+                }),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_reviewed_egress_destinations_fail_closed() {
+        for destination in [
+            "10.0.0.0/8",
+            "10.0.0.0/8:0",
+            "10.0.0.0/33:443",
+            "10.0.0.0/8:70000",
+            "10.0.0.0/8:https",
+        ] {
+            let mut configuration = configuration();
+            configuration.allowed_egress = BTreeSet::from([destination.to_owned()]);
+            assert_eq!(
+                build_sandbox_bundle(&configuration, &spec()).err(),
+                Some(SandboxBundleError::Invalid),
+                "{destination}"
+            );
+        }
+    }
+
+    #[test]
     fn cleanup_plan_only_names_attempt_owned_objects() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = build_sandbox_bundle(&configuration(), &spec())?;
         let resources = bundle
@@ -1464,7 +1538,7 @@ mod tests {
             Some(SandboxBundleError::Invalid)
         );
         let mut invalid = configuration();
-        invalid.allowed_egress_cidrs.clear();
+        invalid.allowed_egress.clear();
         assert_eq!(
             build_sandbox_bundle(&invalid, &spec()).err(),
             Some(SandboxBundleError::Invalid)
@@ -1473,6 +1547,51 @@ mod tests {
         invalid.image = "harbor.lab.lan/sandbox:latest".to_owned();
         assert_eq!(
             build_sandbox_bundle(&invalid, &spec()).err(),
+            Some(SandboxBundleError::Invalid)
+        );
+    }
+
+    #[test]
+    fn generated_instruction_prompts_fit_the_command_bounds() {
+        // The authored instruction prompt travels as an argv entry, so the bound must accept the
+        // generated prompts while still rejecting argv that would bloat the Job manifest.
+        let mut realistic = spec();
+        realistic.command = vec![
+            "claude".to_owned(),
+            "--system-prompt".to_owned(),
+            "S".repeat(4_477),
+            "P".repeat(12_288),
+        ];
+        assert!(build_sandbox_bundle(&configuration(), &realistic).is_ok());
+
+        let mut oversized_argument = spec();
+        oversized_argument.command = vec!["P".repeat(MAX_COMMAND_ARGUMENT_BYTES + 1)];
+        assert_eq!(
+            build_sandbox_bundle(&configuration(), &oversized_argument).err(),
+            Some(SandboxBundleError::Invalid)
+        );
+
+        let mut oversized_command = spec();
+        oversized_command.command = (0..8)
+            .map(|_| "P".repeat(MAX_COMMAND_ARGUMENT_BYTES))
+            .collect();
+        assert!(
+            oversized_command
+                .command
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                > MAX_COMMAND_BYTES
+        );
+        assert_eq!(
+            build_sandbox_bundle(&configuration(), &oversized_command).err(),
+            Some(SandboxBundleError::Invalid)
+        );
+
+        let mut oversized_material = spec();
+        oversized_material.material_size_bytes = MAX_MATERIAL_BYTES + 1;
+        assert_eq!(
+            build_sandbox_bundle(&configuration(), &oversized_material).err(),
             Some(SandboxBundleError::Invalid)
         );
     }
