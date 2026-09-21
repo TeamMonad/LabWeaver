@@ -68,6 +68,7 @@ fn request() -> AnsibleProbeExecutionRequest {
 
 /// Reviewed object-store CIDR the per-attempt egress policy admits.
 const OBJECT_STORE_EGRESS: &str = "10.96.0.0/12:9000";
+const OBJECT_STORE_POD_EGRESS: &str = "10.202.0.0/16:9000";
 
 fn binding() -> AnsibleProbeJobBinding {
     AnsibleProbeJobBinding {
@@ -79,7 +80,10 @@ fn binding() -> AnsibleProbeJobBinding {
             "2".repeat(64)
         ),
         request: request(),
-        object_store_egress: OBJECT_STORE_EGRESS.to_owned(),
+        object_store_egress: vec![
+            OBJECT_STORE_EGRESS.to_owned(),
+            OBJECT_STORE_POD_EGRESS.to_owned(),
+        ],
         materializer: MaterializeCommand {
             schema_version: ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
             artifacts: vec![MaterializeArtifact {
@@ -245,6 +249,10 @@ fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::err
                 "to":[{"ipBlock":{"cidr":"10.96.0.0/12"}}],
                 "ports":[{"protocol":"TCP","port":9000}],
             },
+            {
+                "to":[{"ipBlock":{"cidr":"10.202.0.0/16"}}],
+                "ports":[{"protocol":"TCP","port":9000}],
+            },
             {"to":[{"ipBlock":{"cidr":"192.168.56.10/32"}}],"ports":[{"protocol":"TCP","port":22}]},
         ])
     );
@@ -406,7 +414,7 @@ fn job_plan_rejects_mutable_or_mismatched_images_and_invalid_bindings()
     );
 
     let mut value = binding();
-    value.object_store_egress = "10.96.0.0".to_owned();
+    value.object_store_egress = vec!["10.96.0.0".to_owned()];
     assert_eq!(
         error_diagnostic(AnsibleProbeJobResources::build(&value))?,
         "LW_AP_JOB_BINDING_INVALID"

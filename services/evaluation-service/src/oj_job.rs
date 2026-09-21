@@ -45,7 +45,7 @@ pub struct OjJobBinding {
     /// The per-attempt policy admits DNS and exactly this `"<cidr>:<port>"` destination, so the
     /// attempt cannot reach any other network even though the signed URL is the only credential
     /// it holds.
-    pub object_store_egress: String,
+    pub object_store_egress: Vec<String>,
     /// Short-lived signed downloads and their destination roots. This command
     /// is mounted only by the init container.
     pub materializer: MaterializeCommand,
@@ -172,9 +172,29 @@ impl OjJobResources {
             "type":"Opaque",
             "data":materializer_data,
         });
-        let (object_store_cidr, object_store_port) =
-            parse_egress_destination(&binding.object_store_egress)
-                .ok_or(OjJobError::BindingInvalid)?;
+        let object_store_egress = binding
+            .object_store_egress
+            .iter()
+            .map(|destination| {
+                parse_egress_destination(destination)
+                    .map(|(cidr, port)| (cidr.to_owned(), port))
+                    .ok_or(OjJobError::BindingInvalid)
+            })
+            .collect::<Result<Vec<(String, u16)>, _>>()?;
+        let object_store_rules = object_store_egress
+            .iter()
+            .map(|(cidr, port)| {
+                json!({
+                    "to":[{"ipBlock":{"cidr":cidr}}],
+                    "ports":[{"protocol":"TCP","port":port}],
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut egress_rules = vec![json!({
+            "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
+            "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}],
+        })];
+        egress_rules.extend(object_store_rules);
         let network_policy = json!({
             "apiVersion":"networking.k8s.io/v1",
             "kind":"NetworkPolicy",
@@ -188,12 +208,7 @@ impl OjJobResources {
                 // has no URL Secret. Both destinations are reviewed: the
                 // namespace default deny admits nothing on its own, so this
                 // policy is the only egress the attempt can use.
-                "egress":[
-                    {"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
-                     "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},
-                    {"to":[{"ipBlock":{"cidr":object_store_cidr}}],
-                     "ports":[{"protocol":"TCP","port":object_store_port}]},
-                ],
+                "egress":egress_rules,
             },
         });
         let job = json!({
@@ -359,7 +374,11 @@ fn validate_binding(binding: &OjJobBinding) -> Result<(), OjJobError> {
         || !is_dns_name(&binding.service_account_name)
         || !is_dns_name(&binding.image_pull_secret_name)
         || !is_sha256_image(&binding.worker_image)
-        || parse_egress_destination(&binding.object_store_egress).is_none()
+        || binding.object_store_egress.is_empty()
+        || binding
+            .object_store_egress
+            .iter()
+            .any(|destination| parse_egress_destination(destination).is_none())
         || !binding
             .worker_image
             .ends_with(&binding.request.toolchain_image_digest)

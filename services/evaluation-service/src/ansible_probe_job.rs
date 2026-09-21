@@ -46,7 +46,7 @@ pub struct AnsibleProbeJobBinding {
     ///
     /// The per-attempt policy admits DNS, this destination and the reviewed SSH
     /// target only, so a probe script cannot reach any other network.
-    pub object_store_egress: String,
+    pub object_store_egress: Vec<String>,
     /// Signed package files mounted only into the input materializer init
     /// container; the probe worker sees only the resulting read-only root.
     pub materializer: MaterializeCommand,
@@ -171,9 +171,33 @@ impl AnsibleProbeJobResources {
             "type":"Opaque",
             "data":materializer_data,
         });
-        let (object_store_cidr, object_store_port) =
-            parse_egress_destination(&binding.object_store_egress)
-                .ok_or(AnsibleProbeJobError::BindingInvalid)?;
+        let object_store_egress = binding
+            .object_store_egress
+            .iter()
+            .map(|destination| {
+                parse_egress_destination(destination)
+                    .map(|(cidr, port)| (cidr.to_owned(), port))
+                    .ok_or(AnsibleProbeJobError::BindingInvalid)
+            })
+            .collect::<Result<Vec<(String, u16)>, _>>()?;
+        let object_store_rules = object_store_egress
+            .iter()
+            .map(|(cidr, port)| {
+                json!({
+                    "to":[{"ipBlock":{"cidr":cidr}}],
+                    "ports":[{"protocol":"TCP","port":port}],
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut egress_rules = vec![json!({
+            "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
+            "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}],
+        })];
+        egress_rules.extend(object_store_rules);
+        egress_rules.push(json!({
+            "to":[{"ipBlock":{"cidr":target_egress_cidr}}],
+            "ports":[{"protocol":"TCP","port":SSH_PORT}],
+        }));
         let network_policy = json!({
             "apiVersion":"networking.k8s.io/v1",
             "kind":"NetworkPolicy",
@@ -187,13 +211,7 @@ impl AnsibleProbeJobResources {
                 // SSH exception remains exact, and the namespace default deny
                 // admits nothing on its own, so this policy is the only egress
                 // the attempt can use.
-                "egress":[
-                    {"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
-                     "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},
-                    {"to":[{"ipBlock":{"cidr":object_store_cidr}}],
-                     "ports":[{"protocol":"TCP","port":object_store_port}]},
-                    {"to":[{"ipBlock":{"cidr":target_egress_cidr}}],"ports":[{"protocol":"TCP","port":SSH_PORT}]},
-                ],
+                "egress":egress_rules,
             },
         });
         let job = json!({
@@ -491,7 +509,11 @@ fn validate_binding(binding: &AnsibleProbeJobBinding) -> Result<(), AnsibleProbe
         || !is_dns_name(&binding.service_account_name)
         || !is_dns_name(&binding.image_pull_secret_name)
         || !image_matches_request(&binding.worker_image, &binding.request.runner_image_digest)
-        || parse_egress_destination(&binding.object_store_egress).is_none()
+        || binding.object_store_egress.is_empty()
+        || binding
+            .object_store_egress
+            .iter()
+            .any(|destination| parse_egress_destination(destination).is_none())
     {
         return Err(AnsibleProbeJobError::BindingInvalid);
     }
