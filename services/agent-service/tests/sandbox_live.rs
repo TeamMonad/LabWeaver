@@ -191,7 +191,7 @@ struct LiveEnvironment {
     configuration: KubernetesApiConfiguration,
     namespace: String,
     image: String,
-    egress_cidr: String,
+    egress_destination: String,
     buildkit_image: Option<String>,
     buildkit_config_map: Option<String>,
     pull_secret: Option<String>,
@@ -310,7 +310,7 @@ fn live_environment() -> Result<Option<LiveEnvironment>, Box<dyn Error>> {
         },
         namespace,
         image,
-        egress_cidr: required("LW_LIVE_SANDBOX_EGRESS_CIDR")?,
+        egress_destination: required("LW_LIVE_SANDBOX_EGRESS")?,
         buildkit_image,
         buildkit_config_map,
         pull_secret,
@@ -427,8 +427,7 @@ fn rendered_bundle(
     attempt: &LiveAttempt,
 ) -> Result<SandboxBundle, Box<dyn Error>> {
     let task_run_id = Uuid::now_v7();
-    let mut allowed_egress_cidrs = BTreeSet::new();
-    allowed_egress_cidrs.insert(environment.egress_cidr.clone());
+    let allowed_egress = BTreeSet::from([environment.egress_destination.clone()]);
     let ownership = KubernetesOwnership {
         run_id: Uuid::now_v7(),
         step_run_id: Uuid::now_v7(),
@@ -444,7 +443,7 @@ fn rendered_bundle(
         memory_bytes: 256 * 1024 * 1024,
         workspace_bytes: 256 * 1024 * 1024,
         wall_time_seconds: attempt.wall_time_seconds,
-        allowed_egress_cidrs,
+        allowed_egress,
         buildkit_image: environment.buildkit_image.clone(),
         buildkit_config_map_name: environment.buildkit_config_map.clone(),
     };
@@ -798,14 +797,17 @@ fn assert_per_attempt_policy(policy: &Value) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Asserts the applied per-attempt `NetworkPolicy` admits exactly the DNS and configured CIDR egress.
+/// Asserts the applied per-attempt `NetworkPolicy` admits exactly the DNS and reviewed egress.
 ///
 /// The applied document is asserted unconditionally: whether the cluster CNI enforces it is a
 /// separate, reported observation.
 fn assert_per_attempt_egress_policy(
     policy: &Value,
-    egress_cidr: &str,
+    egress_destination: &str,
 ) -> Result<(), Box<dyn Error>> {
+    let (egress_cidr, egress_port) =
+        task_execution::parse_egress_destination(egress_destination)
+            .ok_or("the live egress destination is not a reviewed cidr:port pair")?;
     let egress = policy
         .pointer("/spec/egress")
         .and_then(Value::as_array)
@@ -837,8 +839,8 @@ fn assert_per_attempt_egress_policy(
     );
     assert_eq!(
         egress[1].get("ports"),
-        Some(&json!([{"protocol": "TCP", "port": 443}])),
-        "the per-attempt policy must admit only TLS beyond the name-resolution rule"
+        Some(&json!([{"protocol": "TCP", "port": egress_port}])),
+        "the per-attempt policy must admit only the reviewed port beyond the name-resolution rule"
     );
     Ok(())
 }
@@ -1658,10 +1660,10 @@ async fn live_disallowed_egress_is_bounded_by_the_applied_policy() -> Result<(),
         &bundle.network_policy_name,
     )
     .await?;
-    assert_per_attempt_egress_policy(&policy, &environment.egress_cidr)?;
+    assert_per_attempt_egress_policy(&policy, &environment.egress_destination)?;
     println!(
-        "live egress policy readback: dns=kube-system:53 cidr={} tls=443",
-        environment.egress_cidr
+        "live egress policy readback: dns=kube-system:53 destination={}",
+        environment.egress_destination
     );
     if environment.attempt_inputs.is_some() {
         let observation = await_terminal(&api, &bundle.bundle.identity).await?;

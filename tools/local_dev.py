@@ -210,6 +210,35 @@ def _permitted_provider_scheme(base_url: SplitResult) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def local_object_store_port(agent_configuration: str) -> int:
+    """Return the port of the reviewed object store the agent attempts upload through.
+
+    The attempt policy names the object-store port explicitly, so the local stack
+    reads it from the rendered agent configuration instead of assuming TLS on 443.
+    """
+
+    match = re.search(
+        r"(?m)^\s*endpoint:\s*\"?https?://[^\s:\"]+:(\d+)/?\"?\s*$",
+        agent_configuration,
+    )
+    if match is None:
+        fail("agent configuration has no object store endpoint port")
+    return int(match.group(1))
+
+
+def local_provider_port(base_url: str) -> int:
+    """Return the port of the local model endpoint the sandbox must reach."""
+
+    parsed = urlsplit(base_url)
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    fail("provider base URL has no reviewed scheme")
+
+
 def local_service_cidr() -> str:
     """Return the Service CIDR of the owned cluster for reviewed egress rules.
 
@@ -2949,14 +2978,19 @@ def make_app_input(
             if replacements != 1:
                 fail("agent configuration has no sandbox.image")
             # Per-attempt NetworkPolicies name exact destinations, so the local
-            # stack renders the run's real Service CIDR and Kind network instead
-            # of the production placeholders.
-            egress_pattern = re.compile(r'(?m)^(\s*allowed_egress_cidrs:\s*)\[[^\]]*\]$')
+            # stack renders the run's real Service CIDR with the reviewed object
+            # store port and the Kind network with the local model endpoint port
+            # instead of the production placeholders.
+            object_store_port = local_object_store_port(data)
+            model_port = local_provider_port(provider_environment["ANTHROPIC_BASE_URL"])
+            egress_pattern = re.compile(r'(?m)^(\s*allowed_egress:\s*)\[[^\]]*\]$')
             data, replacements = egress_pattern.subn(
-                rf'\g<1>["{service_cidr}", "{kind_network_cidr}"]', data, count=1
+                rf'\g<1>["{service_cidr}:{object_store_port}", "{kind_network_cidr}:{model_port}"]',
+                data,
+                count=1,
             )
             if replacements != 1:
-                fail("agent configuration has no sandbox.allowed_egress_cidrs")
+                fail("agent configuration has no sandbox.allowed_egress")
             if authoring_buildkit_sidecar:
                 data = render_authoring_buildkit_sidecar(
                     data, platform_buildkit_image()
@@ -2976,13 +3010,13 @@ def make_app_input(
             if replacements != 1:
                 fail("evaluation service configuration has no coordinator.workerImage")
             egress_pattern = re.compile(
-                r"(?m)^(\s*objectStoreEgressCidr:\s*)[^\r\n]+$"
+                r"(?m)^(\s*objectStoreEgress:\s*)[^\r\n]+$"
             )
             data, replacements = egress_pattern.subn(
-                rf'\g<1>"{service_cidr}"', data, count=1
+                rf'\g<1>"{service_cidr}:{local_object_store_port(data)}"', data, count=1
             )
             if replacements != 1:
-                fail("evaluation service configuration has no execution.objectStoreEgressCidr")
+                fail("evaluation service configuration has no execution.objectStoreEgress")
         if source == "build-executor.yaml.example" and real_build_provider is not None:
             quota_pattern = re.compile(r"(?m)^(\s*projectStorageQuotaBytes:\s*)\d+\s*$")
             data, replacements = quota_pattern.subn(

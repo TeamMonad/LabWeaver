@@ -60,6 +60,21 @@ pub fn valid_cidr(value: &str) -> bool {
     }
 }
 
+/// Splits one reviewed egress destination of the form `"<cidr>:<port>"`.
+///
+/// A per-attempt `NetworkPolicy` names both the reviewed network and the exact port the reviewed
+/// service listens on, because deployments choose that port (an object store or model endpoint is
+/// not always HTTPS on 443). Sharing the parser keeps one authority for the accepted shape.
+#[must_use]
+pub fn parse_egress_destination(value: &str) -> Option<(&str, u16)> {
+    let (cidr, port) = value.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    if port == 0 || !valid_cidr(cidr) {
+        return None;
+    }
+    Some((cidr, port))
+}
+
 const MANAGED_BY_LABEL: &str = "labweaver.io/managed-by";
 const RUN_ID_LABEL: &str = "labweaver.io/run-id";
 const STEP_RUN_ID_LABEL: &str = "labweaver.io/step-run-id";

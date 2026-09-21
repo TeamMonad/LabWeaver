@@ -61,7 +61,7 @@ fn request() -> OjExecutionRequest {
 }
 
 /// Reviewed object-store CIDR the per-attempt egress policy admits.
-const OBJECT_STORE_EGRESS_CIDR: &str = "10.96.0.0/12";
+const OBJECT_STORE_EGRESS: &str = "10.96.0.0/12:9000";
 
 fn binding() -> OjJobBinding {
     let submission = b"submission-archive";
@@ -77,7 +77,7 @@ fn binding() -> OjJobBinding {
             "1".repeat(64)
         ),
         request,
-        object_store_egress_cidr: OBJECT_STORE_EGRESS_CIDR.to_owned(),
+        object_store_egress: OBJECT_STORE_EGRESS.to_owned(),
         materializer: MaterializeCommand {
             schema_version: evaluation_service::ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
             artifacts: vec![
@@ -287,8 +287,8 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
                 "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}],
             },
             {
-                "to":[{"ipBlock":{"cidr":OBJECT_STORE_EGRESS_CIDR}}],
-                "ports":[{"protocol":"TCP","port":443}],
+                "to":[{"ipBlock":{"cidr":"10.96.0.0/12"}}],
+                "ports":[{"protocol":"TCP","port":9000}],
             },
         ])
     );
@@ -403,7 +403,7 @@ fn job_plan_rejects_mutable_images_invalid_materializers_and_oversized_commands(
     );
 
     let mut value = binding();
-    value.object_store_egress_cidr = "objects.example.test".to_owned();
+    value.object_store_egress = "objects.example.test".to_owned();
     assert_eq!(
         error_diagnostic(OjJobResources::build(&value))?,
         "LW_OJ_JOB_BINDING_INVALID"

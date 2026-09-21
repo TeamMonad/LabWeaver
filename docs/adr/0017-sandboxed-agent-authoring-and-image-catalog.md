@@ -35,7 +35,7 @@
 
 ### 一次性负载的出网与进程上限
 
-- OJ run 与 Ansible probe 的 per-attempt `NetworkPolicy` 与 authoring 同形：只放行到 `kube-system` 的 DNS，再按 reviewed CIDR 放行对象存储（probe 另加精确 SSH 目标）。原先把 HTTPS 放行到任意地址的规则删除，`execution.objectStoreEgressCidr` 成为必填项，非法值启动失败。评测输入不进入 LLM 出网，因此不引入评测侧 DLP 分类。
+- OJ run 与 Ansible probe 的 per-attempt `NetworkPolicy` 与 authoring 同形：只放行到 `kube-system` 的 DNS，再按 reviewed CIDR 放行对象存储（probe 另加精确 SSH 目标）。原先把 HTTPS 放行到任意地址的规则删除，`execution.objectStoreEgress` 成为必填的 `<cidr>:<port>` 目标（对象存储端口由部署决定，不再假定 443），非法值启动失败；authoring 侧同理，`sandbox.allowed_egress` 的每一项都带端口，且启动校验必须包含对象存储端点端口。评测输入不进入 LLM 出网，因此不引入评测侧 DLP 分类。
 - gVisor 下进程上限不再由 OCI base spec 表达（`runsc` 无法从缺少 `mounts` 的 base spec 启动容器，且忽略 `linux.resources.pids`），改由节点的 kubelet `podPidsLimit` 在 Pod cgroup 上生效；本地 kind 在集群创建时写入该值。上限因此覆盖整个一次性 Pod 的每个容器，而不是单容器。
 
 ### VM 模板目录与按需 CDI 导入

@@ -173,11 +173,12 @@ pub struct EvaluationExecutionConfiguration {
     pub oj_service_account_name: String,
     pub ansible_probe_service_account_name: String,
     pub image_pull_secret_name: String,
-    /// Reviewed CIDR that contains the object store the attempt materializers download from.
+    /// Reviewed `"<cidr>:<port>"` destination of the object store the attempt materializers
+    /// download from.
     ///
     /// Every per-attempt `NetworkPolicy` narrows egress to DNS and this destination instead of
     /// admitting HTTPS anywhere, so an approved run cannot be used as a network pivot.
-    pub object_store_egress_cidr: String,
+    pub object_store_egress: String,
     pub resource_poll_interval_milliseconds: u64,
     pub resource_approval_timeout_seconds: u64,
     pub execution_observe_poll_interval_milliseconds: u64,
@@ -200,7 +201,8 @@ impl EvaluationExecutionConfiguration {
             || self.oj_service_account_name.trim().is_empty()
             || self.ansible_probe_service_account_name.trim().is_empty()
             || self.image_pull_secret_name.trim().is_empty()
-            || !task_execution::kubernetes::valid_cidr(&self.object_store_egress_cidr)
+            || task_execution::kubernetes::parse_egress_destination(&self.object_store_egress)
+                .is_none()
             || !(100..=30_000).contains(&self.resource_poll_interval_milliseconds)
             || !(1..=3_600).contains(&self.resource_approval_timeout_seconds)
             || !(100..=30_000).contains(&self.execution_observe_poll_interval_milliseconds)
@@ -1322,7 +1324,7 @@ impl KubernetesEvaluationRunner {
             image_pull_secret_name: self.configuration.image_pull_secret_name.clone(),
             worker_image: context.run.identity.runtime_identity.runner_image.clone(),
             request: request.clone(),
-            object_store_egress_cidr: self.configuration.object_store_egress_cidr.clone(),
+            object_store_egress: self.configuration.object_store_egress.clone(),
             materializer,
             materializer_ca_bundle: self.materializer_ca_bundle.clone(),
         };
@@ -1561,7 +1563,7 @@ impl KubernetesEvaluationRunner {
             image_pull_secret_name: self.configuration.image_pull_secret_name.clone(),
             worker_image: context.run.identity.runtime_identity.runner_image.clone(),
             request: request.clone(),
-            object_store_egress_cidr: self.configuration.object_store_egress_cidr.clone(),
+            object_store_egress: self.configuration.object_store_egress.clone(),
             materializer,
             materializer_ca_bundle: self.materializer_ca_bundle.clone(),
         };
@@ -4000,7 +4002,7 @@ mod probe_recovery_tests {
             oj_service_account_name: "oj-runner".to_owned(),
             ansible_probe_service_account_name: "ansible-probe".to_owned(),
             image_pull_secret_name: "pull-secret".to_owned(),
-            object_store_egress_cidr: "10.96.0.0/12".to_owned(),
+            object_store_egress: "10.96.0.0/12:443".to_owned(),
             resource_poll_interval_milliseconds: 100,
             resource_approval_timeout_seconds: 10,
             execution_observe_poll_interval_milliseconds: 100,

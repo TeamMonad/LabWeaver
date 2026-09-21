@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use task_execution::SANDBOX_RUNTIME_CLASS;
-use task_execution::kubernetes::valid_cidr;
+use task_execution::kubernetes::parse_egress_destination;
 use thiserror::Error;
 
 use crate::{
@@ -42,10 +42,10 @@ pub struct OjJobBinding {
     pub request: OjExecutionRequest,
     /// Reviewed CIDR that contains the object store the materializer downloads from.
     ///
-    /// The per-attempt policy admits DNS and exactly this destination, so the attempt
-    /// cannot reach any other network even though the signed URL is the only credential
+    /// The per-attempt policy admits DNS and exactly this `"<cidr>:<port>"` destination, so the
+    /// attempt cannot reach any other network even though the signed URL is the only credential
     /// it holds.
-    pub object_store_egress_cidr: String,
+    pub object_store_egress: String,
     /// Short-lived signed downloads and their destination roots. This command
     /// is mounted only by the init container.
     pub materializer: MaterializeCommand,
@@ -172,6 +172,9 @@ impl OjJobResources {
             "type":"Opaque",
             "data":materializer_data,
         });
+        let (object_store_cidr, object_store_port) =
+            parse_egress_destination(&binding.object_store_egress)
+                .ok_or(OjJobError::BindingInvalid)?;
         let network_policy = json!({
             "apiVersion":"networking.k8s.io/v1",
             "kind":"NetworkPolicy",
@@ -188,8 +191,8 @@ impl OjJobResources {
                 "egress":[
                     {"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
                      "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},
-                    {"to":[{"ipBlock":{"cidr":binding.object_store_egress_cidr}}],
-                     "ports":[{"protocol":"TCP","port":443}]},
+                    {"to":[{"ipBlock":{"cidr":object_store_cidr}}],
+                     "ports":[{"protocol":"TCP","port":object_store_port}]},
                 ],
             },
         });
@@ -356,7 +359,7 @@ fn validate_binding(binding: &OjJobBinding) -> Result<(), OjJobError> {
         || !is_dns_name(&binding.service_account_name)
         || !is_dns_name(&binding.image_pull_secret_name)
         || !is_sha256_image(&binding.worker_image)
-        || !valid_cidr(&binding.object_store_egress_cidr)
+        || parse_egress_destination(&binding.object_store_egress).is_none()
         || !binding
             .worker_image
             .ends_with(&binding.request.toolchain_image_digest)

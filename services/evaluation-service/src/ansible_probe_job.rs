@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use task_execution::SANDBOX_RUNTIME_CLASS;
-use task_execution::kubernetes::valid_cidr;
+use task_execution::kubernetes::parse_egress_destination;
 use thiserror::Error;
 
 use crate::{
@@ -42,11 +42,11 @@ pub struct AnsibleProbeJobBinding {
     pub image_pull_secret_name: String,
     pub worker_image: String,
     pub request: AnsibleProbeExecutionRequest,
-    /// Reviewed CIDR that contains the object store the materializer downloads from.
+    /// Reviewed `"<cidr>:<port>"` destination of the object store the materializer downloads from.
     ///
     /// The per-attempt policy admits DNS, this destination and the reviewed SSH
     /// target only, so a probe script cannot reach any other network.
-    pub object_store_egress_cidr: String,
+    pub object_store_egress: String,
     /// Signed package files mounted only into the input materializer init
     /// container; the probe worker sees only the resulting read-only root.
     pub materializer: MaterializeCommand,
@@ -171,6 +171,9 @@ impl AnsibleProbeJobResources {
             "type":"Opaque",
             "data":materializer_data,
         });
+        let (object_store_cidr, object_store_port) =
+            parse_egress_destination(&binding.object_store_egress)
+                .ok_or(AnsibleProbeJobError::BindingInvalid)?;
         let network_policy = json!({
             "apiVersion":"networking.k8s.io/v1",
             "kind":"NetworkPolicy",
@@ -187,8 +190,8 @@ impl AnsibleProbeJobResources {
                 "egress":[
                     {"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
                      "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]},
-                    {"to":[{"ipBlock":{"cidr":binding.object_store_egress_cidr}}],
-                     "ports":[{"protocol":"TCP","port":443}]},
+                    {"to":[{"ipBlock":{"cidr":object_store_cidr}}],
+                     "ports":[{"protocol":"TCP","port":object_store_port}]},
                     {"to":[{"ipBlock":{"cidr":target_egress_cidr}}],"ports":[{"protocol":"TCP","port":SSH_PORT}]},
                 ],
             },
@@ -488,7 +491,7 @@ fn validate_binding(binding: &AnsibleProbeJobBinding) -> Result<(), AnsibleProbe
         || !is_dns_name(&binding.service_account_name)
         || !is_dns_name(&binding.image_pull_secret_name)
         || !image_matches_request(&binding.worker_image, &binding.request.runner_image_digest)
-        || !valid_cidr(&binding.object_store_egress_cidr)
+        || parse_egress_destination(&binding.object_store_egress).is_none()
     {
         return Err(AnsibleProbeJobError::BindingInvalid);
     }
