@@ -51,6 +51,15 @@
         "sshPort": 22
       }
     ],
+    "runtimeVmBase": {
+      "storageClassBinding": "vm-rwo-primary-v1",
+      "storageClassName": "local-path",
+      "dataSourceNamespace": "labweaver-system",
+      "guestUser": "lab",
+      "sshPort": 22,
+      "maxBases": 8,
+      "maxCapacityBytes": 137438953472
+    },
     "collectorWorkspaceRoot": "/home/lab/workspace",
     "sshUserCaPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
     "sshUserCaPrivateKeyPath": "/etc/labweaver/secrets/collector-ssh-user-ca-key",

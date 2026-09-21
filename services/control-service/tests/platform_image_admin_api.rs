@@ -38,7 +38,9 @@ use contracts::http::{
     PlatformImageEntry, PlatformImageEntryView, PlatformImageKind, PlatformImageStatus,
     PlatformImageUploadSession, RegisterPlatformImageRequest, RepinPlatformImageRequest,
 };
-use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
+use contracts::supply_chain::{
+    EnvironmentTemplateRelease, ImageArtifact, VirtualMachineDiskFormat,
+};
 use contracts::{
     ActorId, ApprovalId, ArtifactId, ArtifactRef, AuthenticatedActor, AuthorizationDecision,
     AuthorizationDecisionRequest, BffSessionId, BuildRequestId, CandidateId, CourseId,
@@ -438,6 +440,9 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
                 target_reference: "harbor.lab.lan/labweaver-system/java:21".to_owned(),
                 archive_bytes: 4_096,
                 archive_media_type: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE.to_owned(),
+                disk_format: None,
+                disk_path: None,
+                capacity_bytes: None,
                 trust_revision: 1,
                 reason: "reviewed OCI archive".to_owned(),
             })?),
@@ -533,6 +538,105 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
         ))
     );
 
+    // A virtual-machine upload carries the reviewed disk descriptor through the staging fence and
+    // into the internal import request the Agent wraps.
+    let vm_upload = app
+        .clone()
+        .oneshot(admin_request(
+            "/api/v1/admin/images/uploads".to_owned(),
+            "POST",
+            actor_id,
+            session_id,
+            Some("vm-upload-key"),
+            Some(serde_json::to_vec(&CreatePlatformImageUploadRequest {
+                kind: PlatformImageKind::VirtualMachine,
+                binding: "ubuntu-24.04-vm-v1".to_owned(),
+                target_reference: "harbor.lab.lan/labweaver-system/ubuntu-vm:24.04".to_owned(),
+                archive_bytes: 8_192,
+                archive_media_type: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE.to_owned(),
+                disk_format: Some(VirtualMachineDiskFormat::Qcow2),
+                disk_path: Some("disk/disk.qcow2".to_owned()),
+                capacity_bytes: Some(10_737_418_240),
+                trust_revision: 1,
+                reason: "reviewed VM base disk".to_owned(),
+            })?),
+        )?)
+        .await?;
+    assert_eq!(vm_upload.status(), StatusCode::CREATED);
+    let vm_session: PlatformImageUploadSession =
+        serde_json::from_slice(&to_bytes(vm_upload.into_body(), usize::MAX).await?)?;
+    assert_eq!(
+        vm_session.disk_format,
+        Some(VirtualMachineDiskFormat::Qcow2)
+    );
+    assert_eq!(vm_session.disk_path.as_deref(), Some("disk/disk.qcow2"));
+    assert_eq!(vm_session.capacity_bytes, Some(10_737_418_240));
+
+    let vm_complete = app
+        .clone()
+        .oneshot(admin_request(
+            format!(
+                "/api/v1/admin/images/uploads/{}/complete",
+                vm_session.upload_id
+            ),
+            "POST",
+            actor_id,
+            session_id,
+            Some("vm-complete-key"),
+            Some(b"{}".to_vec()),
+        )?)
+        .await?;
+    let vm_complete_status = vm_complete.status();
+    let vm_complete_bytes = to_bytes(vm_complete.into_body(), usize::MAX).await?;
+    assert_eq!(
+        vm_complete_status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&vm_complete_bytes)
+    );
+    let vm_import_body = received_body(&received, "import_vm")?;
+    assert_eq!(
+        vm_import_body.get("diskFormat").and_then(Value::as_str),
+        Some("qcow2")
+    );
+    assert_eq!(
+        vm_import_body.get("diskPath").and_then(Value::as_str),
+        Some("disk/disk.qcow2")
+    );
+    assert_eq!(
+        vm_import_body.get("capacityBytes").and_then(Value::as_u64),
+        Some(10_737_418_240)
+    );
+
+    // A partially declared VM descriptor fails closed at staging before any row is written.
+    let partial_vm = app
+        .clone()
+        .oneshot(admin_request(
+            "/api/v1/admin/images/uploads".to_owned(),
+            "POST",
+            actor_id,
+            session_id,
+            Some("vm-partial-key"),
+            Some(serde_json::to_vec(&CreatePlatformImageUploadRequest {
+                kind: PlatformImageKind::VirtualMachine,
+                binding: "ubuntu-24.04-vm-v1".to_owned(),
+                target_reference: "harbor.lab.lan/labweaver-system/ubuntu-vm:24.04".to_owned(),
+                archive_bytes: 8_192,
+                archive_media_type: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE.to_owned(),
+                disk_format: Some(VirtualMachineDiskFormat::Qcow2),
+                disk_path: None,
+                capacity_bytes: Some(10_737_418_240),
+                trust_revision: 1,
+                reason: "misdeclared VM disk".to_owned(),
+            })?),
+        )?)
+        .await?;
+    assert_eq!(partial_vm.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        problem_body(partial_vm).await?.diagnostic_code.as_str(),
+        "LW_PLATFORM_IMAGE_UPLOAD_INVALID"
+    );
+
     // An Agent rejection closes the staging session as failed, keeps the upstream diagnostic and
     // still schedules the frozen archive for deletion.
     let rejected_response = app
@@ -549,6 +653,9 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
                 target_reference: "harbor.lab.lan/labweaver-system/conflict:v1".to_owned(),
                 archive_bytes: 2_048,
                 archive_media_type: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE.to_owned(),
+                disk_format: None,
+                disk_path: None,
+                capacity_bytes: None,
                 trust_revision: 1,
                 reason: "conflicting catalog binding".to_owned(),
             })?),
@@ -752,6 +859,9 @@ fn platform_image_entry(
         status: PlatformImageStatus::Active,
         trust_revision: 1,
         repin_generation: 1,
+        capacity_bytes: None,
+        disk_sha256: None,
+        format: None,
         pinned_at: now,
         updated_at: now,
     }
@@ -1248,7 +1358,11 @@ async fn agent_import_image(
     State(state): State<AgentState>,
     Json(request): Json<InternalPlatformImageImportRequest>,
 ) -> Response {
-    if record_request(&state, "import", json!(request)).is_err() {
+    let route = match request.kind {
+        PlatformImageKind::VirtualMachine => "import_vm",
+        PlatformImageKind::Container => "import",
+    };
+    if record_request(&state, route, json!(request)).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     if request.binding == CONFLICT_BINDING {

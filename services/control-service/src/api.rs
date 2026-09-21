@@ -1226,6 +1226,7 @@ async fn complete_project_authoring_approval(
         project_id,
     )
     .await?;
+    let catalog = state.agent.list_platform_images(&headers).await?;
     let approval = state
         .control
         .complete_authoring_approval(
@@ -1235,6 +1236,7 @@ async fn complete_project_authoring_approval(
             &idempotency(&headers)?,
             now()?,
             &trace_id(&headers),
+            &catalog.entries,
         )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &approval, approval.revision))
@@ -2524,6 +2526,9 @@ async fn complete_admin_image_upload(
         target_reference: staging.target_reference,
         archive: staging.archive,
         archive_object_key: staging.archive_object_key,
+        disk_format: staging.disk_format,
+        disk_path: staging.disk_path,
+        capacity_bytes: staging.capacity_bytes,
         trust_revision: staging.trust_revision,
         actor_id: staging.actor_id,
         reason: staging.reason,

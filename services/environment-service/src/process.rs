@@ -22,7 +22,7 @@ use crate::{
     NatsContainerProviderBackend, NatsEnvironmentProvider, NatsKubeVirtProviderBackend,
     NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher,
     PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry,
-    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler,
+    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler, RuntimeVmBasePolicy,
     VmFreezeBindingConfiguration, WorkAdmissionClient, connect_nats_mtls,
 };
 
@@ -240,6 +240,7 @@ impl EnvironmentProcessRuntime {
                         KubeVirtProviderConfiguration::new(
                             configuration.trust_revision()?,
                             configuration.base_disk_bindings()?,
+                            configuration.runtime_vm_base_policy()?,
                             KubeVirtSshBootstrap::new(
                                 configuration
                                     .gateway_namespace
@@ -774,6 +775,7 @@ struct ProviderBindingConfiguration {
     active_image_policy_revision: Option<u64>,
     active_trust_revision: Option<u64>,
     base_disks: Option<Vec<BaseDiskConfiguration>>,
+    runtime_vm_base: Option<RuntimeVmBaseConfiguration>,
     gateway_pod_label: Option<String>,
     collector_namespace: Option<String>,
     collector_pod_label: Option<String>,
@@ -804,6 +806,19 @@ struct BaseDiskConfiguration {
     data_source_name: String,
     guest_user: String,
     ssh_port: u16,
+}
+
+/// Optional deployment-owned policy admitting release-declared VM base disks that are not seeded.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeVmBaseConfiguration {
+    storage_class_binding: String,
+    storage_class_name: String,
+    data_source_namespace: String,
+    guest_user: String,
+    ssh_port: u16,
+    max_bases: u32,
+    max_capacity_bytes: u64,
 }
 
 impl ProviderBindingConfiguration {
@@ -863,6 +878,25 @@ impl ProviderBindingConfiguration {
             .collect()
     }
 
+    fn runtime_vm_base_policy(
+        &self,
+    ) -> Result<Option<RuntimeVmBasePolicy>, EnvironmentProcessRuntimeError> {
+        let Some(configuration) = self.runtime_vm_base.as_ref() else {
+            return Ok(None);
+        };
+        RuntimeVmBasePolicy::new(
+            configuration.storage_class_binding.clone(),
+            configuration.storage_class_name.clone(),
+            configuration.data_source_namespace.clone(),
+            configuration.guest_user.clone(),
+            configuration.ssh_port,
+            configuration.max_bases,
+            configuration.max_capacity_bytes,
+        )
+        .map(Some)
+        .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)
+    }
+
     fn vm_guest_user(&self) -> Result<String, EnvironmentProcessRuntimeError> {
         let bases = self
             .base_disks
@@ -907,6 +941,7 @@ impl ProviderBindingConfiguration {
 
     fn has_kubevirt_fields(&self) -> bool {
         self.base_disks.is_some()
+            || self.runtime_vm_base.is_some()
             || self.gateway_pod_label.is_some()
             || self.collector_namespace.is_some()
             || self.collector_pod_label.is_some()
@@ -1066,6 +1101,54 @@ mod deployment_contract_tests {
         );
         assert!(!example.contains(".v2"));
         assert!(!example.contains("activeTrustBundleSha256"));
+
+        let kubevirt = bindings
+            .iter()
+            .find(|binding| binding.provider_kind.as_deref() == Some("kubevirt"))
+            .expect("kubevirt provider example");
+        let runtime = kubevirt
+            .runtime_vm_base_policy()
+            .expect("valid runtime vm base policy")
+            .expect("example declares the runtime vm base policy");
+        assert_eq!(runtime.max_bases(), 8);
+        assert_eq!(runtime.max_capacity_bytes(), 137_438_953_472);
+        assert_eq!(runtime.storage_class_binding(), "vm-rwo-primary-v1");
+    }
+
+    #[test]
+    fn invalid_runtime_vm_base_policy_fails_closed() {
+        let example = include_str!("../../../deploy/config/environment-providers.json.example");
+        let mut bindings: Vec<ProviderBindingConfiguration> =
+            serde_json::from_str(example).expect("provider example must deserialize");
+
+        {
+            let kubevirt = bindings
+                .iter_mut()
+                .find(|binding| binding.provider_kind.as_deref() == Some("kubevirt"))
+                .expect("kubevirt provider example");
+
+            kubevirt
+                .runtime_vm_base
+                .as_mut()
+                .expect("example declares the runtime policy")
+                .max_capacity_bytes = 0;
+            assert!(matches!(
+                kubevirt.runtime_vm_base_policy(),
+                Err(EnvironmentProcessRuntimeError::ConfigParse)
+            ));
+
+            kubevirt
+                .runtime_vm_base
+                .as_mut()
+                .expect("example declares the runtime policy")
+                .max_capacity_bytes = 137_438_953_472;
+            // A binding carrying both container-only and runtime base fields is rejected.
+            kubevirt.access_namespace = Some("labweaver-system".to_owned());
+        }
+        assert!(matches!(
+            freeze_binding_configuration(&bindings),
+            Err(EnvironmentProcessRuntimeError::ConfigParse)
+        ));
     }
 
     #[test]

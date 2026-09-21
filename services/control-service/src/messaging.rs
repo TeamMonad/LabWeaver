@@ -20,7 +20,7 @@ use contracts::events::{
 };
 use contracts::http::{
     GeneratedArtifactKind, GeneratedArtifactQuery, GeneratedArtifactRecord, IdempotencyKey,
-    InternalPublishEvaluationReleaseRequest,
+    InternalPublishEvaluationReleaseRequest, PlatformImageCatalog,
 };
 use contracts::{
     ApprovalId, DiagnosticCode, EventId, ImageArtifactId, ProjectId, Revision, UtcTimestamp,
@@ -104,6 +104,25 @@ impl BuildArtifactAuthority for AgentClient {
     ) -> Result<contracts::http::InternalImageArtifactResolution, crate::clients::DownstreamError>
     {
         AgentClient::artifact(self, artifact_id).await
+    }
+}
+
+/// Agent-owned platform image catalog readback used to re-resolve published VM base identities.
+#[async_trait]
+pub trait PlatformImageAuthority: Send + Sync {
+    async fn platform_images(
+        &self,
+    ) -> Result<PlatformImageCatalog, crate::clients::DownstreamError>;
+}
+
+#[async_trait]
+impl PlatformImageAuthority for AgentClient {
+    async fn platform_images(
+        &self,
+    ) -> Result<PlatformImageCatalog, crate::clients::DownstreamError> {
+        self.list_platform_images(&HeaderMap::new())
+            .await
+            .map_err(|_| DownstreamError::Unavailable)
     }
 }
 
@@ -674,10 +693,11 @@ impl AuthoringPublicationConsumer {
     }
 
     /// Runs one publication trigger and acknowledges it only after the durable status transition.
-    pub async fn process_next<E: EvaluationAuthority>(
+    pub async fn process_next<E: EvaluationAuthority, A: PlatformImageAuthority>(
         &mut self,
         control: &ControlService,
         evaluation: &E,
+        images: &A,
     ) -> Result<(), MessagingError> {
         let message = self
             .messages
@@ -780,8 +800,32 @@ impl AuthoringPublicationConsumer {
             return Ok(());
         }
 
+        let catalog = match images.platform_images().await {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let diagnostic = diagnostic_code(&error.to_string());
+                self.handle_publication_failure(
+                    control,
+                    &message,
+                    event.id,
+                    approval.id,
+                    approval.project_id,
+                    "authoring_publication.platform_images",
+                    diagnostic,
+                    true,
+                    now,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         let environment_release = match control
-            .publish_authoring_environment_release(&approval, now, &event.trace_id)
+            .publish_authoring_environment_release(
+                &approval,
+                now,
+                &event.trace_id,
+                &catalog.entries,
+            )
             .await
         {
             Ok(release) => release,

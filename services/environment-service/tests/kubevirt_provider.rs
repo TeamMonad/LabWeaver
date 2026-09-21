@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -31,12 +31,14 @@ use contracts::{
     LeaseId, PolicyId, ReleaseId, ResourceRequestId, Revision, UtcTimestamp,
 };
 use environment_service::{
-    ContainerReleaseResolver, EnvironmentProvider, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
-    KubeVirtBackendFence, KubeVirtBaseDiskBinding, KubeVirtCleanupPlan, KubeVirtObservationStore,
-    KubeVirtObservationStoreError, KubeVirtProvider, KubeVirtProviderBackend,
-    KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, KubeVirtSshBootstrap, KubeVirtStoppedObservation, ProviderFailure,
-    ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
+    CdiImportClient, CdiImportError, ContainerReleaseResolver, EnvironmentProvider,
+    KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence, KubeVirtBaseDiskBinding,
+    KubeVirtBaseDiskIdentity, KubeVirtBaseDiskImport, KubeVirtCleanupPlan,
+    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
+    KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResourceBudget,
+    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
+    KubeVirtStoppedObservation, ProviderFailure, ReconcileAction, ReleaseProjectionError,
+    ResolvedContainerRelease, RuntimeVmBasePolicy, ensure_base_disk,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::json;
@@ -990,6 +992,7 @@ fn provider_with_budget(
         KubeVirtProviderConfiguration::new(
             revision(1),
             vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
+            None,
             KubeVirtSshBootstrap::new(
                 "access-system".to_owned(),
                 "openssh-gateway".to_owned(),
@@ -1167,4 +1170,568 @@ fn revision(value: u64) -> Revision {
 
 fn timestamp(value: &str) -> UtcTimestamp {
     UtcTimestamp::from_str(value).expect("valid timestamp")
+}
+
+const RUNTIME_MANIFEST_HEX: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
+const RUNTIME_DIGEST: &str = concat!(
+    "docker://quay.io/containerdisks/debian@sha256:",
+    "1111111111111111111111111111111111111111111111111111111111111111"
+);
+const SECOND_RUNTIME_MANIFEST_HEX: &str =
+    "2222222222222222222222222222222222222222222222222222222222222222";
+const SECOND_RUNTIME_DIGEST: &str = concat!(
+    "docker://quay.io/containerdisks/debian@sha256:",
+    "2222222222222222222222222222222222222222222222222222222222222222"
+);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FixtureImportOutcome {
+    Succeeds,
+    Fails,
+}
+
+struct FixtureCdiImport {
+    data_sources: Mutex<BTreeMap<(String, String), BTreeMap<String, String>>>,
+    applied_data_volumes: Mutex<Vec<String>>,
+    published_data_sources: Mutex<Vec<String>>,
+    outcome: FixtureImportOutcome,
+}
+
+impl FixtureCdiImport {
+    fn new(outcome: FixtureImportOutcome) -> Self {
+        Self {
+            data_sources: Mutex::new(BTreeMap::new()),
+            applied_data_volumes: Mutex::new(Vec::new()),
+            published_data_sources: Mutex::new(Vec::new()),
+            outcome,
+        }
+    }
+
+    fn seed_data_source(&self, namespace: &str, name: &str, annotations: BTreeMap<String, String>) {
+        self.data_sources
+            .lock()
+            .expect("data sources lock")
+            .insert((namespace.to_owned(), name.to_owned()), annotations);
+    }
+}
+
+/// Mirrors the reviewed annotation contract the real importer writes so the reuse path is
+/// exercised without a cluster.
+fn recorded_identity_annotations(import: &KubeVirtBaseDiskImport) -> BTreeMap<String, String> {
+    let mut annotations = BTreeMap::from([
+        (
+            "labweaver.io/source-registry".to_owned(),
+            import.source_registry_digest.clone(),
+        ),
+        (
+            "labweaver.io/base-disk-identity".to_owned(),
+            import.identity.as_str().to_owned(),
+        ),
+        (
+            "labweaver.io/base-disk-capacity-bytes".to_owned(),
+            import.capacity_bytes.to_string(),
+        ),
+    ]);
+    if import.identity == KubeVirtBaseDiskIdentity::ReviewedDiskSha256 {
+        annotations.insert(
+            "labweaver.io/disk-sha256".to_owned(),
+            import.disk_sha256.clone(),
+        );
+    }
+    annotations
+}
+
+#[async_trait]
+impl CdiImportClient for FixtureCdiImport {
+    async fn read_base_data_source(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<BTreeMap<String, String>>, CdiImportError> {
+        Ok(self
+            .data_sources
+            .lock()
+            .expect("data sources lock")
+            .get(&(namespace.to_owned(), name.to_owned()))
+            .cloned())
+    }
+
+    async fn import_base_data_volume(
+        &self,
+        import: &KubeVirtBaseDiskImport,
+    ) -> Result<String, CdiImportError> {
+        self.applied_data_volumes
+            .lock()
+            .expect("applied lock")
+            .push(import.data_volume_name());
+        if self.outcome == FixtureImportOutcome::Fails {
+            return Err(CdiImportError::ImportFailed);
+        }
+        Ok("11111111-1111-4111-8111-111111111111".to_owned())
+    }
+
+    async fn publish_base_data_source(
+        &self,
+        import: &KubeVirtBaseDiskImport,
+        data_volume_uid: &str,
+    ) -> Result<(), CdiImportError> {
+        self.published_data_sources
+            .lock()
+            .expect("published lock")
+            .push(format!("{}:{data_volume_uid}", import.data_source_name));
+        self.seed_data_source(
+            &import.data_source_namespace,
+            &import.data_source_name,
+            recorded_identity_annotations(import),
+        );
+        Ok(())
+    }
+}
+
+fn import_request(binding: &KubeVirtBaseDiskBinding) -> KubeVirtBaseDiskImport {
+    KubeVirtBaseDiskImport {
+        data_source_namespace: binding.data_source_namespace.clone(),
+        data_source_name: binding.data_source_name.clone(),
+        source_registry_digest: binding.source_registry_digest.clone(),
+        disk_sha256: binding.disk_sha256.clone(),
+        identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
+        storage_class_name: binding.storage_class_name.clone(),
+        capacity_bytes: binding.capacity_bytes,
+    }
+}
+
+#[tokio::test]
+async fn base_disk_import_creates_then_reuses_without_recreating() {
+    let binding = ubuntu_base_disk("local-path".to_owned()).expect("base disk binding");
+    let import = import_request(&binding);
+    let client = FixtureCdiImport::new(FixtureImportOutcome::Succeeds);
+
+    let created = ensure_base_disk(&client, &import)
+        .await
+        .expect("first use imports the base disk");
+    assert_eq!(created.data_source_namespace, "labweaver-system");
+    assert_eq!(created.data_source_name, "ubuntu-lab-base-v1");
+    assert_eq!(
+        client
+            .applied_data_volumes
+            .lock()
+            .expect("applied lock")
+            .as_slice(),
+        ["ubuntu-lab-base-v1-seed"]
+    );
+    assert_eq!(
+        client
+            .published_data_sources
+            .lock()
+            .expect("published lock")
+            .len(),
+        1
+    );
+
+    ensure_base_disk(&client, &import)
+        .await
+        .expect("second use reuses the published DataSource");
+    assert_eq!(
+        client
+            .applied_data_volumes
+            .lock()
+            .expect("applied lock")
+            .len(),
+        1
+    );
+    assert_eq!(
+        client
+            .published_data_sources
+            .lock()
+            .expect("published lock")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn base_disk_import_rejects_recorded_identity_drift() {
+    let binding = ubuntu_base_disk("local-path".to_owned()).expect("base disk binding");
+    let import = import_request(&binding);
+    let client = FixtureCdiImport::new(FixtureImportOutcome::Succeeds);
+
+    let mut registry_drift = recorded_identity_annotations(&import);
+    registry_drift.insert(
+        "labweaver.io/source-registry".to_owned(),
+        RUNTIME_DIGEST.to_owned(),
+    );
+    client.seed_data_source("labweaver-system", "ubuntu-lab-base-v1", registry_drift);
+    assert!(matches!(
+        ensure_base_disk(&client, &import).await,
+        Err(CdiImportError::IdentityMismatch)
+    ));
+
+    let mut disk_drift = recorded_identity_annotations(&import);
+    disk_drift.insert(
+        "labweaver.io/disk-sha256".to_owned(),
+        SECOND_RUNTIME_MANIFEST_HEX.to_owned(),
+    );
+    client.seed_data_source("labweaver-system", "ubuntu-lab-base-v1", disk_drift);
+    assert!(matches!(
+        ensure_base_disk(&client, &import).await,
+        Err(CdiImportError::IdentityMismatch)
+    ));
+
+    assert!(
+        client
+            .applied_data_volumes
+            .lock()
+            .expect("applied lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn base_disk_import_rejects_over_capacity_reuse() {
+    let binding = ubuntu_base_disk("local-path".to_owned()).expect("base disk binding");
+    let import = import_request(&binding);
+    let client = FixtureCdiImport::new(FixtureImportOutcome::Succeeds);
+
+    let mut over_capacity = recorded_identity_annotations(&import);
+    over_capacity.insert(
+        "labweaver.io/base-disk-capacity-bytes".to_owned(),
+        (import.capacity_bytes + 1).to_string(),
+    );
+    client.seed_data_source("labweaver-system", "ubuntu-lab-base-v1", over_capacity);
+
+    assert!(matches!(
+        ensure_base_disk(&client, &import).await,
+        Err(CdiImportError::CapacityExceeded)
+    ));
+    assert!(
+        client
+            .applied_data_volumes
+            .lock()
+            .expect("applied lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn base_disk_import_failure_never_publishes_a_data_source() {
+    let binding = ubuntu_base_disk("local-path".to_owned()).expect("base disk binding");
+    let import = import_request(&binding);
+    let client = FixtureCdiImport::new(FixtureImportOutcome::Fails);
+
+    for _ in 0..2 {
+        assert!(matches!(
+            ensure_base_disk(&client, &import).await,
+            Err(CdiImportError::ImportFailed)
+        ));
+    }
+    assert_eq!(
+        client
+            .applied_data_volumes
+            .lock()
+            .expect("applied lock")
+            .len(),
+        2
+    );
+    assert!(
+        client
+            .published_data_sources
+            .lock()
+            .expect("published lock")
+            .is_empty()
+    );
+}
+
+fn runtime_policy(max_bases: u32, max_capacity_bytes: u64) -> RuntimeVmBasePolicy {
+    RuntimeVmBasePolicy::new(
+        "vm-rwo-primary-v1".to_owned(),
+        "local-path".to_owned(),
+        "labweaver-system".to_owned(),
+        "lab".to_owned(),
+        22,
+        max_bases,
+        max_capacity_bytes,
+    )
+    .expect("runtime vm base policy")
+}
+
+#[test]
+fn runtime_policy_rejects_invalid_fields() {
+    let base = (
+        "vm-rwo-primary-v1".to_owned(),
+        "local-path".to_owned(),
+        "labweaver-system".to_owned(),
+        "lab".to_owned(),
+    );
+    assert!(
+        RuntimeVmBasePolicy::new(
+            String::new(),
+            base.1.clone(),
+            base.2.clone(),
+            base.3.clone(),
+            22,
+            8,
+            1
+        )
+        .is_err()
+    );
+    assert!(
+        RuntimeVmBasePolicy::new(
+            base.0.clone(),
+            base.1.clone(),
+            base.2.clone(),
+            "Lab".to_owned(),
+            22,
+            8,
+            1
+        )
+        .is_err()
+    );
+    assert!(
+        RuntimeVmBasePolicy::new(
+            base.0.clone(),
+            base.1.clone(),
+            base.2.clone(),
+            base.3.clone(),
+            0,
+            8,
+            1
+        )
+        .is_err()
+    );
+    assert!(
+        RuntimeVmBasePolicy::new(
+            base.0.clone(),
+            base.1.clone(),
+            base.2.clone(),
+            base.3.clone(),
+            22,
+            0,
+            1
+        )
+        .is_err()
+    );
+    assert!(RuntimeVmBasePolicy::new(base.0, base.1, base.2, base.3, 22, 8, 0).is_err());
+}
+
+fn remap_runtime_base(
+    mut projection: ReleasePublished,
+    binding: &str,
+    source_registry_digest: &str,
+    capacity_bytes: u64,
+) -> ReleasePublished {
+    let base_disk = VirtualMachineBaseDisk {
+        binding: binding.to_owned(),
+        source_registry_digest: source_registry_digest.to_owned(),
+        capacity_bytes,
+    };
+    if let ImageArtifact::VirtualMachine {
+        base_disk: artifact_base,
+        ..
+    } = &mut projection.release.artifact
+    {
+        *artifact_base = base_disk.clone();
+    }
+    if let EnvironmentRuntimeSpec::VirtualMachine {
+        base_disk: spec_base,
+        ..
+    } = &mut projection.environment_spec.runtime
+    {
+        *spec_base = base_disk;
+    }
+    rebind_projection(&mut projection);
+    projection
+}
+
+fn provider_with_runtime_policy(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+    policy: RuntimeVmBasePolicy,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    KubeVirtProvider::new(
+        "kubevirt-primary-v1".to_owned(),
+        backend,
+        Arc::new(FixtureResolver {
+            projection,
+            authority_now: timestamp("2026-07-16T08:30:00.000Z"),
+            withdrawn_at: None,
+        }),
+        Arc::new(FixtureObservationStore::default()),
+        KubeVirtProviderConfiguration::new(
+            revision(1),
+            vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
+            Some(policy),
+            KubeVirtSshBootstrap::new(
+                "access-system".to_owned(),
+                "openssh-gateway".to_owned(),
+                "labweaver-evaluation".to_owned(),
+                "evaluation-freeze-worker".to_owned(),
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
+            )
+            .expect("SSH bootstrap"),
+            KubeVirtResourceBudget::new(
+                536_870_912,
+                1_000,
+                4_000,
+                262_144_000,
+                1_073_741_824,
+                10_737_418_240,
+            )
+            .expect("KubeVirt resource budget"),
+        )
+        .expect("provider configuration"),
+    )
+    .expect("provider configuration")
+}
+
+#[test]
+fn runtime_registered_base_resolves_by_declared_digest() {
+    let projection =
+        remap_runtime_base(projection(), "debian-13-v1", RUNTIME_DIGEST, 2_147_483_648);
+    let provider = provider_with_runtime_policy(
+        projection.clone(),
+        Arc::new(FixtureBackend::default()),
+        runtime_policy(8, 137_438_953_472),
+    );
+
+    let plan = provider
+        .plan(
+            &instance_for(&projection),
+            &resolved(projection),
+            ReconcileAction::Provision,
+        )
+        .expect("runtime base resolves through the policy");
+    assert_eq!(
+        plan.base_disk_identity,
+        KubeVirtBaseDiskIdentity::RuntimeRegistryDigest
+    );
+    assert_eq!(plan.base_disk_disk_sha256, RUNTIME_MANIFEST_HEX);
+    assert_eq!(
+        plan.base_disk_data_source_name,
+        format!("vm-base-{}", &RUNTIME_MANIFEST_HEX[..32])
+    );
+    assert_eq!(plan.base_disk_data_source_namespace, "labweaver-system");
+
+    let data_volume = resource(&plan, "DataVolume");
+    let annotations = &data_volume.document["metadata"]["annotations"];
+    assert_eq!(
+        annotations["labweaver.io/base-disk-identity"],
+        "registry-digest"
+    );
+    assert_eq!(
+        annotations["labweaver.io/base-disk-source-registry"],
+        RUNTIME_DIGEST
+    );
+    assert!(annotations.get("labweaver.io/base-disk-sha256").is_none());
+    assert_eq!(
+        data_volume.document["spec"]["sourceRef"]["name"],
+        plan.base_disk_data_source_name
+    );
+    assert_eq!(
+        data_volume.document["spec"]["sourceRef"]["namespace"],
+        "labweaver-system"
+    );
+}
+
+#[test]
+fn seeded_base_keeps_reviewed_disk_identity_annotation() {
+    let projection = projection();
+    let provider = provider_with_runtime_policy(
+        projection.clone(),
+        Arc::new(FixtureBackend::default()),
+        runtime_policy(8, 137_438_953_472),
+    );
+    let plan = provider
+        .plan(
+            &instance_for(&projection),
+            &resolved(projection),
+            ReconcileAction::Provision,
+        )
+        .expect("seeded base resolves");
+    assert_eq!(
+        plan.base_disk_identity,
+        KubeVirtBaseDiskIdentity::ReviewedDiskSha256
+    );
+    let annotations = &resource(&plan, "DataVolume").document["metadata"]["annotations"];
+    assert_eq!(
+        annotations["labweaver.io/base-disk-identity"],
+        "disk-sha256"
+    );
+    assert_eq!(
+        annotations["labweaver.io/base-disk-sha256"],
+        "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
+    );
+}
+
+#[test]
+fn runtime_base_capacity_and_count_bounds_fail_closed() {
+    let oversized = remap_runtime_base(projection(), "debian-13-v1", RUNTIME_DIGEST, 4_294_967_296);
+    let provider = provider_with_runtime_policy(
+        oversized.clone(),
+        Arc::new(FixtureBackend::default()),
+        runtime_policy(8, 2_147_483_648),
+    );
+    assert!(matches!(
+        provider.plan(
+            &instance_for(&oversized),
+            &resolved(oversized),
+            ReconcileAction::Provision
+        ),
+        Err(ReleaseProjectionError::VmBaseCapacityExceeded)
+    ));
+
+    let bounded = provider_with_runtime_policy(
+        projection(),
+        Arc::new(FixtureBackend::default()),
+        runtime_policy(1, 137_438_953_472),
+    );
+    let first = remap_runtime_base(projection(), "debian-13-v1", RUNTIME_DIGEST, 1_073_741_824);
+    assert!(
+        bounded
+            .plan(
+                &instance_for(&first),
+                &resolved(first),
+                ReconcileAction::Provision
+            )
+            .is_ok()
+    );
+    let second = remap_runtime_base(
+        projection(),
+        "debian-12-v1",
+        SECOND_RUNTIME_DIGEST,
+        1_073_741_824,
+    );
+    assert!(matches!(
+        bounded.plan(
+            &instance_for(&second),
+            &resolved(second),
+            ReconcileAction::Provision
+        ),
+        Err(ReleaseProjectionError::VmBaseImportFailed)
+    ));
+    let replay = remap_runtime_base(projection(), "debian-13-v1", RUNTIME_DIGEST, 1_073_741_824);
+    assert!(
+        bounded
+            .plan(
+                &instance_for(&replay),
+                &resolved(replay),
+                ReconcileAction::Provision
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn unseeded_base_without_runtime_policy_fails_closed() {
+    let projection =
+        remap_runtime_base(projection(), "debian-13-v1", RUNTIME_DIGEST, 1_073_741_824);
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+    assert!(matches!(
+        provider.plan(
+            &instance_for(&projection),
+            &resolved(projection),
+            ReconcileAction::Provision
+        ),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
 }

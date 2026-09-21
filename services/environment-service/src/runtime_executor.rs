@@ -22,6 +22,10 @@ use crate::{
     KubeVirtBackendFence, KubeVirtCleanupPlan, KubeVirtExecutorBackend, KubeVirtExecutorRequest,
     KubeVirtExecutorResponse, KubeVirtResource, KubeVirtResourcePlan, KubeVirtRunningObservation,
     KubeVirtStoppedObservation, ProviderFailure, ProviderFailureCode,
+    cdi_import::{
+        BASE_DISK_IMPORT_TIMEOUT, CdiImportError, KubeVirtBaseDiskImport,
+        KubernetesCdiImportClient, ensure_base_disk,
+    },
 };
 
 const FIELD_MANAGER: &str = "labweaver-runtime-executor";
@@ -88,6 +92,7 @@ pub struct KubernetesContainerExecutor {
     client: Client,
     token: String,
     objects: Arc<S3ImmutableObjectStore>,
+    cdi_import: Arc<KubernetesCdiImportClient>,
 }
 
 impl KubernetesContainerExecutor {
@@ -110,6 +115,13 @@ impl KubernetesContainerExecutor {
             .build()
             .map_err(|_| rejected())?;
         Ok(Self {
+            cdi_import: Arc::new(KubernetesCdiImportClient::new(
+                client.clone(),
+                configuration.api_server.clone(),
+                token.clone(),
+                Duration::from_millis(configuration.cleanup_poll_milliseconds),
+                BASE_DISK_IMPORT_TIMEOUT,
+            )),
             configuration,
             client,
             token,
@@ -475,6 +487,7 @@ impl KubernetesContainerExecutor {
         plan: &KubeVirtResourcePlan,
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_plan(plan)?;
+        self.ensure_base_disk(plan).await?;
         for resource in &plan.resources {
             validate_kubevirt_resource(plan, resource)?;
             let url = self.kubevirt_resource_url(resource)?;
@@ -519,6 +532,37 @@ impl KubernetesContainerExecutor {
             }
         }
         Ok(())
+    }
+
+    /// Imports and identity-checks the base disk the plan's clone `DataVolume` sources from.
+    ///
+    /// Runs before any plan object is applied so the clone's `sourceRef` target always exists. A
+    /// failed import fails closed and leaves the importer objects in place for diagnosis.
+    async fn ensure_base_disk(&self, plan: &KubeVirtResourcePlan) -> Result<(), ProviderFailure> {
+        let import = KubeVirtBaseDiskImport {
+            data_source_namespace: plan.base_disk_data_source_namespace.clone(),
+            data_source_name: plan.base_disk_data_source_name.clone(),
+            source_registry_digest: plan.base_disk.source_registry_digest.clone(),
+            disk_sha256: plan.base_disk_disk_sha256.clone(),
+            identity: plan.base_disk_identity,
+            storage_class_name: plan.storage_class_name.clone(),
+            capacity_bytes: plan.base_disk.capacity_bytes,
+        };
+        ensure_base_disk(self.cdi_import.as_ref(), &import)
+            .await
+            .map_err(|error| {
+                let failure = cdi_import_failure(&error);
+                tracing::warn!(
+                    event = "environment.kubevirt_executor.base_disk_import_failed",
+                    diagnostic_code = %error,
+                    failure_stage = "base_disk_import",
+                    environment_id = %plan.environment_id,
+                    error_kind = "vm_base_import",
+                    retryable = failure.retryable
+                );
+                failure
+            })
+            .map(|_base_disk| ())
     }
 
     async fn observe_kubevirt_running(
@@ -1119,6 +1163,14 @@ fn validate_kubevirt_plan(plan: &KubeVirtResourcePlan) -> Result<(), ProviderFai
         || plan.data_volume_name != "rootdisk"
         || plan.resources.is_empty()
         || plan.resources.len() > 32
+        || !valid_dns_label(&plan.base_disk_data_source_namespace)
+        || !valid_dns_label(&plan.base_disk_data_source_name)
+        || plan.base_disk_disk_sha256.len() != 64
+        || !plan
+            .base_disk_disk_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || plan.base_disk.validate().is_err()
     {
         return Err(rejected());
     }
@@ -1214,6 +1266,15 @@ fn status_failure(status: StatusCode) -> ProviderFailure {
         rejected()
     } else {
         unavailable()
+    }
+}
+
+/// Maps one CDI import failure onto the closed Provider failure family. A drifted or
+/// over-capacity base is permanent; an incomplete import is retryable within the reconcile budget.
+fn cdi_import_failure(error: &CdiImportError) -> ProviderFailure {
+    match error {
+        CdiImportError::IdentityMismatch | CdiImportError::CapacityExceeded => rejected(),
+        CdiImportError::ImportFailed => unavailable(),
     }
 }
 

@@ -1,7 +1,8 @@
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -101,9 +102,161 @@ pub struct KubeVirtResourcePlan {
     pub data_volume_name: String,
     pub base_disk: VirtualMachineBaseDisk,
     pub base_disk_format: VirtualMachineDiskFormat,
+    /// Identity rule the CDI import must verify for this base disk.
+    pub base_disk_identity: KubeVirtBaseDiskIdentity,
+    /// Namespace of the CDI `DataSource` the per-environment clone references.
+    pub base_disk_data_source_namespace: String,
+    /// Name of the CDI `DataSource` the per-environment clone references.
+    pub base_disk_data_source_name: String,
+    /// Reviewed raw-disk SHA-256 for a seeded base; the declared manifest digest hex for a
+    /// runtime-registered base.
+    pub base_disk_disk_sha256: String,
     pub storage_class_name: String,
     pub resources: Vec<KubeVirtResource>,
     pub plan_sha256: Sha256Digest,
+}
+
+/// Durable identity rule that applies to one resolved VM base disk.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KubeVirtBaseDiskIdentity {
+    /// Deployment-seeded reviewed base disk; the reviewed raw-disk SHA-256 is the durable identity.
+    ReviewedDiskSha256,
+    /// Runtime-registered base disk; the declared registry manifest digest is the durable
+    /// identity. Environment never learns the raw-disk SHA-256 for this path.
+    RuntimeRegistryDigest,
+}
+
+impl KubeVirtBaseDiskIdentity {
+    /// Stable annotation value that makes the identity rule explicit on the imported objects.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewedDiskSha256 => "disk-sha256",
+            Self::RuntimeRegistryDigest => "registry-digest",
+        }
+    }
+}
+
+/// One resolved base-disk binding plus the identity rule that applies to it.
+#[derive(Clone, Debug)]
+pub struct ResolvedVmBaseDisk {
+    pub binding: KubeVirtBaseDiskBinding,
+    pub identity: KubeVirtBaseDiskIdentity,
+}
+
+/// Deployment-owned runtime policy that admits a release-declared VM base disk which is not one of
+/// the reviewed `baseDisks[]` seeds.
+///
+/// The policy supplies the storage class, CDI `DataSource` namespace, guest principal and SSH port
+/// for runtime-registered bases and bounds both the number of distinct runtime bindings this
+/// process admits and the capacity of one runtime base.
+#[derive(Clone, Debug)]
+pub struct RuntimeVmBasePolicy {
+    storage_class_binding: String,
+    storage_class_name: String,
+    data_source_namespace: String,
+    guest_user: String,
+    ssh_port: u16,
+    max_bases: u32,
+    max_capacity_bytes: u64,
+}
+
+impl RuntimeVmBasePolicy {
+    /// Validates the complete runtime policy or fails closed.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the reviewed policy fields stay explicit on one constructor"
+    )]
+    pub fn new(
+        storage_class_binding: String,
+        storage_class_name: String,
+        data_source_namespace: String,
+        guest_user: String,
+        ssh_port: u16,
+        max_bases: u32,
+        max_capacity_bytes: u64,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if !valid_binding(&storage_class_binding)
+            || !valid_dns_label(&storage_class_name)
+            || !valid_dns_label(&data_source_namespace)
+            || !valid_guest_user(&guest_user)
+            || ssh_port == 0
+            || max_bases == 0
+            || max_capacity_bytes == 0
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            storage_class_binding,
+            storage_class_name,
+            data_source_namespace,
+            guest_user,
+            ssh_port,
+            max_bases,
+            max_capacity_bytes,
+        })
+    }
+
+    /// Reviewed storage class binding every runtime base must use.
+    #[must_use]
+    pub fn storage_class_binding(&self) -> &str {
+        &self.storage_class_binding
+    }
+
+    /// Maximum number of distinct runtime bindings this process admits.
+    #[must_use]
+    pub const fn max_bases(&self) -> u32 {
+        self.max_bases
+    }
+
+    /// Maximum capacity of one runtime base in bytes.
+    #[must_use]
+    pub const fn max_capacity_bytes(&self) -> u64 {
+        self.max_capacity_bytes
+    }
+
+    /// Builds the runtime binding for one declared base disk.
+    ///
+    /// The reviewed raw-disk SHA-256 is unknown on this path, so the declared registry manifest
+    /// digest is both the durable identity and the catalog-independent stand-in the binding type
+    /// requires. The CDI `DataSource` name is derived from that digest so one imported disk is
+    /// reused across environments regardless of the release-declared binding string.
+    fn runtime_binding(
+        &self,
+        base_disk: &VirtualMachineBaseDisk,
+        format: VirtualMachineDiskFormat,
+    ) -> Option<KubeVirtBaseDiskBinding> {
+        let manifest_digest = declared_manifest_digest(&base_disk.source_registry_digest)?;
+        let short = manifest_digest.get(..32).unwrap_or(manifest_digest);
+        KubeVirtBaseDiskBinding::new(
+            base_disk.binding.clone(),
+            base_disk.source_registry_digest.clone(),
+            manifest_digest.to_owned(),
+            base_disk.capacity_bytes,
+            format,
+            self.storage_class_binding.clone(),
+            self.storage_class_name.clone(),
+            self.data_source_namespace.clone(),
+            format!("vm-base-{short}"),
+            self.guest_user.clone(),
+            self.ssh_port,
+        )
+        .ok()
+    }
+}
+
+/// Extracts the lowercase `sha256:` hex payload from an immutable `docker://` registry digest.
+fn declared_manifest_digest(source_registry_digest: &str) -> Option<&str> {
+    let (_, digest) = source_registry_digest
+        .strip_prefix("docker://")?
+        .rsplit_once('@')?;
+    let hex = digest.strip_prefix("sha256:")?;
+    (hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(hex)
 }
 
 /// Minimal deterministic namespace deletion plan used after Access revocation.
@@ -1030,6 +1183,8 @@ impl KubeVirtSshBootstrap {
 pub struct KubeVirtProviderConfiguration {
     pub trust_revision: Revision,
     pub base_disks: Vec<KubeVirtBaseDiskBinding>,
+    /// Optional runtime policy admitting release-declared base disks that are not seeded.
+    pub runtime_vm_base: Option<RuntimeVmBasePolicy>,
     pub ssh: KubeVirtSshBootstrap,
     pub resource_budget: KubeVirtResourceBudget,
 }
@@ -1078,6 +1233,7 @@ impl KubeVirtProviderConfiguration {
     pub fn new(
         trust_revision: Revision,
         base_disks: Vec<KubeVirtBaseDiskBinding>,
+        runtime_vm_base: Option<RuntimeVmBasePolicy>,
         ssh: KubeVirtSshBootstrap,
         resource_budget: KubeVirtResourceBudget,
     ) -> Result<Self, ReleaseProjectionError> {
@@ -1093,6 +1249,7 @@ impl KubeVirtProviderConfiguration {
         Ok(Self {
             trust_revision,
             base_disks,
+            runtime_vm_base,
             ssh,
             resource_budget,
         })
@@ -1509,6 +1666,9 @@ pub struct KubeVirtProvider<B, R, S> {
     releases: Arc<R>,
     observations: Arc<S>,
     configuration: KubeVirtProviderConfiguration,
+    /// Distinct runtime base-disk registry digests this process has admitted. Control owns the
+    /// authoritative deployment-wide bound; this is the Environment-side process-local guard.
+    runtime_bases: Mutex<BTreeSet<String>>,
 }
 
 impl<B, R, S> KubeVirtProvider<B, R, S>
@@ -1533,6 +1693,53 @@ where
             releases,
             observations,
             configuration,
+            runtime_bases: Mutex::new(BTreeSet::new()),
+        })
+    }
+
+    /// Resolves the exact base-disk binding for one VM resource plan.
+    ///
+    /// Precedence: a deployment-seeded `baseDisks[]` entry wins and keeps its reviewed raw-disk
+    /// SHA-256 identity. A binding that is not seeded resolves through the optional runtime policy
+    /// and is identified by its declared registry manifest digest. Without the runtime policy an
+    /// unseeded binding fails closed.
+    fn resolve_base_disk(
+        &self,
+        base_disk: &VirtualMachineBaseDisk,
+        format: VirtualMachineDiskFormat,
+    ) -> Result<ResolvedVmBaseDisk, ReleaseProjectionError> {
+        if let Some(seeded) = self.configuration.base_disk_binding(&base_disk.binding) {
+            return Ok(ResolvedVmBaseDisk {
+                binding: seeded.clone(),
+                identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
+            });
+        }
+        let Some(policy) = self.configuration.runtime_vm_base.as_ref() else {
+            return Err(ReleaseProjectionError::SecurityPostureInvalid);
+        };
+        if base_disk.validate().is_err() {
+            return Err(ReleaseProjectionError::VmBaseImportFailed);
+        }
+        if base_disk.capacity_bytes > policy.max_capacity_bytes {
+            return Err(ReleaseProjectionError::VmBaseCapacityExceeded);
+        }
+        let mut admitted = self
+            .runtime_bases
+            .lock()
+            .map_err(|_| ReleaseProjectionError::VmBaseImportFailed)?;
+        let identity = base_disk.source_registry_digest.clone();
+        if !admitted.contains(&identity)
+            && admitted.len() >= usize::try_from(policy.max_bases).unwrap_or(usize::MAX)
+        {
+            return Err(ReleaseProjectionError::VmBaseImportFailed);
+        }
+        let binding = policy
+            .runtime_binding(base_disk, format)
+            .ok_or(ReleaseProjectionError::VmBaseImportFailed)?;
+        admitted.insert(identity);
+        Ok(ResolvedVmBaseDisk {
+            binding,
+            identity: KubeVirtBaseDiskIdentity::RuntimeRegistryDigest,
         })
     }
 
@@ -1575,10 +1782,8 @@ where
         else {
             return Err(ReleaseProjectionError::IdentityMismatch);
         };
-        let base_binding = self
-            .configuration
-            .base_disk_binding(&base_disk.binding)
-            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let resolved_base = self.resolve_base_disk(base_disk, *format)?;
+        let base_binding = &resolved_base.binding;
         if provider_binding != &self.binding
             || storage_class_binding != &base_binding.storage_class_binding
             || *ssh_port != base_binding.ssh_port
@@ -1623,14 +1828,19 @@ where
         if let Some(course_id) = instance.course_id {
             labels["labweaver.io/course-id"] = json!(course_id.to_string());
         }
-        let annotations = json!({
+        let mut annotations = json!({
             "labweaver.io/release-id": projection.release.id.to_string(),
             "labweaver.io/release-version": projection.release.version.to_string(),
             "labweaver.io/base-disk-binding": base_disk.binding,
             "labweaver.io/base-disk-source-registry": base_disk.source_registry_digest,
-            "labweaver.io/base-disk-sha256": base_binding.disk_sha256,
+            "labweaver.io/base-disk-identity": resolved_base.identity.as_str(),
             "labweaver.io/environment-generation": instance.generation.to_string(),
         });
+        // A runtime-registered base is identified by its declared registry digest; the reviewed
+        // raw-disk SHA-256 annotation belongs only to a deployment-seeded reviewed base.
+        if resolved_base.identity == KubeVirtBaseDiskIdentity::ReviewedDiskSha256 {
+            annotations["labweaver.io/base-disk-sha256"] = json!(base_binding.disk_sha256);
+        }
         let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
             approved_resources(instance, projection)?;
         let cpu = format!("{cpu_millicores}m");
@@ -1911,6 +2121,10 @@ where
             data_volume_name,
             base_disk: base_disk.clone(),
             base_disk_format: *format,
+            base_disk_identity: resolved_base.identity,
+            base_disk_data_source_namespace: base_binding.data_source_namespace.clone(),
+            base_disk_data_source_name: base_binding.data_source_name.clone(),
+            base_disk_disk_sha256: base_binding.disk_sha256.clone(),
             storage_class_name: base_binding.storage_class_name.clone(),
             resources: documents,
             plan_sha256,
@@ -2236,7 +2450,9 @@ fn projection_failure(error: &ReleaseProjectionError) -> ProviderFailure {
         | ReleaseProjectionError::SecurityPostureInvalid
         | ReleaseProjectionError::Withdrawn
         | ReleaseProjectionError::EvidenceExpired
-        | ReleaseProjectionError::TrustRevisionMismatch => ProviderFailure {
+        | ReleaseProjectionError::TrustRevisionMismatch
+        | ReleaseProjectionError::VmBaseImportFailed
+        | ReleaseProjectionError::VmBaseCapacityExceeded => ProviderFailure {
             code: ProviderFailureCode::Rejected,
             retryable: false,
         },
