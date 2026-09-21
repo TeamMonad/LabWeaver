@@ -177,6 +177,10 @@ describe('usePlatformImages', () => {
       archiveBytes: 7,
       archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
     })
+    const containerBody = vi.mocked(createPlatformImageUpload).mock.calls[0][0].body
+    expect(containerBody).not.toHaveProperty('diskFormat')
+    expect(containerBody).not.toHaveProperty('diskPath')
+    expect(containerBody).not.toHaveProperty('capacityBytes')
     expect(putFileWithProgress).toHaveBeenCalledWith(
       file,
       session.uploadTarget.uploadUrl,
@@ -227,5 +231,57 @@ describe('usePlatformImages', () => {
       expect(images.state.diagnostic.message).toBe('上传并导入 OCI 归档失败。')
       expect(images.state.diagnostic.retryable).toBe(true)
     }
+  })
+
+  it('submits the base-disk descriptor for a virtual-machine upload', async () => {
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({
+      data: {
+        uploadId: '0197f0e0-0000-7000-8000-000000000005',
+        kind: 'virtual_machine' as const,
+        binding: 'ubuntu-24.04-vm-v1',
+        targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+        archiveBytes: 4096,
+        archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+        capacityBytes: 10737418240,
+        diskFormat: 'qcow2' as const,
+        diskPath: 'disk/disk.img',
+        uploadTarget: {
+          uploadUrl: 'https://objects.example.test/staged-template',
+          requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' },
+          expiresAt: '2026-07-16T09:00:00.000Z',
+        },
+        expiresAt: '2026-07-16T09:00:00.000Z',
+        revision: 1,
+      },
+      error: undefined as never,
+    })
+    vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
+    vi.mocked(putFileWithProgress).mockResolvedValue(undefined)
+    const images = usePlatformImages()
+
+    await expect(images.upload(new File(['disk'], 'template.tar'), {
+      kind: 'virtual_machine',
+      binding: 'ubuntu-24.04-vm-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+      trustRevision: 2,
+      reason: '导入已评审虚拟机模板',
+      diskFormat: 'qcow2',
+      diskPath: 'disk/disk.img',
+      capacityBytes: 10737418240,
+    })).resolves.toBe(true)
+
+    expect(vi.mocked(createPlatformImageUpload).mock.calls[0][0].body).toEqual({
+      kind: 'virtual_machine',
+      binding: 'ubuntu-24.04-vm-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+      trustRevision: 2,
+      reason: '导入已评审虚拟机模板',
+      archiveBytes: 4,
+      archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+      diskFormat: 'qcow2',
+      diskPath: 'disk/disk.img',
+      capacityBytes: 10737418240,
+    })
+    expect(listPlatformImages).toHaveBeenCalledTimes(1)
   })
 })

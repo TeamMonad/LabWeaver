@@ -36,6 +36,7 @@ export const fixtureScenes: FixtureScene[] = [
   { id: 'budget-large', label: '预算 · 大金额与费用', group: '资源与费用', role: 'admin', path: '/admin/resource-finance', projectId: DEFAULT_PROJECT_ID, description: '展示大金额、六位小数和待结算费用。' },
   { id: 'approval-filter-empty', label: '资源审批 · 筛选无匹配', group: '管理员任务', role: 'admin', path: '/admin/resource-approval', description: '列表有数据，选择状态过滤后可看到无匹配提示。' },
   { id: 'platform-images-catalog', label: '平台镜像 · 目录与操作', group: '管理员任务', role: 'admin', path: '/admin/platform-images', description: '展示容器与虚拟机基础镜像、release 影响提示以及注册、重新固定、停用和归档导入入口。' },
+  { id: 'gpu-catalog', label: 'GPU 目录 · 目录与新建', group: '管理员任务', role: 'admin', path: '/admin/gpu-catalog', description: '展示 GPU class 目录条目并保留新建目录项表单。' },
   { id: 'workspace-archive', label: '项目与工作 · 归档确认', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '保留项目归属，并检查危险归档确认文案。' },
   { id: 'workspace-members', label: '项目成员 · 成员管理', group: '项目与工作', role: 'teacher', path: '/researcher/workspaces', projectId: DEFAULT_PROJECT_ID, description: '展示可读成员名称和移除确认入口。' },
   { id: 'resource-reclaim', label: '资源授权 · 回收确认', group: '项目与工作', role: 'student', path: '/researcher/resources', projectId: DEFAULT_PROJECT_ID, description: '已授权 Lease 的回收动作会要求确认。' },

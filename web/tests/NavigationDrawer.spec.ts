@@ -48,7 +48,7 @@ describe('NavigationDrawer', () => {
     expect(wrapper.text()).toContain('项目与工作')
     expect(wrapper.text()).toContain('平台管理')
     expect(wrapper.text()).not.toContain('工作台角色')
-    expect(wrapper.findAll('.drawer-item')).toHaveLength(18)
+    expect(wrapper.findAll('.drawer-item')).toHaveLength(19)
   })
 
   it('uses project context only for project-scoped destinations', async () => {
@@ -57,6 +57,7 @@ describe('NavigationDrawer', () => {
 
     expect(href('项目与工作空间')).toBe('/researcher/workspaces?projectId=project-1')
     expect(href('资源审批')).toBe('/admin/resource-approval')
+    expect(href('GPU 目录')).toBe('/admin/gpu-catalog')
   })
 
   it('does not expose another role’s task group', async () => {

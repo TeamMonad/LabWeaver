@@ -9,7 +9,7 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 
 use crate::capacity::{
-    CapacityProviderError, CapacityReconcileWorker, ResourceCapacityConfiguration,
+    CapacityProviderError, CapacityReconcileWorker, GpuCatalogSeed, ResourceCapacityConfiguration,
 };
 use crate::messaging::{NatsLeaseResponderError, NatsLeaseVerificationResponder};
 use crate::outbox::{ResourceOutboxDispatcher, ResourceOutboxError};
@@ -86,7 +86,7 @@ impl ResourceProcessRuntime {
             required(LEASE_VERIFICATION_SUBJECT)?,
             client.clone(),
         )?;
-        let capacity_configuration: ResourceCapacityConfiguration = serde_json::from_slice(
+        let capacity_configuration = ResourceCapacityConfiguration::parse(
             &std::fs::read(required_path(CAPACITY_CONFIG_FILE)?)
                 .map_err(|_| ResourceProcessRuntimeError::CapacityConfiguration)?,
         )
@@ -97,6 +97,7 @@ impl ResourceProcessRuntime {
         let environment_service_client_id = required(ENVIRONMENT_SERVICE_CLIENT_ID)?;
         let task_service_client_ids = required_set(TASK_SERVICE_CLIENT_IDS)?;
         let store = PgResourceStore::new(pool);
+        seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;
         let capacity_worker = capacity_configuration
@@ -175,6 +176,42 @@ impl ResourceProcessRuntime {
         }
         result
     }
+}
+
+/// Provisions the reviewed GPU classes before the capacity worker observes them.
+///
+/// Validation already happened when the configuration was parsed, so a seed rejection here is a
+/// durable conflict and fails startup rather than rewriting the reviewed catalog. An unseeded
+/// class simply stays absent and cannot grant capacity.
+async fn seed_reviewed_gpu_catalog(
+    store: &PgResourceStore,
+    seeds: &[GpuCatalogSeed],
+) -> Result<(), ResourceProcessRuntimeError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let existing: BTreeSet<String> = store
+        .list_gpu_catalog()
+        .await
+        .map_err(ResourceProcessRuntimeError::Store)?
+        .into_iter()
+        .map(|entry| entry.class)
+        .collect();
+    let created = seeds
+        .iter()
+        .filter(|seed| !existing.contains(&seed.class))
+        .count();
+    let catalog = store
+        .seed_gpu_catalog(seeds)
+        .await
+        .map_err(ResourceProcessRuntimeError::Store)?;
+    tracing::info!(
+        event = "resource.gpu_catalog.seeded",
+        created,
+        already_existing = seeds.len() - created,
+        catalog_rows = catalog.len(),
+    );
+    Ok(())
 }
 
 async fn run_outbox(

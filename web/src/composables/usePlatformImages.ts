@@ -10,6 +10,7 @@ import {
 import type {
   PlatformImageEntryViewSchema,
   PlatformImageKind,
+  VirtualMachineDiskFormat,
 } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
@@ -48,14 +49,41 @@ export interface RegisterPlatformImageInput {
   reason: string
 }
 
-export interface UploadPlatformImageInput {
-  kind: PlatformImageKind
+/** Container archive upload; the body carries no virtual-machine disk descriptor. */
+export interface ContainerUploadPlatformImageInput {
+  kind: 'container'
   binding: string
   /** Target `<registry-host>/<repository>:<tag>` the imported archive is tagged as. */
   targetReference: string
   trustRevision: number
   reason: string
 }
+
+/**
+ * Virtual-machine archive upload.
+ *
+ * The contract only accepts a base-disk descriptor when all three fields are
+ * present, so the type makes them mandatory instead of letting a partially
+ * filled form reach the gateway.
+ */
+export interface VirtualMachineUploadPlatformImageInput {
+  kind: 'virtual_machine'
+  binding: string
+  /** Target `<registry-host>/<repository>:<tag>` the imported archive is tagged as. */
+  targetReference: string
+  trustRevision: number
+  reason: string
+  /** Declared base-disk encoding of the disk inside the archive. */
+  diskFormat: VirtualMachineDiskFormat
+  /** Relative path of the disk inside the uploaded archive, e.g. `disk/disk.img`. */
+  diskPath: string
+  /** Declared base-disk capacity in bytes; the Agent rejects larger disks. */
+  capacityBytes: number
+}
+
+export type UploadPlatformImageInput =
+  | ContainerUploadPlatformImageInput
+  | VirtualMachineUploadPlatformImageInput
 
 /**
  * Administrator platform image catalog over the Control gateway.
@@ -140,12 +168,22 @@ export function usePlatformImages() {
    */
   async function upload(file: File, input: UploadPlatformImageInput): Promise<boolean> {
     state.value = { kind: 'uploading', progress: 0 }
+    // Only the virtual-machine authority declares a base-disk descriptor; a
+    // container upload must not send those keys at all.
+    const descriptor = input.kind === 'virtual_machine'
+      ? { diskFormat: input.diskFormat, diskPath: input.diskPath, capacityBytes: input.capacityBytes }
+      : {}
     const session = await createPlatformImageUpload({
       headers: { 'Idempotency-Key': idempotencyKey() },
       body: {
-        ...input,
+        kind: input.kind,
+        binding: input.binding,
+        targetReference: input.targetReference,
+        trustRevision: input.trustRevision,
+        reason: input.reason,
         archiveBytes: file.size,
         archiveMediaType: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE,
+        ...descriptor,
       },
     })
     if (session.error) {

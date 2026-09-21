@@ -83,6 +83,27 @@
          | selectattr('seed_data_volume_name', 'defined')
          | selectattr('data_source_name', 'defined')
          | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - (platform_application_lock.platform_container_images | length) > 0
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('binding', 'match', '^[a-z0-9][a-z0-9-]{2,62}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('name', 'match', '^[a-z0-9][a-z0-9._-]{0,127}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('tag', 'match', '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('reviewed_digest', 'match', '^sha256:[0-9a-f]{64}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | map(attribute='binding') | unique | list | length)
+        == (platform_application_lock.platform_container_images | length)
       - platform_application_keycloak_truststore_password | length >= 16
       - platform_application_access_seed_file | length > 0
       - platform_application_values_files | length > 0
@@ -530,6 +551,49 @@
          | map(attribute='binding') | sort | list) ==
         (platform_application_lock.platform_vm_bases | map(attribute='binding') | sort | list)
     fail_msg: PLATFORM_VM_BASE_CATALOG_MISMATCH
+  no_log: true
+
+- name: Bind the rendered Agent platform registry seed catalog
+  ansible.builtin.set_fact:
+    platform_application_agent_seed_images: >-
+      {{ (((platform_application_configuration_objects
+            | selectattr('kind', 'equalto', 'ConfigMap')
+            | selectattr('metadata.name', 'equalto', 'agent-service-config')
+            | first).data['config.yaml'] | from_yaml).platform_registry
+          | default({})).get('seed_images', []) }}
+  no_log: true
+
+- name: Require the rendered Agent seed catalog to match the reviewed container base images
+  ansible.builtin.assert:
+    that:
+      - (platform_application_container_images | length) > 0
+      - (platform_application_agent_seed_images | length) == (platform_application_container_images | length)
+      - >-
+        (platform_application_agent_seed_images | map(attribute='binding') | sort | list) ==
+        (platform_application_container_images | map(attribute='binding') | sort | list)
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_SEED_MISMATCH
+  no_log: true
+
+- name: Require every rendered Agent seed to bind the reviewed Harbor source
+  ansible.builtin.assert:
+    that:
+      - item.kind == 'container'
+      - item.trust_revision == 1
+      - >-
+        (platform_application_container_images
+         | selectattr('binding', 'equalto', item.binding)
+         | list | length) == 1
+      - >-
+        item.source_reference ==
+        platform_application_harbor_registry ~ '/' ~ platform_application_harbor_project ~ '/' ~
+        ((platform_application_container_images
+          | selectattr('binding', 'equalto', item.binding) | first).name) ~ ':' ~
+        ((platform_application_container_images
+          | selectattr('binding', 'equalto', item.binding) | first).tag)
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_SEED_MISMATCH
+  loop: "{{ platform_application_agent_seed_images }}"
+  loop_control:
+    label: "{{ item.binding }}"
   no_log: true
 
 - name: Bind the Control event configuration for retained stream validation
@@ -1316,6 +1380,41 @@
     platform_application_harbor_project_verified.status != 200 or
     platform_application_harbor_project_verified.json | length != 1 or
     platform_application_harbor_project_verified.json[0].name != platform_application_harbor_project
+  no_log: true
+
+# The deployment has no image-copy tooling; the operator mirrors each reviewed
+# digest into the retained project, and this read-only probe proves the exact
+# digest is present so the Agent seed catalog cannot claim an image the project
+# does not hold. Absence fails the deployment instead of leaving a catalog that
+# only looks usable.
+- name: Verify the reviewed container base image digests are present in the retained Harbor project
+  ansible.builtin.uri:
+    url: >-
+      {{ platform_application_harbor_api }}/api/v2.0/projects/{{
+      platform_application_harbor_project | urlencode }}/repositories/{{
+      item.name | urlencode }}/artifacts/{{ item.reviewed_digest | urlencode }}
+    user: "{{ platform_application_harbor_admin_username }}"
+    password: "{{ platform_application_harbor_admin_password_raw.content | b64decode | trim }}"
+    force_basic_auth: true
+    validate_certs: true
+    ca_path: "{{ platform_application_harbor_ca_file }}"
+    return_content: false
+  check_mode: false
+  loop: "{{ platform_application_container_images }}"
+  loop_control:
+    label: "{{ item.binding }}"
+  register: platform_application_harbor_seed_digest_probes
+  failed_when: false
+  no_log: true
+
+- name: Require every reviewed container base image digest in the retained Harbor project
+  ansible.builtin.assert:
+    that:
+      - (item.status | default(0)) == 200
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_DIGEST_ABSENT
+  loop: "{{ platform_application_harbor_seed_digest_probes.results }}"
+  loop_control:
+    label: "{{ item.item.binding }}"
   no_log: true
 
 - name: Load the retained Harbor CA for Kubernetes nodes

@@ -44,6 +44,19 @@ const entry = {
   releaseReferenceCount: 2,
 }
 
+const vmEntry = {
+  ...entry,
+  catalogId: '0197f0e0-0000-7000-8000-000000000004',
+  kind: 'virtual_machine' as const,
+  binding: 'ubuntu-24.04-vm-v1',
+  sourceReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+  sizeBytes: 6442450944,
+  capacityBytes: 10737418240,
+  diskSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  format: 'qcow2' as const,
+  releaseReferenceCount: 1,
+}
+
 const uploadSession = {
   uploadId: '0197f0e0-0000-7000-8000-000000000002',
   kind: 'container' as const,
@@ -87,7 +100,28 @@ async function fillUploadForm(wrapper: VueWrapper, file: File) {
   await inputs[2].setValue('3')
   await form.get('textarea').setValue('导入已评审归档')
   const fileInput = form.get('input[type="file"]')
-  Object.defineProperty(fileInput.element, 'files', { value: [file] })
+  Object.defineProperty(fileInput.element, 'files', { value: [file], configurable: true })
+  await fileInput.trigger('change')
+}
+
+/** Selects the virtual-machine kind and fills the base-disk descriptor fields. */
+async function fillVmUploadForm(
+  wrapper: VueWrapper,
+  file: File,
+  descriptor: { capacity?: string; diskPath?: string; diskFormat?: string } = {},
+) {
+  const form = wrapper.get('.upload-card .admin-form')
+  await form.get('select').setValue('virtual_machine')
+  if (descriptor.diskFormat) await form.findAll('select')[1].setValue(descriptor.diskFormat)
+  const inputs = form.findAll('input:not([type="file"])')
+  await inputs[0].setValue('ubuntu-24.04-vm-v1')
+  await inputs[1].setValue('harbor.lab.lan/labweaver-system/ubuntu-vm:24.04')
+  await inputs[2].setValue('2')
+  if (descriptor.capacity !== undefined) await inputs[3].setValue(descriptor.capacity)
+  if (descriptor.diskPath !== undefined) await inputs[4].setValue(descriptor.diskPath)
+  await form.get('textarea').setValue('导入已评审虚拟机模板')
+  const fileInput = form.get('input[type="file"]')
+  Object.defineProperty(fileInput.element, 'files', { value: [file], configurable: true })
   await fileInput.trigger('change')
 }
 
@@ -212,6 +246,10 @@ describe('PlatformImageView', () => {
       archiveBytes: 7,
       archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
     })
+    const containerBody = vi.mocked(createPlatformImageUpload).mock.calls[0][0].body
+    expect(containerBody).not.toHaveProperty('diskFormat')
+    expect(containerBody).not.toHaveProperty('diskPath')
+    expect(containerBody).not.toHaveProperty('capacityBytes')
     expect(putFileWithProgress).toHaveBeenCalledWith(
       file,
       uploadSession.uploadTarget.uploadUrl,
@@ -258,6 +296,84 @@ describe('PlatformImageView', () => {
     await flushPromises()
 
     expect(wrapper.get('.diagnostic-banner').text()).toContain('LW_PLATFORM_IMAGE_STATE_CONFLICT')
+    expect(columnText(wrapper, 0, 'binding')).toBe('ubuntu-24.04-v1')
+  })
+
+  it('renders the base-disk descriptor for virtual-machine rows and a dash for container rows', async () => {
+    vi.mocked(listPlatformImages).mockResolvedValue({ data: { entries: [entry, vmEntry] }, error: undefined as never })
+    const wrapper = await mountView()
+
+    expect(columnText(wrapper, 0, '容量')).toBe('-')
+    expect(columnText(wrapper, 0, 'disk_sha256')).toBe('-')
+    expect(columnText(wrapper, 0, '格式')).toBe('-')
+    expect(columnText(wrapper, 1, '容量')).toBe('10.00 GiB')
+    expect(columnText(wrapper, 1, 'disk_sha256')).toBe(vmEntry.diskSha256.slice(0, 8) + '…' + vmEntry.diskSha256.slice(-8))
+    expect(columnText(wrapper, 1, '格式')).toBe('qcow2')
+  })
+
+  it('accepts a virtual-machine archive and submits its disk descriptor', async () => {
+    const wrapper = await mountView()
+    const file = new File(['template'], 'template.tar')
+
+    expect(wrapper.get('.upload-card input[type="file"]').attributes('accept')).toBe('.tar')
+
+    await fillVmUploadForm(wrapper, file, { capacity: '10737418240', diskFormat: 'raw' })
+
+    expect(wrapper.get('.upload-card input[type="file"]').attributes('accept')).toBe('.tar,.qcow2,.raw,.img')
+
+    await wrapper.get('.upload-card .admin-form').trigger('submit')
+    await flushPromises()
+
+    expect(vi.mocked(createPlatformImageUpload).mock.calls[0][0].body).toEqual({
+      kind: 'virtual_machine',
+      binding: 'ubuntu-24.04-vm-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+      trustRevision: 2,
+      reason: '导入已评审虚拟机模板',
+      archiveBytes: 8,
+      archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+      diskFormat: 'raw',
+      diskPath: 'disk/disk.img',
+      capacityBytes: 10737418240,
+    })
+    expect(putFileWithProgress).toHaveBeenCalledOnce()
+    expect(listPlatformImages).toHaveBeenCalledTimes(2)
+  })
+
+  it('blocks the virtual-machine upload before staging anything when the descriptor is missing or invalid', async () => {
+    const wrapper = await mountView()
+    const file = new File(['template'], 'template.tar')
+    await fillVmUploadForm(wrapper, file)
+
+    let form = wrapper.get('.upload-card .admin-form')
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(createPlatformImageUpload).not.toHaveBeenCalled()
+    expect(wrapper.get('.upload-card .diagnostic-banner').text()).toContain('PLATFORM_IMAGE_VM_DESCRIPTOR_INVALID')
+
+    await fillVmUploadForm(wrapper, file, { capacity: '10737418240', diskPath: '../escape.img' })
+    form = wrapper.get('.upload-card .admin-form')
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(createPlatformImageUpload).not.toHaveBeenCalled()
+    expect(wrapper.get('.upload-card .diagnostic-banner').text()).toContain('路径不得包含 `..`')
+  })
+
+  it('surfaces the Agent diagnostic when the virtual-machine import fails', async () => {
+    vi.mocked(completePlatformImageUpload).mockResolvedValue({
+      error: { diagnosticCode: 'LW_PLATFORM_IMAGE_DISK_INVALID', detail: '归档中的磁盘与声明的路径不一致。' },
+    } as never)
+    const wrapper = await mountView()
+    await fillVmUploadForm(wrapper, new File(['template'], 'template.tar'), { capacity: '4096' })
+
+    await wrapper.get('.upload-card .admin-form').trigger('submit')
+    await flushPromises()
+
+    const banner = wrapper.get('.diagnostic-banner').text()
+    expect(banner).toContain('LW_PLATFORM_IMAGE_DISK_INVALID')
+    expect(banner).toContain('归档中的磁盘与声明的路径不一致。')
     expect(columnText(wrapper, 0, 'binding')).toBe('ubuntu-24.04-v1')
   })
 })

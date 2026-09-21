@@ -86,6 +86,7 @@ const routes: RouteRecordRaw[] = [
     { path: 'policies', component: () => import('@/views/admin/PolicyListView.vue'), meta: { title: '策略' } },
     { path: 'resource-finance', component: () => import('@/views/admin/ResourceFinanceView.vue'), meta: { title: '预算与费用' } },
     { path: 'platform-images', component: () => import('@/views/admin/PlatformImageView.vue'), meta: { title: '平台镜像' } },
+    { path: 'gpu-catalog', component: () => import('@/views/admin/GpuCatalogView.vue'), meta: { title: 'GPU 目录' } },
     { path: 'audit', component: () => import('@/views/admin/AuditLogView.vue'), meta: { title: '审计' } },
   ]),
   {

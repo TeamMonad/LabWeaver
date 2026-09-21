@@ -235,6 +235,19 @@ platform_application_object_store_backend_hostname: minio.labweaver-data.svc
 platform_application_object_store_external_cidr: ""
 platform_application_ssh_load_balancer_ip: ""
 platform_application_ssh_shared_ip_key: labweaver-platform-public
+# Reviewed Control policy bounds for the deployment-owned VM base catalog.
+# `deploy/config/control-plane.yaml.example` declares the same maxBases and
+# maxCapacityBytes, and the provider profile must cover exactly the reviewed
+# version-lock entries; the application role fails closed when either bound is
+# exceeded or the three catalogs disagree.
+platform_application_vm_base_max_count: 8
+platform_application_vm_base_max_capacity_bytes: 137438953472
+# Reviewed container base images the deployment verifies in the retained Harbor
+# project and renders into `agent-service-config/platform_registry.seed_images`.
+# The rendered seed catalog must agree exactly with this immutable list. The
+# platform has no image-copy tooling, so the operator mirrors each reviewed
+# digest into the project first and the role only proves presence.
+platform_application_container_images: "{{ platform_application_lock.platform_container_images }}"
 platform_application_workloads:
   - control-service
   - access-service

@@ -40,6 +40,9 @@
             <template #sourceReference="{ row }"><code :title="row.sourceReference">{{ row.sourceReference }}</code></template>
             <template #resolvedDigest="{ row }"><code :title="row.resolvedDigest">{{ truncateSha256(row.resolvedDigest) }}</code></template>
             <template #sizeBytes="{ row }">{{ formatBytes(row.sizeBytes) }}</template>
+            <template #capacityBytes="{ row }">{{ row.kind === 'virtual_machine' && row.capacityBytes != null ? formatBytes(row.capacityBytes) : '-' }}</template>
+            <template #diskSha256="{ row }">{{ row.kind === 'virtual_machine' && row.diskSha256 ? truncateSha256(row.diskSha256) : '-' }}</template>
+            <template #format="{ row }">{{ row.kind === 'virtual_machine' && row.format ? row.format : '-' }}</template>
             <template #status="{ row }">
               <span class="state-chip" :class="row.status === 'active' ? 'state-chip--active' : 'state-chip--disabled'">{{ statusLabel(row.status) }}</span>
             </template>
@@ -106,8 +109,8 @@
     <section class="upload-card md-card" aria-labelledby="upload-heading">
       <div class="section-heading">
         <div>
-          <h3 id="upload-heading">上传 OCI 归档</h3>
-          <p>归档经预签名地址直传对象存储，由 Agent 校验每个 blob 后推送 registry 并登记目录。</p>
+          <h3 id="upload-heading">上传归档</h3>
+          <p>归档经预签名地址直传对象存储：容器归档由 Agent 校验每个 blob，虚拟机模板按声明的磁盘路径与容量包装后推送 registry 并登记目录。</p>
         </div>
       </div>
       <form class="admin-form" @submit.prevent="submitUpload">
@@ -130,16 +133,39 @@
           <span>信任版本</span>
           <input v-model.number="uploadForm.trustRevision" class="text-input" type="number" min="1" required />
         </label>
+        <template v-if="uploadForm.kind === 'virtual_machine'">
+          <label>
+            <span>磁盘格式</span>
+            <select v-model="uploadForm.diskFormat" class="text-input">
+              <option value="qcow2">qcow2</option>
+              <option value="raw">raw</option>
+            </select>
+          </label>
+          <label>
+            <span>容量（字节）</span>
+            <input v-model="uploadForm.capacityBytes" class="text-input" type="number" min="1" step="1" placeholder="例如 10737418240" required />
+          </label>
+          <label>
+            <span>归档内磁盘路径</span>
+            <input v-model="uploadForm.diskPath" class="text-input" maxlength="256" placeholder="disk/disk.img" required />
+          </label>
+        </template>
         <label class="wide-field">
           <span>原因</span>
           <textarea v-model="uploadForm.reason" class="text-input" rows="2" maxlength="512" required />
         </label>
         <label class="wide-field">
-          <span>OCI 归档（.tar）</span>
-          <input ref="fileInput" class="text-input" type="file" accept=".tar" @change="selectFile" />
+          <span>{{ uploadForm.kind === 'virtual_machine' ? '虚拟机模板归档（.tar/.qcow2/.raw/.img）' : 'OCI 归档（.tar）' }}</span>
+          <input ref="fileInput" class="text-input" type="file" :accept="uploadAccept" @change="selectFile" />
         </label>
         <button type="submit" class="filled-button" :disabled="busy || !uploadFile">上传并导入</button>
       </form>
+      <DiagnosticBanner
+        v-if="uploadDescriptorFailure"
+        :code="uploadDescriptorFailure.code"
+        :message="uploadDescriptorFailure.message"
+        severity="error"
+      />
       <p v-if="uploadProgress !== null" class="upload-progress" role="status">上传中 {{ uploadProgress }}%</p>
       <p v-if="uploadFile" class="upload-file">已选择：{{ uploadFile.name }} · {{ formatBytes(uploadFile.size) }}</p>
     </section>
@@ -162,13 +188,14 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataTableColumn } from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
-import { usePlatformImages } from '@/composables/usePlatformImages'
+import { usePlatformImages, type UploadPlatformImageInput } from '@/composables/usePlatformImages'
 import { formatBytes, truncateSha256 } from '@/utils/format'
-import type { AsyncState, DiagnosticViewModel } from '@/types/async'
+import { makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type {
   PlatformImageEntryViewSchema,
   PlatformImageKind,
   PlatformImageStatus,
+  VirtualMachineDiskFormat,
 } from '@/generated/contracts'
 
 type CatalogRow = PlatformImageEntryViewSchema & { actions?: never }
@@ -196,7 +223,19 @@ const uploadForm = reactive<{
   targetReference: string
   trustRevision: number
   reason: string
-}>({ kind: 'container', binding: '', targetReference: '', trustRevision: 1, reason: '' })
+  diskFormat: VirtualMachineDiskFormat
+  diskPath: string
+  capacityBytes: number | string
+}>({
+  kind: 'container',
+  binding: '',
+  targetReference: '',
+  trustRevision: 1,
+  reason: '',
+  diskFormat: 'qcow2',
+  diskPath: 'disk/disk.img',
+  capacityBytes: '',
+})
 
 const catalogColumns: DataTableColumn<CatalogRow>[] = [
   { key: 'kind', title: '类型' },
@@ -205,6 +244,9 @@ const catalogColumns: DataTableColumn<CatalogRow>[] = [
   { key: 'resolvedDigest', title: 'digest' },
   { key: 'mediaType', title: '媒体类型' },
   { key: 'sizeBytes', title: '大小' },
+  { key: 'capacityBytes', title: '容量' },
+  { key: 'diskSha256', title: 'disk_sha256' },
+  { key: 'format', title: '格式' },
   { key: 'status', title: '状态' },
   { key: 'trustRevision', title: '信任版本' },
   { key: 'repinGeneration', title: '重固定代次' },
@@ -215,6 +257,32 @@ const catalogColumns: DataTableColumn<CatalogRow>[] = [
 const busy = computed(() => images.state.kind === 'loading' || images.state.kind === 'uploading')
 const actionReady = computed(() => operationReason.value.trim().length > 0)
 const uploadProgress = computed(() => (images.state.kind === 'uploading' ? images.state.progress : null))
+
+/** A virtual-machine archive may hold a raw disk image, so it accepts more than the OCI layout tar. */
+const uploadAccept = computed(() => (uploadForm.kind === 'virtual_machine' ? '.tar,.qcow2,.raw,.img' : '.tar'))
+
+/** Client-side descriptor rejection recorded before any upload session is staged. */
+const uploadDescriptorFailure = ref<DiagnosticViewModel | null>(null)
+
+/**
+ * Mirrors `contracts::valid_vm_disk_upload`'s path rule: a non-empty relative
+ * path of at most 256 bytes with no `..`, no leading `/`, no trailing `/`, and
+ * no empty segment. The gateway remains authoritative.
+ */
+function validDiskPath(value: string): string | null {
+  const path = value.trim()
+  if (!path || path.length > 256 || path.startsWith('/') || path.endsWith('/')) return null
+  if (path.includes('..') || path.split('/').some((segment) => segment === '')) return null
+  return path
+}
+
+/** A capacity is a positive integer byte count; the Agent rejects larger disks. */
+function validCapacityBytes(value: number | string): number | null {
+  const trimmed = String(value).trim()
+  if (!/^[0-9]+$/.test(trimmed)) return null
+  const parsed = Number(trimmed)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
 
 /**
  * The catalog keeps rendering the last server projection while a mutation is in
@@ -282,13 +350,41 @@ async function submitRegister() {
 async function submitUpload() {
   const file = uploadFile.value
   if (!file) return
-  const imported = await images.upload(file, { ...uploadForm })
+  uploadDescriptorFailure.value = null
+  const shared = {
+    binding: uploadForm.binding,
+    targetReference: uploadForm.targetReference,
+    trustRevision: uploadForm.trustRevision,
+    reason: uploadForm.reason,
+  }
+  let input: UploadPlatformImageInput = { kind: 'container', ...shared }
+  if (uploadForm.kind === 'virtual_machine') {
+    const diskPath = validDiskPath(uploadForm.diskPath)
+    const capacityBytes = validCapacityBytes(uploadForm.capacityBytes)
+    if (diskPath === null || capacityBytes === null) {
+      uploadDescriptorFailure.value = makeDiagnostic(
+        'PLATFORM_IMAGE_VM_DESCRIPTOR_INVALID',
+        '虚拟机模板必须声明 qcow2/raw 格式、正整数容量和归档内的相对磁盘路径，且路径不得包含 `..`。',
+      )
+      return
+    }
+    input = {
+      kind: 'virtual_machine',
+      ...shared,
+      diskFormat: uploadForm.diskFormat,
+      diskPath,
+      capacityBytes,
+    }
+  }
+  const imported = await images.upload(file, input)
   if (!imported) return
   uploadFile.value = null
   if (fileInput.value) fileInput.value.value = ''
   uploadForm.binding = ''
   uploadForm.targetReference = ''
   uploadForm.reason = ''
+  uploadForm.diskPath = 'disk/disk.img'
+  uploadForm.capacityBytes = ''
 }
 
 onMounted(() => images.load())
