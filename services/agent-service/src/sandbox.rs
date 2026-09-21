@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use task_execution::kubernetes::{
     KubernetesCleanupTarget, KubernetesJobBundle, KubernetesJobIdentity, KubernetesObject,
-    KubernetesOwnership, SANDBOX_RUNTIME_CLASS, parse_egress_destination,
+    KubernetesOwnership, SANDBOX_RUNTIME_CLASS, parse_egress_destination, reviewed_egress_rule,
 };
 use uuid::Uuid;
 
@@ -463,13 +463,10 @@ fn network_policy_document(
         ],
     })];
     for destination in &configuration.allowed_egress {
-        let Some((cidr, port)) = parse_egress_destination(destination) else {
+        let Some(rule) = reviewed_egress_rule(destination) else {
             continue;
         };
-        egress.push(json!({
-            "to": [{"ipBlock": {"cidr": cidr}}],
-            "ports": [{"protocol": "TCP", "port": port}],
-        }));
+        egress.push(rule);
     }
     json!({
         "apiVersion": "networking.k8s.io/v1",

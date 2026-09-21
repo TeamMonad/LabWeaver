@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use task_execution::SANDBOX_RUNTIME_CLASS;
-use task_execution::kubernetes::parse_egress_destination;
+use task_execution::kubernetes::{parse_egress_destination, reviewed_egress_rule};
 use thiserror::Error;
 
 use crate::{
@@ -182,12 +182,7 @@ impl AnsibleProbeJobResources {
             .collect::<Result<Vec<(String, u16)>, _>>()?;
         let object_store_rules = object_store_egress
             .iter()
-            .map(|(cidr, port)| {
-                json!({
-                    "to":[{"ipBlock":{"cidr":cidr}}],
-                    "ports":[{"protocol":"TCP","port":port}],
-                })
-            })
+            .filter_map(|(cidr, port)| reviewed_egress_rule(&format!("{cidr}:{port}")))
             .collect::<Vec<_>>();
         let mut egress_rules = vec![json!({
             "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],

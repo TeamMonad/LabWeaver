@@ -75,6 +75,19 @@ pub fn parse_egress_destination(value: &str) -> Option<(&str, u16)> {
     Some((cidr, port))
 }
 
+/// Renders the egress rule that admits exactly one reviewed `"<cidr>:<port>"` destination.
+///
+/// Every per-attempt `NetworkPolicy` is written from the reviewed destinations of its deployment,
+/// so the rule shape is rendered once instead of once per workload role.
+#[must_use]
+pub fn reviewed_egress_rule(destination: &str) -> Option<serde_json::Value> {
+    let (cidr, port) = parse_egress_destination(destination)?;
+    Some(serde_json::json!({
+        "to": [{"ipBlock": {"cidr": cidr}}],
+        "ports": [{"protocol": "TCP", "port": port}],
+    }))
+}
+
 const MANAGED_BY_LABEL: &str = "labweaver.io/managed-by";
 const RUN_ID_LABEL: &str = "labweaver.io/run-id";
 const STEP_RUN_ID_LABEL: &str = "labweaver.io/step-run-id";

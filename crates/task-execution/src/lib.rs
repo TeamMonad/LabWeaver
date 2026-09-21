@@ -22,5 +22,7 @@ pub mod timing;
 pub use admission::{
     AdmittedExecution, ExecutionAdmissionError, cleanup_unknown, observation_timing,
 };
-pub use kubernetes::{SANDBOX_RUNTIME_CLASS, parse_egress_destination, valid_cidr};
+pub use kubernetes::{
+    SANDBOX_RUNTIME_CLASS, parse_egress_destination, reviewed_egress_rule, valid_cidr,
+};
 pub use timing::ExecutionTiming;
