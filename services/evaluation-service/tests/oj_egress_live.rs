@@ -6,6 +6,19 @@
 //! deployment proves that its reviewed destinations actually admit the object store and that every
 //! destination it did not review stays refused.
 //!
+//! The operator needs an identity that may apply and delete the probe bundle in the runner
+//! namespace:
+//!
+//! ```text
+//! kubectl -n <runner namespace> create serviceaccount evaluation-live-verifier
+//! kubectl -n <runner namespace> create role evaluation-live-verifier \
+//!   --verb=create,get,list,delete,patch,update \
+//!   --resource=jobs.batch,networkpolicies.networking.k8s.io,pods,secrets
+//! kubectl -n <runner namespace> create rolebinding evaluation-live-verifier \
+//!   --role=evaluation-live-verifier --serviceaccount=<ns>:evaluation-live-verifier
+//! kubectl -n <runner namespace> create token evaluation-live-verifier --duration=8h > token
+//! ```
+//!
 //! ```text
 //! LW_LIVE_KUBERNETES=1 \
 //! LW_LIVE_KUBERNETES_API_SERVER=https://127.0.0.1:44135 \
