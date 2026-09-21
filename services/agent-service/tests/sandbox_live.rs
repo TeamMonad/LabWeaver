@@ -1,7 +1,7 @@
 //! Opt-in live `Kubernetes` readback for the Agent authoring sandbox bundle.
 #![allow(
     clippy::too_many_lines,
-    reason = "one live acceptance flow keeps the applied security context, the default-deny admission gate, deterministic cleanup and the terminal observation auditable together"
+    reason = "the live acceptance flows keep the applied security context, the default-deny admission gate, the adversarial probe observations, deterministic cleanup and the terminal observations auditable together"
 )]
 //!
 //! The test runs only when `LW_LIVE_KUBERNETES=1` is set together with every required variable
@@ -31,6 +31,39 @@
 //! `LW_LIVE_SANDBOX_BUILDKIT_IMAGE` plus `LW_LIVE_SANDBOX_BUILDKIT_CONFIG_MAP`, which must be set
 //! together and require the pull secret. Without them the rendered bundle has no sidecar and no
 //! sidecar assertion is made.
+//!
+//! The adversarial cases below observe real attempt behaviour, not just the rendered documents, so
+//! the attempt command has to run. A rendered attempt only reaches its command after the
+//! materialize init container verified its material envelope, so those cases additionally read the
+//! four variables below (material URL, served size, served sha256 and the image's Claude Code
+//! version) and print one labelled skip line instead of asserting when any of them is absent. The
+//! remaining three are optional: a base64 CA for the material host plus overrides of the two probe
+//! targets. Every variable above keeps its meaning, so an existing invocation is unaffected.
+//!
+//! ```text
+//! LW_LIVE_SANDBOX_MATERIAL_URL=https://harbor.lab.lan/v2/ \
+//! LW_LIVE_SANDBOX_MATERIAL_SHA256=<sha256 of the served bytes> \
+//! LW_LIVE_SANDBOX_MATERIAL_SIZE_BYTES=<served byte count> \
+//! LW_LIVE_SANDBOX_CLAUDE_VERSION=<prefix of `claude --version` inside the sandbox image> \
+//! LW_LIVE_SANDBOX_MATERIAL_CA_BASE64=<optional base64 CA the attempt reads the material with> \
+//! LW_LIVE_SANDBOX_BLOCKED_EGRESS_URL=<optional, default https://1.1.1.1/> \
+//! LW_LIVE_SANDBOX_HANG_MATERIAL_URL=<optional, default https://192.0.2.1/labweaver-live-material.json> \
+//! ```
+//!
+//! `LW_LIVE_SANDBOX_MATERIAL_URL` must serve exactly the bytes the size and sha256 variables pin
+//! and must be trusted by the sandbox image itself, because the init container verifies TLS through
+//! the image trust store. The material host has to sit inside `LW_LIVE_SANDBOX_EGRESS_CIDR` while
+//! the probe destinations have to sit outside it. `LW_LIVE_SANDBOX_HANG_MATERIAL_URL` must never
+//! answer (the default `TEST-NET-1` address does not): the deadline, cancellation and crash cases
+//! need an attempt that stays live until the case ends it. The cases share one namespace and the
+//! namespace-wide default-deny gate, so they run one at a time.
+//!
+//! Every observed in-container case reads its evidence from the attempt container's terminal
+//! message. The rendered script redirects the command's own descriptors into the attempt volume, so
+//! a probe cannot reach the pod log; it appends its evidence to the container terminal file instead
+//! and reports a short stdout payload, which makes the rendered script fail at the unreachable
+//! result sink before it can overwrite that evidence with its own receipt. The container log is
+//! still read as supporting evidence that the attempt failed at its own sink.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -41,6 +74,7 @@ use std::{
     time::Duration,
 };
 
+use agent_service::claude_code::RunCancellation;
 use agent_service::sandbox::{
     SANDBOX_BUILDKIT_CONTAINER, SANDBOX_DEFAULT_DENY_POLICY, SANDBOX_EVENT_SCOPE,
     SANDBOX_MAIN_CONTAINER, SANDBOX_MANAGED_BY, SandboxAttemptSpec, SandboxBundle,
@@ -84,6 +118,74 @@ const RESULT_UPLOAD_URL: &str = "https://127.0.0.1:1/labweaver-live-result.json"
 /// Unreachable stderr sink; no attempt stderr is ever uploaded by this probe.
 const STDERR_UPLOAD_URL: &str = "https://127.0.0.1:1/labweaver-live-stderr.log";
 
+/// Minimum wall-clock deadline the sandbox configuration accepts.
+const MINIMUM_WALL_TIME_SECONDS: u64 = 60;
+/// Deadline the cancellation and crash-recovery attempts run under, so they stay live.
+const LIVE_ATTEMPT_WALL_TIME_SECONDS: u64 = 600;
+/// Material source that never answers (`TEST-NET-1`): the materialize init container hangs, so the
+/// attempt stays live until `Kubernetes` fails it at its deadline or a case ends it first.
+const HANG_MATERIAL_URL: &str = "https://192.0.2.1/labweaver-live-material.json";
+/// Egress destination the adversarial probe addresses directly, outside every private CIDR.
+const BLOCKED_EGRESS_URL: &str = "https://1.1.1.1/";
+/// Egress destination the adversarial probe addresses by name, exercising name resolution too.
+const BLOCKED_EGRESS_DNS_URL: &str = "https://example.com/";
+/// Timeout the in-container probe gives every network attempt.
+const PROBE_CURL_MAX_TIME_SECONDS: u64 = 5;
+/// Marker every in-container probe prints its evidence lines under.
+const PROBE_MARKER: &str = "LW_LIVE_PROBE";
+/// Terminal file the probe appends its evidence to and the rendered script writes its receipt to.
+const TERMINATION_LOG: &str = "/dev/termination-log";
+/// Short payload every probe writes to its own stdout.
+///
+/// The rendered script redirects the command's own descriptors into the attempt volume and uploads
+/// a non-empty result to the unreachable sink, so the payload makes the script fail at that sink
+/// before it can overwrite the probe evidence with its receipt.
+const PROBE_RESULT_PAYLOAD: &str = "labweaver-live-probe";
+/// Host every attempt sink in this file is pinned to: the pod's own loopback, where nothing listens.
+const SINK_HOST: &str = "127.0.0.1";
+/// Attempt-id label the shared observation selects the attempt pod with.
+const ATTEMPT_ID_LABEL: &str = "labweaver.io/attempt-id";
+/// Diagnostic the shared observation reports for a Job `Kubernetes` failed at its deadline.
+const DEADLINE_DIAGNOSTIC: &str = "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED";
+/// Model credential the credential case injects and then proves is the only one present.
+const MODEL_CREDENTIAL_ENVIRONMENT: [(&str, &str); 3] = [
+    ("ANTHROPIC_AUTH_TOKEN", "labweaver-live-model-credential"),
+    ("ANTHROPIC_BASE_URL", "https://127.0.0.1:1"),
+    ("ANTHROPIC_MODEL", "labweaver-live-model"),
+];
+/// Optional variable holding the reachable attempt material URL.
+const MATERIAL_URL_VARIABLE: &str = "LW_LIVE_SANDBOX_MATERIAL_URL";
+/// Optional variable holding the sha256 of the attempt material bytes.
+const MATERIAL_SHA256_VARIABLE: &str = "LW_LIVE_SANDBOX_MATERIAL_SHA256";
+/// Optional variable holding the byte count of the attempt material.
+const MATERIAL_SIZE_VARIABLE: &str = "LW_LIVE_SANDBOX_MATERIAL_SIZE_BYTES";
+/// Optional variable holding a base64 CA the attempt trusts while it reads the material.
+const MATERIAL_CA_VARIABLE: &str = "LW_LIVE_SANDBOX_MATERIAL_CA_BASE64";
+/// Optional variable holding the `claude --version` prefix the sandbox image reports.
+const CLAUDE_VERSION_VARIABLE: &str = "LW_LIVE_SANDBOX_CLAUDE_VERSION";
+/// Optional variable overriding the egress destination the adversarial probe must not reach.
+const BLOCKED_EGRESS_VARIABLE: &str = "LW_LIVE_SANDBOX_BLOCKED_EGRESS_URL";
+/// Optional variable overriding the material source that never answers.
+const HANG_MATERIAL_VARIABLE: &str = "LW_LIVE_SANDBOX_HANG_MATERIAL_URL";
+/// CNI agent name prefixes that enforce `NetworkPolicy`.
+const ENFORCING_CNI_AGENTS: [&str; 8] = [
+    "calico",
+    "cilium",
+    "antrea",
+    "canal",
+    "weave",
+    "kube-router",
+    "kube-ovn",
+    "ovn-kubernetes",
+];
+/// CNI agent name prefixes that record `NetworkPolicy` without enforcing it.
+const RECORDING_CNI_AGENTS: [&str; 2] = ["kindnet", "flannel"];
+/// Serializes the live cases: they share one namespace and one namespace-wide default-deny gate.
+static LIVE_CASE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Live execution client, readback client and the environment they were built from.
+type LiveClients = (KubernetesApiClient, LiveRest, LiveEnvironment);
+
 /// Live connection, image and namespace inputs for one real authoring bundle.
 struct LiveEnvironment {
     configuration: KubernetesApiConfiguration,
@@ -93,6 +195,20 @@ struct LiveEnvironment {
     buildkit_image: Option<String>,
     buildkit_config_map: Option<String>,
     pull_secret: Option<String>,
+    attempt_inputs: Option<LiveAttemptInputs>,
+    blocked_egress_url: String,
+    hang_material_url: String,
+}
+
+/// Everything an observed in-container case needs: a reachable material envelope and the exact
+/// `claude --version` prefix the sandbox image reports.
+#[derive(Clone, Debug)]
+struct LiveAttemptInputs {
+    material_url: String,
+    material_sha256: String,
+    material_size_bytes: u64,
+    material_ca_base64: Option<String>,
+    claude_version: String,
 }
 
 /// Reads one required live variable.
@@ -139,6 +255,51 @@ fn live_environment() -> Result<Option<LiveEnvironment>, Box<dyn Error>> {
             "LW_LIVE_SANDBOX_IMAGE must be digest-pinned as <reference>@sha256:<64 hex>".into(),
         );
     }
+    let material_url = optional(MATERIAL_URL_VARIABLE);
+    let material_sha256 = optional(MATERIAL_SHA256_VARIABLE);
+    let material_size = optional(MATERIAL_SIZE_VARIABLE);
+    let material_ca_base64 = optional(MATERIAL_CA_VARIABLE);
+    if material_url.is_some() != material_sha256.is_some()
+        || material_url.is_some() != material_size.is_some()
+    {
+        return Err(format!(
+            "{MATERIAL_URL_VARIABLE}, {MATERIAL_SHA256_VARIABLE} and {MATERIAL_SIZE_VARIABLE} must be set together"
+        )
+        .into());
+    }
+    if material_ca_base64.is_some() && material_url.is_none() {
+        return Err(format!(
+            "{MATERIAL_CA_VARIABLE} requires {MATERIAL_URL_VARIABLE} and its pinned digest"
+        )
+        .into());
+    }
+    let material_size_bytes = material_size
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                format!("{MATERIAL_SIZE_VARIABLE} must be the byte count of the served material")
+            })
+        })
+        .transpose()?;
+    let attempt_inputs = match (
+        material_url,
+        material_sha256,
+        material_size_bytes,
+        optional(CLAUDE_VERSION_VARIABLE),
+    ) {
+        (
+            Some(material_url),
+            Some(material_sha256),
+            Some(material_size_bytes),
+            Some(claude_version),
+        ) => Some(LiveAttemptInputs {
+            material_url,
+            material_sha256,
+            material_size_bytes,
+            material_ca_base64,
+            claude_version,
+        }),
+        _ => None,
+    };
     Ok(Some(LiveEnvironment {
         configuration: KubernetesApiConfiguration {
             kubernetes_api_server: Url::parse(&required("LW_LIVE_KUBERNETES_API_SERVER")?)?,
@@ -153,11 +314,118 @@ fn live_environment() -> Result<Option<LiveEnvironment>, Box<dyn Error>> {
         buildkit_image,
         buildkit_config_map,
         pull_secret,
+        attempt_inputs,
+        blocked_egress_url: optional(BLOCKED_EGRESS_VARIABLE)
+            .unwrap_or_else(|| BLOCKED_EGRESS_URL.to_owned()),
+        hang_material_url: optional(HANG_MATERIAL_VARIABLE)
+            .unwrap_or_else(|| HANG_MATERIAL_URL.to_owned()),
     }))
+}
+
+/// Reads the live environment and builds the shared execution and readback clients.
+fn live_client() -> Result<Option<LiveClients>, Box<dyn Error>> {
+    let Some(environment) = live_environment()? else {
+        eprintln!("LW_LIVE_KUBERNETES is not enabled; skipping live sandbox readback");
+        return Ok(None);
+    };
+    let api = KubernetesApiClient::new(
+        environment.configuration.clone(),
+        FIELD_MANAGER,
+        LOG_SCOPE,
+        DIAGNOSTIC_PREFIX,
+        SANDBOX_MANAGED_BY,
+        SANDBOX_EVENT_SCOPE,
+    )?;
+    let rest = LiveRest::new(&environment.configuration)?;
+    Ok(Some((api, rest, environment)))
+}
+
+/// Prints the labelled notice that one in-container observation was skipped.
+fn print_unobserved_case(case: &str) {
+    eprintln!(
+        "live {case} observation skipped: set {MATERIAL_URL_VARIABLE}, {MATERIAL_SHA256_VARIABLE}, \
+         {MATERIAL_SIZE_VARIABLE} and {CLAUDE_VERSION_VARIABLE} so the attempt command actually runs"
+    );
 }
 
 /// Renders one real attempt bundle for the live namespace and image.
 fn live_bundle(environment: &LiveEnvironment) -> Result<SandboxBundle, Box<dyn Error>> {
+    rendered_bundle(environment, &LiveAttempt::readback_probe())
+}
+
+/// One purpose-built live attempt: its command, material source, deadline and environment.
+struct LiveAttempt {
+    command: Vec<String>,
+    material_url: String,
+    material_sha256: String,
+    material_size_bytes: u64,
+    material_ca_base64: Option<String>,
+    claude_version: String,
+    wall_time_seconds: u64,
+    command_environment: BTreeMap<String, String>,
+}
+
+impl LiveAttempt {
+    /// The default readback attempt: the Claude Code argv against the unreachable material source.
+    fn readback_probe() -> Self {
+        Self {
+            command: vec![
+                "claude".to_owned(),
+                "--print".to_owned(),
+                "labweaver-live-probe".to_owned(),
+            ],
+            material_url: MATERIAL_DOWNLOAD_URL.to_owned(),
+            material_sha256: Sha256Digest::of_bytes(b"labweaver-live-material").to_string(),
+            material_size_bytes: 16,
+            material_ca_base64: None,
+            claude_version: "0.0.0-labweaver-live".to_owned(),
+            wall_time_seconds: ATTEMPT_WALL_TIME_SECONDS,
+            command_environment: BTreeMap::new(),
+        }
+    }
+
+    /// One attempt that runs a purpose-built probe against the reachable material envelope.
+    fn observed_probe(
+        command: Vec<String>,
+        inputs: &LiveAttemptInputs,
+        command_environment: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            command,
+            material_url: inputs.material_url.clone(),
+            material_sha256: inputs.material_sha256.clone(),
+            material_size_bytes: inputs.material_size_bytes,
+            material_ca_base64: inputs.material_ca_base64.clone(),
+            claude_version: inputs.claude_version.clone(),
+            wall_time_seconds: ATTEMPT_WALL_TIME_SECONDS,
+            command_environment,
+        }
+    }
+
+    /// One attempt whose material source never answers, so it stays live until the case ends it.
+    fn hanging_probe(environment: &LiveEnvironment) -> Self {
+        Self {
+            command: vec![
+                "claude".to_owned(),
+                "--print".to_owned(),
+                "labweaver-live-probe".to_owned(),
+            ],
+            material_url: environment.hang_material_url.clone(),
+            material_sha256: Sha256Digest::of_bytes(b"labweaver-live-hang-material").to_string(),
+            material_size_bytes: 16,
+            material_ca_base64: None,
+            claude_version: "0.0.0-labweaver-live".to_owned(),
+            wall_time_seconds: LIVE_ATTEMPT_WALL_TIME_SECONDS,
+            command_environment: BTreeMap::new(),
+        }
+    }
+}
+
+/// Renders one live attempt bundle for a purpose-built command and material source.
+fn rendered_bundle(
+    environment: &LiveEnvironment,
+    attempt: &LiveAttempt,
+) -> Result<SandboxBundle, Box<dyn Error>> {
     let task_run_id = Uuid::now_v7();
     let mut allowed_egress_cidrs = BTreeSet::new();
     allowed_egress_cidrs.insert(environment.egress_cidr.clone());
@@ -175,7 +443,7 @@ fn live_bundle(environment: &LiveEnvironment) -> Result<SandboxBundle, Box<dyn E
         cpu_millicores: 250,
         memory_bytes: 256 * 1024 * 1024,
         workspace_bytes: 256 * 1024 * 1024,
-        wall_time_seconds: ATTEMPT_WALL_TIME_SECONDS,
+        wall_time_seconds: attempt.wall_time_seconds,
         allowed_egress_cidrs,
         buildkit_image: environment.buildkit_image.clone(),
         buildkit_config_map_name: environment.buildkit_config_map.clone(),
@@ -184,16 +452,12 @@ fn live_bundle(environment: &LiveEnvironment) -> Result<SandboxBundle, Box<dyn E
         task_run_id,
         ownership,
         trace_id: format!("live-{task_run_id}"),
-        command: vec![
-            "claude".to_owned(),
-            "--print".to_owned(),
-            "labweaver-live-probe".to_owned(),
-        ],
-        expected_claude_version: "0.0.0-labweaver-live".to_owned(),
-        command_environment: BTreeMap::new(),
-        material_download_url: MATERIAL_DOWNLOAD_URL.to_owned(),
-        material_sha256: Sha256Digest::of_bytes(b"labweaver-live-material").to_string(),
-        material_size_bytes: 16,
+        command: attempt.command.clone(),
+        expected_claude_version: attempt.claude_version.clone(),
+        command_environment: attempt.command_environment.clone(),
+        material_download_url: attempt.material_url.clone(),
+        material_sha256: attempt.material_sha256.clone(),
+        material_size_bytes: attempt.material_size_bytes,
         result_upload_url: RESULT_UPLOAD_URL.to_owned(),
         result_upload_headers: BTreeMap::new(),
         stderr_upload_url: STDERR_UPLOAD_URL.to_owned(),
@@ -202,7 +466,7 @@ fn live_bundle(environment: &LiveEnvironment) -> Result<SandboxBundle, Box<dyn E
         stderr_max_bytes: 4_096,
         export_upload_url: None,
         export_upload_headers: BTreeMap::new(),
-        object_store_ca_base64: None,
+        object_store_ca_base64: attempt.material_ca_base64.clone(),
     };
     Ok(build_sandbox_bundle(&configuration, &spec)?)
 }
@@ -308,6 +572,83 @@ impl LiveRest {
             return Err(format!("POST {path} returned {}", response.status()).into());
         }
         Ok(response.json().await?)
+    }
+
+    /// Lists one collection and returns its raw items.
+    async fn list(&self, path: &str) -> Result<Vec<Value>, Box<dyn Error>> {
+        let response = self
+            .client
+            .get(self.server.join(path)?)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(format!("GET {path} returned {}", response.status()).into());
+        }
+        let document: Value = response.json().await?;
+        let items = document
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or("the live collection response carries no items")?;
+        Ok(items.clone())
+    }
+
+    /// Reads the merged log of one attempt container through the pod log subresource.
+    ///
+    /// Returns `None` while the container has no log yet, which is how a killed attempt that never
+    /// started its command reports itself.
+    async fn pod_log(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        let path = format!(
+            "{}/log?container={container}",
+            object_path("v1", namespace, "pods", pod)
+        );
+        let response = self
+            .client
+            .get(self.server.join(&path)?)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(format!("GET {path} returned {}", response.status()).into());
+        }
+        Ok(Some(response.text().await?))
+    }
+
+    /// Reads the terminated state of one attempt container, including its terminal message.
+    ///
+    /// The rendered script redirects the command's own descriptors into the attempt volume, so the
+    /// terminal message is the only channel the command's own output can be observed through.
+    async fn container_termination(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+    ) -> Result<Option<Value>, Box<dyn Error>> {
+        let path = object_path("v1", namespace, "pods", pod);
+        let live = self
+            .get(&path)
+            .await?
+            .ok_or_else(|| format!("the attempt pod {pod} is absent from readback"))?;
+        let statuses = live
+            .pointer("/status/containerStatuses")
+            .and_then(Value::as_array)
+            .ok_or("the attempt pod reports no container statuses")?;
+        Ok(statuses
+            .iter()
+            .find(|status| status.get("name").and_then(Value::as_str) == Some(container))
+            .and_then(|status| status.pointer("/state/terminated"))
+            .cloned())
     }
 }
 
@@ -453,6 +794,51 @@ fn assert_per_attempt_policy(policy: &Value) -> Result<(), Box<dyn Error>> {
     assert!(
         ingress.is_none_or(|rules| rules.as_array().is_some_and(Vec::is_empty)),
         "the per-attempt policy must admit no ingress rule; the API server omits an empty list"
+    );
+    Ok(())
+}
+
+/// Asserts the applied per-attempt `NetworkPolicy` admits exactly the DNS and configured CIDR egress.
+///
+/// The applied document is asserted unconditionally: whether the cluster CNI enforces it is a
+/// separate, reported observation.
+fn assert_per_attempt_egress_policy(
+    policy: &Value,
+    egress_cidr: &str,
+) -> Result<(), Box<dyn Error>> {
+    let egress = policy
+        .pointer("/spec/egress")
+        .and_then(Value::as_array)
+        .ok_or("the live per-attempt NetworkPolicy has no egress rules")?;
+    assert_eq!(
+        egress.len(),
+        2,
+        "the per-attempt policy must admit exactly the name-resolution and configured CIDR rules"
+    );
+    assert_eq!(
+        egress[0].get("to"),
+        Some(&json!([{
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}
+        }])),
+        "the per-attempt policy must resolve names through the kube-system DNS service only"
+    );
+    assert_eq!(
+        egress[0].get("ports"),
+        Some(&json!([
+            {"protocol": "UDP", "port": 53},
+            {"protocol": "TCP", "port": 53},
+        ])),
+        "the per-attempt policy must admit DNS on both transports only"
+    );
+    assert_eq!(
+        egress[1].get("to"),
+        Some(&json!([{"ipBlock": {"cidr": egress_cidr}}])),
+        "the per-attempt policy must admit exactly the configured egress CIDR"
+    );
+    assert_eq!(
+        egress[1].get("ports"),
+        Some(&json!([{"protocol": "TCP", "port": 443}])),
+        "the per-attempt policy must admit only TLS beyond the name-resolution rule"
     );
     Ok(())
 }
@@ -732,6 +1118,9 @@ async fn live_bundle_readback_default_deny_cleanup_and_failure() -> Result<(), B
         eprintln!("LW_LIVE_KUBERNETES is not enabled; skipping live sandbox readback");
         return Ok(());
     };
+    // The case removes the namespace default-deny policy while it proves the fail-closed gate, so
+    // it must never overlap another live case that shares the namespace.
+    let _guard = LIVE_CASE_LOCK.lock().await;
     let api = KubernetesApiClient::new(
         environment.configuration.clone(),
         FIELD_MANAGER,
@@ -751,4 +1140,811 @@ async fn live_bundle_readback_default_deny_cleanup_and_failure() -> Result<(), B
         environment.namespace
     );
     Ok(())
+}
+
+/// Starts one purpose-built attempt and returns its rendered bundle.
+async fn start_attempt(
+    api: &KubernetesApiClient,
+    environment: &LiveEnvironment,
+    attempt: &LiveAttempt,
+) -> Result<SandboxBundle, Box<dyn Error>> {
+    let bundle = rendered_bundle(environment, attempt)?;
+    api.start(&bundle.bundle).await?;
+    Ok(bundle)
+}
+
+/// Reads one applied object of a started attempt.
+async fn applied_object(
+    rest: &LiveRest,
+    environment: &LiveEnvironment,
+    api_version: &str,
+    plural: &str,
+    name: &str,
+) -> Result<Value, Box<dyn Error>> {
+    rest.get(&object_path(
+        api_version,
+        environment.namespace.as_str(),
+        plural,
+        name,
+    ))
+    .await?
+    .ok_or_else(|| format!("the applied attempt {plural}/{name} is absent from readback").into())
+}
+
+/// Cleans one attempt, proves its objects are gone and asserts the managed-object baseline.
+async fn finish_attempt(
+    api: &KubernetesApiClient,
+    rest: &LiveRest,
+    environment: &LiveEnvironment,
+    bundle: &SandboxBundle,
+    baseline: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let namespace = environment.namespace.as_str();
+    await_cleanup(api, namespace, bundle).await?;
+    for (api_version, plural, name) in [
+        ("batch/v1", "jobs", bundle.job_name.as_str()),
+        (
+            "networking.k8s.io/v1",
+            "networkpolicies",
+            bundle.network_policy_name.as_str(),
+        ),
+        ("v1", "secrets", bundle.secret_name.as_str()),
+    ] {
+        assert!(
+            rest.get(&object_path(api_version, namespace, plural, name))
+                .await?
+                .is_none(),
+            "the cleaned attempt must leave no live {plural} object"
+        );
+    }
+    let managed = managed_object_names(api, namespace).await?;
+    assert_eq!(
+        managed, baseline,
+        "no attempt-owned object may remain once the attempt is cleaned up"
+    );
+    println!("live cleanup count readback: managed objects == captured baseline");
+    Ok(())
+}
+
+/// Returns the name of the single attempt pod the shared observation selects.
+async fn attempt_pod_name(
+    api: &KubernetesApiClient,
+    namespace: &str,
+    attempt_id: Uuid,
+) -> Result<String, Box<dyn Error>> {
+    let selector = format!("{ATTEMPT_ID_LABEL}={attempt_id}");
+    let pods = api.list(namespace, "v1", "pods", &selector).await?;
+    let names = pods
+        .iter()
+        .filter_map(|pod| pod.pointer("/metadata/name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    match names.as_slice() {
+        [name] => Ok(name.clone()),
+        _ => Err(format!("the live attempt must own exactly one pod, observed {names:?}").into()),
+    }
+}
+
+/// Returns the evidence lines one in-container probe printed to the pod log.
+fn probe_evidence(log: &str) -> BTreeMap<String, String> {
+    log.lines()
+        .filter_map(|line| line.strip_prefix(PROBE_MARKER))
+        .filter_map(|rest| rest.trim().split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// Returns one probe evidence list as a set.
+fn probe_names(value: Option<&str>) -> BTreeSet<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Returns one probe exit code as an integer.
+fn probe_exit(evidence: &BTreeMap<String, String>, key: &str) -> Result<i32, Box<dyn Error>> {
+    let value = evidence
+        .get(key)
+        .ok_or_else(|| format!("the in-container probe printed no {key}"))?;
+    value
+        .parse::<i32>()
+        .map_err(|_| format!("the in-container probe printed a malformed {key}={value}").into())
+}
+
+/// Reads the probe evidence of one started attempt from its container terminal message.
+///
+/// The rendered script redirects the command's own descriptors into the attempt volume, so the
+/// command cannot reach the pod log: it appends its evidence to the container terminal file instead
+/// and its stdout payload makes the script fail at the unreachable result sink before the script
+/// overwrites that evidence with its receipt. The container log is read as supporting evidence that
+/// the attempt failed at its own sink.
+async fn probe_evidence_of(
+    api: &KubernetesApiClient,
+    rest: &LiveRest,
+    namespace: &str,
+    bundle: &SandboxBundle,
+) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    let pod = attempt_pod_name(api, namespace, bundle.bundle.identity.ownership.attempt_id).await?;
+    let terminated = rest
+        .container_termination(namespace, &pod, SANDBOX_MAIN_CONTAINER)
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "the attempt container never terminated; check {CLAUDE_VERSION_VARIABLE} against the image's `claude --version`"
+            )
+        })?;
+    let message = terminated
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    println!(
+        "live attempt terminal message: pod={pod} container={SANDBOX_MAIN_CONTAINER}\n{message}"
+    );
+    let evidence = probe_evidence(message);
+    assert!(
+        !evidence.is_empty(),
+        "the attempt container terminal message carries no {PROBE_MARKER} evidence; check {CLAUDE_VERSION_VARIABLE} against the image's `claude --version`"
+    );
+    let log = rest
+        .pod_log(namespace, &pod, SANDBOX_MAIN_CONTAINER)
+        .await?;
+    assert!(
+        log.as_deref().is_some_and(|log| log.contains(SINK_HOST)),
+        "the attempt container log must report the unreachable attempt sink: {log:?}"
+    );
+    println!(
+        "live attempt container log: pod={pod}\n{}",
+        log.unwrap_or_default()
+    );
+    Ok(evidence)
+}
+
+/// Asserts one probe attempt ran its command and then failed at the unreachable attempt sinks.
+fn assert_probe_attempt_failed(
+    observation: &KubernetesJobObservation,
+) -> Result<(), Box<dyn Error>> {
+    let KubernetesJobObservation::Failed {
+        diagnostic_code, ..
+    } = observation
+    else {
+        return Err(format!(
+            "the probe attempt must fail once its command ran; observed {observation:?} (check {CLAUDE_VERSION_VARIABLE} against the image's `claude --version`)"
+        )
+        .into());
+    };
+    assert_eq!(
+        diagnostic_code, "LW_AGENT_SANDBOX_FAILED",
+        "the probe attempt must fail because its result sink is unreachable: {observation:?}"
+    );
+    println!("live attempt readback: state=Failed diagnostic={diagnostic_code}");
+    Ok(())
+}
+
+/// Returns the shell preamble every in-container probe prints its evidence with.
+fn probe_preamble() -> String {
+    format!("probe() {{ printf '{PROBE_MARKER} %s\\n' \"$1\" >>{TERMINATION_LOG}; }}\n")
+}
+
+/// Returns the trailing lines every in-container probe reports its result payload with.
+fn probe_epilogue() -> String {
+    format!("printf '{PROBE_RESULT_PAYLOAD}'\nexit 0\n")
+}
+
+/// Renders the command that probes egress beyond the configured allow-list.
+fn egress_probe_command(blocked_url: &str, blocked_dns_url: &str) -> Vec<String> {
+    let script = format!(
+        "{}\
+         probe egress=start\n\
+         curl --silent --show-error --max-time {PROBE_CURL_MAX_TIME_SECONDS} --output /dev/null '{blocked_url}' 2>/dev/null\n\
+         probe \"blocked_address_exit=$?\"\n\
+         curl --silent --show-error --max-time {PROBE_CURL_MAX_TIME_SECONDS} --output /dev/null '{blocked_dns_url}' 2>/dev/null\n\
+         probe \"blocked_name_exit=$?\"\n\
+         curl --silent --show-error --max-time {PROBE_CURL_MAX_TIME_SECONDS} --output /dev/null \"$MATERIAL_DOWNLOAD_URL\" 2>/dev/null\n\
+         probe \"allowed_exit=$?\"\n\
+         probe egress=done\n\
+         {}",
+        probe_preamble(),
+        probe_epilogue()
+    );
+    vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
+}
+
+/// Renders the command that probes for platform credential material inside the attempt.
+fn credential_probe_command() -> Vec<String> {
+    let script = format!(
+        "{}\
+         if [ -e /var/run/secrets/kubernetes.io/serviceaccount ]; then\n\
+         \x20 if [ -r /var/run/secrets/kubernetes.io/serviceaccount/token ]; then probe serviceaccount=readable; else probe serviceaccount=unreadable; fi\n\
+         else\n\
+         \x20 probe serviceaccount=absent\n\
+         fi\n\
+         credential=''\n\
+         anthropic=''\n\
+         for name in $(env | cut -d= -f1); do\n\
+         \x20 case \"$name\" in\n\
+         \x20   *PASSWORD*|*SECRET*|*TOKEN*|*CREDENTIAL*|*API_KEY*|*APIKEY*|*_KEY|*AUTH*) credential=\"$credential,$name\" ;;\n\
+         \x20 esac\n\
+         \x20 case \"$name\" in ANTHROPIC_*) anthropic=\"$anthropic,$name\" ;; esac\n\
+         done\n\
+         probe \"credential_environment=${{credential#,}}\"\n\
+         probe \"anthropic_environment=${{anthropic#,}}\"\n\
+         docker=absent\n\
+         for candidate in \"${{HOME:-/root}}/.docker/config.json\" /root/.docker/config.json /home/user/.docker/config.json; do\n\
+         \x20 if [ -f \"$candidate\" ]; then\n\
+         \x20   case \"$(cat \"$candidate\")\" in *auth*) docker=\"credentials:$candidate\" ;; *) docker=\"empty:$candidate\" ;; esac\n\
+         \x20 fi\n\
+         done\n\
+         probe \"docker_config=$docker\"\n\
+         {}",
+        probe_preamble(),
+        probe_epilogue()
+    );
+    vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
+}
+
+/// Renders the command that probes the read-only boundaries of the attempt filesystem.
+fn filesystem_probe_command() -> Vec<String> {
+    let script = format!(
+        "{}\
+         if ( : > /usr/local/bin/labweaver-live-probe ) 2>/dev/null; then probe rootfs_write=allowed; else probe rootfs_write=denied; fi\n\
+         if ( : > /materials/labweaver-live-probe ) 2>/dev/null; then probe materials_write=allowed; else probe materials_write=denied; fi\n\
+         if ( : > /workspace/labweaver-live-probe ) 2>/dev/null; then probe workspace_write=allowed; else probe workspace_write=denied; fi\n\
+         if ( : > /run/labweaver/labweaver-live-probe ) 2>/dev/null; then probe attempt_write=allowed; else probe attempt_write=denied; fi\n\
+         {}",
+        probe_preamble(),
+        probe_epilogue()
+    );
+    vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
+}
+
+/// Asserts the applied main container keeps the read-only attempt boundaries.
+fn assert_attempt_read_only_boundaries(job: &Value) -> Result<(), Box<dyn Error>> {
+    let pod = pod_template(job)?;
+    let main = container(pod, SANDBOX_MAIN_CONTAINER)?;
+    let mounts = main
+        .pointer("/volumeMounts")
+        .and_then(Value::as_array)
+        .ok_or("the live main container has no volume mounts")?;
+    let mount = |path: &str| {
+        mounts
+            .iter()
+            .find(|mount| mount.get("mountPath").and_then(Value::as_str) == Some(path))
+    };
+    assert_eq!(
+        mount("/materials").and_then(|mount| mount.get("readOnly")),
+        Some(&Value::Bool(true)),
+        "the attempt materials mount must stay read-only"
+    );
+    assert_eq!(
+        mount("/workspace").and_then(|mount| mount.get("readOnly")),
+        Some(&Value::Bool(false)),
+        "the attempt workspace must stay writable"
+    );
+    Ok(())
+}
+
+/// `NetworkPolicy` enforcement class of the live cluster CNI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CniEnforcement {
+    /// A CNI agent that enforces `NetworkPolicy` is running.
+    Enforcing(String),
+    /// A CNI agent that records `NetworkPolicy` without enforcing it is running.
+    Recording(String),
+    /// No reviewed CNI agent was identified.
+    Unknown,
+}
+
+/// Returns the `NetworkPolicy` enforcement class of the live cluster CNI.
+///
+/// `Kubernetes` never enforces `NetworkPolicy` itself; the CNI plugin does. The classification is a
+/// reviewed name table: `kindnet` and standalone `flannel` record policies without enforcing them,
+/// while the enforcing agents block traffic. An unrecognised agent is reported as unknown instead
+/// of being assumed to enforce, so a recorded policy is never reported as proven enforcement.
+async fn cni_enforcement(rest: &LiveRest) -> Result<CniEnforcement, Box<dyn Error>> {
+    let pods = rest
+        .list(&collection_path("v1", "kube-system", "pods"))
+        .await?;
+    let names = pods
+        .iter()
+        .filter_map(|pod| pod.pointer("/metadata/name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let agent = |markers: &[&str]| {
+        names
+            .iter()
+            .find(|name| markers.iter().any(|marker| name.starts_with(marker)))
+            .cloned()
+    };
+    if let Some(name) = agent(&ENFORCING_CNI_AGENTS) {
+        return Ok(CniEnforcement::Enforcing(name));
+    }
+    if let Some(name) = agent(&RECORDING_CNI_AGENTS) {
+        return Ok(CniEnforcement::Recording(name));
+    }
+    Ok(CniEnforcement::Unknown)
+}
+
+/// Returns the reason of the Job's terminal `Failed` condition, when `Kubernetes` reported one.
+fn failed_condition_reason(job: &Value) -> Option<String> {
+    job.pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .and_then(|conditions| {
+            conditions.iter().find(|condition| {
+                condition.pointer("/type").and_then(Value::as_str) == Some("Failed")
+                    && condition.pointer("/status").and_then(Value::as_str) == Some("True")
+            })
+        })
+        .and_then(|condition| condition.pointer("/reason").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+/// Reads the reason of the live attempt Job's terminal `Failed` condition.
+async fn live_failed_condition_reason(
+    rest: &LiveRest,
+    environment: &LiveEnvironment,
+    job_name: &str,
+) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(rest
+        .get(&object_path(
+            "batch/v1",
+            environment.namespace.as_str(),
+            "jobs",
+            job_name,
+        ))
+        .await?
+        .as_ref()
+        .and_then(failed_condition_reason))
+}
+
+/// Waits until the shared observation reports the hung attempt as live.
+async fn await_live_attempt(
+    api: &KubernetesApiClient,
+    identity: &KubernetesJobIdentity,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    loop {
+        match api.observe(identity, None).await? {
+            KubernetesJobObservation::Running => return Ok(()),
+            KubernetesJobObservation::Missing => {}
+            terminal => {
+                return Err(format!(
+                    "the attempt must stay live until the case ends it; observed {terminal:?}"
+                )
+                .into());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the live attempt never reported itself as running".into());
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Runs the cancellation cleanup the authoring executor runs for a cancelled attempt.
+///
+/// The executor requests cancellation through [`RunCancellation`], cleans the attempt bundle with
+/// the shared cleanup call and only releases the Resource reservation once cleanup is confirmed;
+/// this runs the same authority and the same confirmed-absence precondition.
+async fn cancel_attempt(
+    api: &KubernetesApiClient,
+    cancellation: &RunCancellation,
+    namespace: &str,
+    bundle: &SandboxBundle,
+) -> Result<ExecutionCleanupStatus, KubernetesJobError> {
+    cancellation.cancel();
+    assert!(
+        cancellation.is_cancelled(),
+        "the cancellation authority must report the requested cancellation"
+    );
+    api.cleanup(
+        namespace,
+        bundle.job_name.as_str(),
+        &bundle.bundle.objects,
+        &bundle.bundle.cleanup_plan,
+    )
+    .await
+}
+
+/// Case 1: egress beyond the allow-list, with the applied policy document always asserted.
+///
+/// The applied per-attempt `NetworkPolicy` is asserted exactly. The probe's own outcome is only
+/// claimed as enforcement when a reviewed enforcing CNI is running: a CNI that records policies
+/// without enforcing them is reported as such instead of passing as proven enforcement.
+#[tokio::test]
+async fn live_disallowed_egress_is_bounded_by_the_applied_policy() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let command = egress_probe_command(&environment.blocked_egress_url, BLOCKED_EGRESS_DNS_URL);
+    let attempt = match environment.attempt_inputs.as_ref() {
+        Some(inputs) => LiveAttempt::observed_probe(command, inputs, BTreeMap::new()),
+        None => LiveAttempt {
+            command,
+            ..LiveAttempt::readback_probe()
+        },
+    };
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    let policy = applied_object(
+        &rest,
+        &environment,
+        "networking.k8s.io/v1",
+        "networkpolicies",
+        &bundle.network_policy_name,
+    )
+    .await?;
+    assert_per_attempt_egress_policy(&policy, &environment.egress_cidr)?;
+    println!(
+        "live egress policy readback: dns=kube-system:53 cidr={} tls=443",
+        environment.egress_cidr
+    );
+    if environment.attempt_inputs.is_some() {
+        let observation = await_terminal(&api, &bundle.bundle.identity).await?;
+        assert_probe_attempt_failed(&observation)?;
+        let evidence = probe_evidence_of(&api, &rest, namespace, &bundle).await?;
+        assert_eq!(
+            evidence.get("egress").map(String::as_str),
+            Some("done"),
+            "the in-container egress probe must finish: {evidence:?}"
+        );
+        let allowed = probe_exit(&evidence, "allowed_exit")?;
+        let blocked_address = probe_exit(&evidence, "blocked_address_exit")?;
+        let blocked_name = probe_exit(&evidence, "blocked_name_exit")?;
+        assert_eq!(
+            allowed, 0,
+            "the attempt material host must stay reachable inside the allowed egress CIDRs"
+        );
+        match cni_enforcement(&rest).await? {
+            CniEnforcement::Enforcing(cni) => {
+                assert_ne!(
+                    blocked_address, 0,
+                    "an enforcing CNI must block {BLOCKED_EGRESS_URL} beyond the allow-list"
+                );
+                assert_ne!(
+                    blocked_name, 0,
+                    "an enforcing CNI must block {BLOCKED_EGRESS_DNS_URL} beyond the allow-list"
+                );
+                println!(
+                    "live egress enforcement: verdict=enforcement-observed cni={cni} enforcing=true blockedAddressExit={blocked_address} blockedNameExit={blocked_name} allowedExit={allowed}"
+                );
+            }
+            CniEnforcement::Recording(cni) => {
+                println!(
+                    "live egress enforcement: verdict=policy-document-only cni={cni} enforcing=false blockedAddressExit={blocked_address} blockedNameExit={blocked_name} allowedExit={allowed} (this CNI records NetworkPolicy without enforcing it, so the probe outcome proves nothing about enforcement)"
+                );
+            }
+            CniEnforcement::Unknown => {
+                println!(
+                    "live egress enforcement: verdict=policy-document-only cni=unknown enforcing=unknown blockedAddressExit={blocked_address} blockedNameExit={blocked_name} allowedExit={allowed} (no reviewed CNI agent was identified, so the probe outcome proves nothing about enforcement)"
+                );
+            }
+        }
+    } else {
+        print_unobserved_case("disallowed-egress");
+    }
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Case 2: the attempt carries no platform credential material.
+///
+/// The applied attempt Secret is asserted to hold attempt inputs and the injected model credential
+/// only, and the in-container probe proves that no service-account token, registry docker config or
+/// credential-shaped environment variable beyond that model credential is reachable.
+#[tokio::test]
+async fn live_attempt_environment_carries_no_platform_credential() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let command = credential_probe_command();
+    let mut command_environment = BTreeMap::new();
+    for (name, value) in MODEL_CREDENTIAL_ENVIRONMENT {
+        command_environment.insert(name.to_owned(), value.to_owned());
+    }
+    let attempt = match environment.attempt_inputs.as_ref() {
+        Some(inputs) => LiveAttempt::observed_probe(command, inputs, command_environment),
+        None => LiveAttempt {
+            command,
+            command_environment,
+            ..LiveAttempt::readback_probe()
+        },
+    };
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    let secret = applied_object(&rest, &environment, "v1", "secrets", &bundle.secret_name).await?;
+    let keys = secret
+        .get("data")
+        .and_then(Value::as_object)
+        .map(|data| data.keys().cloned().collect::<BTreeSet<_>>())
+        .ok_or("the applied attempt Secret carries no data")?;
+    assert!(
+        keys.contains("ANTHROPIC_AUTH_TOKEN"),
+        "the attempt Secret must carry the injected model credential: {keys:?}"
+    );
+    for key in &keys {
+        let upper = key.to_ascii_uppercase();
+        assert!(
+            !upper.contains("PASSWORD")
+                && !upper.contains("USERNAME")
+                && !upper.contains("REGISTRY"),
+            "the attempt Secret must carry no registry credential key: {key}"
+        );
+    }
+    println!("live credential readback: attemptSecretKeys={keys:?}");
+    if environment.attempt_inputs.is_some() {
+        let observation = await_terminal(&api, &bundle.bundle.identity).await?;
+        assert_probe_attempt_failed(&observation)?;
+        let evidence = probe_evidence_of(&api, &rest, namespace, &bundle).await?;
+        assert_eq!(
+            evidence.get("serviceaccount").map(String::as_str),
+            Some("absent"),
+            "the attempt must not mount a service account token: {evidence:?}"
+        );
+        assert_eq!(
+            evidence.get("docker_config").map(String::as_str),
+            Some("absent"),
+            "the attempt must hold no registry docker config: {evidence:?}"
+        );
+        let expected: BTreeSet<String> = MODEL_CREDENTIAL_ENVIRONMENT
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(
+            probe_names(evidence.get("anthropic_environment").map(String::as_str)),
+            expected,
+            "the only ANTHROPIC_* variables may be the injected model credential"
+        );
+        assert_eq!(
+            probe_names(evidence.get("credential_environment").map(String::as_str)),
+            BTreeSet::from(["ANTHROPIC_AUTH_TOKEN".to_owned()]),
+            "the only credential-shaped attempt variable may be the injected model credential"
+        );
+        println!("live credential probe readback: no platform credential material is reachable");
+    } else {
+        print_unobserved_case("credential-leakage");
+    }
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Case 3: a malicious script cannot write outside the attempt's writable volumes.
+///
+/// The applied main container is asserted to keep the read-only root filesystem and the read-only
+/// materials mount, and the in-container probe proves the write attempts are rejected while the
+/// workspace stays writable.
+#[tokio::test]
+async fn live_malicious_script_cannot_write_read_only_paths() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let command = filesystem_probe_command();
+    let attempt = match environment.attempt_inputs.as_ref() {
+        Some(inputs) => LiveAttempt::observed_probe(command, inputs, BTreeMap::new()),
+        None => LiveAttempt {
+            command,
+            ..LiveAttempt::readback_probe()
+        },
+    };
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    let job = applied_object(&rest, &environment, "batch/v1", "jobs", &bundle.job_name).await?;
+    assert_attempt_read_only_boundaries(&job)?;
+    println!("live boundary readback: rootfs=read-only materials=read-only workspace=writable");
+    if environment.attempt_inputs.is_some() {
+        let observation = await_terminal(&api, &bundle.bundle.identity).await?;
+        assert_probe_attempt_failed(&observation)?;
+        let evidence = probe_evidence_of(&api, &rest, namespace, &bundle).await?;
+        for (key, expected) in [
+            ("rootfs_write", "denied"),
+            ("materials_write", "denied"),
+            ("workspace_write", "allowed"),
+            ("attempt_write", "allowed"),
+        ] {
+            assert_eq!(
+                evidence.get(key).map(String::as_str),
+                Some(expected),
+                "the in-container filesystem probe must report {key}={expected}: {evidence:?}"
+            );
+        }
+        println!(
+            "live filesystem probe readback: read-only boundaries rejected the write attempts"
+        );
+    } else {
+        print_unobserved_case("malicious-script");
+    }
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Case 4: the Job deadline fails a hung attempt at the configured bound.
+///
+/// The applied deadline is asserted, the Job's terminal state must report `DeadlineExceeded`, and
+/// the attempt must never complete. What the shared observation reports for that terminal state is
+/// recorded and printed: `Kubernetes` only sets the Job's `Failed` condition after it deleted the
+/// attempt pod, so on clusters with that behaviour the shared observation reports the generic
+/// failure code or an unavailable observation instead of the deadline code.
+#[tokio::test]
+async fn live_attempt_deadline_fails_the_hung_attempt() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let mut attempt = LiveAttempt::hanging_probe(&environment);
+    attempt.wall_time_seconds = MINIMUM_WALL_TIME_SECONDS;
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    let job = applied_object(&rest, &environment, "batch/v1", "jobs", &bundle.job_name).await?;
+    assert_eq!(
+        job.pointer("/spec/activeDeadlineSeconds")
+            .and_then(Value::as_u64),
+        Some(MINIMUM_WALL_TIME_SECONDS),
+        "the rendered attempt must be bounded by the configured deadline"
+    );
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    let mut shared = "none".to_owned();
+    let mut job_reason =
+        live_failed_condition_reason(&rest, &environment, &bundle.job_name).await?;
+    while job_reason.is_none() {
+        if shared == "none" {
+            shared = match api.observe(&bundle.bundle.identity, None).await {
+                Ok(KubernetesJobObservation::Running) => "none".to_owned(),
+                Ok(KubernetesJobObservation::Failed {
+                    diagnostic_code, ..
+                }) => diagnostic_code,
+                Ok(KubernetesJobObservation::Completed { .. }) => "Completed".to_owned(),
+                Ok(KubernetesJobObservation::Missing) => "Missing".to_owned(),
+                Err(error) => format!("error:{}", error.error_kind()),
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+        job_reason = live_failed_condition_reason(&rest, &environment, &bundle.job_name).await?;
+    }
+    assert_eq!(
+        job_reason.as_deref(),
+        Some("DeadlineExceeded"),
+        "Kubernetes must fail the hung attempt through the Job deadline"
+    );
+    assert_ne!(
+        shared, "Completed",
+        "an attempt that never finished its work must never complete"
+    );
+    assert!(
+        shared == DEADLINE_DIAGNOSTIC
+            || shared.starts_with(DIAGNOSTIC_PREFIX)
+            || shared.starts_with("error:")
+            || shared == "none"
+            || shared == "Missing",
+        "the shared observation must report a stable attempt diagnostic or an unavailable observation, observed {shared}"
+    );
+    println!(
+        "live deadline observation: verdict={} jobReason=DeadlineExceeded jobDeadlineSeconds={MINIMUM_WALL_TIME_SECONDS} sharedObservation={shared}",
+        if shared == DEADLINE_DIAGNOSTIC {
+            "deadline-diagnostic-observed"
+        } else {
+            "deadline-diagnostic-not-exposed"
+        }
+    );
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Case 5: a cancelled attempt is cleaned up before anything is released.
+///
+/// The attempt is proven live, then cancelled through the executor's own cancellation authority and
+/// the shared cleanup call the executor runs before it releases the Resource reservation. The
+/// cancelled attempt must be gone rather than completed, and its objects must be verifiably absent
+/// before the case ends. The Resource release itself needs the Resource client and run store, which
+/// a live readback cannot construct, so only the confirmed-cleanup precondition is asserted.
+#[tokio::test]
+async fn live_cancelled_attempt_is_cleaned_up_before_release() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let attempt = LiveAttempt::hanging_probe(&environment);
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    await_live_attempt(&api, &bundle.bundle.identity).await?;
+    let cancellation = RunCancellation::new();
+    assert!(
+        !cancellation.is_cancelled(),
+        "the cancellation authority must start active"
+    );
+    let status = cancel_attempt(&api, &cancellation, namespace, &bundle).await?;
+    assert!(
+        status.is_confirmed(),
+        "the cancellation path must confirm cleanup before the reservation is released"
+    );
+    let observed = api.observe(&bundle.bundle.identity, None).await?;
+    assert_eq!(
+        observed,
+        KubernetesJobObservation::Missing,
+        "the cancelled attempt must be gone instead of completed"
+    );
+    println!(
+        "live cancellation readback: authority=cancelled attemptLive=true cleanup=confirmed release=not-attempted (a live readback cannot construct the Resource client and run store)"
+    );
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Case 6: a crashed attempt is recovered as missing without a replacement object.
+///
+/// The attempt Job is deleted out from under the observation, the observation must report `Missing`,
+/// no replacement attempt Job may appear, and the recovery cleanup the executor runs for a persisted
+/// checkpoint must still confirm that every owned object is gone.
+#[tokio::test]
+async fn live_crashed_attempt_recovers_missing_without_replacement() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let attempt = LiveAttempt::hanging_probe(&environment);
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    let refs = api
+        .capture_object_refs(&bundle.bundle.identity, &bundle.bundle.cleanup_plan)
+        .await?;
+    assert_eq!(
+        refs.len(),
+        bundle.bundle.cleanup_plan.len(),
+        "the attempt must persist a reference for every owned object"
+    );
+    rest.delete(&object_path(
+        "batch/v1",
+        namespace,
+        "jobs",
+        &bundle.job_name,
+    ))
+    .await?;
+    let observed = api.observe(&bundle.bundle.identity, None).await?;
+    assert_eq!(
+        observed,
+        KubernetesJobObservation::Missing,
+        "the observation must report the crashed attempt as missing"
+    );
+    assert!(
+        rest.get(&object_path(
+            "batch/v1",
+            namespace,
+            "jobs",
+            &bundle.job_name
+        ))
+        .await?
+        .is_none(),
+        "the crashed attempt must not be replaced by a new Job"
+    );
+    let managed = managed_object_names(&api, namespace).await?;
+    let baseline_jobs = baseline
+        .iter()
+        .filter(|name| name.starts_with("jobs/"))
+        .collect::<Vec<_>>();
+    let managed_jobs = managed
+        .iter()
+        .filter(|name| name.starts_with("jobs/"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        managed_jobs, baseline_jobs,
+        "no replacement attempt Job may be created"
+    );
+    let cleanup = api.cleanup_recovery(&bundle.bundle.identity, &refs).await?;
+    assert_eq!(
+        cleanup,
+        ExecutionCleanupStatus::Confirmed,
+        "the recovery cleanup must confirm every owned object is gone"
+    );
+    println!(
+        "live crash-recovery readback: observation=Missing replacement=none recoveryCleanup=confirmed"
+    );
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
 }

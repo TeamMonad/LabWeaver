@@ -733,7 +733,105 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxReceiptError, parse_receipt};
+    use super::{SandboxReceipt, SandboxReceiptError, parse_receipt};
+    use crate::claude_code::AuthoringAttemptScope;
+    use contracts::authoring::AgentTrackKind;
+    use contracts::{ActorId, AgentRunId, CourseId, ProjectId};
+
+    const RESULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+    const STDERR_MAX_BYTES: u64 = 1024 * 1024;
+    const EXPORT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+    fn scope() -> AuthoringAttemptScope {
+        AuthoringAttemptScope {
+            run_id: AgentRunId::new(),
+            project_id: ProjectId::new(),
+            course_id: Some(CourseId::new()),
+            actor_id: ActorId::new(),
+            track: AgentTrackKind::Environment,
+            attempt: 1,
+            trace_id: "trace-receipt".to_owned(),
+            claude_code_version: "2.1.215".to_owned(),
+        }
+    }
+
+    fn receipt() -> SandboxReceipt {
+        SandboxReceipt {
+            result_size_bytes: 12,
+            result_sha256: "a".repeat(64),
+            stderr_size_bytes: 0,
+            stderr_sha256: String::new(),
+            exit_code: 0,
+            claude_version: "2.1.215".to_owned(),
+            export_size_bytes: 0,
+            export_sha256: String::new(),
+        }
+    }
+
+    fn validate(receipt: &SandboxReceipt) -> Result<(), SandboxReceiptError> {
+        receipt.validate(
+            &scope(),
+            RESULT_MAX_BYTES,
+            STDERR_MAX_BYTES,
+            EXPORT_MAX_BYTES,
+        )
+    }
+
+    #[test]
+    fn receipt_validation_fails_closed_outside_the_scope_bounds() {
+        // Every size exactly at its bound, with matching digests, is accepted.
+        let mut at_bounds = receipt();
+        at_bounds.result_size_bytes = RESULT_MAX_BYTES;
+        at_bounds.stderr_size_bytes = STDERR_MAX_BYTES;
+        at_bounds.stderr_sha256 = "b".repeat(64);
+        at_bounds.export_size_bytes = EXPORT_MAX_BYTES;
+        at_bounds.export_sha256 = "c".repeat(64);
+        assert_eq!(validate(&at_bounds), Ok(()));
+
+        let mut oversized = receipt();
+        oversized.result_size_bytes = RESULT_MAX_BYTES + 1;
+        assert_eq!(
+            validate(&oversized).err(),
+            Some(SandboxReceiptError::Invalid)
+        );
+
+        let mut oversized = receipt();
+        oversized.stderr_size_bytes = STDERR_MAX_BYTES + 1;
+        oversized.stderr_sha256 = "b".repeat(64);
+        assert_eq!(
+            validate(&oversized).err(),
+            Some(SandboxReceiptError::Invalid)
+        );
+
+        let mut oversized = receipt();
+        oversized.export_size_bytes = EXPORT_MAX_BYTES + 1;
+        oversized.export_sha256 = "c".repeat(64);
+        assert_eq!(
+            validate(&oversized).err(),
+            Some(SandboxReceiptError::Invalid)
+        );
+
+        // A non-zero size must be paired with a lowercase hex sha256.
+        let mut non_hex = receipt();
+        non_hex.result_size_bytes = 1;
+        non_hex.result_sha256 = "z".repeat(64);
+        assert_eq!(validate(&non_hex).err(), Some(SandboxReceiptError::Invalid));
+
+        let mut non_hex = receipt();
+        non_hex.stderr_size_bytes = 1;
+        non_hex.stderr_sha256 = "Z".repeat(64);
+        assert_eq!(validate(&non_hex).err(), Some(SandboxReceiptError::Invalid));
+
+        let mut non_hex = receipt();
+        non_hex.export_size_bytes = 1;
+        non_hex.export_sha256 = "g".repeat(64);
+        assert_eq!(validate(&non_hex).err(), Some(SandboxReceiptError::Invalid));
+
+        // The receipt must report the scope's pinned Claude Code version.
+        let mut drifted = receipt();
+        drifted.claude_version = "2.1.999".to_owned();
+        assert_eq!(validate(&drifted).err(), Some(SandboxReceiptError::Invalid));
+    }
 
     #[test]
     #[allow(clippy::expect_used)]
