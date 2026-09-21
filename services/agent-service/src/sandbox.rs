@@ -523,23 +523,27 @@ fn containers(
         "securityContext": container_security,
         "volumeMounts": main_mounts,
     });
-    let mut containers = Vec::new();
-    if let Some(image) = buildkit_image {
-        containers.push(buildkit_sidecar(configuration, image));
-    }
-    containers.push(main);
-    containers
+    let _ = buildkit_image;
+    vec![main]
 }
 
+/// Renders the optional rootless `BuildKit` daemon as a native sidecar container.
+///
+/// It is declared as an init container with `restartPolicy: Always`, so it starts after the
+/// materializer and before the attempt process, its socket exists before the attempt can use it,
+/// and the one-shot Job still completes as soon as the attempt process exits. As a regular
+/// container a daemon would keep the Job running until the attempt deadline, because it never
+/// exits on its own.
+///
+/// Rootless `BuildKit` needs the exceptions proven by the platform builder: an unconfined
+/// seccomp/AppArmor profile, the setuid helpers for the nested user namespace and an `SELinux` type
+/// that may mount snapshot content. The sidecar is tokenless, bounded by the same resources as the
+/// attempt and only reachable through the attempt-local socket directory.
 fn buildkit_sidecar(configuration: &SandboxConfiguration, image: &str) -> Value {
-    // Rootless BuildKit needs the exceptions proven by the platform builder: an
-    // unconfined seccomp/AppArmor profile, the setuid helpers for the nested user
-    // namespace and an SELinux type that may mount snapshot content. The sidecar is
-    // tokenless, bounded by the same resources as the attempt and only reachable
-    // through the attempt-local socket directory.
     json!({
         "name": SANDBOX_BUILDKIT_CONTAINER,
         "image": image,
+        "restartPolicy": "Always",
         "imagePullPolicy": "IfNotPresent",
         "args": ["--config", BUILDKIT_CONFIG_PATH, "--oci-worker-no-process-sandbox"],
         "env": [
@@ -638,6 +642,30 @@ fn job_document(
     secret_name: &str,
     spec: &SandboxAttemptSpec,
 ) -> Value {
+    let mut init_containers = vec![json!({
+        "name": "materialize",
+        "image": configuration.image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["/bin/sh", "-c", materialize_script(spec.object_store_ca_base64.is_some())],
+        "env": init_environment(spec),
+        "envFrom": [{"secretRef": {"name": secret_name, "optional": false}}],
+        "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]},
+            "readOnlyRootFilesystem": true,
+            "runAsNonRoot": true,
+            "runAsUser": SANDBOX_ATTEMPT_USER,
+            "runAsGroup": SANDBOX_ATTEMPT_USER,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "volumeMounts": [
+            {"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false},
+            {"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": false},
+        ],
+    })];
+    if let Some(image) = configuration.buildkit_image.as_deref() {
+        init_containers.push(buildkit_sidecar(configuration, image));
+    }
     let mut environment = vec![
         json!({
             "name": "POD_NAME",
@@ -804,27 +832,7 @@ fn job_document(
                         .iter()
                         .map(|name| json!({"name": name}))
                         .collect::<Vec<_>>(),
-                    "initContainers": [{
-                        "name": "materialize",
-                        "image": configuration.image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["/bin/sh", "-c", materialize_script(spec.object_store_ca_base64.is_some())],
-                        "env": init_environment(spec),
-                        "envFrom": [{"secretRef": {"name": secret_name, "optional": false}}],
-                        "securityContext": {
-                            "allowPrivilegeEscalation": false,
-                            "capabilities": {"drop": ["ALL"]},
-                            "readOnlyRootFilesystem": true,
-                            "runAsNonRoot": true,
-                            "runAsUser": SANDBOX_ATTEMPT_USER,
-                            "runAsGroup": SANDBOX_ATTEMPT_USER,
-                            "seccompProfile": {"type": "RuntimeDefault"},
-                        },
-                        "volumeMounts": [
-                            {"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false},
-                            {"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": false},
-                        ],
-                    }],
+                    "initContainers": init_containers,
                     "containers": containers(
                         configuration,
                         secret_name,
@@ -1080,11 +1088,15 @@ mod tests {
         let containers = job.document["spec"]["template"]["spec"]["containers"]
             .as_array()
             .ok_or(SandboxBundleError::Invalid)?;
-        assert_eq!(containers.len(), 2);
-        let sidecar = containers
+        assert_eq!(containers.len(), 1);
+        let sidecar = job.document["spec"]["template"]["spec"]["initContainers"]
+            .as_array()
+            .ok_or(SandboxBundleError::Invalid)?
             .iter()
             .find(|container| container["name"] == "buildkit")
             .ok_or(SandboxBundleError::Invalid)?;
+        // A native sidecar container is what lets the one-shot Job complete with the attempt.
+        assert_eq!(sidecar["restartPolicy"], "Always");
         assert_eq!(
             sidecar["securityContext"]["seccompProfile"]["type"],
             "Unconfined"
@@ -1344,7 +1356,7 @@ mod tests {
             .iter()
             .find(|object| object.plural == "jobs")
             .ok_or(SandboxBundleError::Invalid)?;
-        let sidecar = job.document["spec"]["template"]["spec"]["containers"]
+        let sidecar = job.document["spec"]["template"]["spec"]["initContainers"]
             .as_array()
             .ok_or(SandboxBundleError::Invalid)?
             .iter()
