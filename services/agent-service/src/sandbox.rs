@@ -789,7 +789,8 @@ fn job_document(
                         "name": "materialize",
                         "image": configuration.image,
                         "imagePullPolicy": "IfNotPresent",
-                        "command": ["/bin/sh", "-c", materialize_script()],
+                        "command": ["/bin/sh", "-c", materialize_script(spec.object_store_ca_base64.is_some())],
+                        "env": init_environment(spec),
                         "envFrom": [{"secretRef": {"name": secret_name, "optional": false}}],
                         "securityContext": {
                             "allowPrivilegeEscalation": false,
@@ -820,10 +821,31 @@ fn job_document(
     })
 }
 
-fn materialize_script() -> &'static str {
-    "set -eu\n\
-     umask 077\n\
-     curl --fail --silent --show-error --location --retry 3 --max-time 300 \
+/// Environment the materializer init container needs beyond the attempt Secret.
+///
+/// The signed material URL is served by the object store, so the initializer reads it with the same
+/// reviewed trust root the attempt uses. Without a configured CA the image trust store applies.
+fn init_environment(spec: &SandboxAttemptSpec) -> Value {
+    if spec.object_store_ca_base64.is_some() {
+        json!([{"name": "SSL_CERT_FILE", "value": format!("{ATTEMPT_DIR}/ca.pem")}])
+    } else {
+        json!([])
+    }
+}
+
+fn materialize_script(object_store_ca: bool) -> String {
+    let mut script = String::new();
+    script.push_str("set -eu\numask 077\n");
+    if object_store_ca {
+        // The materializer is the only reader of the signed object-store URL, so
+        // it has to trust the same reviewed CA the attempt is given.
+        let _ = writeln!(
+            script,
+            "printf '%s' \"$OBJECT_STORE_CA_BASE64\" | base64 -d > {ATTEMPT_DIR}/ca.pem"
+        );
+    }
+    script.push_str(
+        "curl --fail --silent --show-error --location --retry 3 --max-time 300 \
      -o /run/labweaver/input.json \"$MATERIAL_DOWNLOAD_URL\"\n\
      size=$(wc -c < /run/labweaver/input.json | tr -d ' ')\n\
      if [ \"$size\" != \"$MATERIAL_SIZE_BYTES\" ]; then exit 74; fi\n\
@@ -837,7 +859,9 @@ fn materialize_script() -> &'static str {
      \x20   path=os.path.normpath(os.path.join(root, entry['path']))\n\
      \x20   if not path.startswith(root + os.sep): continue\n\
      \x20   os.makedirs(os.path.dirname(path), exist_ok=True)\n\
-     \x20   open(path,'w',encoding='utf-8').write(content)\n\"\n"
+     \x20   open(path,'w',encoding='utf-8').write(content)\n\"\n",
+    );
+    script
 }
 
 fn ownership_labels(ownership: &KubernetesOwnership) -> Value {
@@ -1241,6 +1265,52 @@ mod tests {
             job.document
                 .pointer("/spec/template/spec/securityContext/fsGroup"),
             Some(&serde_json::json!(65_532))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn materializer_trusts_the_reviewed_object_store_ca() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // The initializer is the only reader of the signed material URL, so it must trust the same
+        // reviewed CA the attempt receives and decode it before it curls the object store.
+        let bundle = build_sandbox_bundle(&configuration(), &spec())?;
+        let job = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "jobs")
+            .ok_or(SandboxBundleError::Invalid)?;
+        let init = &job.document["spec"]["template"]["spec"]["initContainers"][0];
+        assert_eq!(
+            init["env"],
+            serde_json::json!([{"name": "SSL_CERT_FILE", "value": "/run/labweaver/ca.pem"}])
+        );
+        let script = init["command"][2]
+            .as_str()
+            .ok_or(SandboxBundleError::Invalid)?;
+        assert!(script.contains("OBJECT_STORE_CA_BASE64"));
+        assert!(script.contains("base64 -d > /run/labweaver/ca.pem"));
+        assert!(script.starts_with("set -eu"));
+
+        // Without a reviewed CA the initializer relies on the image trust store and is handed no
+        // path it cannot read.
+        let mut spec = spec();
+        spec.object_store_ca_base64 = None;
+        let bundle = build_sandbox_bundle(&configuration(), &spec)?;
+        let job = bundle
+            .bundle
+            .objects
+            .iter()
+            .find(|object| object.plural == "jobs")
+            .ok_or(SandboxBundleError::Invalid)?;
+        let init = &job.document["spec"]["template"]["spec"]["initContainers"][0];
+        assert_eq!(init["env"], serde_json::json!([]));
+        assert!(
+            !init["command"][2]
+                .as_str()
+                .ok_or(SandboxBundleError::Invalid)?
+                .contains("ca.pem")
         );
         Ok(())
     }

@@ -129,6 +129,9 @@ struct SandboxFileConfig {
     kubernetes_bearer_token_file: String,
     kubernetes_ca_file: String,
     request_timeout_milliseconds: u64,
+    /// Reviewed object-store trust root the attempt reads signed URLs with; absent means the
+    /// object store is trusted by the sandbox image trust store.
+    object_store_ca_file: Option<String>,
 }
 
 impl SandboxFileConfig {
@@ -155,6 +158,10 @@ impl SandboxFileConfig {
             || !self.kubernetes_api_server.starts_with("https://")
             || !self.kubernetes_bearer_token_file.starts_with('/')
             || !self.kubernetes_ca_file.starts_with('/')
+            || self
+                .object_store_ca_file
+                .as_deref()
+                .is_some_and(|path| !path.starts_with('/'))
             || !(100..=60_000).contains(&self.request_timeout_milliseconds)
             || !(1_024..=8 * 1024 * 1024).contains(&self.result_max_bytes)
             || self.stderr_max_bytes > 1024 * 1024
@@ -374,6 +381,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
             kubernetes_bearer_token_file: sandbox.kubernetes_bearer_token_file.clone(),
             kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
             request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
+            object_store_ca_file: sandbox.object_store_ca_file.clone().map(Into::into),
         },
         resource_client,
         store.clone(),

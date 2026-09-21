@@ -71,7 +71,7 @@ use std::{
     error::Error,
     fs,
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use agent_service::claude_code::RunCancellation;
@@ -1418,9 +1418,12 @@ fn assert_attempt_read_only_boundaries(job: &Value) -> Result<(), Box<dyn Error>
         Some(&Value::Bool(true)),
         "the attempt materials mount must stay read-only"
     );
-    assert_eq!(
-        mount("/workspace").and_then(|mount| mount.get("readOnly")),
-        Some(&Value::Bool(false)),
+    let workspace = mount("/workspace").ok_or("the live main container has no workspace mount")?;
+    // Kubernetes omits a `readOnly` field that is false, so an absent value is
+    // exactly the writable case this boundary requires.
+    assert_ne!(
+        workspace.get("readOnly"),
+        Some(&Value::Bool(true)),
         "the attempt workspace must stay writable"
     );
     Ok(())
@@ -1546,6 +1549,61 @@ async fn cancel_attempt(
         &bundle.bundle.cleanup_plan,
     )
     .await
+}
+
+/// Polls one attempt observation until it reaches the expected state.
+///
+/// Kubernetes deletes an owned Job asynchronously, so a readback taken immediately after a delete
+/// can still see the running attempt. The executor re-observes on its next pass, and the live case
+/// does the same instead of assuming one instant of convergence.
+async fn await_observation(
+    api: &KubernetesApiClient,
+    identity: &KubernetesJobIdentity,
+    expected: KubernetesJobObservation,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + OBSERVE_TIMEOUT;
+    loop {
+        let observed = api.observe(identity, None).await?;
+        if observed == expected {
+            println!("live observation readback: {label} -> {observed:?}");
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{label} never reached {expected:?}; last {observed:?}").into());
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Polls the shared cleanup until Kubernetes confirms every owned object is gone.
+///
+/// Deleting an attempt that still runs a Pod is a foreground deletion, so the first readback can
+/// legitimately report the objects as still present. The executor only releases the reservation
+/// after a confirmed cleanup, and it retries on its next pass; the live case does the same.
+async fn await_confirmed_cleanup(
+    api: &KubernetesApiClient,
+    namespace: &str,
+    bundle: &SandboxBundle,
+    mut status: ExecutionCleanupStatus,
+) -> Result<ExecutionCleanupStatus, Box<dyn Error>> {
+    let deadline = Instant::now() + CLEANUP_TIMEOUT;
+    while !status.is_confirmed() {
+        if Instant::now() >= deadline {
+            return Err(format!("cleanup was never confirmed; last {status:?}").into());
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+        status = api
+            .cleanup(
+                namespace,
+                bundle.job_name.as_str(),
+                &bundle.bundle.objects,
+                &bundle.bundle.cleanup_plan,
+            )
+            .await?;
+    }
+    println!("live cleanup readback: confirmed after bounded polling");
+    Ok(status)
 }
 
 /// Case 1: egress beyond the allow-list, with the applied policy document always asserted.
@@ -1861,16 +1919,18 @@ async fn live_cancelled_attempt_is_cleaned_up_before_release() -> Result<(), Box
         "the cancellation authority must start active"
     );
     let status = cancel_attempt(&api, &cancellation, namespace, &bundle).await?;
+    let status = await_confirmed_cleanup(&api, namespace, &bundle, status).await?;
     assert!(
         status.is_confirmed(),
         "the cancellation path must confirm cleanup before the reservation is released"
     );
-    let observed = api.observe(&bundle.bundle.identity, None).await?;
-    assert_eq!(
-        observed,
+    await_observation(
+        &api,
+        &bundle.bundle.identity,
         KubernetesJobObservation::Missing,
-        "the cancelled attempt must be gone instead of completed"
-    );
+        "cancelled attempt",
+    )
+    .await?;
     println!(
         "live cancellation readback: authority=cancelled attemptLive=true cleanup=confirmed release=not-attempted (a live readback cannot construct the Resource client and run store)"
     );
@@ -1907,12 +1967,13 @@ async fn live_crashed_attempt_recovers_missing_without_replacement() -> Result<(
         &bundle.job_name,
     ))
     .await?;
-    let observed = api.observe(&bundle.bundle.identity, None).await?;
-    assert_eq!(
-        observed,
+    await_observation(
+        &api,
+        &bundle.bundle.identity,
         KubernetesJobObservation::Missing,
-        "the observation must report the crashed attempt as missing"
-    );
+        "crashed attempt",
+    )
+    .await?;
     assert!(
         rest.get(&object_path(
             "batch/v1",

@@ -73,6 +73,10 @@ sandbox:
   result_max_bytes: 4194304
   stderr_max_bytes: 262144
   object_prefix: "authoring-sandbox"
+  # Reviewed object-store trust root the materializer and the attempt read signed
+  # URLs with. Omit it when the object store is trusted by the sandbox image
+  # trust store; the deployment mounts this file into the agent API Pod.
+  object_store_ca_file: "/etc/labweaver/secrets/minio-ca.pem"
   kubernetes_api_server: "https://kubernetes.default.svc:443/"
   kubernetes_bearer_token_file: "/var/run/secrets/kubernetes.io/serviceaccount/token"
   kubernetes_ca_file: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"

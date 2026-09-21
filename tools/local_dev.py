@@ -248,15 +248,26 @@ def local_kind_network_cidr() -> str:
     """
 
     result = run(
-        ["docker", "network", "inspect", "kind", "--format", "{{(index .IPAM.Config 0).Subnet}}"],
+        ["docker", "network", "inspect", "kind", "--format", "{{json .IPAM.Config}}"],
         capture=True,
     ).stdout
     if not isinstance(result, str) or not result.strip():
-        fail("Kind network did not return an IPAM subnet")
-    subnet = result.strip()
-    if re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}", subnet) is None:
-        fail("Kind network returned an invalid IPv4 subnet")
-    return subnet
+        fail("Kind network did not return an IPAM configuration")
+    try:
+        configurations = json.loads(result)
+    except json.JSONDecodeError:
+        fail("Kind network IPAM configuration is invalid JSON")
+    if not isinstance(configurations, list):
+        fail("Kind network IPAM configuration must be a list")
+    # The Kind network carries an IPv6 subnet as well, so the IPv4 one is
+    # selected explicitly instead of trusting the first entry.
+    for configuration in configurations:
+        subnet = configuration.get("Subnet") if isinstance(configuration, dict) else None
+        if isinstance(subnet, str) and re.fullmatch(
+            r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}", subnet
+        ):
+            return subnet
+    fail("Kind network has no IPv4 subnet")
 
 
 def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:

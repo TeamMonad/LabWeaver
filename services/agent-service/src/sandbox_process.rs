@@ -6,12 +6,16 @@
 //! egress envelope through short-lived object-store URLs, observes the Job and then persists the
 //! terminal receipt before cleaning up and releasing the reservation.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use contracts::execution::{ExecutionCleanupStatus, ExecutionObjectRef, TaskExecutionBinding};
 use contracts::resource::WorkloadResources;
 use contracts::{TaskRunId, UtcTimestamp};
@@ -58,6 +62,11 @@ pub struct SandboxProcessConfiguration {
     pub kubernetes_bearer_token_file: String,
     pub kubernetes_ca_file: String,
     pub request_timeout_milliseconds: u64,
+    /// Reviewed object-store trust root the materializer and the attempt read signed URLs with.
+    ///
+    /// Absent means the object store is trusted by the image trust store. The file is read once at
+    /// startup so an attempt never depends on a path inside its own pod.
+    pub object_store_ca_file: Option<PathBuf>,
 }
 
 /// Admitted Kubernetes execution backend for authoring attempts.
@@ -68,6 +77,7 @@ pub struct SandboxAuthoringProcess {
     store: PostgresAgentRunStore,
     objects: Arc<S3ImmutableObjectStore>,
     configuration: SandboxProcessConfiguration,
+    object_store_ca_base64: Option<String>,
 }
 
 impl SandboxAuthoringProcess {
@@ -88,9 +98,17 @@ impl SandboxAuthoringProcess {
             || configuration.stderr_max_bytes > 1024 * 1024
             || !configuration.kubernetes_api_server.starts_with("https://")
             || !(100..=60_000).contains(&configuration.request_timeout_milliseconds)
+            || configuration
+                .object_store_ca_file
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
         {
             return Err(SandboxBundleError::Invalid);
         }
+        let object_store_ca_base64 = match configuration.object_store_ca_file.as_deref() {
+            Some(path) => Some(read_object_store_ca(path)?),
+            None => None,
+        };
         let api = KubernetesApiClient::new(
             KubernetesApiConfiguration {
                 kubernetes_api_server: reqwest::Url::parse(&configuration.kubernetes_api_server)
@@ -116,6 +134,7 @@ impl SandboxAuthoringProcess {
             store,
             objects,
             configuration,
+            object_store_ca_base64,
         })
     }
 
@@ -277,7 +296,7 @@ impl SandboxAuthoringProcess {
             export_upload_headers: export_upload
                 .map(|upload| upload.required_headers)
                 .unwrap_or_default(),
-            object_store_ca_base64: None,
+            object_store_ca_base64: self.object_store_ca_base64.clone(),
         };
         let sandbox_bundle = build_sandbox_bundle(&self.configuration.sandbox, &spec)
             .map_err(|_| ClaudeCodeProcessError::Io)?;
@@ -551,6 +570,21 @@ impl SandboxAuthoringProcess {
             }
         }
     }
+}
+
+/// Reads the reviewed object-store trust root once, bounded like every other deployment input.
+///
+/// # Errors
+///
+/// Returns [`SandboxBundleError::Invalid`] for an unreadable, empty or oversized bundle.
+fn read_object_store_ca(path: &Path) -> Result<String, SandboxBundleError> {
+    const MAX_CA_BYTES: u64 = 1024 * 1024;
+    let metadata = fs::metadata(path).map_err(|_| SandboxBundleError::Invalid)?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CA_BYTES {
+        return Err(SandboxBundleError::Invalid);
+    }
+    let bytes = fs::read(path).map_err(|_| SandboxBundleError::Invalid)?;
+    Ok(STANDARD.encode(bytes))
 }
 
 /// Terminal receipt written by the sandbox attempt.

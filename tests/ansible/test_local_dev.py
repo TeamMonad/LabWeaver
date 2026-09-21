@@ -154,6 +154,31 @@ class LocalDevBundleTests(unittest.TestCase):
                     provider(base_url)
                 self.assertIn("absolute HTTPS URL", str(context.exception))
 
+    def test_local_kind_network_cidr_selects_the_ipv4_subnet(self) -> None:
+        configurations = json.dumps(
+            [
+                {"Subnet": "fc00:f853:ccd:e793::/64", "Gateway": "fc00:f853:ccd:e793::1"},
+                {"Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1"},
+            ]
+        )
+
+        def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, stdout=configurations)
+
+        with patch.object(local_dev, "run", side_effect=capture_run):
+            self.assertEqual(local_dev.local_kind_network_cidr(), "172.18.0.0/16")
+
+        with patch.object(
+            local_dev,
+            "run",
+            side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps([{"Subnet": "fc00::/64"}])
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_kind_network_cidr()
+            self.assertIn("no IPv4 subnet", str(context.exception))
+
     def test_local_service_cidr_reads_the_apiserver_range(self) -> None:
         manifest = (
             "apiVersion: v1\n"
