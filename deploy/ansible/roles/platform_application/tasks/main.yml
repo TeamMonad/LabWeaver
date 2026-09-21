@@ -2870,6 +2870,7 @@
           [worker.oci]
             enabled = true
             noProcessSandbox = true
+            networkMode = "host"
           [registry."{{ platform_application_harbor_registry }}"]
             ca = ["/etc/buildkit/registry-ca.crt"]
         registry-ca.crt: "{{ platform_application_harbor_ca_bundle.content | b64decode }}"
@@ -2898,6 +2899,8 @@
           'noProcessSandbox = true' in
             platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
           'rootless = true' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          'networkMode = "host"' in
             platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
           '/etc/buildkit/registry-ca.crt' in
             platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and

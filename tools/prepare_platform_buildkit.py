@@ -206,6 +206,10 @@ def buildkitd_configuration(
         '  enabled = true\n'
         '  rootless = true\n'
         '  noProcessSandbox = true\n'
+        # The authoring sidecar shares the attempt pod network namespace, so the worker must not
+        # install bridge networking and its iptables rules there: that silently breaks every other
+        # connection the attempt makes, including the result upload to the object store.
+        '  networkMode = "host"\n'
         '  gc = true\n'
     )
 

@@ -10,6 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+AUTHORING_CA_PATH = "/etc/buildkit/registry-ca.crt"
 SCRIPT = ROOT / "tools/prepare_platform_buildkit.py"
 SPEC = importlib.util.spec_from_file_location("prepare_platform_buildkit", SCRIPT)
 if SPEC is None or SPEC.loader is None:
@@ -73,6 +74,22 @@ class BuildkitAuthoringTests(unittest.TestCase):
                     "10.96.0.10",
                     Path("/not/invoked"),
                 )
+
+    def test_worker_never_installs_bridge_networking_in_the_attempt_namespace(self) -> None:
+        # The authoring sidecar shares the attempt pod network namespace. A worker that installs
+        # bridge networking there breaks the attempt's own connections, including the result
+        # upload, so the reviewed configuration has to pin host networking explicitly.
+        standalone = BUILDKIT.buildkitd_configuration(
+            "harbor.lab.lan", "10.96.0.10", True, "/etc/buildkit/registry-ca.crt"
+        )
+        sidecar = BUILDKIT.buildkitd_configuration(
+            "harbor.lab.lan", None, False, AUTHORING_CA_PATH
+        )
+        for configuration in (standalone, sidecar):
+            self.assertIn('[worker.oci]', configuration)
+            self.assertIn('networkMode = "host"', configuration)
+            self.assertIn("noProcessSandbox = true", configuration)
+            self.assertNotIn("networkMode = \"auto\"", configuration)
 
     def test_dns_nameserver_is_an_explicit_ip_address(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
