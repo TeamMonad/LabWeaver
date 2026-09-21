@@ -268,6 +268,37 @@ def local_service_cidr() -> str:
     return match.group(1)
 
 
+def local_kind_pod_cidr() -> str:
+    """Return the pod CIDR the reviewed attempt egress has to name on the owned CNI.
+
+    The owned Kind CNI programs a per-attempt egress policy after service DNAT, so a rule that
+    names the Service CIDR never matches the object store's ClusterIP: on this CNI the reviewed
+    destination has to be the network the object store pod itself lives in. A cluster whose CNI
+    evaluates the policy before DNAT, which is the supported production shape, names the Service
+    CIDR and the object store's own address instead.
+    """
+
+    nodes = kind_nodes()
+    if not nodes:
+        fail("Kind did not return the owned node list")
+    manifest = run(
+        [
+            "docker",
+            "exec",
+            nodes[0],
+            "cat",
+            "/etc/kubernetes/manifests/kube-controller-manager.yaml",
+        ],
+        capture=True,
+    ).stdout
+    if not isinstance(manifest, str):
+        fail("Kind node controller-manager manifest was not returned as text")
+    match = re.search(r"--cluster-cidr=([0-9a-fA-F:./]+)", manifest)
+    if match is None:
+        fail("Kind node controller-manager manifest has no cluster-cidr")
+    return match.group(1)
+
+
 def local_kind_network_cidr() -> str:
     """Return the Docker network CIDR that carries the Kind nodes.
 
@@ -2898,6 +2929,7 @@ def make_app_input(
     *,
     authoring_buildkit_sidecar: bool = False,
     service_cidr: str | None = None,
+    pod_cidr: str | None = None,
     kind_network_cidr: str | None = None,
 ) -> tuple[Path, Path, str]:
     provider_environment = validate_provider_environment(provider_environment)
@@ -2917,6 +2949,7 @@ def make_app_input(
     # CIDR and Kind network are resolved from the owned cluster unless the
     # caller already observed them.
     service_cidr = service_cidr or local_service_cidr()
+    pod_cidr = pod_cidr or local_kind_pod_cidr()
     kind_network_cidr = kind_network_cidr or local_kind_network_cidr()
     for section, manifest_key in (("configmaps", "configMaps"), ("secrets", "secrets")):
         for name in manifest[manifest_key]:
@@ -2985,7 +3018,9 @@ def make_app_input(
             model_port = local_provider_port(provider_environment["ANTHROPIC_BASE_URL"])
             egress_pattern = re.compile(r'(?m)^(\s*allowed_egress:\s*)\[[^\]]*\]$')
             data, replacements = egress_pattern.subn(
-                rf'\g<1>["{service_cidr}:{object_store_port}", "{kind_network_cidr}:{model_port}"]',
+                rf'\g<1>["{service_cidr}:{object_store_port}", '
+                rf'"{pod_cidr}:{object_store_port}", '
+                rf'"{kind_network_cidr}:{model_port}"]',
                 data,
                 count=1,
             )
@@ -3010,10 +3045,14 @@ def make_app_input(
             if replacements != 1:
                 fail("evaluation service configuration has no coordinator.workerImage")
             egress_pattern = re.compile(
-                r"(?m)^(\s*objectStoreEgress:\s*)[^\r\n]+$"
+                r"(?m)^(\s*objectStoreEgress:)[ \t]*\n(?:[ \t]*-[ \t]*\"[^\"]*\"[ \t]*\n)*"
             )
+            object_store_port = local_object_store_port(data)
             data, replacements = egress_pattern.subn(
-                rf'\g<1>"{service_cidr}:{local_object_store_port(data)}"', data, count=1
+                rf'\g<1>\n    - "{service_cidr}:{object_store_port}"'
+                rf'\n    - "{pod_cidr}:{object_store_port}"\n',
+                data,
+                count=1,
             )
             if replacements != 1:
                 fail("evaluation service configuration has no execution.objectStoreEgress")

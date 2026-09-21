@@ -30,12 +30,13 @@ import local_dev  # noqa: E402
 def make_app_input_with_local_cidrs(*args: object, **kwargs: object) -> tuple[Path, Path, str]:
     """Render the local app input with the CIDRs the owned cluster reports.
 
-    The renderer resolves the Service CIDR and the Kind network from the owned
+    The renderer resolves the Service CIDR, the pod CIDR and the Kind network from the owned
     cluster; these tests exercise the rendering, not the cluster readback.
     """
 
     with (
         patch.object(local_dev, "local_service_cidr", return_value="10.201.0.0/16"),
+        patch.object(local_dev, "local_kind_pod_cidr", return_value="10.202.0.0/16"),
         patch.object(local_dev, "local_kind_network_cidr", return_value="172.18.0.0/16"),
     ):
         return local_dev.make_app_input(*args, **kwargs)
