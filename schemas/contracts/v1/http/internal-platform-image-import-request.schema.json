@@ -51,6 +51,14 @@
         "virtual_machine"
       ],
       "type": "string"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -70,6 +78,33 @@
     },
     "binding": {
       "type": "string"
+    },
+    "capacityBytes": {
+      "description": "Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "diskFormat": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VirtualMachineDiskFormat"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Declared virtual-machine disk encoding inside the archive; see [`valid_vm_disk_upload`]."
+    },
+    "diskPath": {
+      "description": "Relative path of the disk inside the archived bundle; see [`valid_vm_disk_upload`].",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "kind": {
       "$ref": "#/$defs/PlatformImageKind"

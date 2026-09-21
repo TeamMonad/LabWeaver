@@ -157,6 +157,12 @@ impl FakeRegistry {
         self.lock().blobs.keys().cloned().collect()
     }
 
+    /// Returns the exact bytes the registry holds for one blob digest.
+    #[must_use]
+    pub fn blob(&self, digest: &str) -> Option<Vec<u8>> {
+        self.lock().blobs.get(digest).cloned()
+    }
+
     /// Returns the digest `reference` currently resolves to, or `None` when it is not published.
     #[must_use]
     pub fn manifest_digest(&self, reference: &str) -> Option<String> {

@@ -3293,6 +3293,19 @@ export type CreatePlatformImageUploadRequestSchema = {
      */
     archiveMediaType: string;
     binding: string;
+    /**
+     * Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].
+     */
+    capacityBytes?: number | null;
+    /**
+     * Declared virtual-machine disk encoding inside the archive; must agree with
+     * `disk_path` and `capacity_bytes` under [`valid_vm_disk_upload`].
+     */
+    diskFormat?: CreatePlatformImageUploadRequestSchemaVirtualMachineDiskFormat | null;
+    /**
+     * Relative path of the disk inside the uploaded archive; see [`valid_vm_disk_upload`].
+     */
+    diskPath?: string | null;
     kind: PlatformImageKind;
     reason: string;
     /**
@@ -3306,6 +3319,11 @@ export type CreatePlatformImageUploadRequestSchema = {
  * Reviewed platform image kinds.
  */
 export type PlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type CreatePlatformImageUploadRequestSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * CreateProblemPackageUploadRequest
@@ -7555,7 +7573,19 @@ export type PlatformImageCatalogViewSchema = {
  */
 export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
     binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
     catalogId: PlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageCatalogViewSchemaVirtualMachineDiskFormat | null;
     kind: PlatformImageCatalogViewSchemaPlatformImageKind;
     mediaType: string;
     pinnedAt: PlatformImageCatalogViewSchemaUtcTimestamp;
@@ -7593,6 +7623,11 @@ export type PlatformImageStatus = 'active' | 'disabled';
 export type PlatformImageCatalogViewSchemaUtcTimestamp = string;
 
 /**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageCatalogViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
  * PlatformImageCatalog
  *
  * Catalog listing returned by the Agent authority and the administrator gateway.
@@ -7606,7 +7641,19 @@ export type PlatformImageCatalogSchema = {
  */
 export type PlatformImageCatalogSchemaPlatformImageEntry = {
     binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
     catalogId: PlatformImageCatalogSchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageCatalogSchemaVirtualMachineDiskFormat | null;
     kind: PlatformImageCatalogSchemaPlatformImageKind;
     mediaType: string;
     pinnedAt: PlatformImageCatalogSchemaUtcTimestamp;
@@ -7640,13 +7687,30 @@ export type PlatformImageCatalogSchemaPlatformImageStatus = 'active' | 'disabled
 export type PlatformImageCatalogSchemaUtcTimestamp = string;
 
 /**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageCatalogSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
  * PlatformImageEntryView
  *
  * One catalog entry with the Control-owned release impact hint.
  */
 export type PlatformImageEntryViewSchema = {
     binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
     catalogId: PlatformImageEntryViewSchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageEntryViewSchemaVirtualMachineDiskFormat | null;
     kind: PlatformImageEntryViewSchemaPlatformImageKind;
     mediaType: string;
     pinnedAt: PlatformImageEntryViewSchemaUtcTimestamp;
@@ -7684,13 +7748,30 @@ export type PlatformImageEntryViewSchemaPlatformImageStatus = 'active' | 'disabl
 export type PlatformImageEntryViewSchemaUtcTimestamp = string;
 
 /**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageEntryViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
  * PlatformImageEntry
  *
  * One pinned platform image identity as persisted by the Agent authority.
  */
 export type PlatformImageEntrySchema = {
     binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
     catalogId: PlatformImageEntrySchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageEntrySchemaVirtualMachineDiskFormat | null;
     kind: PlatformImageEntrySchemaPlatformImageKind;
     mediaType: string;
     pinnedAt: PlatformImageEntrySchemaUtcTimestamp;
@@ -7724,6 +7805,11 @@ export type PlatformImageEntrySchemaPlatformImageStatus = 'active' | 'disabled';
 export type PlatformImageEntrySchemaUtcTimestamp = string;
 
 /**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageEntrySchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
  * PlatformImageUploadSession
  *
  * Staged OCI archive upload session owned by Control.
@@ -7732,6 +7818,9 @@ export type PlatformImageUploadSessionSchema = {
     archiveBytes: number;
     archiveMediaType: string;
     binding: string;
+    capacityBytes?: number | null;
+    diskFormat?: PlatformImageUploadSessionSchemaVirtualMachineDiskFormat | null;
+    diskPath?: string | null;
     expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
     kind: PlatformImageUploadSessionSchemaPlatformImageKind;
     revision: PlatformImageUploadSessionSchemaRevision;
@@ -7770,6 +7859,11 @@ export type UploadSessionId = string;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type PlatformImageUploadSessionSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageUploadSessionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * ProblemPackageUploadSession

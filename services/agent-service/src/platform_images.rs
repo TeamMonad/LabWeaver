@@ -7,6 +7,7 @@
 
 use std::str::FromStr;
 
+use contracts::supply_chain::VirtualMachineDiskFormat;
 use contracts::{ActorId, PlatformImageId, UtcTimestamp};
 use reqwest::{Client, Url};
 use serde::Deserialize;
@@ -41,6 +42,13 @@ pub struct RegisterPlatformImage {
     pub media_type: String,
     /// Reviewed content size in bytes.
     pub size_bytes: u64,
+    /// Reviewed capacity of the wrapped virtual-machine disk; absent for container images and for
+    /// virtual-machine rows that only inventory an already-published containerdisk reference.
+    pub capacity_bytes: Option<u64>,
+    /// Lowercase hex SHA-256 of the raw virtual-machine disk bytes inside the published archive.
+    pub disk_sha256: Option<String>,
+    /// Declared virtual-machine disk encoding.
+    pub format: Option<VirtualMachineDiskFormat>,
     /// Trust revision the administrator pinned under.
     pub trust_revision: u64,
     /// Authenticated administrator.
@@ -49,6 +57,39 @@ pub struct RegisterPlatformImage {
     pub reason: String,
     /// Mutation time.
     pub now: UtcTimestamp,
+}
+
+/// One deployment-seeded platform image catalog entry.
+///
+/// The deployment reviews the container base images it copied into the platform registry and
+/// seeds them here, so a sandbox build can only choose an identity the deployment already
+/// published. A seed resolves its reference once at startup and pins the observed digest under
+/// its binding; it never replaces an existing pin and never reactivates a disabled entry.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformImageSeed {
+    /// Reviewed kind.
+    pub kind: PlatformImageKind,
+    /// Stable resolution key the seeded entry is pinned under.
+    pub binding: String,
+    /// `<registry-host>/<repository>:<tag>` inside the configured platform registry.
+    pub source_reference: String,
+    /// Trust revision the deployment pinned under.
+    pub trust_revision: u64,
+}
+
+/// Outcome of one deployment seed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformImageSeedOutcome {
+    /// The seed resolved and pinned its exact digest.
+    Registered,
+    /// The binding already exists, so the seed changed nothing.
+    Existing,
+    /// The seed was rejected and stays absent from the catalog.
+    Failed {
+        /// Stable diagnostic of the underlying resolution or catalog failure.
+        cause: &'static str,
+    },
 }
 
 /// Repin input. The write only succeeds when `expected_digest` is still current.
@@ -151,8 +192,9 @@ impl PgPlatformImageCatalog {
         let inserted = sqlx::query(
             "INSERT INTO agent.platform_image_catalog \
              (catalog_id,kind,binding,source_reference,resolved_digest,media_type,size_bytes,\
+              capacity_bytes,disk_sha256,format,\
               status,trust_revision,created_by,created_at,updated_at,pinned_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$10,$10) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,$12,$13,$13,$13) \
              ON CONFLICT (kind,binding) DO NOTHING",
         )
         .bind(catalog_id)
@@ -165,6 +207,16 @@ impl PgPlatformImageCatalog {
             i64::try_from(request.size_bytes)
                 .map_err(|_| PlatformImageStoreError::InvalidRequest)?,
         )
+        .bind(
+            request
+                .capacity_bytes
+                .map(|capacity| {
+                    i64::try_from(capacity).map_err(|_| PlatformImageStoreError::InvalidRequest)
+                })
+                .transpose()?,
+        )
+        .bind(request.disk_sha256.as_deref())
+        .bind(request.format.map(disk_format_str))
         .bind(
             i64::try_from(request.trust_revision)
                 .map_err(|_| PlatformImageStoreError::InvalidRequest)?,
@@ -342,6 +394,7 @@ impl PgPlatformImageCatalog {
     ) -> Result<Vec<PlatformImageEntry>, PlatformImageStoreError> {
         let rows = sqlx::query(
             "SELECT catalog_id,kind,binding,source_reference,resolved_digest,media_type,size_bytes,\
+                    capacity_bytes,disk_sha256,format,\
                     status,trust_revision,repin_generation,pinned_at,updated_at \
              FROM agent.platform_image_catalog \
              WHERE $1::text IS NULL OR status=$1 \
@@ -355,21 +408,190 @@ impl PgPlatformImageCatalog {
     }
 }
 
+/// Reason recorded in the audit row of a deployment-seeded registration.
+const SEED_REASON: &str = "deployment platform image seed";
+
+/// Actor recorded for deployment-seeded registrations.
+///
+/// These pins belong to the deployment, not to an authenticated administrator, so the audit row
+/// carries the nil UUID instead of a fabricated actor. Every console session actor is a `UUIDv7`,
+/// so a seed is distinguishable from an administrator action in the audit trail.
+const SEED_ACTOR: &str = "00000000-0000-0000-0000-000000000000";
+
+/// Resolves and pins every deployment seed the catalog does not already hold.
+///
+/// Seeds are processed in configuration order, one at a time, and each is resolved exactly once:
+/// the resolved digest is registered only when no entry exists for its `(kind, binding)`, so a
+/// moved tag, a repinned entry, and a disabled entry all stay untouched, and a rerun registers
+/// nothing new. A seed that cannot be validated, resolved, or registered is reported as
+/// [`PlatformImageSeedOutcome::Failed`] with the underlying stable diagnostic and leaves the
+/// binding absent from the catalog rather than pinning a weaker identity.
+pub async fn seed_platform_images(
+    catalog: &PgPlatformImageCatalog,
+    registry: &PlatformImageRegistry,
+    seeds: &[PlatformImageSeed],
+    now: UtcTimestamp,
+) -> Vec<PlatformImageSeedOutcome> {
+    let Ok(actor_id) = ActorId::from_str(SEED_ACTOR) else {
+        return fail_all(seeds, &PlatformImageStoreError::Persistence);
+    };
+    let mut pinned = match catalog.list(None).await {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| (entry.kind, entry.binding))
+            .collect::<Vec<_>>(),
+        Err(error) => return fail_all(seeds, &error),
+    };
+    let mut outcomes = Vec::with_capacity(seeds.len());
+    for seed in seeds {
+        if let Err(error) = validate_registration_identity(
+            &seed.binding,
+            &seed.source_reference,
+            seed.trust_revision,
+        ) {
+            outcomes.push(PlatformImageSeedOutcome::Failed {
+                cause: error.diagnostic_code(),
+            });
+            continue;
+        }
+        if is_pinned(&pinned, seed.kind, &seed.binding) {
+            outcomes.push(PlatformImageSeedOutcome::Existing);
+            continue;
+        }
+        let resolved = match registry.resolve(&seed.source_reference).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                outcomes.push(PlatformImageSeedOutcome::Failed {
+                    cause: error.diagnostic_code(),
+                });
+                continue;
+            }
+        };
+        let registration = RegisterPlatformImage {
+            kind: seed.kind,
+            binding: seed.binding.clone(),
+            source_reference: seed.source_reference.clone(),
+            resolved_digest: resolved.digest,
+            media_type: resolved.media_type,
+            size_bytes: resolved.size_bytes,
+            capacity_bytes: None,
+            disk_sha256: None,
+            format: None,
+            trust_revision: seed.trust_revision,
+            actor_id,
+            reason: SEED_REASON.to_owned(),
+            now,
+        };
+        match catalog.register(&registration).await {
+            Ok(_) => {
+                pinned.push((seed.kind, seed.binding.clone()));
+                outcomes.push(PlatformImageSeedOutcome::Registered);
+            }
+            // A concurrent registration of the same binding wins; a seed never overwrites a pin.
+            Err(PlatformImageStoreError::Conflict) => {
+                outcomes.push(PlatformImageSeedOutcome::Existing);
+            }
+            Err(error) => outcomes.push(PlatformImageSeedOutcome::Failed {
+                cause: error.diagnostic_code(),
+            }),
+        }
+    }
+    outcomes
+}
+
+fn is_pinned(
+    pinned: &[(PlatformImageKind, String)],
+    kind: PlatformImageKind,
+    binding: &str,
+) -> bool {
+    pinned
+        .iter()
+        .any(|(pinned_kind, pinned_binding)| *pinned_kind == kind && pinned_binding == binding)
+}
+
+fn fail_all(
+    seeds: &[PlatformImageSeed],
+    error: &PlatformImageStoreError,
+) -> Vec<PlatformImageSeedOutcome> {
+    let cause = error.diagnostic_code();
+    seeds
+        .iter()
+        .map(|_| PlatformImageSeedOutcome::Failed { cause })
+        .collect()
+}
+
 impl RegisterPlatformImage {
     fn validate(&self) -> Result<(), PlatformImageStoreError> {
+        validate_registration_identity(&self.binding, &self.source_reference, self.trust_revision)?;
         validate_digest(&self.resolved_digest)?;
         validate_reason(&self.reason)?;
-        if !contracts::http::valid_platform_image_binding(&self.binding)
-            || self.source_reference.trim().is_empty()
-            || self.source_reference.len() > 512
-            || self.media_type.trim().is_empty()
-            || self.media_type.len() > 255
-            || self.size_bytes == 0
-            || self.trust_revision == 0
+        self.validate_disk_descriptor()?;
+        if self.media_type.trim().is_empty() || self.media_type.len() > 255 || self.size_bytes == 0
         {
             return Err(PlatformImageStoreError::InvalidRequest);
         }
         Ok(())
+    }
+
+    /// Validates the virtual-machine disk descriptor as a consistent triple.
+    ///
+    /// A registration either inventories an already-published containerdisk reference (none of
+    /// the three) or pins the raw/qcow2 disk the importer wrapped: all three present, the entry a
+    /// virtual machine, a positive capacity and the lowercase hex digest of the exact disk bytes.
+    /// A partially declared descriptor and a container carrying one are both misdeclared uploads.
+    fn validate_disk_descriptor(&self) -> Result<(), PlatformImageStoreError> {
+        match (
+            self.capacity_bytes,
+            self.disk_sha256.as_deref(),
+            self.format,
+        ) {
+            (None, None, None) => Ok(()),
+            (Some(capacity), Some(disk_sha256), Some(_)) => {
+                if self.kind != PlatformImageKind::VirtualMachine
+                    || capacity == 0
+                    || !valid_disk_sha256(disk_sha256)
+                {
+                    return Err(PlatformImageStoreError::InvalidRequest);
+                }
+                Ok(())
+            }
+            _ => Err(PlatformImageStoreError::InvalidRequest),
+        }
+    }
+}
+
+/// Validates the reviewed registration identity every catalog write depends on.
+///
+/// Deployment seeds pass through the same check as an authenticated registration, so a
+/// misdeclared seed can never pin a binding an administrator could not.
+fn validate_registration_identity(
+    binding: &str,
+    source_reference: &str,
+    trust_revision: u64,
+) -> Result<(), PlatformImageStoreError> {
+    if !contracts::http::valid_platform_image_binding(binding)
+        || source_reference.trim().is_empty()
+        || source_reference.len() > 512
+        || trust_revision == 0
+    {
+        return Err(PlatformImageStoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
+/// Returns the persisted lowercase discriminator for one declared disk encoding.
+const fn disk_format_str(format: VirtualMachineDiskFormat) -> &'static str {
+    match format {
+        VirtualMachineDiskFormat::Qcow2 => "qcow2",
+        VirtualMachineDiskFormat::Raw => "raw",
+    }
+}
+
+fn parse_disk_format(value: &str) -> Result<VirtualMachineDiskFormat, PlatformImageStoreError> {
+    match value {
+        "qcow2" => Ok(VirtualMachineDiskFormat::Qcow2),
+        "raw" => Ok(VirtualMachineDiskFormat::Raw),
+        _ => Err(PlatformImageStoreError::Persistence),
     }
 }
 
@@ -411,6 +633,7 @@ async fn load_entry(
 ) -> Result<PlatformImageEntry, PlatformImageStoreError> {
     let row = sqlx::query(
         "SELECT catalog_id,kind,binding,source_reference,resolved_digest,media_type,size_bytes,\
+                capacity_bytes,disk_sha256,format,\
                 status,trust_revision,repin_generation,pinned_at,updated_at \
          FROM agent.platform_image_catalog WHERE catalog_id=$1",
     )
@@ -491,6 +714,21 @@ fn entry_from_row(
                 .map_err(|_| PlatformImageStoreError::Persistence)?,
         )
         .map_err(|_| PlatformImageStoreError::Persistence)?,
+        capacity_bytes: row
+            .try_get::<Option<i64>, _>("capacity_bytes")
+            .map_err(|_| PlatformImageStoreError::Persistence)?
+            .map(|capacity| {
+                u64::try_from(capacity).map_err(|_| PlatformImageStoreError::Persistence)
+            })
+            .transpose()?,
+        disk_sha256: row
+            .try_get("disk_sha256")
+            .map_err(|_| PlatformImageStoreError::Persistence)?,
+        format: row
+            .try_get::<Option<String>, _>("format")
+            .map_err(|_| PlatformImageStoreError::Persistence)?
+            .map(|format| parse_disk_format(&format))
+            .transpose()?,
         status: match status.as_str() {
             "active" => PlatformImageStatus::Active,
             "disabled" => PlatformImageStatus::Disabled,
@@ -522,18 +760,19 @@ fn parse_timestamp(value: time::OffsetDateTime) -> Result<UtcTimestamp, Platform
 }
 
 fn validate_digest(value: &str) -> Result<(), PlatformImageStoreError> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
-        return Err(PlatformImageStoreError::InvalidRequest);
-    };
-    if hex.len() == 64
-        && hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if value.strip_prefix("sha256:").is_some_and(valid_disk_sha256) {
         Ok(())
     } else {
         Err(PlatformImageStoreError::InvalidRequest)
     }
+}
+
+/// Whether `value` is a lowercase hex SHA-256 digest body.
+fn valid_disk_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_reason(value: &str) -> Result<(), PlatformImageStoreError> {

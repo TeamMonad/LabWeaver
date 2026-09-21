@@ -26,7 +26,9 @@ use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
 use agent_service::oci_registry::RegistryCredentials;
-use agent_service::platform_images::{PgPlatformImageCatalog, PlatformImageRegistry};
+use agent_service::platform_images::{
+    PgPlatformImageCatalog, PlatformImageRegistry, PlatformImageSeed, PlatformImageSeedOutcome,
+};
 use agent_service::run_store::{AgentRunService, PostgresAgentRunStore};
 use agent_service::sandbox_process::{SandboxAuthoringProcess, SandboxProcessConfiguration};
 use agent_service::work_execution::{
@@ -97,6 +99,13 @@ struct PlatformRegistryFileConfig {
     username_file: String,
     /// Mounted file holding the platform robot account password.
     password_file: String,
+    /// Reviewed base images the deployment copied into the platform registry.
+    ///
+    /// Each seed is resolved once at startup and pinned under its binding; see
+    /// [`PlatformImageSeed`]. The deployment file names the list `seed_images` and the JSON
+    /// form `seedImages`.
+    #[serde(default, alias = "seedImages")]
+    seed_images: Vec<PlatformImageSeed>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,16 +380,27 @@ async fn run_agent_service() -> Result<(), StartupError> {
         Arc::clone(&objects),
     )?);
     let platform_registry = load_platform_registry(deployment.platform_registry.as_ref())?;
+    let seed_images = if let Some(config) = deployment.platform_registry.as_ref() {
+        config.seed_images.clone()
+    } else {
+        Vec::new()
+    };
     let api_objects: Arc<dyn ImmutableObjectStore> = objects.clone();
+    let platform_images = PgPlatformImageCatalog::new(store.pool().clone());
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
         generated_artifacts: generated_artifacts.clone(),
         llm_reviews: llm_reviews.clone(),
-        platform_images: PgPlatformImageCatalog::new(store.pool().clone()),
+        platform_images: platform_images.clone(),
         platform_registry,
         objects: api_objects,
     });
+    spawn_platform_image_seeds(
+        &platform_images,
+        state.platform_registry.as_ref(),
+        seed_images,
+    )?;
     let bind = SocketAddr::from_str(&deployment.control_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -433,6 +453,79 @@ async fn run_agent_service() -> Result<(), StartupError> {
         result = outbox_loop(outbox, outbox_poll) => result?,
     }
     Ok(())
+}
+
+/// Starts the background deployment seeding of the platform image catalog.
+///
+/// Seeding never blocks startup and never fails it: the resolved digests are registered once by
+/// a background task while the API and workers come up. Without a configured platform registry
+/// there is nothing to resolve against, so a seeded deployment is reported as skipped and the
+/// catalog keeps whatever the administrator registered through the gateway. A clock failure is
+/// the one startup-blocking condition, because every catalog write needs the mutation timestamp.
+fn spawn_platform_image_seeds(
+    catalog: &PgPlatformImageCatalog,
+    registry: Option<&PlatformImageRegistry>,
+    seeds: Vec<PlatformImageSeed>,
+) -> Result<(), StartupError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let Some(registry) = registry else {
+        tracing::warn!(
+            event = "agent.platform_image.seed_skipped",
+            outcome = "skipped",
+            diagnostic_code = "LW_PLATFORM_IMAGE_REGISTRY_NOT_CONFIGURED",
+            seed_count = seeds.len(),
+            failure_stage = "seed",
+            error_kind = "configuration",
+            retryable = false
+        );
+        return Ok(());
+    };
+    let catalog = catalog.clone();
+    let registry = registry.clone();
+    let now = timestamp()?;
+    tokio::spawn(async move {
+        let outcomes =
+            agent_service::platform_images::seed_platform_images(&catalog, &registry, &seeds, now)
+                .await;
+        log_platform_image_seed_outcomes(&seeds, &outcomes);
+    });
+    Ok(())
+}
+
+/// Logs one stable event per deployment seed.
+fn log_platform_image_seed_outcomes(
+    seeds: &[PlatformImageSeed],
+    outcomes: &[PlatformImageSeedOutcome],
+) {
+    for (seed, outcome) in seeds.iter().zip(outcomes) {
+        match outcome {
+            PlatformImageSeedOutcome::Registered => tracing::info!(
+                event = "agent.platform_image.seed_registered",
+                outcome = "registered",
+                binding = %seed.binding,
+                kind = seed.kind.as_str()
+            ),
+            PlatformImageSeedOutcome::Existing => tracing::info!(
+                event = "agent.platform_image.seed_existing",
+                outcome = "unchanged",
+                binding = %seed.binding,
+                kind = seed.kind.as_str()
+            ),
+            PlatformImageSeedOutcome::Failed { cause } => tracing::error!(
+                event = "agent.platform_image.seed_failed",
+                outcome = "failed",
+                diagnostic_code = contracts::diagnostic::PLATFORM_IMAGE_SEED_FAILED,
+                cause = cause,
+                binding = %seed.binding,
+                kind = seed.kind.as_str(),
+                failure_stage = "seed",
+                error_kind = "dependency",
+                retryable = false
+            ),
+        }
+    }
 }
 
 async fn discover_service_auth(
@@ -996,6 +1089,8 @@ enum StartupError {
 mod deployment_contract_tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use agent_service::platform_images::PlatformImageKind;
+
     use super::{BuildExecutorDeploymentFile, DeploymentFile};
 
     #[test]
@@ -1049,6 +1144,81 @@ mod deployment_contract_tests {
                 "environment:resolve_work_execution_binding".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn checked_in_platform_example_seeds_only_reviewed_registry_bindings() {
+        let example = include_str!("../../../deploy/config/agent-control-plane.yaml.example");
+        let deployment: DeploymentFile =
+            serde_yaml::from_str(example).expect("agent deployment example must deserialize");
+        let registry = deployment
+            .platform_registry
+            .as_ref()
+            .expect("agent deployment example must configure the platform registry");
+
+        assert_eq!(registry.seed_images.len(), 2);
+        for seed in &registry.seed_images {
+            assert_eq!(seed.kind, PlatformImageKind::Container);
+            assert!(seed.source_reference.starts_with("harbor.example.invalid/"));
+            assert!(seed.binding.ends_with("-v1"));
+            assert_eq!(seed.trust_revision, 1);
+        }
+        assert_eq!(registry.seed_images[0].binding, "rust-builder-v1");
+        assert_eq!(registry.seed_images[1].binding, "distroless-runtime-v1");
+    }
+
+    #[test]
+    fn platform_registry_seeds_accept_both_reviewed_keys_and_reject_unknown_fields() {
+        let reviewed = r#"
+registry: "harbor.example.invalid"
+ca_file: "/etc/labweaver/secrets/harbor-ca.crt"
+username_file: "/etc/labweaver/secrets/harbor-username"
+password_file: "/etc/labweaver/secrets/harbor-password"
+seed_images:
+  - kind: "container"
+    binding: "rust-builder-v1"
+    source_reference: "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm"
+    trust_revision: 1
+"#;
+        let config: super::PlatformRegistryFileConfig =
+            serde_yaml::from_str(reviewed).expect("snake_case seed key must deserialize");
+        assert_eq!(config.seed_images.len(), 1);
+        assert_eq!(config.seed_images[0].binding, "rust-builder-v1");
+
+        let camel = r#"{
+            "registry": "harbor.example.invalid",
+            "ca_file": "/etc/labweaver/secrets/harbor-ca.crt",
+            "username_file": "/etc/labweaver/secrets/harbor-username",
+            "password_file": "/etc/labweaver/secrets/harbor-password",
+            "seedImages": [{
+                "kind": "container",
+                "binding": "rust-builder-v1",
+                "source_reference": "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm",
+                "trust_revision": 2
+            }]
+        }"#;
+        let config: super::PlatformRegistryFileConfig =
+            serde_json::from_str(camel).expect("camelCase seed key must deserialize");
+        assert_eq!(config.seed_images[0].trust_revision, 2);
+
+        let absent = reviewed.replace(
+            r#"seed_images:
+  - kind: "container"
+    binding: "rust-builder-v1"
+    source_reference: "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm"
+    trust_revision: 1
+"#,
+            "",
+        );
+        let config: super::PlatformRegistryFileConfig =
+            serde_yaml::from_str(&absent).expect("seeds must default to empty");
+        assert!(config.seed_images.is_empty());
+
+        let unknown = reviewed.replace(
+            "    trust_revision: 1",
+            "    trust_revision: 1\n    disk_format: \"qcow2\"",
+        );
+        assert!(serde_yaml::from_str::<super::PlatformRegistryFileConfig>(&unknown).is_err());
     }
 
     fn example_deployment() -> super::DeploymentFile {

@@ -13,6 +13,7 @@ pub mod build_store;
 pub mod candidate_materializer;
 pub mod classifier;
 pub mod claude_code;
+pub mod containerdisk;
 pub mod generated_artifacts;
 pub mod llm_review;
 pub mod messaging;

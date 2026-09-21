@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::supply_chain::VirtualMachineDiskFormat;
 use crate::{
     AccessGrantId, ActorId, AgentRunId, ApprovalId, ArtifactRef, BuildRequestId, CandidateId,
     CourseId, DiagnosticCode, EndpointId, EnvironmentId, EvaluationReleaseId, EvaluationRunId,
@@ -276,6 +277,47 @@ pub fn valid_platform_image_binding(value: &str) -> bool {
         })
 }
 
+/// Maximum accepted byte length of the relative in-archive virtual-machine disk path.
+pub const PLATFORM_IMAGE_DISK_PATH_MAX_BYTES: usize = 256;
+
+/// Returns whether an administrator platform-image upload carries a reviewed disk descriptor.
+///
+/// A container upload always imports an OCI layout, so all three disk fields must be absent. A
+/// virtual-machine upload either imports an already-published registry containerdisk reference
+/// (all three absent) or declares the raw/qcow2 disk frozen inside the archive (all three present
+/// and self-consistent): `disk_path` is a relative path of at most
+/// [`PLATFORM_IMAGE_DISK_PATH_MAX_BYTES`] bytes with no `..`, no leading `/`, and no trailing `/`,
+/// and `capacity_bytes` is positive. A partially specified descriptor is never accepted, so a
+/// misdeclared VM upload fails closed instead of being silently imported as a containerdisk.
+#[must_use]
+pub fn valid_vm_disk_upload(
+    kind: PlatformImageKind,
+    disk_format: Option<VirtualMachineDiskFormat>,
+    disk_path: Option<&str>,
+    capacity_bytes: Option<u64>,
+) -> bool {
+    match (disk_format, disk_path, capacity_bytes) {
+        // Both kinds may import an already-published registry reference with no disk descriptor.
+        (None, None, None) => true,
+        // Any partial descriptor is a misdeclared upload.
+        (None, _, _) | (_, None, _) | (_, _, None) => false,
+        (Some(_), Some(path), Some(capacity)) => {
+            kind == PlatformImageKind::VirtualMachine && valid_vm_disk_path(path) && capacity > 0
+        }
+    }
+}
+
+/// Returns whether `value` is a reviewed relative in-archive disk path.
+#[must_use]
+fn valid_vm_disk_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= PLATFORM_IMAGE_DISK_PATH_MAX_BYTES
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("..")
+        && !value.split('/').any(str::is_empty)
+}
+
 /// Reviewed platform image kinds.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -317,6 +359,15 @@ pub struct PlatformImageEntry {
     pub status: PlatformImageStatus,
     pub trust_revision: u64,
     pub repin_generation: u64,
+    /// Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+    /// Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_sha256: Option<String>,
+    /// Declared virtual-machine base-disk encoding; absent for container entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<VirtualMachineDiskFormat>,
     pub pinned_at: UtcTimestamp,
     pub updated_at: UtcTimestamp,
 }
@@ -389,6 +440,16 @@ pub struct CreatePlatformImageUploadRequest {
     pub archive_bytes: u64,
     /// Archive media type; must equal `PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE`.
     pub archive_media_type: String,
+    /// Declared virtual-machine disk encoding inside the archive; must agree with
+    /// `disk_path` and `capacity_bytes` under [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    /// Relative path of the disk inside the uploaded archive; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    /// Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
     pub trust_revision: u64,
     pub reason: String,
 }
@@ -412,6 +473,12 @@ pub struct PlatformImageUploadSession {
     pub target_reference: String,
     pub archive_bytes: u64,
     pub archive_media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
     pub upload_target: PlatformImageUploadTarget,
     pub expires_at: UtcTimestamp,
     pub revision: Revision,
@@ -465,6 +532,15 @@ pub struct InternalPlatformImageImportRequest {
     pub archive: ArtifactRef,
     /// Object-store key of the frozen archive.
     pub archive_object_key: String,
+    /// Declared virtual-machine disk encoding inside the archive; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    /// Relative path of the disk inside the archived bundle; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    /// Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
     pub trust_revision: u64,
     pub actor_id: ActorId,
     pub reason: String,

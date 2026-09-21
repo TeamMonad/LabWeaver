@@ -44,6 +44,14 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -59,6 +67,30 @@
     },
     "binding": {
       "type": "string"
+    },
+    "capacityBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "diskFormat": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VirtualMachineDiskFormat"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diskPath": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "expiresAt": {
       "$ref": "#/$defs/UtcTimestamp"

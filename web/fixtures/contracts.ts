@@ -8,6 +8,7 @@ import type {
   EnvironmentOperation,
   EnvironmentOperationPageSchema,
   EnvironmentOperationSnapshot,
+  GpuCatalogEntrySchema,
   ListEnvironmentsData,
   EnvironmentSummary,
   EnvironmentSummaryPageSchema,
@@ -371,6 +372,9 @@ const platformImageCatalog = {
       resolvedDigest: 'sha256:4b1d2f8a6c0e9d7b5a3f1e8c6d4b2a0f9e7c5d3b1a8f6e4c2d0b9a7f5e3c1d0b',
       mediaType: 'application/vnd.oci.image.manifest.v1+json',
       sizeBytes: 6442450944,
+      capacityBytes: 10737418240,
+      diskSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      format: 'qcow2',
       status: 'active',
       trustRevision: 2,
       repinGeneration: 1,
@@ -395,6 +399,35 @@ const platformImageCatalog = {
     },
   ],
 } satisfies PlatformImageCatalogViewSchema
+
+/**
+ * Administrator GPU catalog preview.
+ *
+ * Resource Service keeps every revision; the fixture shows one active class
+ * plus the revision it retired so the page renders both states.
+ */
+export const gpuCatalogFixture = [
+  {
+    id: '0197f0e0-0000-7000-8000-0000000000a1',
+    class: 'nvidia-a10',
+    mode: 'exclusive',
+    providerBinding: 'fixture-kubernetes',
+    capacityUnits: 4,
+    allocationBinding: 'fixture-nvidia-a10',
+    revision: 2,
+    active: true,
+  },
+  {
+    id: '0197f0e0-0000-7000-8000-0000000000a2',
+    class: 'nvidia-a10',
+    mode: 'exclusive',
+    providerBinding: 'fixture-kubernetes',
+    capacityUnits: 2,
+    allocationBinding: 'fixture-nvidia-a10',
+    revision: 1,
+    active: false,
+  },
+] satisfies GpuCatalogEntrySchema[]
 
 function fixtureResponse<T>(data: T): Promise<FixtureSuccess<T>> {
   return Promise.resolve({ data, error: undefined })
@@ -641,3 +674,6 @@ export async function repinPlatformImage() { return unsupportedResponse('重新�
 export async function disablePlatformImage() { return unsupportedResponse('停用平台镜像') }
 export async function createPlatformImageUpload() { return unsupportedResponse('创建平台镜像上传会话') }
 export async function completePlatformImageUpload() { return unsupportedResponse('完成平台镜像导入') }
+
+export async function listResourceGpuCatalog(): Promise<FixtureResult<GpuCatalogEntrySchema[]>> { return fixtureResponse(gpuCatalogFixture) }
+export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }

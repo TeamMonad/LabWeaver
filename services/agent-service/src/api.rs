@@ -437,6 +437,11 @@ async fn register_platform_image(
             resolved_digest: resolved.digest,
             media_type: resolved.media_type,
             size_bytes: resolved.size_bytes,
+            // The registration request carries no disk descriptor: a reference registration is
+            // catalog inventory and never resolvable as a virtual-machine base.
+            capacity_bytes: None,
+            disk_sha256: None,
+            format: None,
             trust_revision: request.trust_revision,
             actor_id: request.actor_id,
             reason: request.reason,
@@ -714,6 +719,11 @@ impl From<PlatformImageImportError> for AgentApiError {
         match error {
             PlatformImageImportError::ObjectStore(_) => Self::persistence(),
             PlatformImageImportError::Layout(error) => Self {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                diagnostic: error.diagnostic_code(),
+                retryable: false,
+            },
+            PlatformImageImportError::Disk | PlatformImageImportError::Capacity => Self {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 diagnostic: error.diagnostic_code(),
                 retryable: false,
