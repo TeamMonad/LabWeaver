@@ -17,7 +17,9 @@ use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use contracts::execution::{ExecutionCleanupStatus, ExecutionObjectRef, TaskExecutionBinding};
+use contracts::execution::{
+    ExecutionCleanupStatus, ExecutionObjectRef, ExecutionObservation, TaskExecutionBinding,
+};
 use contracts::resource::WorkloadResources;
 use contracts::{TaskRunId, UtcTimestamp};
 use persistence_sqlx::Sha256Digest;
@@ -28,6 +30,7 @@ use task_execution::kubernetes::{
     KubernetesJobObservation, KubernetesOwnership,
 };
 use task_execution::resource::{ResourceClient, TaskResourceError, TaskResourceLifecycle};
+use task_execution::{ExecutionTiming, usage_deliveries};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -50,6 +53,10 @@ const RESULT_MEDIA_TYPE: &str = "application/json";
 const STDERR_MEDIA_TYPE: &str = "text/plain";
 const EXPORT_MEDIA_TYPE: &str = contracts::http::PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE;
 const SANDBOX_DEADLINE_SLACK_SECONDS: u64 = 300;
+/// Bounded retries for one usage delivery before the reservation is released anyway.
+const USAGE_DELIVERY_ATTEMPTS: u32 = 3;
+/// Delay between two usage delivery attempts.
+const USAGE_DELIVERY_RETRY: Duration = Duration::from_millis(500);
 const OBSERVE_POLL: Duration = Duration::from_secs(2);
 
 /// Deployment-owned boundaries for admitted authoring sandbox executions.
@@ -376,8 +383,14 @@ impl SandboxAuthoringProcess {
             );
         loop {
             if cancellation.is_cancelled() {
-                self.cleanup_and_release(&intent, &bundle, &lifecycle, &status)
-                    .await;
+                self.cleanup_and_release(
+                    &intent,
+                    &bundle,
+                    &lifecycle,
+                    &status,
+                    ExecutionTiming::unknown(),
+                )
+                .await;
                 return Err(ClaudeCodeProcessError::Cancelled);
             }
             let observation = self
@@ -386,7 +399,10 @@ impl SandboxAuthoringProcess {
                 .await
                 .map_err(|_| ClaudeCodeProcessError::Io)?;
             match observation {
-                KubernetesJobObservation::Completed { message, .. } => {
+                KubernetesJobObservation::Completed {
+                    message,
+                    observation,
+                } => {
                     let receipt =
                         parse_receipt(&message).map_err(|_| ClaudeCodeProcessError::Io)?;
                     receipt
@@ -418,19 +434,32 @@ impl SandboxAuthoringProcess {
                         )
                         .await
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
-                    self.cleanup_and_release(&intent, &bundle, &lifecycle, &status)
-                        .await;
+                    self.cleanup_and_release(
+                        &intent,
+                        &bundle,
+                        &lifecycle,
+                        &status,
+                        attempt_timing(&observation),
+                    )
+                    .await;
                     return Ok(output);
                 }
                 KubernetesJobObservation::Failed {
-                    diagnostic_code, ..
+                    diagnostic_code,
+                    observation,
                 } => {
                     self.store
                         .complete_sandbox_attempt(&intent, None, 1, Some(diagnostic_code.as_str()))
                         .await
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
-                    self.cleanup_and_release(&intent, &bundle, &lifecycle, &status)
-                        .await;
+                    self.cleanup_and_release(
+                        &intent,
+                        &bundle,
+                        &lifecycle,
+                        &status,
+                        attempt_timing(&observation),
+                    )
+                    .await;
                     return Err(ClaudeCodeProcessError::Io);
                 }
                 KubernetesJobObservation::Missing | KubernetesJobObservation::Running => {}
@@ -445,8 +474,14 @@ impl SandboxAuthoringProcess {
                     )
                     .await
                     .map_err(|_| ClaudeCodeProcessError::Io)?;
-                self.cleanup_and_release(&intent, &bundle, &lifecycle, &status)
-                    .await;
+                self.cleanup_and_release(
+                    &intent,
+                    &bundle,
+                    &lifecycle,
+                    &status,
+                    ExecutionTiming::unknown(),
+                )
+                .await;
                 return Err(ClaudeCodeProcessError::TimedOut);
             }
             tokio::time::sleep(OBSERVE_POLL).await;
@@ -513,6 +548,10 @@ impl SandboxAuthoringProcess {
                 .load_status()
                 .await
                 .map_err(|error| map_task_resource(&error))?;
+            // A recovered attempt owes the same usage observation as a fresh one; it left no
+            // container timing behind, so the reservation interval is reported as unknown.
+            self.deliver_usage(&latest, ExecutionTiming::unknown())
+                .await;
             if lifecycle.release(&latest).await.is_ok() {
                 let _ = self.store.mark_sandbox_released(&intent).await;
             }
@@ -599,6 +638,7 @@ impl SandboxAuthoringProcess {
         bundle: &KubernetesJobBundle,
         lifecycle: &TaskResourceLifecycle,
         status: &contracts::http::TaskResourceStatus,
+        timing: ExecutionTiming,
     ) {
         let cleanup = self
             .api
@@ -616,8 +656,59 @@ impl SandboxAuthoringProcess {
                 Ok(latest) => latest,
                 Err(_) => status.clone(),
             };
+            // The shared reservation contract releases a task only after its usage observation is
+            // durable, so the attempt delivers one before the lease goes back to Resource.
+            self.deliver_usage(&latest, timing).await;
             if lifecycle.release(&latest).await.is_ok() {
                 let _ = self.store.mark_sandbox_released(intent).await;
+            }
+        }
+    }
+
+    /// Delivers the attempt's usage observation, with a bounded retry.
+    ///
+    /// A failed delivery is reported with a stable event instead of being retried without bound:
+    /// the reservation must not stay claimed by an attempt that already ended.
+    async fn deliver_usage(
+        &self,
+        status: &contracts::http::TaskResourceStatus,
+        timing: ExecutionTiming,
+    ) {
+        let Ok(until) = authority_now() else {
+            tracing::warn!(
+                event = "agent.authoring.sandbox.usage_delivery_skipped",
+                failure_stage = "sandbox.usage",
+                task_run_id = %status.task_run_id.as_uuid(),
+                "authoring attempt could not read the clock for its usage observation",
+            );
+            return;
+        };
+        let Ok(deliveries) = usage_deliveries(status, timing, until) else {
+            tracing::warn!(
+                event = "agent.authoring.sandbox.usage_delivery_skipped",
+                failure_stage = "sandbox.usage",
+                task_run_id = %status.task_run_id.as_uuid(),
+                "authoring attempt could not derive its usage observation",
+            );
+            return;
+        };
+        for delivery in &deliveries {
+            let mut delivered = false;
+            for _ in 0..USAGE_DELIVERY_ATTEMPTS {
+                if self.resources.record_resource_usage(delivery).await.is_ok() {
+                    delivered = true;
+                    break;
+                }
+                tokio::time::sleep(USAGE_DELIVERY_RETRY).await;
+            }
+            if !delivered {
+                tracing::warn!(
+                    event = "agent.authoring.sandbox.usage_delivery_failed",
+                    failure_stage = "sandbox.usage",
+                    task_run_id = %status.task_run_id.as_uuid(),
+                    kind = ?delivery.kind,
+                    "authoring attempt could not deliver its usage observation",
+                );
             }
         }
     }
@@ -809,6 +900,14 @@ fn attempt_environment(
             .map(|(key, value)| (key.clone(), value.clone())),
     );
     environment
+}
+
+/// Timing of one observed attempt, taken from the shared observation.
+fn attempt_timing(observation: &ExecutionObservation) -> ExecutionTiming {
+    ExecutionTiming {
+        started_at: observation.started_at,
+        terminated_at: observation.terminated_at,
+    }
 }
 
 fn command_argv(command: &ClaudeCodeCommand) -> Vec<String> {

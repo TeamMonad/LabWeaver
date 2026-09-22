@@ -11,7 +11,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -19,7 +18,6 @@ use std::{
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use contracts::{
-    EventId,
     authoring::{PackageFile, ProblemPackage},
     evaluation::{
         AdvisoryOutputMode, ApprovedProgramProfile, EvaluationStepCompletion, ProgramPhase,
@@ -29,7 +27,7 @@ use contracts::{
         AgentLlmReviewFile, AgentLlmReviewRubric, AgentLlmReviewState,
         InternalAgentLlmReviewRequest,
     },
-    resource::{ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement, WorkloadResources},
+    resource::WorkloadResources,
     submission::FrozenSubmission,
 };
 use persistence_sqlx::Sha256Digest;
@@ -2155,89 +2153,8 @@ impl KubernetesEvaluationRunner {
         timing: ExecutionTiming,
         fallback_until: contracts::UtcTimestamp,
     ) -> Result<Vec<RecordResourceUsageRequest>, ExecutionError> {
-        let (measured_from, measured_until, measurement) = match timing_boundaries(timing)? {
-            (Some(started), Some(terminated)) => {
-                let milliseconds = usage_milliseconds(started, terminated)?;
-                let resources = &status.claim.workload_resources;
-                let quantities = ResourceUsageQuantities {
-                    cpu_millicore_seconds: quantity_per_millisecond(
-                        u64::from(resources.cpu_millicores),
-                        milliseconds,
-                    )?,
-                    memory_byte_seconds: quantity_per_millisecond(
-                        resources.memory_bytes,
-                        milliseconds,
-                    )?,
-                    storage_byte_seconds: 0,
-                    gpu_unit_seconds: match resources.gpu.as_ref() {
-                        Some(gpu) => quantity_per_millisecond(u64::from(gpu.count), milliseconds)?,
-                        None => 0,
-                    },
-                };
-                (started, terminated, UsageMeasurement::Known { quantities })
-            }
-            (None, None) => {
-                let started = status.lease.active_from.ok_or_else(|| {
-                    ExecutionError::Backend("resource_active_from_missing".to_owned())
-                })?;
-                if fallback_until <= started {
-                    return Err(ExecutionError::Backend("usage_interval_invalid".to_owned()));
-                }
-                (
-                    started,
-                    fallback_until,
-                    UsageMeasurement::Unknown {
-                        reason: "executor_timing_unavailable".to_owned(),
-                    },
-                )
-            }
-            _ => {
-                return Err(ExecutionError::Backend(
-                    "execution_timing_invalid".to_owned(),
-                ));
-            }
-        };
-        let compute = RecordResourceUsageRequest {
-            project_id: status.project_id,
-            course_id: status.request.course_id,
-            kind: ResourceUsageKind::Compute,
-            request_id: status.request.id,
-            lease_id: Some(status.lease.id),
-            source_event_id: deterministic_usage_event_id(status.task_run_id, 0x01)?,
-            measured_from,
-            measured_until,
-            measurement: measurement.clone(),
-        };
-        let storage = status.claim.workload_resources.storage_bytes;
-        let mut deliveries = vec![compute];
-        if storage > 0 {
-            let storage_measurement = match measurement {
-                UsageMeasurement::Known { .. } => UsageMeasurement::Known {
-                    quantities: ResourceUsageQuantities {
-                        cpu_millicore_seconds: 0,
-                        memory_byte_seconds: 0,
-                        storage_byte_seconds: quantity_per_millisecond(
-                            storage,
-                            usage_milliseconds(measured_from, measured_until)?,
-                        )?,
-                        gpu_unit_seconds: 0,
-                    },
-                },
-                UsageMeasurement::Unknown { reason } => UsageMeasurement::Unknown { reason },
-            };
-            deliveries.push(RecordResourceUsageRequest {
-                project_id: status.project_id,
-                course_id: status.request.course_id,
-                kind: ResourceUsageKind::Storage,
-                request_id: status.request.id,
-                lease_id: Some(status.lease.id),
-                source_event_id: deterministic_usage_event_id(status.task_run_id, 0x02)?,
-                measured_from,
-                measured_until,
-                measurement: storage_measurement,
-            });
-        }
-        Ok(deliveries)
+        task_execution::usage_deliveries(status, timing, fallback_until)
+            .map_err(|_| ExecutionError::Backend("usage_delivery_invalid".to_owned()))
     }
 
     async fn run_is_cancelling(
@@ -2566,44 +2483,6 @@ fn parse_advisory_recovery_request(
         return Err(ExecutionError::IdentityMismatch);
     }
     Ok(request)
-}
-
-fn usage_milliseconds(
-    measured_from: contracts::UtcTimestamp,
-    measured_until: contracts::UtcTimestamp,
-) -> Result<u64, ExecutionError> {
-    if measured_until <= measured_from {
-        return Err(ExecutionError::Backend("usage_interval_invalid".to_owned()));
-    }
-    u64::try_from(
-        (measured_until.get() - measured_from.get())
-            .whole_milliseconds()
-            .max(1),
-    )
-    .map_err(|_| ExecutionError::Backend("usage_duration_invalid".to_owned()))
-}
-
-fn quantity_per_millisecond(base: u64, milliseconds: u64) -> Result<u64, ExecutionError> {
-    u64::try_from(
-        u128::from(base)
-            .checked_mul(u128::from(milliseconds))
-            .ok_or_else(|| ExecutionError::Backend("usage_quantity_overflow".to_owned()))?
-            / 1_000,
-    )
-    .map_err(|_| ExecutionError::Backend("usage_quantity_overflow".to_owned()))
-}
-
-fn deterministic_usage_event_id(
-    task_run_id: contracts::TaskRunId,
-    discriminator: u8,
-) -> Result<EventId, ExecutionError> {
-    let mut bytes = task_run_id.as_uuid().into_bytes();
-    // Preserve UUIDv7 version and RFC 9562 variant while deriving stable,
-    // category-specific ids from the durable TaskRunId.
-    bytes[14] = bytes[14].wrapping_add(discriminator);
-    bytes[15] ^= discriminator;
-    EventId::from_str(&Uuid::from_bytes(bytes).to_string())
-        .map_err(|_| ExecutionError::Backend("usage_event_id_invalid".to_owned()))
 }
 
 #[cfg(test)]
