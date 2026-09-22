@@ -170,9 +170,11 @@ def buildkitd_configuration(
     """Render the reviewed rootless ``buildkitd.toml`` for one registry host.
 
     The standalone deployment enables the mutual-TLS ``[grpc]`` listener and
-    pins the cluster nameserver. The authoring sandbox sidecar serves the
-    attempt-local unix socket the sandbox bundle mounts in both containers
-    instead, and inherits the pod resolver instead of a pinned nameserver.
+    pins the cluster nameserver. The authoring sandbox sidecar serves pod-local
+    loopback instead: both containers share the pod network namespace, while a
+    socket file written by the rootless daemon is not visible to the attempt
+    container. The sidecar inherits the pod resolver instead of a pinned
+    nameserver.
     """
 
     grpc = (
@@ -185,7 +187,7 @@ def buildkitd_configuration(
         '\n'
         if grpc_tls
         else '[grpc]\n'
-        '  address = ["unix:///run/buildkit/buildkitd.sock"]\n'
+        '  address = ["tcp://127.0.0.1:1234"]\n'
         '\n'
     )
     dns = (

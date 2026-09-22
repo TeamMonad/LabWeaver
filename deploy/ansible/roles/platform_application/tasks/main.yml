@@ -2867,6 +2867,8 @@
       data:
         buildkitd.toml: |
           rootless = true
+          [grpc]
+            address = ["tcp://127.0.0.1:1234"]
           [worker.oci]
             enabled = true
             noProcessSandbox = true
@@ -2898,6 +2900,8 @@
           'noProcessSandbox = true' in
             platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
           'rootless = true' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          'address = ["tcp://127.0.0.1:1234"]' in
             platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
           '/etc/buildkit/registry-ca.crt' in
             platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and

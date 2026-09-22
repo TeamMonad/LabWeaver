@@ -1382,8 +1382,6 @@ fn buildkit_build_command() -> Vec<String> {
          printf 'labweaver-sidecar-live' > /tmp/context/hello.txt\n\
          printf 'FROM scratch\\nCOPY hello.txt /hello.txt\\n' > /tmp/context/Dockerfile\n\
          sleep 15\n\
-         probe \"run_dir=$(ls -l /run/buildkit 2>&1 | tr '\\n' ' ' | head -c 120)\"\n\
-         probe \"socket=$(ls -l /run/buildkit/buildkitd.sock 2>&1 | head -c 60)\"\n\
          if buildctl --addr \"$BUILDKIT_HOST\" debug workers >/tmp/workers.txt 2>/tmp/workers.err; then probe sidecar_workers=ok; else probe sidecar_workers=failed; probe \"workers_error=$(head -c 160 /tmp/workers.err | tr '\\n' ' ')\"; fi\n\
          if buildctl --addr \"$BUILDKIT_HOST\" build --frontend dockerfile.v0 --local context=/tmp/context --local dockerfile=/tmp/context --output type=oci,dest=/workspace/labweaver-export.tar >/tmp/build.log 2>&1; then probe sidecar_build=ok; else probe sidecar_build=failed; fi\n\
          probe \"export_bytes=$(wc -c </workspace/labweaver-export.tar 2>/dev/null || echo 0)\"\n\
@@ -1877,29 +1875,23 @@ async fn live_attempt_builds_an_image_through_its_sidecar() -> Result<(), Box<dy
         let observation = await_terminal(&api, &bundle.bundle.identity).await?;
         assert_probe_attempt_failed(&observation)?;
         let evidence = probe_evidence_of(&api, &rest, namespace, &bundle).await?;
-        // Whether the attempt process reaches the daemon is a property of the runtime the cluster
-        // uses, so it is reported instead of asserted: measured on the owned Kind runtime, the
-        // rootless daemon started by the sidecar writes its socket where the attempt container
-        // cannot see it, while a plain shared `emptyDir` between two containers stays visible. The
-        // rendered sidecar form and its startup gate are asserted above.
-        let reachable = evidence.get("sidecar_workers").map(String::as_str) == Some("ok")
-            && evidence.get("sidecar_build").map(String::as_str) == Some("ok");
+        for (key, expected) in [("sidecar_workers", "ok"), ("sidecar_build", "ok")] {
+            assert_eq!(
+                evidence.get(key).map(String::as_str),
+                Some(expected),
+                "the attempt must reach the daemon it shares a pod network with: {evidence:?}"
+            );
+        }
         let export_bytes = evidence
             .get("export_bytes")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
-        assert_eq!(
-            evidence.get("sidecar").map(String::as_str),
-            Some("done"),
-            "the in-container probe must run to completion: {evidence:?}"
+        assert!(
+            export_bytes > 0,
+            "the sidecar build must export a layout the attempt can publish: {evidence:?}"
         );
         println!(
-            "live sidecar build readback: verdict={} reachable={reachable} exportBytes={export_bytes} evidence={evidence:?}",
-            if reachable {
-                "attempt-built-an-image"
-            } else {
-                "daemon-unreachable-from-attempt"
-            }
+            "live sidecar build readback: verdict=attempt-built-an-image exportBytes={export_bytes}"
         );
     } else {
         print_unobserved_case("sidecar-build");

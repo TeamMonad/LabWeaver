@@ -35,7 +35,6 @@ const REQUEST_SHA_ANNOTATION: &str = "labweaver.io/request-sha256";
 const ATTEMPT_VOLUME: &str = "attempt";
 const WORKSPACE_VOLUME: &str = "workspace";
 const MATERIALS_VOLUME: &str = "materials";
-const BUILDKIT_RUN_VOLUME: &str = "buildkit-run";
 const BUILDKIT_STATE_VOLUME: &str = "buildkit-state";
 const BUILDKIT_CONFIG_VOLUME: &str = "buildkit-config";
 const BUILDKIT_AUTH_VOLUME: &str = "buildkit-auth";
@@ -46,8 +45,12 @@ const WORKSPACE_DIR: &str = "/workspace";
 const MATERIALS_DIR: &str = "/materials";
 const ATTEMPT_VOLUME_BYTES: u64 = 64 * 1024 * 1024;
 const MATERIALS_VOLUME_BYTES: u64 = 32 * 1024 * 1024;
-const BUILDKIT_RUN_DIR: &str = "/run/buildkit";
-const BUILDKIT_SOCKET: &str = "/run/buildkit/buildkitd.sock";
+/// `BuildKit` daemon address the attempt process uses.
+///
+/// Both containers share the pod network namespace, while a socket file written by the rootless
+/// daemon inside its own mount namespace is not visible to the attempt container, so the daemon
+/// serves pod-local loopback instead of an attempt-local socket file.
+const BUILDKIT_ADDRESS: &str = "tcp://127.0.0.1:1234";
 const BUILDKIT_STATE_DIR: &str = "/home/user/.local/share/buildkit";
 const BUILDKIT_CONFIG_PATH: &str = "/etc/buildkit/buildkitd.toml";
 const BUILDKIT_CA_PATH: &str = "/etc/buildkit/registry-ca.crt";
@@ -499,16 +502,12 @@ fn containers(
         "memory": configuration.memory_bytes.to_string(),
         "ephemeral-storage": configuration.workspace_bytes.to_string(),
     });
-    let mut main_mounts = vec![
+    let main_mounts = vec![
         json!({"name": ATTEMPT_VOLUME, "mountPath": ATTEMPT_DIR, "readOnly": false}),
         json!({"name": WORKSPACE_VOLUME, "mountPath": WORKSPACE_DIR, "readOnly": false}),
         json!({"name": MATERIALS_VOLUME, "mountPath": MATERIALS_DIR, "readOnly": true}),
     ];
-    if buildkit_image.is_some() {
-        main_mounts.push(
-            json!({"name": BUILDKIT_RUN_VOLUME, "mountPath": BUILDKIT_RUN_DIR, "readOnly": true}),
-        );
-    }
+    let _ = buildkit_image;
     let main = json!({
         "name": SANDBOX_MAIN_CONTAINER,
         "image": configuration.image,
@@ -550,7 +549,7 @@ fn buildkit_sidecar(configuration: &SandboxConfiguration, image: &str) -> Value 
             "exec": {"command": [
                 "/usr/bin/buildctl",
                 "--addr",
-                format!("unix://{BUILDKIT_SOCKET}"),
+                BUILDKIT_ADDRESS,
                 "debug",
                 "workers",
             ]},
@@ -589,7 +588,6 @@ fn buildkit_sidecar(configuration: &SandboxConfiguration, image: &str) -> Value 
             "seLinuxOptions": {"type": "spc_t"},
         },
         "volumeMounts": [
-            {"name": BUILDKIT_RUN_VOLUME, "mountPath": BUILDKIT_RUN_DIR, "readOnly": false},
             {"name": BUILDKIT_STATE_VOLUME, "mountPath": BUILDKIT_STATE_DIR, "readOnly": false},
             {"name": BUILDKIT_RUNTIME_VOLUME, "mountPath": BUILDKIT_RUNTIME_DIR, "readOnly": false},
             {"name": BUILDKIT_TMP_VOLUME, "mountPath": "/tmp", "readOnly": false},
@@ -626,7 +624,6 @@ fn volumes(configuration: &SandboxConfiguration, secret_name: &str, buildkit: bo
             .as_deref()
             .unwrap_or_default();
         volumes.extend([
-            json!({"name": BUILDKIT_RUN_VOLUME, "emptyDir": {"sizeLimit": BUILDKIT_RUN_VOLUME_BYTES.to_string()}}),
             json!({"name": BUILDKIT_STATE_VOLUME, "emptyDir": {"sizeLimit": configuration.workspace_bytes.to_string()}}),
             json!({"name": BUILDKIT_RUNTIME_VOLUME, "emptyDir": {"sizeLimit": BUILDKIT_RUN_VOLUME_BYTES.to_string()}}),
             json!({"name": BUILDKIT_TMP_VOLUME, "emptyDir": {"sizeLimit": BUILDKIT_TMP_VOLUME_BYTES.to_string()}}),
@@ -695,8 +692,7 @@ fn job_document(
     }
     let buildkit_image = configuration.buildkit_image.as_deref();
     if buildkit_image.is_some() {
-        environment
-            .push(json!({"name": "BUILDKIT_HOST", "value": format!("unix://{BUILDKIT_SOCKET}")}));
+        environment.push(json!({"name": "BUILDKIT_HOST", "value": BUILDKIT_ADDRESS}));
     }
 
     let mut script = String::new();
@@ -1117,7 +1113,7 @@ mod tests {
             serde_json::json!([
                 "/usr/bin/buildctl",
                 "--addr",
-                "unix:///run/buildkit/buildkitd.sock",
+                "tcp://127.0.0.1:1234",
                 "debug",
                 "workers"
             ])
@@ -1141,14 +1137,21 @@ mod tests {
             .ok_or(SandboxBundleError::Invalid)?;
         assert!(main["env"].as_array().is_some_and(|env| {
             env.iter().any(|entry| {
-                entry["name"] == "BUILDKIT_HOST"
-                    && entry["value"] == "unix:///run/buildkit/buildkitd.sock"
+                entry["name"] == "BUILDKIT_HOST" && entry["value"] == "tcp://127.0.0.1:1234"
             })
         }));
+        // The attempt reaches the daemon over the shared pod network, so it mounts no socket
+        // directory and the daemon keeps its state volume to itself.
         assert!(main["volumeMounts"].as_array().is_some_and(|mounts| {
             mounts
                 .iter()
-                .any(|mount| mount["name"] == "buildkit-run" && mount["readOnly"] == true)
+                .all(|mount| mount["name"] != "buildkit-state" && mount["name"] != "buildkit-run")
+        }));
+        assert!(sidecar["volumeMounts"].as_array().is_some_and(|mounts| {
+            mounts.iter().any(|mount| {
+                mount["name"] == "buildkit-state"
+                    && mount["mountPath"] == "/home/user/.local/share/buildkit"
+            })
         }));
         let volumes = job.document["spec"]["template"]["spec"]["volumes"]
             .as_array()
@@ -1658,7 +1661,6 @@ mod tests {
                     ("attempt", "67108864"),
                     ("workspace", "2147483648"),
                     ("materials", "33554432"),
-                    ("buildkit-run", "67108864"),
                     ("buildkit-state", "2147483648"),
                     ("buildkit-runtime", "67108864"),
                     ("buildkit-tmp", "268435456"),

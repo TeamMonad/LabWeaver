@@ -53,7 +53,7 @@
 
 - Agent 服务进程需要访问 Kubernetes API（namespace 级 Role，仅该 namespace 的 Job/Secret/Pod/NetworkPolicy），并持有模型凭据；沙箱通过 NetworkPolicy 与无推送凭据的容器限制其能力。隔离边界统一为 gVisor `runsc`：authoring attempt、OJ run 与 Ansible probe 三类一次性负载都使用同一 `RuntimeClass`（handler `labweaver-sandbox`，containerd 运行时类型 `io.containerd.runsc.v1`），不由各服务各选一套运行时；本地 kind 由 bootstrap 安装锁定版本并校验 sha512 的 runsc，生产节点须注册同名 handler，缺失时调度失败关闭。seccomp/capability/非 root/只读 rootfs 等容器级限制保持不变，不因引入 gVisor 而放宽。
 - 每次 attempt 进入 Resource 审批链；批量审批 UI 已存在，但高频 authoring 的预授权策略是后续产品决定，本 ADR 不引入自动审批。
-- rootless BuildKit 需要受控的 seccomp/capability 例外（`seccompProfile`/`appArmorProfile` Unconfined、`SETUID`/`SETGID`、`seLinuxOptions: spc_t`），与既有 `platform_buildkit` 角色同类。`labweaver-authoring` 命名空间按既有 builder 的方式使用 `pod-security.kubernetes.io/enforce: privileged` 与 restricted 审计/告警，并标注 `labweaver.io/security-exception`；例外只落在无 token、资源受限、仅可经 attempt 本地 socket 访问的 sidecar 上。该能力当前通过可选 `sandbox.buildkit_image`/`sandbox.buildkit_config_map_name` 启用，部署侧仍需把 rootless 镜像与 Harbor CA ConfigMap 绑定进该命名空间并联调。
+- rootless BuildKit 需要受控的 seccomp/capability 例外（`seccompProfile`/`appArmorProfile` Unconfined、`SETUID`/`SETGID`、`seLinuxOptions: spc_t`），与既有 `platform_buildkit` 角色同类。`labweaver-authoring` 命名空间按既有 builder 的方式使用 `pod-security.kubernetes.io/enforce: privileged` 与 restricted 审计/告警，并标注 `labweaver.io/security-exception`；例外只落在无 token、资源受限、仅可经 Pod 本地回环（`tcp://127.0.0.1:1234`，两容器共享 Pod 网络命名空间）访问的 sidecar 上；rootless daemon 写出的 socket 文件位于其自身 mount namespace，attempt 容器看不到，因此不用共享 socket 目录。该能力当前通过可选 `sandbox.buildkit_image`/`sandbox.buildkit_config_map_name` 启用，部署侧仍需把 rootless 镜像与 Harbor CA ConfigMap 绑定进该命名空间并联调。
 
 ## 验证边界
 
