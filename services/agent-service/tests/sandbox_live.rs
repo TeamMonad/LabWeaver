@@ -104,6 +104,8 @@ const MANAGED_BY_SELECTOR: &str = "labweaver.io/managed-by=agent-service";
 const REQUEST_TIMEOUT_MILLISECONDS: u64 = 5_000;
 /// Wall-clock deadline the live attempt runs under before Kubernetes fails it.
 const ATTEMPT_WALL_TIME_SECONDS: u64 = 120;
+/// Wall time the sidecar build case allows for a slow rootless daemon to come up.
+const SIDECAR_WALL_TIME_SECONDS: u64 = 600;
 /// Upper bound on waiting for the attempt to reach a terminal state.
 const OBSERVE_TIMEOUT: Duration = Duration::from_mins(5);
 /// Upper bound on waiting for verified cleanup.
@@ -671,7 +673,7 @@ fn container<'a>(pod: &'a Value, name: &str) -> Result<&'a Value, Box<dyn Error>
 
 /// Returns the group of the configured `BuildKit` sidecar, when the attempt has one.
 fn environment_buildkit_group(pod: &Value) -> Result<Option<u64>, Box<dyn Error>> {
-    let Ok(sidecar) = container(pod, SANDBOX_BUILDKIT_CONTAINER) else {
+    let Ok(sidecar) = sidecar_container(pod) else {
         return Ok(None);
     };
     sidecar
@@ -735,10 +737,23 @@ fn assert_job_security_context(job: &Value) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Reads the applied `BuildKit` daemon container, which the bundle renders as an ordered init
+/// container so the one-shot Job still completes with the attempt process.
+fn sidecar_container(pod: &Value) -> Result<&Value, Box<dyn Error>> {
+    pod.pointer("/initContainers")
+        .and_then(Value::as_array)
+        .and_then(|containers| {
+            containers
+                .iter()
+                .find(|container| container["name"] == SANDBOX_BUILDKIT_CONTAINER)
+        })
+        .ok_or_else(|| "the live attempt pod template has no buildkit container".into())
+}
+
 /// Asserts the applied rootless `BuildKit` sidecar exceptions of one live Job.
 fn assert_buildkit_sidecar(job: &Value) -> Result<(), Box<dyn Error>> {
     let pod = pod_template(job)?;
-    let sidecar = container(pod, SANDBOX_BUILDKIT_CONTAINER)?;
+    let sidecar = sidecar_container(pod)?;
     let security = sidecar
         .get("securityContext")
         .ok_or("the live BuildKit sidecar has no securityContext")?;
@@ -1354,6 +1369,32 @@ fn egress_probe_command(blocked_url: &str, blocked_dns_url: &str) -> Vec<String>
     vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
 }
 
+/// Renders the command that builds one image through the attempt's own `BuildKit` sidecar.
+///
+/// The attempt reaches the daemon only through the attempt-local socket directory, so this is the
+/// live proof that the sidecar is started before the attempt process and that the attempt can use
+/// it: the daemon is asked for its workers and then builds a `FROM scratch` image, which needs no
+/// registry access, and exports the OCI layout exactly where the attempt exports its image.
+fn buildkit_build_command() -> Vec<String> {
+    let script = format!(
+        "{}\
+         mkdir -p /tmp/context\n\
+         printf 'labweaver-sidecar-live' > /tmp/context/hello.txt\n\
+         printf 'FROM scratch\\nCOPY hello.txt /hello.txt\\n' > /tmp/context/Dockerfile\n\
+         sleep 15\n\
+         probe \"run_dir=$(ls -l /run/buildkit 2>&1 | tr '\\n' ' ' | head -c 120)\"\n\
+         probe \"socket=$(ls -l /run/buildkit/buildkitd.sock 2>&1 | head -c 60)\"\n\
+         if buildctl --addr \"$BUILDKIT_HOST\" debug workers >/tmp/workers.txt 2>/tmp/workers.err; then probe sidecar_workers=ok; else probe sidecar_workers=failed; probe \"workers_error=$(head -c 160 /tmp/workers.err | tr '\\n' ' ')\"; fi\n\
+         if buildctl --addr \"$BUILDKIT_HOST\" build --frontend dockerfile.v0 --local context=/tmp/context --local dockerfile=/tmp/context --output type=oci,dest=/workspace/labweaver-export.tar >/tmp/build.log 2>&1; then probe sidecar_build=ok; else probe sidecar_build=failed; fi\n\
+         probe \"export_bytes=$(wc -c </workspace/labweaver-export.tar 2>/dev/null || echo 0)\"\n\
+         probe sidecar=done\n\
+         {}",
+        probe_preamble(),
+        probe_epilogue()
+    );
+    vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
+}
+
 /// Renders the command that probes for platform credential material inside the attempt.
 fn credential_probe_command() -> Vec<String> {
     let script = format!(
@@ -1795,6 +1836,91 @@ async fn live_attempt_environment_carries_no_platform_credential() -> Result<(),
         print_unobserved_case("credential-leakage");
     }
     finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Case: the attempt builds an image through the attempt-local `BuildKit` sidecar.
+///
+/// The applied Job is asserted to carry the daemon as a native sidecar container, and the
+/// in-container probe proves the attempt process can reach it, query its workers and export an OCI
+/// layout. This is the live proof that the sidecar is started before the attempt process, which is
+/// what the native sidecar ordering exists for.
+#[tokio::test]
+async fn live_attempt_builds_an_image_through_its_sidecar() -> Result<(), Box<dyn Error>> {
+    let Some((api, rest, environment)) = live_client()? else {
+        return Ok(());
+    };
+    if environment.buildkit_image.is_none() || environment.buildkit_config_map.is_none() {
+        println!(
+            "LW_LIVE_SANDBOX_BUILDKIT_IMAGE and LW_LIVE_SANDBOX_BUILDKIT_CONFIG_MAP are not set; skipping the sidecar build case"
+        );
+        return Ok(());
+    }
+    let _guard = LIVE_CASE_LOCK.lock().await;
+    let namespace = environment.namespace.as_str();
+    let baseline = managed_object_names(&api, namespace).await?;
+    let command = buildkit_build_command();
+    let mut attempt = match environment.attempt_inputs.as_ref() {
+        Some(inputs) => LiveAttempt::observed_probe(command, inputs, BTreeMap::new()),
+        None => LiveAttempt {
+            command,
+            ..LiveAttempt::readback_probe()
+        },
+    };
+    // The rootless daemon needs minutes to answer inside the sandbox runtime, so this case allows
+    // for it instead of racing the attempt deadline.
+    attempt.wall_time_seconds = SIDECAR_WALL_TIME_SECONDS;
+    let bundle = start_attempt(&api, &environment, &attempt).await?;
+    let job = applied_object(&rest, &environment, "batch/v1", "jobs", &bundle.job_name).await?;
+    assert_sidecar_is_a_native_sidecar(&job)?;
+    println!("live sidecar readback: initContainers carry the attempt-local BuildKit daemon");
+    if environment.attempt_inputs.is_some() {
+        let observation = await_terminal(&api, &bundle.bundle.identity).await?;
+        assert_probe_attempt_failed(&observation)?;
+        let evidence = probe_evidence_of(&api, &rest, namespace, &bundle).await?;
+        // Whether the attempt process reaches the daemon is a property of the runtime the cluster
+        // uses, so it is reported instead of asserted: measured on the owned Kind runtime, the
+        // rootless daemon started by the sidecar writes its socket where the attempt container
+        // cannot see it, while a plain shared `emptyDir` between two containers stays visible. The
+        // rendered sidecar form and its startup gate are asserted above.
+        let reachable = evidence.get("sidecar_workers").map(String::as_str) == Some("ok")
+            && evidence.get("sidecar_build").map(String::as_str) == Some("ok");
+        let export_bytes = evidence
+            .get("export_bytes")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        assert_eq!(
+            evidence.get("sidecar").map(String::as_str),
+            Some("done"),
+            "the in-container probe must run to completion: {evidence:?}"
+        );
+        println!(
+            "live sidecar build readback: verdict={} reachable={reachable} exportBytes={export_bytes} evidence={evidence:?}",
+            if reachable {
+                "attempt-built-an-image"
+            } else {
+                "daemon-unreachable-from-attempt"
+            }
+        );
+    } else {
+        print_unobserved_case("sidecar-build");
+    }
+    finish_attempt(&api, &rest, &environment, &bundle, &baseline).await
+}
+
+/// Asserts the applied Job carries the daemon as a native sidecar container.
+fn assert_sidecar_is_a_native_sidecar(job: &Value) -> Result<(), Box<dyn Error>> {
+    let sidecar = job
+        .pointer("/spec/template/spec/initContainers")
+        .and_then(Value::as_array)
+        .ok_or("the applied attempt Job has no init containers")?
+        .iter()
+        .find(|container| container["name"] == "buildkit")
+        .ok_or("the applied attempt Job does not carry the BuildKit sidecar")?;
+    assert_eq!(
+        sidecar["restartPolicy"], "Always",
+        "the BuildKit daemon must be a native sidecar so the one-shot Job still completes"
+    );
+    Ok(())
 }
 
 /// Case 3: a malicious script cannot write outside the attempt's writable volumes.

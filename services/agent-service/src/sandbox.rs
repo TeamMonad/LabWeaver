@@ -543,6 +543,23 @@ fn buildkit_sidecar(configuration: &SandboxConfiguration, image: &str) -> Value 
         "restartPolicy": "Always",
         "imagePullPolicy": "IfNotPresent",
         "args": ["--config", BUILDKIT_CONFIG_PATH, "--oci-worker-no-process-sandbox"],
+        // A native sidecar is started before the attempt process, but its container is "running"
+        // long before the daemon answers on the socket. The startup probe is what makes the
+        // kubelet hold the attempt process back until the daemon is actually usable.
+        "startupProbe": {
+            "exec": {"command": [
+                "/usr/bin/buildctl",
+                "--addr",
+                format!("unix://{BUILDKIT_SOCKET}"),
+                "debug",
+                "workers",
+            ]},
+            "periodSeconds": 1,
+            "timeoutSeconds": 3,
+            // The daemon answers about a second after it starts, so this only has to absorb a slow
+            // node; the attempt deadline stays the outer bound.
+            "failureThreshold": 120,
+        },
         "env": [
             {"name": "XDG_RUNTIME_DIR", "value": BUILDKIT_RUNTIME_DIR},
             {"name": "TMPDIR", "value": "/tmp"},
@@ -1094,6 +1111,17 @@ mod tests {
             .ok_or(SandboxBundleError::Invalid)?;
         // A native sidecar container is what lets the one-shot Job complete with the attempt.
         assert_eq!(sidecar["restartPolicy"], "Always");
+        // Starting the sidecar is not enough: the attempt must wait until the daemon answers.
+        assert_eq!(
+            sidecar["startupProbe"]["exec"]["command"],
+            serde_json::json!([
+                "/usr/bin/buildctl",
+                "--addr",
+                "unix:///run/buildkit/buildkitd.sock",
+                "debug",
+                "workers"
+            ])
+        );
         assert_eq!(
             sidecar["securityContext"]["seccompProfile"]["type"],
             "Unconfined"
