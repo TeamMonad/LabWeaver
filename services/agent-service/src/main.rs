@@ -795,6 +795,10 @@ impl Worker {
     async fn run(self) -> Result<(), StartupError> {
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tracing::info!(
+            event = "agent.dispatch.worker_started",
+            poll_interval = ?self.poll_interval,
+        );
         loop {
             ticker.tick().await;
             if let Err(error) = self.tick().await {
@@ -819,6 +823,7 @@ impl Worker {
         let Some(lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
             return Ok(());
         };
+        tracing::info!(event = "agent.dispatch.claimed", run_id = %lease.run.id);
             let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
                 objects: Arc::clone(&self.objects),
                 locators: lease.object_locators.clone(),
