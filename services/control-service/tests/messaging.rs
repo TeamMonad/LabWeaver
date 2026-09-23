@@ -121,7 +121,15 @@ async fn control_projection_is_transactional_across_duplicate_restart_outage_and
     wrong_project_event.project_id = ProjectId::new();
     assert!(matches!(
         service
-            .consume_agent_run_event(&wrong_project_event, &requested, None, None, None, None)
+            .consume_agent_run_event(
+                &wrong_project_event,
+                &requested,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
             .await,
         Err(ControlError::ProjectionConflict)
     ));

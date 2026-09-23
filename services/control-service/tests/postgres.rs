@@ -462,6 +462,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             None,
             None,
             None,
+            None,
         )
         .await;
     assert!(matches!(
@@ -486,6 +487,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             &run,
             Some(&environment_candidate),
+            None,
             None,
             None,
             None,
@@ -1005,6 +1007,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
             Some(&evaluation),
             Some(&export),
             None,
+            None,
         )
         .await?;
     let source_kind: String = sqlx::query_scalar(
@@ -1040,6 +1043,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
             Some(&evaluation),
             Some(&export),
             None,
+            None,
         )
         .await?;
     assert_eq!(
@@ -1061,6 +1065,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
                 Some(&environment),
                 Some(&evaluation),
                 Some(&changed_key),
+                None,
                 None,
             )
             .await,
@@ -1157,6 +1162,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             None,
             None,
         )
@@ -1505,6 +1511,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
             Some(&evaluation),
             None,
             None,
+            None,
         )
         .await?;
 
@@ -1541,6 +1548,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
         evaluation_candidate_id: evaluation.id,
         evaluation_candidate_revision: evaluation.revision,
         image_artifact: image_artifact.clone(),
+        evaluation_runner_image_artifact: None,
         reason: "administrator catalog base reviewed".to_owned(),
     };
 
@@ -1751,6 +1759,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             Some(&environment_generated),
             Some(&runner_generated),
         )
@@ -1836,6 +1845,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
                 &IdempotencyKey::parse("runner-approval-missing")?,
                 now,
                 "trace-runner-approval-missing",
+                &[],
             )
             .await,
         Err(ControlError::EvaluationRunnerArtifactRequired)
@@ -1855,6 +1865,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
                 &IdempotencyKey::parse("runner-approval-mismatch")?,
                 now,
                 "trace-runner-approval-mismatch",
+                &[],
             )
             .await,
         Err(ControlError::ArtifactMismatch)
@@ -1868,6 +1879,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
             &IdempotencyKey::parse("runner-approval")?,
             now,
             "trace-runner-approval",
+            &[],
         )
         .await?;
     assert_eq!(
@@ -2116,7 +2128,15 @@ async fn private_work_environment_approval_requires_project_owner()
         EnvironmentClass::Work,
     )?;
     service
-        .project_candidates(EventId::new(), &run, Some(&environment), None, None, None)
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            None,
+            None,
+            None,
+            None,
+        )
         .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: environment.revision,
