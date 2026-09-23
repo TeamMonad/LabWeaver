@@ -2068,27 +2068,30 @@
     namespace: "{{ platform_application_namespace }}"
     name: "{{ item.seed_data_volume_name }}"
   register: platform_application_vm_base_dv
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Reject a conflicting immutable VM base DataVolume
   ansible.builtin.assert:
     that:
-      - platform_application_vm_base_dv.resources | length <= 1
+      - item.resources | length <= 1
       - >-
-        platform_application_vm_base_dv.resources | length == 0 or
-        platform_application_vm_base_dv.resources[0].spec.source.registry.url ==
-        item.registry_url
+        item.resources | length == 0 or
+        item.resources[0].spec.source.registry.url ==
+        item.item.registry_url
       - >-
-        platform_application_vm_base_dv.resources | length == 0 or
-        platform_application_vm_base_dv.resources[0].spec.storage.storageClassName ==
-        item.storage_class_name
+        item.resources | length == 0 or
+        item.resources[0].spec.storage.storageClassName ==
+        item.item.storage_class_name
       - >-
-        platform_application_vm_base_dv.resources | length == 0 or
-        platform_application_vm_base_dv.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
-        item.disk_sha256
+        item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
+        item.item.disk_sha256
     fail_msg: PLATFORM_VM_BASE_DATAVOLUME_CONFLICT
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop: "{{ platform_application_vm_base_dv.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Import the immutable VM base disk when absent
   kubernetes.core.k8s:
@@ -2098,30 +2101,30 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataVolume
       metadata:
-        name: "{{ item.seed_data_volume_name }}"
+        name: "{{ item.item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
-          labweaver.io/source-release: "{{ item.release }}"
-          labweaver.io/source-registry: "{{ item.registry_url }}"
-          labweaver.io/disk-sha256: "{{ item.disk_sha256 }}"
+          labweaver.io/source-release: "{{ item.item.release }}"
+          labweaver.io/source-registry: "{{ item.item.registry_url }}"
+          labweaver.io/disk-sha256: "{{ item.item.disk_sha256 }}"
       spec:
         source:
           registry:
-            url: "{{ item.registry_url }}"
+            url: "{{ item.item.registry_url }}"
             pullMethod: node
         storage:
-          storageClassName: "{{ item.storage_class_name }}"
+          storageClassName: "{{ item.item.storage_class_name }}"
           accessModes: [ReadWriteOnce]
           resources:
             requests:
-              storage: "{{ item.storage_request }}"
-  when: platform_application_vm_base_dv.resources | length == 0
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+              storage: "{{ item.item.storage_request }}"
+  when: item.resources | length == 0
+  loop: "{{ platform_application_vm_base_dv.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Reconcile immediate binding for the immutable VM base
   kubernetes.core.k8s:
@@ -2202,17 +2205,17 @@
 - name: Reject a conflicting immutable VM base DataSource
   ansible.builtin.assert:
     that:
-      - platform_application_vm_base_source.resources | length <= 1
+      - item.resources | length <= 1
       - >-
-        platform_application_vm_base_source.resources | length == 0 or
-        (platform_application_vm_base_source.resources[0].spec.source.pvc.name ==
-         item.seed_data_volume_name and
-         platform_application_vm_base_source.resources[0].spec.source.pvc.namespace ==
+        item.resources | length == 0 or
+        (item.resources[0].spec.source.pvc.name ==
+         item.item.seed_data_volume_name and
+         item.resources[0].spec.source.pvc.namespace ==
          platform_application_namespace)
     fail_msg: PLATFORM_VM_BASE_DATASOURCE_CONFLICT
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop: "{{ platform_application_vm_base_source.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Publish the immutable VM base DataSource when absent
   kubernetes.core.k8s:
@@ -2222,23 +2225,23 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataSource
       metadata:
-        name: "{{ item.data_source_name }}"
+        name: "{{ item.item.data_source_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
-          labweaver.io/source-release: "{{ item.release }}"
-          labweaver.io/source-registry: "{{ item.registry_url }}"
-          labweaver.io/disk-sha256: "{{ item.disk_sha256 }}"
+          labweaver.io/source-release: "{{ item.item.release }}"
+          labweaver.io/source-registry: "{{ item.item.registry_url }}"
+          labweaver.io/disk-sha256: "{{ item.item.disk_sha256 }}"
       spec:
         source:
           pvc:
-            name: "{{ item.seed_data_volume_name }}"
+            name: "{{ item.item.seed_data_volume_name }}"
             namespace: "{{ platform_application_namespace }}"
-  when: platform_application_vm_base_source.resources | length == 0
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  when: item.resources | length == 0
+  loop: "{{ platform_application_vm_base_source.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Read back the immutable VM base DataSource
   kubernetes.core.k8s_info:
@@ -2255,21 +2258,21 @@
 - name: Require the immutable VM base identity
   ansible.builtin.assert:
     that:
-      - platform_application_vm_base_source_readback.resources | length == 1
-      - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.name == item.seed_data_volume_name
-      - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.namespace == platform_application_namespace
+      - item.resources | length == 1
+      - item.resources[0].spec.source.pvc.name == item.item.seed_data_volume_name
+      - item.resources[0].spec.source.pvc.namespace == platform_application_namespace
       - >-
-        platform_application_vm_base_source_readback.resources[0]
+        item.resources[0]
         .metadata.annotations['labweaver.io/source-registry'] ==
-        item.registry_url
+        item.item.registry_url
       - >-
-        platform_application_vm_base_source_readback.resources[0]
+        item.resources[0]
         .metadata.annotations['labweaver.io/disk-sha256'] ==
-        item.disk_sha256
+        item.item.disk_sha256
     fail_msg: PLATFORM_VM_BASE_IDENTITY_INVALID
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop: "{{ platform_application_vm_base_source_readback.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Reconcile the application Harbor pull credential
   kubernetes.core.k8s:
