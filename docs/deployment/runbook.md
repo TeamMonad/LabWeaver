@@ -554,6 +554,23 @@ helm -n labweaver-system history labweaver
     docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
   ```
 
+- `platform_application` 还会校验 `platform_container_images` 里每个基础镜像的**原 digest** 已在 Harbor
+  项目内（Agent 的 seed 目录不能声称项目里不存在的镜像）。部署本身不做镜像复制，操作者必须先按
+  `platform_container_images` 的 `name:tag` 建仓并镜像同一 digest，例如：
+
+  ```sh
+  HTTPS_PROXY=http://49.52.27.95:7897 HTTP_PROXY=http://49.52.27.95:7897 \
+  NO_PROXY=harbor.lab.lan,localhost,127.0.0.1 \
+  docker buildx imagetools create \
+    --tag harbor.lab.lan/labweaver-system/rust:1.97.1-bookworm \
+    docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
+  docker buildx imagetools create \
+    --tag harbor.lab.lan/labweaver-system/distroless-cc:nonroot \
+    gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
+  ```
+
+  缺失时部署以 `PLATFORM_APPLICATION_CONTAINER_IMAGE_DIGEST_ABSENT` 失败，不会留下只有名字可用的 seed 目录。
+
 ### 11.3 BuildKit 出网
 
 - 新模板默认 `platform_buildkit_egress_mode: open`。若 `92-platform-buildkit` 因集群 CoreDNS 已存在
