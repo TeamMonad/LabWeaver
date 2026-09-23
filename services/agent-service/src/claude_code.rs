@@ -2174,6 +2174,17 @@ impl ClaudeCodeRuntime {
         error: ClaudeCodeRuntimeError,
         process_output: Option<&ClaudeCodeProcessOutput>,
     ) -> ClaudeCodeFailure {
+        // The returned audit deliberately carries no reason, so the stable
+        // diagnostic and the closed error kind are recorded here: an authoring
+        // attempt that fails before any cluster object exists is otherwise
+        // invisible in ordinary logs.
+        tracing::warn!(
+            event = "agent.authoring.runtime.failed",
+            track = ?track,
+            error_kind = ?error,
+            diagnostic_code = error.diagnostic_code(),
+            "authoring runtime refused the attempt",
+        );
         let audit = self.audit(AuditContext {
             track,
             tool_policy_sha256,

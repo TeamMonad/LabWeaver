@@ -790,16 +790,35 @@ struct Worker {
 impl Worker {
     #[allow(
         clippy::large_futures,
-        reason = "the dispatch loop owns preparation and execution as one durable boundary"
+        reason = "the supervisor awaits the whole reserved-dispatch boundary"
     )]
     async fn run(self) -> Result<(), StartupError> {
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let Some(lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
-                continue;
-            };
+            if let Err(error) = self.tick().await {
+                // One reserved dispatch that fails outside the per-track failure
+                // boundary would otherwise end the worker without naming a
+                // reason; record the closed error kind before it propagates.
+                tracing::error!(
+                    event = "agent.dispatch.worker_failed",
+                    error_kind = ?error,
+                    "agent dispatch worker stopped on a reserved dispatch",
+                );
+                return Err(error);
+            }
+        }
+    }
+
+    #[allow(
+        clippy::large_futures,
+        reason = "one reserved dispatch owns preparation and execution as one durable boundary"
+    )]
+    async fn tick(&self) -> Result<(), StartupError> {
+        let Some(lease) = self.store.claim_dispatch(self.dispatch_lease).await? else {
+            return Ok(());
+        };
             let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
                 objects: Arc::clone(&self.objects),
                 locators: lease.object_locators.clone(),
@@ -814,7 +833,7 @@ impl Worker {
                         .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
                         .await?;
                     tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false, safe_detail = error.safe_detail());
-                    continue;
+                    return Ok(());
                 }
             };
             self.store
@@ -851,7 +870,7 @@ impl Worker {
                 agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
             };
             tracing::info!(event = "agent.dispatch.completed", run_id = %run_id, outcome = dispatch_outcome);
-        }
+        Ok(())
     }
 }
 
