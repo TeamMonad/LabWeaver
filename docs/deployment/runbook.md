@@ -689,6 +689,11 @@ helm -n labweaver-system history labweaver
   `platform-model-egress`/`authoring-model-egress` 两条 `CiliumNetworkPolicy` 再按
   `platform_application_model_namespace` 放行该端口。
 - 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
+- **预算也要按本机模型调**：单个请求可能耗时分分钟，`web/e2e/support/live.mjs` 的策略默认
+  `timeoutMilliseconds=120000`、`maxCostMicrousd=1000000`（1 USD）会让 CLI 以
+  `error_max_budget_usd` / 超时结束（沙箱尝试 `exit_code=1`、`LW_AGENT_SANDBOX_FAILED`）。
+  `tools/user_acceptance.py` 现在默认下发 `LABWEAVER_E2E_LLM_TIMEOUT_MS=900000` 与
+  `LABWEAVER_E2E_LLM_MAX_COST_MICROUSD=50000000`，两者都可用环境变量覆盖。
 
 ### 11.8 已知阻塞
 - **服务身份缺 scope-mapping（已定位并临时修复，角色本身有缺陷）**：authoring 的失败链最终落到
