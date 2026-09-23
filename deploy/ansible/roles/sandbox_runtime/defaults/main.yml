@@ -1,0 +1,44 @@
+---
+# Install the gVisor sandbox runtime that every platform one-shot workload uses.
+#
+# `crates/task-execution` pins the shared `RuntimeClass` name for Agent authoring
+# attempts, OJ runs and Ansible probes; the node has to expose a CRI-O runtime
+# handler of the same name or those Jobs stay unschedulable (fail-closed).
+sandbox_runtime_enabled: true
+
+# Handler name == `RuntimeClass` name == the `runtimeClassName` every sandbox
+# Job carries. It must match `SANDBOX_RUNTIME_CLASS` in
+# `crates/task-execution/src/kubernetes.rs`.
+sandbox_runtime_name: labweaver-sandbox
+sandbox_runtime_runtime_type: oci
+
+# Reviewed gVisor release: version, archive URL and archive digest all come from
+# `deploy/versions.lock.yml`; nothing is duplicated here.
+sandbox_runtime_install_dir: /usr/local/libexec/labweaver-sandbox
+sandbox_runtime_archive_dir: /var/lib/labweaver/sandbox-runtime
+sandbox_runtime_crio_dropin: /etc/crio/crio.conf.d/99-labweaver-sandbox.conf
+# This CRI-O release refuses to start a runtime handler without a monitor path.
+sandbox_runtime_conmon_path: /usr/libexec/crio/conmon
+
+# Node-wide kubelet process bound for one sandbox Pod. gVisor ignores the OCI
+# `linux.resources.pids` cap and rejects a base runtime spec without a mounts
+# array, so the reviewed bound is applied to the pod cgroup by the kubelet.
+# These nodes also run Keycloak, PostgreSQL, NATS, MinIO and Harbor, and every
+# guest process of a sandbox is a host thread, so the value leaves room for the
+# co-located workloads; a dedicated one-shot node pool can review a smaller one.
+sandbox_runtime_pod_pids_limit: 16384
+sandbox_runtime_kubelet_config: /var/lib/kubelet/config.yaml
+
+# The superseded per-container wrapper runtime installed by the earlier OJ
+# design. The sandbox `RuntimeClass` replaces it: leaving both would keep a
+# second, weaker runtime authoritative for evaluation Jobs.
+sandbox_runtime_superseded_handler: labweaver-oj
+sandbox_runtime_superseded_runtime_path: /usr/local/libexec/labweaver-oj-runtime
+sandbox_runtime_superseded_dropin: /etc/crio/crio.conf.d/99-labweaver-oj.conf
+
+sandbox_runtime_kubeconfig: /etc/kubernetes/admin.conf
+
+# Campus-network egress: the nodes cannot reach public download hosts directly.
+# The archive is fetched on the node through the same reviewed proxy CRI-O uses.
+sandbox_runtime_download_proxy: "{{ crio_https_proxy | default('') }}"
+sandbox_runtime_download_no_proxy: "{{ crio_no_proxy | default('') }}"

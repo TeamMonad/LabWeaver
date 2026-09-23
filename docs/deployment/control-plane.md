@@ -65,10 +65,23 @@ probe scripts and model-generated code all execute inside that runtime, so the i
 identical for all three roles and is not chosen per service.
 
 Before any of these services dispatches work, every node eligible for those workloads must expose a
-`RuntimeClass` with handler `labweaver-sandbox` mapped to gVisor (`io.containerd.runsc.v1`) with the
-`runsc` sentry sidecar tree installed next to the runtime binary. The handler must not set a
-`base_runtime_spec`: `runsc` refuses to start a container from a base spec that carries no `mounts`
-array, so the process bound is not expressed in the OCI spec.
+`RuntimeClass` with handler `labweaver-sandbox` mapped to gVisor, with the `runsc` sentry sidecar
+tree installed next to the runtime binary. The handler is a container-runtime handler, so its
+spelling depends on the node's CRI: a containerd node registers
+`runtime_type = "io.containerd.runsc.v1"` in the `io.containerd.grpc.v1.cri` runtime table, while a
+CRI-O node registers a CRI-O runtime table named exactly like the handler:
+
+```toml
+[crio.runtime.runtimes.labweaver-sandbox]
+runtime_path = "/usr/local/libexec/labweaver-sandbox/runsc"
+runtime_type = "oci"
+monitor_path = "/usr/libexec/crio/conmon"
+```
+
+`deploy/ansible/roles/sandbox_runtime` installs that table (and the reviewed gVisor release from
+`deploy/versions.lock.yml`) on the CRI-O worker nodes and publishes the `RuntimeClass`. The handler
+must not set a `base_runtime_spec`: `runsc` refuses to start a container from a base spec that
+carries no `mounts` array, so the process bound is not expressed in the OCI spec.
 
 The process bound is enforced on the pod cgroup instead. Eligible nodes set the kubelet
 `podPidsLimit` to a reviewed finite value, so a fork bomb inside a sandbox is terminated instead of
@@ -77,9 +90,12 @@ node-level bound covers the whole one-shot Pod â€” every container of the Job â€
 container, and a gVisor release that ignores `linux.resources.pids` leaves a per-container OCI cap
 unenforceable. The bound therefore has to leave room for every co-located workload on that node: a
 deployment that shares nodes with JVM services must review a larger value, while a dedicated
-one-shot node pool can review a small one. Recording which value the node class carries is a
-deployment prerequisite, not a reason to drop the sandbox. If the handler is unavailable,
-scheduling must fail closed instead of falling back to the node default runtime.
+one-shot node pool can review a small one. The v1 deployment shares both workers with Keycloak,
+PostgreSQL, NATS, MinIO, Harbor and user environments, and carries `podPidsLimit: 16384`
+(`deploy/ansible/roles/sandbox_runtime/defaults/main.yml`); the single-node local stack carries
+4096 (`tools/local_dev.py`). Recording which value the node class carries is a deployment
+prerequisite, not a reason to drop the sandbox. If the handler is unavailable, scheduling must fail
+closed instead of falling back to the node default runtime.
 
 Keep the existing seccomp, no-new-privileges, dropped-capability, read-only-root-filesystem and
 non-root controls unchanged; do not weaken them to make the runtime available. When the authoring
