@@ -717,6 +717,14 @@ helm -n labweaver-system history labweaver
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
+- **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
+  （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
+  run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
+  （实测：三条陈旧 dispatch 各等待其沙箱审批，新 run 排队 20+ 分钟）。验收前应确认队列为空，
+  或先把陈旧 run 取消；不要靠改数据库绕过。
+- **CLI 的预算来自 run 的 policy 快照**：`--max-budget-usd` 取自 dispatch 里的 policy，而不是当前
+  项目策略，所以调大 `LABWEAVER_E2E_LLM_MAX_COST_MICROUSD` 后**旧的 pending dispatch 仍是旧预算**
+  （实测仍以 `error_max_budget_usd`、约 1.09 USD 结束）。新 run 才会带上新预算。
 - **authoring AgentRun 失败且无 sandbox Job（未解决，需 owner 判断）**：三条旅程都在“发布包”这一步以
   `LW_PROVIDER_UNAVAILABLE` 失败，且每条 run 的两个 track 各报一次。已实测的边界：
   - `agent.agent_run_dispatches` 有本次记录且状态为 `prepared`（`bind_prepared_dispatch` 由
