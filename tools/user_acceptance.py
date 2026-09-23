@@ -430,9 +430,15 @@ def check_portal_health(
 def check_portal_csrf(
     base_url: str, http: Callable[[str], tuple[int | None, str | None]]
 ) -> Check:
+    """Prove the public API route reaches access-service.
+
+    An anonymous request has no session cookie, so access-service answers the
+    CSRF bootstrap with 401; that is the reachable, authenticated-required
+    contract. Only a missing answer or a server error means the route is down.
+    """
     url = _join(base_url, "/api/v1/auth/csrf")
     status, _ = http(url)
-    ok = status == 200
+    ok = status in {200, 401}
     return Check("portal-csrf", ok, None if ok else PORTAL_UNREACHABLE, f"GET {url} -> {status}")
 
 
