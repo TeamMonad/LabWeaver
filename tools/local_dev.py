@@ -330,6 +330,88 @@ def local_kind_network_cidr() -> str:
     fail("Kind network has no IPv4 subnet")
 
 
+def local_kubernetes_api_endpoint(kubeconfig: Path) -> str:
+    """Return the adopted API endpoint the reviewed egress rules have to name.
+
+    Workloads that read Kubernetes state themselves (the sandbox executors and
+    Resource's GPU observers) are admitted to the API endpoint alone, so the
+    run's real Service address is read back instead of trusting the checked-in
+    placeholder.
+    """
+
+    address = kubectl(
+        kubeconfig,
+        ["get", "service", "kubernetes", "-o", "jsonpath={.spec.clusterIP}"],
+        capture=True,
+    ).stdout
+    if not isinstance(address, str) or not address.strip():
+        fail("the owned cluster did not report the API Service address")
+    address = address.strip()
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        fail(f"the owned cluster reported an invalid API Service address: {address}")
+    return f"{parsed}/{parsed.max_prefixlen}"
+
+
+def local_gpu_capacity_configuration(example: str) -> str:
+    """Render the run's GPU capacity configuration from the reviewed example.
+
+    Two things are local to this run. First, the example ships `gpuObservers: []`
+    because an observer binds deployment-specific credentials; the owned cluster
+    hands Resource its own projected service account token and CA through the
+    in-cluster API endpoint, so the reviewed provider binding of the lock becomes
+    observable instead of failing closed forever. Second, the local device plugin
+    advertises the stock `nvidia.com/gpu` extended resource, so a local class
+    named for that binding is seeded next to the lock's reviewed class: a class
+    whose binding no node advertises stays observed at zero units and refuses
+    every request, which is the correct production behaviour and useless for a
+    local acceptance. Neither addition rewrites the lock's entry.
+    """
+
+    configuration = json.loads(example)
+    if not isinstance(configuration, dict):
+        fail("reviewed GPU capacity configuration must be a JSON object")
+    observers = configuration.get("gpuObservers")
+    if observers != []:
+        fail("reviewed GPU capacity configuration must ship no observer")
+    seeds = configuration.get("gpuCatalogSeed")
+    if not isinstance(seeds, list) or not seeds:
+        fail("reviewed GPU capacity configuration must seed at least one GPU class")
+    provider_bindings = {
+        seed.get("providerBinding") for seed in seeds if isinstance(seed, dict)
+    }
+    if len(provider_bindings) != 1 or None in provider_bindings:
+        fail("reviewed GPU capacity configuration must seed one provider binding")
+    provider_binding = provider_bindings.pop()
+    configuration["gpuObservers"] = [
+        {
+            "providerBinding": provider_binding,
+            "apiServer": "https://kubernetes.default.svc:443",
+            "bearerTokenFile": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            "clusterCaFile": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+            "requestTimeoutMilliseconds": 5000,
+            "observationTtlSeconds": 60,
+            "maxNodes": 100,
+            "maxPods": 1000,
+        }
+    ]
+    classes = {seed.get("class") for seed in seeds if isinstance(seed, dict)}
+    local_class = "nvidia-cuda-local"
+    if local_class in classes:
+        fail("reviewed GPU capacity configuration already seeds the local class")
+    seeds.append(
+        {
+            "class": local_class,
+            "mode": "exclusive",
+            "providerBinding": provider_binding,
+            "capacityUnits": 1,
+            "allocationBinding": "nvidia.com/gpu",
+        }
+    )
+    return json.dumps(configuration, indent=2) + "\n"
+
+
 def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:
     """Validate and copy the exact provider environment passed to the worker."""
 
@@ -3224,7 +3306,9 @@ def make_app_input(
     (resource_root / "configmaps" / "resource-service-config").mkdir(parents=True, exist_ok=True)
     (resource_root / "secrets" / "resource-service-secrets").mkdir(parents=True, exist_ok=True)
     http_config = (ROOT / "deploy/config/resource-service.yaml.example").read_text()
-    capacity_config = (ROOT / "deploy/config/resource-capacity.json.example").read_text()
+    capacity_config = local_gpu_capacity_configuration(
+        (ROOT / "deploy/config/resource-capacity.json.example").read_text()
+    )
     write(resource_root / "configmaps/resource-service-config/http.yaml", http_config)
     write(resource_root / "configmaps/resource-service-config/capacity.json", capacity_config)
     resource_keys = json.loads((ROOT / "deploy/config/resource-bundle-manifest.json").read_text())["secrets"]["resource-service-secrets"]
@@ -3267,7 +3351,8 @@ def deploy(kubeconfig: Path, images: dict[str,str], bundle: Path, resource_bundl
     args=["helm","upgrade","--install","labweaver-local","deploy/helm/labweaver",
           "--namespace",NAMESPACE,"--create-namespace","--kubeconfig",str(kubeconfig),
           "--values","deploy/helm/labweaver/values.local-kind.yaml",
-          "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}"]
+          "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}",
+          "--set-string",f"network.kubernetesApiCidrs[0]={local_kubernetes_api_endpoint(kubeconfig)}"]
     if real_build_provider is not None:
         if real_build_values is None:
             fail("real build Helm values were not prepared")

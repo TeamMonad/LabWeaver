@@ -31,6 +31,32 @@
 //!   --role=cdi-live-verifier --serviceaccount=<namespace>:cdi-live-verifier
 //! kubectl -n <namespace> create token cdi-live-verifier --duration=4h > token
 //! ```
+//!
+//! The source has to be a containerdisk the cluster can actually pull. Three properties decide the
+//! outcome, and all three were measured against a live Kind cluster:
+//!
+//! * The cluster must use subnets that do not collide with the local network, otherwise the CDI
+//!   operator itself cannot reach its own API server (`unable to retrieve the complete list of
+//!   server APIs`).
+//! * The image holds exactly one regular file, `disk/<name>`, and that entry has to be readable by
+//!   the container CDI runs it in. CDI's `cdi-containerimage-server` answers `403` for a file it
+//!   cannot open, which surfaces as `Unable to connect to http data source: expected status code
+//!   200, got 403`; the platform's own `wrap_containerdisk` writes mode `0444` for that reason.
+//! * The node has to trust the registry that serves it. A plain HTTP registry works with a
+//!   containerd `hosts.toml` endpoint, and an HTTPS registry works with a `ca` entry in
+//!   `/etc/containerd/certs.d/<host>/hosts.toml`; without either, the pull fails with `x509:
+//!   certificate signed by unknown authority` and the `DataVolume` stays in `ImportInProgress`.
+//!
+//! A containerdisk built here from an upstream disk image is enough to exercise this path, so the
+//! acceptance never depends on a public containerdisk repository:
+//!
+//! ```text
+//! curl -L -o disk.img https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img
+//! chmod 0444 disk.img
+//! printf 'FROM scratch\nCOPY disk.img /disk/disk.img\n' > Dockerfile.containerdisk
+//! docker build -f Dockerfile.containerdisk -t <registry>/<repository>:<tag> .
+//! docker push <registry>/<repository>:<tag>   # then pass the pushed digest as the registry URL
+//! ```
 
 #![allow(
     clippy::too_many_lines,

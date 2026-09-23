@@ -205,12 +205,106 @@ class LocalDevBundleTests(unittest.TestCase):
             patch.object(
                 local_dev,
                 "run",
-                side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout=""),
+                side_effect=lambda *args, **kwargs: subprocess.CompletedProcess(list(args), 0, stdout=""),
             ),
         ):
             with self.assertRaises(local_dev.LocalDevError) as context:
                 local_dev.local_service_cidr()
             self.assertIn("service-cluster-ip-range", str(context.exception))
+
+    def test_local_kubernetes_api_endpoint_names_the_adopted_service_address(self) -> None:
+        def capture_kubectl(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(list(args), 0, stdout="10.201.0.1")
+
+        with patch.object(local_dev, "kubectl", side_effect=capture_kubectl):
+            self.assertEqual(
+                local_dev.local_kubernetes_api_endpoint(Path("kubeconfig")),
+                "10.201.0.1/32",
+            )
+
+        with patch.object(
+            local_dev,
+            "kubectl",
+            side_effect=lambda *args, **kwargs: subprocess.CompletedProcess(list(args), 0, stdout=""),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_kubernetes_api_endpoint(Path("kubeconfig"))
+            self.assertIn("API Service address", str(context.exception))
+
+        with patch.object(
+            local_dev,
+            "kubectl",
+            side_effect=lambda *args, **kwargs: subprocess.CompletedProcess(
+                list(args), 0, stdout="not-an-address"
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_kubernetes_api_endpoint(Path("kubeconfig"))
+            self.assertIn("invalid API Service address", str(context.exception))
+
+    def test_local_gpu_capacity_configuration_observes_the_reviewed_binding(self) -> None:
+        rendered = json.loads(
+            local_dev.local_gpu_capacity_configuration(
+                (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8")
+            )
+        )
+        observer, = rendered["gpuObservers"]
+        self.assertEqual(observer["providerBinding"], "gpu-primary-v1")
+        self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
+        self.assertEqual(
+            observer["bearerTokenFile"],
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        )
+        self.assertEqual(
+            observer["clusterCaFile"],
+            "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+        )
+        classes = {seed["class"]: seed for seed in rendered["gpuCatalogSeed"]}
+        self.assertEqual(
+            classes["nvidia-cuda"]["allocationBinding"], "nvidia-cuda-primary-v1"
+        )
+        self.assertEqual(classes["nvidia-cuda-local"]["allocationBinding"], "nvidia.com/gpu")
+        self.assertEqual(classes["nvidia-cuda-local"]["providerBinding"], "gpu-primary-v1")
+        self.assertEqual(classes["nvidia-cuda-local"]["mode"], "exclusive")
+        self.assertEqual(classes["nvidia-cuda-local"]["capacityUnits"], 1)
+
+    def test_local_gpu_capacity_configuration_rejects_reviewed_configuration_drift(self) -> None:
+        example = json.loads(
+            (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8")
+        )
+        cases = {
+            "observer": {**example, "gpuObservers": [{"providerBinding": "gpu-primary-v1"}]},
+            "seed": {**example, "gpuCatalogSeed": []},
+            "binding": {
+                **example,
+                "gpuCatalogSeed": [
+                    *example["gpuCatalogSeed"],
+                    {
+                        "class": "nvidia-cuda-second",
+                        "mode": "exclusive",
+                        "providerBinding": "gpu-secondary-v1",
+                        "capacityUnits": 1,
+                        "allocationBinding": "nvidia-cuda-secondary-v1",
+                    },
+                ],
+            },
+            "local": {
+                **example,
+                "gpuCatalogSeed": [
+                    {
+                        "class": "nvidia-cuda-local",
+                        "mode": "exclusive",
+                        "providerBinding": "gpu-primary-v1",
+                        "capacityUnits": 1,
+                        "allocationBinding": "nvidia.com/gpu",
+                    }
+                ],
+            },
+        }
+        for label, configuration in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(local_dev.LocalDevError):
+                    local_dev.local_gpu_capacity_configuration(json.dumps(configuration))
 
     def test_provider_environment_rejects_extra_fields_and_path_is_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

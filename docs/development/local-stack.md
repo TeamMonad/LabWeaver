@@ -71,6 +71,16 @@ python tools/local_dev_e2e.py run --project teacher
 
 以上仅在本机验证过；生产节点由集群运维按同一职责边界（设备、驱动库、容器运行时、device plugin）提供。
 
+### 本地 GPU 容量观察
+
+`up` 渲染的 `resource-service-config/capacity.json` 与检查入的示例不同：它给 reviewed provider binding（`gpu-primary-v1`）配一个只读观察者，使用 Resource 自己 ServiceAccount 的投影 token 与 CA、集群内 API 端点（`https://kubernetes.default.svc:443`）与 60 秒 TTL；同时追加一条本地 class `nvidia-cuda-local`（`exclusive`，`allocationBinding` 为节点实际广播的 `nvidia.com/gpu`，1 unit）。生产档不追加这条 class——它的 `allocationBinding` 必须由真实设备插件广播。
+
+可观察的行为：
+
+- 观察值 = `min(节点 allocatable, catalog capacity_units) - 已占用`，因此本地 class 报 1 unit（策略上限），reviewed class（`nvidia-cuda-primary-v1`）报 0，因为本机没有节点广播该名字。
+- 无观察者或观察过期时，GPU 申请以 `GpuObservationStale` 失败关闭；节点广播名与 catalog binding 不一致时以 `GpuCapacityExhausted` 失败关闭，不会被静默授予。
+- 查询真实记录：`kubectl -n labweaver-data exec postgres-0 -- psql -U postgres -d labweaver -tAc "SELECT e.class,e.allocation_binding,o.available_units FROM resource.gpu_catalog_entries e LEFT JOIN LATERAL (SELECT * FROM resource.gpu_capacity_observations WHERE entry_id=e.entry_id ORDER BY observed_at DESC LIMIT 1) o ON true"`。
+
 Kind 环境不提供真实 KubeVirt、vGPU 或生产网络隔离验收。对应功能需在具备相应设备、插件和网络策略实现的环境中另行验证。费用页面的核算结果也不表示已经执行支付。
 
 本地构建另外提供通用评测运行镜像，包含现有 C++17 和 Ansible Probe 执行工具，并把构建得到的 digest 写入 Control 的评测运行配置。Evaluation 协调器使用业务服务镜像执行冻结任务，两者分别配置。

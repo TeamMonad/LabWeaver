@@ -17,6 +17,11 @@ object_store:
   # Startup rejects a deployment whose sandbox bounds exceed it.
   maxObjectBytes: 2147483648
   forcePathStyle: true
+  # The platform object store serves the deployment's own CA. Pin exactly that
+  # anchor: the Agent uploads attempt material and reads results with its own S3
+  # client, and a minimal runtime image has no reason to carry the private CA in
+  # its platform trust store.
+  caBundleFile: "/etc/labweaver/secrets/minio-ca.pem"
 object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
 object_store_secret_key_file: "/etc/labweaver/secrets/minio-secret-key"
 object_store_session_token_file: null
