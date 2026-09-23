@@ -649,7 +649,20 @@ helm -n labweaver-system history labweaver
   `hostAliases` 指向公网入口 Gateway VIP（`10.99.0.140`）、`portal-ca.pem` 换成 LE 根
   （公网入口用 `labweaver-public-wildcard` 证书）。
 
-### 11.7 已知阻塞
+### 11.7 模型服务可达性（authoring 与 Work 模板生成的前提）
+
+- v1 的模型服务是宿主机上的 ollama（`labweaver-llm` 命名空间的 `ollama` Service 用手工 Endpoints
+  指向 `49.52.27.63:11434`）。**Pod 直连节点 IP 会被 Cilium 归类为 `host` entity**：即使
+  NetworkPolicy 的 `ipBlock` 写了 `49.52.27.63/32:11434`，策略也不会命中，authoring 的 AgentRun 会以
+  `LW_PROVIDER_UNAVAILABLE` 失败（`sandbox` 里的 Claude Code 既取不到模型也取不到包对象）。
+- 可用的形态是 **Cilium LB VIP**：给 ollama 建一个带手工 Endpoints 的 `type: LoadBalancer` Service
+  （本环境用 `10.99.0.150`），pod→VIP 在策略评估阶段仍是普通 ipBlock，DNAT 之后才落到宿主。
+  因此需要同时改三处：`agent-service-config/anthropic-base-url` = `http://10.99.0.150:11434`、
+  values 的 `network.externalServiceEndpoints` 加 `10.99.0.150/32:11434`、
+  `agent-service-config` 的 `sandbox.allowed_egress` 加 `10.99.0.150/32:11434`。
+- 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
+
+### 11.8 已知阻塞
 
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
