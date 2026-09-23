@@ -616,6 +616,14 @@ helm -n labweaver-system history labweaver
   否则 Pod 侧 TLS 校验会失败。
 - 改 issuer 后必须用 `tools/prepare_platform_access_seed.py --issuer <公网 issuer>` 重新生成 access
   seed（`access.actors` 以 issuer 为键），否则所有 actor 都无法解析。
+- 控制器的 Keycloak 管理面走**公网入口**：`identity-gateway` 的 listener 仍只声明
+  `keycloak.labweaver.internal`，其 `labweaver-keycloak-tls` 证书的 SAN 只有公网名，因此经内部 VIP
+  校验必然失败；公网入口（`--resolve <公网名>:443:<公网 IP>`）由 public Gateway 提供 Let's Encrypt
+  证书。`platform_application` 只导入**单张**证书到 kcadm 的隔离 truststore（`keytool -importcert`），
+  所以 `platform_application_keycloak_ca_file` 必须指向 LE 根（`ISRG Root X1`，控制器上为
+  `/etc/ssl/certs/ISRG_Root_X1.pem`），`platform_application_keycloak_server`/`keycloak_hostname`
+  用公网名、`keycloak_endpoint_address` 用公网 IP；否则在
+  `Authenticate retained Keycloak administration` 处失败。
 
 ### 11.7 已知阻塞
 
