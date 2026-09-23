@@ -3123,6 +3123,16 @@
               - ports:
                   - port: "9000"
                     protocol: TCP
+          # The authoring sandbox fetches its reviewed material and uploads its
+          # result through the same object store, so the attempt namespace needs
+          # the object-store port only.
+          - fromEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_authoring_namespace }}"
+            toPorts:
+              - ports:
+                  - port: "9000"
+                    protocol: TCP
 
 - name: Inspect the retained CDI clone source network policy
   kubernetes.core.k8s_info:
