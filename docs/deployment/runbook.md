@@ -319,69 +319,95 @@ Resource 管理接口 `POST /api/v1/resource/gpu-catalog`（需管理员 princip
 
 设备缺失、观测缺失/过期、数据不完整或释放未确认时，分配必须明确失败并保留原始诊断；不得回退到 Mock、普通容器或其他 GPU 模式，也不得把未知容量当作零继续准入。
 
-## 6. OJ 评测运行时
+## 6. 沙箱运行时（gVisor on containerd）
 
-OJ Job 使用 `runtimeClassName: labweaver-oj`。该运行时由 `deploy/ansible/roles/oj_runtime` 安装，在 `site.yml` 中于 KubeVirt 之后、addons 之前对 `k8s_cluster` 执行。
+平台的一次性负载（Agent authoring attempt、OJ run、Ansible probe）都以
+`runtimeClassName: labweaver-sandbox` 运行，隔离边界是 gVisor。`#127` 在 v1 集群上实测得到两条
+结论，二者都决定了本节的部署形态：
 
-当前树**没有**单独运行该角色的 playbook 或 xtask 入口；支持的入口是完整 `site.yml`。在既有集群上补装时需重跑 `site.yml`，或由运维以临时 play 调用该角色。
+- **CRI-O 不能提供按 Pod 的沙箱运行时**：CRI-O 1.35 会用节点默认运行时创建 Pod 的 sandbox
+  （pause）容器，并在日志里记为 `Ran pod sandbox … with infra container`，但该容器没有任何
+  runtime 进程、conmon 或 state 文件；于是 gVisor 的应用容器全部以
+  `cannot load sandbox: open /run/…/<id>_sandbox:<id>.state: no such file or directory` 失败。
+  （复核方式：把默认运行时换成"拒绝 create"的包装脚本，sandbox 仍然"成功"。）
+- **gVisor 读取 CRI 标准注解**：`runsc` 依据 `io.kubernetes.cri.container-type`、
+  `io.kubernetes.cri.sandbox-id` 等注解区分 sandbox 容器与普通容器，而 CRI-O 只写
+  `io.kubernetes.cri-o.*`；containerd 写标准名，所以换到 containerd 后无需任何注解翻译层。
 
-角色完成并回读：
+因此 sandbox 能力的节点运行 **containerd**（控制平面节点保留原 CRI）。`deploy/ansible/roles/sandbox_runtime`
+是唯一入口，playbook `75-sandbox-runtime.yml` 在 `site.yml` 中于 KubeVirt 之后、addons 之前对
+`workers` 执行，并从控制平面发布 `RuntimeClass`。角色做四件事：
 
-- 每台 worker 安装 CRI-O drop-in `/etc/crio/crio.conf.d/99-labweaver-oj.conf`：
-  ```ini
-  [crio.runtime.runtimes.labweaver-oj]
-  runtime_path = "/usr/local/libexec/labweaver-oj-runtime"
-  runtime_type = "oci"
-  ```
-- wrapper `/usr/local/libexec/labweaver-oj-runtime` 只对 `create`/`run` 改写 OCI `config.json` 的 `linux.resources.pids.limit`（默认 128），随后 `execv /usr/bin/runc`；其他命令原样透传。
-- 要求 CRI-O `cgroup_manager = "systemd"` 且 `crio` active。
-- 控制平面创建 `node.k8s.io/v1` `RuntimeClass/labweaver-oj`，handler 为 `labweaver-oj`。
+1. 安装锁定版 containerd 与 runc（`deploy/versions.lock.yml` 的 `containerd.*`）到 `/usr/local/bin`，
+   以及 `containerd.service` 与 `/etc/systemd/system/containerd.service.d/99-proxy.conf`（校园网代理）。
+2. 安装锁定版 gVisor 整树到 `/usr/local/bin`（`runsc`、`containerd-shim-runsc-v1` 与同级
+   `gvisor-bin/` sentry；`runsc` 依赖同级 sentry 树，containerd 按名字在 `PATH` 上找 shim）。
+3. 写 `/etc/containerd/config.toml`：默认运行时 `runc`（`SystemdCgroup = true`）、
+   `labweaver-sandbox` → `io.containerd.runsc.v1`、每个运行时 `sandboxer = podsandbox`、
+   pin 的 Pod sandbox 镜像、GPU 节点保留 `nvidia` 设备运行时、CNI 目录
+   `/etc/cni/net.d` + `/opt/cni/bin`，并把 `image_pull_progress_timeout` 提到 30m
+   （校园网代理下默认 5 分钟会中断大镜像）。
+4. 把 kubelet 的 `containerRuntimeEndpoint` 指向 `unix:///run/containerd/containerd.sock`、
+   保留评审过的 `podPidsLimit`、停用并禁用旧 CRI（`crio`）、删除其沙箱 drop-in，然后逐项回读。
 
-逐节点校验：
+施加（需 root，私有 inventory 见 §1.2）：
 
 ```sh
-cat /etc/crio/crio.conf.d/99-labweaver-oj.conf
-crio config | grep -A2 'labweaver-oj'
-systemctl is-active crio
-kubectl get runtimeclass labweaver-oj -o jsonpath='{.handler}'
+cd /home/wzh/LabWeaver/deploy/ansible
+sudo env ANSIBLE_COLLECTIONS_PATH=/home/wzh/LabWeaver/deploy/ansible/collections \
+  ansible-playbook -i /var/lib/labweaver/v1-controller/deploy/ansible/inventories/v1/hosts.yml \
+  playbooks/75-sandbox-runtime.yml
 ```
 
-最小 OJ Job 验证（一次运行、用完即删；显式设置非 root 安全上下文以匹配运行时约束）：
+切换运行时会让节点上所有容器重建，应先 `kubectl drain`，完成后再 `uncordon`。重启节点后
+`containerd`/`kubelet` 必须自动 active、`crio` inactive（v1 两台 worker 已实测）。
+
+逐节点回读：
 
 ```sh
-kubectl create namespace oj-runtime-probe
-kubectl apply -f - <<'YAML'
+containerd --version
+runc --version
+/usr/local/bin/runsc --version
+systemctl is-active containerd kubelet crio
+containerd config dump | grep -A3 "runtimes.labweaver-sandbox"
+grep -n containerRuntimeEndpoint /var/lib/kubelet/config.yaml
+kubectl get runtimeclass labweaver-sandbox -o jsonpath='{.handler}'
+```
+
+最小沙箱探针（一次运行、用完即删；安全上下文必须满足命名空间的 restricted 策略）：
+
+```sh
+kubectl -n labweaver-evaluation apply -f - <<'YAML'
 apiVersion: batch/v1
 kind: Job
-metadata:
-  name: oj-runtime-probe
-  namespace: oj-runtime-probe
+metadata: {name: sandbox-probe, namespace: labweaver-evaluation}
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 300
   template:
     spec:
-      runtimeClassName: labweaver-oj
-      automountServiceAccountToken: false
+      runtimeClassName: labweaver-sandbox
       restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: probe
           image: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
-          command: ["sh", "-c", "cat /sys/fs/cgroup/pids.max; cat /sys/fs/cgroup/pids.current"]
+          command: ["sh", "-c", "cat /proc/version; uname -r"]
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 65532
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            seccompProfile: { type: RuntimeDefault }
-            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities: {drop: ["ALL"]}
+          resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {cpu: 500m, memory: 128Mi}}
 YAML
-kubectl -n oj-runtime-probe wait --for=condition=Complete job/oj-runtime-probe --timeout=120s
-kubectl -n oj-runtime-probe logs job/oj-runtime-probe   # pids.max 必须为有限值且 <= 128
-kubectl delete namespace oj-runtime-probe --wait=true
+kubectl -n labweaver-evaluation wait --for=condition=complete job/sandbox-probe --timeout=300s
+kubectl -n labweaver-evaluation logs job/sandbox-probe   # 必须包含 4.19.0-gvisor
+kubectl -n labweaver-evaluation delete job sandbox-probe --wait=true
 ```
 
-handler 不可用或 PID 上限不生效时，OJ 调度必须失败关闭；不要为让运行时“可用”而放宽 seccomp、Landlock 或 no-new-privileges。
+handler 不可用或 `runsc` 缺失时必须失败关闭：不要把沙箱降级为节点默认运行时，也不要放宽
+seccomp、no-new-privileges、drop caps 或只读 rootfs。
 
 ## 7. KubeVirt / VM 验证与 linux-nginx 材料链
 
@@ -521,12 +547,21 @@ helm -n labweaver-system history labweaver
   `labweaver-build` 命名空间内的 `NetworkPolicy/buildkit` 与 `CiliumNetworkPolicy/buildkit-dependency-egress`
   的 egress 收敛为开放形态（DNS + 全部出网），与 `open` 模板一致。
 
-### 11.4 OJ 运行时与 GPU
+### 11.4 沙箱运行时与 GPU
 
-- `oj_runtime` role 定义 CRI-O runtime handler 时必须同时设置 `monitor_path`（v1 为
-  `/usr/libexec/crio/conmon`），否则 CRI-O 启动失败。role 默认 `oj_runtime_runc_path=/usr/libexec/crio/runc`。
-- NVIDIA device plugin 需要通过 `runtimeClassName: nvidia` 运行才能看到设备，且集群需要
-  `RuntimeClass/nvidia`（handler `nvidia`）。仅重启 device plugin 不够。
+- sandbox 能力的节点必须运行 containerd（见 §6）；CRI-O 上 `RuntimeClass` 只会让应用容器进入
+  gVisor，Pod sandbox 仍留在节点默认运行时，因此一次性负载必然以 `cannot load sandbox` 失败。
+- 切换运行时后节点上会残留旧 CRI 的容器进程（systemd `crio-*.scope`）。它们会占住 hostPath 上的
+  socket/端口（例如 `cilium-envoy` 的 `/var/run/cilium/envoy/sockets/*.sock` 导致新 Pod
+  `unable to bind domain socket … errno=98`）。清理方式：`systemctl list-units --type=scope --all |
+  grep -o 'crio-[a-f0-9]*\.scope' | xargs -r systemctl stop`，随后重启对应 DaemonSet 的 Pod。
+- 切换运行时后若出现跨节点 Pod 流量中断（同节点与节点间 ICMP 正常、`cilium-dbg status` 报
+  `Cluster health: … reachable` 下降），按顺序处理：`kubectl -n kube-system rollout restart ds/cilium`、
+  重新施加 `playbooks/50-install-network.yml`、必要时先 `drain` 再重启该节点；恢复后
+  `cilium-dbg bpf ipcache list` 中远端 Pod IP 必须带 `tunnelendpoint=<节点 IP>`。
+- NVIDIA device plugin 需要通过 `runtimeClassName: nvidia` 运行才能看到设备，集群需要
+  `RuntimeClass/nvidia`（handler `nvidia`）；containerd 侧由 `sandbox_runtime` 在存在
+  `/usr/bin/nvidia-container-runtime` 的节点上生成同名 runtime 表。
 - 仅 worker-97 的 V100 会以独占 `nvidia.com/gpu` 上报；time-slice 本轮不验证；worker-158 的 P40
   驱动/库版本不匹配，修复需要重载模块或重启节点，且会中断其 NFS 服务，因此必须排在镜像推送之后。
 
@@ -537,7 +572,22 @@ helm -n labweaver-system history labweaver
   由打包产物 digest 填充。实验 `evaluation/Dockerfile` 使用
   `FROM ${LABWEAVER_SERVICE_IMAGE} AS labweaver-service` 再 `COPY --from=labweaver-service`。
 
-### 11.6 已知阻塞
+### 11.6 公网域名（唯一用户入口）
 
-- KubeVirt 控制面（virt-api/virt-controller/virt-operator）已连续 40 天 CrashLoop，报
-  `dial tcp 10.96.0.1:443: i/o timeout`，因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
+- 公网入口是 `https://portal.labweaver.2018wzh.top`（`public_ingress` role，`portal-public` 路由
+  `/api`、`/auth`、`/connect` → access-service，`/` → web；apex 由 `portal-apex-redirect` 301 到 portal）。
+- 身份栈使用公网名 `keycloak.labweaver.2018wzh.top`：`identity_hostname` 是单一真源，证书 SAN、
+  内部 Gateway、dnsmasq 记录都由它派生；`identity_public_address` 打开后 role 会额外经公网入口校验
+  issuer。access-service 的 `oidc.issuer`/`redirect_uri`/`allowed_origins` 与 realm client 的
+  `redirectUris`/`webOrigins` 必须同步为公网 origin，否则登录会在回调处失败。
+- 集群内 Pod 通过 values 的 `hostAliases`（公网 Keycloak 名 → `keycloak-internal` Service ClusterIP，
+  即 `internalIdentityProxy`）访问公网 issuer；`internalIdentityProxy.hostname` 也必须改为公网名，
+  否则 Pod 侧 TLS 校验会失败。
+- 改 issuer 后必须用 `tools/prepare_platform_access_seed.py --issuer <公网 issuer>` 重新生成 access
+  seed（`access.actors` 以 issuer 为键），否则所有 actor 都无法解析。
+
+### 11.7 已知阻塞
+
+- KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
+  `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
+- worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
