@@ -761,8 +761,12 @@ fn job_document(
     script.push_str(
         "if [ \"$stderr_size\" -gt 0 ]; then stderr_sum=$(sha256sum {ATTEMPT_DIR}/stderr.upload | cut -d' ' -f1); fi\n",
     );
+    // The receipt always reports the export, so both names have to exist for every bundle. An
+    // attempt without the image-build capability has no export upload at all, and the script runs
+    // under `set -u`: an unset name there would fail the whole attempt after it already produced
+    // its result.
+    script.push_str("export_size=0\nexport_sum=$(sha256sum /dev/null | cut -d' ' -f1)\n");
     if spec.export_upload_url.is_some() {
-        script.push_str("export_size=0\nexport_sum=$(sha256sum /dev/null | cut -d' ' -f1)\n");
         let _ = writeln!(script, "if [ -f {EXPORT_OUTPUT_PATH} ]; then");
         let _ = writeln!(
             script,
@@ -1430,6 +1434,59 @@ mod tests {
         assert!(script.contains("LW_AGENT_SANDBOX_RESULT_TOO_LARGE"));
         assert!(script.contains("LW_AGENT_SANDBOX_VERSION_MISMATCH"));
         assert!(script.contains("exit 0"));
+        Ok(())
+    }
+
+    /// The attempt script runs under `set -u`, so every name its receipt prints must already be
+    /// assigned. An attempt without the image-build capability has no export upload at all, and
+    /// the receipt still reports one, so both shapes have to define it before the receipt line.
+    #[test]
+    fn receipt_names_are_assigned_for_bundles_with_and_without_an_export()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut exported = spec();
+        exported.export_upload_url = Some("https://objects.example/export?sig=4".to_owned());
+        exported.export_upload_headers =
+            BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]);
+        for (label, configuration, attempt) in [
+            ("without export", configuration(), spec()),
+            ("with export", buildkit_configuration(), exported),
+        ] {
+            let bundle = build_sandbox_bundle(&configuration, &attempt)?;
+            let job = bundle
+                .bundle
+                .objects
+                .iter()
+                .find(|object| object.plural == "jobs")
+                .ok_or(SandboxBundleError::Invalid)?;
+            let script = job.document["spec"]["template"]["spec"]["containers"][0]["command"][2]
+                .as_str()
+                .ok_or(SandboxBundleError::Invalid)?;
+            let receipt = script
+                .lines()
+                .find(|line| line.contains("resultSizeBytes"))
+                .ok_or(SandboxBundleError::Invalid)?;
+            for name in [
+                "size",
+                "sum",
+                "stderr_size",
+                "stderr_sum",
+                "code",
+                "export_size",
+                "export_sum",
+            ] {
+                let assignment = format!("{name}=");
+                assert!(
+                    script
+                        .lines()
+                        .take_while(|line| !std::ptr::eq(*line, receipt))
+                        .any(|line| line.trim_start().starts_with(&assignment)),
+                    "{label}: the receipt prints ${name}, so the script has to assign it"
+                );
+            }
+            // The reviewed CLI version arrives through the pod environment, never through the
+            // script, so it stays the one name the receipt may print without an assignment.
+            assert!(receipt.contains("\"$CLAUDE_CODE_VERSION\""));
+        }
         Ok(())
     }
 
