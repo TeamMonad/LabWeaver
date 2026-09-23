@@ -24,6 +24,7 @@ import {
   readResumablePublishedWork,
   waitForRealWorkCharges,
 } from '../support/real-work.mjs'
+import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 
 const WORK_PROVIDER_BINDING = 'kubernetes-work-local-hostpath'
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
@@ -615,6 +616,7 @@ async function cleanupWorkResources(request, baseURL, projectId, environmentId, 
 test('student provisions a Work environment, configures it, and releases its capacity', async ({ page, browser, baseURL }) => {
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
   if (REAL_WORK_RESUME && REAL_WORK_CONFIG) throw new Error('REAL_WORK_RESUME_AND_FULL_PROVIDER_CONFIG_CONFLICT')
+  const guards = installUsabilityGuards(page)
 
   await expectProblem(
     await page.request.get('/api/v1/resource-requests'),
@@ -779,6 +781,9 @@ test('student provisions a Work environment, configures it, and releases its cap
     } else {
       expect(runtimeBody).toContain('Welcome to nginx')
     }
+    await assertNoStuckProgress(page, 'student-work-environment')
+    await auditAccessibility(page, 'student-work-environment')
+    guards.assertCleanConsole('student-work-environment')
 
     await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
@@ -939,6 +944,8 @@ test('student provisions a Work environment, configures it, and releases its cap
     const renewedLease = await expectJson(await renewResponsePromise, 'RESOURCE_LEASE_RENEW_FAILED')
     expect(renewedLease).toMatchObject({ id: lease.id, state: 'active', revision: expect.any(Number) })
     expect(new Date(renewedLease.expiresAt).getTime()).toBeGreaterThan(new Date(lease.expiresAt).getTime())
+    await assertNoStuckProgress(page, 'researcher-resource-lease')
+    await auditAccessibility(page, 'researcher-resource-lease')
 
     await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}&environmentId=${encodeURIComponent(environmentId)}`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('button', { name: '停止', exact: true })).toBeEnabled({ timeout: 120_000 })
@@ -1024,6 +1031,9 @@ test('student provisions a Work environment, configures it, and releases its cap
     )
     if (finalLease.state !== 'revoked') throw new Error(`RESOURCE_LEASE_NOT_REVOKED:${finalLease.state}`)
     await waitForDeletedEnvironment(page.request, environmentId)
+    await assertNoStuckProgress(page, 'researcher-resource-released')
+    await auditAccessibility(page, 'researcher-resource-released')
+    guards.assertCleanConsole('researcher-resource-released')
     if (REAL_WORK_MODE) {
       const finance = await waitForRealWorkCharges(browser, baseURL, project.id)
       assertRealWorkCharges(finance.charges)

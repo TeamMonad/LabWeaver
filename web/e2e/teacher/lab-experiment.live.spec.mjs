@@ -24,6 +24,7 @@ import { cp, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 
 const LAB_ROOT = fileURLToPath(new URL('../../../examples', import.meta.url))
 
@@ -353,6 +354,7 @@ async function closeExperimentEnvironment(page, environmentId, baseURL) {
 test('student completes a published lab experiment through the browser terminal', async ({ browser, page, baseURL }, testInfo) => {
   test.setTimeout(1_800_000)
   const request = page.context().request
+  const teacherGuards = installUsabilityGuards(page)
   const packageCopy = await mkdtemp(join(tmpdir(), 'labweaver-lab-'))
   let environmentId
   let studentContext
@@ -378,15 +380,21 @@ test('student completes a published lab experiment through the browser terminal'
       built.artifact,
     )
     await page.screenshot({ path: testInfo.outputPath('approval.png'), fullPage: true })
+    await assertNoStuckProgress(page, 'teacher-approval')
+    await auditAccessibility(page, 'teacher-approval', testInfo)
+    teacherGuards.assertCleanConsole('teacher-approval')
 
     studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
     const studentPage = await studentContext.newPage()
+    const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(page, project.id, studentActorId)
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     const adminPage = await adminContext.newPage()
     environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
     await waitForEnvironment(studentContext.request, environmentId)
+    await assertNoStuckProgress(studentPage, 'student-environment')
+    await auditAccessibility(studentPage, 'student-environment', testInfo)
     const beforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
 
     const terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
@@ -444,6 +452,9 @@ test('student completes a published lab experiment through the browser terminal'
       await expect(card.locator('.result-score')).toHaveText(`${firstResult.awardedScore} / ${firstResult.maxScore}`)
       await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
     }
+    await assertNoStuckProgress(studentPage, 'student-results')
+    await auditAccessibility(studentPage, 'student-results', testInfo)
+    studentGuards.assertCleanConsole('student-results')
   } finally {
     try {
       if (environmentId) {

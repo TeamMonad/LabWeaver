@@ -19,15 +19,35 @@ const PASSWORD_FILES = Object.freeze([
   'LABWEAVER_PLATFORM_ADMIN_PASSWORD_FILE',
 ])
 export const RUNTIME_PROJECTS = Object.freeze(['setup', 'teacher', 'student', 'platform-admin'])
+/**
+ * The runner owns the Playwright config and the role project selection, so a
+ * caller may not replace the config. Every other flag (`--grep`, `--project`,
+ * `--reporter`, `--list`, …) is forwarded verbatim.
+ */
+const REJECTED_ARGUMENT_PREFIXES = Object.freeze(['--config'])
 
-export function playwrightArguments() {
+/**
+ * Build the Playwright command line. `extra` carries the caller's arguments
+ * after the fixed role project selection, so a narrower run can select tests
+ * without losing the authenticated role projects.
+ */
+export function playwrightArguments(extra = []) {
   return [
     'node_modules/@playwright/test/cli.js',
     'test',
     '--config=playwright.config.mjs',
     '--workers=1',
     ...RUNTIME_PROJECTS.flatMap((project) => ['--project', project]),
+    ...extra,
   ]
+}
+
+/** Validate forwarded arguments; the runner keeps ownership of the config. */
+function validateArguments(arguments_, diagnostics) {
+  for (const argument of arguments_) {
+    const name = argument.split('=', 1)[0]
+    if (REJECTED_ARGUMENT_PREFIXES.includes(name)) fail(`PW_ARGUMENT_REJECTED:${name}`, diagnostics)
+  }
 }
 
 function fail(code, diagnostics) {
@@ -61,11 +81,11 @@ async function validateRuntimeInputs(environment, diagnostics) {
   }
 }
 
-function executePlaywright(environment) {
+function executePlaywright(environment, extraArguments = []) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      playwrightArguments(),
+      playwrightArguments(extraArguments),
       { cwd: WEB_ROOT, env: environment, stdio: 'inherit' },
     )
     child.once('error', (error) => resolve({ exitCode: 1, error: error.message }))
@@ -76,18 +96,19 @@ function executePlaywright(environment) {
   })
 }
 
-export async function runE2e({ environment = process.env, execute = executePlaywright } = {}) {
+export async function runE2e({ environment = process.env, execute = executePlaywright, extraArguments = [] } = {}) {
   const { diagnostics } = await validateConfiguration()
   const baseUrl = environment.LABWEAVER_BASE_URL
   if (!baseUrl) fail('PW_BASE_URL_REQUIRED', diagnostics)
   else if (!isHttpUrl(baseUrl)) fail('PW_BASE_URL_INVALID', diagnostics)
+  validateArguments(extraArguments, diagnostics)
   if (diagnostics.length === 0) await validateRuntimeInputs(environment, diagnostics)
 
   if (diagnostics.length > 0) {
     return { exitCode: 2, diagnostics }
   }
 
-  const execution = await execute(environment)
+  const execution = await execute(environment, extraArguments)
   const passed = execution.exitCode === 0
   return {
     exitCode: passed ? 0 : 1,
@@ -97,7 +118,7 @@ export async function runE2e({ environment = process.env, execute = executePlayw
 }
 
 async function main() {
-  const result = await runE2e()
+  const result = await runE2e({ extraArguments: process.argv.slice(2) })
   for (const code of result.diagnostics) console.error(code)
   process.exitCode = result.exitCode
 }
