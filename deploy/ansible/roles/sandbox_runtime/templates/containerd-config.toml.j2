@@ -10,6 +10,10 @@ state = '/run/containerd'
   snapshotter = 'overlayfs'
   disable_snapshot_annotations = true
   discard_unpacked_layers = false
+  # Campus-network nodes pull every image through a shared proxy; the default
+  # five-minute progress timeout aborts large images mid-pull and leaves the Pod
+  # in ImagePullBackOff.
+  image_pull_progress_timeout = '30m'
 
   [plugins.'io.containerd.cri.v1.images'.pinned_images]
     sandbox = '{{ sandbox_runtime_lock.containerd.sandbox_image }}'

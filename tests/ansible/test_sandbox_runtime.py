@@ -88,6 +88,10 @@ class SandboxContainerRuntimeConfigTest(unittest.TestCase):
             config["plugins"][CRI_IMAGES]["pinned_images"]["sandbox"], PAUSE_IMAGE
         )
 
+    def test_slow_proxied_pulls_are_not_aborted_early(self) -> None:
+        images = render(nvidia_available=False)["plugins"][CRI_IMAGES]
+        self.assertEqual(images["image_pull_progress_timeout"], "30m")
+
     def test_the_cri_uses_the_platform_cni_configuration(self) -> None:
         cni = render(nvidia_available=False)["plugins"][CRI_RUNTIME]["cni"]
         self.assertEqual(cni["conf_dir"], "/etc/cni/net.d")
