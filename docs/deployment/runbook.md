@@ -695,7 +695,12 @@ helm -n labweaver-system history labweaver
   - agent-service 日志里没有 `agent.dispatch.completed`、也没有 `preparation_failed`，Pod 重启数为 0，
     即失败发生在 `bind_prepared_dispatch` 之后的 `execute_reserved_dispatch` 段，且该段**没有稳定诊断输出**
     （这是需要一并修的可观测性缺口：worker 的 `Err` 直接经 `select!` 冒泡，既不落日志也不落事件）；
-  - 该段所需的 RBAC 已单独验证（补 `list/watch` 后重跑仍失败，随后还原）。
+  - 该段所需的 RBAC 已单独验证（补 `list/watch` 后重跑仍失败，随后还原）；
+  - 已排除的假设（都可复核）：agent-service 的 `minio-ca.pem` 与 MinIO 服务端 `ca.crt` 指纹一致、
+    与 control-service 的 `minio-access-key/secret-key` 指纹一致；`SandboxAuthoringProcess` 的
+    `verifies_identity_in_execution() == true`，所以不会走 `version()` 那条恒返回 `Unavailable` 的分支；
+    track work item 在创建后约 1 秒即 `failed`，`execution_request`/`execution_receipt` 均为空，说明失败在
+    尝试落地之前，且 `agent.agent_run_dispatches` 已是 `prepared`。
   处置：按 §12「产品缺陷」改源码后重新打包部署，并补上该段的失败诊断；不得以 Mock 或降级断言绕过。
 
 ## 12. 用户验收（模拟真实用户操作）
