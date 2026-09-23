@@ -686,6 +686,17 @@ helm -n labweaver-system history labweaver
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
+- **authoring AgentRun 失败且无 sandbox Job（未解决，需 owner 判断）**：三条旅程都在“发布包”这一步以
+  `LW_PROVIDER_UNAVAILABLE` 失败，且每条 run 的两个 track 各报一次。已实测的边界：
+  - `agent.agent_run_dispatches` 有本次记录且状态为 `prepared`（`bind_prepared_dispatch` 由
+    `agent-service` 写入），说明 agent-service 已消费 dispatch、读过全部包对象并生成 egress envelope；
+  - `labweaver-authoring` 内 5 分钟 2 秒粒度 watch 捕获 **0 个 Pod**；全集群 60×2s watch 也没有任何本次
+    run 的 Job/Pod；`agent.authoring_sandbox_attempts` 无行；
+  - agent-service 日志里没有 `agent.dispatch.completed`、也没有 `preparation_failed`，Pod 重启数为 0，
+    即失败发生在 `bind_prepared_dispatch` 之后的 `execute_reserved_dispatch` 段，且该段**没有稳定诊断输出**
+    （这是需要一并修的可观测性缺口：worker 的 `Err` 直接经 `select!` 冒泡，既不落日志也不落事件）；
+  - 该段所需的 RBAC 已单独验证（补 `list/watch` 后重跑仍失败，随后还原）。
+  处置：按 §12「产品缺陷」改源码后重新打包部署，并补上该段的失败诊断；不得以 Mock 或降级断言绕过。
 
 ## 12. 用户验收（模拟真实用户操作）
 
