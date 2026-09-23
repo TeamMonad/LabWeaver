@@ -525,6 +525,51 @@ class PreflightTest(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn(MODULE.EVIDENCE_DIR_UNWRITABLE, result.diagnostics)
 
+    def test_anonymous_csrf_401_counts_as_reachable(self) -> None:
+        """The public API route is up when access-service answers 401."""
+
+        def http(url: str) -> tuple[int, str | None]:
+            if url.endswith("/api/v1/auth/csrf"):
+                return 401, None
+            return ok_http(url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.preflight(Path(tmp), http=http)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.diagnostics, [])
+
+    def test_deployment_identity_reads_only_the_platform_release(self) -> None:
+        """The Resource release's own bundle must not hide the platform identity."""
+        seen: list[list[str]] = []
+        platform = {
+            "metadata": {"name": "access-service"},
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {MODULE.BUNDLE_ANNOTATION: "sha256:platform"}}
+                }
+            },
+        }
+        resource = {
+            "metadata": {"name": "resource-service"},
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {MODULE.BUNDLE_ANNOTATION: "sha256:resource"}}
+                }
+            },
+        }
+
+        def kubectl(argv: list[str]) -> tuple[int, str, str]:
+            seen.append(list(argv))
+            # Emulate the API server applying the requested label selector.
+            selector = argv[argv.index("-l") + 1] if "-l" in argv else ""
+            if selector == f"app.kubernetes.io/instance={MODULE.PLATFORM_RELEASE}":
+                return 0, json.dumps({"items": [platform]}), ""
+            return 0, json.dumps({"items": [platform, resource]}), ""
+
+        identity = MODULE.probe_deployment_identity(kubectl)
+        self.assertEqual(identity, "sha256:platform")
+        self.assertIn(f"app.kubernetes.io/instance={MODULE.PLATFORM_RELEASE}", seen[0])
+
 
 if __name__ == "__main__":
     unittest.main()

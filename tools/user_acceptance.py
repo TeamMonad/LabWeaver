@@ -37,6 +37,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 KUBECTL_CONTEXT = "kubernetes-admin@kubernetes"
 NAMESPACE = "labweaver-system"
+# Helm release that owns the platform profile workloads; the Resource profile
+# renders the same chart under its own release and bundle identity.
+PLATFORM_RELEASE = "labweaver"
 BUNDLE_ANNOTATION = "labweaver.io/configuration-bundle-sha256"
 MODEL_ENV = "LABWEAVER_E2E_PROVIDER_MODEL"
 DEFAULT_CREDENTIALS_DIR = Path("/home/wzh/.private/labweaver-acceptance/credentials")
@@ -363,7 +366,11 @@ def probe_git_commit() -> str | None:
 def probe_deployment_identity(
     run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
 ) -> str | None:
-    """The unique ``configuration-bundle-sha256`` annotation across workloads."""
+    """The unique ``configuration-bundle-sha256`` annotation across workloads.
+
+    Only the platform release is read: the Resource release renders the same
+    chart with its own bundle, so mixing both would never yield one identity.
+    """
 
     code, stdout, _ = run_kubectl(
         [
@@ -374,6 +381,8 @@ def probe_deployment_identity(
             NAMESPACE,
             "get",
             "deploy",
+            "-l",
+            f"app.kubernetes.io/instance={PLATFORM_RELEASE}",
             "-o",
             "json",
         ]
