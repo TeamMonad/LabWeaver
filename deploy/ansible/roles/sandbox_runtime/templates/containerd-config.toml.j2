@@ -1,0 +1,60 @@
+version = 4
+
+# CRI-O's replacement on sandbox-capable workers: containerd creates a Pod's
+# sandbox container with the runtime the Pod's `runtimeClassName` names, which is
+# what makes a per-Pod gVisor boundary possible.
+root = '/var/lib/containerd'
+state = '/run/containerd'
+
+[plugins.'io.containerd.cri.v1.images']
+  snapshotter = 'overlayfs'
+  disable_snapshot_annotations = true
+  discard_unpacked_layers = false
+
+  [plugins.'io.containerd.cri.v1.images'.pinned_images]
+    sandbox = '{{ sandbox_runtime_lock.containerd.sandbox_image }}'
+
+[plugins.'io.containerd.cri.v1.runtime']
+  enable_selinux = false
+  disable_apparmor = false
+  restrict_oom_score_adj = false
+  device_ownership_from_security_context = false
+  ignore_image_defined_volumes = false
+  enable_unprivileged_ports = true
+  enable_unprivileged_icmp = true
+  cdi_spec_dirs = ['/etc/cdi', '/var/run/cdi']
+
+  [plugins.'io.containerd.cri.v1.runtime'.containerd]
+    default_runtime_name = '{{ sandbox_runtime_default_runtime_name }}'
+
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+      runtime_type = 'io.containerd.runc.v2'
+      sandboxer = 'podsandbox'
+
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+        SystemdCgroup = true
+
+    # gVisor: the reviewed sandbox boundary. No options sub-table is set: the
+    # shim rejects unknown option keys, and `runsc` refuses a base runtime spec
+    # that carries no mounts array, so the process bound comes from the kubelet
+    # `podPidsLimit` instead.
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.{{ sandbox_runtime_name }}]
+      runtime_type = '{{ sandbox_runtime_runtime_type }}'
+      sandboxer = 'podsandbox'
+{% if sandbox_runtime_nvidia_available | bool %}
+
+    # The device runtime stays available for the workloads that need it; the
+    # sandbox boundary is chosen per Pod, not per node.
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.{{ sandbox_runtime_nvidia_runtime_name }}]
+      runtime_type = 'io.containerd.runc.v2'
+      sandboxer = 'podsandbox'
+
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.{{ sandbox_runtime_nvidia_runtime_name }}.options]
+        BinaryName = '{{ sandbox_runtime_nvidia_runtime_binary }}'
+        SystemdCgroup = true
+{% endif %}
+
+  [plugins.'io.containerd.cri.v1.runtime'.cni]
+    bin_dirs = ['/opt/cni/bin']
+    conf_dir = '/etc/cni/net.d'
+    max_conf_num = 1

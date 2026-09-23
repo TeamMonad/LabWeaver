@@ -76,6 +76,14 @@ nfs_csi:
 cert_manager: v1.21.0
 kubevirt: v1.8.4
 cdi: v1.65.0
+containerd:
+  version: v2.4.0
+  linux_amd64_url: https://github.com/containerd/containerd/releases/download/v2.4.0/containerd-2.4.0-linux-amd64.tar.gz
+  linux_amd64_sha256: b30cb53c6a212fcf3c3ac384db280c0e09be5a02e547f7f73cc27c62cbe2d8e7
+  # Pause image the CRI creates for every Pod sandbox. The campus-network nodes
+  # pull it through the reviewed proxy, so it stays the mirror the CRI-O nodes
+  # already used.
+  sandbox_image: registry.aliyuncs.com/google_containers/pause:3.10.1
 gvisor:
   version: release-20260914.0
   linux_amd64_url: https://storage.googleapis.com/gvisor/releases/release/20260914.0/x86_64/gvisor.tar.bz2

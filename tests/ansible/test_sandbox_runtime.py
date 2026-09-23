@@ -1,20 +1,14 @@
-"""Behavioural tests for the sandbox runtime wrapper and its annotation shim.
+"""Behavioural tests for the sandbox container-runtime configuration.
 
-gVisor's OCI runtime reads the CRI-standard container annotations that containerd
-writes, while CRI-O writes its own `io.kubernetes.cri-o.*` names. The wrapper is
-the sandbox handler's entry point, so these tests render it exactly as Ansible
-does and assert the bundle it hands to `runsc`.
+The sandbox `RuntimeClass` only works when the container runtime applies the
+gVisor runtime to a Pod *and* to its sandbox container. These tests render the
+configuration exactly as Ansible does, parse it as TOML, and assert the runtime
+table the runtime will actually consume.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import shlex
-import shutil
-import stat
-import subprocess
-import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -22,134 +16,82 @@ from jinja2 import Environment, StrictUndefined
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ROLE = ROOT / "deploy" / "ansible" / "roles" / "sandbox_runtime"
-WRAPPER = ROLE / "templates" / "labweaver-sandbox-runtime.j2"
-TRANSLATOR = ROLE / "files" / "translate-cri-annotations.py"
+TEMPLATE = (
+    ROOT
+    / "deploy"
+    / "ansible"
+    / "roles"
+    / "sandbox_runtime"
+    / "templates"
+    / "containerd-config.toml.j2"
+)
+CRI_RUNTIME = "io.containerd.cri.v1.runtime"
+CRI_IMAGES = "io.containerd.cri.v1.images"
+HANDLER = "labweaver-sandbox"
+PAUSE_IMAGE = "registry.example.test/pause:3.10.1"
 
-CRI_O_PAUSE_ANNOTATIONS = {
-    "io.kubernetes.cri-o.ContainerType": "sandbox",
-    "io.kubernetes.cri-o.SandboxID": "0123456789abcdef",
-    "io.kubernetes.cri-o.SandboxName": "lab-job-pod",
-    "io.kubernetes.cri-o.Namespace": "labweaver-evaluation",
-    "io.kubernetes.cri-o.ContainerName": "k8s_POD_lab-job-pod",
-    "io.kubernetes.cri-o.RuntimeHandler": "labweaver-sandbox",
-    "io.kubernetes.pod.name": "lab-job-pod",
-}
+
+def render(nvidia_available: bool) -> dict:
+    environment = Environment(undefined=StrictUndefined, keep_trailing_newline=True)
+    # Ansible provides these filters; plain Jinja2 does not.
+    environment.filters["bool"] = lambda value: bool(value)
+    rendered = environment.from_string(TEMPLATE.read_text(encoding="utf-8")).render(
+        sandbox_runtime_name=HANDLER,
+        sandbox_runtime_runtime_type="io.containerd.runsc.v1",
+        sandbox_runtime_default_runtime_name="runc",
+        sandbox_runtime_nvidia_runtime_name="nvidia",
+        sandbox_runtime_nvidia_runtime_binary="/usr/bin/nvidia-container-runtime",
+        sandbox_runtime_nvidia_available=nvidia_available,
+        sandbox_runtime_lock={"containerd": {"sandbox_image": PAUSE_IMAGE}},
+    )
+    return tomllib.loads(rendered)
 
 
-class SandboxRuntimeWrapperTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
-        self.install = self.root / "install"
-        self.install.mkdir()
-        shutil.copy2(TRANSLATOR, self.install / TRANSLATOR.name)
-        self.runsc = self.install / "runsc"
-        self.runsc.write_text(
-            '#!/bin/sh\necho "runsc $*"\n', encoding="utf-8"
-        )
-        self.runsc.chmod(self.runsc.stat().st_mode | stat.S_IEXEC)
-        environment = Environment(undefined=StrictUndefined, keep_trailing_newline=True)
-        environment.filters["quote"] = lambda value: shlex.quote(str(value))
-        rendered = environment.from_string(WRAPPER.read_text(encoding="utf-8")).render(
-            sandbox_runtime_install_dir=str(self.install)
-        )
-        self.wrapper = self.root / "labweaver-sandbox-runtime"
-        self.wrapper.write_text(rendered, encoding="utf-8")
-        self.wrapper.chmod(0o755)
+class SandboxContainerRuntimeConfigTest(unittest.TestCase):
+    def runtime_table(self, config: dict) -> dict:
+        return config["plugins"][CRI_RUNTIME]["containerd"]["runtimes"]
 
-    def bundle(self, name: str, annotations: dict[str, str]) -> Path:
-        directory = self.root / name
-        directory.mkdir()
-        (directory / "config.json").write_text(
-            json.dumps({"annotations": annotations, "process": {"args": ["/pause"]}}),
-            encoding="utf-8",
-        )
-        return directory
+    def test_the_sandbox_handler_is_a_gvisor_runtime(self) -> None:
+        runtimes = self.runtime_table(render(nvidia_available=False))
+        self.assertIn(HANDLER, runtimes)
+        self.assertEqual(runtimes[HANDLER]["runtime_type"], "io.containerd.runsc.v1")
+        # gVisor's shim rejects unknown option keys, so the table carries none.
+        self.assertNotIn("options", runtimes[HANDLER])
 
-    def run_wrapper(self, bundle: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                str(self.wrapper),
-                "--systemd-cgroup",
-                "--root",
-                "/run/crun",
-                "create",
-                "--bundle",
-                str(bundle),
-                "--pid-file",
-                str(self.root / "pid"),
-                "0123456789abcdef",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-        )
+    def test_every_runtime_creates_the_pod_sandbox_itself(self) -> None:
+        runtimes = self.runtime_table(render(nvidia_available=True))
+        for name, table in runtimes.items():
+            self.assertEqual(
+                table["sandboxer"],
+                "podsandbox",
+                f"runtime {name} must own the Pod sandbox container",
+            )
 
-    def read_annotations(self, bundle: Path) -> dict[str, str]:
-        return json.loads((bundle / "config.json").read_text(encoding="utf-8"))[
-            "annotations"
-        ]
+    def test_the_default_runtime_stays_the_node_runtime(self) -> None:
+        config = render(nvidia_available=False)
+        containerd = config["plugins"][CRI_RUNTIME]["containerd"]
+        self.assertEqual(containerd["default_runtime_name"], "runc")
+        self.assertEqual(containerd["runtimes"]["runc"]["runtime_type"], "io.containerd.runc.v2")
+        self.assertIs(containerd["runtimes"]["runc"]["options"]["SystemdCgroup"], True)
+        self.assertNotIn("nvidia", containerd["runtimes"])
 
-    def test_cri_o_annotations_reach_gvisor_under_their_standard_names(self) -> None:
-        bundle = self.bundle("sandbox", dict(CRI_O_PAUSE_ANNOTATIONS))
-        result = self.run_wrapper(bundle)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.startswith("runsc "), result.stdout)
-        annotations = self.read_annotations(bundle)
-        self.assertEqual(annotations["io.kubernetes.cri.container-type"], "sandbox")
+    def test_a_gpu_node_keeps_the_device_runtime(self) -> None:
+        runtimes = self.runtime_table(render(nvidia_available=True))
         self.assertEqual(
-            annotations["io.kubernetes.cri.sandbox-id"], "0123456789abcdef"
+            runtimes["nvidia"]["options"]["BinaryName"], "/usr/bin/nvidia-container-runtime"
         )
-        self.assertEqual(
-            annotations["io.kubernetes.cri.sandbox-namespace"], "labweaver-evaluation"
-        )
-        self.assertEqual(
-            annotations["io.kubernetes.cri.sandbox-name"], "lab-job-pod"
-        )
-        self.assertEqual(
-            annotations["io.kubernetes.cri.container-name"], "k8s_POD_lab-job-pod"
-        )
-        # CRI-O's own names stay in place: the runtime handler annotation and the
-        # rest of the spec must survive untouched.
-        self.assertEqual(
-            annotations["io.kubernetes.cri-o.RuntimeHandler"], "labweaver-sandbox"
-        )
-        self.assertEqual(annotations["io.kubernetes.pod.name"], "lab-job-pod")
+        self.assertIs(runtimes["nvidia"]["options"]["SystemdCgroup"], True)
 
-    def test_an_existing_standard_annotation_is_never_overwritten(self) -> None:
-        annotations = dict(CRI_O_PAUSE_ANNOTATIONS)
-        annotations["io.kubernetes.cri.sandbox-id"] = "from-the-cri"
-        bundle = self.bundle("existing", annotations)
-        result = self.run_wrapper(bundle)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_the_pod_sandbox_image_is_the_locked_one(self) -> None:
+        config = render(nvidia_available=False)
         self.assertEqual(
-            self.read_annotations(bundle)["io.kubernetes.cri.sandbox-id"], "from-the-cri"
+            config["plugins"][CRI_IMAGES]["pinned_images"]["sandbox"], PAUSE_IMAGE
         )
 
-    def test_a_bundle_without_annotations_is_left_alone(self) -> None:
-        bundle = self.bundle("plain", {})
-        result = self.run_wrapper(bundle)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.read_annotations(bundle), {})
-
-    def test_an_unreadable_bundle_fails_closed_without_running_the_runtime(self) -> None:
-        bundle = self.root / "broken"
-        bundle.mkdir()
-        (bundle / "config.json").write_text("{not json", encoding="utf-8")
-        result = self.run_wrapper(bundle)
-        self.assertEqual(result.returncode, 127)
-        self.assertNotIn("runsc ", result.stdout)
-        self.assertIn("cannot translate CRI annotations", result.stderr)
-
-    def test_a_missing_runtime_fails_closed(self) -> None:
-        self.runsc.unlink()
-        bundle = self.bundle("missing-runtime", dict(CRI_O_PAUSE_ANNOTATIONS))
-        result = self.run_wrapper(bundle)
-        self.assertEqual(result.returncode, 127)
-        self.assertIn("is missing or not executable", result.stderr)
+    def test_the_cri_uses_the_platform_cni_configuration(self) -> None:
+        cni = render(nvidia_available=False)["plugins"][CRI_RUNTIME]["cni"]
+        self.assertEqual(cni["conf_dir"], "/etc/cni/net.d")
+        self.assertIn("/opt/cni/bin", cni["bin_dirs"])
 
 
 if __name__ == "__main__":

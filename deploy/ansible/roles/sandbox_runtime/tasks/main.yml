@@ -1,32 +1,34 @@
 ---
-# Node-level half: install the gVisor runtime, register the CRI-O handler, apply
-# the reviewed kubelet process bound and retire the superseded OJ runtime.
+# Node-level half: install the container runtime that can express a per-Pod
+# sandbox, install the gVisor release the sandbox handler selects, point the
+# kubelet at that runtime and retire the previous one.
 # The `RuntimeClass` half runs on the control plane (see the playbook).
 
-- name: Load the locked gVisor release identity
+- name: Load the locked gVisor and containerd releases
   ansible.builtin.set_fact:
     sandbox_runtime_lock: >-
-      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml')
-          | from_yaml).gvisor }}
+      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml')
+         | from_yaml }}
 
 - name: Require the sandbox runtime inputs
   ansible.builtin.assert:
     that:
       - sandbox_runtime_enabled | bool
       - sandbox_runtime_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - sandbox_runtime_runtime_type == 'oci'
+      - sandbox_runtime_runtime_type is match('^io\.containerd\.[a-z0-9.-]+$')
+      - sandbox_runtime_default_runtime_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sandbox_runtime_default_runtime_name != sandbox_runtime_name
       - sandbox_runtime_install_dir is match('^/')
       - sandbox_runtime_archive_dir is match('^/')
-      - sandbox_runtime_crio_dropin is match('^/')
-      - sandbox_runtime_conmon_path is match('^/')
       - sandbox_runtime_kubelet_config is match('^/')
+      - sandbox_runtime_containerd_config is match('^/')
+      - sandbox_runtime_containerd_endpoint is match('^unix:///')
+      - sandbox_runtime_containerd_service is match('^[a-z0-9-]+$')
+      - sandbox_runtime_superseded_service is match('^[a-z0-9-]+$')
+      - sandbox_runtime_superseded_service != sandbox_runtime_containerd_service
       - sandbox_runtime_kubeconfig is match('^/')
-      - sandbox_runtime_superseded_handler is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - sandbox_runtime_superseded_handler != sandbox_runtime_name
-      - sandbox_runtime_superseded_dropin is match('^/')
-      - sandbox_runtime_superseded_runtime_path is match('^/')
-      - sandbox_runtime_handler_path is match('^/')
-      - sandbox_runtime_translator_path is match('^/')
+      - sandbox_runtime_nvidia_runtime_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - sandbox_runtime_nvidia_runtime_binary is match('^/')
     fail_msg: SANDBOX_RUNTIME_INPUT_INVALID
 
 - name: Require the reviewed kubelet process bound
@@ -36,13 +38,19 @@
       - (sandbox_runtime_pod_pids_limit | int) >= 1024
     fail_msg: SANDBOX_RUNTIME_PIDS_LIMIT_INVALID
 
-- name: Require the locked gVisor release identity
+- name: Require the locked sandbox runtime releases
   ansible.builtin.assert:
     that:
       - sandbox_runtime_lock is mapping
-      - sandbox_runtime_lock.version is match('^release-[0-9]{8}\.[0-9]+$')
-      - sandbox_runtime_lock.linux_amd64_url is match('^https://')
-      - sandbox_runtime_lock.linux_amd64_sha512 is match('^[0-9a-f]{128}$')
+      - sandbox_runtime_lock.gvisor is mapping
+      - sandbox_runtime_lock.gvisor.version is match('^release-[0-9]{8}\.[0-9]+$')
+      - sandbox_runtime_lock.gvisor.linux_amd64_url is match('^https://')
+      - sandbox_runtime_lock.gvisor.linux_amd64_sha512 is match('^[0-9a-f]{128}$')
+      - sandbox_runtime_lock.containerd is mapping
+      - sandbox_runtime_lock.containerd.version is match('^v[0-9]+\.[0-9]+\.[0-9]+$')
+      - sandbox_runtime_lock.containerd.linux_amd64_url is match('^https://')
+      - sandbox_runtime_lock.containerd.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
+      - sandbox_runtime_lock.containerd.sandbox_image is match('^[^\s]+:[^\s]+$')
     fail_msg: SANDBOX_RUNTIME_LOCK_INVALID
 
 - name: Select the reviewed node download proxy
@@ -53,57 +61,102 @@
           'NO_PROXY': sandbox_runtime_download_no_proxy}
          if sandbox_runtime_download_proxy | length > 0 else {} }}
 
-- name: Install the gVisor sandbox runtime on sandbox-capable workers
+- name: Install the sandbox runtime on sandbox-capable workers
   when: inventory_hostname in groups['workers']
   block:
-    - name: Require the CRI-O monitor binary
+    - name: Inspect the device runtime binary
       ansible.builtin.stat:
-        path: "{{ sandbox_runtime_conmon_path }}"
-      register: sandbox_runtime_conmon
+        path: "{{ sandbox_runtime_nvidia_runtime_binary }}"
+      register: sandbox_runtime_nvidia_binary
 
-    - name: Reject a worker without the CRI-O monitor binary
-      ansible.builtin.assert:
-        that:
-          - sandbox_runtime_conmon.stat.exists
-          - sandbox_runtime_conmon.stat.executable
-        fail_msg: SANDBOX_RUNTIME_CONMON_MISSING
+    - name: Select whether the device runtime is configured
+      ansible.builtin.set_fact:
+        sandbox_runtime_nvidia_available: "{{ sandbox_runtime_nvidia_binary.stat.exists }}"
 
     - name: Ensure the sandbox runtime directories exist
       ansible.builtin.file:
-        path: "{{ item.path }}"
+        path: "{{ item }}"
         state: directory
         owner: root
         group: root
-        mode: "{{ item.mode }}"
+        mode: '0755'
       loop:
-        - { path: "{{ sandbox_runtime_install_dir }}", mode: '0755' }
-        - { path: "{{ sandbox_runtime_archive_dir }}", mode: '0755' }
+        - "{{ sandbox_runtime_archive_dir }}"
+        - "{{ sandbox_runtime_containerd_config | dirname }}"
+
+    - name: Download the locked containerd release
+      ansible.builtin.get_url:
+        url: "{{ sandbox_runtime_lock.containerd.linux_amd64_url }}"
+        dest: "{{ sandbox_runtime_archive_dir }}/containerd-{{ sandbox_runtime_lock.containerd.version }}-linux-amd64.tar.gz"
+        checksum: "sha256:{{ sandbox_runtime_lock.containerd.linux_amd64_sha256 }}"
+        mode: '0644'
+        timeout: 300
+      environment: "{{ sandbox_runtime_download_env }}"
+      register: sandbox_runtime_containerd_archive
+      failed_when: false
+      retries: 3
+      delay: 5
+      until: sandbox_runtime_containerd_archive is not failed
+
+    - name: Reject a containerd archive that does not match the locked digest
+      ansible.builtin.assert:
+        that:
+          - "'Checksum mismatch' not in (sandbox_runtime_containerd_archive.msg | default(''))"
+        fail_msg: SANDBOX_RUNTIME_CONTAINERD_DIGEST_MISMATCH
+
+    - name: Require a verified containerd release archive
+      ansible.builtin.assert:
+        that:
+          - sandbox_runtime_containerd_archive is not failed
+          - sandbox_runtime_containerd_archive.dest is defined
+        fail_msg: SANDBOX_RUNTIME_CONTAINERD_ARCHIVE_UNAVAILABLE
+
+    - name: Extract the locked containerd release
+      ansible.builtin.unarchive:
+        src: "{{ sandbox_runtime_containerd_archive.dest }}"
+        dest: "{{ sandbox_runtime_install_dir }}"
+        remote_src: true
+        extra_opts: ['--strip-components=1', '--no-same-owner']
+        include: ['bin/containerd', 'bin/containerd-shim-runc-v2', 'bin/ctr']
+      notify: Restart containerd
+
+    - name: Read the installed containerd version
+      ansible.builtin.command:
+        argv: ["{{ sandbox_runtime_install_dir }}/containerd", --version]
+      changed_when: false
+      register: sandbox_runtime_containerd_version
+
+    - name: Require the locked containerd version
+      ansible.builtin.assert:
+        that:
+          - sandbox_runtime_lock.containerd.version | regex_replace('^v', '') in sandbox_runtime_containerd_version.stdout
+        fail_msg: SANDBOX_RUNTIME_CONTAINERD_VERSION_MISMATCH
 
     - name: Read the installed gVisor release stamp
       ansible.builtin.slurp:
-        src: "{{ sandbox_runtime_install_dir }}/.version"
+        src: "{{ sandbox_runtime_install_dir }}/.gvisor-version"
       register: sandbox_runtime_stamp
       failed_when: false
 
     - name: Inspect the installed gVisor runtime members
       ansible.builtin.stat:
         path: "{{ sandbox_runtime_install_dir }}/{{ item }}"
-      loop: [runsc, gvisor-bin/gvisor_sentry]
+      loop: [runsc, containerd-shim-runsc-v1, gvisor-bin/gvisor_sentry]
       register: sandbox_runtime_installed
 
     - name: Decide whether the locked gVisor release must be installed
       ansible.builtin.set_fact:
         sandbox_runtime_needs_install: >-
           {{ (sandbox_runtime_stamp.content | default('') | b64decode | trim)
-             != sandbox_runtime_lock.version
+             != sandbox_runtime_lock.gvisor.version
              or sandbox_runtime_installed.results
                 | map(attribute='stat.exists') | select('equalto', false) | list | length > 0 }}
 
     - name: Download the locked gVisor release
       ansible.builtin.get_url:
-        url: "{{ sandbox_runtime_lock.linux_amd64_url }}"
-        dest: "{{ sandbox_runtime_archive_dir }}/gvisor-{{ sandbox_runtime_lock.version }}.tar.bz2"
-        checksum: "sha512:{{ sandbox_runtime_lock.linux_amd64_sha512 }}"
+        url: "{{ sandbox_runtime_lock.gvisor.linux_amd64_url }}"
+        dest: "{{ sandbox_runtime_archive_dir }}/gvisor-{{ sandbox_runtime_lock.gvisor.version }}.tar.bz2"
+        checksum: "sha512:{{ sandbox_runtime_lock.gvisor.linux_amd64_sha512 }}"
         mode: '0644'
         timeout: 300
       environment: "{{ sandbox_runtime_download_env }}"
@@ -139,8 +192,8 @@
 
     - name: Record the installed gVisor release
       ansible.builtin.copy:
-        content: "{{ sandbox_runtime_lock.version }}\n"
-        dest: "{{ sandbox_runtime_install_dir }}/.version"
+        content: "{{ sandbox_runtime_lock.gvisor.version }}\n"
+        dest: "{{ sandbox_runtime_install_dir }}/.gvisor-version"
         owner: root
         group: root
         mode: '0644'
@@ -158,7 +211,7 @@
     - name: Inspect the required gVisor runtime members
       ansible.builtin.stat:
         path: "{{ sandbox_runtime_install_dir }}/{{ item }}"
-      loop: [runsc, gvisor-bin/gvisor_sentry]
+      loop: [runsc, containerd-shim-runsc-v1, gvisor-bin/gvisor_sentry]
       register: sandbox_runtime_members
 
     - name: Require every locked gVisor runtime member
@@ -170,71 +223,75 @@
 
     - name: Read the installed gVisor runtime version
       ansible.builtin.command:
-        argv:
-          - "{{ sandbox_runtime_install_dir }}/runsc"
-          - --version
+        argv: ["{{ sandbox_runtime_install_dir }}/runsc", --version]
       changed_when: false
       register: sandbox_runtime_runsc_version
 
     - name: Require the locked gVisor runtime version
       ansible.builtin.assert:
         that:
-          - sandbox_runtime_lock.version in sandbox_runtime_runsc_version.stdout
+          - sandbox_runtime_lock.gvisor.version in sandbox_runtime_runsc_version.stdout
         fail_msg: SANDBOX_RUNTIME_VERSION_MISMATCH
 
-    - name: Ensure the CRI-O drop-in directory exists
+    - name: Install the containerd systemd unit
+      ansible.builtin.copy:
+        src: containerd.service
+        dest: /etc/systemd/system/containerd.service
+        owner: root
+        group: root
+        mode: '0644'
+      register: sandbox_runtime_unit
+
+    - name: Ensure the container runtime drop-in directory exists
       ansible.builtin.file:
-        path: "{{ sandbox_runtime_crio_dropin | dirname }}"
+        path: /etc/systemd/system/containerd.service.d
         state: directory
         owner: root
         group: root
         mode: '0755'
+      when: sandbox_runtime_download_proxy | length > 0
 
-    - name: Install the sandbox CRI-O runtime drop-in
-      ansible.builtin.template:
-        src: 99-labweaver-sandbox.conf.j2
-        dest: "{{ sandbox_runtime_crio_dropin }}"
+    - name: Configure the container runtime proxy
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/containerd.service.d/99-proxy.conf
         owner: root
         group: root
         mode: '0644'
-      notify: Restart CRI-O
+        content: |
+          [Service]
+          Environment=HTTP_PROXY={{ sandbox_runtime_download_proxy }}
+          Environment=HTTPS_PROXY={{ sandbox_runtime_download_proxy }}
+          Environment=NO_PROXY={{ sandbox_runtime_download_no_proxy }}
+      when: sandbox_runtime_download_proxy | length > 0
 
-    - name: Install the CRI annotation translator
-      ansible.builtin.copy:
-        src: translate-cri-annotations.py
-        dest: "{{ sandbox_runtime_translator_path }}"
-        owner: root
-        group: root
-        mode: '0755'
-
-    - name: Install the sandbox runtime wrapper
+    - name: Install the container runtime configuration
       ansible.builtin.template:
-        src: labweaver-sandbox-runtime.j2
-        dest: "{{ sandbox_runtime_handler_path }}"
+        src: containerd-config.toml.j2
+        dest: "{{ sandbox_runtime_containerd_config }}"
         owner: root
         group: root
-        mode: '0755'
+        mode: '0644'
+      notify: Restart containerd
 
-    # A CRI-O drop-in is TOML and CRI-O refuses to start at all when one of its
-    # drop-ins does not parse, which would take the node's container runtime
-    # down. Parse the installed configuration before any restart is applied, so
-    # an unparsable drop-in fails the play instead of the runtime.
-    - name: Parse the installed CRI-O configuration
-      ansible.builtin.command:
-        argv:
-          - crio
-          - --config-dir
-          - "{{ sandbox_runtime_crio_dropin | dirname }}"
-          - config
-      changed_when: false
-      failed_when: false
-      register: sandbox_runtime_dropin_parse
+    - name: Enable and start the container runtime
+      ansible.builtin.systemd_service:
+        name: "{{ sandbox_runtime_containerd_service }}"
+        enabled: true
+        state: started
+        daemon_reload: "{{ sandbox_runtime_unit.changed }}"
 
-    - name: Reject an unparsable CRI-O runtime drop-in
-      ansible.builtin.assert:
-        that:
-          - sandbox_runtime_dropin_parse.rc == 0
-        fail_msg: SANDBOX_RUNTIME_DROPIN_INVALID
+    - name: Apply the notified container runtime restart
+      ansible.builtin.meta: flush_handlers
+
+    - name: Point the kubelet at the container runtime
+      ansible.builtin.lineinfile:
+        path: "{{ sandbox_runtime_kubelet_config }}"
+        regexp: '^containerRuntimeEndpoint:'
+        line: 'containerRuntimeEndpoint: {{ sandbox_runtime_containerd_endpoint }}'
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart kubelet
 
     - name: Apply the reviewed kubelet process bound
       ansible.builtin.lineinfile:
@@ -247,81 +304,74 @@
         mode: '0644'
       notify: Restart kubelet
 
-    # An earlier revision of this role repointed the node's default runtime at a
-    # dispatching wrapper. CRI-O does not create a Pod sandbox through that
-    # wrapper, so the node keeps its own default runtime.
-    - name: Retire the dispatching default runtime drop-in
-      ansible.builtin.file:
-        path: /etc/crio/crio.conf.d/99-labweaver-dispatch.conf
-        state: absent
-      notify: Restart CRI-O
+    # The previous container runtime keeps its own state and would keep serving
+    # the node if it stayed enabled: only one runtime may own the kubelet's
+    # container endpoint.
+    - name: Retire the superseded container runtime
+      ansible.builtin.systemd_service:
+        name: "{{ sandbox_runtime_superseded_service }}"
+        enabled: false
+        state: stopped
 
-    - name: Retire the dispatching default runtime wrapper
+    - name: Retire the superseded container runtime drop-in
       ansible.builtin.file:
-        path: /usr/local/libexec/labweaver-sandbox/labweaver-dispatch
-        state: absent
-
-    - name: Remove the superseded OJ runtime drop-in
-      ansible.builtin.file:
-        path: "{{ sandbox_runtime_superseded_dropin }}"
-        state: absent
-      notify: Restart CRI-O
-
-    - name: Remove the superseded OJ runtime wrapper
-      ansible.builtin.file:
-        path: "{{ sandbox_runtime_superseded_runtime_path }}"
+        path: "{{ sandbox_runtime_superseded_crio_dropin }}"
         state: absent
 
-    - name: Apply the notified CRI-O and kubelet restarts
+    - name: Apply the notified kubelet restart
       ansible.builtin.meta: flush_handlers
 
-    - name: Read the effective CRI-O configuration
-      ansible.builtin.command: crio config
+    - name: Read the effective container runtime configuration
+      ansible.builtin.command:
+        argv: ["{{ sandbox_runtime_install_dir }}/containerd", config, dump]
       changed_when: false
-      register: sandbox_runtime_crio_config
+      register: sandbox_runtime_containerd_config_dump
 
-    - name: Require the sandbox runtime handler in the effective CRI-O configuration
+    - name: Require the sandbox handler in the effective container runtime configuration
       ansible.builtin.assert:
         that:
-          - ("[crio.runtime.runtimes." ~ sandbox_runtime_name ~ "]")
-            in sandbox_runtime_crio_config.stdout
-          - ('runtime_path = "' ~ sandbox_runtime_handler_path ~ '"')
-            in sandbox_runtime_crio_config.stdout
-          - ('runtime_type = "' ~ sandbox_runtime_runtime_type ~ '"')
-            in sandbox_runtime_crio_config.stdout
-          - ('monitor_path = "' ~ sandbox_runtime_conmon_path ~ '"')
-            in sandbox_runtime_crio_config.stdout
-          - ("[crio.runtime.runtimes." ~ sandbox_runtime_superseded_handler ~ "]")
-            not in sandbox_runtime_crio_config.stdout
+          - ("io.containerd.cri.v1.runtime'.containerd.runtimes." ~ sandbox_runtime_name)
+            in sandbox_runtime_containerd_config_dump.stdout
+          - ("runtime_type = '" ~ sandbox_runtime_runtime_type ~ "'")
+            in sandbox_runtime_containerd_config_dump.stdout
+          - ("sandbox = '" ~ sandbox_runtime_lock.containerd.sandbox_image ~ "'")
+            in sandbox_runtime_containerd_config_dump.stdout
+          - ("default_runtime_name = '" ~ sandbox_runtime_default_runtime_name ~ "'")
+            in sandbox_runtime_containerd_config_dump.stdout
         fail_msg: SANDBOX_RUNTIME_HANDLER_INVALID
 
-    - name: Read the CRI-O and kubelet service states
+    - name: Read the container runtime and kubelet service states
       ansible.builtin.command:
         argv: [systemctl, is-active, "{{ item }}"]
-      loop: [crio, kubelet]
+      loop:
+        - "{{ sandbox_runtime_containerd_service }}"
+        - kubelet
+        - "{{ sandbox_runtime_superseded_service }}"
       changed_when: false
       failed_when: false
       register: sandbox_runtime_service_states
 
-    - name: Require an active CRI-O and kubelet
+    - name: Require the container runtime and kubelet to be the active runtimes
       ansible.builtin.assert:
         that:
-          - sandbox_runtime_service_states.results
-            | map(attribute='stdout') | map('trim') | select('equalto', 'active')
-            | list | length == 2
-        fail_msg: SANDBOX_RUNTIME_SERVICE_INACTIVE
+          - sandbox_runtime_service_states.results[0].stdout | trim == 'active'
+          - sandbox_runtime_service_states.results[1].stdout | trim == 'active'
+          - sandbox_runtime_service_states.results[2].stdout | trim != 'active'
+        fail_msg: SANDBOX_RUNTIME_SERVICE_STATE_INVALID
 
-    - name: Read back the kubelet process bound
+    - name: Read back the kubelet container endpoint and process bound
       ansible.builtin.slurp:
         src: "{{ sandbox_runtime_kubelet_config }}"
       register: sandbox_runtime_kubelet_readback
 
-    - name: Require the reviewed kubelet process bound on the node
+    - name: Require the kubelet to use the container runtime and the reviewed bound
       ansible.builtin.assert:
         that:
+          - (sandbox_runtime_kubelet_readback.content | b64decode | from_yaml).containerRuntimeEndpoint
+            == sandbox_runtime_containerd_endpoint
           - (sandbox_runtime_kubelet_readback.content | b64decode | from_yaml).podPidsLimit
             | int == sandbox_runtime_pod_pids_limit | int
-        fail_msg: SANDBOX_RUNTIME_KUBELET_PIDS_LIMIT_INVALID
+        fail_msg: SANDBOX_RUNTIME_KUBELET_CONFIG_INVALID
 
 - name: Publish the sandbox RuntimeClass from the control plane
   when: inventory_hostname in groups['control_plane']
@@ -353,27 +403,3 @@
           - sandbox_runtime_runtimeclass.resources | length == 1
           - sandbox_runtime_runtimeclass.resources[0].handler == sandbox_runtime_name
         fail_msg: SANDBOX_RUNTIME_RUNTIMECLASS_INVALID
-
-    - name: Retire the superseded OJ RuntimeClass
-      kubernetes.core.k8s:
-        kubeconfig: "{{ sandbox_runtime_kubeconfig }}"
-        state: absent
-        definition:
-          apiVersion: node.k8s.io/v1
-          kind: RuntimeClass
-          metadata:
-            name: "{{ sandbox_runtime_superseded_handler }}"
-
-    - name: Read back the superseded OJ RuntimeClass
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ sandbox_runtime_kubeconfig }}"
-        api_version: node.k8s.io/v1
-        kind: RuntimeClass
-        name: "{{ sandbox_runtime_superseded_handler }}"
-      register: sandbox_runtime_superseded_runtimeclass
-
-    - name: Require the superseded OJ RuntimeClass to be gone
-      ansible.builtin.assert:
-        that:
-          - sandbox_runtime_superseded_runtimeclass.resources | length == 0
-        fail_msg: SANDBOX_RUNTIME_SUPERSEDED_RUNTIMECLASS_PRESENT

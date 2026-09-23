@@ -1,34 +1,28 @@
 ---
-# Install the gVisor sandbox runtime that every platform one-shot workload uses.
+# Install the sandbox runtime that every platform one-shot workload uses, and the
+# container runtime that can express it per Pod.
 #
-# `crates/task-execution` pins the shared `RuntimeClass` name for Agent authoring
-# attempts, OJ runs and Ansible probes; the node has to expose a CRI-O runtime
-# handler of the same name or those Jobs stay unschedulable (fail-closed).
+# `crates/task-execution` pins one shared `RuntimeClass` (`labweaver-sandbox`)
+# for Agent authoring attempts, OJ runs and Ansible probes; the node has to
+# expose a matching container-runtime handler or those Jobs stay unschedulable
+# (fail-closed). The handler is gVisor, which decides sandbox-vs-container and
+# the owning sandbox from the CRI-standard annotations and from a runtime class
+# that applies to the Pod *sandbox* container as well. The v1 workers therefore
+# run containerd, which creates a Pod sandbox with the runtime its
+# `runtimeClassName` names; CRI-O does not, so it cannot offer a per-Pod sandbox.
 sandbox_runtime_enabled: true
 
 # Handler name == `RuntimeClass` name == the `runtimeClassName` every sandbox
 # Job carries. It must match `SANDBOX_RUNTIME_CLASS` in
 # `crates/task-execution/src/kubernetes.rs`.
 sandbox_runtime_name: labweaver-sandbox
-sandbox_runtime_runtime_type: oci
+sandbox_runtime_runtime_type: io.containerd.runsc.v1
+sandbox_runtime_default_runtime_name: runc
 
-# Reviewed gVisor release: version, archive URL and archive digest all come from
-# `deploy/versions.lock.yml`; nothing is duplicated here.
-sandbox_runtime_install_dir: /usr/local/libexec/labweaver-sandbox
+# gVisor's release installs as a whole tree: `runsc` resolves its sentry sidecar
+# tree from its own directory, and containerd finds the shim by name on `PATH`.
+sandbox_runtime_install_dir: /usr/local/bin
 sandbox_runtime_archive_dir: /var/lib/labweaver/sandbox-runtime
-sandbox_runtime_crio_dropin: /etc/crio/crio.conf.d/99-labweaver-sandbox.conf
-# This CRI-O release refuses to start a runtime handler without a monitor path.
-sandbox_runtime_conmon_path: /usr/libexec/crio/conmon
-
-# CRI-O writes its own container annotations (`io.kubernetes.cri-o.*`) while
-# gVisor's OCI runtime reads the CRI-standard ones (`io.kubernetes.cri.*`) that
-# containerd writes. Without a translation `runsc` never recognises a Pod
-# sandbox container, never boots the sandbox, and every container of a Job fails
-# with `cannot load sandbox`. The handler's entry point is therefore a wrapper
-# that adds the standard annotations to the container bundle and then executes
-# `runsc`.
-sandbox_runtime_handler_path: "{{ sandbox_runtime_install_dir }}/labweaver-sandbox-runtime"
-sandbox_runtime_translator_path: "{{ sandbox_runtime_install_dir }}/translate-cri-annotations.py"
 
 # Node-wide kubelet process bound for one sandbox Pod. gVisor ignores the OCI
 # `linux.resources.pids` cap and rejects a base runtime spec without a mounts
@@ -39,16 +33,24 @@ sandbox_runtime_translator_path: "{{ sandbox_runtime_install_dir }}/translate-cr
 sandbox_runtime_pod_pids_limit: 16384
 sandbox_runtime_kubelet_config: /var/lib/kubelet/config.yaml
 
-# The superseded per-container wrapper runtime installed by the earlier OJ
-# design. The sandbox `RuntimeClass` replaces it: leaving both would keep a
-# second, weaker runtime authoritative for evaluation Jobs.
-sandbox_runtime_superseded_handler: labweaver-oj
-sandbox_runtime_superseded_runtime_path: /usr/local/libexec/labweaver-oj-runtime
-sandbox_runtime_superseded_dropin: /etc/crio/crio.conf.d/99-labweaver-oj.conf
+# The container runtime the sandbox handler runs on, and the runtime that
+# served this node before it.
+sandbox_runtime_containerd_config: /etc/containerd/config.toml
+sandbox_runtime_containerd_state_dir: /run/containerd
+sandbox_runtime_containerd_endpoint: unix:///run/containerd/containerd.sock
+sandbox_runtime_containerd_service: containerd
+sandbox_runtime_superseded_service: crio
+sandbox_runtime_superseded_crio_dropin: /etc/crio/crio.conf.d/99-labweaver-sandbox.conf
+
+# GPU nodes keep a `nvidia` handler for the workloads that need the device
+# runtime; it is only configured when the node actually has the binary.
+sandbox_runtime_nvidia_runtime_name: nvidia
+sandbox_runtime_nvidia_runtime_binary: /usr/bin/nvidia-container-runtime
 
 sandbox_runtime_kubeconfig: /etc/kubernetes/admin.conf
 
 # Campus-network egress: the nodes cannot reach public download hosts directly.
-# The archive is fetched on the node through the same reviewed proxy CRI-O uses.
+# The archives are fetched on the node through the same reviewed proxy the
+# container runtime uses for image pulls.
 sandbox_runtime_download_proxy: "{{ crio_https_proxy | default('') }}"
 sandbox_runtime_download_no_proxy: "{{ crio_no_proxy | default('') }}"

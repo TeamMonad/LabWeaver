@@ -66,42 +66,35 @@ identical for all three roles and is not chosen per service.
 
 Before any of these services dispatches work, every node eligible for those workloads must expose a
 `RuntimeClass` with handler `labweaver-sandbox` mapped to gVisor, with the `runsc` sentry sidecar
-tree installed next to the runtime binary. The handler is a container-runtime handler, so its
-spelling depends on the node's CRI: a containerd node registers
-`runtime_type = "io.containerd.runsc.v1"` in the `io.containerd.grpc.v1.cri` runtime table, while a
-CRI-O node registers a CRI-O runtime table named exactly like the handler:
+tree installed next to the runtime binary.
+
+The isolation boundary has to cover a Pod's sandbox container as well as its other containers, so
+the node needs a container runtime that applies the Pod's runtime class to both. containerd does:
+`sandboxer = "podsandbox"` on a runtime table makes the runtime own the Pod sandbox, and the CRI
+writes the standard `io.kubernetes.cri.*` annotations that gVisor reads to tell a sandbox container
+from an ordinary one. CRI-O does not — it creates a Pod's sandbox with the node's *default* runtime
+regardless of the Pod's `runtimeClassName`, so `runsc` never owns a sandbox for such a Pod and every
+Job container fails with `cannot load sandbox: …_sandbox:….state: no such file or directory`.
+Sandbox-capable workers therefore run containerd, while the control-plane node keeps the CRI the
+cluster was installed with:
 
 ```toml
-[crio.runtime.runtimes.labweaver-sandbox]
-runtime_path = "/usr/local/libexec/labweaver-sandbox/labweaver-sandbox-runtime"
-runtime_type = "oci"
-monitor_path = "/usr/libexec/crio/conmon"
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.labweaver-sandbox]
+  runtime_type = 'io.containerd.runsc.v1'
+  sandboxer = 'podsandbox'
 ```
 
-`deploy/ansible/roles/sandbox_runtime` installs that table (and the reviewed gVisor release from
-`deploy/versions.lock.yml`) on the CRI-O worker nodes and publishes the `RuntimeClass`. The handler
-must not set a `base_runtime_spec`: `runsc` refuses to start a container from a base spec that
-carries no `mounts` array, so the process bound is not expressed in the OCI spec.
-
-CRI-O and gVisor disagree about annotation names. gVisor's OCI runtime decides whether a container
-is a Pod sandbox and which sandbox a container belongs to from the CRI-standard annotations
-`io.kubernetes.cri.container-type`, `io.kubernetes.cri.sandbox-id`,
-`io.kubernetes.cri.sandbox-name`, `io.kubernetes.cri.sandbox-namespace` and
-`io.kubernetes.cri.container-name`, which containerd writes. CRI-O writes its own
-`io.kubernetes.cri-o.*` equivalents instead, so `runsc` never sees a sandbox container, never boots
-the sandbox, and every container of a sandbox Job fails with
-`cannot load sandbox: …_sandbox:….state: no such file or directory`. The handler's entry point is
-therefore the reviewed wrapper `labweaver-sandbox-runtime`
-(`deploy/ansible/roles/sandbox_runtime/templates/labweaver-sandbox-runtime.j2`), which adds the
-standard annotations to the container bundle — never overwriting a standard annotation that is
-already present — and then executes `runsc` unchanged. A bundle that cannot be translated fails
-closed instead of running the container without the sandbox boundary.
-
-`deploy/ansible/roles/sandbox_runtime` installs that table (and the reviewed gVisor release from
-`deploy/versions.lock.yml`) on the CRI-O worker nodes and publishes the `RuntimeClass`. The handler
-must not set a `base_runtime_spec`: `runsc` refuses to start a container from a base spec that
-carries no `mounts` array, so the process bound is not expressed in the OCI spec. The node keeps its
-own default runtime: the sandbox boundary applies only to Pods that ask for the handler.
+`deploy/ansible/roles/sandbox_runtime` installs the reviewed gVisor release from
+`deploy/versions.lock.yml` into `/usr/local/bin` (the whole tree, because `runsc` resolves its
+`gvisor-bin/` sentry relative to its own directory and containerd finds the shim by name on `PATH`),
+writes that runtime table into `/etc/containerd/config.toml`, points the kubelet's
+`containerRuntimeEndpoint` at containerd, retires the previous container runtime on the node and
+publishes the `RuntimeClass`. The runtime table sets no options and no `base_runtime_spec`: gVisor's
+shim rejects unknown option keys, and `runsc` refuses to start a container from a base spec that
+carries no `mounts` array, so the process bound is not expressed in the OCI spec. Every runtime
+table keeps `sandboxer = 'podsandbox'` so the sandbox container of a Pod is created by the runtime
+that Pod selected; a GPU node additionally keeps the `nvidia` device runtime for the workloads that
+need it.
 
 The process bound is enforced on the pod cgroup instead. Eligible nodes set the kubelet
 `podPidsLimit` to a reviewed finite value, so a fork bomb inside a sandbox is terminated instead of
