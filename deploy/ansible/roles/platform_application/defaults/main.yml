@@ -234,6 +234,8 @@ platform_application_object_store_service_port: 9000
 # Reviewed host model endpoint port admitted to the Agent service and the
 # authoring sandbox as a Cilium `host`/`remote-node` entity allowance.
 platform_application_model_service_port: 11434
+# Namespace that fronts the reviewed model endpoint for in-cluster callers.
+platform_application_model_namespace: labweaver-llm
 platform_application_object_store_backend_hostname: minio.labweaver-data.svc
 platform_application_object_store_external_cidr: ""
 platform_application_ssh_load_balancer_ip: ""

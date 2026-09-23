@@ -2899,6 +2899,13 @@
               - ports:
                   - port: "{{ platform_application_model_service_port | string }}"
                     protocol: TCP
+          - toEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_model_namespace }}"
+            toPorts:
+              - ports:
+                  - port: "{{ platform_application_model_service_port | string }}"
+                    protocol: TCP
 
 - name: Reconcile the reviewed model egress for the platform services
   kubernetes.core.k8s:
@@ -2922,6 +2929,13 @@
               values: [agent-service]
         egress:
           - toEntities: [host, remote-node]
+            toPorts:
+              - ports:
+                  - port: "{{ platform_application_model_service_port | string }}"
+                    protocol: TCP
+          - toEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_model_namespace }}"
             toPorts:
               - ports:
                   - port: "{{ platform_application_model_service_port | string }}"
