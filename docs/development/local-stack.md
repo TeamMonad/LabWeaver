@@ -56,6 +56,21 @@ python tools/local_dev_e2e.py run --project teacher
 
 测试入口构建与当前 Playwright 版本匹配的浏览器镜像，推送到本次本地镜像仓库，并启动临时 Job。Job 从本次部署的 `agent-service-config/anthropic-model` ConfigMap 读取 `LABWEAVER_E2E_PROVIDER_MODEL`，用于创建与 Agent 实际配置一致的 live E2E policy；测试不会硬编码或从 Secret 读取模型。它从本次运行读取地址、CA 和测试账户，把 CA 信任限制在测试容器内；账户密码通过临时 Secret 文件传入。命令返回浏览器测试的退出码，并清理自己创建的 Job、Secret 和网络策略。可重复使用 `--project` 选择其他角色测试，或用 `--grep` 限定测试名称；不会启动新的集群或修改默认 kubeconfig。
 
-Kind 环境不提供真实 KubeVirt、GPU、vGPU 或生产网络隔离验收。对应功能需在具备相应设备、插件和网络策略实现的环境中另行验证。费用页面的核算结果也不表示已经执行支付。
+## 宿主镜像站与 GPU 暴露（可选，用于真实 GPU 与外部镜像验收）
+
+默认档从本地 Registry 与预载镜像取像，因此不需要出网。需要拉取外部镜像（评测运行镜像、CDI/设备插件等）或做真实 GPU 验收时，在本次 Kind 节点上补齐下面两步；两者都只作用于本次运行的节点容器，不修改仓库配置。
+
+**镜像站**：宿主机跑一组 pull-through cache（`registry:2` + `REGISTRY_PROXY_REMOTEURL` + 代理环境变量，端口绑 `0.0.0.0`），节点通过 Docker 网关注入 containerd 的 hosts 目录（`/etc/containerd/certs.d/<host>/hosts.toml`，`server` 指向上游、`[host."http://<网关>:<端口>"]` 指向缓存）。**注意**：containerd 2.x 在设置了 `config_path` 时禁止在内联配置里写 `mirrors`，写进去会让 CRI 插件加载失败、节点转 NotReady。实测 `docker.io`、`registry.k8s.io`、`gcr.io`、`nvcr.io` 可经缓存拉取（`alpine:3.20` 冷拉 6 s）；`quay.io` 需要匿名 token，pull-through cache 不转发该流程，仍会 404。
+
+**GPU**：Kind 节点是普通容器，需要把宿主设备与驱动库显式带入节点，再用 NVIDIA 容器工具包让容器内的 NVML 可用：
+
+1. 节点内 `mknod` 出 `/dev/nvidia0`、`/dev/nvidia1`、`/dev/nvidiactl`、`/dev/nvidia-uvm`、`/dev/nvidia-uvm-tools`、`/dev/nvidia-modeset`（主次设备号取自宿主），并把宿主的 `libnvidia-ml.so.*`、`libcuda.so.*` 放进节点的 `/usr/lib/x86_64-linux-gnu`。
+2. 节点内安装 `libnvidia-container1`、`libnvidia-container-tools`、`nvidia-container-toolkit-base`、`nvidia-container-toolkit`（`.deb` 在宿主机经代理下载后流式送入节点），执行 `nvidia-ctk runtime configure --runtime=containerd` 并重启 containerd，再创建 `nvidia` RuntimeClass。
+3. 部署 NVIDIA k8s device plugin（镜像可经 `nvcr.io` 缓存拉取），并以 `runtimeClassName: nvidia` 运行——**不设该 RuntimeClass 时 NVML 在容器内初始化失败**，因为容器的 procfs 里没有 `/proc/driver/nvidia`，而该路径不能通过 hostPath 挂载。
+4. 验收：节点 `capacity` 出现 `nvidia.com/gpu: 2`；`resources.limits."nvidia.com/gpu": 1` 的 Pod 在 `nvidia` RuntimeClass 下执行 `nvidia-smi` 能列出真实卡与显存。
+
+以上仅在本机验证过；生产节点由集群运维按同一职责边界（设备、驱动库、容器运行时、device plugin）提供。
+
+Kind 环境不提供真实 KubeVirt、vGPU 或生产网络隔离验收。对应功能需在具备相应设备、插件和网络策略实现的环境中另行验证。费用页面的核算结果也不表示已经执行支付。
 
 本地构建另外提供通用评测运行镜像，包含现有 C++17 和 Ansible Probe 执行工具，并把构建得到的 digest 写入 Control 的评测运行配置。Evaluation 协调器使用业务服务镜像执行冻结任务，两者分别配置。
