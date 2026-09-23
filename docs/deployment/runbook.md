@@ -659,6 +659,20 @@ helm -n labweaver-system history labweaver
   转发到 `49.52.27.63:11434`，镜像取 Harbor 的 `base-web-runtime`，需要同命名空间的 Harbor
   pull secret）并暴露 ClusterIP Service `ollama-proxy:11434`。sandbox 的每次尝试只允许
   `NetworkPolicy`，而它对 host entity 无效；代理是**普通 Pod**，所以 ipBlock 能命中。
+
+  ```yaml
+  # ConfigMap ollama-proxy-config (namespace labweaver-llm), key nginx.conf:
+  #   worker_processes 1; error_log /dev/stderr info; pid /tmp/nginx.pid;
+  #   events { worker_connections 512; }
+  #   stream { server { listen 11434; proxy_pass 49.52.27.63:11434;
+  #                     proxy_connect_timeout 5s; proxy_timeout 1800s; } }
+  # Deployment ollama-proxy: 1 replica, image
+  #   harbor.lab.lan/labweaver-system/base-web-runtime@sha256:42a7d7f2ee23e9f5a1dcdf3647ba5c585bbd18f79e79cd817e70e8cd61c55779
+  #   (mount the ConfigMap at /etc/nginx/nginx.conf, imagePullSecrets:
+  #    harbor-labweaver-system-pull 复制到该命名空间)
+  # Service ollama-proxy: ClusterIP, port/targetPort 11434
+  ```
+
   需要同时改三处：`agent-service-config/anthropic-base-url` =
   `http://ollama-proxy.labweaver-llm.svc.cluster.local:11434`、
   values 的 `network.externalServiceEndpoints` 加 `10.0.0.0/8:11434`、
