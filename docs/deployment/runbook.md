@@ -241,6 +241,23 @@ cargo xtask resource-application --env v1 --infra --yes \
 
 playbook `94-resource-application.yml` 只启用 `resource-service`，显式关闭其他 workload，并应用 `resource-service-config`/`resource-service-secrets`。
 
+v1 实测补充（三项都会让 resource profile 失败关闭）：
+
+- `LABWEAVER_POSTGRES_SERVICE_FILE` 必须指向**控制器端口转发**的 service 文件（`hostaddr=127.0.0.1`、
+  `port=15432`、`host=postgres.labweaver-data.svc`）。私有源文件里的 `hostaddr` 是集群内地址，控制器不可路由，
+  直接用会以 `RESOURCE_APPLICATION_ACCESS_SEED_APPLY_FAILED` 失败。
+- Access seed 是**精确**的：它会校验课程成员数。issuer 改为公网名后，旧 issuer 生成的那批 actor
+  成员仍在库里，必须按 actor id 精确删除，否则以
+  `LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_MEMBERSHIP_CONFLICT` 失败。
+- `resource-service-config/capacity.json` 必须带 `gpuCatalogSeed`，且与 `deploy/versions.lock.yml` 的
+  `platform_gpu_classes` 逐字段一致（`class`/`mode`/`providerBinding`/`capacityUnits`/`allocationBinding`），
+  否则以 `PLATFORM_APPLICATION_GPU_CLASS_CATALOG_MISMATCH` 失败。目录项只创建一次、不回写；没有对应
+  `gpuObservers` 时该项保持不可用（失败关闭，不得降级为 Mock 或普通容器）。
+- `resource-service-secrets` 必须与 bundle 的 `data` **逐键相同**（模块只应用 ConfigMap，Secret 视为
+  operator 拥有的不可变材料），否则以 `RESOURCE_APPLICATION_SECRET_OWNERSHIP_CONFLICT` 失败。
+  `platform_application` 会统一平台 mTLS 信任根，因此 issuer/信任根迁移后该 Secret 的 `mtls-ca.pem`
+  需要由操作者按 bundle 显式接管（`kubectl apply --server-side --force-conflicts`），其余键必须保持一致。
+
 ## 4. 简化验证
 
 ```sh
