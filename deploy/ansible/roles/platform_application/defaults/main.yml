@@ -231,6 +231,9 @@ platform_application_portal_tls_ca_file: ""
 platform_application_object_store_route_enabled: false
 platform_application_object_store_service_name: minio
 platform_application_object_store_service_port: 9000
+# Reviewed host model endpoint port admitted to the Agent service and the
+# authoring sandbox as a Cilium `host`/`remote-node` entity allowance.
+platform_application_model_service_port: 11434
 platform_application_object_store_backend_hostname: minio.labweaver-data.svc
 platform_application_object_store_external_cidr: ""
 platform_application_ssh_load_balancer_ip: ""

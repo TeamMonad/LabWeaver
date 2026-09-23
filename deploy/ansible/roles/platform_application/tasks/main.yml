@@ -2873,6 +2873,60 @@
         )
     fail_msg: PLATFORM_APPLICATION_AUTHORING_DEFAULT_DENY_INVALID
 
+# The reviewed model endpoint is a host service, and Cilium classifies any
+# traffic to a node address as the `host` entity. A NetworkPolicy ipBlock can
+# never match that entity, so the model allowance has to be a
+# CiliumNetworkPolicy. It stays port-scoped: no other host port is admitted.
+- name: Reconcile the reviewed model egress for the authoring sandbox
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata:
+        name: authoring-model-egress
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        endpointSelector: {}
+        egress:
+          - toEntities: [host, remote-node]
+            toPorts:
+              - ports:
+                  - port: "{{ platform_application_model_service_port | string }}"
+                    protocol: TCP
+
+- name: Reconcile the reviewed model egress for the platform services
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata:
+        name: platform-model-egress
+        namespace: "{{ platform_application_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        endpointSelector:
+          matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values: [agent-service]
+        egress:
+          - toEntities: [host, remote-node]
+            toPorts:
+              - ports:
+                  - port: "{{ platform_application_model_service_port | string }}"
+                    protocol: TCP
+
 - name: Reconcile the tokenless authoring runner service account
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
