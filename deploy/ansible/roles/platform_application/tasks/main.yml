@@ -830,7 +830,7 @@
     mode: "0600"
     content: >-
       {{ (platform_application_postgres_service_source.content | b64decode)
-         | regex_replace('(?m)^hostaddr=.*\\n?', '')
+         | regex_replace('(?m)^hostaddr=.*$\n?', '')
          | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
          | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\n' ~
              'host=' ~ platform_application_postgres_forward_hostname) }}
