@@ -641,6 +641,13 @@ helm -n labweaver-system history labweaver
   `/etc/ssl/certs/ISRG_Root_X1.pem`），`platform_application_keycloak_server`/`keycloak_hostname`
   用公网名、`keycloak_endpoint_address` 用公网 IP；否则在
   `Authenticate retained Keycloak administration` 处失败。
+- **对象存储的上传 URL 也必须用公网 origin**：`control-service` 的 `object_store.endpoint` 同时决定
+  服务端读取和**浏览器直传的 presigned URL**。用内部名（`https://portal.labweaver.internal/`）时浏览器
+  解析不到该主机，包上传会以 `UPLOAD_OBJECT_FAILED` 失败（页面上逐文件"失败"）。改为
+  `https://portal.labweaver.2018wzh.top/`（path-style 下 bucket 就是 `/labweaver-artifacts` 这个
+  nginx 代理前缀，`proxy_set_header Host $http_host` 保留签名用的 Host），并把该主机的
+  `hostAliases` 指向公网入口 Gateway VIP（`10.99.0.140`）、`portal-ca.pem` 换成 LE 根
+  （公网入口用 `labweaver-public-wildcard` 证书）。
 
 ### 11.7 已知阻塞
 
