@@ -66,6 +66,10 @@ fn request() -> AnsibleProbeExecutionRequest {
     }
 }
 
+/// Reviewed object-store CIDR the per-attempt egress policy admits.
+const OBJECT_STORE_EGRESS: &str = "10.96.0.0/12:9000";
+const OBJECT_STORE_POD_EGRESS: &str = "10.202.0.0/16:9000";
+
 fn binding() -> AnsibleProbeJobBinding {
     AnsibleProbeJobBinding {
         namespace: "labweaver-evaluation-runs".to_owned(),
@@ -76,6 +80,10 @@ fn binding() -> AnsibleProbeJobBinding {
             "2".repeat(64)
         ),
         request: request(),
+        object_store_egress: vec![
+            OBJECT_STORE_EGRESS.to_owned(),
+            OBJECT_STORE_POD_EGRESS.to_owned(),
+        ],
         materializer: MaterializeCommand {
             schema_version: ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
             artifacts: vec![MaterializeArtifact {
@@ -119,6 +127,10 @@ fn job_plan_is_non_root_bounded_and_read_only() -> Result<(), Box<dyn std::error
     assert_eq!(
         pointer(job, "/spec/template/spec/automountServiceAccountToken"),
         false
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/runtimeClassName"),
+        "labweaver-sandbox"
     );
     assert_eq!(
         pointer(job, "/spec/template/spec/securityContext/runAsNonRoot"),
@@ -200,6 +212,12 @@ fn job_plan_is_non_root_bounded_and_read_only() -> Result<(), Box<dyn std::error
         pointer(&resources.materializer_secret, "/data/ca.crt"),
         &Value::String(STANDARD.encode(b"test-ca-bundle"))
     );
+    assert_probe_container_mounts(job);
+    Ok(())
+}
+
+/// Asserts the probe container mounts only the read-only command and evaluator volumes.
+fn assert_probe_container_mounts(job: &Value) {
     assert_eq!(
         pointer(job, "/spec/template/spec/containers/0/volumeMounts/0/name"),
         "command"
@@ -208,7 +226,6 @@ fn job_plan_is_non_root_bounded_and_read_only() -> Result<(), Box<dyn std::error
         pointer(job, "/spec/template/spec/containers/0/volumeMounts/1/name"),
         "evaluator"
     );
-    Ok(())
 }
 
 #[test]
@@ -216,15 +233,26 @@ fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::err
     let resources = AnsibleProbeJobResources::build(&binding())?;
     let policy = &resources.network_policy;
 
-    // HTTPS is needed by the init materializer; SSH remains scoped to the
-    // exact target IPv4.
+    // The materializer needs DNS and exactly the reviewed object-store CIDR;
+    // SSH remains scoped to the exact target IPv4.
     assert_eq!(pointer(policy, "/spec/policyTypes/0"), "Ingress");
     assert_eq!(pointer(policy, "/spec/policyTypes/1"), "Egress");
     assert_eq!(pointer(policy, "/spec/ingress"), &json!([]));
     assert_eq!(
         pointer(policy, "/spec/egress"),
         &json!([
-            {"ports":[{"protocol":"TCP","port":443}]},
+            {
+                "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
+                "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}],
+            },
+            {
+                "to":[{"ipBlock":{"cidr":"10.96.0.0/12"}}],
+                "ports":[{"protocol":"TCP","port":9000}],
+            },
+            {
+                "to":[{"ipBlock":{"cidr":"10.202.0.0/16"}}],
+                "ports":[{"protocol":"TCP","port":9000}],
+            },
             {"to":[{"ipBlock":{"cidr":"192.168.56.10/32"}}],"ports":[{"protocol":"TCP","port":22}]},
         ])
     );
@@ -380,6 +408,13 @@ fn job_plan_rejects_mutable_or_mismatched_images_and_invalid_bindings()
 
     let mut value = binding();
     value.request.target.port = 2222;
+    assert_eq!(
+        error_diagnostic(AnsibleProbeJobResources::build(&value))?,
+        "LW_AP_JOB_BINDING_INVALID"
+    );
+
+    let mut value = binding();
+    value.object_store_egress = vec!["10.96.0.0".to_owned()];
     assert_eq!(
         error_diagnostic(AnsibleProbeJobResources::build(&value))?,
         "LW_AP_JOB_BINDING_INVALID"

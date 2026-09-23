@@ -28,6 +28,8 @@ use crate::{
 };
 
 const FIELD_MANAGER: &str = "labweaver-oj-executor";
+const MANAGED_BY: &str = "evaluation-service";
+const EVENT_SCOPE: &str = "evaluation";
 const LOG_SCOPE: &str = "program.oj";
 const DIAGNOSTIC_PREFIX: &str = "LW_OJ_";
 const RUNNER_DEFAULT_DENY_POLICY: &str = "oj-runner-default-deny";
@@ -64,6 +66,8 @@ impl OjKubernetesExecutor {
             FIELD_MANAGER,
             LOG_SCOPE,
             DIAGNOSTIC_PREFIX,
+            MANAGED_BY,
+            EVENT_SCOPE,
         )?;
         Ok(Self { api })
     }
@@ -590,8 +594,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        OjCancellationObservation, OjExecutorError, OjJobObservation, OjKubernetesExecutor,
-        attempt_job_name, cancellation_observation, recovery_cleanup_plan,
+        DIAGNOSTIC_PREFIX, EVENT_SCOPE, MANAGED_BY, OjCancellationObservation, OjExecutorError,
+        OjJobObservation, OjKubernetesExecutor, attempt_job_name, cancellation_observation,
+        recovery_cleanup_plan,
     };
     use crate::kubernetes_job::{
         KubernetesApiClient, KubernetesApiConfiguration, KubernetesCleanupTarget,
@@ -640,7 +645,10 @@ mod tests {
                 "finishedAt": "2026-09-14T06:26:32Z"
             }}
         });
-        assert_eq!(execution_timing(&equal)?, ExecutionTiming::unknown());
+        assert_eq!(
+            execution_timing(&equal, EVENT_SCOPE, DIAGNOSTIC_PREFIX)?,
+            ExecutionTiming::unknown()
+        );
 
         let reversed = json!({
             "state": {"terminated": {
@@ -649,7 +657,7 @@ mod tests {
             }}
         });
         assert!(matches!(
-            execution_timing(&reversed),
+            execution_timing(&reversed, EVENT_SCOPE, DIAGNOSTIC_PREFIX),
             Err(KubernetesJobError::ObservationInvalid)
         ));
 
@@ -659,7 +667,7 @@ mod tests {
                 "finishedAt": "2026-09-14T06:26:33Z"
             }}
         });
-        let timing = execution_timing(&positive)?;
+        let timing = execution_timing(&positive, EVENT_SCOPE, DIAGNOSTIC_PREFIX)?;
         assert!(timing.started_at.is_some());
         assert!(timing.terminated_at.is_some());
         Ok(())
@@ -1033,6 +1041,8 @@ mod tests {
             "labweaver-oj-executor",
             "program.oj",
             "LW_OJ_",
+            MANAGED_BY,
+            EVENT_SCOPE,
         );
         let executor = OjKubernetesExecutor { api };
         Ok(FakeExecutor {

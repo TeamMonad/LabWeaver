@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Administrator disable of one catalog entry.",
+  "properties": {
+    "expectedDigest": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "expectedDigest",
+    "reason"
+  ],
+  "title": "DisablePlatformImageRequest",
+  "type": "object"
+}

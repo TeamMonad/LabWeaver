@@ -11,7 +11,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -19,7 +18,6 @@ use std::{
 use artifact_store::{ImmutableObjectStore, S3ImmutableObjectStore};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use contracts::{
-    EventId,
     authoring::{PackageFile, ProblemPackage},
     evaluation::{
         AdvisoryOutputMode, ApprovedProgramProfile, EvaluationStepCompletion, ProgramPhase,
@@ -29,7 +27,7 @@ use contracts::{
         AgentLlmReviewFile, AgentLlmReviewRubric, AgentLlmReviewState,
         InternalAgentLlmReviewRequest,
     },
-    resource::{ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement, WorkloadResources},
+    resource::WorkloadResources,
     submission::FrozenSubmission,
 };
 use persistence_sqlx::Sha256Digest;
@@ -56,7 +54,7 @@ use crate::environment_client::{
 };
 use crate::execution::{
     EvaluationAttemptContext, EvaluationAttemptRunner, ExecutionError, ExecutionTiming,
-    StepExecutionPlan, TaskResourceError, TaskResourceLifecycle,
+    StepExecutionPlan, TaskResourceError, TaskResourceFailure, TaskResourceLifecycle,
 };
 use crate::freeze_store::PgFreezeStore;
 use crate::materializer::{
@@ -114,19 +112,19 @@ impl StartedExecution {
     }
 }
 
-impl ExecutionTiming {
-    fn boundaries(
-        self,
-    ) -> Result<
-        (
-            Option<contracts::UtcTimestamp>,
-            Option<contracts::UtcTimestamp>,
-        ),
-        ExecutionError,
-    > {
-        self.validate()?;
-        Ok((self.started_at, self.terminated_at))
-    }
+fn timing_boundaries(
+    timing: ExecutionTiming,
+) -> Result<
+    (
+        Option<contracts::UtcTimestamp>,
+        Option<contracts::UtcTimestamp>,
+    ),
+    ExecutionError,
+> {
+    timing
+        .validate()
+        .map_err(|_| ExecutionError::Backend("execution_timing_invalid".to_owned()))?;
+    Ok((timing.started_at, timing.terminated_at))
 }
 
 /// Resource limits for a read-only Ansible probe.
@@ -173,6 +171,12 @@ pub struct EvaluationExecutionConfiguration {
     pub oj_service_account_name: String,
     pub ansible_probe_service_account_name: String,
     pub image_pull_secret_name: String,
+    /// Reviewed `"<cidr>:<port>"` destinations of the object store the attempt materializers
+    /// download from and upload to.
+    ///
+    /// Every per-attempt `NetworkPolicy` narrows egress to DNS and these destinations instead of
+    /// admitting HTTPS anywhere, so an approved run cannot be used as a network pivot.
+    pub object_store_egress: Vec<String>,
     pub resource_poll_interval_milliseconds: u64,
     pub resource_approval_timeout_seconds: u64,
     pub execution_observe_poll_interval_milliseconds: u64,
@@ -195,6 +199,10 @@ impl EvaluationExecutionConfiguration {
             || self.oj_service_account_name.trim().is_empty()
             || self.ansible_probe_service_account_name.trim().is_empty()
             || self.image_pull_secret_name.trim().is_empty()
+            || self.object_store_egress.is_empty()
+            || self.object_store_egress.iter().any(|destination| {
+                task_execution::kubernetes::parse_egress_destination(destination).is_none()
+            })
             || !(100..=30_000).contains(&self.resource_poll_interval_milliseconds)
             || !(1..=3_600).contains(&self.resource_approval_timeout_seconds)
             || !(100..=30_000).contains(&self.execution_observe_poll_interval_milliseconds)
@@ -498,7 +506,7 @@ impl KubernetesEvaluationRunner {
             .authority_now()
             .await
             .map_err(ExecutionError::Control)?;
-        let (execution_started_at, execution_terminated_at) = observed.timing.boundaries()?;
+        let (execution_started_at, execution_terminated_at) = timing_boundaries(observed.timing)?;
         let deliveries = Self::usage_deliveries(
             &resource_status,
             observed.timing,
@@ -641,7 +649,7 @@ impl KubernetesEvaluationRunner {
             .authority_now()
             .await
             .map_err(ExecutionError::Control)?;
-        let (observed_started_at, observed_terminated_at) = observed.timing.boundaries()?;
+        let (observed_started_at, observed_terminated_at) = timing_boundaries(observed.timing)?;
         let execution_started_at = checkpoint.execution_started_at.or(observed_started_at);
         let execution_terminated_at = checkpoint
             .execution_terminated_at
@@ -734,7 +742,7 @@ impl KubernetesEvaluationRunner {
                 ));
             }
         };
-        let (execution_started_at, execution_terminated_at) = timing.boundaries()?;
+        let (execution_started_at, execution_terminated_at) = timing_boundaries(timing)?;
         let deliveries = Self::usage_deliveries(
             &status,
             timing,
@@ -973,7 +981,7 @@ impl KubernetesEvaluationRunner {
             resources,
             duration_seconds,
         )
-        .map_err(ExecutionError::TaskResource)
+        .map_err(ExecutionError::from)
     }
 
     fn execute_file_assertion(
@@ -1316,6 +1324,7 @@ impl KubernetesEvaluationRunner {
             image_pull_secret_name: self.configuration.image_pull_secret_name.clone(),
             worker_image: context.run.identity.runtime_identity.runner_image.clone(),
             request: request.clone(),
+            object_store_egress: self.configuration.object_store_egress.clone(),
             materializer,
             materializer_ca_bundle: self.materializer_ca_bundle.clone(),
         };
@@ -1554,6 +1563,7 @@ impl KubernetesEvaluationRunner {
             image_pull_secret_name: self.configuration.image_pull_secret_name.clone(),
             worker_image: context.run.identity.runtime_identity.runner_image.clone(),
             request: request.clone(),
+            object_store_egress: self.configuration.object_store_egress.clone(),
             materializer,
             materializer_ca_bundle: self.materializer_ca_bundle.clone(),
         };
@@ -2143,90 +2153,8 @@ impl KubernetesEvaluationRunner {
         timing: ExecutionTiming,
         fallback_until: contracts::UtcTimestamp,
     ) -> Result<Vec<RecordResourceUsageRequest>, ExecutionError> {
-        timing.validate()?;
-        let (measured_from, measured_until, measurement) = match timing.boundaries()? {
-            (Some(started), Some(terminated)) => {
-                let milliseconds = usage_milliseconds(started, terminated)?;
-                let resources = &status.claim.workload_resources;
-                let quantities = ResourceUsageQuantities {
-                    cpu_millicore_seconds: quantity_per_millisecond(
-                        u64::from(resources.cpu_millicores),
-                        milliseconds,
-                    )?,
-                    memory_byte_seconds: quantity_per_millisecond(
-                        resources.memory_bytes,
-                        milliseconds,
-                    )?,
-                    storage_byte_seconds: 0,
-                    gpu_unit_seconds: match resources.gpu.as_ref() {
-                        Some(gpu) => quantity_per_millisecond(u64::from(gpu.count), milliseconds)?,
-                        None => 0,
-                    },
-                };
-                (started, terminated, UsageMeasurement::Known { quantities })
-            }
-            (None, None) => {
-                let started = status.lease.active_from.ok_or_else(|| {
-                    ExecutionError::Backend("resource_active_from_missing".to_owned())
-                })?;
-                if fallback_until <= started {
-                    return Err(ExecutionError::Backend("usage_interval_invalid".to_owned()));
-                }
-                (
-                    started,
-                    fallback_until,
-                    UsageMeasurement::Unknown {
-                        reason: "executor_timing_unavailable".to_owned(),
-                    },
-                )
-            }
-            _ => {
-                return Err(ExecutionError::Backend(
-                    "execution_timing_invalid".to_owned(),
-                ));
-            }
-        };
-        let compute = RecordResourceUsageRequest {
-            project_id: status.project_id,
-            course_id: status.request.course_id,
-            kind: ResourceUsageKind::Compute,
-            request_id: status.request.id,
-            lease_id: Some(status.lease.id),
-            source_event_id: deterministic_usage_event_id(status.task_run_id, 0x01)?,
-            measured_from,
-            measured_until,
-            measurement: measurement.clone(),
-        };
-        let storage = status.claim.workload_resources.storage_bytes;
-        let mut deliveries = vec![compute];
-        if storage > 0 {
-            let storage_measurement = match measurement {
-                UsageMeasurement::Known { .. } => UsageMeasurement::Known {
-                    quantities: ResourceUsageQuantities {
-                        cpu_millicore_seconds: 0,
-                        memory_byte_seconds: 0,
-                        storage_byte_seconds: quantity_per_millisecond(
-                            storage,
-                            usage_milliseconds(measured_from, measured_until)?,
-                        )?,
-                        gpu_unit_seconds: 0,
-                    },
-                },
-                UsageMeasurement::Unknown { reason } => UsageMeasurement::Unknown { reason },
-            };
-            deliveries.push(RecordResourceUsageRequest {
-                project_id: status.project_id,
-                course_id: status.request.course_id,
-                kind: ResourceUsageKind::Storage,
-                request_id: status.request.id,
-                lease_id: Some(status.lease.id),
-                source_event_id: deterministic_usage_event_id(status.task_run_id, 0x02)?,
-                measured_from,
-                measured_until,
-                measurement: storage_measurement,
-            });
-        }
-        Ok(deliveries)
+        task_execution::usage_deliveries(status, timing, fallback_until)
+            .map_err(|_| ExecutionError::Backend("usage_delivery_invalid".to_owned()))
     }
 
     async fn run_is_cancelling(
@@ -2418,7 +2346,7 @@ fn map_task_resource(error: TaskResourceError, stage: &str) -> ExecutionError {
         cleanup_verified = false,
         "Resource lifecycle failed during evaluation",
     );
-    ExecutionError::TaskResource(error)
+    ExecutionError::TaskResource(TaskResourceFailure(error))
 }
 
 fn map_oj_start_error(error: &OjExecutorError) -> ExecutionError {
@@ -2557,51 +2485,13 @@ fn parse_advisory_recovery_request(
     Ok(request)
 }
 
-fn usage_milliseconds(
-    measured_from: contracts::UtcTimestamp,
-    measured_until: contracts::UtcTimestamp,
-) -> Result<u64, ExecutionError> {
-    if measured_until <= measured_from {
-        return Err(ExecutionError::Backend("usage_interval_invalid".to_owned()));
-    }
-    u64::try_from(
-        (measured_until.get() - measured_from.get())
-            .whole_milliseconds()
-            .max(1),
-    )
-    .map_err(|_| ExecutionError::Backend("usage_duration_invalid".to_owned()))
-}
-
-fn quantity_per_millisecond(base: u64, milliseconds: u64) -> Result<u64, ExecutionError> {
-    u64::try_from(
-        u128::from(base)
-            .checked_mul(u128::from(milliseconds))
-            .ok_or_else(|| ExecutionError::Backend("usage_quantity_overflow".to_owned()))?
-            / 1_000,
-    )
-    .map_err(|_| ExecutionError::Backend("usage_quantity_overflow".to_owned()))
-}
-
-fn deterministic_usage_event_id(
-    task_run_id: contracts::TaskRunId,
-    discriminator: u8,
-) -> Result<EventId, ExecutionError> {
-    let mut bytes = task_run_id.as_uuid().into_bytes();
-    // Preserve UUIDv7 version and RFC 9562 variant while deriving stable,
-    // category-specific ids from the durable TaskRunId.
-    bytes[14] = bytes[14].wrapping_add(discriminator);
-    bytes[15] ^= discriminator;
-    EventId::from_str(&Uuid::from_bytes(bytes).to_string())
-        .map_err(|_| ExecutionError::Backend("usage_event_id_invalid".to_owned()))
-}
-
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         ExecutionError, OjExecutionPhase, OjExecutorError, OjTerminalStatus, TaskResourceError,
-        TerminalResult, map_oj_start_error, map_task_resource, oj_receipt_result,
-        validate_advisory_receipt_hash,
+        TaskResourceFailure, TerminalResult, map_oj_start_error, map_task_resource,
+        oj_receipt_result, validate_advisory_receipt_hash,
     };
     use contracts::authoring::ProjectLlmEgressPolicy;
     use contracts::http::{
@@ -2739,7 +2629,7 @@ mod tests {
         assert_eq!(mapped.to_string(), "LW_EVALUATION_TASK_RESOURCE_TERMINAL");
         assert!(matches!(
             mapped,
-            ExecutionError::TaskResource(TaskResourceError::ResourceTerminal)
+            ExecutionError::TaskResource(TaskResourceFailure(TaskResourceError::ResourceTerminal))
         ));
     }
 
@@ -3993,6 +3883,7 @@ mod probe_recovery_tests {
             oj_service_account_name: "oj-runner".to_owned(),
             ansible_probe_service_account_name: "ansible-probe".to_owned(),
             image_pull_secret_name: "pull-secret".to_owned(),
+            object_store_egress: vec!["10.96.0.0/12:443".to_owned()],
             resource_poll_interval_milliseconds: 100,
             resource_approval_timeout_seconds: 10,
             execution_observe_poll_interval_milliseconds: 100,

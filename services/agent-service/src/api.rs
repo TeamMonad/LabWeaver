@@ -15,10 +15,13 @@ use contracts::http::{
     InternalAgentBuildCancellationRequest, InternalAgentBuildStatusQuery,
     InternalAgentLlmReviewRequest, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
-    InternalImageArtifactResolution,
+    InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
+    InternalPlatformImageImportRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, PlatformImageCatalog,
 };
 use contracts::{
-    AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, ProblemDetails, UtcTimestamp,
+    AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, PlatformImageId, ProblemDetails,
+    UtcTimestamp,
 };
 use serde_json::Value;
 use sqlx::Row;
@@ -27,6 +30,11 @@ use time::OffsetDateTime;
 use crate::build_store::{BuildStoreError, PgBuildStore};
 use crate::generated_artifacts::{GeneratedArtifactStore, GeneratedArtifactStoreError};
 use crate::llm_review::{LlmReviewStore, LlmReviewStoreError};
+use crate::platform_image_import::{self, PlatformImageImportError};
+use crate::platform_images::{
+    DisablePlatformImage, PgPlatformImageCatalog, PlatformImageRegistry,
+    PlatformImageRegistryError, PlatformImageStoreError, RegisterPlatformImage, RepinPlatformImage,
+};
 use crate::run_store::{
     AgentRunReservation, AgentRunStoreError, PostgresAgentRunStore, StoredCandidate,
 };
@@ -41,7 +49,7 @@ pub const LLM_REVIEW_READ_PERMISSION: &str = "agent.llm_review.read";
 pub const LLM_REVIEW_CANCEL_PERMISSION: &str = "agent.llm_review.cancel";
 
 /// Agent internal API state.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AgentApiState {
     /// Agent-owned run repository.
     pub store: PostgresAgentRunStore,
@@ -51,6 +59,20 @@ pub struct AgentApiState {
     pub generated_artifacts: GeneratedArtifactStore,
     /// Agent-owned advisory review queue and receipt store.
     pub llm_reviews: LlmReviewStore,
+    /// Agent-owned platform image catalog.
+    pub platform_images: PgPlatformImageCatalog,
+    /// Optional platform registry resolver; catalog mutations fail closed without it.
+    pub platform_registry: Option<PlatformImageRegistry>,
+    /// Immutable object store holding the Control-staged image archives.
+    pub objects: Arc<dyn artifact_store::ImmutableObjectStore>,
+}
+
+impl std::fmt::Debug for AgentApiState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentApiState")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Builds all Control-to-Agent routes.
@@ -96,6 +118,22 @@ pub fn router(state: Arc<AgentApiState>) -> Router {
         .route(
             "/internal/v1/llm-reviews/{task_run_id}/cancel",
             post(cancel_llm_review),
+        )
+        .route(
+            "/internal/v1/platform-images",
+            post(register_platform_image).get(list_platform_images),
+        )
+        .route(
+            "/internal/v1/platform-images/{catalog_id}/repin",
+            post(repin_platform_image),
+        )
+        .route(
+            "/internal/v1/platform-images/{catalog_id}/disable",
+            post(disable_platform_image),
+        )
+        .route(
+            "/internal/v1/platform-images/imports",
+            post(import_platform_image),
         )
         .with_state(state);
     telemetry::instrument_http(router, "agent-service", "agent-api")
@@ -267,10 +305,12 @@ async fn get_outcome(
     let run = state.store.load(run_id).await?;
     let checkpoints = state.store.load_checkpoints(run_id).await?;
     let mut environment_candidate = None;
+    let mut environment_image_export = None;
     let mut evaluation_candidate = None;
     for checkpoint in checkpoints {
         match checkpoint.candidate {
             Some(StoredCandidate::Environment(candidate)) => {
+                environment_image_export.clone_from(&checkpoint.audit.image_export);
                 environment_candidate = Some(candidate);
             }
             Some(StoredCandidate::Evaluation(candidate)) => evaluation_candidate = Some(candidate),
@@ -281,6 +321,7 @@ async fn get_outcome(
         plan: run.plan.clone(),
         run,
         environment_candidate,
+        environment_image_export,
         evaluation_candidate,
     };
     outcome.validate().map_err(|_| AgentApiError::contract())?;
@@ -377,6 +418,135 @@ async fn cancel_llm_review(
     Ok(Json(receipt).into_response())
 }
 
+async fn register_platform_image(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Json(request): Json<InternalPlatformImageRegistrationRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let resolved = state
+        .platform_registry()?
+        .resolve(&request.source_reference)
+        .await?;
+    let entry = state
+        .platform_images
+        .register(&RegisterPlatformImage {
+            kind: request.kind,
+            binding: request.binding,
+            source_reference: request.source_reference,
+            resolved_digest: resolved.digest,
+            media_type: resolved.media_type,
+            size_bytes: resolved.size_bytes,
+            // The registration request carries no disk descriptor: a reference registration is
+            // catalog inventory and never resolvable as a virtual-machine base.
+            capacity_bytes: None,
+            disk_sha256: None,
+            format: None,
+            trust_revision: request.trust_revision,
+            actor_id: request.actor_id,
+            reason: request.reason,
+            now: now()?,
+        })
+        .await?;
+    Ok((StatusCode::CREATED, Json(entry)).into_response())
+}
+
+async fn list_platform_images(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let entries = state.platform_images.list(None).await?;
+    Ok(Json(PlatformImageCatalog { entries }).into_response())
+}
+
+async fn import_platform_image(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Json(request): Json<InternalPlatformImageImportRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let entry = platform_image_import::import_platform_image(
+        state.platform_registry()?,
+        &state.platform_images,
+        state.objects.as_ref(),
+        &request,
+        now()?,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(entry)).into_response())
+}
+
+async fn repin_platform_image(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(catalog_id): Path<PlatformImageId>,
+    Json(request): Json<InternalPlatformImageRepinRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let current = state
+        .platform_images
+        .list(None)
+        .await?
+        .into_iter()
+        .find(|entry| entry.catalog_id == catalog_id)
+        .ok_or_else(AgentApiError::not_found)?;
+    if current.resolved_digest != request.expected_digest {
+        return Err(AgentApiError::conflict());
+    }
+    let resolved = state
+        .platform_registry()?
+        .resolve(&current.source_reference)
+        .await?;
+    let entry = state
+        .platform_images
+        .repin(
+            catalog_id,
+            &RepinPlatformImage {
+                resolved_digest: resolved.digest,
+                media_type: resolved.media_type,
+                size_bytes: resolved.size_bytes,
+                expected_digest: request.expected_digest,
+                trust_revision: request.trust_revision,
+                actor_id: request.actor_id,
+                reason: request.reason,
+                now: now()?,
+            },
+        )
+        .await?;
+    Ok(Json(entry).into_response())
+}
+
+async fn disable_platform_image(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(catalog_id): Path<PlatformImageId>,
+    Json(request): Json<InternalPlatformImageDisableRequest>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let entry = state
+        .platform_images
+        .disable(
+            catalog_id,
+            &DisablePlatformImage {
+                expected_digest: request.expected_digest,
+                actor_id: request.actor_id,
+                reason: request.reason,
+                now: now()?,
+            },
+        )
+        .await?;
+    Ok(Json(entry).into_response())
+}
+
+impl AgentApiState {
+    fn platform_registry(&self) -> Result<&PlatformImageRegistry, AgentApiError> {
+        self.platform_registry
+            .as_ref()
+            .ok_or_else(AgentApiError::registry_unconfigured)
+    }
+}
+
 fn require_control(caller: Option<Extension<auth::ServiceIdentity>>) -> Result<(), AgentApiError> {
     require_permission(caller, CONTROL_PERMISSION)
 }
@@ -455,6 +625,20 @@ impl AgentApiError {
             retryable: false,
         }
     }
+    fn conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            diagnostic: "LW_PLATFORM_IMAGE_STATE_CONFLICT",
+            retryable: false,
+        }
+    }
+    fn registry_unconfigured() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            diagnostic: "LW_PLATFORM_IMAGE_REGISTRY_NOT_CONFIGURED",
+            retryable: false,
+        }
+    }
     fn persistence() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -509,6 +693,61 @@ impl AgentApiError {
         Self {
             status,
             diagnostic,
+            retryable,
+        }
+    }
+}
+
+impl From<PlatformImageStoreError> for AgentApiError {
+    fn from(error: PlatformImageStoreError) -> Self {
+        let status = match error {
+            PlatformImageStoreError::NotFound => StatusCode::NOT_FOUND,
+            PlatformImageStoreError::Conflict => StatusCode::CONFLICT,
+            PlatformImageStoreError::Persistence => StatusCode::SERVICE_UNAVAILABLE,
+            PlatformImageStoreError::InvalidRequest => StatusCode::UNPROCESSABLE_ENTITY,
+        };
+        Self {
+            status,
+            diagnostic: error.diagnostic_code(),
+            retryable: matches!(error, PlatformImageStoreError::Persistence),
+        }
+    }
+}
+
+impl From<PlatformImageImportError> for AgentApiError {
+    fn from(error: PlatformImageImportError) -> Self {
+        match error {
+            PlatformImageImportError::ObjectStore(_) => Self::persistence(),
+            PlatformImageImportError::Layout(error) => Self {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                diagnostic: error.diagnostic_code(),
+                retryable: false,
+            },
+            PlatformImageImportError::Disk | PlatformImageImportError::Capacity => Self {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                diagnostic: error.diagnostic_code(),
+                retryable: false,
+            },
+            PlatformImageImportError::Registry(error) => error.into(),
+            PlatformImageImportError::Catalog(error) => error.into(),
+        }
+    }
+}
+
+impl From<PlatformImageRegistryError> for AgentApiError {
+    fn from(error: PlatformImageRegistryError) -> Self {
+        let (status, retryable) = match error {
+            PlatformImageRegistryError::InvalidReference => {
+                (StatusCode::UNPROCESSABLE_ENTITY, false)
+            }
+            PlatformImageRegistryError::RegistryRejected => (StatusCode::BAD_GATEWAY, false),
+            PlatformImageRegistryError::RegistryUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, true)
+            }
+        };
+        Self {
+            status,
+            diagnostic: error.diagnostic_code(),
             retryable,
         }
     }

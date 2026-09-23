@@ -15,7 +15,9 @@ use contracts::diagnostic;
 use contracts::evaluation::{
     EvaluationSpec, GoalReview, evaluation_spec_schema, goal_review_schema,
 };
-use contracts::{ArtifactRef, PolicyId, ProblemPackageId, ProjectId, Revision};
+use contracts::{
+    ActorId, AgentRunId, ArtifactRef, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision,
+};
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
@@ -29,6 +31,7 @@ use uuid::Uuid;
 use crate::candidate_materializer::{
     EnvironmentCandidateMaterializer, WorkConfigurationArtifactMaterializer, recipe_schema,
 };
+use crate::platform_images::{PlatformImageEntry, PlatformImageKind};
 
 /// Claude Code's documented stdin cap is 10 MB. `LabWeaver` leaves headroom and rejects larger
 /// egress before starting a billable invocation.
@@ -510,6 +513,36 @@ impl Default for RunCancellation {
     }
 }
 
+/// Authority under which one Claude Code invocation executes.
+#[derive(Clone, Debug)]
+pub enum ExecutionScope {
+    /// In-process advisory review that holds no Resource reservation.
+    Advisory,
+    /// One admitted authoring attempt generation with a Resource task reservation.
+    Authoring(AuthoringAttemptScope),
+}
+
+/// Identity of one admitted authoring attempt generation.
+#[derive(Clone, Debug)]
+pub struct AuthoringAttemptScope {
+    /// Parent `AgentRun`.
+    pub run_id: AgentRunId,
+    /// Authoritative project of the run.
+    pub project_id: ProjectId,
+    /// Optional teaching course of the run.
+    pub course_id: Option<CourseId>,
+    /// Control-authenticated actor that authorized the run.
+    pub actor_id: ActorId,
+    /// Independently leased candidate track.
+    pub track: AgentTrackKind,
+    /// Monotonic track-local attempt number.
+    pub attempt: u32,
+    /// Sanitized distributed trace identity.
+    pub trace_id: String,
+    /// Pinned Claude Code version the sandbox CLI must verify before executing.
+    pub claude_code_version: String,
+}
+
 /// A shell-free Claude Code process request.
 #[derive(Clone)]
 pub struct ClaudeCodeCommand {
@@ -546,6 +579,12 @@ impl ClaudeCodeCommand {
         self.stdin_sha256
     }
 
+    /// Returns the exact stdin envelope transferred to the process.
+    #[must_use]
+    pub fn stdin(&self) -> &[u8] {
+        &self.stdin
+    }
+
     /// Returns the bounded invocation timeout.
     #[must_use]
     pub const fn timeout(&self) -> Duration {
@@ -575,6 +614,7 @@ pub struct ClaudeCodeProcessOutput {
     stderr_sha256: Option<Sha256Digest>,
     stderr_bytes: u64,
     failure_class: Option<RuntimeFailureClass>,
+    image_export: Option<contracts::supply_chain::ExportedOciImage>,
 }
 
 impl ClaudeCodeProcessOutput {
@@ -587,7 +627,24 @@ impl ClaudeCodeProcessOutput {
             stderr_sha256: (!stderr.is_empty()).then(|| Sha256Digest::of_bytes(stderr)),
             stderr_bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
             failure_class: classify_runtime_stderr(stderr),
+            image_export: None,
         }
+    }
+
+    /// Attaches the frozen sandbox layout export to a successful attempt output.
+    #[must_use]
+    pub fn with_image_export(
+        mut self,
+        image_export: contracts::supply_chain::ExportedOciImage,
+    ) -> Self {
+        self.image_export = Some(image_export);
+        self
+    }
+
+    /// Returns the frozen sandbox layout export, when the attempt built one.
+    #[must_use]
+    pub const fn image_export(&self) -> Option<&contracts::supply_chain::ExportedOciImage> {
+        self.image_export.as_ref()
     }
 
     /// Reports successful process exit.
@@ -617,6 +674,7 @@ impl Debug for ClaudeCodeProcessOutput {
             .field("stderr_sha256", &self.stderr_sha256)
             .field("stderr_bytes", &self.stderr_bytes)
             .field("failure_class", &self.failure_class)
+            .field("has_image_export", &self.image_export.is_some())
             .finish()
     }
 }
@@ -681,9 +739,18 @@ pub trait ClaudeCodeProcess: Send + Sync {
     /// Returns the exact CLI version from the fixed worker executable.
     async fn version(&self) -> Result<String, ClaudeCodeProcessError>;
 
-    /// Executes exactly one Claude Code invocation.
+    /// Reports whether the executable verifies its exact version inside the execution itself.
+    ///
+    /// A sandbox backend runs the pinned CLI inside one admitted workload and validates the
+    /// reported version in the execution receipt, so the pre-execution probe is skipped.
+    fn verifies_identity_in_execution(&self) -> bool {
+        false
+    }
+
+    /// Executes exactly one Claude Code invocation under the given authority.
     async fn execute(
         &self,
+        scope: &ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError>;
@@ -754,6 +821,7 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
 
     async fn execute(
         &self,
+        _scope: &ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
@@ -1038,6 +1106,8 @@ pub struct ClaudeCodeAudit {
     pub usage_observed: bool,
     /// Raw stderr identity without its content.
     pub stderr_sha256: Option<Sha256Digest>,
+    /// Frozen sandbox layout export produced by this exact attempt, when present.
+    pub image_export: Option<contracts::supply_chain::ExportedOciImage>,
     /// Final outcome.
     pub outcome: RuntimeAuditOutcome,
     /// Stable root-cause diagnostic.
@@ -1116,6 +1186,7 @@ pub struct ClaudeCodeReviewFailure {
 
 struct AuditContext<'a> {
     track: AgentTrackKind,
+    tool_policy_sha256: Sha256Digest,
     input: &'a ImmutableEgressInput,
     schema: &'a Value,
     prompt: &'a str,
@@ -1211,7 +1282,6 @@ impl ClaudeCodeRuntime {
     }
 
     /// Generates one candidate constrained by the Control-authoritative Environment class.
-    #[allow(clippy::too_many_lines)]
     pub async fn generate_for_class(
         &self,
         track: AgentTrackKind,
@@ -1219,6 +1289,54 @@ impl ClaudeCodeRuntime {
         cancellation: RunCancellation,
         expected_environment_class: EnvironmentClass,
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        self.generate_scoped(
+            track,
+            &ExecutionScope::Advisory,
+            input,
+            cancellation,
+            expected_environment_class,
+            &[],
+        )
+        .await
+    }
+
+    /// Generates one candidate for an admitted authoring attempt generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a payload-free failure with hash-only audit evidence.
+    pub async fn generate_authoring(
+        &self,
+        scope: &AuthoringAttemptScope,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        expected_environment_class: EnvironmentClass,
+        platform_images: &[PlatformImageEntry],
+    ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        let execution_scope = ExecutionScope::Authoring(scope.clone());
+        self.generate_scoped(
+            scope.track,
+            &execution_scope,
+            input,
+            cancellation,
+            expected_environment_class,
+            platform_images,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn generate_scoped(
+        &self,
+        track: AgentTrackKind,
+        scope: &ExecutionScope,
+        input: ImmutableEgressInput,
+        cancellation: RunCancellation,
+        expected_environment_class: EnvironmentClass,
+        platform_images: &[PlatformImageEntry],
+    ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
+        let authoring = matches!(scope, ExecutionScope::Authoring(_));
+        let tool_policy = tool_policy_sha256(authoring);
         let (schema, prompt) = match track {
             AgentTrackKind::Environment => (
                 provider_environment_schema().map_err(|()| {
@@ -1227,6 +1345,7 @@ impl ClaudeCodeRuntime {
                         &input,
                         &Value::Null,
                         "",
+                        tool_policy,
                         ClaudeCodeRuntimeError::ProtocolInvalid,
                         None,
                     )
@@ -1240,6 +1359,7 @@ impl ClaudeCodeRuntime {
                         &input,
                         &Value::Null,
                         "",
+                        tool_policy,
                         ClaudeCodeRuntimeError::ProtocolInvalid,
                         None,
                     )
@@ -1251,12 +1371,21 @@ impl ClaudeCodeRuntime {
                 WORK_CONFIGURATION_PROMPT.to_owned(),
             ),
         };
+        let prompt = if authoring {
+            format!(
+                "{prompt}\n\n{AUTHORING_SANDBOX_PROMPT}{}",
+                platform_image_prompt(platform_images)
+            )
+        } else {
+            prompt
+        };
         let schema_text = serde_json::to_string(&schema).map_err(|_| {
             self.failure(
                 track,
                 &input,
                 &schema,
                 &prompt,
+                tool_policy,
                 ClaudeCodeRuntimeError::ProtocolInvalid,
                 None,
             )
@@ -1268,6 +1397,7 @@ impl ClaudeCodeRuntime {
                 &input,
                 &schema,
                 &prompt,
+                tool_policy,
                 ClaudeCodeRuntimeError::Cancelled,
                 None,
             ));
@@ -1280,6 +1410,7 @@ impl ClaudeCodeRuntime {
                         &input,
                         &schema,
                         &prompt,
+                        tool_policy,
                         ClaudeCodeRuntimeError::Cancelled,
                         None,
                     ));
@@ -1290,23 +1421,24 @@ impl ClaudeCodeRuntime {
                         &input,
                         &schema,
                         &prompt,
+                        tool_policy,
                         ClaudeCodeRuntimeError::RuntimeUnavailable,
                         None,
                     ))?
                 }
             }
         };
-        self.verify_runtime_identity()
-            .await
-            .map_err(|error| self.failure(track, &input, &schema, &prompt, error, None))?;
+        self.verify_runtime_identity().await.map_err(|error| {
+            self.failure(track, &input, &schema, &prompt, tool_policy, error, None)
+        })?;
         let max_repairs = self.policy.budget.max_schema_repairs;
         let mut repairs = 0_u8;
         let mut current_prompt = prompt.clone();
         loop {
-            let command = build_command(&self.policy, &input, &current_prompt);
+            let command = build_command(&self.policy, &input, &current_prompt, authoring);
             let process_output = self
                 .process
-                .execute(command, cancellation.clone())
+                .execute(scope, command, cancellation.clone())
                 .await
                 .map_err(|error| {
                     let runtime_error = match error {
@@ -1320,7 +1452,15 @@ impl ClaudeCodeRuntime {
                         }
                         ClaudeCodeProcessError::Io => ClaudeCodeRuntimeError::ExecutionFailed,
                     };
-                    self.failure(track, &input, &schema, &current_prompt, runtime_error, None)
+                    self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &current_prompt,
+                        tool_policy,
+                        runtime_error,
+                        None,
+                    )
                 })?;
             let parsed = self
                 .parse_result(
@@ -1328,6 +1468,7 @@ impl ClaudeCodeRuntime {
                     &input,
                     &schema,
                     &current_prompt,
+                    tool_policy,
                     &process_output,
                     expected_environment_class,
                 )
@@ -1476,10 +1617,11 @@ impl ClaudeCodeRuntime {
                 Arc::clone(&input),
                 input_sha256,
                 &prompt,
+                false,
             );
             let process_output = self
                 .process
-                .execute(command, cancellation.clone())
+                .execute(&ExecutionScope::Advisory, command, cancellation.clone())
                 .await
                 .map_err(|error| match error {
                     ClaudeCodeProcessError::Unavailable => review_failure(
@@ -1593,12 +1735,17 @@ impl ClaudeCodeRuntime {
         clippy::too_many_lines,
         reason = "candidate parsing applies schema, policy, and materialization gates in order"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one parse boundary carries the immutable candidate, policy and audit identity"
+    )]
     async fn parse_result(
         &self,
         track: AgentTrackKind,
         input: &ImmutableEgressInput,
         schema: &Value,
         prompt: &str,
+        tool_policy: Sha256Digest,
         process_output: &ClaudeCodeProcessOutput,
         expected_environment_class: EnvironmentClass,
     ) -> Result<ClaudeCodeExecution, ClaudeCodeFailure> {
@@ -1610,6 +1757,7 @@ impl ClaudeCodeRuntime {
                     input,
                     schema,
                     prompt,
+                    tool_policy,
                     process_output.classified_error().unwrap_or_else(|| {
                         if process_output.is_success() {
                             parse_error
@@ -1623,10 +1771,19 @@ impl ClaudeCodeRuntime {
         };
         let envelope = stream.envelope;
         let usage = envelope.usage().map_err(|error| {
-            self.failure(track, input, schema, prompt, error, Some(process_output))
+            self.failure(
+                track,
+                input,
+                schema,
+                prompt,
+                tool_policy,
+                error,
+                Some(process_output),
+            )
         })?;
         let mut audit = self.audit(AuditContext {
             track,
+            tool_policy_sha256: tool_policy,
             input,
             schema,
             prompt,
@@ -1840,17 +1997,23 @@ impl ClaudeCodeRuntime {
         Ok(ClaudeCodeExecution { document, audit })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one failure boundary carries the immutable candidate, policy and audit identity"
+    )]
     fn failure(
         &self,
         track: AgentTrackKind,
         input: &ImmutableEgressInput,
         schema: &Value,
         prompt: &str,
+        tool_policy_sha256: Sha256Digest,
         error: ClaudeCodeRuntimeError,
         process_output: Option<&ClaudeCodeProcessOutput>,
     ) -> ClaudeCodeFailure {
         let audit = self.audit(AuditContext {
             track,
+            tool_policy_sha256,
             input,
             schema,
             prompt,
@@ -1890,7 +2053,7 @@ impl ClaudeCodeRuntime {
             claude_code_version: binding.claude_code_version.clone(),
             prompt_sha256: Sha256Digest::of_bytes(context.prompt.as_bytes()),
             schema_sha256,
-            tool_policy_sha256: tool_policy_sha256(),
+            tool_policy_sha256: context.tool_policy_sha256,
             input_sha256: context.input.sha256(),
             output_sha256: None,
             session_id: context.session_id,
@@ -1899,12 +2062,18 @@ impl ClaudeCodeRuntime {
             stderr_sha256: context
                 .process_output
                 .and_then(|output| output.stderr_sha256),
+            image_export: context
+                .process_output
+                .and_then(|output| output.image_export().cloned()),
             outcome: RuntimeAuditOutcome::Failed,
             diagnostic_code: None,
         }
     }
 
     async fn verify_runtime_identity(&self) -> Result<(), ClaudeCodeRuntimeError> {
+        if self.process.verifies_identity_in_execution() {
+            return Ok(());
+        }
         *self
             .version_check
             .get_or_init(|| async {
@@ -2045,8 +2214,16 @@ fn build_command(
     policy: &ProjectLlmEgressPolicy,
     input: &ImmutableEgressInput,
     prompt: &str,
+    authoring: bool,
 ) -> ClaudeCodeCommand {
-    build_command_from_bytes(policy, policy.budget, input.bytes(), input.sha256(), prompt)
+    build_command_from_bytes(
+        policy,
+        policy.budget,
+        input.bytes(),
+        input.sha256(),
+        prompt,
+        authoring,
+    )
 }
 
 fn build_command_from_bytes(
@@ -2055,7 +2232,17 @@ fn build_command_from_bytes(
     stdin: Arc<[u8]>,
     stdin_sha256: Sha256Digest,
     prompt: &str,
+    authoring: bool,
 ) -> ClaudeCodeCommand {
+    let (max_turns, tools, permission_mode) = if authoring {
+        (
+            AUTHORING_MAX_TURNS.to_string(),
+            AUTHORING_TOOLS.to_owned(),
+            "bypassPermissions",
+        )
+    } else {
+        ("1".to_owned(), String::new(), "dontAsk")
+    };
     let args = vec![
         "--bare".to_owned(),
         "--print".to_owned(),
@@ -2065,7 +2252,7 @@ fn build_command_from_bytes(
         "--model".to_owned(),
         policy.binding.model.clone(),
         "--max-turns".to_owned(),
-        "1".to_owned(),
+        max_turns,
         "--max-budget-usd".to_owned(),
         microusd_to_usd(budget.max_cost_microusd),
         "--no-session-persistence".to_owned(),
@@ -2075,9 +2262,9 @@ fn build_command_from_bytes(
         "--disable-slash-commands".to_owned(),
         "--strict-mcp-config".to_owned(),
         "--tools".to_owned(),
-        String::new(),
+        tools,
         "--permission-mode".to_owned(),
-        "dontAsk".to_owned(),
+        permission_mode.to_owned(),
         "--system-prompt".to_owned(),
         SYSTEM_PROMPT.to_owned(),
         prompt.to_owned(),
@@ -2491,8 +2678,41 @@ fn contains_protected_field(output: &Value) -> bool {
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
 
-fn tool_policy_sha256() -> Sha256Digest {
-    Sha256Digest::of_bytes(TOOL_POLICY_CANONICAL_JSON)
+const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
+
+const AUTHORING_MAX_TURNS: u32 = 60;
+const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
+const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. A rootless BuildKit daemon is reachable through BUILDKIT_HOST for image builds and may only pull from the platform Harbor registry; when you build a container image, export its OCI layout to exactly /workspace/labweaver-export.tar (for example: buildctl build --frontend dockerfile.v0 --local context=/workspace/context --local dockerfile=/workspace/context --output type=oci,dest=/workspace/labweaver-export.tar). Only that exact exported layout is imported and published by the platform. The final response must still be exactly one JSON object satisfying the required schema.";
+
+fn platform_image_prompt(images: &[PlatformImageEntry]) -> String {
+    use std::fmt::Write as _;
+    if images.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "\n\nPLATFORM IMAGE CATALOG (prefer these reviewed, digest-pinned base images and pull only from the platform Harbor registry):",
+    );
+    for image in images {
+        let _ = write!(
+            text,
+            "\n- {} ({}) @ {}",
+            image.binding,
+            match image.kind {
+                PlatformImageKind::Container => "container",
+                PlatformImageKind::VirtualMachine => "vm",
+            },
+            image.resolved_digest
+        );
+    }
+    text
+}
+
+fn tool_policy_sha256(authoring: bool) -> Sha256Digest {
+    if authoring {
+        Sha256Digest::of_bytes(AUTHORING_TOOL_POLICY_CANONICAL_JSON)
+    } else {
+        Sha256Digest::of_bytes(TOOL_POLICY_CANONICAL_JSON)
+    }
 }
 
 fn microusd_to_usd(value: u64) -> String {
@@ -2638,9 +2858,40 @@ mod tests {
 
     use super::{
         CLAUDE_RUNTIME_PATH, ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError,
-        TokioClaudeCodeProcess, decimal_to_microusd, microusd_to_usd, read_stream_until_result,
-        usd_number_to_microusd,
+        TokioClaudeCodeProcess, decimal_to_microusd, microusd_to_usd, platform_image_prompt,
+        read_stream_until_result, usd_number_to_microusd,
     };
+    use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn platform_image_prompt_lists_only_digest_pinned_reviewed_entries() {
+        assert_eq!(platform_image_prompt(&[]), "");
+        let entry = PlatformImageEntry {
+            catalog_id: contracts::PlatformImageId::new(),
+            kind: PlatformImageKind::Container,
+            binding: "ubuntu-24.04".to_owned(),
+            source_reference: "harbor.internal/labweaver-system/ubuntu:24.04".to_owned(),
+            resolved_digest: format!("sha256:{}", "a".repeat(64)),
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            size_bytes: 4_096,
+            capacity_bytes: None,
+            disk_sha256: None,
+            format: None,
+            status: PlatformImageStatus::Active,
+            trust_revision: 1,
+            repin_generation: 1,
+            pinned_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+            updated_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+        };
+        let prompt = platform_image_prompt(std::slice::from_ref(&entry));
+        assert!(prompt.contains("PLATFORM IMAGE CATALOG"));
+        assert!(prompt.contains(&format!(
+            "- ubuntu-24.04 (container) @ {}",
+            entry.resolved_digest
+        )));
+        assert!(!prompt.contains(":24.04"));
+    }
 
     #[test]
     fn process_environment_has_a_fixed_runtime_path() {
@@ -2689,7 +2940,7 @@ mod tests {
             "sessionPersistence": false
         });
         assert_eq!(
-            super::tool_policy_sha256(),
+            super::tool_policy_sha256(false),
             Sha256Digest::of_canonical(&document)?
         );
         Ok(())

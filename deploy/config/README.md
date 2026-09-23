@@ -56,8 +56,8 @@ carry a short-lived signed user delegation for user scope. The Access and Resour
 must contain the same generated `resource-delegation-key` under their respective Secret objects;
 the key is a root-owned `0600` input and is never written to this repository, a report or a log.
 Actor and role HTTP headers are not an identity mechanism. Internal Resource routes require a
-service JWT with the route permission; Task resource routes additionally require the configured
-Evaluation client ID.
+service JWT with the route permission; Task resource routes additionally require a configured task
+owner client ID (Evaluation and Agent authoring share the one-shot Task boundary).
 
 The deployment binds the pinned Claude Code CLI to the reviewed Anthropic-compatible endpoint using
 only the three generic provider fields. Put the operator-provided auth token value in
@@ -67,6 +67,16 @@ command argument, a log or a report. The Agent process receives exactly
 files. Operator-specific variable names are not read, and there is no compatibility alias,
 ambient credential fallback or alternate provider route; startup fails closed when the
 mounted set differs from these three fields.
+
+The administrator image catalog binds exactly one platform registry. Put the operator-provided CA,
+robot username and robot password values in
+`secrets/agent-service-secrets/{harbor-ca.crt,harbor-username,harbor-password}` with mode `0600`;
+`agent-control-plane.yaml.example` reads them through `platform_registry.ca_file`,
+`platform_registry.username_file` and `platform_registry.password_file` and accepts no other
+registry host than `platform_registry.registry`. The robot account needs pull on the reviewed base
+images and push on the import target project. Startup fails closed when the mounted files are
+missing, and a deployment without the `platform_registry` block keeps catalog writes disabled with
+`LW_PLATFORM_IMAGE_REGISTRY_NOT_CONFIGURED`.
 
 Environment-specific Helm values must explicitly bind existing infrastructure names and VIPs. This
 includes reviewed `hostAliases`, matching `/32` entries under
@@ -103,3 +113,37 @@ The controller resolves existing headless PostgreSQL, NATS and MinIO endpoints f
 objects on every run and owns one bounded `/etc/hosts` block for those service DNS names plus the
 reviewed Harbor and Keycloak VIPs. Administrative clients use explicit CA files and isolated
 configuration directories; they do not disable TLS verification or depend on ambient credentials.
+
+## Reviewed GPU capacity and class catalog
+
+`resource-capacity.json.example` ships `gpuObservers: []` because an observer binds
+deployment-specific credentials and node selectors; JSON has no comment syntax, so the required
+shape is documented here instead. Each entry is
+`{providerBinding, apiServer, bearerTokenFile, clusterCaFile, requestTimeoutMilliseconds,
+observationTtlSeconds, maxNodes, maxPods}` with an HTTPS API server, absolute credential paths, a
+bounded timeout, an observation TTL of at most 300 seconds and non-zero node/pod bounds. Without an
+observer for a GPU provider binding, a GPU request fails closed with `GpuObservationStale` rather
+than being admitted against an unobserved capacity.
+
+`deploy/versions.lock.yml` `platform_gpu_classes` is the reviewed starting catalog
+(`class`, `mode`, `provider_binding`, `capacity_units`, `allocation_binding`). The
+`resource_application` role renders it into `resource-service-config/capacity.json`
+(`gpuCatalogSeed`) and fails closed with `PLATFORM_APPLICATION_GPU_CLASS_CATALOG_MISMATCH` unless
+the rendered catalog is non-empty, claims positive capacity units, and agrees exactly with the
+lock. It must stay within the provider's observed capacity: an entry that claims more units than
+the observer reports is refused instead of being silently trimmed. Production must set real GPU
+classes through the admin catalog API or by rendering this list; the checked-in values are the
+reviewed local example.
+
+## Reviewed container base images
+
+`deploy/versions.lock.yml` `platform_container_images` lists the container base images the
+deployment registers in the Agent platform image catalog (`platform_registry.seed_images`). The
+repository ships no image-copy tooling, so the operator mirrors each reviewed `reviewed_digest`
+into the configured Harbor project; the application role proves the exact digest is present there
+and renders `seed_images` from the lock, failing with
+`PLATFORM_APPLICATION_CONTAINER_IMAGE_DIGEST_ABSENT` or
+`PLATFORM_APPLICATION_CONTAINER_IMAGE_SEED_MISMATCH` when it cannot. Each entry pins the exact
+upstream digest the operator imported, so a later tag move cannot change what authoring sees; a
+seed that cannot be resolved or registered is logged with `LW_PLATFORM_IMAGE_SEED_FAILED` and
+stays absent from the catalog.

@@ -49,14 +49,61 @@
       - platform_application_keycloak_ca_file | length > 0
       - platform_application_keycloak_hostname is match('^[a-z0-9][a-z0-9.-]+$')
       - platform_application_keycloak_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-      - platform_application_lock.platform_vm_base.registry_url is match('^docker://[^@]+@sha256:[0-9a-f]{64}$')
-      - platform_application_lock.platform_vm_base.disk_sha256 is match('^[0-9a-f]{64}$')
-      - platform_application_lock.platform_vm_base.binding == 'ubuntu-24.04-v1'
-      - platform_application_lock.platform_vm_base.artifact_id is match('^[0-9a-f-]{36}$')
-      - platform_application_lock.platform_vm_base.format in ['qcow2', 'raw']
-      - platform_application_lock.platform_vm_base.capacity_bytes | int > 0
-      - platform_application_lock.platform_vm_base.data_source_name == 'ubuntu-lab-base-v1'
-      - platform_application_lock.platform_vm_base.storage_class_name == 'local-path'
+      - (platform_application_lock.platform_vm_bases | length) >= 2
+      - (platform_application_lock.platform_vm_bases | length) <= platform_application_vm_base_max_count
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('capacity_bytes', 'gt', platform_application_vm_base_max_capacity_bytes)
+         | list | length) == 0
+      - >-
+        (platform_application_lock.platform_vm_bases | map(attribute='binding') | unique | list | length) ==
+        (platform_application_lock.platform_vm_bases | length)
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('registry_url', 'match', '^docker://[^@]+@sha256:[0-9a-f]{64}$')
+         | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('disk_sha256', 'match', '^[0-9a-f]{64}$')
+         | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('artifact_id', 'match', '^[0-9a-f-]{36}$')
+         | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('format', 'in', ['qcow2', 'raw'])
+         | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('storage_class_name', 'equalto', 'local-path')
+         | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('seed_data_volume_name', 'defined')
+         | selectattr('data_source_name', 'defined')
+         | list | length) == (platform_application_lock.platform_vm_bases | length)
+      - (platform_application_lock.platform_container_images | length) > 0
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('binding', 'match', '^[a-z0-9][a-z0-9-]{2,62}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('name', 'match', '^[a-z0-9][a-z0-9._-]{0,127}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('tag', 'match', '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | selectattr('reviewed_digest', 'match', '^sha256:[0-9a-f]{64}$')
+         | list | length) == (platform_application_lock.platform_container_images | length)
+      - >-
+        (platform_application_lock.platform_container_images
+         | map(attribute='binding') | unique | list | length)
+        == (platform_application_lock.platform_container_images | length)
       - platform_application_keycloak_truststore_password | length >= 16
       - platform_application_access_seed_file | length > 0
       - platform_application_values_files | length > 0
@@ -474,6 +521,79 @@
          | selectattr('providerKind', 'equalto', 'container')
          | first).workspaceAccessMode in ['ReadWriteOnce', 'ReadWriteMany']
     fail_msg: PLATFORM_APPLICATION_CONTAINER_WORKSPACE_STORAGE_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Require every provider base disk to match a reviewed lock entry
+  ansible.builtin.assert:
+    that:
+      - >-
+        (platform_application_lock.platform_vm_bases
+         | selectattr('binding', 'equalto', item.binding)
+         | selectattr('registry_url', 'equalto', item.sourceRegistryDigest)
+         | selectattr('disk_sha256', 'equalto', item.diskSha256)
+         | selectattr('capacity_bytes', 'equalto', item.capacityBytes)
+         | selectattr('format', 'equalto', item.format)
+         | list | length) == 1
+    fail_msg: PLATFORM_VM_BASE_CATALOG_MISMATCH
+  loop: >-
+    {{ (platform_application_environment_providers
+        | selectattr('providerKind', 'equalto', 'kubevirt') | first).baseDisks }}
+  loop_control:
+    label: "{{ item.binding }}"
+  no_log: true
+
+- name: Require the provider base disk catalog to cover every reviewed base
+  ansible.builtin.assert:
+    that:
+      - >-
+        ((platform_application_environment_providers
+          | selectattr('providerKind', 'equalto', 'kubevirt') | first).baseDisks
+         | map(attribute='binding') | sort | list) ==
+        (platform_application_lock.platform_vm_bases | map(attribute='binding') | sort | list)
+    fail_msg: PLATFORM_VM_BASE_CATALOG_MISMATCH
+  no_log: true
+
+- name: Bind the rendered Agent platform registry seed catalog
+  ansible.builtin.set_fact:
+    platform_application_agent_seed_images: >-
+      {{ (((platform_application_configuration_objects
+            | selectattr('kind', 'equalto', 'ConfigMap')
+            | selectattr('metadata.name', 'equalto', 'agent-service-config')
+            | first).data['config.yaml'] | from_yaml).platform_registry
+          | default({})).get('seed_images', []) }}
+  no_log: true
+
+- name: Require the rendered Agent seed catalog to match the reviewed container base images
+  ansible.builtin.assert:
+    that:
+      - (platform_application_container_images | length) > 0
+      - (platform_application_agent_seed_images | length) == (platform_application_container_images | length)
+      - >-
+        (platform_application_agent_seed_images | map(attribute='binding') | sort | list) ==
+        (platform_application_container_images | map(attribute='binding') | sort | list)
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_SEED_MISMATCH
+  no_log: true
+
+- name: Require every rendered Agent seed to bind the reviewed Harbor source
+  ansible.builtin.assert:
+    that:
+      - item.kind == 'container'
+      - item.trust_revision == 1
+      - >-
+        (platform_application_container_images
+         | selectattr('binding', 'equalto', item.binding)
+         | list | length) == 1
+      - >-
+        item.source_reference ==
+        platform_application_harbor_registry ~ '/' ~ platform_application_harbor_project ~ '/' ~
+        ((platform_application_container_images
+          | selectattr('binding', 'equalto', item.binding) | first).name) ~ ':' ~
+        ((platform_application_container_images
+          | selectattr('binding', 'equalto', item.binding) | first).tag)
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_SEED_MISMATCH
+  loop: "{{ platform_application_agent_seed_images }}"
+  loop_control:
+    label: "{{ item.binding }}"
   no_log: true
 
 - name: Bind the Control event configuration for retained stream validation
@@ -1262,6 +1382,41 @@
     platform_application_harbor_project_verified.json[0].name != platform_application_harbor_project
   no_log: true
 
+# The deployment has no image-copy tooling; the operator mirrors each reviewed
+# digest into the retained project, and this read-only probe proves the exact
+# digest is present so the Agent seed catalog cannot claim an image the project
+# does not hold. Absence fails the deployment instead of leaving a catalog that
+# only looks usable.
+- name: Verify the reviewed container base image digests are present in the retained Harbor project
+  ansible.builtin.uri:
+    url: >-
+      {{ platform_application_harbor_api }}/api/v2.0/projects/{{
+      platform_application_harbor_project | urlencode }}/repositories/{{
+      item.name | urlencode }}/artifacts/{{ item.reviewed_digest | urlencode }}
+    user: "{{ platform_application_harbor_admin_username }}"
+    password: "{{ platform_application_harbor_admin_password_raw.content | b64decode | trim }}"
+    force_basic_auth: true
+    validate_certs: true
+    ca_path: "{{ platform_application_harbor_ca_file }}"
+    return_content: false
+  check_mode: false
+  loop: "{{ platform_application_container_images }}"
+  loop_control:
+    label: "{{ item.binding }}"
+  register: platform_application_harbor_seed_digest_probes
+  failed_when: false
+  no_log: true
+
+- name: Require every reviewed container base image digest in the retained Harbor project
+  ansible.builtin.assert:
+    that:
+      - (item.status | default(0)) == 200
+    fail_msg: PLATFORM_APPLICATION_CONTAINER_IMAGE_DIGEST_ABSENT
+  loop: "{{ platform_application_harbor_seed_digest_probes.results }}"
+  loop_control:
+    label: "{{ item.item.binding }}"
+  no_log: true
+
 - name: Load the retained Harbor CA for Kubernetes nodes
   ansible.builtin.slurp:
     src: "{{ platform_application_harbor_ca_file }}"
@@ -1894,7 +2049,7 @@
     api_version: cdi.kubevirt.io/v1beta1
     kind: DataVolume
     namespace: "{{ platform_application_namespace }}"
-    name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+    name: "{{ item.seed_data_volume_name }}"
   register: platform_application_vm_base_dv
 
 - name: Reject a conflicting immutable VM base DataVolume
@@ -1904,16 +2059,19 @@
       - >-
         platform_application_vm_base_dv.resources | length == 0 or
         platform_application_vm_base_dv.resources[0].spec.source.registry.url ==
-        platform_application_lock.platform_vm_base.registry_url
+        item.registry_url
       - >-
         platform_application_vm_base_dv.resources | length == 0 or
         platform_application_vm_base_dv.resources[0].spec.storage.storageClassName ==
-        platform_application_lock.platform_vm_base.storage_class_name
+        item.storage_class_name
       - >-
         platform_application_vm_base_dv.resources | length == 0 or
         platform_application_vm_base_dv.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
-        platform_application_lock.platform_vm_base.disk_sha256
+        item.disk_sha256
     fail_msg: PLATFORM_VM_BASE_DATAVOLUME_CONFLICT
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Import the immutable VM base disk when absent
   kubernetes.core.k8s:
@@ -1923,27 +2081,30 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataVolume
       metadata:
-        name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+        name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
-          labweaver.io/source-release: "{{ platform_application_lock.platform_vm_base.release }}"
-          labweaver.io/source-registry: "{{ platform_application_lock.platform_vm_base.registry_url }}"
-          labweaver.io/disk-sha256: "{{ platform_application_lock.platform_vm_base.disk_sha256 }}"
+          labweaver.io/source-release: "{{ item.release }}"
+          labweaver.io/source-registry: "{{ item.registry_url }}"
+          labweaver.io/disk-sha256: "{{ item.disk_sha256 }}"
       spec:
         source:
           registry:
-            url: "{{ platform_application_lock.platform_vm_base.registry_url }}"
+            url: "{{ item.registry_url }}"
             pullMethod: node
         storage:
-          storageClassName: "{{ platform_application_lock.platform_vm_base.storage_class_name }}"
+          storageClassName: "{{ item.storage_class_name }}"
           accessModes: [ReadWriteOnce]
           resources:
             requests:
-              storage: "{{ platform_application_lock.platform_vm_base.storage_request }}"
+              storage: "{{ item.storage_request }}"
   when: platform_application_vm_base_dv.resources | length == 0
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Reconcile immediate binding for the immutable VM base
   kubernetes.core.k8s:
@@ -1953,10 +2114,13 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataVolume
       metadata:
-        name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+        name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Wait for the immutable VM base claim
   kubernetes.core.k8s_info:
@@ -1964,11 +2128,14 @@
     api_version: v1
     kind: PersistentVolumeClaim
     namespace: "{{ platform_application_namespace }}"
-    name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+    name: "{{ item.seed_data_volume_name }}"
   register: platform_application_vm_base_claim
   until: platform_application_vm_base_claim.resources | length == 1
   retries: 30
   delay: 2
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Reconcile immediate binding on the immutable VM base claim
   kubernetes.core.k8s:
@@ -1978,10 +2145,13 @@
       apiVersion: v1
       kind: PersistentVolumeClaim
       metadata:
-        name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+        name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Wait for the immutable VM base import
   kubernetes.core.k8s_info:
@@ -1989,13 +2159,16 @@
     api_version: cdi.kubevirt.io/v1beta1
     kind: DataVolume
     namespace: "{{ platform_application_namespace }}"
-    name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+    name: "{{ item.seed_data_volume_name }}"
   register: platform_application_vm_base_ready
   until: >-
     platform_application_vm_base_ready.resources | length == 1 and
     platform_application_vm_base_ready.resources[0].status.phase | default('') == 'Succeeded'
   retries: 120
   delay: 5
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Read the immutable VM base DataSource
   kubernetes.core.k8s_info:
@@ -2003,8 +2176,11 @@
     api_version: cdi.kubevirt.io/v1beta1
     kind: DataSource
     namespace: "{{ platform_application_namespace }}"
-    name: "{{ platform_application_lock.platform_vm_base.data_source_name }}"
+    name: "{{ item.data_source_name }}"
   register: platform_application_vm_base_source
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Reject a conflicting immutable VM base DataSource
   ansible.builtin.assert:
@@ -2013,10 +2189,13 @@
       - >-
         platform_application_vm_base_source.resources | length == 0 or
         (platform_application_vm_base_source.resources[0].spec.source.pvc.name ==
-         platform_application_lock.platform_vm_base.seed_data_volume_name and
+         item.seed_data_volume_name and
          platform_application_vm_base_source.resources[0].spec.source.pvc.namespace ==
          platform_application_namespace)
     fail_msg: PLATFORM_VM_BASE_DATASOURCE_CONFLICT
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Publish the immutable VM base DataSource when absent
   kubernetes.core.k8s:
@@ -2026,20 +2205,23 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataSource
       metadata:
-        name: "{{ platform_application_lock.platform_vm_base.data_source_name }}"
+        name: "{{ item.data_source_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
-          labweaver.io/source-release: "{{ platform_application_lock.platform_vm_base.release }}"
-          labweaver.io/source-registry: "{{ platform_application_lock.platform_vm_base.registry_url }}"
-          labweaver.io/disk-sha256: "{{ platform_application_lock.platform_vm_base.disk_sha256 }}"
+          labweaver.io/source-release: "{{ item.release }}"
+          labweaver.io/source-registry: "{{ item.registry_url }}"
+          labweaver.io/disk-sha256: "{{ item.disk_sha256 }}"
       spec:
         source:
           pvc:
-            name: "{{ platform_application_lock.platform_vm_base.seed_data_volume_name }}"
+            name: "{{ item.seed_data_volume_name }}"
             namespace: "{{ platform_application_namespace }}"
   when: platform_application_vm_base_source.resources | length == 0
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Read back the immutable VM base DataSource
   kubernetes.core.k8s_info:
@@ -2047,24 +2229,30 @@
     api_version: cdi.kubevirt.io/v1beta1
     kind: DataSource
     namespace: "{{ platform_application_namespace }}"
-    name: "{{ platform_application_lock.platform_vm_base.data_source_name }}"
+    name: "{{ item.data_source_name }}"
   register: platform_application_vm_base_source_readback
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Require the immutable VM base identity
   ansible.builtin.assert:
     that:
       - platform_application_vm_base_source_readback.resources | length == 1
-      - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.name == platform_application_lock.platform_vm_base.seed_data_volume_name
+      - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.name == item.seed_data_volume_name
       - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.namespace == platform_application_namespace
       - >-
         platform_application_vm_base_source_readback.resources[0]
         .metadata.annotations['labweaver.io/source-registry'] ==
-        platform_application_lock.platform_vm_base.registry_url
+        item.registry_url
       - >-
         platform_application_vm_base_source_readback.resources[0]
         .metadata.annotations['labweaver.io/disk-sha256'] ==
-        platform_application_lock.platform_vm_base.disk_sha256
+        item.disk_sha256
     fail_msg: PLATFORM_VM_BASE_IDENTITY_INVALID
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Reconcile the application Harbor pull credential
   kubernetes.core.k8s:
@@ -2333,6 +2521,84 @@
           }}
   no_log: true
 
+- name: Bind the authoring sandbox to the immutable package image
+  ansible.builtin.set_fact:
+    platform_application_agent_configuration_object: >-
+      {{
+        platform_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'agent-service-config')
+        | first
+      }}
+    platform_application_authoring_sandbox_image: >-
+      {{
+        (
+          platform_application_package.images
+          | selectattr('component', 'equalto', 'authoring-sandbox')
+          | first
+        ).reference
+      }}
+    platform_application_authoring_buildkit_image: >-
+      {{ platform_application_lock.platform_foundation.buildkit_rootless }}
+  no_log: true
+
+- name: Require the authoring sandbox package binding
+  ansible.builtin.assert:
+    that:
+      - platform_application_authoring_sandbox_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - platform_application_authoring_buildkit_image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - >-
+        (
+          platform_application_agent_configuration_object.data['config.yaml']
+          | from_yaml
+        ).sandbox.image is match('^[^@]+@sha256:[0-9a-f]{64}$')
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_SANDBOX_IMAGE_INVALID
+  no_log: true
+
+- name: Apply the package-bound agent configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: >-
+        {{ platform_application_agent_configuration_object.metadata }}
+      data: >-
+        {{
+          platform_application_agent_configuration_object.data
+          | combine(
+              {
+                'config.yaml': (
+                  (
+                    platform_application_agent_configuration_object.data['config.yaml']
+                    | from_yaml
+                    | combine(
+                        {
+                          'sandbox': (
+                            (
+                              platform_application_agent_configuration_object.data['config.yaml']
+                              | from_yaml
+                            ).sandbox
+                            | combine(
+                                {
+                                  'image': platform_application_authoring_sandbox_image,
+                                  'buildkit_image': platform_application_authoring_buildkit_image,
+                                  'buildkit_config_map_name': platform_application_authoring_buildkit_config_name
+                                }
+                              )
+                          )
+                        }
+                      )
+                    | to_nice_yaml(indent=2, sort_keys=false)
+                  )
+                )
+              }
+            )
+        }}
+  no_log: true
+
 - name: Reconcile the evaluation worker namespace without deleting retained state
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -2471,6 +2737,177 @@
                'password': platform_application_harbor_password,
                'auth': (platform_application_harbor_username + ':' + platform_application_harbor_password)
                  | b64encode}}} | to_json | b64encode }}
+  no_log: true
+
+- name: Reconcile the authoring sandbox namespace without deleting retained state
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          labweaver.io/managed: "true"
+          labweaver.io/security-exception: rootless-buildkit-no-process-sandbox
+          pod-security.kubernetes.io/enforce: privileged
+          pod-security.kubernetes.io/audit: restricted
+          pod-security.kubernetes.io/warn: restricted
+
+- name: Reconcile the permanent authoring sandbox namespace default deny
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: authoring-default-deny
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress, Egress]
+        ingress: []
+        egress: []
+
+- name: Read back the permanent authoring sandbox namespace default deny
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{ platform_application_authoring_namespace }}"
+    name: authoring-default-deny
+  register: platform_application_authoring_default_deny
+
+- name: Require the permanent authoring sandbox namespace default deny
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_authoring_default_deny.resources | length == 0
+        ) or
+        (
+          platform_application_authoring_default_deny.resources | length == 1 and
+          platform_application_authoring_default_deny.resources[0].spec.podSelector == {} and
+          platform_application_authoring_default_deny.resources[0].spec.policyTypes | sort == ['Egress', 'Ingress'] and
+          platform_application_authoring_default_deny.resources[0].spec.ingress | default([]) == [] and
+          platform_application_authoring_default_deny.resources[0].spec.egress | default([]) == []
+        )
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_DEFAULT_DENY_INVALID
+
+- name: Reconcile the tokenless authoring runner service account
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ platform_application_authoring_service_account_name }}"
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      automountServiceAccountToken: false
+
+- name: Require the authoring sandbox to use the platform image pull identity
+  ansible.builtin.assert:
+    that:
+      - platform_application_authoring_pull_secret_name == platform_application_image_pull_secret_name
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_REGISTRY_PULL_CONFIG_INVALID
+  no_log: true
+
+- name: Reconcile the authoring sandbox registry pull secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ platform_application_authoring_pull_secret_name }}"
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: >-
+          {{ {'auths': {platform_application_harbor_registry: {
+               'username': platform_application_harbor_username,
+               'password': platform_application_harbor_password,
+               'auth': (platform_application_harbor_username + ':' + platform_application_harbor_password)
+                 | b64encode}}} | to_json | b64encode }}
+  no_log: true
+
+- name: Reconcile the reviewed authoring BuildKit configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ platform_application_authoring_buildkit_config_name }}"
+        namespace: "{{ platform_application_authoring_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      data:
+        buildkitd.toml: |
+          rootless = true
+          [grpc]
+            address = ["tcp://127.0.0.1:1234"]
+          [worker.oci]
+            enabled = true
+            noProcessSandbox = true
+          [registry."{{ platform_application_harbor_registry }}"]
+            ca = ["/etc/buildkit/registry-ca.crt"]
+        registry-ca.crt: "{{ platform_application_harbor_ca_bundle.content | b64decode }}"
+  no_log: true
+
+- name: Read back the reviewed authoring BuildKit configuration
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ platform_application_authoring_namespace }}"
+    name: "{{ platform_application_authoring_buildkit_config_name }}"
+  register: platform_application_authoring_buildkit_config
+  no_log: true
+
+- name: Require the reviewed authoring BuildKit configuration
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          ansible_check_mode and
+          platform_application_authoring_buildkit_config.resources | length == 0
+        ) or
+        (
+          platform_application_authoring_buildkit_config.resources | length == 1 and
+          'noProcessSandbox = true' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          'rootless = true' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          'address = ["tcp://127.0.0.1:1234"]' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          '/etc/buildkit/registry-ca.crt' in
+            platform_application_authoring_buildkit_config.resources[0].data['buildkitd.toml'] and
+          platform_application_authoring_buildkit_config.resources[0].data['registry-ca.crt'] is match('-----BEGIN CERTIFICATE-----')
+        )
+    fail_msg: PLATFORM_APPLICATION_AUTHORING_BUILDKIT_CONFIGURATION_INVALID
   no_log: true
 
 - name: Reconcile the retained MinIO transport policy for platform clients

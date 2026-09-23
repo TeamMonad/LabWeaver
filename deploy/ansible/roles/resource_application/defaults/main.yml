@@ -24,6 +24,11 @@ resource_application_psql: /usr/bin/psql
 resource_application_postgres_service: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE') }}"
 resource_application_postgres_service_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_POSTGRES_SERVICE_FILE') }}"
 resource_application_configuration_manifest: "{{ playbook_dir }}/../../config/resource-bundle-manifest.json"
+# Reviewed GPU classes the deployment renders into
+# `resource-service-config/capacity.json` (`gpuCatalogSeed`). The rendered
+# catalog must be non-empty, claim positive capacity units, and agree exactly
+# with this immutable list; the role fails closed otherwise.
+resource_application_gpu_classes: "{{ resource_application_lock.platform_gpu_classes }}"
 resource_application_values_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_VALUES_FILE') }}"
 resource_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 resource_application_kubeconfig: /etc/kubernetes/admin.conf

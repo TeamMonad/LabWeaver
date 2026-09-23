@@ -60,6 +60,10 @@ fn request() -> OjExecutionRequest {
     }
 }
 
+/// Reviewed object-store CIDR the per-attempt egress policy admits.
+const OBJECT_STORE_EGRESS: &str = "10.96.0.0/12:9000";
+const OBJECT_STORE_POD_EGRESS: &str = "10.202.0.0/16:9000";
+
 fn binding() -> OjJobBinding {
     let submission = b"submission-archive";
     let evaluator = b"approved-evaluator";
@@ -74,6 +78,10 @@ fn binding() -> OjJobBinding {
             "1".repeat(64)
         ),
         request,
+        object_store_egress: vec![
+            OBJECT_STORE_EGRESS.to_owned(),
+            OBJECT_STORE_POD_EGRESS.to_owned(),
+        ],
         materializer: MaterializeCommand {
             schema_version: evaluation_service::ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
             artifacts: vec![
@@ -133,7 +141,7 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
     );
     assert_eq!(
         pointer(job, "/spec/template/spec/runtimeClassName"),
-        "labweaver-oj"
+        "labweaver-sandbox"
     );
     assert_eq!(
         pointer(job, "/metadata/annotations/labweaver.io~1trace-id"),
@@ -274,7 +282,24 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
     assert_eq!(pointer(policy, "/spec/policyTypes/0"), "Ingress");
     assert_eq!(pointer(policy, "/spec/policyTypes/1"), "Egress");
     assert_eq!(pointer(policy, "/spec/ingress"), &serde_json::json!([]));
-    assert_eq!(pointer(policy, "/spec/egress/0/ports/0/port"), 443);
+    // DNS plus the reviewed object-store CIDR only: no rule admits HTTPS anywhere.
+    assert_eq!(
+        pointer(policy, "/spec/egress"),
+        &serde_json::json!([
+            {
+                "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
+                "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}],
+            },
+            {
+                "to":[{"ipBlock":{"cidr":"10.96.0.0/12"}}],
+                "ports":[{"protocol":"TCP","port":9000}],
+            },
+            {
+                "to":[{"ipBlock":{"cidr":"10.202.0.0/16"}}],
+                "ports":[{"protocol":"TCP","port":9000}],
+            },
+        ])
+    );
 
     let serialized = serde_json::to_string(&resources)?;
     assert!(!serialized.contains("basic.in\\n"));
@@ -383,6 +408,13 @@ fn job_plan_rejects_mutable_images_invalid_materializers_and_oversized_commands(
     assert_eq!(
         error_diagnostic(OjJobResources::build(&value))?,
         "LW_OJ_MATERIALIZER_INVALID"
+    );
+
+    let mut value = binding();
+    value.object_store_egress = vec!["objects.example.test".to_owned()];
+    assert_eq!(
+        error_diagnostic(OjJobResources::build(&value))?,
+        "LW_OJ_JOB_BINDING_INVALID"
     );
 
     let mut value = binding();

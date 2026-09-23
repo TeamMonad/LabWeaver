@@ -35,15 +35,18 @@ HTTPS 证书由本次运行的本地 CA 签发。命令不自动修改宿主机�
 
 本地入口用于业务开发和 CPU 容器流程。模型调用和镜像构建依赖必须明确配置，不能把未配置的外部能力视为成功。普通 `up` 会先安装锁定版本的 Harbor 图表、启动运行拥有的 Harbor 和 rootless BuildKit，再启用真实镜像构建执行器；本地 Registry 仍只分发平台镜像。`--external-fixtures` 才会关闭真实构建执行器并使用边界明确的构建夹具。默认不发起付费模型请求、真实扣款或远端部署。
 
+普通 `up` 默认不启用沙箱内镜像构建；需要验证 authoring sandbox 的 rootless BuildKit sidecar 时显式加 `--authoring-buildkit-sidecar`。该开关把锁定的 rootless BuildKit 镜像和 `authoring-buildkit-config` ConfigMap（`buildkitd.toml` 与 Harbor CA）写入沙箱配置，只在真实 Harbor 与 BuildKit 就绪的普通 `up` 中可用，`--external-fixtures` 不支持。
+
 普通 `up` 在创建 Kind 资源前读取仓库根目录 `.env` 中的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和 `ANTHROPIC_MODEL`；也可以通过 `--provider-env <path>` 指定同样只包含这三个字段的 dotenv 文件。三项会分别进入 Agent 的 ConfigMap 和 Secret，缺失、空值、额外字段或非 HTTPS 地址会直接阻止启动。Agent 的持久化 LLM policy 仍由管理员显式创建；它的 `binding.model` 必须选择当前 Provider 支持的模型，不会从 `.env` 静默改写。
 
 管理员批准不含 GPU 的资源申请时，填写当前 Environment 配置中的执行后端绑定。本地配置使用 `kubernetes-work-local-hostpath`，来自 `deploy/config/environment-providers.local-hostpath.example.json` 中容器条目的 `binding`。该文件与其他部署共用 Provider 配置数组格式，本地只配置容器后端；GPU 目录为空不会阻止 CPU 申请。其他部署应使用自己的实际绑定。
 
 本地 Kind 的 `standard` StorageClass 使用 `ReadWriteOnce` 工作区访问模式；运行时 Pod 和冻结 worker 在单节点上共享同一个工作区 PVC。生产 NFS 配置在 `environment-providers.json.example` 中显式使用 `ReadWriteMany`。
 
-业务集成测试可显式运行 `python tools/local_dev.py up --external-fixtures`。该测试配置仅替换外部 Claude 进程和 NATS 构建执行器响应，保留真实业务服务、身份校验、数据库、工件绑定与审批流程。启动时会从 Web Containerfile 的 `work-runtime-fixture` 阶段构建并推送一次带有 `/opt/labweaver/workspace-seed` 的 Nginx 镜像，供构建执行器夹具复制；生产 Web 镜像仍使用完整的 `runtime` 阶段。构建执行器夹具只在运行拥有的本地 Registry 内复制这个预构建 OCI 镜像，不读取候选生成的 Dockerfile 或执行实际镜像构建，因此该模式不能验证模型质量或实际镜像构建能力；启动输出与本地状态会标明启用了这些夹具。普通 `up` 不启用夹具。
+业务集成测试可显式运行 `python tools/local_dev.py up --external-fixtures`。该测试配置仅替换外部 Claude 进程和 NATS 构建执行器响应，保留真实业务服务、身份校验、数据库、工件绑定与审批流程。该配置同时把平台镜像目录的 registry 指向本次运行的本地 Registry，并写入仅满足 Agent 启动校验的固定凭据（运行 CA 与 `local-dev`）；本地 Registry 不是 HTTPS Harbor，因此该配置下目录写入始终以真实传输错误失败关闭，不伪造成功。启动时会从 Web Containerfile 的 `work-runtime-fixture` 阶段构建并推送一次带有 `/opt/labweaver/workspace-seed` 的 Nginx 镜像，供构建执行器夹具复制；生产 Web 镜像仍使用完整的 `runtime` 阶段。构建执行器夹具只在运行拥有的本地 Registry 内复制这个预构建 OCI 镜像，不读取候选生成的 Dockerfile 或执行实际镜像构建，因此该模式不能验证模型质量或实际镜像构建能力；启动输出与本地状态会标明启用了这些夹具。普通 `up` 不启用夹具。
 
-Kind 默认使用 kindnet CNI，并由其 network-policy 插件执行 Kubernetes `NetworkPolicy`。Bootstrap 会为 kindnet 保留 `cpu: 500m`、`memory: 128Mi` 的 requests 和 limits，避免用户态策略处理因资源不足而积压。OJ Job 使用专用的 `labweaver-oj` RuntimeClass；Bootstrap 在每个 Kind 节点从现有 containerd runc 基础 OCI spec 复制出专用 spec，设置 `linux.resources.pids.limit=128`，注册对应 handler 后重启 containerd。该专用 spec 会为 OJ RuntimeClass Pod 中的每个容器设置 128 进程上限，普通业务和浏览器容器继续使用默认运行时；生产节点必须为同名 OJ handler 配置等效的 CRI/OCI 运行时上限。BuildKit 的策略对象仍按部署模板声明；本地环境不提供生产级网络隔离验收。
+
+Kind 默认使用 kindnet CNI，并由其 network-policy 插件执行 Kubernetes `NetworkPolicy`。Bootstrap 会为 kindnet 保留 `cpu: 500m`、`memory: 128Mi` 的 requests 和 limits，避免用户态策略处理因资源不足而积压。authoring attempt、OJ Job 与 Ansible Probe Job 统一使用 `labweaver-sandbox` RuntimeClass，其 handler 指向 gVisor（containerd 运行时类型 `io.containerd.runsc.v1`）：Bootstrap 在宿主机按 `deploy/versions.lock.yml` 的 `gvisor` 条目下载锁定版本的 gVisor 发行包、校验 sha512 后解出 `runsc`、`containerd-shim-runsc-v1` 与 `gvisor-bin/` sentry sidecar 树，`docker cp` 进每个 Kind 节点，注册 handler 后重启 containerd 并创建同名 RuntimeClass。handler 不设置 `base_runtime_spec`（`runsc` 无法从缺少 `mounts` 的 base spec 启动容器）；进程上限改由 kind 集群创建时的 `kubeadmConfigPatches` 写入 kubelet `podPidsLimit`（本机单节点同时运行 Keycloak/Harbor/PostgreSQL，故取 4096），在 Pod cgroup 上生效，因此 fork 炸弹会被终止而不是耗尽节点 pid；gVisor 不执行 OCI spec 的 `linux.resources.pids`，原先 runc 时代的每容器 128 上限不再可用。Kind 节点本身没有直连外网，因此下载与校验在宿主机完成；生产节点必须为同名 handler 安装 gVisor 并配置等效的 Pod 进程上限。BuildKit 的策略对象仍按部署模板声明；本地环境不提供生产级网络隔离验收。该插件把 per-attempt 的 egress 规则作用在 **Service DNAT 之后**的地址上，因此只按 Service CIDR 书写的 `ipBlock` 匹配不到对象存储的 ClusterIP；本地渲染的 `sandbox.allowed_egress` 因此同时写入对象存储所在 Pod 网段（`local_kind_pod_cidr` 从节点的 `--cluster-cidr` 读取，并复用同一对象存储端口）。支持的生产形态是 CNI 在 DNAT 之前评估 egress 策略，那时 review 的是 Service CIDR 与对象存储自身地址；两者都只是部署输入的差异，产品侧策略语义不变。
 
 服务就绪后，可在本次 Kind 集群内运行浏览器测试：
 
@@ -53,6 +56,31 @@ python tools/local_dev_e2e.py run --project teacher
 
 测试入口构建与当前 Playwright 版本匹配的浏览器镜像，推送到本次本地镜像仓库，并启动临时 Job。Job 从本次部署的 `agent-service-config/anthropic-model` ConfigMap 读取 `LABWEAVER_E2E_PROVIDER_MODEL`，用于创建与 Agent 实际配置一致的 live E2E policy；测试不会硬编码或从 Secret 读取模型。它从本次运行读取地址、CA 和测试账户，把 CA 信任限制在测试容器内；账户密码通过临时 Secret 文件传入。命令返回浏览器测试的退出码，并清理自己创建的 Job、Secret 和网络策略。可重复使用 `--project` 选择其他角色测试，或用 `--grep` 限定测试名称；不会启动新的集群或修改默认 kubeconfig。
 
-Kind 环境不提供真实 KubeVirt、GPU、vGPU 或生产网络隔离验收。对应功能需在具备相应设备、插件和网络策略实现的环境中另行验证。费用页面的核算结果也不表示已经执行支付。
+## 宿主镜像站与 GPU 暴露（可选，用于真实 GPU 与外部镜像验收）
+
+默认档从本地 Registry 与预载镜像取像，因此不需要出网。需要拉取外部镜像（评测运行镜像、CDI/设备插件等）或做真实 GPU 验收时，在本次 Kind 节点上补齐下面两步；两者都只作用于本次运行的节点容器，不修改仓库配置。
+
+**镜像站**：宿主机跑一组 pull-through cache（`registry:2` + `REGISTRY_PROXY_REMOTEURL` + 代理环境变量，端口绑 `0.0.0.0`），节点通过 Docker 网关注入 containerd 的 hosts 目录（`/etc/containerd/certs.d/<host>/hosts.toml`，`server` 指向上游、`[host."http://<网关>:<端口>"]` 指向缓存）。**注意**：containerd 2.x 在设置了 `config_path` 时禁止在内联配置里写 `mirrors`，写进去会让 CRI 插件加载失败、节点转 NotReady。实测 `docker.io`、`registry.k8s.io`、`gcr.io`、`nvcr.io` 可经缓存拉取（`alpine:3.20` 冷拉 6 s）；`quay.io` 需要匿名 token，pull-through cache 不转发该流程，仍会 404。
+
+**GPU**：Kind 节点是普通容器，需要把宿主设备与驱动库显式带入节点，再用 NVIDIA 容器工具包让容器内的 NVML 可用：
+
+1. 节点内 `mknod` 出 `/dev/nvidia0`、`/dev/nvidia1`、`/dev/nvidiactl`、`/dev/nvidia-uvm`、`/dev/nvidia-uvm-tools`、`/dev/nvidia-modeset`（主次设备号取自宿主），并把宿主的 `libnvidia-ml.so.*`、`libcuda.so.*` 放进节点的 `/usr/lib/x86_64-linux-gnu`。
+2. 节点内安装 `libnvidia-container1`、`libnvidia-container-tools`、`nvidia-container-toolkit-base`、`nvidia-container-toolkit`（`.deb` 在宿主机经代理下载后流式送入节点），执行 `nvidia-ctk runtime configure --runtime=containerd` 并重启 containerd，再执行 `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` 生成 CDI 规格。
+3. 部署 NVIDIA k8s device plugin（镜像可经 `nvcr.io` 缓存拉取；需 `ctr images import` 预载，因为节点直连不可用），并以 **CDI 注解**方式注入：`--device-discovery-strategy=nvml --device-list-strategy=cdi-annotations`，同时把节点根挂到 `/driver-root`（只读）、把 `/var/run/cdi` 挂进插件 Pod，并把节点的 `libnvidia-ml.so.1` 挂进插件（插件自身的 NVML 加载）。**只有 `cdi-annotations` 策略能让默认运行时（runc）的 Pod 拿到设备、驱动库与 `/proc/driver/nvidia`**；默认的 `envvar` 策略依赖 NVIDIA 容器运行时注入，在只有 runc 的节点上容器内看不到 GPU。插件无法加载 NVML 时会以 `nvml init failed` 退出，节点也就不会广播 `nvidia.com/gpu`。
+4. 验收：节点 `capacity` 出现 `nvidia.com/gpu: 2`；`resources.limits."nvidia.com/gpu": 1` 的 Pod（默认运行时即可）执行 `nvidia-smi -L` 能列出真实卡与显存。
+
+以上仅在本机验证过；生产节点由集群运维按同一职责边界（设备、驱动库、容器运行时、device plugin）提供。
+
+### 本地 GPU 容量观察
+
+`up` 渲染的 `resource-service-config/capacity.json` 与检查入的示例不同：它给 reviewed provider binding（`gpu-primary-v1`）配一个只读观察者，使用 Resource 自己 ServiceAccount 的投影 token 与 CA、集群内 API 端点（`https://kubernetes.default.svc:443`）与 60 秒 TTL；同时追加一条本地 class `nvidia-cuda-local`（`exclusive`，`allocationBinding` 为节点实际广播的 `nvidia.com/gpu`，1 unit）。生产档不追加这条 class——它的 `allocationBinding` 必须由真实设备插件广播。
+
+可观察的行为：
+
+- 观察值 = `min(节点 allocatable, catalog capacity_units) - 已占用`，因此本地 class 报 1 unit（策略上限），reviewed class（`nvidia-cuda-primary-v1`）报 0，因为本机没有节点广播该名字。
+- 无观察者或观察过期时，GPU 申请以 `GpuObservationStale` 失败关闭；节点广播名与 catalog binding 不一致时以 `GpuCapacityExhausted` 失败关闭，不会被静默授予。
+- 查询真实记录：`kubectl -n labweaver-data exec postgres-0 -- psql -U postgres -d labweaver -tAc "SELECT e.class,e.allocation_binding,o.available_units FROM resource.gpu_catalog_entries e LEFT JOIN LATERAL (SELECT * FROM resource.gpu_capacity_observations WHERE entry_id=e.entry_id ORDER BY observed_at DESC LIMIT 1) o ON true"`。
+
+Kind 环境不提供真实 KubeVirt、vGPU 或生产网络隔离验收。对应功能需在具备相应设备、插件和网络策略实现的环境中另行验证。费用页面的核算结果也不表示已经执行支付。
 
 本地构建另外提供通用评测运行镜像，包含现有 C++17 和 Ansible Probe 执行工具，并把构建得到的 digest 写入 Control 的评测运行配置。Evaluation 协调器使用业务服务镜像执行冻结任务，两者分别配置。

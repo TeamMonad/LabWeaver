@@ -297,6 +297,7 @@ impl ClaudeCodeProcess for FakeProcess {
 
     async fn execute(
         &self,
+        _scope: &agent_service::claude_code::ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
@@ -2095,6 +2096,7 @@ async fn assert_dispatch_does_not_replay_live_tracks(
     let command = InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
+        actor_id: ActorId::new(),
         request: InternalAgentRunRequest::Authoring(request.clone()),
         purpose: AgentRunPurpose::Authoring {
             environment_class: request.environment_class,
@@ -2189,6 +2191,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     let command = InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
+        actor_id: ActorId::new(),
         request: InternalAgentRunRequest::Authoring(request.clone()),
         purpose: AgentRunPurpose::Authoring { environment_class },
         package: package.clone(),
@@ -2218,6 +2221,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     let result = service
         .execute_reserved(
             ExecuteAgentRun {
+                actor_id: ActorId::new(),
                 project_id: policy.project_id,
                 course_id: policy.course_id,
                 expected_environment_class: environment_class,
@@ -2313,6 +2317,7 @@ fn work_dispatch_command_with_runtime(
     InternalCreateAgentRunRequest {
         project_id: policy.project_id,
         course_id: policy.course_id,
+        actor_id,
         request: InternalAgentRunRequest::WorkConfiguration(request),
         purpose: AgentRunPurpose::WorkConfiguration {
             environment_id,
@@ -2710,6 +2715,7 @@ async fn assert_exact_replay(
     )?;
     let first = service
         .execute(ExecuteAgentRun {
+            actor_id: ActorId::new(),
             project_id: policy.project_id,
             course_id: policy.course_id,
             expected_environment_class: EnvironmentClass::Work,
@@ -2735,6 +2741,7 @@ async fn assert_exact_replay(
         .collect::<Vec<_>>();
     let second = service
         .execute(ExecuteAgentRun {
+            actor_id: ActorId::new(),
             project_id: policy.project_id,
             course_id: policy.course_id,
             expected_environment_class: EnvironmentClass::Work,
@@ -2977,6 +2984,7 @@ async fn assert_concurrent_idempotency(
             let trace_id = format!("trace-agent-concurrent-{request_number}");
             service
                 .execute(ExecuteAgentRun {
+                    actor_id: ActorId::new(),
                     project_id,
                     course_id,
                     expected_environment_class: EnvironmentClass::Experiment,
@@ -3019,6 +3027,7 @@ async fn assert_distinct_runs(
             let trace_id = format!("trace-agent-distinct-{request_number}");
             service
                 .execute(ExecuteAgentRun {
+                    actor_id: ActorId::new(),
                     project_id,
                     course_id,
                     expected_environment_class: EnvironmentClass::Experiment,
@@ -3224,6 +3233,62 @@ async fn successful_invocation_is_shell_free_hardened_and_hash_audited()
     let debug = format!("{command:?}");
     assert!(!debug.contains("ignore all previous instructions"));
     assert!(!debug.contains("Generate exactly one"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_invocation_runs_with_tools_inside_the_sandbox_scope()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = runtime(FakeMode::Success)?;
+    let scope = agent_service::claude_code::AuthoringAttemptScope {
+        run_id: contracts::AgentRunId::new(),
+        project_id: policy.project_id,
+        course_id: policy.course_id,
+        actor_id: ActorId::new(),
+        track: AgentTrackKind::Environment,
+        attempt: 1,
+        trace_id: "trace-authoring-scope".to_owned(),
+        claude_code_version: policy.binding.claude_code_version.clone(),
+    };
+    let execution = runtime
+        .generate_authoring(
+            &scope,
+            input(&policy).await?,
+            RunCancellation::new(),
+            EnvironmentClass::Experiment,
+            &[],
+        )
+        .await?;
+
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Environment(_)
+    ));
+    let commands = process.commands();
+    assert_eq!(commands.len(), 1);
+    let args = commands[0].args();
+    let max_turns = args
+        .windows(2)
+        .find(|window| window[0] == "--max-turns")
+        .map(|window| window[1].as_str());
+    assert_eq!(max_turns, Some("60"));
+    let tools = args
+        .windows(2)
+        .find(|window| window[0] == "--tools")
+        .map(|window| window[1].as_str());
+    assert_eq!(tools, Some("Bash,Edit,Glob,Grep,Read,Write"));
+    let permission = args
+        .windows(2)
+        .find(|window| window[0] == "--permission-mode")
+        .map(|window| window[1].as_str());
+    assert_eq!(permission, Some("bypassPermissions"));
+    let prompt = args
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    assert!(prompt.contains("LABWEAVER SANDBOX EXECUTION"));
+    assert!(prompt.contains("/materials/"));
+    assert!(prompt.contains("BUILDKIT_HOST"));
+    assert!(prompt.contains("/workspace/labweaver-export.tar"));
     Ok(())
 }
 

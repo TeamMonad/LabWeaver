@@ -37,6 +37,8 @@ use crate::{
 pub const ORPHAN_JOB_LABEL_SELECTOR: &str = "labweaver.io/managed-by=evaluation-service";
 
 const FIELD_MANAGER: &str = "labweaver-orphan-reconciler";
+const MANAGED_BY: &str = "evaluation-service";
+const EVENT_SCOPE: &str = "evaluation";
 const LOG_SCOPE: &str = "evaluation.orphan";
 const DIAGNOSTIC_PREFIX: &str = "LW_EVALUATION_";
 
@@ -182,6 +184,8 @@ impl OrphanReconciler {
             FIELD_MANAGER,
             LOG_SCOPE,
             DIAGNOSTIC_PREFIX,
+            MANAGED_BY,
+            EVENT_SCOPE,
         )
         .map_err(|_| OrphanReconcileError::ConfigurationInvalid)?;
         let oj = OjKubernetesExecutor::new(configuration.oj.clone())

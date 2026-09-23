@@ -103,6 +103,14 @@ execution:
   ojServiceAccountName: oj-runner
   ansibleProbeServiceAccountName: ansible-probe
   imagePullSecretName: harbor-course-pull
+  # Reviewed "<cidr>:<port>" destinations of the object store every attempt
+  # materializer downloads from and uploads to. Each per-attempt NetworkPolicy
+  # admits DNS and exactly these destinations; the namespace default deny admits
+  # nothing on its own, so an approved run cannot be used as a network pivot.
+  # Pin the object-store ClusterIP as a /32 when it is stable, and use the port
+  # the object store actually serves.
+  objectStoreEgress:
+    - "10.96.0.0/12:443"
   resourcePollIntervalMilliseconds: 500
   resourceApprovalTimeoutSeconds: 300
   executionObservePollIntervalMilliseconds: 500

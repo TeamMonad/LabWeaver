@@ -78,6 +78,16 @@ export type OperationAccepted = {
     statusUrl: string;
 };
 
+export type PlatformImageCatalog = PlatformImageCatalogSchema;
+
+export type PlatformImageCatalogView = PlatformImageCatalogViewSchema;
+
+export type PlatformImageEntry = PlatformImageEntrySchema;
+
+export type PlatformImageEntryView = PlatformImageEntryViewSchema;
+
+export type PlatformImageUploadSession = PlatformImageUploadSessionSchema;
+
 export type ProblemDetails = {
     detail: string;
     diagnosticCode: string;
@@ -2909,6 +2919,15 @@ export type CompleteAuthoringApprovalRequestSchemaVirtualMachineBaseDisk = {
 export type CompleteAuthoringApprovalRequestSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
+ * CompletePlatformImageUploadRequest
+ *
+ * Completion request for one staged OCI archive upload.
+ */
+export type CompletePlatformImageUploadRequestSchema = {
+    [key: string]: never;
+};
+
+/**
  * CompleteProblemPackageUploadRequest
  */
 export type CompleteProblemPackageUploadRequestSchema = {
@@ -3260,6 +3279,53 @@ export type CreateEvaluationReleaseRequestSchemaProjectId = string;
 export type CreateEvaluationReleaseRequestSchemaRevision = number;
 
 /**
+ * CreatePlatformImageUploadRequest
+ *
+ * Administrator request for one OCI archive upload authority.
+ */
+export type CreatePlatformImageUploadRequestSchema = {
+    /**
+     * Exact archive size the client will upload.
+     */
+    archiveBytes: number;
+    /**
+     * Archive media type; must equal `PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE`.
+     */
+    archiveMediaType: string;
+    binding: string;
+    /**
+     * Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].
+     */
+    capacityBytes?: number | null;
+    /**
+     * Declared virtual-machine disk encoding inside the archive; must agree with
+     * `disk_path` and `capacity_bytes` under [`valid_vm_disk_upload`].
+     */
+    diskFormat?: CreatePlatformImageUploadRequestSchemaVirtualMachineDiskFormat | null;
+    /**
+     * Relative path of the disk inside the uploaded archive; see [`valid_vm_disk_upload`].
+     */
+    diskPath?: string | null;
+    kind: PlatformImageKind;
+    reason: string;
+    /**
+     * Target `<registry-host>/<repository>:<tag>` the imported archive is tagged as.
+     */
+    targetReference: string;
+    trustRevision: number;
+};
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type PlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type CreatePlatformImageUploadRequestSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
  * CreateProblemPackageUploadRequest
  */
 export type CreateProblemPackageUploadRequestSchema = {
@@ -3524,6 +3590,16 @@ export type CreateWorkConfigurationRunRequestSchemaRevision = number;
  * Strongly typed UUIDv7 identifier for `WorkConfigurationPreauthorizationId`.
  */
 export type WorkConfigurationPreauthorizationId = string;
+
+/**
+ * DisablePlatformImageRequest
+ *
+ * Administrator disable of one catalog entry.
+ */
+export type DisablePlatformImageRequestSchema = {
+    expectedDigest: string;
+    reason: string;
+};
 
 /**
  * SnapshotPage
@@ -5472,6 +5548,10 @@ export type InternalAgentRunOutcomeSchema = {
      */
     environmentCandidate?: InternalAgentRunOutcomeSchemaEnvironmentCandidate | null;
     /**
+     * Frozen sandbox layout export produced by the successful Environment attempt, if any.
+     */
+    environmentImageExport?: ExportedOciImage | null;
+    /**
      * Validated Evaluation candidate, if that track succeeded.
      */
     evaluationCandidate?: InternalAgentRunOutcomeSchemaEvaluationCandidate | null;
@@ -5955,6 +6035,23 @@ export type InternalAgentRunOutcomeSchemaExecutionLimits = {
 export type InternalAgentRunOutcomeSchemaExpectedServiceState = 'active' | 'inactive';
 
 /**
+ * Frozen sandbox-exported OCI layout archive.
+ *
+ * The agent freezes and hashes the exact uploaded version before Control may bind it into a
+ * build request, so the executor re-reads that immutable version instead of a current key.
+ */
+export type ExportedOciImage = {
+    /**
+     * Immutable object-store identity of the layout archive.
+     */
+    layout: InternalAgentRunOutcomeSchemaArtifactRef;
+    /**
+     * Object-store key of the layout archive.
+     */
+    layoutObjectKey: string;
+};
+
+/**
  * Expected fact emitted by a Linux probe.
  */
 export type InternalAgentRunOutcomeSchemaFactAssertion = {
@@ -6399,6 +6496,13 @@ export type InternalCompleteEvaluationStepRequestSchemaProjectId = string;
  * Control-to-Agent command carried only over an allowlisted mTLS service identity.
  */
 export type InternalCreateAgentRunRequestSchema = {
+    /**
+     * Control-authenticated actor that initiated this run.
+     *
+     * The actor authorizes and is attributed for the one-shot Resource task reservation that a
+     * sandboxed authoring attempt creates; it is never derived from browser input.
+     */
+    actorId: InternalCreateAgentRunRequestSchemaActorId;
     courseId?: InternalCreateAgentRunRequestSchemaCourseId | null;
     /**
      * Internal artifact ID to opaque object-key mapping; keys never contain original paths.
@@ -7453,13 +7557,322 @@ export type IssueConsoleCapabilityRequestSchemaRevision = number;
 export type IssueConsoleCapabilityRequestSchemaUtcTimestamp = string;
 
 /**
+ * PlatformImageCatalogView
+ *
+ * Catalog listing with the Control-owned release impact hint on every entry.
+ *
+ * The Agent authority never answers with this type: it does not own Environment template
+ * releases, so the impact hint exists only on the administrator gateway projection.
+ */
+export type PlatformImageCatalogViewSchema = {
+    entries: Array<PlatformImageCatalogViewSchemaPlatformImageEntryView>;
+};
+
+/**
+ * One catalog entry with the Control-owned release impact hint.
+ */
+export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
+    binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
+    catalogId: PlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageCatalogViewSchemaVirtualMachineDiskFormat | null;
+    kind: PlatformImageCatalogViewSchemaPlatformImageKind;
+    mediaType: string;
+    pinnedAt: PlatformImageCatalogViewSchemaUtcTimestamp;
+    /**
+     * Non-withdrawn Environment template releases that pin this exact digest.
+     */
+    releaseReferenceCount: number;
+    repinGeneration: number;
+    resolvedDigest: string;
+    sizeBytes: number;
+    sourceReference: string;
+    status: PlatformImageStatus;
+    trustRevision: number;
+    updatedAt: PlatformImageCatalogViewSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageId = string;
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type PlatformImageCatalogViewSchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Catalog lifecycle status.
+ */
+export type PlatformImageStatus = 'active' | 'disabled';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageCatalogViewSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageCatalogViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * PlatformImageCatalog
+ *
+ * Catalog listing returned by the Agent authority and the administrator gateway.
+ */
+export type PlatformImageCatalogSchema = {
+    entries: Array<PlatformImageCatalogSchemaPlatformImageEntry>;
+};
+
+/**
+ * One pinned platform image identity as persisted by the Agent authority.
+ */
+export type PlatformImageCatalogSchemaPlatformImageEntry = {
+    binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
+    catalogId: PlatformImageCatalogSchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageCatalogSchemaVirtualMachineDiskFormat | null;
+    kind: PlatformImageCatalogSchemaPlatformImageKind;
+    mediaType: string;
+    pinnedAt: PlatformImageCatalogSchemaUtcTimestamp;
+    repinGeneration: number;
+    resolvedDigest: string;
+    sizeBytes: number;
+    sourceReference: string;
+    status: PlatformImageCatalogSchemaPlatformImageStatus;
+    trustRevision: number;
+    updatedAt: PlatformImageCatalogSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageCatalogSchemaPlatformImageId = string;
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type PlatformImageCatalogSchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Catalog lifecycle status.
+ */
+export type PlatformImageCatalogSchemaPlatformImageStatus = 'active' | 'disabled';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageCatalogSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageCatalogSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * PlatformImageEntryView
+ *
+ * One catalog entry with the Control-owned release impact hint.
+ */
+export type PlatformImageEntryViewSchema = {
+    binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
+    catalogId: PlatformImageEntryViewSchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageEntryViewSchemaVirtualMachineDiskFormat | null;
+    kind: PlatformImageEntryViewSchemaPlatformImageKind;
+    mediaType: string;
+    pinnedAt: PlatformImageEntryViewSchemaUtcTimestamp;
+    /**
+     * Non-withdrawn Environment template releases that pin this exact digest.
+     */
+    releaseReferenceCount: number;
+    repinGeneration: number;
+    resolvedDigest: string;
+    sizeBytes: number;
+    sourceReference: string;
+    status: PlatformImageEntryViewSchemaPlatformImageStatus;
+    trustRevision: number;
+    updatedAt: PlatformImageEntryViewSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageEntryViewSchemaPlatformImageId = string;
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type PlatformImageEntryViewSchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Catalog lifecycle status.
+ */
+export type PlatformImageEntryViewSchemaPlatformImageStatus = 'active' | 'disabled';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageEntryViewSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageEntryViewSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * PlatformImageEntry
+ *
+ * One pinned platform image identity as persisted by the Agent authority.
+ */
+export type PlatformImageEntrySchema = {
+    binding: string;
+    /**
+     * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+     */
+    capacityBytes?: number | null;
+    catalogId: PlatformImageEntrySchemaPlatformImageId;
+    /**
+     * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+     */
+    diskSha256?: string | null;
+    /**
+     * Declared virtual-machine base-disk encoding; absent for container entries.
+     */
+    format?: PlatformImageEntrySchemaVirtualMachineDiskFormat | null;
+    kind: PlatformImageEntrySchemaPlatformImageKind;
+    mediaType: string;
+    pinnedAt: PlatformImageEntrySchemaUtcTimestamp;
+    repinGeneration: number;
+    resolvedDigest: string;
+    sizeBytes: number;
+    sourceReference: string;
+    status: PlatformImageEntrySchemaPlatformImageStatus;
+    trustRevision: number;
+    updatedAt: PlatformImageEntrySchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageEntrySchemaPlatformImageId = string;
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type PlatformImageEntrySchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Catalog lifecycle status.
+ */
+export type PlatformImageEntrySchemaPlatformImageStatus = 'active' | 'disabled';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageEntrySchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageEntrySchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * PlatformImageUploadSession
+ *
+ * Staged OCI archive upload session owned by Control.
+ */
+export type PlatformImageUploadSessionSchema = {
+    archiveBytes: number;
+    archiveMediaType: string;
+    binding: string;
+    capacityBytes?: number | null;
+    diskFormat?: PlatformImageUploadSessionSchemaVirtualMachineDiskFormat | null;
+    diskPath?: string | null;
+    expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
+    kind: PlatformImageUploadSessionSchemaPlatformImageKind;
+    revision: PlatformImageUploadSessionSchemaRevision;
+    targetReference: string;
+    uploadId: UploadSessionId;
+    uploadTarget: PlatformImageUploadTarget;
+};
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type PlatformImageUploadSessionSchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
+ * Short-lived per-object upload authority for one OCI archive.
+ */
+export type PlatformImageUploadTarget = {
+    expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
+    requiredHeaders: {
+        [key: string]: string;
+    };
+    uploadUrl: string;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformImageUploadSessionSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UploadSessionId`.
+ */
+export type UploadSessionId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageUploadSessionSchemaUtcTimestamp = string;
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type PlatformImageUploadSessionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
  * ProblemPackageUploadSession
  */
 export type ProblemPackageUploadSessionSchema = {
     courseId?: ProblemPackageUploadSessionSchemaCourseId | null;
     expiresAt: ProblemPackageUploadSessionSchemaUtcTimestamp;
     files: Array<ProblemPackageUploadSessionSchemaProblemPackageUploadFile>;
-    id: UploadSessionId;
+    id: ProblemPackageUploadSessionSchemaUploadSessionId;
     projectId: ProblemPackageUploadSessionSchemaProjectId;
     revision: ProblemPackageUploadSessionSchemaRevision;
     uploadTargets: Array<ProblemPackageUploadTarget>;
@@ -7501,7 +7914,7 @@ export type ProblemPackageUploadSessionSchemaRevision = number;
 /**
  * Strongly typed UUIDv7 identifier for `UploadSessionId`.
  */
-export type UploadSessionId = string;
+export type ProblemPackageUploadSessionSchemaUploadSessionId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -7586,6 +7999,27 @@ export type UsageMeasurement = {
 export type RecordResourceUsageRequestSchemaUtcTimestamp = string;
 
 /**
+ * RegisterPlatformImageRequest
+ *
+ * Administrator registration of one registry reference. The actor is supplied by the gateway.
+ */
+export type RegisterPlatformImageRequestSchema = {
+    binding: string;
+    kind: RegisterPlatformImageRequestSchemaPlatformImageKind;
+    reason: string;
+    /**
+     * `<registry-host>/<repository>:<tag>` inside the configured platform registry.
+     */
+    sourceReference: string;
+    trustRevision: number;
+};
+
+/**
+ * Reviewed platform image kinds.
+ */
+export type RegisterPlatformImageRequestSchemaPlatformImageKind = 'container' | 'virtual_machine';
+
+/**
  * RemoveProjectMembershipRequest
  *
  * Revision-fenced removal of one Project membership.
@@ -7633,6 +8067,17 @@ export type RenewResourceLeaseSchema = {
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type RenewResourceLeaseSchemaRevision = number;
+
+/**
+ * RepinPlatformImageRequest
+ *
+ * Administrator repin of one catalog entry.
+ */
+export type RepinPlatformImageRequestSchema = {
+    expectedDigest: string;
+    reason: string;
+    trustRevision: number;
+};
 
 /**
  * ResetEnvironmentRequest
@@ -9637,6 +10082,430 @@ export type RevokeAccessGrantResponses = {
 };
 
 export type RevokeAccessGrantResponse = RevokeAccessGrantResponses[keyof RevokeAccessGrantResponses];
+
+export type ListPlatformImagesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/images';
+};
+
+export type ListPlatformImagesErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListPlatformImagesError = ListPlatformImagesErrors[keyof ListPlatformImagesErrors];
+
+export type ListPlatformImagesResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformImageCatalogViewSchema;
+};
+
+export type ListPlatformImagesResponse = ListPlatformImagesResponses[keyof ListPlatformImagesResponses];
+
+export type RegisterPlatformImageData = {
+    body: RegisterPlatformImageRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/images';
+};
+
+export type RegisterPlatformImageErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RegisterPlatformImageError = RegisterPlatformImageErrors[keyof RegisterPlatformImageErrors];
+
+export type RegisterPlatformImageResponses = {
+    /**
+     * Successful response
+     */
+    201: PlatformImageEntryViewSchema;
+};
+
+export type RegisterPlatformImageResponse = RegisterPlatformImageResponses[keyof RegisterPlatformImageResponses];
+
+export type CreatePlatformImageUploadData = {
+    body: CreatePlatformImageUploadRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/images/uploads';
+};
+
+export type CreatePlatformImageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreatePlatformImageUploadError = CreatePlatformImageUploadErrors[keyof CreatePlatformImageUploadErrors];
+
+export type CreatePlatformImageUploadResponses = {
+    /**
+     * Successful response
+     */
+    201: PlatformImageUploadSessionSchema;
+};
+
+export type CreatePlatformImageUploadResponse = CreatePlatformImageUploadResponses[keyof CreatePlatformImageUploadResponses];
+
+export type CompletePlatformImageUploadData = {
+    body: CompletePlatformImageUploadRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/uploads/{uploadId}/complete';
+};
+
+export type CompletePlatformImageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CompletePlatformImageUploadError = CompletePlatformImageUploadErrors[keyof CompletePlatformImageUploadErrors];
+
+export type CompletePlatformImageUploadResponses = {
+    /**
+     * Successful response
+     */
+    201: PlatformImageEntryViewSchema;
+};
+
+export type CompletePlatformImageUploadResponse = CompletePlatformImageUploadResponses[keyof CompletePlatformImageUploadResponses];
+
+export type DisablePlatformImageData = {
+    body: DisablePlatformImageRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        catalogId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/{catalogId}/disable';
+};
+
+export type DisablePlatformImageErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type DisablePlatformImageError = DisablePlatformImageErrors[keyof DisablePlatformImageErrors];
+
+export type DisablePlatformImageResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformImageEntryViewSchema;
+};
+
+export type DisablePlatformImageResponse = DisablePlatformImageResponses[keyof DisablePlatformImageResponses];
+
+export type RepinPlatformImageData = {
+    body: RepinPlatformImageRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        catalogId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/{catalogId}/repin';
+};
+
+export type RepinPlatformImageErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RepinPlatformImageError = RepinPlatformImageErrors[keyof RepinPlatformImageErrors];
+
+export type RepinPlatformImageResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformImageEntryViewSchema;
+};
+
+export type RepinPlatformImageResponse = RepinPlatformImageResponses[keyof RepinPlatformImageResponses];
 
 export type IssueCsrfTokenData = {
     body?: never;

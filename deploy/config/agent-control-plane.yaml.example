@@ -12,8 +12,16 @@ object_store:
   region: "labweaver-internal-1"
   objectPrefix: "problem-packages"
   uploadTtlSeconds: 900
-  maxObjectBytes: 67108864
+  # This binding also carries sandbox attempt material, results and image-layout
+  # exports, so the bound has to cover the largest presigned transfer below.
+  # Startup rejects a deployment whose sandbox bounds exceed it.
+  maxObjectBytes: 2147483648
   forcePathStyle: true
+  # The platform object store serves the deployment's own CA. Pin exactly that
+  # anchor: the Agent uploads attempt material and reads results with its own S3
+  # client, and a minimal runtime image has no reason to carry the private CA in
+  # its platform trust store.
+  caBundleFile: "/etc/labweaver/secrets/minio-ca.pem"
 object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
 object_store_secret_key_file: "/etc/labweaver/secrets/minio-secret-key"
 object_store_session_token_file: null
@@ -40,6 +48,54 @@ work_execution:
   environment_scopes:
     - "environment.work.configure"
     - "environment:resolve_work_execution_binding"
+resource:
+  # Resource Service task admission for admitted authoring sandbox attempts.
+  baseUri: "https://resource-service:9448/"
+  caFile: "/etc/labweaver/secrets/mtls-ca.pem"
+  timeoutMilliseconds: 5000
+  maxRequestBytes: 1048576
+  maxResponseBytes: 8388608
+  audience: "labweaver-resource"
+sandbox:
+  # Per-attempt Kubernetes Job that runs the pinned Claude Code CLI with tools.
+  # The attempt Pod always carries runtimeClassName "labweaver-sandbox"; the node
+  # must expose that RuntimeClass (gVisor runsc handler) or the Pod stays
+  # unschedulable, which is the intended fail-closed behaviour.
+  namespace: "labweaver-authoring"
+  image: "harbor.example.invalid/labweaver-system/authoring-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  service_account_name: "authoring-runner"
+  image_pull_secret_name: "harbor-labweaver-system-pull"
+  cpu_millicores: 2000
+  memory_bytes: 2147483648
+  workspace_bytes: 2147483648
+  wall_time_seconds: 3600
+  # Reviewed attempt egress destinations as "<cidr>:<port>": the object store and
+  # the model endpoint. The attempt reaches nothing else; startup rejects a
+  # deployment that omits the configured object-store port.
+  allowed_egress: ["10.0.0.0/8:443"]
+  # Optional rootless BuildKit sidecar; deployment binds both keys together with
+  # the reviewed buildkitd.toml ConfigMap so the attempt can build only against
+  # Harbor. Leave unset to run attempts without an image-build capability.
+  # The ConfigMap must carry buildkitd.toml serving the attempt-local socket
+  # "unix:///run/buildkit/buildkitd.sock" plus the Harbor CA, because the sandbox
+  # reaches the daemon only through that shared socket directory.
+  # buildkit_image: "harbor.example.invalid/labweaver-system/buildkit-rootless@sha256:0000...0000"
+  # buildkit_config_map_name: "authoring-buildkit-config"
+  result_max_bytes: 4194304
+  stderr_max_bytes: 262144
+  # Attempt material, result, stderr and export keys. They must stay inside the
+  # configured `object_store.objectPrefix`, because the immutable object store
+  # rejects every key outside its own prefix; the deployment fails at startup
+  # when they disagree.
+  object_prefix: "problem-packages/authoring-sandbox"
+  # Reviewed object-store trust root the materializer and the attempt read signed
+  # URLs with. Omit it when the object store is trusted by the sandbox image
+  # trust store; the deployment mounts this file into the agent API Pod.
+  object_store_ca_file: "/etc/labweaver/secrets/minio-ca.pem"
+  kubernetes_api_server: "https://kubernetes.default.svc:443/"
+  kubernetes_bearer_token_file: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  kubernetes_ca_file: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  request_timeout_milliseconds: 5000
 build:
   # Served by the deployment-owned executor binding immutable ArtifactRef inputs
   # to restricted BuildKit and private Harbor.
@@ -65,3 +121,26 @@ nats:
   build_command_quarantine_subject: "labweaver.agent.quarantine.build_command.v1"
   publish_timeout_milliseconds: 5000
   outbox_poll_milliseconds: 250
+platform_registry:
+  # Single platform registry the administrator image catalog may resolve and push
+  # inside. The robot account needs pull on the reviewed base images and push on
+  # the import target project; no other host is accepted, and a missing block
+  # keeps catalog writes fail closed (503).
+  registry: "harbor.example.invalid"
+  ca_file: "/etc/labweaver/secrets/harbor-ca.crt"
+  username_file: "/etc/labweaver/secrets/harbor-username"
+  password_file: "/etc/labweaver/secrets/harbor-password"
+  # Reviewed container base images the deployment copied into Harbor. Agent
+  # resolves each tag once at startup, registers the exact digest in the
+  # platform image catalog, and logs LW_PLATFORM_IMAGE_SEED_FAILED for an entry
+  # it cannot register. A missing or failed entry stays absent from the catalog
+  # instead of being replaced by a weaker identity.
+  seed_images:
+    - kind: "container"
+      binding: "rust-builder-v1"
+      source_reference: "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm"
+      trust_revision: 1
+    - kind: "container"
+      binding: "distroless-runtime-v1"
+      source_reference: "harbor.example.invalid/labweaver-system/distroless-cc:nonroot"
+      trust_revision: 1

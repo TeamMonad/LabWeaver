@@ -62,15 +62,24 @@ control:
     maxDurationMilliseconds: 600000
     maxCpuMillicores: 2000
     maxMemoryBytes: 2147483648
-  virtualMachineBase:
+  virtualMachineBases:
     providerBinding: "kubevirt-primary-v1"
     storageClassBinding: "vm-rwo-primary-v1"
-    artifactId: "00000000-0000-7000-8000-000000000003"
-    baseDisk:
-      binding: "ubuntu-24.04-v1"
-      sourceRegistryDigest: "docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-      capacityBytes: 10737418240
-    format: "qcow2"
+    maxBases: 8
+    maxCapacityBytes: 137438953472
+    bases:
+      - artifactId: "00000000-0000-7000-8000-000000000003"
+        baseDisk:
+          binding: "ubuntu-24.04-v1"
+          sourceRegistryDigest: "docker://quay.io/containerdisks/ubuntu@sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+          capacityBytes: 10737418240
+        format: "qcow2"
+      - artifactId: "00000000-0000-7000-8000-000000000004"
+        baseDisk:
+          binding: "cirros-0.6-v1"
+          sourceRegistryDigest: "docker://quay.io/kubevirt/cirros-container-disk-demo@sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe"
+          capacityBytes: 1073741824
+        format: "qcow2"
   evaluationRuntime:
     providerBinding: "evaluation-kubernetes-primary-v1"
     runnerImage: "harbor.example.invalid/labweaver/evaluation-runner@sha256:4444444444444444444444444444444444444444444444444444444444444444"

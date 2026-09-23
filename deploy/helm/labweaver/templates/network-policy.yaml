@@ -23,14 +23,16 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     {{- if eq $name "resource-service" }}
-    # Resource accepts Access browser calls and Evaluation/Environment service JWT calls over
-    # the TLS API port; the health port remains exposed for the platform probe path.
+    # Resource accepts Access browser calls plus Agent/Evaluation/Environment service JWT calls
+    # over the TLS API port; Agent needs it because every admitted authoring attempt proves its
+    # Resource binding before any cluster object exists. The health port remains exposed for the
+    # platform probe path.
     - from:
         - podSelector:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [access-service, environment-service, evaluation-service]
+                values: [access-service, agent-service, environment-service, evaluation-service]
       ports:
         - {protocol: TCP, port: 8087}
         - {protocol: TCP, port: 9448}

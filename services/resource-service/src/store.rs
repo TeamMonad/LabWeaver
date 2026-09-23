@@ -35,8 +35,10 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::cmp::{max, min};
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
+use crate::capacity::GpuCatalogSeed;
 use crate::{ApprovalPolicy, LifecycleError, ResourceLifecycle};
 
 const REQUEST_SUBMITTED_SUBJECT: &str = subjects::RESOURCE_REQUEST_SUBMITTED;
@@ -131,7 +133,7 @@ pub struct PgResourceStore {
 struct UsageAuthority<'a> {
     caller: &'a auth::ServiceIdentity,
     environment_service_client_id: &'a str,
-    evaluation_service_client_id: &'a str,
+    task_service_client_ids: &'a BTreeSet<String>,
 }
 
 impl PgResourceStore {
@@ -428,12 +430,12 @@ impl PgResourceStore {
         observed_at: UtcTimestamp,
         caller: &auth::ServiceIdentity,
         environment_service_client_id: &str,
-        evaluation_service_client_id: &str,
+        task_service_client_ids: &BTreeSet<String>,
     ) -> Result<ResourceUsageRecord, ResourceStoreError> {
         let authority = UsageAuthority {
             caller,
             environment_service_client_id,
-            evaluation_service_client_id,
+            task_service_client_ids,
         };
         self.record_usage_with_authority(input, observed_at, Some(&authority))
             .await
@@ -486,12 +488,16 @@ impl PgResourceStore {
             return Err(ResourceStoreError::ScopeConflict);
         }
         if let Some(authority) = authority {
-            let expected_client_id = match target_kind.as_str() {
-                "environment" => authority.environment_service_client_id,
-                "task" => authority.evaluation_service_client_id,
+            let authorized = match target_kind.as_str() {
+                "environment" => {
+                    authority.caller.client_id == authority.environment_service_client_id
+                }
+                "task" => authority
+                    .task_service_client_ids
+                    .contains(&authority.caller.client_id),
                 _ => return Err(ResourceStoreError::ScopeConflict),
             };
-            if authority.caller.client_id != expected_client_id {
+            if !authorized {
                 tracing::warn!(
                     event = "resource.usage.authority_mismatch",
                     request_id = %usage.request_id,
@@ -1113,42 +1119,13 @@ impl PgResourceStore {
                 }) {
                     return Err(ResourceStoreError::GpuCatalogRevisionConflict);
                 }
-                let mode_collision: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(
-                         SELECT 1
-                         FROM resource.gpu_catalog_entries
-                         WHERE active
-                           AND allocation_binding=$1
-                           AND class<>$2
-                           AND mode<>$3
-                      )",
+                assert_gpu_pool_available(
+                    &mut transaction,
+                    &entry.class,
+                    &mode,
+                    &entry.allocation_binding,
                 )
-                .bind(&entry.allocation_binding)
-                .bind(&entry.class)
-                .bind(&mode)
-                .fetch_one(&mut *transaction)
                 .await?;
-                if mode_collision {
-                    return Err(ResourceStoreError::GpuCatalogModeCollision);
-                }
-                let pool_collision: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(
-                         SELECT 1
-                         FROM resource.gpu_catalog_entries
-                         WHERE active
-                           AND allocation_binding=$1
-                           AND class<>$2
-                           AND mode=$3
-                     )",
-                )
-                .bind(&entry.allocation_binding)
-                .bind(&entry.class)
-                .bind(&mode)
-                .fetch_one(&mut *transaction)
-                .await?;
-                if pool_collision {
-                    return Err(ResourceStoreError::GpuCatalogPoolCollision);
-                }
                 let current_active = sqlx::query(
                     "SELECT mode,provider_binding,allocation_binding
                      FROM resource.gpu_catalog_entries
@@ -1229,6 +1206,56 @@ impl PgResourceStore {
         };
         transaction.commit().await?;
         Ok(result)
+    }
+
+    /// Provisions reviewed GPU classes from deployment configuration.
+    ///
+    /// Each seed inserts its class only when no row with that class exists. An existing class is
+    /// returned unchanged and is never updated, re-versioned, or reactivated. A seed that
+    /// disagrees with the existing row's mode, provider binding, capacity, or allocation binding
+    /// fails with [`ResourceStoreError::GpuCatalogSeedConflict`] instead of rewriting reviewed
+    /// state, and no seed in the batch is committed. The returned rows are the current catalog row
+    /// of each seeded class — its active revision, or the latest revision when the class has been
+    /// deactivated — in seed order.
+    pub async fn seed_gpu_catalog(
+        &self,
+        seeds: &[GpuCatalogSeed],
+    ) -> Result<Vec<GpuCatalogEntry>, ResourceStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let mut catalog = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            let rows = sqlx::query(
+                "SELECT contract FROM resource.gpu_catalog_entries
+                 WHERE class=$1
+                 ORDER BY revision DESC, entry_id FOR UPDATE",
+            )
+            .bind(&seed.class)
+            .fetch_all(&mut *transaction)
+            .await?;
+            if rows.is_empty() {
+                catalog.push(insert_seeded_gpu_class(&mut transaction, seed).await?);
+                continue;
+            }
+            let mut entries = rows
+                .into_iter()
+                .map(|row| decode_gpu_catalog(row.try_get("contract")?))
+                .collect::<Result<Vec<_>, _>>()?;
+            let current = entries.iter().position(|entry| entry.active).unwrap_or(0);
+            let existing = entries.swap_remove(current);
+            if !gpu_seed_matches(&existing, seed) {
+                tracing::error!(
+                    event = "resource.gpu_catalog.seed_conflict",
+                    gpu_class = seed.class.as_str(),
+                    diagnostic_code = "LW_RESOURCE_GPU_CATALOG_SEED_CONFLICT",
+                    existing_revision = existing.revision.get(),
+                );
+                return Err(ResourceStoreError::GpuCatalogSeedConflict);
+            }
+            catalog.push(existing);
+        }
+        transaction.commit().await?;
+        Ok(catalog)
     }
 
     /// Records capacity available to this platform before Resource's own durable reservations.
@@ -3585,6 +3612,86 @@ async fn lock_gpu_admission(
     Ok(())
 }
 
+/// Inserts the first immutable catalog revision declared by a reviewed seed.
+///
+/// The class does not exist yet, so the insert reuses the same active-pool uniqueness rule as
+/// [`PgResourceStore::create_gpu_catalog_entry`] and never touches another class's row.
+async fn insert_seeded_gpu_class(
+    transaction: &mut Transaction<'_, Postgres>,
+    seed: &GpuCatalogSeed,
+) -> Result<GpuCatalogEntry, ResourceStoreError> {
+    let entry = seed.to_entry().map_err(ResourceStoreError::Foundation)?;
+    entry.validate().map_err(ResourceStoreError::Contract)?;
+    let mode = wire(entry.mode)?;
+    assert_gpu_pool_available(transaction, &entry.class, &mode, &entry.allocation_binding).await?;
+    sqlx::query(
+        "INSERT INTO resource.gpu_catalog_entries
+          (entry_id,class,mode,provider_binding,capacity_units,allocation_binding,revision,active,contract)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    )
+    .bind(entry.id.as_uuid())
+    .bind(&entry.class)
+    .bind(&mode)
+    .bind(&entry.provider_binding)
+    .bind(i32::try_from(entry.capacity_units)?)
+    .bind(&entry.allocation_binding)
+    .bind(i64::try_from(entry.revision.get())?)
+    .bind(entry.active)
+    .bind(serde_json::to_value(&entry)?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(entry)
+}
+
+/// Keeps one active catalog product per allocation binding, and one mode per binding, regardless
+/// of how the operator names the class.
+async fn assert_gpu_pool_available(
+    transaction: &mut Transaction<'_, Postgres>,
+    class: &str,
+    mode: &str,
+    allocation_binding: &str,
+) -> Result<(), ResourceStoreError> {
+    let mode_collision: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM resource.gpu_catalog_entries
+             WHERE active AND allocation_binding=$1 AND class<>$2 AND mode<>$3
+         )",
+    )
+    .bind(allocation_binding)
+    .bind(class)
+    .bind(mode)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if mode_collision {
+        return Err(ResourceStoreError::GpuCatalogModeCollision);
+    }
+    let pool_collision: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM resource.gpu_catalog_entries
+             WHERE active AND allocation_binding=$1 AND class<>$2 AND mode=$3
+         )",
+    )
+    .bind(allocation_binding)
+    .bind(class)
+    .bind(mode)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if pool_collision {
+        return Err(ResourceStoreError::GpuCatalogPoolCollision);
+    }
+    Ok(())
+}
+
+/// A reviewed seed is authoritative only for the exact row it declares; any other shape is a
+/// conflict rather than an implicit rewrite.
+fn gpu_seed_matches(entry: &GpuCatalogEntry, seed: &GpuCatalogSeed) -> bool {
+    entry.class == seed.class
+        && entry.mode == seed.mode
+        && entry.provider_binding == seed.provider_binding
+        && entry.capacity_units == seed.capacity_units
+        && entry.allocation_binding == seed.allocation_binding
+}
+
 async fn resolve_gpu_allocation(
     transaction: &mut Transaction<'_, Postgres>,
     provider_binding: &str,
@@ -4267,6 +4374,8 @@ pub enum ResourceStoreError {
     GpuCatalogPoolCollision,
     #[error("LW_RESOURCE_GPU_CATALOG_MAPPING_CONFLICT")]
     GpuCatalogMappingConflict,
+    #[error("LW_RESOURCE_GPU_CATALOG_SEED_CONFLICT")]
+    GpuCatalogSeedConflict,
     #[error("LW_RESOURCE_BUDGET_NOT_FOUND")]
     BudgetNotFound,
     #[error("LW_RESOURCE_BUDGET_CURRENCY_CONFLICT")]

@@ -146,6 +146,7 @@ dependencies = [
  "serde_yaml",
  "sqlx",
  "tar",
+ "task-execution",
  "telemetry",
  "tempfile",
  "testcontainers",
@@ -154,6 +155,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tonic",
  "tracing",
  "uuid",
@@ -2264,6 +2266,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sqlx",
+ "task-execution",
  "telemetry",
  "tempfile",
  "testcontainers",
@@ -6571,6 +6574,25 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "task-execution"
+version = "0.1.0"
+dependencies = [
+ "auth",
+ "contracts",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

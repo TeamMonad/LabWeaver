@@ -1700,7 +1700,9 @@ fn valid_control_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     (path.starts_with("/api/v1/courses/")
         || path == "/api/v1/projects"
-        || path.starts_with("/api/v1/projects/"))
+        || path.starts_with("/api/v1/projects/")
+        || path == "/api/v1/admin/images"
+        || path.starts_with("/api/v1/admin/images/"))
         && !path.contains("//")
         && !path.contains('\\')
         && !lowercase.contains("%2f")
@@ -1877,12 +1879,25 @@ mod tests {
         assert!(valid_control_path("/api/v1/courses/course-1/agent-runs"));
         assert!(valid_control_path("/api/v1/projects/project-1/events"));
         assert!(valid_control_path("/api/v1/projects"));
+        assert!(valid_control_path("/api/v1/admin/images"));
+        assert!(valid_control_path(&format!(
+            "/api/v1/admin/images/uploads/{}/complete",
+            uuid::Uuid::now_v7()
+        )));
+        assert!(valid_control_path(
+            "/api/v1/admin/images/01890000-0000-7000-8000-000000000000/repin"
+        ));
         assert!(!valid_control_path("/internal/v1/auth/decision"));
         assert!(!valid_control_path("/api/v1/courses/../internal"));
         assert!(!valid_control_path("/api/v1/courses/a%2Finternal"));
         assert!(!valid_control_path("/api/v1/courses//agent-runs"));
         assert!(!valid_control_path("/api/v1/projects/../internal"));
         assert!(!valid_control_path("/api/v1/projects/a%2Finternal"));
+        assert!(!valid_control_path("/api/v1/admin/other"));
+        assert!(!valid_control_path("/api/v1/admin/images/../internal"));
+        assert!(!valid_control_path("/api/v1/admin/images/a%2Fb"));
+        assert!(!valid_control_path("/api/v1/admin/images//uploads"));
+        assert!(!valid_control_path("/api/v1/admin/imagesx"));
     }
 
     #[tokio::test]

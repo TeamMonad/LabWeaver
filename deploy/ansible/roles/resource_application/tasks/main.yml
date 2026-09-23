@@ -12,6 +12,12 @@
       - resource_application_values_file | length > 0
     fail_msg: RESOURCE_APPLICATION_INPUT_INVALID
 
+- name: Load the immutable application identities
+  ansible.builtin.set_fact:
+    resource_application_lock: >-
+      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml }}
+  no_log: true
+
 - name: Verify controller-owned Resource deployment inputs
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -246,6 +252,56 @@
       - resource_application_bundle_objects | map(attribute='metadata.name') | sort == ['resource-service-config', 'resource-service-secrets']
       - resource_application_bundle_objects | map(attribute='metadata.namespace') | unique | list == [resource_application_namespace]
     fail_msg: RESOURCE_APPLICATION_CONFIGURATION_INVALID
+  no_log: true
+
+- name: Bind the rendered Resource capacity configuration
+  ansible.builtin.set_fact:
+    resource_application_capacity_configuration: >-
+      {{ ((resource_application_bundle_objects
+           | selectattr('kind', 'equalto', 'ConfigMap')
+           | selectattr('metadata.name', 'equalto', 'resource-service-config')
+           | first).data['capacity.json']) | from_json }}
+  no_log: true
+
+- name: Require every reviewed GPU class to match the rendered Resource capacity catalog
+  ansible.builtin.assert:
+    that:
+      - (resource_application_gpu_classes | length) > 0
+      - >-
+        (resource_application_gpu_classes
+         | selectattr('capacity_units', 'gt', 0)
+         | list | length) == (resource_application_gpu_classes | length)
+      - >-
+        (resource_application_gpu_classes
+         | selectattr('mode', 'in', ['exclusive', 'container_time_slice', 'vm_vgpu'])
+         | list | length) == (resource_application_gpu_classes | length)
+      - (resource_application_capacity_configuration.gpuCatalogSeed | default([]) | length) > 0
+      - >-
+        (resource_application_capacity_configuration.gpuCatalogSeed
+         | selectattr('capacityUnits', 'gt', 0)
+         | list | length) == (resource_application_capacity_configuration.gpuCatalogSeed | length)
+      - >-
+        (resource_application_capacity_configuration.gpuCatalogSeed
+         | map(attribute='class') | sort | list) ==
+        (resource_application_gpu_classes | map(attribute='class') | sort | list)
+    fail_msg: PLATFORM_APPLICATION_GPU_CLASS_CATALOG_MISMATCH
+  no_log: true
+
+- name: Require every rendered GPU class to match the reviewed lock entry
+  ansible.builtin.assert:
+    that:
+      - >-
+        (resource_application_gpu_classes
+         | selectattr('class', 'equalto', item.class)
+         | selectattr('mode', 'equalto', item.mode)
+         | selectattr('provider_binding', 'equalto', item.providerBinding)
+         | selectattr('capacity_units', 'equalto', item.capacityUnits)
+         | selectattr('allocation_binding', 'equalto', item.allocationBinding)
+         | list | length) == 1
+    fail_msg: PLATFORM_APPLICATION_GPU_CLASS_CATALOG_MISMATCH
+  loop: "{{ resource_application_capacity_configuration.gpuCatalogSeed }}"
+  loop_control:
+    label: "{{ item.class }}"
   no_log: true
 
 - name: Apply only the independently reviewed Resource configuration

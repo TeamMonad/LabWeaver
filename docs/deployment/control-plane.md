@@ -58,17 +58,48 @@ Service startup verifies required tables and exits with a stable diagnostic when
 certificate, secret locator, provider binding or durable consumer configuration is absent.
 Startup never repairs an unknown schema.
 
-## Evaluation runner prerequisites
+## One-shot workload runtime prerequisites
 
-Every OJ Job uses `runtimeClassName: labweaver-oj`. Before Evaluation starts, each node eligible
-for OJ workloads must expose a `RuntimeClass` with handler `labweaver-oj` mapped to a dedicated
-runc/containerd runtime whose OCI base spec applies a finite `linux.resources.pids.limit` of 128
-or less to every OJ container, with `SystemdCgroup=true` matching the node cgroup manager. A
-kubelet Pod-level PID setting or a limit visible only on a parent cgroup is insufficient when the
-worker cgroup namespace hides it; the worker must observe the finite per-container cap. If the
-handler is unavailable, OJ scheduling must fail closed. Keep the existing seccomp, Landlock,
-no-new-privileges and other sandbox controls unchanged; do not weaken them to make the runtime
-available.
+Every platform one-shot workload — admitted Agent authoring attempts, OJ runs and Ansible probes —
+runs as a Kubernetes Job with `runtimeClassName: labweaver-sandbox`. Untrusted experiment programs,
+probe scripts and model-generated code all execute inside that runtime, so the isolation boundary is
+identical for all three roles and is not chosen per service.
+
+Before any of these services dispatches work, every node eligible for those workloads must expose a
+`RuntimeClass` with handler `labweaver-sandbox` mapped to gVisor (`io.containerd.runsc.v1`) with the
+`runsc` sentry sidecar tree installed next to the runtime binary. The handler must not set a
+`base_runtime_spec`: `runsc` refuses to start a container from a base spec that carries no `mounts`
+array, so the process bound is not expressed in the OCI spec.
+
+The process bound is enforced on the pod cgroup instead. Eligible nodes set the kubelet
+`podPidsLimit` to a reviewed finite value, so a fork bomb inside a sandbox is terminated instead of
+exhausting the node's pid space. Under gVisor every guest process is a sandbox host thread, so this
+node-level bound covers the whole one-shot Pod — every container of the Job — rather than one
+container, and a gVisor release that ignores `linux.resources.pids` leaves a per-container OCI cap
+unenforceable. The bound therefore has to leave room for every co-located workload on that node: a
+deployment that shares nodes with JVM services must review a larger value, while a dedicated
+one-shot node pool can review a small one. Recording which value the node class carries is a
+deployment prerequisite, not a reason to drop the sandbox. If the handler is unavailable,
+scheduling must fail closed instead of falling back to the node default runtime.
+
+Keep the existing seccomp, no-new-privileges, dropped-capability, read-only-root-filesystem and
+non-root controls unchanged; do not weaken them to make the runtime available. When the authoring
+BuildKit sidecar is enabled, the attempt Pod keeps the same RuntimeClass; a node class that cannot
+run the rootless BuildKit sidecar inside gVisor is a deployment prerequisite to record, not a reason
+to drop the sandbox control.
+
+## Authoring sandbox prerequisites
+
+Admitted authoring attempts run one Kubernetes Job per attempt in the fixed `labweaver-authoring`
+namespace. Ansible reconciles the namespace, the `authoring-default-deny` namespace-wide
+NetworkPolicy, the tokenless `authoring-runner` ServiceAccount and the platform registry pull
+secret; the Agent executor verifies the default-deny policy before it applies any attempt bundle.
+The attempt Pod runs the digest-pinned sandbox image built from the `authoring-sandbox` target of
+`containers/Containerfile.rust` (Claude Code CLI plus bash, python3, git, curl and buildctl), as a
+non-root user with a read-only root filesystem, no service-account token and only the configured
+proxy/registry/model egress CIDRs, and it carries `runtimeClassName: labweaver-sandbox` (see the
+shared runtime prerequisites above). Agent holds a namespaced Role limited to Jobs, Secrets, Pods and
+NetworkPolicies in that single namespace; it never receives cluster-wide permissions.
 
 ## Rollback
 

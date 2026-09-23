@@ -20,6 +20,8 @@ export type NavigationItemId =
   | 'work-resources'
   | 'admin-resource-approval'
   | 'admin-policies'
+  | 'admin-platform-images'
+  | 'admin-gpu-catalog'
   | 'admin-finance'
   | 'admin-audit'
 
@@ -217,6 +219,24 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
         path: '/admin/policies',
         icon: 'policy',
         keywords: ['管理员', '策略', '安全', 'policy'],
+        allowedRoles: ADMIN_ONLY,
+      },
+      {
+        id: 'admin-platform-images',
+        label: '平台镜像',
+        description: '维护沙箱可用的容器与虚拟机基础镜像。',
+        path: '/admin/platform-images',
+        icon: 'image',
+        keywords: ['管理员', '镜像', '基础镜像', 'image', 'digest'],
+        allowedRoles: ADMIN_ONLY,
+      },
+      {
+        id: 'admin-gpu-catalog',
+        label: 'GPU 目录',
+        description: '维护 GPU class 目录、分配模式和容量单位。',
+        path: '/admin/gpu-catalog',
+        icon: 'developer_board',
+        keywords: ['管理员', 'GPU', '目录', 'class', 'capacity', 'catalog'],
         allowedRoles: ADMIN_ONLY,
       },
       {

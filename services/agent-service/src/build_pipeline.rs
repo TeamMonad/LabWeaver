@@ -1,4 +1,4 @@
-//! Deterministic, fail-closed orchestration for approved Container image builds.
+//! Deterministic, fail-closed orchestration for approved Container image builds and imports.
 #![allow(
     missing_docs,
     reason = "the contracts crate owns public wire documentation; this module exposes provider integration seams"
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::events::AgentBuildRequested;
-use contracts::supply_chain::ImageArtifact;
+use contracts::supply_chain::{BuildSource, ImageArtifact};
 use contracts::{BuildRequestId, ImageArtifactId, UtcTimestamp};
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,7 @@ impl BuildExecutionFence {
 pub enum BuildProviderStage {
     EnsurePrivateProject,
     Build,
+    Import,
     Publish,
     Cleanup,
 }
@@ -93,6 +94,7 @@ impl BuildProviderStage {
         match self {
             Self::EnsurePrivateProject => "ensure_private_project",
             Self::Build => "build",
+            Self::Import => "import",
             Self::Publish => "publish",
             Self::Cleanup => "cleanup",
         }
@@ -201,6 +203,13 @@ pub trait BuildSupplyChainProvider: Send + Sync {
     ) -> Result<PrivateRegistryProject, BuildProviderFailure>;
 
     async fn build_candidate(
+        &self,
+        context: &BuildProviderRequestContext,
+        command: &AgentBuildRequested,
+        identity: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure>;
+
+    async fn import_candidate(
         &self,
         context: &BuildProviderRequestContext,
         command: &AgentBuildRequested,
@@ -381,15 +390,29 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
                 )
                 .await);
         }
-        let build_context = fence.request_context(command.request.id, BuildProviderStage::Build);
-        let candidate = match self
-            .stage(
-                cancellation,
-                self.provider
-                    .build_candidate(&build_context, command, identity),
-            )
-            .await
-        {
+        let candidate = match &command.request.source {
+            BuildSource::Dockerfile { .. } => {
+                let build_context =
+                    fence.request_context(command.request.id, BuildProviderStage::Build);
+                self.stage(
+                    cancellation,
+                    self.provider
+                        .build_candidate(&build_context, command, identity),
+                )
+                .await
+            }
+            BuildSource::ExportedOci { .. } => {
+                let import_context =
+                    fence.request_context(command.request.id, BuildProviderStage::Import);
+                self.stage(
+                    cancellation,
+                    self.provider
+                        .import_candidate(&import_context, command, identity),
+                )
+                .await
+            }
+        };
+        let candidate = match candidate {
             Ok(candidate) => candidate,
             Err(error) => {
                 return Err(self

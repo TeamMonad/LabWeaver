@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Internal Agent request that imports one frozen OCI archive into the platform registry.",
+  "properties": {
+    "actorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "archive": {
+      "$ref": "#/$defs/ArtifactRef",
+      "description": "Frozen object identity of the uploaded archive."
+    },
+    "archiveObjectKey": {
+      "description": "Object-store key of the frozen archive.",
+      "type": "string"
+    },
+    "binding": {
+      "type": "string"
+    },
+    "capacityBytes": {
+      "description": "Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "diskFormat": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VirtualMachineDiskFormat"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Declared virtual-machine disk encoding inside the archive; see [`valid_vm_disk_upload`]."
+    },
+    "diskPath": {
+      "description": "Relative path of the disk inside the archived bundle; see [`valid_vm_disk_upload`].",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "targetReference": {
+      "description": "Target `<registry-host>/<repository>:<tag>` inside the configured platform registry.",
+      "type": "string"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "kind",
+    "binding",
+    "targetReference",
+    "archive",
+    "archiveObjectKey",
+    "trustRevision",
+    "actorId",
+    "reason"
+  ],
+  "title": "InternalPlatformImageImportRequest",
+  "type": "object"
+}

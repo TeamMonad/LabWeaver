@@ -1227,6 +1227,25 @@
         }
       ]
     },
+    "ExportedOciImage": {
+      "additionalProperties": false,
+      "description": "Frozen sandbox-exported OCI layout archive.\n\nThe agent freezes and hashes the exact uploaded version before Control may bind it into a\nbuild request, so the executor re-reads that immutable version instead of a current key.",
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/ArtifactRef",
+          "description": "Immutable object-store identity of the layout archive."
+        },
+        "layoutObjectKey": {
+          "description": "Object-store key of the layout archive.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "layout",
+        "layoutObjectKey"
+      ],
+      "type": "object"
+    },
     "FactAssertion": {
       "additionalProperties": false,
       "description": "Expected fact emitted by a Linux probe.",
@@ -1716,6 +1735,17 @@
         }
       ],
       "description": "Validated Environment candidate, if that track succeeded."
+    },
+    "environmentImageExport": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExportedOciImage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Frozen sandbox layout export produced by the successful Environment attempt, if any."
     },
     "evaluationCandidate": {
       "anyOf": [

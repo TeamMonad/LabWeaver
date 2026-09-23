@@ -405,6 +405,13 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         S3ImmutableObjectStore::binding(self)
     }
 
+    /// Presigns one write once object.
+    ///
+    /// `size_bytes` is the reviewed upper bound of the write, not the size of the body a writer
+    /// sends: the body of a sandbox attempt result only exists inside the attempt. The bound
+    /// therefore stays a caller-side check — the writer refuses to upload beyond it and the reader
+    /// verifies the exact size it was promised — while the signature must not pin `Content-Length`,
+    /// because a pinned length makes every writer whose body is smaller than the bound fail.
     async fn presign_upload(
         &self,
         key: &str,
@@ -426,9 +433,6 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .put_object()
             .bucket(&self.config.bucket)
             .key(key)
-            .content_length(
-                i64::try_from(size_bytes).map_err(|_| ObjectStoreError::ObjectTooLarge)?,
-            )
             .content_type(media_type)
             .if_none_match("*")
             .presigned(
@@ -960,6 +964,28 @@ mod tests {
         }
         let response = request.body(bytes.to_vec()).send().await?;
         assert!(response.status().is_success());
+        // A writer that uploads less than the reviewed bound must still succeed: the size bound is
+        // a caller-side check, so the signature never pins a body length.
+        let bounded = store
+            .presign_upload(
+                "problem-packages/course/upload/bounded-object",
+                store.config.max_object_bytes,
+                "text/plain",
+                "2026-07-15T08:00:00.000Z".parse::<UtcTimestamp>()?,
+            )
+            .await?;
+        let mut bounded_request = http.put(&bounded.url);
+        for (name, value) in &bounded.required_headers {
+            bounded_request = bounded_request.header(name, value);
+        }
+        assert!(
+            bounded_request
+                .body(bytes.to_vec())
+                .send()
+                .await?
+                .status()
+                .is_success()
+        );
         let mut overwrite = http.put(&presigned.url);
         for (name, value) in &presigned.required_headers {
             overwrite = overwrite.header(name, value);

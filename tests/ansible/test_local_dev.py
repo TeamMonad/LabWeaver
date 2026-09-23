@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -21,7 +25,42 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import local_dev  # noqa: E402
+
+
+def make_app_input_with_local_cidrs(*args: object, **kwargs: object) -> tuple[Path, Path, str]:
+    """Render the local app input with the CIDRs the owned cluster reports.
+
+    The renderer resolves the Service CIDR, the pod CIDR and the Kind network from the owned
+    cluster; these tests exercise the rendering, not the cluster readback.
+    """
+
+    with (
+        patch.object(local_dev, "local_service_cidr", return_value="10.201.0.0/16"),
+        patch.object(local_dev, "local_kind_pod_cidr", return_value="10.202.0.0/16"),
+        patch.object(local_dev, "local_kind_network_cidr", return_value="172.18.0.0/16"),
+    ):
+        return local_dev.make_app_input(*args, **kwargs)
 import local_dev_e2e  # noqa: E402
+
+
+class _FakeDownloadResponse:
+    """Context manager standing in for a urlopen response body."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeDownloadResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            block, self._payload = self._payload, b""
+            return block
+        block, self._payload = self._payload[:size], self._payload[size:]
+        return block
 
 
 class LocalDevBundleTests(unittest.TestCase):
@@ -82,6 +121,210 @@ class LocalDevBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(local_dev.LocalDevError, "absolute HTTPS URL") as invalid:
                 local_dev.load_provider_environment(invalid_port)
             self.assertNotIn("private-token", str(invalid.exception))
+
+    def test_provider_environment_accepts_plain_http_only_for_local_endpoints(self) -> None:
+        def provider(base_url: str) -> dict[str, str]:
+            return local_dev.validate_provider_environment(
+                {
+                    "ANTHROPIC_BASE_URL": base_url,
+                    "ANTHROPIC_AUTH_TOKEN": "local-token",
+                    "ANTHROPIC_MODEL": "local-model",
+                }
+            )
+
+        for base_url in (
+            "http://127.0.0.1:11434",
+            "http://localhost:11434/v1",
+            "http://10.201.0.1:11434",
+            "http://172.18.0.1:11434",
+            "http://192.168.56.10:11434",
+            "http://[::1]:11434",
+            "http://169.254.10.10:11434",
+            "https://provider.example.test/anthropic",
+        ):
+            with self.subTest(base_url=base_url):
+                self.assertEqual(provider(base_url)["ANTHROPIC_BASE_URL"], base_url)
+
+        for base_url in (
+            "http://provider.example.test/anthropic",
+            "http://8.8.8.8:11434",
+            "ftp://127.0.0.1:11434",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    provider(base_url)
+                self.assertIn("absolute HTTPS URL", str(context.exception))
+
+    def test_local_kind_network_cidr_selects_the_ipv4_subnet(self) -> None:
+        configurations = json.dumps(
+            [
+                {"Subnet": "fc00:f853:ccd:e793::/64", "Gateway": "fc00:f853:ccd:e793::1"},
+                {"Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1"},
+            ]
+        )
+
+        def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, stdout=configurations)
+
+        with patch.object(local_dev, "run", side_effect=capture_run):
+            self.assertEqual(local_dev.local_kind_network_cidr(), "172.18.0.0/16")
+
+        with patch.object(
+            local_dev,
+            "run",
+            side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps([{"Subnet": "fc00::/64"}])
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_kind_network_cidr()
+            self.assertIn("no IPv4 subnet", str(context.exception))
+
+    def test_local_service_cidr_reads_the_apiserver_range(self) -> None:
+        manifest = (
+            "apiVersion: v1\n"
+            "kind: Pod\n"
+            "spec:\n"
+            "  containers:\n"
+            "  - command:\n"
+            "    - kube-apiserver\n"
+            "    - --service-cluster-ip-range=10.201.0.0/16\n"
+        )
+
+        def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, stdout=manifest)
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(local_dev, "run", side_effect=capture_run),
+        ):
+            self.assertEqual(local_dev.local_service_cidr(), "10.201.0.0/16")
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(
+                local_dev,
+                "run",
+                side_effect=lambda *args, **kwargs: subprocess.CompletedProcess(list(args), 0, stdout=""),
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_service_cidr()
+            self.assertIn("service-cluster-ip-range", str(context.exception))
+
+    def test_local_kubernetes_api_endpoint_names_the_adopted_service_address(self) -> None:
+        def capture_kubectl(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(list(args), 0, stdout="10.201.0.1")
+
+        with patch.object(local_dev, "kubectl", side_effect=capture_kubectl):
+            self.assertEqual(
+                local_dev.local_kubernetes_api_endpoint(Path("kubeconfig")),
+                "10.201.0.1/32",
+            )
+
+        with patch.object(
+            local_dev,
+            "kubectl",
+            side_effect=lambda *args, **kwargs: subprocess.CompletedProcess(list(args), 0, stdout=""),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_kubernetes_api_endpoint(Path("kubeconfig"))
+            self.assertIn("API Service address", str(context.exception))
+
+        with patch.object(
+            local_dev,
+            "kubectl",
+            side_effect=lambda *args, **kwargs: subprocess.CompletedProcess(
+                list(args), 0, stdout="not-an-address"
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.local_kubernetes_api_endpoint(Path("kubeconfig"))
+            self.assertIn("invalid API Service address", str(context.exception))
+
+    def test_local_gpu_capacity_configuration_observes_the_reviewed_binding(self) -> None:
+        rendered = json.loads(
+            local_dev.local_gpu_capacity_configuration(
+                (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8"),
+                local_dev.local_environment_provider_binding(),
+            )
+        )
+        self.assertEqual(
+            [observer["providerBinding"] for observer in rendered["gpuObservers"]],
+            ["gpu-primary-v1", "kubernetes-work-local-hostpath"],
+        )
+        for observer in rendered["gpuObservers"]:
+            self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
+            self.assertEqual(
+                observer["bearerTokenFile"],
+                "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            )
+            self.assertEqual(
+                observer["clusterCaFile"],
+                "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+            )
+        classes = {seed["class"]: seed for seed in rendered["gpuCatalogSeed"]}
+        self.assertEqual(
+            classes["nvidia-cuda"]["allocationBinding"], "nvidia-cuda-primary-v1"
+        )
+        self.assertEqual(classes["nvidia-cuda"]["providerBinding"], "gpu-primary-v1")
+        self.assertEqual(classes["nvidia-cuda-local"]["allocationBinding"], "nvidia.com/gpu")
+        # Resource resolves the allocation for the binding the Work environment runs under.
+        self.assertEqual(
+            classes["nvidia-cuda-local"]["providerBinding"], "kubernetes-work-local-hostpath"
+        )
+        self.assertEqual(classes["nvidia-cuda-local"]["mode"], "exclusive")
+        self.assertEqual(classes["nvidia-cuda-local"]["capacityUnits"], 1)
+
+    def test_local_gpu_capacity_configuration_rejects_reviewed_configuration_drift(self) -> None:
+        example = json.loads(
+            (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8")
+        )
+        cases = {
+            "observer": {**example, "gpuObservers": [{"providerBinding": "gpu-primary-v1"}]},
+            "seed": {**example, "gpuCatalogSeed": []},
+            "binding": {
+                **example,
+                "gpuCatalogSeed": [
+                    {
+                        "class": "nvidia-cuda",
+                        "mode": "exclusive",
+                        "capacityUnits": 1,
+                        "allocationBinding": "nvidia-cuda-primary-v1",
+                    }
+                ],
+            },
+            "local-binding": {
+                **example,
+                "gpuCatalogSeed": [
+                    {
+                        "class": "nvidia-cuda",
+                        "mode": "exclusive",
+                        "providerBinding": "kubernetes-work-local-hostpath",
+                        "capacityUnits": 1,
+                        "allocationBinding": "nvidia-cuda-primary-v1",
+                    }
+                ],
+            },
+            "local": {
+                **example,
+                "gpuCatalogSeed": [
+                    {
+                        "class": "nvidia-cuda-local",
+                        "mode": "exclusive",
+                        "providerBinding": "gpu-primary-v1",
+                        "capacityUnits": 1,
+                        "allocationBinding": "nvidia.com/gpu",
+                    }
+                ],
+            },
+        }
+        for label, configuration in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(local_dev.LocalDevError):
+                    local_dev.local_gpu_capacity_configuration(
+                        json.dumps(configuration), "kubernetes-work-local-hostpath"
+                    )
 
     def test_provider_environment_rejects_extra_fields_and_path_is_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -359,24 +602,52 @@ class LocalDevBundleTests(unittest.TestCase):
         )
         wait.assert_called_once_with(kubeconfig, "daemonset", "kindnet", "kube-system")
 
-    def test_kind_oj_runtime_preserves_base_spec_and_installs_dedicated_handler(self) -> None:
-        base_spec = {
-            "ociVersion": "1.0.2",
-            "process": {"args": ["/pause"]},
-            "linux": {
-                "resources": {
-                    "devices": [{"allow": False}],
-                    "pids": {"existing": "preserved", "limit": 57793},
-                }
-            },
-        }
-        base_spec_text = json.dumps(base_spec)
+    def test_kind_cluster_config_applies_the_reviewed_pod_process_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            calls: list[list[str]] = []
+
+            def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout="")
+
+            with (
+                patch.object(local_dev, "STATE_DIR", state),
+                patch.object(local_dev, "CLUSTER", "kind-config-cluster"),
+                patch.object(local_dev, "REGISTRY", "kind-config-registry"),
+                patch.object(local_dev, "REGISTRY_PORT", 5001),
+                patch.object(local_dev, "RUN_ID", "kindconfig"),
+                patch.object(local_dev, "run", side_effect=capture_run),
+                patch.object(local_dev, "configure_kind_sandbox_runtime"),
+                patch.object(local_dev, "configure_kindnet_resources"),
+                patch.object(local_dev, "kind_nodes", return_value=[]),
+            ):
+                local_dev.create_cluster(state / "kubeconfig", expose_registry=False)
+
+            kind_config = yaml.safe_load((state / "kind-config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(kind_config["name"], "kind-config-cluster")
+        self.assertEqual(
+            kind_config["kubeadmConfigPatches"],
+            [
+                "kind: KubeletConfiguration\n"
+                f"podPidsLimit: {local_dev.SANDBOX_PIDS_LIMIT}\n"
+            ],
+        )
+        self.assertEqual(
+            kind_config["nodes"],
+            [{"role": "control-plane", "image": local_dev.KIND_IMAGE}],
+        )
+        self.assertEqual(
+            calls[0][:3], ["kind", "create", "cluster"]
+        )
+
+    def test_kind_sandbox_runtime_installs_gvisor_handler_without_a_base_spec(self) -> None:
         containerd_config = (
             '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
             '  runtime_type = "io.containerd.runc.v2"\n'
         )
         calls: list[tuple[list[str], bytes | None]] = []
-        applied: list[list[dict[str, object]]] = []
+        applied: list[tuple[Path, list[dict[str, object]]]] = []
 
         def capture_run(
             argv: list[str],
@@ -387,14 +658,6 @@ class LocalDevBundleTests(unittest.TestCase):
         ) -> subprocess.CompletedProcess[str]:
             del capture, check
             calls.append((argv, input_bytes))
-            if argv == [
-                "docker",
-                "exec",
-                "kind-control-plane",
-                "cat",
-                local_dev.KIND_CONTAINERD_BASE_RUNTIME_SPEC,
-            ]:
-                return subprocess.CompletedProcess(argv, 0, stdout=base_spec_text)
             if argv == [
                 "docker",
                 "exec",
@@ -405,34 +668,33 @@ class LocalDevBundleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
             return subprocess.CompletedProcess(argv, 0, stdout="")
 
-        def capture_apply(_kubeconfig: Path, objects: list[dict[str, object]]) -> None:
-            applied.append(objects)
+        def capture_apply(kubeconfig: Path, objects: list[dict[str, object]]) -> None:
+            applied.append((kubeconfig, objects))
 
-        with (
-            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
-            patch.object(local_dev, "run", side_effect=capture_run),
-            patch.object(local_dev, "apply", side_effect=capture_apply),
-        ):
-            kubeconfig = Path(".tmp/local-dev/owned-kubeconfig")
-            local_dev.configure_kind_oj_runtime(kubeconfig)
-
-        runtime_writes = [
-            payload
-            for argv, payload in calls
-            if payload is not None and argv[-1] == f"cat > {local_dev.KIND_OJ_RUNTIME_SPEC}"
-        ]
-        self.assertEqual(len(runtime_writes), 1)
-        written_spec = json.loads(runtime_writes[0])
-        self.assertEqual(written_spec["ociVersion"], base_spec["ociVersion"])
-        self.assertEqual(written_spec["process"], base_spec["process"])
-        self.assertEqual(
-            written_spec["linux"]["resources"]["devices"],
-            base_spec["linux"]["resources"]["devices"],
-        )
-        self.assertEqual(
-            written_spec["linux"]["resources"]["pids"],
-            {"existing": "preserved", "limit": local_dev.KIND_OJ_PIDS_LIMIT},
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            binaries: dict[str, Path] = {}
+            for name in (
+                "runsc",
+                "containerd-shim-runsc-v1",
+                "gvisor-bin/gvisor_sentry",
+            ):
+                (cache / name).parent.mkdir(parents=True, exist_ok=True)
+                (cache / name).write_bytes(f"{name} bytes".encode())
+                binaries[name] = cache / name
+            with (
+                patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+                patch.object(local_dev, "run", side_effect=capture_run),
+                patch.object(local_dev, "apply", side_effect=capture_apply),
+                patch.object(
+                    local_dev,
+                    "_sandbox_runsc_archive",
+                    return_value=cache / "gvisor.tar.bz2",
+                ),
+                patch.object(local_dev, "_extract_sandbox_runsc", return_value=binaries),
+            ):
+                kubeconfig = Path(".tmp/local-dev/owned-kubeconfig")
+                local_dev.configure_kind_sandbox_runtime(kubeconfig)
 
         config_writes = [
             payload
@@ -443,12 +705,61 @@ class LocalDevBundleTests(unittest.TestCase):
         written_config = config_writes[0].decode("utf-8")
         self.assertTrue(written_config.startswith(containerd_config))
         self.assertIn(
-            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj]\n'
-            '  runtime_type = "io.containerd.runc.v2"\n'
-            '  base_runtime_spec = "/etc/containerd/labweaver-oj-base.json"\n'
-            '\n[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj.options]\n'
-            '  SystemdCgroup = true\n',
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox]\n'
+            '  runtime_type = "io.containerd.runsc.v1"\n',
             written_config,
+        )
+        # gVisor's containerd runtime plugin rejects unknown option keys, and a
+        # base OCI spec without a mounts array makes runsc refuse to start a
+        # container, so the installed table carries neither.
+        self.assertNotIn(".options]", written_config)
+        self.assertNotIn("base_runtime_spec", written_config)
+        self.assertEqual(
+            [argv for argv, _payload in calls if argv[:2] == ["docker", "cp"]],
+            [
+                [
+                    "docker",
+                    "cp",
+                    str(binaries[name]),
+                    f"kind-control-plane:{local_dev.SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+                for name in sorted(binaries)
+            ],
+        )
+        self.assertEqual(
+            [
+                argv
+                for argv, _payload in calls
+                if argv[:3] == ["docker", "exec", "kind-control-plane"] and "mkdir" in argv
+            ],
+            [
+                [
+                    "docker",
+                    "exec",
+                    "kind-control-plane",
+                    "mkdir",
+                    "-p",
+                    f"{local_dev.SANDBOX_RUNSC_INSTALL_DIR}/gvisor-bin",
+                ]
+            ],
+        )
+        self.assertEqual(
+            [
+                argv
+                for argv, _payload in calls
+                if argv[:3] == ["docker", "exec", "kind-control-plane"] and "chmod" in argv
+            ],
+            [
+                [
+                    "docker",
+                    "exec",
+                    "kind-control-plane",
+                    "chmod",
+                    "0755",
+                    f"{local_dev.SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+                for name in local_dev.SANDBOX_RUNSC_REQUIRED_MEMBERS
+            ],
         )
         self.assertEqual(
             [argv for argv, _payload in calls if argv[-3:] == ["systemctl", "restart", "containerd"]],
@@ -457,34 +768,33 @@ class LocalDevBundleTests(unittest.TestCase):
         self.assertEqual(
             applied,
             [
-                [
-                    {
-                        "apiVersion": "node.k8s.io/v1",
-                        "kind": "RuntimeClass",
-                        "metadata": {
-                            "name": "labweaver-oj",
-                            "labels": {
-                                "labweaver.local-dev.owner": local_dev.KUBERNETES_OWNER_LABEL_VALUE
+                (
+                    Path(".tmp/local-dev/owned-kubeconfig"),
+                    [
+                        {
+                            "apiVersion": "node.k8s.io/v1",
+                            "kind": "RuntimeClass",
+                            "metadata": {
+                                "name": "labweaver-sandbox",
+                                "labels": {
+                                    "labweaver.local-dev.owner": (
+                                        local_dev.KUBERNETES_OWNER_LABEL_VALUE
+                                    )
+                                },
                             },
-                        },
-                        "handler": "labweaver-oj",
-                    }
-                ]
+                            "handler": "labweaver-sandbox",
+                        }
+                    ],
+                )
             ],
         )
 
-    def test_kind_oj_runtime_accepts_existing_handler_without_duplicate_config(self) -> None:
-        base_spec_text = json.dumps(
-            {"linux": {"resources": {"devices": [{"allow": False}]}}}
-        )
+    def test_kind_sandbox_runtime_accepts_existing_handler_without_duplicate_config(self) -> None:
         containerd_config = (
             '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
             '  runtime_type = "io.containerd.runc.v2"\n'
-            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj]\n'
-            '  runtime_type = "io.containerd.runc.v2"\n'
-            '  base_runtime_spec = "/etc/containerd/labweaver-oj-base.json"\n'
-            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-oj.options]\n'
-            '  SystemdCgroup = true\n'
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox]\n'
+            '  runtime_type = "io.containerd.runsc.v1"\n'
         )
         calls: list[tuple[list[str], bytes | None]] = []
 
@@ -497,8 +807,6 @@ class LocalDevBundleTests(unittest.TestCase):
         ) -> subprocess.CompletedProcess[str]:
             del capture, check
             calls.append((argv, input_bytes))
-            if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_BASE_RUNTIME_SPEC]:
-                return subprocess.CompletedProcess(argv, 0, stdout=base_spec_text)
             if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_CONFIG]:
                 return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
             return subprocess.CompletedProcess(argv, 0, stdout="")
@@ -507,8 +815,18 @@ class LocalDevBundleTests(unittest.TestCase):
             patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
             patch.object(local_dev, "run", side_effect=capture_run),
             patch.object(local_dev, "apply"),
+            patch.object(local_dev, "_sandbox_runsc_archive", return_value=Path("gvisor.tar.bz2")),
+            patch.object(
+                local_dev,
+                "_extract_sandbox_runsc",
+                return_value={
+                    "runsc": Path("/cache/runsc"),
+                    "containerd-shim-runsc-v1": Path("/cache/containerd-shim-runsc-v1"),
+                    "gvisor-bin/gvisor_sentry": Path("/cache/gvisor-bin/gvisor_sentry"),
+                },
+            ),
         ):
-            local_dev.configure_kind_oj_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
+            local_dev.configure_kind_sandbox_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
 
         self.assertFalse(
             any(
@@ -520,6 +838,178 @@ class LocalDevBundleTests(unittest.TestCase):
             sum(argv[-3:] == ["systemctl", "restart", "containerd"] for argv, _payload in calls),
             1,
         )
+
+    def test_kind_sandbox_runtime_rejects_unexpected_existing_handler(self) -> None:
+        containerd_config = (
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox]\n'
+            '  runtime_type = "io.containerd.runsc.v1"\n'
+            '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.labweaver-sandbox.options]\n'
+            '  SystemdCgroup = true\n'
+        )
+
+        def capture_run(
+            argv: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            capture: bool = False,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            del input_bytes, capture, check
+            if argv[-2:] == ["cat", local_dev.KIND_CONTAINERD_CONFIG]:
+                return subprocess.CompletedProcess(argv, 0, stdout=containerd_config)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        with (
+            patch.object(local_dev, "kind_nodes", return_value=["kind-control-plane"]),
+            patch.object(local_dev, "run", side_effect=capture_run),
+            patch.object(local_dev, "apply"),
+            patch.object(local_dev, "_sandbox_runsc_archive", return_value=Path("gvisor.tar.bz2")),
+            patch.object(
+                local_dev,
+                "_extract_sandbox_runsc",
+                return_value={
+                    "runsc": Path("/cache/runsc"),
+                    "containerd-shim-runsc-v1": Path("/cache/containerd-shim-runsc-v1"),
+                    "gvisor-bin/gvisor_sentry": Path("/cache/gvisor-bin/gvisor_sentry"),
+                },
+            ),
+        ):
+            with self.assertRaises(local_dev.LocalDevError) as context:
+                local_dev.configure_kind_sandbox_runtime(Path(".tmp/local-dev/owned-kubeconfig"))
+        self.assertIn("unexpected settings", str(context.exception))
+
+    def test_sandbox_runtime_lock_requires_every_gvisor_key(self) -> None:
+        complete = {
+            "gvisor": {
+                "version": "release-20260914.0",
+                "linux_amd64_url": "https://example.invalid/gvisor.tar.bz2",
+                "linux_amd64_sha512": "a" * 128,
+            }
+        }
+        with patch.object(local_dev, "load_yaml", return_value=complete):
+            self.assertEqual(
+                local_dev._sandbox_runtime_lock()["version"], "release-20260914.0"
+            )
+        for key in ("version", "linux_amd64_url", "linux_amd64_sha512"):
+            incomplete = {"gvisor": {k: v for k, v in complete["gvisor"].items() if k != key}}
+            with patch.object(local_dev, "load_yaml", return_value=incomplete):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._sandbox_runtime_lock()
+            self.assertIn(f"gvisor.{key}", str(context.exception))
+        empty = {"gvisor": {**complete["gvisor"], "linux_amd64_sha512": "  "}}
+        with patch.object(local_dev, "load_yaml", return_value=empty):
+            with self.assertRaises(local_dev.LocalDevError):
+                local_dev._sandbox_runtime_lock()
+        with patch.object(local_dev, "load_yaml", return_value={"gvisor": None}):
+            with self.assertRaises(local_dev.LocalDevError):
+                local_dev._sandbox_runtime_lock()
+
+    def test_sandbox_runsc_archive_verifies_the_locked_sha512(self) -> None:
+        payload = b"locked gvisor release payload"
+        correct = hashlib.sha512(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "gvisor.tar.bz2"
+            archive.write_bytes(payload)
+            wrong = {
+                "version": "release-test",
+                "linux_amd64_url": "https://example.invalid/gvisor.tar.bz2",
+                "linux_amd64_sha512": "0" * 128,
+            }
+            with patch.object(local_dev, "SANDBOX_RUNSC_ARCHIVE", archive):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._sandbox_runsc_archive(wrong)
+                self.assertIn("sha512", str(context.exception))
+                cached = local_dev._sandbox_runsc_archive(
+                    {**wrong, "linux_amd64_sha512": correct}
+                )
+            self.assertEqual(cached, archive)
+
+            fresh = root / "fresh.tar.bz2"
+
+            def fake_urlopen(_request: object, **_kwargs: object) -> _FakeDownloadResponse:
+                return _FakeDownloadResponse(payload)
+
+            with (
+                patch.object(local_dev, "SANDBOX_RUNSC_ARCHIVE", fresh),
+                patch.object(local_dev, "urlopen", side_effect=fake_urlopen),
+            ):
+                with self.assertRaises(local_dev.LocalDevError):
+                    local_dev._sandbox_runsc_archive(wrong)
+            self.assertFalse(fresh.exists())
+            self.assertFalse(fresh.with_name(fresh.name + ".part").exists())
+
+            with (
+                patch.object(local_dev, "SANDBOX_RUNSC_ARCHIVE", fresh),
+                patch.object(local_dev, "urlopen", side_effect=fake_urlopen),
+            ):
+                downloaded = local_dev._sandbox_runsc_archive(
+                    {**wrong, "linux_amd64_sha512": correct}
+                )
+            self.assertEqual(downloaded.read_bytes(), payload)
+
+    def test_sandbox_runsc_extraction_requires_the_reviewed_members(self) -> None:
+        runsc = b"runsc binary"
+        shim = b"shim binary"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "gvisor.tar.bz2"
+            self._write_tarball(archive, {"runsc": runsc})
+            cache = root / "extracted"
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._extract_sandbox_runsc(archive)
+                self.assertIn("containerd-shim-runsc-v1", str(context.exception))
+
+            self._write_tarball(
+                archive, {"runsc": runsc, "containerd-shim-runsc-v1": shim}
+            )
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                extracted = local_dev._extract_sandbox_runsc(archive)
+            self.assertEqual(extracted["runsc"].read_bytes(), runsc)
+            self.assertEqual(extracted["containerd-shim-runsc-v1"].read_bytes(), shim)
+            for target in extracted.values():
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
+            sentry = b"sentry sidecar"
+            self._write_tarball(
+                archive,
+                {
+                    "runsc": runsc,
+                    "containerd-shim-runsc-v1": shim,
+                    "gvisor-bin/gvisor_sentry": sentry,
+                },
+            )
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                extracted = local_dev._extract_sandbox_runsc(archive)
+            self.assertEqual(
+                extracted["gvisor-bin/gvisor_sentry"].read_bytes(), sentry
+            )
+            self.assertEqual(
+                stat.S_IMODE(extracted["gvisor-bin/gvisor_sentry"].stat().st_mode),
+                0o755,
+            )
+
+            self._write_tarball(
+                archive,
+                {
+                    "runsc": runsc,
+                    "containerd-shim-runsc-v1": shim,
+                    "../escape": b"escape",
+                },
+            )
+            with patch.object(local_dev, "SANDBOX_RUNSC_CACHE_DIR", cache):
+                with self.assertRaises(local_dev.LocalDevError) as context:
+                    local_dev._extract_sandbox_runsc(archive)
+            self.assertIn("plain path", str(context.exception))
+            self.assertFalse((root / "escape").exists())
+
+    def _write_tarball(self, path: Path, members: dict[str, bytes]) -> None:
+        with tarfile.open(path, "w:bz2") as bundle:
+            for name, payload in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                bundle.addfile(info, io.BytesIO(payload))
 
     def test_cert_creates_nested_output_and_verifies_chain(self) -> None:
         openssl = shutil.which("openssl")
@@ -1306,6 +1796,10 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertIn(required, fixture)
 
     def test_local_kind_bundle_covers_enabled_workloads_and_identity_bindings(self) -> None:
+        # The Agent platform registry is part of the reviewed bundle contract, so
+        # only the profile that provisions the run-owned Harbor and BuildKit
+        # provider can render every declared secret; the fixture profile fails
+        # closed in test_local_fixture_profile_requires_the_real_build_provider.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             work = root / "work"
@@ -1330,9 +1824,14 @@ class LocalDevBundleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self._write_foundation_fixture(foundation)
+            build_nats = foundation / "nats-clients" / "build-executor"
+            build_nats.mkdir(parents=True)
+            for name in ("nats.creds", "nats-client.crt", "nats-client.key"):
+                (build_nats / name).write_bytes(f"build-{name}".encode())
             for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
                 (work / name).write_bytes(name.encode())
 
+            provider = self._write_real_build_provider(root)
             images = {
                 "evaluation_service": (
                     f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
@@ -1342,8 +1841,12 @@ class LocalDevBundleTests(unittest.TestCase):
                     f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
                     "evaluation-runner@sha256:" + "b" * 64
                 ),
+                "authoring_sandbox": (
+                    f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                    "authoring-sandbox@sha256:" + "c" * 64
+                ),
             }
-            bundle, resource_bundle, _ = local_dev.make_app_input(
+            bundle, resource_bundle, _ = make_app_input_with_local_cidrs(
                 work,
                 foundation,
                 images,
@@ -1352,6 +1855,7 @@ class LocalDevBundleTests(unittest.TestCase):
                     "ANTHROPIC_AUTH_TOKEN": "test-provider-token",
                     "ANTHROPIC_MODEL": "test-model",
                 },
+                provider,
             )
 
             platform_documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
@@ -1359,8 +1863,8 @@ class LocalDevBundleTests(unittest.TestCase):
                 (document["kind"], document["metadata"]["name"])
                 for document in platform_documents
             }
-            self.assertNotIn(("ConfigMap", "build-executor-config"), platform_names)
-            self.assertNotIn(("Secret", "build-executor-secrets"), platform_names)
+            self.assertIn(("ConfigMap", "build-executor-config"), platform_names)
+            self.assertIn(("Secret", "build-executor-secrets"), platform_names)
             self.assertNotIn(("ConfigMap", "kubevirt-executor-config"), platform_names)
             self.assertNotIn(("Secret", "kubevirt-executor-secrets"), platform_names)
             self.assertNotIn(("ConfigMap", "kubevirt-console-executor-config"), platform_names)
@@ -1447,7 +1951,7 @@ class LocalDevBundleTests(unittest.TestCase):
             )
             self.assertEqual(
                 container_provider["imageRepositoryPrefix"],
-                f"localhost:{local_dev.REGISTRY_PORT}/labweaver-system",
+                f"{provider.registry_host}/labweaver-system",
             )
             self.assertEqual(container_provider["imagePullSecretName"], "harbor-course-pull")
             self.assertEqual(container_provider["workspaceStorageClassName"], "standard")
@@ -1461,7 +1965,7 @@ class LocalDevBundleTests(unittest.TestCase):
             pull_config = json.loads(
                 base64.b64decode(pull_secret["data"]["registry-pull-config.json"])
             )
-            self.assertIn(f"localhost:{local_dev.REGISTRY_PORT}", pull_config["auths"])
+            self.assertIn(provider.registry_host, pull_config["auths"])
 
             resource_documents = list(yaml.safe_load_all(resource_bundle.read_text(encoding="utf-8")))
             resource_names = {
@@ -1477,14 +1981,148 @@ class LocalDevBundleTests(unittest.TestCase):
             self.assertFalse((app_input / "secrets" / "kubevirt-executor-secrets").exists())
             self.assertFalse((app_input / "secrets" / "kubevirt-console-executor-secrets").exists())
 
+    def test_local_fixture_profile_binds_fixture_platform_registry_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            foundation = root / "foundation"
+            work.mkdir()
+            client_names = ("web", "access", "agent", "control", "environment", "evaluation", "resource")
+            (work / "client-secrets.json").write_text(
+                json.dumps({name: f"{name}-secret" for name in client_names}),
+                encoding="utf-8",
+            )
+            database_names = (
+                "control-service",
+                "access-service",
+                "agent-service",
+                "environment-service",
+                "evaluation-service",
+                "resource-service",
+            )
+            (work / "database-passwords.json").write_text(
+                json.dumps({name: f"{name}-password" for name in database_names}),
+                encoding="utf-8",
+            )
+            self._write_foundation_fixture(foundation)
+            for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
+                (work / name).write_bytes(name.encode())
+
+            bundle, _resource_bundle, _ = make_app_input_with_local_cidrs(
+                work,
+                foundation,
+                {
+                    "evaluation_service": (
+                        f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                        "evaluation-service@sha256:" + "a" * 64
+                    ),
+                    "evaluation_runner": (
+                        f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                        "evaluation-runner@sha256:" + "b" * 64
+                    ),
+                    "authoring_sandbox": (
+                        f"localhost:{local_dev.REGISTRY_PORT}/labweaver/local/"
+                        "authoring-sandbox@sha256:" + "c" * 64
+                    ),
+                },
+                {
+                    "ANTHROPIC_BASE_URL": "https://provider.example.test/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": "test-provider-token",
+                    "ANTHROPIC_MODEL": "test-model",
+                },
+            )
+
+            documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
+            agent_config = next(
+                document
+                for document in documents
+                if document["kind"] == "ConfigMap"
+                and document["metadata"]["name"] == "agent-service-config"
+            )
+            platform_registry = yaml.safe_load(agent_config["data"]["config.yaml"])[
+                "platform_registry"
+            ]
+            self.assertEqual(
+                platform_registry["registry"], f"localhost:{local_dev.REGISTRY_PORT}"
+            )
+            self.assertEqual(
+                platform_registry["ca_file"], "/etc/labweaver/secrets/harbor-ca.crt"
+            )
+            agent_secret = next(
+                document
+                for document in documents
+                if document["kind"] == "Secret"
+                and document["metadata"]["name"] == "agent-service-secrets"
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["harbor-ca.crt"]),
+                (foundation / "authority" / "ca.crt").read_bytes(),
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["harbor-username"]), b"local-dev"
+            )
+            self.assertEqual(
+                base64.b64decode(agent_secret["data"]["harbor-password"]), b"local-dev"
+            )
+            build_executor_secret = next(
+                (
+                    document
+                    for document in documents
+                    if document["kind"] == "Secret"
+                    and document["metadata"]["name"] == "build-executor-secrets"
+                ),
+                None,
+            )
+            self.assertIsNone(build_executor_secret)
+
+    @staticmethod
+    def _write_real_build_provider(root: Path) -> local_dev.local_dev_build.RealBuildProvider:
+        """Write the private Harbor and BuildKit provider files for one bundle render."""
+
+        provider_root = root / "provider"
+        provider_root.mkdir()
+        files = {
+            "harbor-ca.crt": b"harbor-ca",
+            "builder-username": b"robot$labweaver-system+platform-build-executor\n",
+            "builder-password": b"builder-token\n",
+            "runtime-username": b"robot$labweaver-system+runtime-puller\n",
+            "runtime-password": b"runtime-token\n",
+            "registry-pull-config.json": b'{"auths": {"harbor.lab.lan": {"auth": "runtime"}}}\n',
+            "buildkit-ca.crt": b"buildkit-ca",
+            "buildkit-client.crt": b"buildkit-client-crt",
+            "buildkit-client.key": b"buildkit-client-key",
+            "chart.tgz": b"chart",
+        }
+        paths = {}
+        for name, value in files.items():
+            path = provider_root / name
+            path.write_bytes(value)
+            paths[name] = path
+        return local_dev.local_dev_build.RealBuildProvider(
+            registry_host="harbor.lab.lan",
+            registry_service_ip="10.96.0.42",
+            harbor_api="https://harbor.lab.lan/",
+            buildkit_address="tcp://buildkit.labweaver-build.svc:1234",
+            harbor_ca_file=paths["harbor-ca.crt"],
+            builder_username_file=paths["builder-username"],
+            builder_password_file=paths["builder-password"],
+            runtime_username_file=paths["runtime-username"],
+            runtime_password_file=paths["runtime-password"],
+            registry_pull_config_file=paths["registry-pull-config.json"],
+            buildkit_ca_file=paths["buildkit-ca.crt"],
+            buildkit_client_certificate_file=paths["buildkit-client.crt"],
+            buildkit_client_private_key_file=paths["buildkit-client.key"],
+            chart_archive=paths["chart.tgz"],
+            project_storage_quota_bytes=4 * 1024 * 1024 * 1024,
+            buildkit_network_policy_mode="kindnet-network-policy-unenforced;cilium-unavailable",
+        )
+
     def test_real_provider_bundle_uses_harbor_buildkit_inputs_and_quota(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             work = root / "work"
             foundation = root / "foundation"
-            provider_root = root / "provider"
             work.mkdir()
-            provider_root.mkdir()
 
             client_names = ("web", "access", "agent", "control", "environment", "evaluation", "resource")
             (work / "client-secrets.json").write_text(
@@ -1511,46 +2149,13 @@ class LocalDevBundleTests(unittest.TestCase):
             for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
                 (work / name).write_bytes(name.encode())
 
-            files = {
-                "harbor-ca.crt": b"harbor-ca",
-                "builder-username": b"robot$labweaver-system+platform-build-executor\n",
-                "builder-password": b"builder-token\n",
-                "runtime-username": b"robot$labweaver-system+runtime-puller\n",
-                "runtime-password": b"runtime-token\n",
-                "registry-pull-config.json": b'{"auths": {"harbor.lab.lan": {"auth": "runtime"}}}\n',
-                "buildkit-ca.crt": b"buildkit-ca",
-                "buildkit-client.crt": b"buildkit-client-crt",
-                "buildkit-client.key": b"buildkit-client-key",
-                "chart.tgz": b"chart",
-            }
-            paths = {}
-            for name, value in files.items():
-                path = provider_root / name
-                path.write_bytes(value)
-                paths[name] = path
-            provider = local_dev.local_dev_build.RealBuildProvider(
-                registry_host="harbor.lab.lan",
-                registry_service_ip="10.96.0.42",
-                harbor_api="https://harbor.lab.lan/",
-                buildkit_address="tcp://buildkit.labweaver-build.svc:1234",
-                harbor_ca_file=paths["harbor-ca.crt"],
-                builder_username_file=paths["builder-username"],
-                builder_password_file=paths["builder-password"],
-                runtime_username_file=paths["runtime-username"],
-                runtime_password_file=paths["runtime-password"],
-                registry_pull_config_file=paths["registry-pull-config.json"],
-                buildkit_ca_file=paths["buildkit-ca.crt"],
-                buildkit_client_certificate_file=paths["buildkit-client.crt"],
-                buildkit_client_private_key_file=paths["buildkit-client.key"],
-                chart_archive=paths["chart.tgz"],
-                project_storage_quota_bytes=4 * 1024 * 1024 * 1024,
-                buildkit_network_policy_mode="kindnet-network-policy-unenforced;cilium-unavailable",
-            )
+            provider = self._write_real_build_provider(root)
             images = {
                 "evaluation_service": "localhost:5001/labweaver/local/evaluation-service@sha256:" + "a" * 64,
                 "evaluation_runner": "localhost:5001/labweaver/local/evaluation-runner@sha256:" + "b" * 64,
+                "authoring_sandbox": "localhost:5001/labweaver/local/authoring-sandbox@sha256:" + "c" * 64,
             }
-            bundle, _resource_bundle, _ = local_dev.make_app_input(
+            bundle, _resource_bundle, _ = make_app_input_with_local_cidrs(
                 work,
                 foundation,
                 images,
@@ -1602,6 +2207,52 @@ class LocalDevBundleTests(unittest.TestCase):
                         }
                     }
                 },
+            )
+
+    def test_authoring_buildkit_sidecar_activates_only_the_two_reviewed_keys(self) -> None:
+        example = ROOT / "deploy/config/agent-control-plane.yaml.example"
+        original = example.read_text(encoding="utf-8")
+        self.assertIn('  # buildkit_image: "', original)
+        self.assertIn('  # buildkit_config_map_name: "authoring-buildkit-config"', original)
+        image = "docker.io/moby/buildkit:v0.31.1-rootless@sha256:" + "d" * 64
+
+        rendered = local_dev.render_authoring_buildkit_sidecar(original, image)
+
+        original_lines = original.splitlines()
+        rendered_lines = rendered.splitlines()
+        self.assertEqual(len(original_lines), len(rendered_lines))
+        changed = [
+            (before, after)
+            for before, after in zip(original_lines, rendered_lines)
+            if before != after
+        ]
+        self.assertEqual(len(changed), 2)
+        self.assertTrue(changed[0][0].startswith("  # buildkit_image: "))
+        self.assertEqual(changed[0][1], f'  buildkit_image: "{image}"')
+        self.assertEqual(
+            changed[1],
+            (
+                '  # buildkit_config_map_name: "authoring-buildkit-config"',
+                '  buildkit_config_map_name: "authoring-buildkit-config"',
+            ),
+        )
+        sandbox = yaml.safe_load(rendered)["sandbox"]
+        self.assertEqual(sandbox["buildkit_image"], image)
+        self.assertEqual(sandbox["buildkit_config_map_name"], "authoring-buildkit-config")
+
+    def test_authoring_buildkit_sidecar_requires_both_commented_anchors(self) -> None:
+        image = "docker.io/moby/buildkit:v0.31.1-rootless@sha256:" + "d" * 64
+        with self.assertRaisesRegex(
+            local_dev.LocalDevError,
+            r"no commented sandbox\.buildkit_image anchor",
+        ):
+            local_dev.render_authoring_buildkit_sidecar('sandbox:\n  image: "pinned"\n', image)
+        with self.assertRaisesRegex(
+            local_dev.LocalDevError,
+            r"no commented sandbox\.buildkit_config_map_name anchor",
+        ):
+            local_dev.render_authoring_buildkit_sidecar(
+                'sandbox:\n  # buildkit_image: "old"\n', image
             )
 
     @staticmethod

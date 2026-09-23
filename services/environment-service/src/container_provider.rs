@@ -1930,7 +1930,9 @@ fn projection_failure(error: &ReleaseProjectionError) -> ProviderFailure {
         | ReleaseProjectionError::SecurityPostureInvalid
         | ReleaseProjectionError::Withdrawn
         | ReleaseProjectionError::EvidenceExpired
-        | ReleaseProjectionError::TrustRevisionMismatch => ProviderFailure {
+        | ReleaseProjectionError::TrustRevisionMismatch
+        | ReleaseProjectionError::VmBaseImportFailed
+        | ReleaseProjectionError::VmBaseCapacityExceeded => ProviderFailure {
             code: ProviderFailureCode::Rejected,
             retryable: false,
         },
@@ -2126,6 +2128,10 @@ pub enum ReleaseProjectionError {
     EvidenceExpired,
     #[error("LW_ENVIRONMENT_RELEASE_TRUST_REVISION_MISMATCH")]
     TrustRevisionMismatch,
+    #[error("LW_ENVIRONMENT_VM_BASE_IMPORT_FAILED")]
+    VmBaseImportFailed,
+    #[error("LW_ENVIRONMENT_VM_BASE_CAPACITY_EXCEEDED")]
+    VmBaseCapacityExceeded,
     #[error("LW_ENVIRONMENT_RELEASE_PERSISTENCE_FAILED")]
     PersistenceFailed,
     #[error("LW_ENVIRONMENT_RELEASE_DATABASE_FAILED")]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import ipaddress
 import importlib.util
 import json
 import math
@@ -15,12 +16,15 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 import tomllib
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import SplitResult, urlsplit
+from urllib.request import Request, urlopen
 
 import local_dev_build
 
@@ -54,6 +58,10 @@ ACCESS_PORT = "38081"
 WEB_PORT = "38082"
 RUN_ID = "bootstrap"
 KUBERNETES_OWNER_LABEL_VALUE = "tools.local_dev.py"
+# The optional authoring sandbox BuildKit sidecar is bound to one ConfigMap the
+# attempt mounts as its BuildKit configuration and registry CA bundle.
+AUTHORING_BUILDKIT_CONFIG_MAP = "authoring-buildkit-config"
+AUTHORING_BUILDKIT_CA_PATH = "/etc/buildkit/registry-ca.crt"
 # The local Kind profile points every OIDC caller at the local Keycloak issuer
 # through the portal edge. Keep this list limited to workloads that actually
 # use that path; the BuildKit and KubeVirt executors do not call the portal,
@@ -73,11 +81,28 @@ DNS_SUBDOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 REGISTRY_IMAGE = "docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e"
 KIND_IMAGE = "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
 KIND_CONTAINERD_CONFIG = "/etc/containerd/config.toml"
-KIND_CONTAINERD_BASE_RUNTIME_SPEC = "/etc/containerd/cri-base.json"
-KIND_OJ_RUNTIME_SPEC = "/etc/containerd/labweaver-oj-base.json"
-KIND_OJ_RUNTIME_HANDLER = "labweaver-oj"
-KIND_OJ_RUNTIME_CLASS = "labweaver-oj"
-KIND_OJ_PIDS_LIMIT = 128
+# Every platform one-shot workload (agent authoring, OJ run, Ansible probe)
+# runs under this single gVisor RuntimeClass.
+SANDBOX_RUNTIME_CLASS = "labweaver-sandbox"
+SANDBOX_RUNTIME_HANDLER = "labweaver-sandbox"
+SANDBOX_CONTAINERD_RUNTIME_TYPE = "io.containerd.runsc.v1"
+SANDBOX_RUNSC_INSTALL_DIR = "/usr/local/bin"
+SANDBOX_RUNSC_PATH = f"{SANDBOX_RUNSC_INSTALL_DIR}/runsc"
+SANDBOX_SHIM_PATH = f"{SANDBOX_RUNSC_INSTALL_DIR}/containerd-shim-runsc-v1"
+# A reviewed release installs as a whole tree, not only as its two entry
+# points: `runsc` looks for its sentry sidecar tree under
+# `<install dir>/gvisor-bin/` and refuses to create a sandbox when it is
+# missing.
+SANDBOX_RUNSC_REQUIRED_MEMBERS = ("runsc", "containerd-shim-runsc-v1")
+# Node-wide kubelet process bound. gVisor cannot enforce a per-container
+# `linux.resources.pids` cap (runsc ignores it and rejects a base runtime spec
+# without a mounts array), so the reviewed bound is applied to the pod cgroup
+# by the kubelet. The local single node also runs Keycloak, Harbor and
+# PostgreSQL, so the value has to leave room for those workloads; a deployment
+# with a dedicated one-shot node pool can review a much smaller number.
+SANDBOX_PIDS_LIMIT = 4096
+SANDBOX_RUNSC_ARCHIVE = STATE_DIR / "gvisor-runsc.tar.bz2"
+SANDBOX_RUNSC_CACHE_DIR = STATE_DIR / "gvisor-runsc"
 POSTGRES_IMAGE = "docker.io/library/postgres:17.6-alpine@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be"
 NATS_IMAGE = "docker.io/library/nats:2.14.1-scratch@sha256:4223c8fa116891628611e154fb66570cad599d8f8b3b131b82caf10f378e9dcf"
 NATS_BOX_IMAGE = "docker.io/natsio/nats-box:0.18.0@sha256:abdc9f9f0120bb8adfbf674eb037d1551db55356eb198b7bd4ffed377f6950a6"
@@ -159,6 +184,265 @@ def _provider_path_label(path: Path) -> str:
         return path.name or "provider environment file"
 
 
+def _permitted_provider_scheme(base_url: SplitResult) -> bool:
+    """Accept HTTPS anywhere and HTTP only for a local or private endpoint host.
+
+    The model credential travels in a header, so a public endpoint must stay
+    TLS. A loopback, private or link-local host is the documented local
+    development case: the model runs on this machine or on the private network
+    the operator already controls, and no public path can downgrade the scheme.
+    """
+
+    if base_url.scheme == "https":
+        return True
+    if base_url.scheme != "http" or not base_url.hostname:
+        return False
+    host = base_url.hostname
+    if host.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A DNS name cannot be verified as private before the request is made.
+        return False
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
+def local_object_store_port(agent_configuration: str) -> int:
+    """Return the port of the reviewed object store the agent attempts upload through.
+
+    The attempt policy names the object-store port explicitly, so the local stack
+    reads it from the rendered agent configuration instead of assuming TLS on 443.
+    """
+
+    match = re.search(
+        r"(?m)^\s*endpoint:\s*\"?https?://[^\s:\"]+:(\d+)/?\"?\s*$",
+        agent_configuration,
+    )
+    if match is None:
+        fail("agent configuration has no object store endpoint port")
+    return int(match.group(1))
+
+
+def local_provider_port(base_url: str) -> int:
+    """Return the port of the local model endpoint the sandbox must reach."""
+
+    parsed = urlsplit(base_url)
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    fail("provider base URL has no reviewed scheme")
+
+
+def local_service_cidr() -> str:
+    """Return the Service CIDR of the owned cluster for reviewed egress rules.
+
+    Per-attempt NetworkPolicies name the exact object-store destination instead
+    of admitting HTTPS anywhere, so the local stack renders the run's real
+    Service CIDR into the evaluation configuration.
+    """
+
+    nodes = kind_nodes()
+    if not nodes:
+        fail("Kind did not return the owned node list")
+    manifest = run(
+        [
+            "docker",
+            "exec",
+            nodes[0],
+            "cat",
+            "/etc/kubernetes/manifests/kube-apiserver.yaml",
+        ],
+        capture=True,
+    ).stdout
+    if not isinstance(manifest, str):
+        fail("Kind node kube-apiserver manifest was not returned as text")
+    match = re.search(r"--service-cluster-ip-range=([0-9a-fA-F:./]+)", manifest)
+    if match is None:
+        fail("Kind node kube-apiserver manifest has no service-cluster-ip-range")
+    return match.group(1)
+
+
+def local_kind_pod_cidr() -> str:
+    """Return the pod CIDR the reviewed attempt egress has to name on the owned CNI.
+
+    The owned Kind CNI programs a per-attempt egress policy after service DNAT, so a rule that
+    names the Service CIDR never matches the object store's ClusterIP: on this CNI the reviewed
+    destination has to be the network the object store pod itself lives in. A cluster whose CNI
+    evaluates the policy before DNAT, which is the supported production shape, names the Service
+    CIDR and the object store's own address instead.
+    """
+
+    nodes = kind_nodes()
+    if not nodes:
+        fail("Kind did not return the owned node list")
+    manifest = run(
+        [
+            "docker",
+            "exec",
+            nodes[0],
+            "cat",
+            "/etc/kubernetes/manifests/kube-controller-manager.yaml",
+        ],
+        capture=True,
+    ).stdout
+    if not isinstance(manifest, str):
+        fail("Kind node controller-manager manifest was not returned as text")
+    match = re.search(r"--cluster-cidr=([0-9a-fA-F:./]+)", manifest)
+    if match is None:
+        fail("Kind node controller-manager manifest has no cluster-cidr")
+    return match.group(1)
+
+
+def local_kind_network_cidr() -> str:
+    """Return the Docker network CIDR that carries the Kind nodes.
+
+    A local model server runs on this host, which the sandbox reaches through
+    the network gateway, so the reviewed sandbox egress list has to name that
+    network.
+    """
+
+    result = run(
+        ["docker", "network", "inspect", "kind", "--format", "{{json .IPAM.Config}}"],
+        capture=True,
+    ).stdout
+    if not isinstance(result, str) or not result.strip():
+        fail("Kind network did not return an IPAM configuration")
+    try:
+        configurations = json.loads(result)
+    except json.JSONDecodeError:
+        fail("Kind network IPAM configuration is invalid JSON")
+    if not isinstance(configurations, list):
+        fail("Kind network IPAM configuration must be a list")
+    # The Kind network carries an IPv6 subnet as well, so the IPv4 one is
+    # selected explicitly instead of trusting the first entry.
+    for configuration in configurations:
+        subnet = configuration.get("Subnet") if isinstance(configuration, dict) else None
+        if isinstance(subnet, str) and re.fullmatch(
+            r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}", subnet
+        ):
+            return subnet
+    fail("Kind network has no IPv4 subnet")
+
+
+def local_kubernetes_api_endpoint(kubeconfig: Path) -> str:
+    """Return the adopted API endpoint the reviewed egress rules have to name.
+
+    Workloads that read Kubernetes state themselves (the sandbox executors and
+    Resource's GPU observers) are admitted to the API endpoint alone, so the
+    run's real Service address is read back instead of trusting the checked-in
+    placeholder.
+    """
+
+    address = kubectl(
+        kubeconfig,
+        ["get", "service", "kubernetes", "-o", "jsonpath={.spec.clusterIP}"],
+        capture=True,
+    ).stdout
+    if not isinstance(address, str) or not address.strip():
+        fail("the owned cluster did not report the API Service address")
+    address = address.strip()
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        fail(f"the owned cluster reported an invalid API Service address: {address}")
+    return f"{parsed}/{parsed.max_prefixlen}"
+
+
+def local_environment_provider_binding() -> str:
+    """Return the container provider binding this run's Environment service uses.
+
+    Resource resolves a GPU allocation for the provider binding of the Work
+    environment that will run the workload, so the local GPU class has to be
+    seeded under that exact binding.
+    """
+
+    providers = json.loads(
+        (ROOT / "deploy/config/environment-providers.local-hostpath.example.json").read_text()
+    )
+    if not isinstance(providers, list):
+        fail("local environment provider profile must be a list")
+    bindings = sorted(
+        {
+            provider.get("binding")
+            for provider in providers
+            if isinstance(provider, dict) and provider.get("providerKind") == "container"
+        }
+    )
+    if len(bindings) != 1 or not isinstance(bindings[0], str) or not bindings[0]:
+        fail("local environment provider profile must name exactly one container binding")
+    return bindings[0]
+
+
+def local_gpu_capacity_configuration(example: str, provider_binding: str) -> str:
+    """Render the run's GPU capacity configuration from the reviewed example.
+
+    Two things are local to this run. First, the example ships `gpuObservers: []`
+    because an observer binds deployment-specific credentials; the owned cluster
+    hands Resource its own projected service account token and CA through the
+    in-cluster API endpoint, so every reviewed provider binding becomes
+    observable instead of failing closed forever. Second, Resource resolves a GPU
+    allocation for the exact provider binding that will run the workload, and the
+    local device plugin advertises the stock `nvidia.com/gpu` extended resource,
+    so a local class is seeded for this run's environment provider binding next to
+    the lock's reviewed classes: a class whose binding no node advertises stays
+    observed at zero units and refuses every request, which is the correct
+    production behaviour and useless for a local acceptance. No reviewed entry is
+    rewritten.
+    """
+
+    configuration = json.loads(example)
+    if not isinstance(configuration, dict):
+        fail("reviewed GPU capacity configuration must be a JSON object")
+    observers = configuration.get("gpuObservers")
+    if observers != []:
+        fail("reviewed GPU capacity configuration must ship no observer")
+    seeds = configuration.get("gpuCatalogSeed")
+    if not isinstance(seeds, list) or not seeds:
+        fail("reviewed GPU capacity configuration must seed at least one GPU class")
+    reviewed_bindings = {
+        seed.get("providerBinding") for seed in seeds if isinstance(seed, dict)
+    }
+    if None in reviewed_bindings or not reviewed_bindings:
+        fail("reviewed GPU capacity configuration must name a provider binding")
+    classes = {seed.get("class") for seed in seeds if isinstance(seed, dict)}
+    local_class = "nvidia-cuda-local"
+    if local_class in classes:
+        fail("reviewed GPU capacity configuration already seeds the local class")
+    if provider_binding in reviewed_bindings:
+        fail("local environment provider binding is already a reviewed GPU binding")
+    seeds.append(
+        {
+            "class": local_class,
+            "mode": "exclusive",
+            "providerBinding": provider_binding,
+            "capacityUnits": 1,
+            "allocationBinding": "nvidia.com/gpu",
+        }
+    )
+    # Resource records an observation per provider binding and resolves an allocation for the
+    # binding the workload will actually run under, so every seeded binding needs an observer.
+    configuration["gpuObservers"] = [
+        {
+            "providerBinding": binding,
+            "apiServer": "https://kubernetes.default.svc:443",
+            "bearerTokenFile": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            "clusterCaFile": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+            "requestTimeoutMilliseconds": 5000,
+            "observationTtlSeconds": 60,
+            "maxNodes": 100,
+            "maxPods": 1000,
+        }
+        for binding in sorted(reviewed_bindings | {provider_binding})
+    ]
+    return json.dumps(configuration, indent=2) + "\n"
+
+
 def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:
     """Validate and copy the exact provider environment passed to the worker."""
 
@@ -180,13 +464,16 @@ def validate_provider_environment(values: dict[str, str]) -> dict[str, str]:
     except ValueError:
         fail("provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL")
     if (
-        base_url.scheme != "https"
+        not _permitted_provider_scheme(base_url)
         or not base_url.netloc
         or not base_url.hostname
         or (base_url.netloc.endswith(":") and parsed_port is None)
         or any(character.isspace() for character in normalized["ANTHROPIC_BASE_URL"])
     ):
-        fail("provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL")
+        fail(
+            "provider configuration ANTHROPIC_BASE_URL must be an absolute HTTPS URL "
+            "(plain HTTP is accepted only for loopback or private endpoint hosts)"
+        )
     if base_url.username or base_url.password or base_url.query or base_url.fragment:
         fail("provider configuration ANTHROPIC_BASE_URL must not contain credentials or query data")
     if any(character.isspace() for character in normalized["ANTHROPIC_MODEL"]):
@@ -292,6 +579,102 @@ def real_build_helm_values(
             }
         }
     }
+
+def _buildkit_authoring_module() -> Any:
+    """Load the shared rootless BuildKit configuration renderer."""
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_platform_buildkit", ROOT / "tools" / "prepare_platform_buildkit.py"
+    )
+    if spec is None or spec.loader is None:
+        fail("cannot load the platform BuildKit authoring module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def platform_buildkit_image() -> str:
+    """Return the locked rootless BuildKit image pinned for the sandbox sidecar."""
+
+    lock = load_yaml(ROOT / "deploy" / "versions.lock.yml")
+    foundation = lock.get("platform_foundation") if isinstance(lock, dict) else None
+    image = foundation.get("buildkit_rootless") if isinstance(foundation, dict) else None
+    if not isinstance(image, str) or re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", image
+    ) is None:
+        fail("versions lock has no platform_foundation.buildkit_rootless digest image")
+    return image
+
+
+def render_authoring_buildkit_sidecar(data: str, buildkit_image: str) -> str:
+    """Activate the reviewed optional sandbox BuildKit sidecar keys.
+
+    The checked-in example leaves ``sandbox.buildkit_image`` and
+    ``sandbox.buildkit_config_map_name`` commented so the default local profile
+    runs attempts without an image-build capability. Enabling the sidecar
+    replaces exactly those two anchors and leaves the rest of the document
+    untouched; a missing anchor is a hard failure rather than a silent partial
+    activation.
+    """
+
+    for key, value in (
+        ("buildkit_image", buildkit_image),
+        ("buildkit_config_map_name", AUTHORING_BUILDKIT_CONFIG_MAP),
+    ):
+        anchor = re.compile(rf"(?m)^(\s*)#\s*{key}:\s*[^\r\n]+$")
+        replacement = f'{key}: "{value}"'
+        data, replacements = anchor.subn(
+            lambda match, replacement=replacement: match.group(1) + replacement,
+            data,
+            count=1,
+        )
+        if replacements != 1:
+            fail(f"agent configuration has no commented sandbox.{key} anchor")
+    return data
+
+
+def authoring_buildkit_config_map(
+    namespace: str,
+    labels: dict[str, str],
+    real_build_provider: local_dev_build.RealBuildProvider | None,
+) -> dict[str, Any]:
+    """Build the ConfigMap the authoring attempt mounts as its BuildKit binding.
+
+    The sidecar reaches BuildKit over the attempt-local unix socket, so the
+    rendered configuration omits the standalone mutual-TLS listener while
+    keeping the reviewed rootless worker settings and the Harbor registry CA.
+    """
+
+    if real_build_provider is None:
+        fail("the authoring BuildKit sidecar requires the real Harbor and BuildKit provider")
+    if re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", real_build_provider.registry_host
+    ) is None:
+        fail("real build provider returned an invalid Harbor registry hostname")
+    registry_ca = _read_real_build_file(
+        real_build_provider, real_build_provider.harbor_ca_file, "Harbor CA"
+    )
+    try:
+        registry_ca_text = registry_ca.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("real build provider Harbor CA is not a UTF-8 certificate bundle")
+    configuration = _buildkit_authoring_module().buildkitd_configuration(
+        real_build_provider.registry_host,
+        None,
+        False,
+        AUTHORING_BUILDKIT_CA_PATH,
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": AUTHORING_BUILDKIT_CONFIG_MAP,
+            "namespace": namespace,
+            "labels": labels,
+        },
+        "data": {"buildkitd.toml": configuration, "registry-ca.crt": registry_ca_text},
+    }
+
 
 def digest(path: Path) -> str:
     h = hashlib.sha256()
@@ -1238,10 +1621,20 @@ def verify_loopback_nip_io() -> None:
 
 def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
     kind_config = STATE_DIR / "kind-config.yaml"
-    write(kind_config, f"""kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: {CLUSTER}\nnodes:\n- role: control-plane\n  image: {KIND_IMAGE}\n""")
+    # gVisor keeps every guest process inside the sandbox's own host threads, so
+    # the reviewed process bound is enforced on the pod cgroup by the kubelet
+    # rather than through an OCI runtime spec. The patch is applied at cluster
+    # creation so a fork bomb can never exhaust the node pid space.
+    kubelet_patch = (
+        "kubeadmConfigPatches:\n"
+        "- |\n"
+        "  kind: KubeletConfiguration\n"
+        f"  podPidsLimit: {SANDBOX_PIDS_LIMIT}\n"
+    )
+    write(kind_config, f"""kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: {CLUSTER}\n{kubelet_patch}nodes:\n- role: control-plane\n  image: {KIND_IMAGE}\n""")
     run(["kind", "create", "cluster", "--name", CLUSTER, "--config",
          str(kind_config), "--kubeconfig", str(kubeconfig), "--wait", "120s"])
-    configure_kind_oj_runtime(kubeconfig)
+    configure_kind_sandbox_runtime(kubeconfig)
     configure_kindnet_resources(kubeconfig)
     run(["docker", "run", "-d", "--restart=always", "--name", REGISTRY,
          "--label", f"labweaver.local-dev.run-id={RUN_ID}",
@@ -1306,71 +1699,164 @@ def kind_nodes() -> list[str]:
     return nodes
 
 
-def configure_kind_oj_runtime(kubeconfig: Path) -> None:
-    """Install the dedicated process-limited runtime used by OJ Jobs."""
+def _sandbox_runtime_lock() -> dict[str, str]:
+    """Read the locked gVisor release with fail-closed validation."""
 
+    lock = load_yaml(ROOT / "deploy" / "versions.lock.yml")
+    gvisor = lock.get("gvisor") if isinstance(lock, dict) else None
+    if not isinstance(gvisor, dict):
+        fail("versions lock has no gvisor block")
+    resolved: dict[str, str] = {}
+    for key in ("version", "linux_amd64_url", "linux_amd64_sha512"):
+        value = gvisor.get(key)
+        if not isinstance(value, str) or not value.strip():
+            fail(f"versions lock gvisor.{key} is missing or empty")
+        resolved[key] = value.strip()
+    return resolved
+
+
+def _sha512_digest(path: Path) -> str:
+    digest = hashlib.sha512()
+    try:
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as error:
+        fail(f"cannot read the cached gVisor release: {type(error).__name__}")
+    return digest.hexdigest()
+
+
+def _sandbox_runsc_archive(lock: dict[str, str]) -> Path:
+    """Return the sha512-verified gVisor release archive, downloading it once."""
+
+    archive = SANDBOX_RUNSC_ARCHIVE
+    if not archive.is_file():
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        partial = archive.with_name(archive.name + ".part")
+        try:
+            request = Request(
+                lock["linux_amd64_url"],
+                headers={"User-Agent": "LabWeaver-local-dev/1"},
+            )
+            with urlopen(request, timeout=300) as response, partial.open("wb") as handle:
+                shutil.copyfileobj(response, handle, 1024 * 1024)
+        except (OSError, HTTPError, URLError, TimeoutError) as error:
+            partial.unlink(missing_ok=True)
+            fail(
+                f"cannot download the locked gVisor {lock['version']}: {type(error).__name__}"
+            )
+        if _sha512_digest(partial) != lock["linux_amd64_sha512"]:
+            partial.unlink(missing_ok=True)
+            fail("downloaded gVisor release does not match the locked sha512")
+        partial.replace(archive)
+    if _sha512_digest(archive) != lock["linux_amd64_sha512"]:
+        fail("cached gVisor release does not match the locked sha512")
+    return archive
+
+
+def _extract_sandbox_runsc(archive: Path) -> dict[str, Path]:
+    """Extract the sha512-verified gVisor release into the local state cache.
+
+    The reviewed tree is extracted as a whole because ``runsc`` resolves its
+    sentry sidecar tree relative to its own directory. Member names are
+    validated first, so a hostile archive cannot escape the cache directory.
+    """
+
+    cache = SANDBOX_RUNSC_CACHE_DIR
+    extracted: dict[str, Path] = {}
+    try:
+        with tarfile.open(archive, "r:bz2") as bundle:
+            for member in bundle.getmembers():
+                name = member.name.rstrip("/")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or ".." in name.split("/")
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    fail(f"locked gVisor release member {member.name!r} is not a plain path")
+                if member.isdir():
+                    (cache / name).mkdir(parents=True, exist_ok=True)
+                    continue
+                stream = bundle.extractfile(member)
+                if stream is None:
+                    fail(f"locked gVisor release member {name} is not readable")
+                target = cache / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                write(target, stream.read(), 0o755)
+                extracted[name] = target
+    except (OSError, tarfile.TarError) as error:
+        fail(f"cannot extract the locked gVisor release: {type(error).__name__}")
+    for name in SANDBOX_RUNSC_REQUIRED_MEMBERS:
+        if name not in extracted:
+            fail(f"locked gVisor release has no {name} member")
+    return extracted
+
+
+def configure_kind_sandbox_runtime(kubeconfig: Path) -> None:
+    """Install the gVisor RuntimeClass shared by every platform sandbox workload."""
+
+    lock = _sandbox_runtime_lock()
+    binaries = _extract_sandbox_runsc(_sandbox_runsc_archive(lock))
     handler_header = (
         '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.'
-        f"{KIND_OJ_RUNTIME_HANDLER}]"
+        f"{SANDBOX_RUNTIME_HANDLER}]"
     )
-    handler_options_header = handler_header[:-1] + ".options]"
+    # gVisor's containerd runtime plugin rejects unknown option keys, so this
+    # table must stay free of an options sub-table (for example SystemdCgroup).
+    # It also must not set `base_runtime_spec`: runsc cannot start a container
+    # from a spec that carries no `mounts` array, and the process bound is
+    # enforced on the pod cgroup instead of through the OCI spec.
     handler_block = (
         f"{handler_header}\n"
-        '  runtime_type = "io.containerd.runc.v2"\n'
-        f'  base_runtime_spec = "{KIND_OJ_RUNTIME_SPEC}"\n'
-        f"\n{handler_options_header}\n"
-        "  SystemdCgroup = true\n"
+        f'  runtime_type = "{SANDBOX_CONTAINERD_RUNTIME_TYPE}"\n'
     )
     runtime_class = {
         "apiVersion": "node.k8s.io/v1",
         "kind": "RuntimeClass",
         "metadata": {
-            "name": KIND_OJ_RUNTIME_CLASS,
+            "name": SANDBOX_RUNTIME_CLASS,
             "labels": {"labweaver.local-dev.owner": KUBERNETES_OWNER_LABEL_VALUE},
         },
-        "handler": KIND_OJ_RUNTIME_HANDLER,
+        "handler": SANDBOX_RUNTIME_HANDLER,
     }
 
     for node in kind_nodes():
-        base_spec_result = run(
-            ["docker", "exec", node, "cat", KIND_CONTAINERD_BASE_RUNTIME_SPEC],
-            capture=True,
-        )
-        raw_base_spec = base_spec_result.stdout
-        if not isinstance(raw_base_spec, str):
-            fail("Kind node containerd base runtime spec was not returned as text")
-        try:
-            base_spec = json.loads(raw_base_spec)
-        except json.JSONDecodeError as error:
-            fail(f"Kind node containerd base runtime spec is invalid JSON: {error.msg}")
-        if not isinstance(base_spec, dict):
-            fail("Kind node containerd base runtime spec must be a JSON object")
-        linux = base_spec.get("linux")
-        if not isinstance(linux, dict):
-            fail("Kind node containerd base runtime spec has no linux object")
-        resources = linux.get("resources")
-        if not isinstance(resources, dict):
-            fail("Kind node containerd base runtime spec has invalid linux.resources")
-        pids = resources.get("pids")
-        if pids is None:
-            pids = {}
-            resources["pids"] = pids
-        if not isinstance(pids, dict):
-            fail("Kind node containerd base runtime spec has invalid linux.resources.pids")
-        pids["limit"] = KIND_OJ_PIDS_LIMIT
-        runtime_spec_payload = (json.dumps(base_spec, indent=2) + "\n").encode("utf-8")
-        run(
-            [
-                "docker",
-                "exec",
-                "-i",
-                node,
-                "sh",
-                "-c",
-                f"cat > {KIND_OJ_RUNTIME_SPEC}",
-            ],
-            input_bytes=runtime_spec_payload,
-        )
+        for directory in sorted(
+            {name.rsplit("/", 1)[0] for name in binaries if "/" in name}
+        ):
+            run(
+                [
+                    "docker",
+                    "exec",
+                    node,
+                    "mkdir",
+                    "-p",
+                    f"{SANDBOX_RUNSC_INSTALL_DIR}/{directory}",
+                ]
+            )
+        for name, local_path in sorted(binaries.items()):
+            run(
+                [
+                    "docker",
+                    "cp",
+                    str(local_path),
+                    f"{node}:{SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+            )
+        for name in SANDBOX_RUNSC_REQUIRED_MEMBERS:
+            run(
+                [
+                    "docker",
+                    "exec",
+                    node,
+                    "chmod",
+                    "0755",
+                    f"{SANDBOX_RUNSC_INSTALL_DIR}/{name}",
+                ]
+            )
 
         config_result = run(
             ["docker", "exec", node, "cat", KIND_CONTAINERD_CONFIG],
@@ -1389,7 +1875,7 @@ def configure_kind_oj_runtime(kubeconfig: Path) -> None:
         runtimes = containerd_plugin.get("runtimes") if isinstance(containerd_plugin, dict) else None
         if not isinstance(runtimes, dict):
             fail("Kind node containerd config has no CRI runtime table")
-        existing_handler = runtimes.get(KIND_OJ_RUNTIME_HANDLER)
+        existing_handler = runtimes.get(SANDBOX_RUNTIME_HANDLER)
         if existing_handler is None:
             config_payload = (raw_config.rstrip("\n") + "\n\n" + handler_block).encode("utf-8")
             run(
@@ -1404,16 +1890,8 @@ def configure_kind_oj_runtime(kubeconfig: Path) -> None:
                 ],
                 input_bytes=config_payload,
             )
-        else:
-            options = existing_handler.get("options") if isinstance(existing_handler, dict) else None
-            if (
-                not isinstance(existing_handler, dict)
-                or existing_handler.get("runtime_type") != "io.containerd.runc.v2"
-                or existing_handler.get("base_runtime_spec") != KIND_OJ_RUNTIME_SPEC
-                or not isinstance(options, dict)
-                or options.get("SystemdCgroup") is not True
-            ):
-                fail("Kind node containerd OJ runtime handler has unexpected settings")
+        elif existing_handler != {"runtime_type": SANDBOX_CONTAINERD_RUNTIME_TYPE}:
+            fail("Kind node containerd gVisor runtime handler has unexpected settings")
         run(["docker", "exec", node, "systemctl", "restart", "containerd"])
 
     apply(kubeconfig, [runtime_class])
@@ -1786,6 +2264,115 @@ def bootstrap_evaluation_runner_resources(
             "data": {".dockerconfigjson": encode(pull_config)},
         },
     ]
+    apply(kubeconfig, objects)
+
+
+def bootstrap_authoring_sandbox_resources(
+    kubeconfig: Path,
+    app_input: Path,
+    registry_pull_config: Path,
+    *,
+    authoring_buildkit_sidecar: bool = False,
+    real_build_provider: local_dev_build.RealBuildProvider | None = None,
+) -> None:
+    """Provision the permanent authoring sandbox objects from final config."""
+
+    configuration_path = app_input / "configmaps" / "agent-service-config" / "config.yaml"
+    configuration = load_yaml(configuration_path)
+    if not isinstance(configuration, dict):
+        fail("local agent service configuration must be a mapping")
+    sandbox = configuration.get("sandbox")
+    if not isinstance(sandbox, dict):
+        fail("local agent service configuration has no sandbox mapping")
+
+    def required_name(key: str) -> str:
+        value = sandbox.get(key)
+        if (
+            not isinstance(value, str)
+            or DNS_SUBDOMAIN_LABEL_PATTERN.fullmatch(value) is None
+            or len(value) > 63
+        ):
+            fail(f"local agent sandbox.{key} must be a DNS label")
+        return value
+
+    namespace = required_name("namespace")
+    service_account = required_name("service_account_name")
+    image_pull_secret = required_name("image_pull_secret_name")
+    if (
+        authoring_buildkit_sidecar
+        and sandbox.get("buildkit_config_map_name") != AUTHORING_BUILDKIT_CONFIG_MAP
+    ):
+        fail(
+            "local agent sandbox.buildkit_config_map_name must select the "
+            "authoring BuildKit ConfigMap"
+        )
+    try:
+        pull_config = registry_pull_config.read_bytes()
+    except (OSError, UnicodeError) as error:
+        fail(f"local authoring image pull configuration is unavailable: {type(error).__name__}")
+    if not pull_config.strip():
+        fail("local authoring image pull configuration is empty")
+    try:
+        json.loads(pull_config)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        fail("local authoring image pull configuration is invalid JSON")
+    policy_labels = {
+        "app.kubernetes.io/part-of": "labweaver",
+        "labweaver.io/managed": "true",
+    }
+    objects = [
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace,
+                "labels": {
+                    "app.kubernetes.io/part-of": "labweaver",
+                    "labweaver.io/managed": "true",
+                },
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": "authoring-default-deny",
+                "namespace": namespace,
+                "labels": policy_labels,
+            },
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [],
+                "egress": [],
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {
+                "name": service_account,
+                "namespace": namespace,
+                "labels": policy_labels,
+            },
+            "automountServiceAccountToken": False,
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": image_pull_secret,
+                "namespace": namespace,
+                "labels": policy_labels,
+            },
+            "type": "kubernetes.io/dockerconfigjson",
+            "data": {".dockerconfigjson": encode(pull_config)},
+        },
+    ]
+    if authoring_buildkit_sidecar:
+        objects.append(
+            authoring_buildkit_config_map(namespace, policy_labels, real_build_provider)
+        )
     apply(kubeconfig, objects)
 
 
@@ -2258,6 +2845,19 @@ def build_images(*, external_fixtures: bool) -> dict[str, str]:
     if not match:
         fail("registry did not return an immutable digest for evaluation-runner")
     images["evaluation_runner"] = f"{root}/evaluation-runner{match.group(0)}"
+    sandbox_target = "authoring-sandbox-fixture" if external_fixtures else "authoring-sandbox"
+    sandbox_tag = f"{root}/authoring-sandbox:{commit}"
+    run(["docker", "buildx", "build", "--load", "--target", sandbox_target,
+         "--build-arg", f"CLAUDE_CODE_VERSION={CLAUDE_CODE_VERSION}",
+         "--build-arg", f"CLAUDE_CODE_LINUX_X64_SHA512={CLAUDE_CODE_LINUX_X64_SHA512}",
+         "--tag", sandbox_tag, "--file", "containers/Containerfile.rust", "."])
+    run(["docker", "push", sandbox_tag])
+    ref = run(["docker", "inspect", "--format", "{{index .RepoDigests 0}}",
+               sandbox_tag], capture=True).stdout.strip()
+    match = re.search(r"@sha256:[0-9a-f]{64}$", ref)
+    if not match:
+        fail("registry did not return an immutable digest for authoring-sandbox")
+    images["authoring_sandbox"] = f"{root}/authoring-sandbox{match.group(0)}"
     for key, name, file in (("web","web","containers/Containerfile.web"),
                             ("openssh_gateway","openssh-gateway","access-gateway/Dockerfile")):
         tag=f"{root}/{name}:{commit}"
@@ -2283,6 +2883,10 @@ def build_work_runtime_fixture() -> str:
     tag = f"{root}/work-runtime-fixture:{commit}"
     run([
         "docker", "buildx", "build", "--load", "--target", "work-runtime-fixture",
+        # The fixture provider copies exactly one reviewed image manifest, so the
+        # seed has to be that shape: buildx would otherwise attach provenance and
+        # publish an index whose platform manifest the copy never pushes.
+        "--provenance=false", "--sbom=false",
         "--build-arg", f"SOURCE_COMMIT={commit}",
         "--build-arg", f"SOURCE_DATE_EPOCH={epoch}",
         "--tag", tag, "--file", "containers/Containerfile.web", ".",
@@ -2439,6 +3043,11 @@ def make_app_input(
     images: dict[str, str],
     provider_environment: dict[str, str],
     real_build_provider: local_dev_build.RealBuildProvider | None = None,
+    *,
+    authoring_buildkit_sidecar: bool = False,
+    service_cidr: str | None = None,
+    pod_cidr: str | None = None,
+    kind_network_cidr: str | None = None,
 ) -> tuple[Path, Path, str]:
     provider_environment = validate_provider_environment(provider_environment)
     manifest = _local_platform_manifest(real_build_provider)
@@ -2453,6 +3062,12 @@ def make_app_input(
         real_build_provider.registry_host if real_build_provider is not None else None
     )
     root=work/"app-input"
+    # Reviewed egress rules name exact destinations, so the run's real Service
+    # CIDR and Kind network are resolved from the owned cluster unless the
+    # caller already observed them.
+    service_cidr = service_cidr or local_service_cidr()
+    pod_cidr = pod_cidr or local_kind_pod_cidr()
+    kind_network_cidr = kind_network_cidr or local_kind_network_cidr()
     for section, manifest_key in (("configmaps", "configMaps"), ("secrets", "secrets")):
         for name in manifest[manifest_key]:
             (root/section/name).mkdir(parents=True,exist_ok=True)
@@ -2500,6 +3115,38 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("control plane configuration has no evaluationRuntime.runnerImage")
+        if source == "agent-control-plane.yaml.example":
+            sandbox_image = images.get("authoring_sandbox")
+            if not isinstance(sandbox_image, str) or not re.fullmatch(
+                r"[^\s@]+(?:/[^\s@]+)*@sha256:[0-9a-f]{64}", sandbox_image
+            ):
+                fail("local authoring sandbox image must be an immutable image")
+            sandbox_image_pattern = re.compile(r"(?m)^(\s*image:\s*)[^\r\n]+$")
+            data, replacements = sandbox_image_pattern.subn(
+                rf"\g<1>{sandbox_image}", data, count=1
+            )
+            if replacements != 1:
+                fail("agent configuration has no sandbox.image")
+            # Per-attempt NetworkPolicies name exact destinations, so the local
+            # stack renders the run's real Service CIDR with the reviewed object
+            # store port and the Kind network with the local model endpoint port
+            # instead of the production placeholders.
+            object_store_port = local_object_store_port(data)
+            model_port = local_provider_port(provider_environment["ANTHROPIC_BASE_URL"])
+            egress_pattern = re.compile(r'(?m)^(\s*allowed_egress:\s*)\[[^\]]*\]$')
+            data, replacements = egress_pattern.subn(
+                rf'\g<1>["{service_cidr}:{object_store_port}", '
+                rf'"{pod_cidr}:{object_store_port}", '
+                rf'"{kind_network_cidr}:{model_port}"]',
+                data,
+                count=1,
+            )
+            if replacements != 1:
+                fail("agent configuration has no sandbox.allowed_egress")
+            if authoring_buildkit_sidecar:
+                data = render_authoring_buildkit_sidecar(
+                    data, platform_buildkit_image()
+                )
         if source == "evaluation-service.yaml.example":
             evaluation_image = images.get("evaluation_service")
             if not isinstance(evaluation_image, str) or not re.fullmatch(
@@ -2514,6 +3161,18 @@ def make_app_input(
             )
             if replacements != 1:
                 fail("evaluation service configuration has no coordinator.workerImage")
+            egress_pattern = re.compile(
+                r"(?m)^(\s*objectStoreEgress:)[ \t]*\n(?:[ \t]*-[ \t]*\"[^\"]*\"[ \t]*\n)*"
+            )
+            object_store_port = local_object_store_port(data)
+            data, replacements = egress_pattern.subn(
+                rf'\g<1>\n    - "{service_cidr}:{object_store_port}"'
+                rf'\n    - "{pod_cidr}:{object_store_port}"\n',
+                data,
+                count=1,
+            )
+            if replacements != 1:
+                fail("evaluation service configuration has no execution.objectStoreEgress")
         if source == "build-executor.yaml.example" and real_build_provider is not None:
             quota_pattern = re.compile(r"(?m)^(\s*projectStorageQuotaBytes:\s*)\d+\s*$")
             data, replacements = quota_pattern.subn(
@@ -2615,29 +3274,42 @@ def make_app_input(
                 "harbor-username",
             }:
                 if real_build_provider is None:
-                    fail(f"real build provider is required for build executor secret {key}")
-                provider_files = {
-                    "buildkit-ca.pem": (real_build_provider.buildkit_ca_file, "BuildKit CA"),
-                    "buildkit-client.crt": (
-                        real_build_provider.buildkit_client_certificate_file,
-                        "BuildKit client certificate",
-                    ),
-                    "buildkit-client.key": (
-                        real_build_provider.buildkit_client_private_key_file,
-                        "BuildKit client private key",
-                    ),
-                    "harbor-ca.crt": (real_build_provider.harbor_ca_file, "Harbor CA"),
-                    "harbor-password": (
-                        real_build_provider.builder_password_file,
-                        "Harbor builder password",
-                    ),
-                    "harbor-username": (
-                        real_build_provider.builder_username_file,
-                        "Harbor builder username",
-                    ),
-                }
-                provider_file, label = provider_files[key]
-                values[key] = _read_real_build_file(real_build_provider, provider_file, label)
+                    if key not in ("harbor-ca.crt", "harbor-password", "harbor-username"):
+                        fail(f"real build provider is required for platform registry secret {key}")
+                    # The fixture profile has no Harbor and points the platform
+                    # registry at the run-local registry host, so the catalog
+                    # stays unusable there and every write fails closed against a
+                    # real transport error. The mounted files only have to
+                    # satisfy the Agent startup validation, exactly like the
+                    # fixture registry pull configuration above.
+                    values[key] = {
+                        "harbor-ca.crt": ca,
+                        "harbor-password": b"local-dev",
+                        "harbor-username": b"local-dev",
+                    }[key]
+                else:
+                    provider_files = {
+                        "buildkit-ca.pem": (real_build_provider.buildkit_ca_file, "BuildKit CA"),
+                        "buildkit-client.crt": (
+                            real_build_provider.buildkit_client_certificate_file,
+                            "BuildKit client certificate",
+                        ),
+                        "buildkit-client.key": (
+                            real_build_provider.buildkit_client_private_key_file,
+                            "BuildKit client private key",
+                        ),
+                        "harbor-ca.crt": (real_build_provider.harbor_ca_file, "Harbor CA"),
+                        "harbor-password": (
+                            real_build_provider.builder_password_file,
+                            "Harbor builder password",
+                        ),
+                        "harbor-username": (
+                            real_build_provider.builder_username_file,
+                            "Harbor builder username",
+                        ),
+                    }
+                    provider_file, label = provider_files[key]
+                    values[key] = _read_real_build_file(real_build_provider, provider_file, label)
             elif key=="system-actor-id": values[key]="00000000-0000-7000-8000-000000000001"
             elif key=="collector-ssh-user-ca-key": values[key]=(foundation/"ssh-authority/collector-ca").read_bytes()
             elif key in ("mtls.crt","mtls.key"): values[key]=(identities/"openssh-gateway"/("certificate.pem" if key=="mtls.crt" else "key.pem")).read_bytes()
@@ -2669,7 +3341,10 @@ def make_app_input(
     (resource_root / "configmaps" / "resource-service-config").mkdir(parents=True, exist_ok=True)
     (resource_root / "secrets" / "resource-service-secrets").mkdir(parents=True, exist_ok=True)
     http_config = (ROOT / "deploy/config/resource-service.yaml.example").read_text()
-    capacity_config = (ROOT / "deploy/config/resource-capacity.json.example").read_text()
+    capacity_config = local_gpu_capacity_configuration(
+        (ROOT / "deploy/config/resource-capacity.json.example").read_text(),
+        local_environment_provider_binding(),
+    )
     write(resource_root / "configmaps/resource-service-config/http.yaml", http_config)
     write(resource_root / "configmaps/resource-service-config/capacity.json", capacity_config)
     resource_keys = json.loads((ROOT / "deploy/config/resource-bundle-manifest.json").read_text())["secrets"]["resource-service-secrets"]
@@ -2712,7 +3387,8 @@ def deploy(kubeconfig: Path, images: dict[str,str], bundle: Path, resource_bundl
     args=["helm","upgrade","--install","labweaver-local","deploy/helm/labweaver",
           "--namespace",NAMESPACE,"--create-namespace","--kubeconfig",str(kubeconfig),
           "--values","deploy/helm/labweaver/values.local-kind.yaml",
-          "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}"]
+          "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}",
+          "--set-string",f"network.kubernetesApiCidrs[0]={local_kubernetes_api_endpoint(kubeconfig)}"]
     if real_build_provider is not None:
         if real_build_values is None:
             fail("real build Helm values were not prepared")
@@ -2973,12 +3649,19 @@ http {
     apply(kubeconfig, objects)
     wait_rollout(kubeconfig, "deployment", "local-dev-portal", NAMESPACE)
 
-def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> None:
+def up(
+    *,
+    external_fixtures: bool = False,
+    provider_env: Path | None = None,
+    authoring_buildkit_sidecar: bool = False,
+) -> None:
     global CLUSTER, REGISTRY, REGISTRY_PORT, PORTAL_PORT, ACCESS_PORT, WEB_PORT, RUN_ID
     provider_environment = resolve_provider_environment(
         external_fixtures=external_fixtures,
         provider_env=provider_env,
     )
+    if authoring_buildkit_sidecar and external_fixtures:
+        fail("--authoring-buildkit-sidecar requires the real Harbor and BuildKit provider")
     need_tools(["docker","kind","kubectl","helm","openssl","ssh-keygen"])
     require_psutil()
     verify_loopback_nip_io()
@@ -3039,7 +3722,8 @@ def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> 
             source_image = build_work_runtime_fixture()
             start_build_executor_fixture(kubeconfig, foundation, source_image)
         bundle,resource_bundle,bundle_sha=make_app_input(
-            work, foundation, images, provider_environment, real_build_provider
+            work, foundation, images, provider_environment, real_build_provider,
+            authoring_buildkit_sidecar=authoring_buildkit_sidecar,
         )
         real_build_values: Path | None = None
         if real_build_provider is not None:
@@ -3057,6 +3741,13 @@ def up(*, external_fixtures: bool = False, provider_env: Path | None = None) -> 
             kubeconfig,
             work / "app-input",
             evaluation_pull_config,
+        )
+        bootstrap_authoring_sandbox_resources(
+            kubeconfig,
+            work / "app-input",
+            evaluation_pull_config,
+            authoring_buildkit_sidecar=authoring_buildkit_sidecar,
+            real_build_provider=real_build_provider,
         )
         kubectl(kubeconfig, ["create", "namespace", NAMESPACE], check=False)
         kubectl(kubeconfig, ["label", "namespace", NAMESPACE, "labweaver.io/edge=true",
@@ -3295,14 +3986,25 @@ def main() -> int:
         type=Path,
         help="dotenv file containing ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_MODEL",
     )
+    parser.add_argument(
+        "--authoring-buildkit-sidecar",
+        action="store_true",
+        help=(
+            "enable the optional rootless BuildKit sidecar of the local authoring "
+            "sandbox and provision its BuildKit configuration ConfigMap"
+        ),
+    )
     args=parser.parse_args()
     if args.external_fixtures and args.command != "up":
         parser.error("--external-fixtures is valid only with the up command")
     if args.provider_env is not None and args.command != "up":
         parser.error("--provider-env is valid only with the up command")
+    if args.authoring_buildkit_sidecar and args.command != "up":
+        parser.error("--authoring-buildkit-sidecar is valid only with the up command")
     try:
         if args.command == "up":
-            up(external_fixtures=args.external_fixtures, provider_env=args.provider_env)
+            up(external_fixtures=args.external_fixtures, provider_env=args.provider_env,
+               authoring_buildkit_sidecar=args.authoring_buildkit_sidecar)
         elif args.command == "status":
             status()
         else:

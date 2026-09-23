@@ -9,7 +9,7 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 
 use crate::capacity::{
-    CapacityProviderError, CapacityReconcileWorker, ResourceCapacityConfiguration,
+    CapacityProviderError, CapacityReconcileWorker, GpuCatalogSeed, ResourceCapacityConfiguration,
 };
 use crate::messaging::{NatsLeaseResponderError, NatsLeaseVerificationResponder};
 use crate::outbox::{ResourceOutboxDispatcher, ResourceOutboxError};
@@ -40,7 +40,7 @@ const SERVICE_SCOPES: &str = "LABWEAVER_SERVICE_SCOPES";
 const SERVICE_TOKEN_REFRESH_SKEW_SECONDS: &str = "LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS";
 const ACCESS_SERVICE_CLIENT_ID: &str = "LABWEAVER_ACCESS_SERVICE_CLIENT_ID";
 const ENVIRONMENT_SERVICE_CLIENT_ID: &str = "LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID";
-const EVALUATION_SERVICE_CLIENT_ID: &str = "LABWEAVER_EVALUATION_SERVICE_CLIENT_ID";
+const TASK_SERVICE_CLIENT_IDS: &str = "LABWEAVER_TASK_SERVICE_CLIENT_IDS";
 const ENVIRONMENT_SERVICE_AUDIENCE: &str = "labweaver-environment";
 const OUTBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const OUTBOX_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -52,7 +52,7 @@ pub struct ResourceProcessRuntime {
     service_verifier: Arc<ServiceTokenVerifier>,
     access_service_client_id: String,
     environment_service_client_id: String,
-    evaluation_service_client_id: String,
+    task_service_client_ids: BTreeSet<String>,
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
@@ -86,7 +86,7 @@ impl ResourceProcessRuntime {
             required(LEASE_VERIFICATION_SUBJECT)?,
             client.clone(),
         )?;
-        let capacity_configuration: ResourceCapacityConfiguration = serde_json::from_slice(
+        let capacity_configuration = ResourceCapacityConfiguration::parse(
             &std::fs::read(required_path(CAPACITY_CONFIG_FILE)?)
                 .map_err(|_| ResourceProcessRuntimeError::CapacityConfiguration)?,
         )
@@ -95,8 +95,9 @@ impl ResourceProcessRuntime {
         let environment_token_client = discover_environment_token_client().await?;
         let access_service_client_id = required(ACCESS_SERVICE_CLIENT_ID)?;
         let environment_service_client_id = required(ENVIRONMENT_SERVICE_CLIENT_ID)?;
-        let evaluation_service_client_id = required(EVALUATION_SERVICE_CLIENT_ID)?;
+        let task_service_client_ids = required_set(TASK_SERVICE_CLIENT_IDS)?;
         let store = PgResourceStore::new(pool);
+        seed_reviewed_gpu_catalog(&store, &capacity_configuration.gpu_catalog_seed).await?;
         let outbox = ResourceOutboxDispatcher::new(store.pool(), client, OUTBOX_TIMEOUT)
             .map_err(ResourceProcessRuntimeError::Outbox)?;
         let capacity_worker = capacity_configuration
@@ -109,7 +110,7 @@ impl ResourceProcessRuntime {
             service_verifier,
             access_service_client_id,
             environment_service_client_id,
-            evaluation_service_client_id,
+            task_service_client_ids,
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
@@ -129,7 +130,7 @@ impl ResourceProcessRuntime {
             .with_service_verifier(Arc::clone(&self.service_verifier))
             .with_access_service_client_id(self.access_service_client_id.clone())
             .with_environment_service_client_id(self.environment_service_client_id.clone())
-            .with_evaluation_service_client_id(self.evaluation_service_client_id.clone())
+            .with_task_service_client_ids(self.task_service_client_ids.clone())
     }
 
     /// Keeps the responder live. A failed authoritative dependency flips readiness false.
@@ -143,7 +144,7 @@ impl ResourceProcessRuntime {
             service_verifier: _service_verifier,
             access_service_client_id: _access_service_client_id,
             environment_service_client_id: _environment_service_client_id,
-            evaluation_service_client_id: _evaluation_service_client_id,
+            task_service_client_ids: _task_service_client_ids,
             _shutdown_sender,
             shutdown,
         } = self;
@@ -175,6 +176,42 @@ impl ResourceProcessRuntime {
         }
         result
     }
+}
+
+/// Provisions the reviewed GPU classes before the capacity worker observes them.
+///
+/// Validation already happened when the configuration was parsed, so a seed rejection here is a
+/// durable conflict and fails startup rather than rewriting the reviewed catalog. An unseeded
+/// class simply stays absent and cannot grant capacity.
+async fn seed_reviewed_gpu_catalog(
+    store: &PgResourceStore,
+    seeds: &[GpuCatalogSeed],
+) -> Result<(), ResourceProcessRuntimeError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let existing: BTreeSet<String> = store
+        .list_gpu_catalog()
+        .await
+        .map_err(ResourceProcessRuntimeError::Store)?
+        .into_iter()
+        .map(|entry| entry.class)
+        .collect();
+    let created = seeds
+        .iter()
+        .filter(|seed| !existing.contains(&seed.class))
+        .count();
+    let catalog = store
+        .seed_gpu_catalog(seeds)
+        .await
+        .map_err(ResourceProcessRuntimeError::Store)?;
+    tracing::info!(
+        event = "resource.gpu_catalog.seeded",
+        created,
+        already_existing = seeds.len() - created,
+        catalog_rows = catalog.len(),
+    );
+    Ok(())
 }
 
 async fn run_outbox(

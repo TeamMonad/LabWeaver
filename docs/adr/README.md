@@ -1,6 +1,6 @@
 # 架构决定
 
-当前产品与重构方向见 [ADR 0015](0015-v3-project-work-resource-platform.md)。一次性任务资源准入与 Kubernetes 执行边界见 [ADR 0016](0016-task-resource-admission-and-kubernetes-execution.md)。历史 ADR 解释旧实现，不能覆盖当前用户选择。
+当前产品与重构方向见 [ADR 0015](0015-v3-project-work-resource-platform.md)。一次性任务资源准入与 Kubernetes 执行边界见 [ADR 0016](0016-task-resource-admission-and-kubernetes-execution.md)，沙箱化 Agent 创作与镜像/模板目录见 [ADR 0017](0017-sandboxed-agent-authoring-and-image-catalog.md)。历史 ADR 解释旧实现，不能覆盖当前用户选择。
 
 仍适用的领域行为包括生命周期代次与回收、Outbox 防重、冻结提交、ConsoleCapability 与确定性评测。旧课程时间限制、固定发布证明、禁用 Resource/Evaluation、仅 Mock GPU 和未来兼容层不再适用。
 

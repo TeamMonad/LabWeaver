@@ -28,6 +28,8 @@ use crate::{
 };
 
 const FIELD_MANAGER: &str = "labweaver-ansible-probe-executor";
+const MANAGED_BY: &str = "evaluation-service";
+const EVENT_SCOPE: &str = "evaluation";
 const LOG_SCOPE: &str = "probe.ansible";
 const DIAGNOSTIC_PREFIX: &str = "LW_AP_";
 const RUNNER_DEFAULT_DENY_POLICY: &str = "ansible-probe-default-deny";
@@ -66,6 +68,8 @@ impl AnsibleProbeKubernetesExecutor {
             FIELD_MANAGER,
             LOG_SCOPE,
             DIAGNOSTIC_PREFIX,
+            MANAGED_BY,
+            EVENT_SCOPE,
         )?;
         Ok(Self { api })
     }
@@ -652,6 +656,8 @@ mod tests {
         verify_owned, verify_runner_default_deny,
     };
 
+    use super::MANAGED_BY;
+
     const TEST_NAMESPACE: &str = "labweaver-evaluation-runs";
 
     fn assertion(fact: &str, expected: &serde_json::Value) -> FactAssertion {
@@ -855,26 +861,26 @@ mod tests {
     fn request_sha256_annotation_reuses_the_same_attempt_and_conflicts_on_drift() {
         let expected = request();
         let resource = owned_resource(&expected);
-        assert!(verify_owned(&resource, &ownership(&expected)).is_ok());
+        assert!(verify_owned(&resource, &ownership(&expected), MANAGED_BY).is_ok());
 
         // A second attempt identity never reuses the first attempt's resources.
         let other = request();
         assert!(matches!(
-            verify_owned(&resource, &ownership(&other)),
+            verify_owned(&resource, &ownership(&other), MANAGED_BY),
             Err(KubernetesJobError::IdentityConflict)
         ));
 
         let mut drifted = owned_resource(&expected);
         drifted["metadata"]["annotations"]["labweaver.io/request-sha256"] = json!("0".repeat(64));
         assert!(matches!(
-            verify_owned(&drifted, &ownership(&expected)),
+            verify_owned(&drifted, &ownership(&expected), MANAGED_BY),
             Err(KubernetesJobError::IdentityConflict)
         ));
 
         let mut drifted = owned_resource(&expected);
         drifted["metadata"]["labels"]["labweaver.io/managed-by"] = json!("other-service");
         assert!(matches!(
-            verify_owned(&drifted, &ownership(&expected)),
+            verify_owned(&drifted, &ownership(&expected), MANAGED_BY),
             Err(KubernetesJobError::IdentityConflict)
         ));
     }

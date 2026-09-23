@@ -20,7 +20,7 @@ use contracts::events::{
 };
 use contracts::http::{
     GeneratedArtifactKind, GeneratedArtifactQuery, GeneratedArtifactRecord, IdempotencyKey,
-    InternalPublishEvaluationReleaseRequest,
+    InternalPublishEvaluationReleaseRequest, PlatformImageCatalog,
 };
 use contracts::{
     ApprovalId, DiagnosticCode, EventId, ImageArtifactId, ProjectId, Revision, UtcTimestamp,
@@ -104,6 +104,25 @@ impl BuildArtifactAuthority for AgentClient {
     ) -> Result<contracts::http::InternalImageArtifactResolution, crate::clients::DownstreamError>
     {
         AgentClient::artifact(self, artifact_id).await
+    }
+}
+
+/// Agent-owned platform image catalog readback used to re-resolve published VM base identities.
+#[async_trait]
+pub trait PlatformImageAuthority: Send + Sync {
+    async fn platform_images(
+        &self,
+    ) -> Result<PlatformImageCatalog, crate::clients::DownstreamError>;
+}
+
+#[async_trait]
+impl PlatformImageAuthority for AgentClient {
+    async fn platform_images(
+        &self,
+    ) -> Result<PlatformImageCatalog, crate::clients::DownstreamError> {
+        self.list_platform_images(&HeaderMap::new())
+            .await
+            .map_err(|_| DownstreamError::Unavailable)
     }
 }
 
@@ -399,7 +418,7 @@ impl AgentRunConsumer {
                 .map_err(|_| MessagingError::Ack)?;
             return Ok(());
         }
-        let (run, environment, evaluation) = if matches!(
+        let (run, environment, evaluation, environment_image_export) = if matches!(
             event.subject.as_str(),
             subjects::AGENT_RUN_COMPLETED | subjects::AGENT_RUN_FAILED
         ) {
@@ -427,6 +446,7 @@ impl AgentRunConsumer {
                 outcome.run,
                 outcome.environment_candidate,
                 outcome.evaluation_candidate,
+                outcome.environment_image_export,
             )
         } else if event.subject == subjects::AGENT_RUN_REQUESTED {
             match control.agent_run_event_duplicate(&event).await {
@@ -493,7 +513,7 @@ impl AgentRunConsumer {
                     .map_err(|_| MessagingError::Ack)?;
                 return Ok(());
             }
-            (run, None, None)
+            (run, None, None, None)
         } else {
             self.quarantine(&message, Some(event.id), "LW_EVENT_SUBJECT_MISMATCH")
                 .await?;
@@ -503,47 +523,44 @@ impl AgentRunConsumer {
                 .map_err(|_| MessagingError::Ack)?;
             return Ok(());
         };
-        let generated_context = match resolve_generated_context(
-            control,
-            agent,
-            &run,
-            environment.as_ref(),
-        )
-        .await
-        {
-            Ok(record) => record,
-            Err(ContextResolutionError::Retryable) => {
-                message
-                    .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
-                    .await
-                    .map_err(|_| MessagingError::Ack)?;
-                return Ok(());
-            }
-            Err(ContextResolutionError::Rejected) => {
-                tracing::error!(
-                    event = "control.agent_run_context_resolution_rejected",
-                    component = "control-service",
-                    operation = "agent_run.context.resolve",
-                    outcome = "quarantined",
-                    duration_ms = 0_u64,
-                    event_id = %event.id,
-                    run_id = %run.id,
-                    candidate_id = environment.as_ref().map(|candidate| candidate.id.to_string()),
-                    diagnostic_code = "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
-                    failure_stage = "agent_run.context.resolve",
-                    retryable = false,
-                );
-                self.quarantine(
-                    &message,
-                    Some(event.id),
-                    "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
-                )
-                .await?;
-                message
-                    .double_ack_with(AckKind::Term)
-                    .await
-                    .map_err(|_| MessagingError::Ack)?;
-                return Ok(());
+        let generated_context = if environment_image_export.is_some() {
+            None
+        } else {
+            match resolve_generated_context(control, agent, &run, environment.as_ref()).await {
+                Ok(record) => record,
+                Err(ContextResolutionError::Retryable) => {
+                    message
+                        .ack_with(AckKind::Nak(Some(REDELIVERY_DELAY)))
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
+                Err(ContextResolutionError::Rejected) => {
+                    tracing::error!(
+                        event = "control.agent_run_context_resolution_rejected",
+                        component = "control-service",
+                        operation = "agent_run.context.resolve",
+                        outcome = "quarantined",
+                        duration_ms = 0_u64,
+                        event_id = %event.id,
+                        run_id = %run.id,
+                        candidate_id = environment.as_ref().map(|candidate| candidate.id.to_string()),
+                        diagnostic_code = "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
+                        failure_stage = "agent_run.context.resolve",
+                        retryable = false,
+                    );
+                    self.quarantine(
+                        &message,
+                        Some(event.id),
+                        "LW_AGENT_BUILD_CONTEXT_READBACK_REJECTED",
+                    )
+                    .await?;
+                    message
+                        .double_ack_with(AckKind::Term)
+                        .await
+                        .map_err(|_| MessagingError::Ack)?;
+                    return Ok(());
+                }
             }
         };
         match control
@@ -552,6 +569,7 @@ impl AgentRunConsumer {
                 &run,
                 environment.as_ref(),
                 evaluation.as_ref(),
+                environment_image_export.as_ref(),
                 generated_context.as_ref(),
             )
             .await
@@ -675,10 +693,11 @@ impl AuthoringPublicationConsumer {
     }
 
     /// Runs one publication trigger and acknowledges it only after the durable status transition.
-    pub async fn process_next<E: EvaluationAuthority>(
+    pub async fn process_next<E: EvaluationAuthority, A: PlatformImageAuthority>(
         &mut self,
         control: &ControlService,
         evaluation: &E,
+        images: &A,
     ) -> Result<(), MessagingError> {
         let message = self
             .messages
@@ -781,8 +800,32 @@ impl AuthoringPublicationConsumer {
             return Ok(());
         }
 
+        let catalog = match images.platform_images().await {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let diagnostic = diagnostic_code(&error.to_string());
+                self.handle_publication_failure(
+                    control,
+                    &message,
+                    event.id,
+                    approval.id,
+                    approval.project_id,
+                    "authoring_publication.platform_images",
+                    diagnostic,
+                    true,
+                    now,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         let environment_release = match control
-            .publish_authoring_environment_release(&approval, now, &event.trace_id)
+            .publish_authoring_environment_release(
+                &approval,
+                now,
+                &event.trace_id,
+                &catalog.entries,
+            )
             .await
         {
             Ok(release) => release,

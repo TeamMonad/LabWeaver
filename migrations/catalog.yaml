@@ -20,6 +20,10 @@ domains:
         file: control/0006_authoring_publication.sql
       - id: 7
         file: control/0007_work_configuration_preauthorizations.sql
+      - id: 8
+        file: control/0008_platform_image_uploads.sql
+      - id: 9
+        file: control/0009_vm_template_upload.sql
   - name: access
     migrations:
       - id: 1
@@ -60,6 +64,14 @@ domains:
         file: agent/0009_work_execution_intent.sql
       - id: 10
         file: agent/0010_llm_review_runs.sql
+      - id: 11
+        file: agent/0011_authoring_sandbox.sql
+      - id: 12
+        file: agent/0012_dispatch_actor.sql
+      - id: 13
+        file: agent/0013_platform_image_catalog.sql
+      - id: 15
+        file: agent/0015_platform_image_vm_fields.sql
   - name: evaluation
     migrations:
       - id: 1

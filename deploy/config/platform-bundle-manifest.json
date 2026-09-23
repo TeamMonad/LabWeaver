@@ -33,6 +33,9 @@
     "agent-service-secrets": [
       "anthropic-auth-token",
       "database-url",
+      "harbor-ca.crt",
+      "harbor-password",
+      "harbor-username",
       "minio-access-key",
       "minio-ca.pem",
       "minio-secret-key",

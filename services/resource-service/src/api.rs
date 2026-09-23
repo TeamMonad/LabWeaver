@@ -22,6 +22,7 @@ use contracts::{
     ActorId, ChargeId, LeaseId, ProjectId, ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
 };
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::ApprovalPolicy;
@@ -46,7 +47,7 @@ pub struct ResourceApiState {
     service_verifier: Option<Arc<auth::ServiceTokenVerifier>>,
     access_service_client_id: Option<String>,
     environment_service_client_id: Option<String>,
-    evaluation_service_client_id: Option<String>,
+    task_service_client_ids: Option<BTreeSet<String>>,
 }
 
 impl ResourceApiState {
@@ -57,7 +58,7 @@ impl ResourceApiState {
             service_verifier: None,
             access_service_client_id: None,
             environment_service_client_id: None,
-            evaluation_service_client_id: None,
+            task_service_client_ids: None,
         }
     }
 
@@ -83,11 +84,11 @@ impl ResourceApiState {
         self
     }
 
-    /// Restricts Task resources and Task usage records to the configured Evaluation service
-    /// account.
+    /// Restricts Task resources and Task usage records to the configured task owner service
+    /// accounts (Evaluation and Agent authoring share the one-shot Task boundary).
     #[must_use]
-    pub fn with_evaluation_service_client_id(mut self, client_id: String) -> Self {
-        self.evaluation_service_client_id = Some(client_id);
+    pub fn with_task_service_client_ids(mut self, client_ids: BTreeSet<String>) -> Self {
+        self.task_service_client_ids = Some(client_ids);
         self
     }
 }
@@ -864,9 +865,9 @@ async fn record_internal_usage(
         .environment_service_client_id
         .as_deref()
         .ok_or(ResourceApiError::ServiceConfiguration)?;
-    let evaluation_service_client_id = state
-        .evaluation_service_client_id
-        .as_deref()
+    let task_service_client_ids = state
+        .task_service_client_ids
+        .as_ref()
         .ok_or(ResourceApiError::ServiceConfiguration)?;
     let observed_at = state.store.current_time().await?;
     Ok(Json(
@@ -877,7 +878,7 @@ async fn record_internal_usage(
                 observed_at,
                 &identity,
                 environment_service_client_id,
-                evaluation_service_client_id,
+                task_service_client_ids,
             )
             .await?,
     ))
@@ -1123,21 +1124,21 @@ async fn internal_service_auth(
         return (StatusCode::NOT_FOUND, "LW_RESOURCE_ROUTE_NOT_FOUND").into_response();
     };
     let task_route = permission.starts_with("resource.task.");
-    let expected_task_client_id = if task_route {
-        let Some(client_id) = state.evaluation_service_client_id else {
+    let authorized_task_client_ids = if task_route {
+        let Some(client_ids) = state.task_service_client_ids.as_ref() else {
             tracing::error!(
                 event = "resource.internal_auth.unconfigured",
                 permission,
-                diagnostic_code = "LW_AUTH_EVALUATION_CLIENT_ID_MISSING",
+                diagnostic_code = "LW_AUTH_TASK_CLIENT_IDS_MISSING",
                 retryable = false,
             );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "LW_AUTH_EVALUATION_CLIENT_ID_MISSING",
+                "LW_AUTH_TASK_CLIENT_IDS_MISSING",
             )
                 .into_response();
         };
-        Some(client_id)
+        Some(client_ids)
     } else {
         None
     };
@@ -1146,9 +1147,8 @@ async fn internal_service_auth(
         .await
     {
         Ok(identity)
-            if expected_task_client_id
-                .as_deref()
-                .is_none_or(|client_id| identity.client_id == client_id) =>
+            if authorized_task_client_ids
+                .is_none_or(|client_ids| client_ids.contains(&identity.client_id)) =>
         {
             request.extensions_mut().insert(identity);
             next.run(request).await
@@ -1157,15 +1157,11 @@ async fn internal_service_auth(
             tracing::warn!(
                 event = "resource.internal_auth.denied",
                 permission,
-                diagnostic_code = "LW_AUTH_EVALUATION_CLIENT_ID_MISMATCH",
+                diagnostic_code = "LW_AUTH_TASK_CLIENT_ID_MISMATCH",
                 client_id = identity.client_id,
                 retryable = false,
             );
-            (
-                StatusCode::FORBIDDEN,
-                "LW_AUTH_EVALUATION_CLIENT_ID_MISMATCH",
-            )
-                .into_response()
+            (StatusCode::FORBIDDEN, "LW_AUTH_TASK_CLIENT_ID_MISMATCH").into_response()
         }
         Err(error @ auth::ServiceAuthError::PermissionDenied) => {
             tracing::warn!(

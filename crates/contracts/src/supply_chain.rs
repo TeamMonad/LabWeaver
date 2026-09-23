@@ -18,6 +18,80 @@ pub enum BuildNetworkPolicy {
     Restricted { allowed_registries: Vec<String> },
 }
 
+/// Approved, immutable build input source.
+///
+/// `Dockerfile` is the deployment-owned `BuildKit` path. `ExportedOci` names an OCI
+/// layout/tar archive produced by an admitted sandbox attempt: the build executor
+/// verifies every entry and content digest before publishing the exact image by
+/// digest, so the sandbox itself never holds registry push credentials.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum BuildSource {
+    Dockerfile {
+        context: ArtifactRef,
+        /// Object-store key resolved by Control and bound to the immutable context reference.
+        context_object_key: String,
+        dockerfile_path: String,
+    },
+    ExportedOci {
+        image: ExportedOciImage,
+    },
+}
+
+/// Frozen sandbox-exported OCI layout archive.
+///
+/// The agent freezes and hashes the exact uploaded version before Control may bind it into a
+/// build request, so the executor re-reads that immutable version instead of a current key.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportedOciImage {
+    /// Immutable object-store identity of the layout archive.
+    pub layout: ArtifactRef,
+    /// Object-store key of the layout archive.
+    pub layout_object_key: String,
+}
+
+impl BuildSource {
+    /// Validates the source-specific immutable inputs.
+    fn validate(&self, network: &BuildNetworkPolicy) -> Result<(), SupplyChainError> {
+        match self {
+            Self::Dockerfile {
+                context,
+                context_object_key,
+                dockerfile_path,
+            } => {
+                if context.size_bytes == 0
+                    || crate::validate_relative_path(context_object_key).is_err()
+                    || crate::validate_relative_path(dockerfile_path).is_err()
+                {
+                    return Err(SupplyChainError::IncompleteBuildRequest);
+                }
+                if let BuildNetworkPolicy::Restricted { allowed_registries } = network
+                    && (allowed_registries.is_empty()
+                        || allowed_registries
+                            .iter()
+                            .any(|registry| registry.trim().is_empty()))
+                {
+                    return Err(SupplyChainError::IncompleteBuildRequest);
+                }
+                Ok(())
+            }
+            Self::ExportedOci { image } => {
+                image.validate()?;
+                if !matches!(network, BuildNetworkPolicy::DenyAll) {
+                    return Err(SupplyChainError::IncompleteBuildRequest);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Approved, immutable build request.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -28,10 +102,7 @@ pub struct BuildRequest {
     pub candidate_id: CandidateId,
     pub candidate_revision: Revision,
     pub builder_binding: String,
-    pub context: ArtifactRef,
-    /// Object-store key resolved by Control and bound to the immutable context reference.
-    pub context_object_key: String,
-    pub dockerfile_path: String,
+    pub source: BuildSource,
     pub output_repository: String,
     pub network: BuildNetworkPolicy,
     pub max_duration_milliseconds: u64,
@@ -48,22 +119,10 @@ impl BuildRequest {
             || self.max_duration_milliseconds == 0
             || self.max_cpu_millicores == 0
             || self.max_memory_bytes == 0
-            || self.context.size_bytes == 0
-            || crate::validate_relative_path(&self.context_object_key).is_err()
         {
             return Err(SupplyChainError::IncompleteBuildRequest);
         }
-        crate::validate_relative_path(&self.dockerfile_path)
-            .map_err(|_| SupplyChainError::IncompleteBuildRequest)?;
-        if let BuildNetworkPolicy::Restricted { allowed_registries } = &self.network
-            && (allowed_registries.is_empty()
-                || allowed_registries
-                    .iter()
-                    .any(|registry| registry.trim().is_empty()))
-        {
-            return Err(SupplyChainError::IncompleteBuildRequest);
-        }
-        Ok(())
+        self.source.validate(&self.network)
     }
 }
 
@@ -267,6 +326,20 @@ fn validate_oci_digest(value: &str) -> Result<(), SupplyChainError> {
         return Err(SupplyChainError::DigestMismatch);
     }
     Ok(())
+}
+
+impl ExportedOciImage {
+    /// Validates the frozen layout identity and object key.
+    pub fn validate(&self) -> Result<(), SupplyChainError> {
+        if self.layout.size_bytes == 0
+            || self.layout.object_version.trim().is_empty()
+            || self.layout.store_binding.trim().is_empty()
+            || crate::validate_relative_path(&self.layout_object_key).is_err()
+        {
+            return Err(SupplyChainError::IncompleteArtifact);
+        }
+        Ok(())
+    }
 }
 
 /// Supply-chain contract failure.

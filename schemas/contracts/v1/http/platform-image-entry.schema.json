@@ -1,0 +1,126 @@
+{
+  "$defs": {
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
+    },
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "PlatformImageStatus": {
+      "description": "Catalog lifecycle status.",
+      "enum": [
+        "active",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One pinned platform image identity as persisted by the Agent authority.",
+  "properties": {
+    "binding": {
+      "type": "string"
+    },
+    "capacityBytes": {
+      "description": "Declared virtual-machine base-disk capacity in bytes; absent for container entries.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "catalogId": {
+      "$ref": "#/$defs/PlatformImageId"
+    },
+    "diskSha256": {
+      "description": "Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "format": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VirtualMachineDiskFormat"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Declared virtual-machine base-disk encoding; absent for container entries."
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "mediaType": {
+      "type": "string"
+    },
+    "pinnedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "repinGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "resolvedDigest": {
+      "type": "string"
+    },
+    "sizeBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sourceReference": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/PlatformImageStatus"
+    },
+    "trustRevision": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "catalogId",
+    "kind",
+    "binding",
+    "sourceReference",
+    "resolvedDigest",
+    "mediaType",
+    "sizeBytes",
+    "status",
+    "trustRevision",
+    "repinGeneration",
+    "pinnedAt",
+    "updatedAt"
+  ],
+  "title": "PlatformImageEntry",
+  "type": "object"
+}

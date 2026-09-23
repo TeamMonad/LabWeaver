@@ -43,6 +43,9 @@ use contracts::{
 };
 use resource_service::ApprovalPolicy;
 use resource_service::LifecycleError;
+use resource_service::capacity::{
+    CapacityProviderError, GpuCatalogSeed, ResourceCapacityConfiguration,
+};
 use resource_service::outbox::{ResourceOutboxDispatcher, ResourceOutboxOutcome};
 use resource_service::store::{PendingAllocation, PgResourceStore};
 use testcontainers::GenericImage;
@@ -883,6 +886,207 @@ async fn gpu_catalog_rejects_cross_provider_active_alias() -> Result<(), Box<dyn
         Err(resource_service::store::ResourceStoreError::GpuCatalogPoolCollision)
     ));
     Ok(())
+}
+
+fn review_seed(class: &str) -> GpuCatalogSeed {
+    GpuCatalogSeed {
+        class: class.to_owned(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: "gpu-primary-v1".to_owned(),
+        capacity_units: 1,
+        allocation_binding: "nvidia-cuda-primary-v1".to_owned(),
+    }
+}
+
+fn capacity_configuration_json(seeds: &Value) -> Value {
+    json!({
+        "pollIntervalMilliseconds": 1000,
+        "environmentHandoff": {
+            "baseUri": "https://environment-service:9446/",
+            "caFile": "/etc/labweaver/secrets/mtls-ca.pem",
+            "timeoutMilliseconds": 5000,
+            "systemActorId": "00000000-0000-7000-8000-000000000001"
+        },
+        "gpuCatalogSeed": seeds
+    })
+}
+
+fn reviewed_seed_json() -> Value {
+    json!({
+        "class": "nvidia-cuda",
+        "mode": "exclusive",
+        "providerBinding": "gpu-primary-v1",
+        "capacityUnits": 1,
+        "allocationBinding": "nvidia-cuda-primary-v1"
+    })
+}
+
+#[tokio::test]
+async fn gpu_catalog_seed_provisions_reviewed_class_once() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let seed = review_seed("nvidia-cuda");
+
+    let created = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].class, seed.class);
+    assert_eq!(created[0].mode, seed.mode);
+    assert_eq!(created[0].provider_binding, seed.provider_binding);
+    assert_eq!(created[0].capacity_units, seed.capacity_units);
+    assert_eq!(created[0].allocation_binding, seed.allocation_binding);
+    assert_eq!(created[0].revision, Revision::new(1)?);
+    assert!(created[0].active);
+
+    let catalog = store.list_gpu_catalog().await?;
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].id, created[0].id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gpu_catalog_seed_is_idempotent_and_never_bumps_revision()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let seed = review_seed("nvidia-cuda");
+
+    let first = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
+    let second = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].id, first[0].id);
+    assert_eq!(second[0].revision, first[0].revision);
+    assert_eq!(second[0].revision, Revision::new(1)?);
+
+    let catalog = store.list_gpu_catalog().await?;
+    assert_eq!(catalog.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gpu_catalog_seed_conflict_fails_and_leaves_existing_row_untouched()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let seed = review_seed("nvidia-cuda");
+    store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
+
+    let provider_conflict = GpuCatalogSeed {
+        provider_binding: "gpu-secondary-v1".to_owned(),
+        ..seed.clone()
+    };
+    assert!(matches!(
+        store
+            .seed_gpu_catalog(std::slice::from_ref(&provider_conflict))
+            .await,
+        Err(resource_service::store::ResourceStoreError::GpuCatalogSeedConflict)
+    ));
+    let capacity_conflict = GpuCatalogSeed {
+        capacity_units: 8,
+        ..seed.clone()
+    };
+    assert!(matches!(
+        store
+            .seed_gpu_catalog(std::slice::from_ref(&capacity_conflict))
+            .await,
+        Err(resource_service::store::ResourceStoreError::GpuCatalogSeedConflict)
+    ));
+
+    let catalog = store.list_gpu_catalog().await?;
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].provider_binding, seed.provider_binding);
+    assert_eq!(catalog[0].capacity_units, seed.capacity_units);
+    assert_eq!(catalog[0].revision, Revision::new(1)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gpu_catalog_seed_does_not_reactivate_disabled_class()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let disabled = GpuCatalogEntry {
+        id: GpuCatalogEntryId::new(),
+        class: "nvidia-cuda".to_owned(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: "gpu-primary-v1".to_owned(),
+        capacity_units: 1,
+        allocation_binding: "nvidia-cuda-primary-v1".to_owned(),
+        revision: Revision::new(1)?,
+        active: false,
+    };
+    store
+        .create_gpu_catalog_entry("gpu-catalog-seed-disabled", &disabled)
+        .await?;
+    let seed = GpuCatalogSeed {
+        class: disabled.class.clone(),
+        mode: disabled.mode,
+        provider_binding: disabled.provider_binding.clone(),
+        capacity_units: disabled.capacity_units,
+        allocation_binding: disabled.allocation_binding.clone(),
+    };
+
+    let seeded = store.seed_gpu_catalog(std::slice::from_ref(&seed)).await?;
+    assert_eq!(seeded.len(), 1);
+    assert_eq!(seeded[0].id, disabled.id);
+    assert!(!seeded[0].active);
+    assert_eq!(seeded[0].revision, Revision::new(1)?);
+
+    let catalog = store.list_gpu_catalog().await?;
+    assert_eq!(catalog.len(), 1);
+    assert!(!catalog[0].active);
+    Ok(())
+}
+
+#[test]
+fn gpu_catalog_seed_rejects_duplicate_class_at_configuration_parse() {
+    let entry = reviewed_seed_json();
+    let single = capacity_configuration_json(&json!([entry.clone()]));
+    assert!(ResourceCapacityConfiguration::parse(single.to_string().as_bytes()).is_ok());
+
+    let duplicate = capacity_configuration_json(&json!([entry.clone(), entry]));
+    assert!(matches!(
+        ResourceCapacityConfiguration::parse(duplicate.to_string().as_bytes()),
+        Err(CapacityProviderError::Configuration)
+    ));
+}
+
+#[test]
+fn gpu_catalog_seed_rejects_invalid_seed_at_configuration_parse() {
+    let mut zero_units = reviewed_seed_json();
+    zero_units["capacityUnits"] = json!(0);
+    assert!(matches!(
+        ResourceCapacityConfiguration::parse(
+            capacity_configuration_json(&json!([zero_units]))
+                .to_string()
+                .as_bytes()
+        ),
+        Err(CapacityProviderError::Configuration)
+    ));
+
+    let mut over_long_binding = reviewed_seed_json();
+    over_long_binding["providerBinding"] = json!("p".repeat(121));
+    assert!(matches!(
+        ResourceCapacityConfiguration::parse(
+            capacity_configuration_json(&json!([over_long_binding]))
+                .to_string()
+                .as_bytes()
+        ),
+        Err(CapacityProviderError::Configuration)
+    ));
+}
+
+#[test]
+fn gpu_catalog_seed_parses_the_shipped_capacity_example() {
+    let configuration = ResourceCapacityConfiguration::parse(
+        include_str!("../../../deploy/config/resource-capacity.json.example").as_bytes(),
+    )
+    .expect("the shipped capacity example must parse");
+    assert!(!configuration.gpu_catalog_seed.is_empty());
+    for seed in &configuration.gpu_catalog_seed {
+        seed.validate()
+            .expect("every shipped seed must materialize a valid catalog entry");
+    }
 }
 
 #[tokio::test]
@@ -1903,11 +2107,12 @@ const RESOURCE_AUTH_AUDIENCE: &str = "labweaver-resource";
 const RESOURCE_ACCESS_CLIENT_ID: &str = "labweaver-access-test";
 const RESOURCE_ENVIRONMENT_CLIENT_ID: &str = "labweaver-environment-test";
 const RESOURCE_EVALUATION_CLIENT_ID: &str = "labweaver-evaluation-test";
+const RESOURCE_AGENT_CLIENT_ID: &str = "labweaver-agent-test";
 const RESOURCE_TASK_PERMISSION: &str = "resource.task.create";
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn resource_http_auth_binds_task_routes_to_evaluation_client()
+async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_postgres, pool) = migrated_pool().await?;
     let authority =
@@ -1920,7 +2125,14 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
         .with_service_verifier(Arc::new(verifier))
         .with_access_service_client_id(RESOURCE_ACCESS_CLIENT_ID.to_owned())
         .with_environment_service_client_id(RESOURCE_ENVIRONMENT_CLIENT_ID.to_owned())
-        .with_evaluation_service_client_id(RESOURCE_EVALUATION_CLIENT_ID.to_owned());
+        .with_task_service_client_ids(
+            [
+                RESOURCE_EVALUATION_CLIENT_ID.to_owned(),
+                RESOURCE_AGENT_CLIENT_ID.to_owned(),
+            ]
+            .into_iter()
+            .collect(),
+        );
     let router = resource_service::api::with_delegation(
         resource_service::api::resource_api_router(state),
         Arc::new(delegation_key.to_vec()),
@@ -1950,7 +2162,7 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
     assert_eq!(environment_response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         to_bytes(environment_response.into_body(), 1024 * 1024).await?,
-        "LW_AUTH_EVALUATION_CLIENT_ID_MISMATCH"
+        "LW_AUTH_TASK_CLIENT_ID_MISMATCH"
     );
 
     let missing_permission_token = signed_resource_token(
@@ -2005,6 +2217,33 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
     .await?;
     assert_eq!(persisted_count, 1);
 
+    let agent_task_run_id = TaskRunId::new();
+    let agent_token = signed_resource_token(
+        &authority.material,
+        &authority.issuer,
+        RESOURCE_AGENT_CLIENT_ID,
+        RESOURCE_AUTH_AUDIENCE,
+        &[RESOURCE_TASK_PERMISSION],
+    )?;
+    let agent_response = router
+        .clone()
+        .oneshot(task_request(
+            &agent_token,
+            &task_input(agent_task_run_id, owner_id, project_id, "agent-authorized"),
+            "resource-auth-agent",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(agent_response.status(), StatusCode::CREATED);
+    let agent_created: ResourceRequest =
+        serde_json::from_slice(&to_bytes(agent_response.into_body(), 1024 * 1024).await?)?;
+    assert_eq!(
+        agent_created.target,
+        ResourceTarget::Task {
+            task_run_id: agent_task_run_id
+        }
+    );
+
     let now = time::OffsetDateTime::now_utc();
     let session = auth::BffSession {
         session_id: Uuid::now_v7(),
@@ -2030,8 +2269,15 @@ async fn resource_http_auth_binds_task_routes_to_evaluation_client()
     assert_eq!(public_response.status(), StatusCode::OK);
     let public_requests: Vec<ResourceRequest> =
         serde_json::from_slice(&to_bytes(public_response.into_body(), 1024 * 1024).await?)?;
-    assert_eq!(public_requests.len(), 1);
-    assert_eq!(public_requests[0].request_key, "evaluation-authorized");
+    assert_eq!(public_requests.len(), 2);
+    let keys = public_requests
+        .iter()
+        .map(|request| request.request_key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from(["agent-authorized", "evaluation-authorized"])
+    );
     Ok(())
 }
 
@@ -2073,6 +2319,7 @@ async fn build_resource_verifier(
             RESOURCE_ACCESS_CLIENT_ID.to_owned(),
             RESOURCE_ENVIRONMENT_CLIENT_ID.to_owned(),
             RESOURCE_EVALUATION_CLIENT_ID.to_owned(),
+            RESOURCE_AGENT_CLIENT_ID.to_owned(),
         ]),
         BTreeSet::new(),
         BTreeSet::from(["ES256".to_owned()]),

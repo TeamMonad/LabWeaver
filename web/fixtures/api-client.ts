@@ -1,4 +1,5 @@
 import { activeScene, fixtureProjectId } from './scenes'
+import { gpuCatalogFixture } from './contracts'
 import type {
   GpuCatalogEntrySchema,
   ProblemDetails,
@@ -18,19 +19,6 @@ type FixtureData =
 type FixtureDataResult = { kind: 'data'; data: FixtureData } | { kind: 'error'; error: unknown }
 
 const now = '2026-09-14T08:00:00.000Z'
-
-const catalog = [
-  {
-    id: 'gpu-a10-fixture',
-    class: 'nvidia-a10',
-    mode: 'exclusive',
-    capacityUnits: 4,
-    revision: 2,
-    active: true,
-    providerBinding: 'fixture-kubernetes',
-    allocationBinding: 'fixture-nvidia-a10',
-  },
-] satisfies GpuCatalogEntrySchema[]
 
 const rates = [
   { id: 'rate-cpu-fixture', revision: 1, unit: 'cpu_millicore_second', unitQuantity: 1000, gpuClass: null, gpuMode: null, unitPrice: { currency: 'USD', amount: '0.000010' }, effectiveFrom: '2026-01-01T00:00:00.000Z', effectiveUntil: null },
@@ -74,7 +62,7 @@ function unsupported(operation: string): ProblemDetails {
 }
 
 function getData(url: string): FixtureDataResult {
-  if (url.endsWith('/resource/gpu-catalog')) return { kind: 'data', data: catalog }
+  if (url.endsWith('/resource/gpu-catalog')) return { kind: 'data', data: gpuCatalogFixture }
   if (url.endsWith('/resource/rates')) return { kind: 'data', data: rates }
   const fixtureBudgetUrl = `/api/v1/projects/${encodeURIComponent(fixtureProjectId)}/resource-budget`
   if (url === fixtureBudgetUrl) {

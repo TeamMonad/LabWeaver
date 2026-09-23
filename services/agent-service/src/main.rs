@@ -25,7 +25,12 @@ use agent_service::llm_review::{LlmReviewStore, LlmReviewWorker};
 use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
+use agent_service::oci_registry::RegistryCredentials;
+use agent_service::platform_images::{
+    PgPlatformImageCatalog, PlatformImageRegistry, PlatformImageSeed, PlatformImageSeedOutcome,
+};
 use agent_service::run_store::{AgentRunService, PostgresAgentRunStore};
+use agent_service::sandbox_process::{SandboxAuthoringProcess, SandboxProcessConfiguration};
 use agent_service::work_execution::{
     WorkExecutionClient, WorkExecutionConfiguration, WorkExecutionWorker,
 };
@@ -38,6 +43,7 @@ use auth::{
 use contracts::{ArtifactId, ArtifactRef, Revision, UtcTimestamp};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
+use task_execution::kubernetes::parse_egress_destination;
 use time::OffsetDateTime;
 
 #[path = "../../http_transport.rs"]
@@ -77,6 +83,110 @@ struct DeploymentFile {
     work_execution: WorkExecutionFileConfig,
     build: BuildFileConfig,
     nats: NatsFileConfig,
+    resource: task_execution::resource::ResourceClientConfiguration,
+    sandbox: SandboxFileConfig,
+    /// Optional platform registry used by the administrator image catalog.
+    platform_registry: Option<PlatformRegistryFileConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformRegistryFileConfig {
+    /// Registry host name, for example `harbor.internal`.
+    registry: String,
+    /// Mounted CA bundle used to verify the registry TLS endpoint.
+    ca_file: String,
+    /// Mounted file holding the platform robot account username.
+    username_file: String,
+    /// Mounted file holding the platform robot account password.
+    password_file: String,
+    /// Reviewed base images the deployment copied into the platform registry.
+    ///
+    /// Each seed is resolved once at startup and pinned under its binding; see
+    /// [`PlatformImageSeed`]. The deployment file names the list `seed_images` and the JSON
+    /// form `seedImages`.
+    #[serde(default, alias = "seedImages")]
+    seed_images: Vec<PlatformImageSeed>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxFileConfig {
+    namespace: String,
+    image: String,
+    service_account_name: String,
+    image_pull_secret_name: Option<String>,
+    cpu_millicores: u32,
+    memory_bytes: u64,
+    workspace_bytes: u64,
+    wall_time_seconds: u64,
+    allowed_egress: BTreeSet<String>,
+    buildkit_image: Option<String>,
+    buildkit_config_map_name: Option<String>,
+    result_max_bytes: u64,
+    stderr_max_bytes: u64,
+    object_prefix: String,
+    kubernetes_api_server: String,
+    kubernetes_bearer_token_file: String,
+    kubernetes_ca_file: String,
+    request_timeout_milliseconds: u64,
+    /// Reviewed object-store trust root the attempt reads signed URLs with; absent means the
+    /// object store is trusted by the sandbox image trust store.
+    object_store_ca_file: Option<String>,
+}
+
+impl SandboxFileConfig {
+    /// Validates the deployment configuration against the object store it writes through.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartupError::Configuration`] when the sandbox object prefix, the attempt transfer
+    /// bounds or the reviewed egress would be rejected by the configured object store.
+    fn to_configuration(
+        &self,
+        store_prefix: &str,
+        store_max_object_bytes: u64,
+        store_port: u16,
+    ) -> Result<agent_service::sandbox::SandboxConfiguration, StartupError> {
+        let configuration = agent_service::sandbox::SandboxConfiguration {
+            namespace: self.namespace.clone(),
+            image: self.image.clone(),
+            service_account_name: self.service_account_name.clone(),
+            image_pull_secret_name: self.image_pull_secret_name.clone(),
+            cpu_millicores: self.cpu_millicores,
+            memory_bytes: self.memory_bytes,
+            workspace_bytes: self.workspace_bytes,
+            wall_time_seconds: self.wall_time_seconds,
+            allowed_egress: self.allowed_egress.clone(),
+            buildkit_image: self.buildkit_image.clone(),
+            buildkit_config_map_name: self.buildkit_config_map_name.clone(),
+        };
+        configuration
+            .validate()
+            .map_err(|_| StartupError::Configuration)?;
+        if self.object_prefix.trim().is_empty()
+            || !self.object_prefix.starts_with(store_prefix)
+            || self.workspace_bytes > store_max_object_bytes
+            || self.result_max_bytes > store_max_object_bytes
+            || self.stderr_max_bytes > store_max_object_bytes
+            || !self.allowed_egress.iter().any(|destination| {
+                parse_egress_destination(destination).is_some_and(|(_, port)| port == store_port)
+            })
+            || !self.kubernetes_api_server.starts_with("https://")
+            || !self.kubernetes_bearer_token_file.starts_with('/')
+            || !self.kubernetes_ca_file.starts_with('/')
+            || self
+                .object_store_ca_file
+                .as_deref()
+                .is_some_and(|path| !path.starts_with('/'))
+            || !(100..=60_000).contains(&self.request_timeout_milliseconds)
+            || !(1_024..=8 * 1024 * 1024).contains(&self.result_max_bytes)
+            || self.stderr_max_bytes > 1024 * 1024
+        {
+            return Err(StartupError::Configuration);
+        }
+        Ok(configuration)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,7 +286,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         &deployment.control_tls.server_certificate_file,
         &deployment.control_tls.server_key_file,
     )?;
-    let (service_verifier, service_token_client) = discover_service_auth().await?;
+    let (service_verifier, service_token_client) = discover_service_auth(true).await?;
     let work_execution_configuration = WorkExecutionConfiguration::defaults(
         reqwest::Url::parse(&deployment.work_execution.environment_base_uri)
             .map_err(|_| StartupError::Configuration)?,
@@ -186,7 +296,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     );
     let environment = WorkExecutionClient::from_configuration(
         &work_execution_configuration,
-        service_token_client,
+        Arc::clone(&service_token_client),
     )
     .map_err(StartupError::WorkExecutionClient)?;
     let pool = PgPoolOptions::new()
@@ -246,6 +356,17 @@ async fn run_agent_service() -> Result<(), StartupError> {
     )
     .map_err(|_| StartupError::Configuration)?;
     let outbox_poll = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
+    let object_store_prefix = deployment
+        .object_store
+        .object_prefix
+        .trim_matches('/')
+        .to_owned();
+    let object_store_max_object_bytes = deployment.object_store.max_object_bytes;
+    let object_store_port = deployment
+        .object_store
+        .endpoint
+        .port_or_known_default()
+        .ok_or(StartupError::Configuration)?;
     let objects = Arc::new(
         S3ImmutableObjectStore::new(
             deployment.object_store,
@@ -268,16 +389,58 @@ async fn run_agent_service() -> Result<(), StartupError> {
         )
         .map_err(|_| StartupError::Configuration)?,
     );
-    let process = Arc::new(TokioClaudeCodeProcess::new(read_worker_environment(
-        &deployment.worker_environment_files,
-    )?));
-    let review_process: Arc<dyn ClaudeCodeProcess> = process.clone();
+    let worker_environment = read_worker_environment(&deployment.worker_environment_files)?;
+    let local_process = Arc::new(TokioClaudeCodeProcess::new(worker_environment.clone()));
+    let review_process: Arc<dyn ClaudeCodeProcess> = local_process.clone();
+    let sandbox = &deployment.sandbox;
+    let resource_client = task_execution::resource::ResourceClient::from_configuration(
+        deployment.resource.clone(),
+        Arc::clone(&service_token_client),
+        required_set("LABWEAVER_SERVICE_SCOPES")?,
+    )?;
+    let process: Arc<dyn ClaudeCodeProcess> = Arc::new(SandboxAuthoringProcess::new(
+        SandboxProcessConfiguration {
+            sandbox: sandbox.to_configuration(
+                &object_store_prefix,
+                object_store_max_object_bytes,
+                object_store_port,
+            )?,
+            object_prefix: sandbox.object_prefix.clone(),
+            result_max_bytes: sandbox.result_max_bytes,
+            stderr_max_bytes: sandbox.stderr_max_bytes,
+            kubernetes_api_server: sandbox.kubernetes_api_server.clone(),
+            kubernetes_bearer_token_file: sandbox.kubernetes_bearer_token_file.clone(),
+            kubernetes_ca_file: sandbox.kubernetes_ca_file.clone(),
+            request_timeout_milliseconds: sandbox.request_timeout_milliseconds,
+            object_store_ca_file: sandbox.object_store_ca_file.clone().map(Into::into),
+            worker_environment: worker_environment.clone(),
+        },
+        resource_client,
+        store.clone(),
+        Arc::clone(&objects),
+    )?);
+    let platform_registry = load_platform_registry(deployment.platform_registry.as_ref())?;
+    let seed_images = if let Some(config) = deployment.platform_registry.as_ref() {
+        config.seed_images.clone()
+    } else {
+        Vec::new()
+    };
+    let api_objects: Arc<dyn ImmutableObjectStore> = objects.clone();
+    let platform_images = PgPlatformImageCatalog::new(store.pool().clone());
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
         generated_artifacts: generated_artifacts.clone(),
         llm_reviews: llm_reviews.clone(),
+        platform_images: platform_images.clone(),
+        platform_registry,
+        objects: api_objects,
     });
+    spawn_platform_image_seeds(
+        &platform_images,
+        state.platform_registry.as_ref(),
+        seed_images,
+    )?;
     let bind = SocketAddr::from_str(&deployment.control_tls.bind_addr)
         .map_err(|_| StartupError::Configuration)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -332,14 +495,100 @@ async fn run_agent_service() -> Result<(), StartupError> {
     Ok(())
 }
 
-async fn discover_service_auth()
--> Result<(Arc<ServiceTokenVerifier>, Arc<ServiceTokenClient>), StartupError> {
+/// Starts the background deployment seeding of the platform image catalog.
+///
+/// Seeding never blocks startup and never fails it: the resolved digests are registered once by
+/// a background task while the API and workers come up. Without a configured platform registry
+/// there is nothing to resolve against, so a seeded deployment is reported as skipped and the
+/// catalog keeps whatever the administrator registered through the gateway. A clock failure is
+/// the one startup-blocking condition, because every catalog write needs the mutation timestamp.
+fn spawn_platform_image_seeds(
+    catalog: &PgPlatformImageCatalog,
+    registry: Option<&PlatformImageRegistry>,
+    seeds: Vec<PlatformImageSeed>,
+) -> Result<(), StartupError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let Some(registry) = registry else {
+        tracing::warn!(
+            event = "agent.platform_image.seed_skipped",
+            outcome = "skipped",
+            diagnostic_code = "LW_PLATFORM_IMAGE_REGISTRY_NOT_CONFIGURED",
+            seed_count = seeds.len(),
+            failure_stage = "seed",
+            error_kind = "configuration",
+            retryable = false
+        );
+        return Ok(());
+    };
+    let catalog = catalog.clone();
+    let registry = registry.clone();
+    let now = timestamp()?;
+    tokio::spawn(async move {
+        let outcomes =
+            agent_service::platform_images::seed_platform_images(&catalog, &registry, &seeds, now)
+                .await;
+        log_platform_image_seed_outcomes(&seeds, &outcomes);
+    });
+    Ok(())
+}
+
+/// Logs one stable event per deployment seed.
+fn log_platform_image_seed_outcomes(
+    seeds: &[PlatformImageSeed],
+    outcomes: &[PlatformImageSeedOutcome],
+) {
+    for (seed, outcome) in seeds.iter().zip(outcomes) {
+        match outcome {
+            PlatformImageSeedOutcome::Registered => tracing::info!(
+                event = "agent.platform_image.seed_registered",
+                outcome = "registered",
+                binding = %seed.binding,
+                kind = seed.kind.as_str()
+            ),
+            PlatformImageSeedOutcome::Existing => tracing::info!(
+                event = "agent.platform_image.seed_existing",
+                outcome = "unchanged",
+                binding = %seed.binding,
+                kind = seed.kind.as_str()
+            ),
+            PlatformImageSeedOutcome::Failed { cause } => tracing::error!(
+                event = "agent.platform_image.seed_failed",
+                outcome = "failed",
+                diagnostic_code = contracts::diagnostic::PLATFORM_IMAGE_SEED_FAILED,
+                cause = cause,
+                binding = %seed.binding,
+                kind = seed.kind.as_str(),
+                failure_stage = "seed",
+                error_kind = "dependency",
+                retryable = false
+            ),
+        }
+    }
+}
+
+async fn discover_service_auth(
+    require_task_resource_scopes: bool,
+) -> Result<(Arc<ServiceTokenVerifier>, Arc<ServiceTokenClient>), StartupError> {
     let issuer = required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?;
     let audience = required_env("LABWEAVER_SERVICE_AUDIENCE")?;
     let allowed_client_ids = required_set("LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS")?;
     let scopes = required_set("LABWEAVER_SERVICE_SCOPES")?;
     if !scopes.contains("environment.work.configure")
         || !scopes.contains("environment:resolve_work_execution_binding")
+        || (require_task_resource_scopes
+            && ![
+                "resource.task.create",
+                "resource.task.read",
+                "resource.task.claim",
+                "resource.task.ack",
+                "resource.task.release",
+                "resource.task.cancel",
+                "resource.usage.record",
+            ]
+            .iter()
+            .all(|scope| scopes.contains(*scope)))
     {
         return Err(StartupError::Configuration);
     }
@@ -531,7 +780,7 @@ struct Worker {
     objects: Arc<S3ImmutableObjectStore>,
     generated_artifacts: GeneratedArtifactStore,
     classifier: Arc<dyn EgressClassifier>,
-    process: Arc<TokioClaudeCodeProcess>,
+    process: Arc<dyn ClaudeCodeProcess>,
     runtime_identity: String,
     dispatch_lease: Duration,
     track_lease: Duration,
@@ -640,6 +889,51 @@ fn load_deployment() -> Result<DeploymentFile, StartupError> {
     serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|_| StartupError::Configuration)
 }
 
+fn load_platform_registry(
+    config: Option<&PlatformRegistryFileConfig>,
+) -> Result<Option<PlatformImageRegistry>, StartupError> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if config.registry.is_empty()
+        || config.registry.contains('/')
+        || config.registry.contains("://")
+        || config
+            .registry
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace())
+        || !config.ca_file.starts_with('/')
+        || !config.username_file.starts_with('/')
+        || !config.password_file.starts_with('/')
+    {
+        return Err(StartupError::Configuration);
+    }
+    let base = reqwest::Url::parse(&format!("https://{}", config.registry))
+        .map_err(|_| StartupError::Configuration)?;
+    let ca = std::fs::read(&config.ca_file).map_err(|_| StartupError::Configuration)?;
+    let ca = reqwest::Certificate::from_pem(&ca).map_err(|_| StartupError::Configuration)?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(30))
+        .add_root_certificate(ca)
+        .build()
+        .map_err(|_| StartupError::Configuration)?;
+    let username = read_platform_secret(&config.username_file)?;
+    let password = read_platform_secret(&config.password_file)?;
+    PlatformImageRegistry::new(base, client, RegistryCredentials { username, password })
+        .map(Some)
+        .map_err(|_| StartupError::Configuration)
+}
+
+fn read_platform_secret(path: &str) -> Result<String, StartupError> {
+    let value = std::fs::read_to_string(path).map_err(|_| StartupError::Configuration)?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(StartupError::Configuration);
+    }
+    Ok(value)
+}
+
 fn load_build_executor_deployment() -> Result<BuildExecutorDeploymentFile, StartupError> {
     let path = std::env::var("LABWEAVER_BUILD_EXECUTOR_CONFIG_FILE")
         .map_err(|_| StartupError::Configuration)?;
@@ -711,6 +1005,22 @@ fn validate_deployment(deployment: &DeploymentFile) -> Result<(), StartupError> 
     {
         return Err(StartupError::Configuration);
     }
+    deployment.sandbox.to_configuration(
+        deployment.object_store.object_prefix.trim_matches('/'),
+        deployment.object_store.max_object_bytes,
+        deployment
+            .object_store
+            .endpoint
+            .port_or_known_default()
+            .ok_or(StartupError::Configuration)?,
+    )?;
+    let resource = &deployment.resource;
+    if resource.audience.trim().is_empty()
+        || !resource.ca_file.is_absolute()
+        || resource.base_uri.scheme() != "https"
+    {
+        return Err(StartupError::Configuration);
+    }
     Ok(())
 }
 
@@ -757,7 +1067,8 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
           AND to_regclass('agent.agent_track_work_items') IS NOT NULL \
           AND to_regclass('agent.build_commands') IS NOT NULL \
           AND to_regclass('agent.generated_artifacts') IS NOT NULL \
-          AND to_regclass('agent.llm_review_runs') IS NOT NULL",
+          AND to_regclass('agent.llm_review_runs') IS NOT NULL \
+          AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -806,6 +1117,10 @@ enum StartupError {
     #[error(transparent)]
     LlmReview(#[from] agent_service::llm_review::LlmReviewStoreError),
     #[error(transparent)]
+    Sandbox(#[from] agent_service::sandbox::SandboxBundleError),
+    #[error(transparent)]
+    ResourceClient(#[from] task_execution::resource::ResourceClientError),
+    #[error(transparent)]
     BuildStore(#[from] agent_service::build_store::BuildStoreError),
     #[error(transparent)]
     Runtime(#[from] agent_service::claude_code::ClaudeCodeRuntimeError),
@@ -821,6 +1136,8 @@ enum StartupError {
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
     use std::collections::{BTreeMap, BTreeSet};
+
+    use agent_service::platform_images::PlatformImageKind;
 
     use super::{BuildExecutorDeploymentFile, DeploymentFile};
 
@@ -875,6 +1192,81 @@ mod deployment_contract_tests {
                 "environment:resolve_work_execution_binding".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn checked_in_platform_example_seeds_only_reviewed_registry_bindings() {
+        let example = include_str!("../../../deploy/config/agent-control-plane.yaml.example");
+        let deployment: DeploymentFile =
+            serde_yaml::from_str(example).expect("agent deployment example must deserialize");
+        let registry = deployment
+            .platform_registry
+            .as_ref()
+            .expect("agent deployment example must configure the platform registry");
+
+        assert_eq!(registry.seed_images.len(), 2);
+        for seed in &registry.seed_images {
+            assert_eq!(seed.kind, PlatformImageKind::Container);
+            assert!(seed.source_reference.starts_with("harbor.example.invalid/"));
+            assert!(seed.binding.ends_with("-v1"));
+            assert_eq!(seed.trust_revision, 1);
+        }
+        assert_eq!(registry.seed_images[0].binding, "rust-builder-v1");
+        assert_eq!(registry.seed_images[1].binding, "distroless-runtime-v1");
+    }
+
+    #[test]
+    fn platform_registry_seeds_accept_both_reviewed_keys_and_reject_unknown_fields() {
+        let reviewed = r#"
+registry: "harbor.example.invalid"
+ca_file: "/etc/labweaver/secrets/harbor-ca.crt"
+username_file: "/etc/labweaver/secrets/harbor-username"
+password_file: "/etc/labweaver/secrets/harbor-password"
+seed_images:
+  - kind: "container"
+    binding: "rust-builder-v1"
+    source_reference: "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm"
+    trust_revision: 1
+"#;
+        let config: super::PlatformRegistryFileConfig =
+            serde_yaml::from_str(reviewed).expect("snake_case seed key must deserialize");
+        assert_eq!(config.seed_images.len(), 1);
+        assert_eq!(config.seed_images[0].binding, "rust-builder-v1");
+
+        let camel = r#"{
+            "registry": "harbor.example.invalid",
+            "ca_file": "/etc/labweaver/secrets/harbor-ca.crt",
+            "username_file": "/etc/labweaver/secrets/harbor-username",
+            "password_file": "/etc/labweaver/secrets/harbor-password",
+            "seedImages": [{
+                "kind": "container",
+                "binding": "rust-builder-v1",
+                "source_reference": "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm",
+                "trust_revision": 2
+            }]
+        }"#;
+        let config: super::PlatformRegistryFileConfig =
+            serde_json::from_str(camel).expect("camelCase seed key must deserialize");
+        assert_eq!(config.seed_images[0].trust_revision, 2);
+
+        let absent = reviewed.replace(
+            r#"seed_images:
+  - kind: "container"
+    binding: "rust-builder-v1"
+    source_reference: "harbor.example.invalid/labweaver-system/rust:1.97.1-bookworm"
+    trust_revision: 1
+"#,
+            "",
+        );
+        let config: super::PlatformRegistryFileConfig =
+            serde_yaml::from_str(&absent).expect("seeds must default to empty");
+        assert!(config.seed_images.is_empty());
+
+        let unknown = reviewed.replace(
+            "    trust_revision: 1",
+            "    trust_revision: 1\n    disk_format: \"qcow2\"",
+        );
+        assert!(serde_yaml::from_str::<super::PlatformRegistryFileConfig>(&unknown).is_err());
     }
 
     fn example_deployment() -> super::DeploymentFile {

@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::supply_chain::VirtualMachineDiskFormat;
 use crate::{
     AccessGrantId, ActorId, AgentRunId, ApprovalId, ArtifactRef, BuildRequestId, CandidateId,
     CourseId, DiagnosticCode, EndpointId, EnvironmentId, EvaluationReleaseId, EvaluationRunId,
     EvaluationStepRunId, EventId, FrozenSubmissionId, ImageArtifactId, LeaseId, OperationId,
-    PlatformRole, ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId, Revision,
-    StreamSequence, TaskRunId, UploadSessionId, UtcTimestamp,
+    PlatformImageId, PlatformRole, ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId,
+    Revision, StreamSequence, TaskRunId, UploadSessionId, UtcTimestamp,
 };
 
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -259,6 +260,292 @@ pub struct ProblemPackageUploadSession {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompleteProblemPackageUploadRequest {}
 
+/// Reviewed archive media type accepted for an administrator OCI layout upload.
+pub const PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE: &str = "application/vnd.oci.image.layout.v1+tar";
+
+/// Returns whether a catalog binding uses the reviewed lowercase locator charset.
+#[must_use]
+pub fn valid_platform_image_binding(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    match bytes.next() {
+        Some(byte) if byte.is_ascii_lowercase() || byte.is_ascii_digit() => {}
+        _ => return false,
+    }
+    value.len() <= 128
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// Maximum accepted byte length of the relative in-archive virtual-machine disk path.
+pub const PLATFORM_IMAGE_DISK_PATH_MAX_BYTES: usize = 256;
+
+/// Returns whether an administrator platform-image upload carries a reviewed disk descriptor.
+///
+/// A container upload always imports an OCI layout, so all three disk fields must be absent. A
+/// virtual-machine upload either imports an already-published registry containerdisk reference
+/// (all three absent) or declares the raw/qcow2 disk frozen inside the archive (all three present
+/// and self-consistent): `disk_path` is a relative path of at most
+/// [`PLATFORM_IMAGE_DISK_PATH_MAX_BYTES`] bytes with no `..`, no leading `/`, and no trailing `/`,
+/// and `capacity_bytes` is positive. A partially specified descriptor is never accepted, so a
+/// misdeclared VM upload fails closed instead of being silently imported as a containerdisk.
+#[must_use]
+pub fn valid_vm_disk_upload(
+    kind: PlatformImageKind,
+    disk_format: Option<VirtualMachineDiskFormat>,
+    disk_path: Option<&str>,
+    capacity_bytes: Option<u64>,
+) -> bool {
+    match (disk_format, disk_path, capacity_bytes) {
+        // Both kinds may import an already-published registry reference with no disk descriptor.
+        (None, None, None) => true,
+        // Any partial descriptor is a misdeclared upload.
+        (None, _, _) | (_, None, _) | (_, _, None) => false,
+        (Some(_), Some(path), Some(capacity)) => {
+            kind == PlatformImageKind::VirtualMachine && valid_vm_disk_path(path) && capacity > 0
+        }
+    }
+}
+
+/// Returns whether `value` is a reviewed relative in-archive disk path.
+#[must_use]
+fn valid_vm_disk_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= PLATFORM_IMAGE_DISK_PATH_MAX_BYTES
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("..")
+        && !value.split('/').any(str::is_empty)
+}
+
+/// Reviewed platform image kinds.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformImageKind {
+    Container,
+    VirtualMachine,
+}
+
+impl PlatformImageKind {
+    /// Returns the persisted snake_case discriminator.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::VirtualMachine => "virtual_machine",
+        }
+    }
+}
+
+/// Catalog lifecycle status.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformImageStatus {
+    Active,
+    Disabled,
+}
+
+/// One pinned platform image identity as persisted by the Agent authority.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageEntry {
+    pub catalog_id: PlatformImageId,
+    pub kind: PlatformImageKind,
+    pub binding: String,
+    pub source_reference: String,
+    pub resolved_digest: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub status: PlatformImageStatus,
+    pub trust_revision: u64,
+    pub repin_generation: u64,
+    /// Declared virtual-machine base-disk capacity in bytes; absent for container entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+    /// Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_sha256: Option<String>,
+    /// Declared virtual-machine base-disk encoding; absent for container entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<VirtualMachineDiskFormat>,
+    pub pinned_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+}
+
+/// Catalog listing returned by the Agent authority and the administrator gateway.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageCatalog {
+    pub entries: Vec<PlatformImageEntry>,
+}
+
+/// One catalog entry with the Control-owned release impact hint.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformImageEntryView {
+    #[serde(flatten)]
+    pub entry: PlatformImageEntry,
+    /// Non-withdrawn Environment template releases that pin this exact digest.
+    pub release_reference_count: u64,
+}
+
+/// Catalog listing with the Control-owned release impact hint on every entry.
+///
+/// The Agent authority never answers with this type: it does not own Environment template
+/// releases, so the impact hint exists only on the administrator gateway projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageCatalogView {
+    pub entries: Vec<PlatformImageEntryView>,
+}
+
+/// Administrator registration of one registry reference. The actor is supplied by the gateway.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisterPlatformImageRequest {
+    pub kind: PlatformImageKind,
+    pub binding: String,
+    /// `<registry-host>/<repository>:<tag>` inside the configured platform registry.
+    pub source_reference: String,
+    pub trust_revision: u64,
+    pub reason: String,
+}
+
+/// Administrator repin of one catalog entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepinPlatformImageRequest {
+    pub expected_digest: String,
+    pub trust_revision: u64,
+    pub reason: String,
+}
+
+/// Administrator disable of one catalog entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisablePlatformImageRequest {
+    pub expected_digest: String,
+    pub reason: String,
+}
+
+/// Administrator request for one OCI archive upload authority.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreatePlatformImageUploadRequest {
+    pub kind: PlatformImageKind,
+    pub binding: String,
+    /// Target `<registry-host>/<repository>:<tag>` the imported archive is tagged as.
+    pub target_reference: String,
+    /// Exact archive size the client will upload.
+    pub archive_bytes: u64,
+    /// Archive media type; must equal `PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE`.
+    pub archive_media_type: String,
+    /// Declared virtual-machine disk encoding inside the archive; must agree with
+    /// `disk_path` and `capacity_bytes` under [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    /// Relative path of the disk inside the uploaded archive; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    /// Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+    pub trust_revision: u64,
+    pub reason: String,
+}
+
+/// Short-lived per-object upload authority for one OCI archive.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformImageUploadTarget {
+    pub upload_url: String,
+    pub required_headers: BTreeMap<String, String>,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Staged OCI archive upload session owned by Control.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformImageUploadSession {
+    pub upload_id: UploadSessionId,
+    pub kind: PlatformImageKind,
+    pub binding: String,
+    pub target_reference: String,
+    pub archive_bytes: u64,
+    pub archive_media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+    pub upload_target: PlatformImageUploadTarget,
+    pub expires_at: UtcTimestamp,
+    pub revision: Revision,
+}
+
+/// Completion request for one staged OCI archive upload.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletePlatformImageUploadRequest {}
+
+/// Internal registration request; the actor is the verified Control caller's decision actor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageRegistrationRequest {
+    pub kind: PlatformImageKind,
+    pub binding: String,
+    pub source_reference: String,
+    pub trust_revision: u64,
+    pub actor_id: ActorId,
+    pub reason: String,
+}
+
+/// Internal repin request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageRepinRequest {
+    pub expected_digest: String,
+    pub trust_revision: u64,
+    pub actor_id: ActorId,
+    pub reason: String,
+}
+
+/// Internal disable request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageDisableRequest {
+    pub expected_digest: String,
+    pub actor_id: ActorId,
+    pub reason: String,
+}
+
+/// Internal Agent request that imports one frozen OCI archive into the platform registry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportRequest {
+    pub kind: PlatformImageKind,
+    pub binding: String,
+    /// Target `<registry-host>/<repository>:<tag>` inside the configured platform registry.
+    pub target_reference: String,
+    /// Frozen object identity of the uploaded archive.
+    pub archive: ArtifactRef,
+    /// Object-store key of the frozen archive.
+    pub archive_object_key: String,
+    /// Declared virtual-machine disk encoding inside the archive; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    /// Relative path of the disk inside the archived bundle; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+    /// Declared virtual-machine disk capacity in bytes; see [`valid_vm_disk_upload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+    pub trust_revision: u64,
+    pub actor_id: ActorId,
+    pub reason: String,
+}
+
 /// One teacher command for approving an immutable Environment/Evaluation authoring package.
 ///
 /// The selected artifact is checked against Control's authoritative build projection before the
@@ -475,6 +762,11 @@ pub struct InternalCreateAgentRunRequest {
     /// Authoritative Project ownership and optional teaching association.
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
+    /// Control-authenticated actor that initiated this run.
+    ///
+    /// The actor authorizes and is attributed for the one-shot Resource task reservation that a
+    /// sandboxed authoring attempt creates; it is never derived from browser input.
+    pub actor_id: ActorId,
     /// Public immutable request whose idempotency key remains an HTTP header.
     pub request: InternalAgentRunRequest,
     /// Control-derived immutable purpose. Agent rejects a request whose purpose does not agree
@@ -546,6 +838,14 @@ impl InternalCreateAgentRunRequest {
             }
             _ => return Err(HttpContractError::InvalidInternalIdentity),
         };
+        let actor_matches = match self.purpose {
+            crate::authoring::AgentRunPurpose::Authoring { .. } => {
+                self.actor_id.as_uuid() != uuid::Uuid::nil()
+            }
+            crate::authoring::AgentRunPurpose::WorkConfiguration { actor_id, .. } => {
+                actor_id == self.actor_id
+            }
+        };
         if request_identity.0 != self.project_id
             || request_identity.1 != self.course_id
             || self.package.project_id != self.project_id
@@ -555,6 +855,7 @@ impl InternalCreateAgentRunRequest {
             || request_identity.2 != self.package.id
             || request_identity.4 != self.policy.revision
             || request_identity.3 != self.policy.id
+            || !actor_matches
         {
             return Err(HttpContractError::InvalidInternalIdentity);
         }
@@ -844,6 +1145,9 @@ pub struct InternalAgentRunOutcome {
     pub run: crate::authoring::AgentRun,
     /// Validated Environment candidate, if that track succeeded.
     pub environment_candidate: Option<crate::authoring::EnvironmentCandidate>,
+    /// Frozen sandbox layout export produced by the successful Environment attempt, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_image_export: Option<crate::supply_chain::ExportedOciImage>,
     /// Validated Evaluation candidate, if that track succeeded.
     pub evaluation_candidate: Option<crate::authoring::EvaluationCandidate>,
     /// Generated Work configuration plan, if this run has the WorkConfiguration purpose.
@@ -854,13 +1158,19 @@ impl InternalAgentRunOutcome {
     /// Validates parent identities.
     pub fn validate(&self) -> Result<(), HttpContractError> {
         if self
-            .environment_candidate
+            .environment_image_export
             .as_ref()
-            .is_some_and(|candidate| {
-                candidate.run_id != self.run.id
-                    || candidate.project_id != self.run.project_id
-                    || candidate.course_id != self.run.course_id
+            .is_some_and(|export| {
+                self.environment_candidate.is_none() || export.validate().is_err()
             })
+            || self
+                .environment_candidate
+                .as_ref()
+                .is_some_and(|candidate| {
+                    candidate.run_id != self.run.id
+                        || candidate.project_id != self.run.project_id
+                        || candidate.course_id != self.run.course_id
+                })
             || self.evaluation_candidate.as_ref().is_some_and(|candidate| {
                 candidate.run_id != self.run.id
                     || candidate.project_id != self.run.project_id
@@ -3290,6 +3600,104 @@ pub const OPERATIONS: &[OperationContract] = &[
         ServiceJwt,
         None,
         200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/images",
+        "listPlatformImages",
+        "platform_image:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images",
+        "registerPlatformImage",
+        "platform_image:write",
+        BffSession,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images/{catalogId}/repin",
+        "repinPlatformImage",
+        "platform_image:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images/{catalogId}/disable",
+        "disablePlatformImage",
+        "platform_image:write",
+        BffSession,
+        IdempotentRevisioned,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images/uploads",
+        "createPlatformImageUpload",
+        "platform_image:write",
+        BffSession,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images/uploads/{uploadId}/complete",
+        "completePlatformImageUpload",
+        "platform_image:write",
+        BffSession,
+        IdempotentRevisioned,
+        201,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/platform-images/imports",
+        "importPlatformImage",
+        "agent.control.invoke",
+        ServiceJwt,
+        IdempotentCreate,
+        201,
         false,
         true,
         PLATFORM_ADMIN,

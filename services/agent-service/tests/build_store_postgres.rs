@@ -107,6 +107,20 @@ impl BuildSupplyChainProvider for SlowProvider {
         })
     }
 
+    async fn import_candidate(
+        &self,
+        _context: &BuildProviderRequestContext,
+        command: &AgentBuildRequested,
+        identity: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        Ok(BuiltCandidate {
+            build_request_id: command.request.id,
+            build_identity: identity,
+            repository: command.request.output_repository.clone(),
+            digest: digest(),
+        })
+    }
+
     async fn publish_immutable(
         &self,
         _context: &BuildProviderRequestContext,
@@ -676,9 +690,11 @@ fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
         candidate_id,
         candidate_revision: revision(1)?,
         builder_binding: "buildkit-primary-v1".to_owned(),
-        context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
-        context_object_key: "build-contexts/context.tar.gz".to_owned(),
-        dockerfile_path: "Dockerfile".to_owned(),
+        source: contracts::supply_chain::BuildSource::Dockerfile {
+            context: artifact_ref("application/vnd.oci.image.layer.v1.tar+gzip"),
+            context_object_key: "build-contexts/context.tar.gz".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+        },
         output_repository: format!(
             "harbor.internal/labweaver-system/course-{course_id}-{candidate_id}"
         ),

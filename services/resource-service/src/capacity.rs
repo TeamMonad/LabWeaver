@@ -15,7 +15,8 @@ use contracts::environment::{
     ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkCleanupStatus, ResourceWorkHandoff,
     ResourceWorkLeaseUpdate,
 };
-use contracts::resource::{ResourceLeaseState, ResourceTarget};
+use contracts::resource::{GpuAllocationMode, GpuCatalogEntry, ResourceLeaseState, ResourceTarget};
+use contracts::{GpuCatalogEntryId, Revision};
 use reqwest::{Certificate, Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -42,9 +43,34 @@ pub struct ResourceCapacityConfiguration {
     /// matching observer remains unavailable until an observation is recorded.
     #[serde(default)]
     pub gpu_observers: Vec<GpuCapacityObservationConfiguration>,
+    /// Reviewed GPU classes provisioned at startup. A seed creates a missing class exactly once
+    /// and never rewrites an existing row, so reviewed capacity cannot be re-pointed by a
+    /// configuration reload.
+    #[serde(default)]
+    pub gpu_catalog_seed: Vec<GpuCatalogSeed>,
 }
 
 impl ResourceCapacityConfiguration {
+    /// Parses the deployment configuration, rejecting malformed JSON, unknown fields, and
+    /// invalid or duplicate GPU seeds before any durable state is touched.
+    pub fn parse(bytes: &[u8]) -> Result<Self, CapacityProviderError> {
+        let configuration: Self =
+            serde_json::from_slice(bytes).map_err(|_| CapacityProviderError::Configuration)?;
+        configuration.validate_seeds()?;
+        Ok(configuration)
+    }
+
+    fn validate_seeds(&self) -> Result<(), CapacityProviderError> {
+        let mut classes = BTreeSet::new();
+        for seed in &self.gpu_catalog_seed {
+            seed.validate()?;
+            if !classes.insert(seed.class.as_str()) {
+                return Err(CapacityProviderError::Configuration);
+            }
+        }
+        Ok(())
+    }
+
     pub fn build_worker(
         self,
         store: crate::store::PgResourceStore,
@@ -71,6 +97,47 @@ impl ResourceCapacityConfiguration {
             )?,
             gpu_observers,
             poll_interval: Duration::from_millis(self.poll_interval_milliseconds),
+        })
+    }
+}
+
+/// One reviewed GPU class provisioned into the catalog at Resource startup.
+///
+/// A seed is inert deployment configuration: it carries no entry id or revision. Resource creates
+/// a missing class exactly once and never re-points, re-versions, or reactivates an existing row.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GpuCatalogSeed {
+    pub class: String,
+    pub mode: GpuAllocationMode,
+    pub provider_binding: String,
+    pub capacity_units: u32,
+    pub allocation_binding: String,
+}
+
+impl GpuCatalogSeed {
+    /// Applies the durable [`GpuCatalogEntry::validate`] rules so a rejected seed cannot reach
+    /// persistence, and every seed materializes to a valid first revision.
+    pub fn validate(&self) -> Result<(), CapacityProviderError> {
+        self.to_entry()
+            .map_err(|_| CapacityProviderError::Configuration)?
+            .validate()
+            .map_err(|_| CapacityProviderError::Configuration)
+    }
+
+    /// Materializes the initial immutable catalog revision declared by this seed.
+    pub(crate) fn to_entry(
+        &self,
+    ) -> Result<GpuCatalogEntry, contracts::foundation::FoundationError> {
+        Ok(GpuCatalogEntry {
+            id: GpuCatalogEntryId::new(),
+            class: self.class.clone(),
+            mode: self.mode,
+            provider_binding: self.provider_binding.clone(),
+            capacity_units: self.capacity_units,
+            allocation_binding: self.allocation_binding.clone(),
+            revision: Revision::new(1)?,
+            active: true,
         })
     }
 }

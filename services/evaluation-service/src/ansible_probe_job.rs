@@ -10,6 +10,8 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use task_execution::SANDBOX_RUNTIME_CLASS;
+use task_execution::kubernetes::{parse_egress_destination, reviewed_egress_rule};
 use thiserror::Error;
 
 use crate::{
@@ -40,6 +42,11 @@ pub struct AnsibleProbeJobBinding {
     pub image_pull_secret_name: String,
     pub worker_image: String,
     pub request: AnsibleProbeExecutionRequest,
+    /// Reviewed `"<cidr>:<port>"` destination of the object store the materializer downloads from.
+    ///
+    /// The per-attempt policy admits DNS, this destination and the reviewed SSH
+    /// target only, so a probe script cannot reach any other network.
+    pub object_store_egress: Vec<String>,
     /// Signed package files mounted only into the input materializer init
     /// container; the probe worker sees only the resulting read-only root.
     pub materializer: MaterializeCommand,
@@ -164,6 +171,28 @@ impl AnsibleProbeJobResources {
             "type":"Opaque",
             "data":materializer_data,
         });
+        let object_store_egress = binding
+            .object_store_egress
+            .iter()
+            .map(|destination| {
+                parse_egress_destination(destination)
+                    .map(|(cidr, port)| (cidr.to_owned(), port))
+                    .ok_or(AnsibleProbeJobError::BindingInvalid)
+            })
+            .collect::<Result<Vec<(String, u16)>, _>>()?;
+        let object_store_rules = object_store_egress
+            .iter()
+            .filter_map(|(cidr, port)| reviewed_egress_rule(&format!("{cidr}:{port}")))
+            .collect::<Vec<_>>();
+        let mut egress_rules = vec![json!({
+            "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}}}],
+            "ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}],
+        })];
+        egress_rules.extend(object_store_rules);
+        egress_rules.push(json!({
+            "to":[{"ipBlock":{"cidr":target_egress_cidr}}],
+            "ports":[{"protocol":"TCP","port":SSH_PORT}],
+        }));
         let network_policy = json!({
             "apiVersion":"networking.k8s.io/v1",
             "kind":"NetworkPolicy",
@@ -172,13 +201,12 @@ impl AnsibleProbeJobResources {
                 "podSelector":{"matchLabels":{"labweaver.io/attempt-id":binding.request.attempt_id.to_string()}},
                 "policyTypes":["Ingress","Egress"],
                 "ingress":[],
-                // HTTPS is needed by the init materializer. The probe's SSH
-                // exception remains exact; the namespace policy must constrain
-                // the object-store destination behind this shared Pod policy.
-                "egress":[
-                    {"ports":[{"protocol":"TCP","port":443}]},
-                    {"to":[{"ipBlock":{"cidr":target_egress_cidr}}],"ports":[{"protocol":"TCP","port":SSH_PORT}]},
-                ],
+                // The init materializer needs DNS and HTTPS to the exact
+                // object-store CIDR reviewed for this deployment. The probe's
+                // SSH exception remains exact, and the namespace default deny
+                // admits nothing on its own, so this policy is the only egress
+                // the attempt can use.
+                "egress":egress_rules,
             },
         });
         let job = json!({
@@ -193,6 +221,7 @@ impl AnsibleProbeJobResources {
                     "metadata":{"labels":labels,"annotations":annotations},
                     "spec":{
                         "restartPolicy":"Never",
+                        "runtimeClassName":SANDBOX_RUNTIME_CLASS,
                         "serviceAccountName":binding.service_account_name,
                         "automountServiceAccountToken":false,
                         "terminationGracePeriodSeconds":5,
@@ -475,6 +504,11 @@ fn validate_binding(binding: &AnsibleProbeJobBinding) -> Result<(), AnsibleProbe
         || !is_dns_name(&binding.service_account_name)
         || !is_dns_name(&binding.image_pull_secret_name)
         || !image_matches_request(&binding.worker_image, &binding.request.runner_image_digest)
+        || binding.object_store_egress.is_empty()
+        || binding
+            .object_store_egress
+            .iter()
+            .any(|destination| parse_egress_destination(destination).is_none())
     {
         return Err(AnsibleProbeJobError::BindingInvalid);
     }

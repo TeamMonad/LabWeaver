@@ -106,6 +106,8 @@ workloads:
     args: ["--mode", "agent-service"]
     configMap: agent-service-config
     secret: agent-service-secrets
+    rbacProfile: authoring
+    kubernetesApi: true
     env:
       LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
       # Acceptance-only VM candidate diagnostics. The directory is backed by
@@ -121,7 +123,7 @@ workloads:
       LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
       LABWEAVER_SERVICE_CLIENT_ID: labweaver-agent
       LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
-      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,environment.work.configure,environment:resolve_work_execution_binding
+      LABWEAVER_SERVICE_SCOPES: agent.control.invoke,environment.work.configure,environment:resolve_work_execution_binding,resource.task.create,resource.task.read,resource.task.claim,resource.task.ack,resource.task.release,resource.task.cancel,resource.usage.record
       LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:
       - {name: mtls, containerPort: 9445, servicePort: 9445}
@@ -346,7 +348,7 @@ workloads:
       LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
       LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
       LABWEAVER_SERVICE_AUDIENCE: labweaver-resource
-      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-environment,labweaver-evaluation
+      LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS: labweaver-access,labweaver-environment,labweaver-evaluation,labweaver-agent
       LABWEAVER_SERVICE_JWT_ALGORITHMS: RS256
       LABWEAVER_SERVICE_JWKS_REFRESH_SECONDS: "300"
       LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
@@ -356,7 +358,7 @@ workloads:
       LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
       LABWEAVER_ACCESS_SERVICE_CLIENT_ID: labweaver-access
       LABWEAVER_ENVIRONMENT_SERVICE_CLIENT_ID: labweaver-environment
-      LABWEAVER_EVALUATION_SERVICE_CLIENT_ID: labweaver-evaluation
+      LABWEAVER_TASK_SERVICE_CLIENT_IDS: labweaver-evaluation,labweaver-agent
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
       LABWEAVER_NATS_CLIENT_KEY_PATH: /etc/labweaver/secrets/nats-client.key

@@ -9,7 +9,7 @@ pub mod api;
 pub mod clients;
 pub mod messaging;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -32,22 +32,24 @@ use contracts::http::{
     AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery, CandidateBuildState,
     CandidateBuildView, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
-    CreateProblemPackageUploadRequest, EnvironmentCandidateView,
+    CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest, EnvironmentCandidateView,
     EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactRecord,
-    IdempotencyKey, InternalPublishEvaluationReleaseRequest, ProblemPackageUploadFile,
-    ProblemPackageUploadSession, ProblemPackageUploadTarget, RemoveProjectMembershipRequest,
-    WorkConfigurationAdmissionBinding, WorkConfigurationAdmissionQuery,
-    WorkConfigurationRecoveryIdentity,
+    IdempotencyKey, InternalPublishEvaluationReleaseRequest, PlatformImageEntry, PlatformImageKind,
+    PlatformImageStatus, PlatformImageUploadSession, PlatformImageUploadTarget,
+    ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
+    RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
+    WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
 };
 use contracts::supply_chain::{
-    BuildNetworkPolicy, BuildRequest, EnvironmentTemplateRelease, EnvironmentTemplateReleaseView,
-    ImageArtifact, ReleaseWithdrawal, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
+    BuildNetworkPolicy, BuildRequest, BuildSource, EnvironmentTemplateRelease,
+    EnvironmentTemplateReleaseView, ImageArtifact, ReleaseWithdrawal, VirtualMachineBaseDisk,
+    VirtualMachineDiskFormat,
 };
 use contracts::{
     ActorId, ApprovalId, BuildRequestId, CandidateId, CourseId, DiagnosticCode, EventId,
-    ImageArtifactId, MembershipState, PlatformRole, PolicyId, ProblemPackageId, Project, ProjectId,
-    ProjectMembership, ProjectState, ReleaseId, RetentionClass, RetentionDisposition,
-    RetentionSnapshot, Revision, Sequence, UploadSessionId, UtcTimestamp,
+    ImageArtifactId, MembershipState, PlatformImageId, PlatformRole, PolicyId, ProblemPackageId,
+    Project, ProjectId, ProjectMembership, ProjectState, ReleaseId, RetentionClass,
+    RetentionDisposition, RetentionSnapshot, Revision, Sequence, UploadSessionId, UtcTimestamp,
 };
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use persistence_sqlx::{
@@ -62,6 +64,8 @@ use uuid::Uuid;
 
 const CREATE_UPLOAD: &str = "control_create_problem_package_upload_v1";
 const COMPLETE_UPLOAD: &str = "control_complete_problem_package_upload_v1";
+const CREATE_PLATFORM_IMAGE_UPLOAD: &str = "control_create_platform_image_upload_v1";
+const COMPLETE_PLATFORM_IMAGE_UPLOAD: &str = "control_complete_platform_image_upload_v1";
 const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_WORK_RELEASE: &str = "control_create_work_environment_template_release_v1";
@@ -111,8 +115,8 @@ pub struct ControlConfig {
     pub evaluation_schema_sha256: Sha256Digest,
     /// Exact build execution policy used to turn an approved Container candidate into a command.
     pub container_build: ContainerBuildPolicy,
-    /// Exact deployment-owned `KubeVirt` base disk accepted for VM publication.
-    pub virtual_machine_base: VirtualMachineBasePolicy,
+    /// Deployment-owned `KubeVirt` base disk catalog accepted for VM publication.
+    pub virtual_machine_bases: VirtualMachineBaseCatalog,
     /// Single deployment-owned Evaluation runtime identity template.
     pub evaluation_runtime: EvaluationRuntimePolicy,
 }
@@ -160,14 +164,30 @@ pub struct ContainerBuildPolicy {
     pub max_memory_bytes: u64,
 }
 
-/// Deployment-owned fixed `KubeVirt` artifact and provider bindings.
+/// Deployment-owned reviewed `KubeVirt` base disk catalog.
+///
+/// Candidates resolve one entry by their declared `base_disk.binding`; the declared source
+/// digest and capacity must equal the reviewed entry. Entries are bounded in count and
+/// capacity so an unreviewed base can never be published.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VirtualMachineBasePolicy {
+pub struct VirtualMachineBaseCatalog {
     /// Exact Environment provider binding accepted in the candidate.
     pub provider_binding: String,
     /// Exact reviewed storage binding accepted in the candidate.
     pub storage_class_binding: String,
+    /// Maximum number of reviewed base disks in this deployment.
+    pub max_bases: u32,
+    /// Maximum reviewed capacity of one base disk in bytes.
+    pub max_capacity_bytes: u64,
+    /// Reviewed base disks keyed by their stable binding.
+    pub bases: Vec<VirtualMachineBasePolicy>,
+}
+
+/// One reviewed deployment-owned `KubeVirt` base disk.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualMachineBasePolicy {
     /// Stable release artifact identity assigned to this deployment-owned disk.
     pub artifact_id: ImageArtifactId,
     /// Immutable CDI source and imported disk identity.
@@ -186,7 +206,7 @@ impl ControlConfig {
         let package_bytes_valid = self.max_package_bytes != 0;
         let retention_valid = self.retention_seconds != 0 && self.sse_retention_seconds != 0;
         let container_build_valid = self.container_build.validate();
-        let virtual_machine_base_valid = self.virtual_machine_base.validate();
+        let virtual_machine_base_valid = self.virtual_machine_bases.validate();
         let evaluation_runtime_valid = self.evaluation_runtime.identity().is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
@@ -256,11 +276,107 @@ impl ContainerBuildPolicy {
     }
 }
 
-impl VirtualMachineBasePolicy {
+impl VirtualMachineBaseCatalog {
     fn validate(&self) -> bool {
         !self.provider_binding.trim().is_empty()
             && !self.storage_class_binding.trim().is_empty()
-            && self.base_disk.validate().is_ok()
+            && self.max_bases > 0
+            && self.max_capacity_bytes > 0
+            && !self.bases.is_empty()
+            && self.bases.len() <= usize::try_from(self.max_bases).unwrap_or(usize::MAX)
+            && self.bases.iter().enumerate().all(|(index, entry)| {
+                entry.base_disk.validate().is_ok()
+                    && entry.base_disk.capacity_bytes <= self.max_capacity_bytes
+                    && !self.bases[..index]
+                        .iter()
+                        .any(|other| other.base_disk.binding == entry.base_disk.binding)
+            })
+    }
+
+    /// Resolves the exact reviewed entry named by the candidate bindings.
+    fn resolve(
+        &self,
+        provider_binding: &str,
+        storage_class_binding: &str,
+        base_disk: &VirtualMachineBaseDisk,
+    ) -> Option<&VirtualMachineBasePolicy> {
+        if provider_binding != self.provider_binding
+            || storage_class_binding != self.storage_class_binding
+        {
+            return None;
+        }
+        self.bases
+            .iter()
+            .find(|entry| &entry.base_disk == base_disk)
+    }
+
+    /// Resolves one reviewed base disk from the static policy or the Agent image catalog.
+    ///
+    /// The deployment bindings are checked first, then the deployment bounds are enforced across
+    /// both sources together: the distinct active virtual-machine bindings in the catalog plus the
+    /// static `bases` length must fit `max_bases`, and no accepted catalog capacity may exceed
+    /// `max_capacity_bytes`. A catalog that violates a bound is rejected here instead of being
+    /// silently truncated. A static `bases` entry always wins and is returned exactly as before;
+    /// otherwise an active virtual-machine catalog entry is accepted only when the declared
+    /// `docker://<repository>@<digest>` identity names that entry (same binding, repository digest,
+    /// reviewed capacity, declared format, and unpacked disk sha256), so a registry-reference
+    /// inventory entry can never be published.
+    #[must_use]
+    pub fn resolve_with_catalog(
+        &self,
+        provider_binding: &str,
+        storage_class_binding: &str,
+        base_disk: &VirtualMachineBaseDisk,
+        catalog: &[PlatformImageEntry],
+    ) -> Option<(ImageArtifactId, VirtualMachineDiskFormat)> {
+        if provider_binding != self.provider_binding
+            || storage_class_binding != self.storage_class_binding
+        {
+            return None;
+        }
+        let mut catalog_bindings = BTreeSet::new();
+        for entry in catalog.iter().filter(|entry| {
+            entry.kind == PlatformImageKind::VirtualMachine
+                && entry.status == PlatformImageStatus::Active
+        }) {
+            if entry
+                .capacity_bytes
+                .is_some_and(|capacity| capacity > self.max_capacity_bytes)
+            {
+                return None;
+            }
+            catalog_bindings.insert(entry.binding.as_str());
+        }
+        if catalog_bindings.len() + self.bases.len()
+            > usize::try_from(self.max_bases).unwrap_or(usize::MAX)
+        {
+            return None;
+        }
+        if let Some(policy) = self
+            .bases
+            .iter()
+            .find(|entry| &entry.base_disk == base_disk)
+        {
+            return Some((policy.artifact_id, policy.format));
+        }
+        let declared_source = base_disk.source_registry_digest.strip_prefix("docker://")?;
+        let declared_digest = declared_source.rsplit_once('@')?.1;
+        let entry = catalog.iter().find(|entry| {
+            entry.kind == PlatformImageKind::VirtualMachine
+                && entry.status == PlatformImageStatus::Active
+                && entry.binding == base_disk.binding
+                && entry.resolved_digest == declared_digest
+                && entry.capacity_bytes == Some(base_disk.capacity_bytes)
+                && entry.format.is_some()
+                && entry.disk_sha256.is_some()
+        })?;
+        let format = entry.format?;
+        let artifact_id = entry
+            .catalog_id
+            .to_string()
+            .parse::<ImageArtifactId>()
+            .ok()?;
+        Some((artifact_id, format))
     }
 }
 
@@ -1282,6 +1398,413 @@ impl ControlService {
         Ok(package)
     }
 
+    /// Creates one short-lived upload authority for one administrator OCI layout archive.
+    ///
+    /// The archive is staged under the reviewed object-key prefix Control shares with the Agent.
+    /// The Agent reads that exact frozen version later and remains the only holder of platform
+    /// registry push credentials.
+    pub async fn create_platform_image_upload(
+        &self,
+        actor_id: ActorId,
+        request: &CreatePlatformImageUploadRequest,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+    ) -> Result<PlatformImageUploadSession, ControlError> {
+        validate_platform_image_upload(request)?;
+        let request_hash = canonical_hash(&json!({"actorId": actor_id, "request": request}))?;
+        let upload_id = UploadSessionId::new();
+        let revision = Revision::new(1).map_err(|_| ControlError::ContractInvalid)?;
+        let expires_at = add_seconds(now, self.config.upload_ttl_seconds)?;
+        let key = platform_image_upload_key(&self.config.package_object_prefix, upload_id);
+        let signed = self
+            .objects
+            .presign_upload(
+                &key,
+                request.archive_bytes,
+                &request.archive_media_type,
+                now,
+            )
+            .await?;
+        if signed.expires_at != expires_at {
+            return Err(ControlError::ObjectStoreIdentityMismatch);
+        }
+        let session = PlatformImageUploadSession {
+            upload_id,
+            kind: request.kind,
+            binding: request.binding.clone(),
+            target_reference: request.target_reference.clone(),
+            archive_bytes: request.archive_bytes,
+            archive_media_type: request.archive_media_type.clone(),
+            disk_format: request.disk_format,
+            disk_path: request.disk_path.clone(),
+            capacity_bytes: request.capacity_bytes,
+            upload_target: PlatformImageUploadTarget {
+                upload_url: signed.url,
+                required_headers: signed.required_headers,
+                expires_at,
+            },
+            expires_at,
+            revision,
+        };
+        let result = serde_json::to_value(&session).map_err(|_| ControlError::ContractInvalid)?;
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Control,
+            CREATE_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                transaction.rollback().await.map_err(db)?;
+                return serde_json::from_value(value)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch);
+            }
+            IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        sqlx::query(
+            "INSERT INTO control.platform_image_upload_sessions \
+             (upload_id,created_by,kind,binding,target_reference,trust_revision,reason,archive_bytes, \
+              archive_media_type,object_key,disk_format,disk_path,capacity_bytes,state,expires_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14)",
+        )
+        .bind(upload_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .bind(request.kind.as_str())
+        .bind(&request.binding)
+        .bind(&request.target_reference)
+        .bind(i64::try_from(request.trust_revision).map_err(|_| ControlError::PlatformImageUploadInvalid)?)
+        .bind(&request.reason)
+        .bind(
+            i64::try_from(request.archive_bytes)
+                .map_err(|_| ControlError::PlatformImageUploadInvalid)?,
+        )
+        .bind(&request.archive_media_type)
+        .bind(&key)
+        .bind(request.disk_format.map(disk_format_str))
+        .bind(request.disk_path.as_deref())
+        .bind(
+            request
+                .capacity_bytes
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| ControlError::PlatformImageUploadInvalid)?,
+        )
+        .bind(expires_at.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(db)?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Control,
+            CREATE_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            &result,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?;
+        transaction.commit().await.map_err(db)?;
+        Ok(session)
+    }
+
+    /// Claims one completion lease and freezes the uploaded archive at one exact object version.
+    ///
+    /// A retry that reclaims an expired lease with the same idempotency key re-reads the version
+    /// recorded by the first attempt. A completed import is never replayed: the Agent catalog is
+    /// the only authority for the resulting entry and the administrator re-reads the listing.
+    pub async fn begin_platform_image_completion(
+        &self,
+        actor_id: ActorId,
+        upload_id: UploadSessionId,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+    ) -> Result<PlatformImageImportStaging, ControlError> {
+        let request_hash = canonical_hash(&json!({"actorId": actor_id, "uploadId": upload_id}))?;
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Control,
+            COMPLETE_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(_) => {
+                return Err(ControlError::PlatformImageUploadStateConflict);
+            }
+            IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
+            IdempotencyDecision::InProgress | IdempotencyDecision::Reserved => {}
+        }
+        let row = sqlx::query(
+            "SELECT kind,binding,target_reference,trust_revision,reason,archive_bytes, \
+                    archive_media_type,object_key,object_version,artifact_id,state, \
+                    disk_format,disk_path,capacity_bytes, \
+                    completion_idempotency_key,completion_request_sha256,completion_lease_expires_at \
+             FROM control.platform_image_upload_sessions WHERE upload_id=$1 FOR UPDATE",
+        )
+        .bind(upload_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadNotFound)?;
+        let state: String = row.try_get("state").map_err(db)?;
+        let stored_key: Option<String> = row.try_get("completion_idempotency_key").map_err(db)?;
+        let stored_hash: Option<String> = row.try_get("completion_request_sha256").map_err(db)?;
+        let lease_expires_at: Option<time::OffsetDateTime> =
+            row.try_get("completion_lease_expires_at").map_err(db)?;
+        let resuming = stored_key.as_deref() == Some(idempotency_key.as_str())
+            && stored_hash.as_deref() == Some(request_hash.to_string().as_str());
+        match state.as_str() {
+            "pending" => {}
+            "importing"
+                if resuming && lease_expires_at.is_some_and(|expires| expires <= now.get()) => {}
+            "importing" => return Err(ControlError::OperationInProgress),
+            _ => return Err(ControlError::PlatformImageUploadStateConflict),
+        }
+        let lease_token = Uuid::now_v7();
+        let lease_seconds = i64::try_from(self.config.completion_lease_seconds)
+            .map_err(|_| ControlError::ConfigurationInvalid)?;
+        sqlx::query(
+            "UPDATE control.platform_image_upload_sessions \
+             SET state='importing',completion_idempotency_key=$2, \
+                 completion_request_sha256=$3,completion_lease_token=$4, \
+                 completion_lease_expires_at=date_trunc('milliseconds',clock_timestamp())+($5*interval '1 second'), \
+                 updated_at=$6 \
+             WHERE upload_id=$1 AND state IN ('pending','importing')",
+        )
+        .bind(upload_id.as_uuid())
+        .bind(idempotency_key.as_str())
+        .bind(request_hash.to_string())
+        .bind(lease_token)
+        .bind(lease_seconds)
+        .bind(now.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(db)?;
+        transaction.commit().await.map_err(db)?;
+
+        let object_key: String = row.try_get("object_key").map_err(db)?;
+        let archive_bytes = u64::try_from(row.try_get::<i64, _>("archive_bytes").map_err(db)?)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        let archive_media_type: String = row.try_get("archive_media_type").map_err(db)?;
+        let stored_version: Option<String> = row.try_get("object_version").map_err(db)?;
+        let stored_artifact: Option<Uuid> = row.try_get("artifact_id").map_err(db)?;
+        let verified = match (stored_version, stored_artifact) {
+            (Some(version), Some(artifact_id)) => {
+                let expected = contracts::ArtifactRef {
+                    artifact_id: artifact_id_from_uuid(artifact_id)?,
+                    store_binding: self.objects.binding().to_owned(),
+                    object_version: version,
+                    size_bytes: archive_bytes,
+                    media_type: archive_media_type,
+                };
+                self.objects
+                    .read_verified(&object_key, &expected)
+                    .await
+                    .map_err(ControlError::from)
+            }
+            (None, None) => self
+                .objects
+                .freeze_current(&object_key, archive_bytes, &archive_media_type)
+                .await
+                .map_err(ControlError::from),
+            _ => Err(ControlError::PersistenceIdentityMismatch),
+        }?;
+        let updated = sqlx::query(
+            "UPDATE control.platform_image_upload_sessions \
+             SET artifact_id=$3,object_version=$4,updated_at=$5 \
+             WHERE upload_id=$1 AND state='importing' AND completion_lease_token=$2 \
+               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
+               AND (artifact_id IS NULL OR (artifact_id=$3 AND object_version=$4))",
+        )
+        .bind(upload_id.as_uuid())
+        .bind(lease_token)
+        .bind(verified.reference.artifact_id.as_uuid())
+        .bind(&verified.reference.object_version)
+        .bind(now.get())
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        if updated.rows_affected() != 1 {
+            return Err(ControlError::OperationLeaseLost);
+        }
+        Ok(PlatformImageImportStaging {
+            kind: platform_image_kind_from_str(&row.try_get::<String, _>("kind").map_err(db)?)?,
+            binding: row.try_get("binding").map_err(db)?,
+            target_reference: row.try_get("target_reference").map_err(db)?,
+            trust_revision: u64::try_from(row.try_get::<i64, _>("trust_revision").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+            reason: row.try_get("reason").map_err(db)?,
+            disk_format: row
+                .try_get::<Option<String>, _>("disk_format")
+                .map_err(db)?
+                .map(|format| parse_disk_format(&format))
+                .transpose()?,
+            disk_path: row.try_get("disk_path").map_err(db)?,
+            capacity_bytes: row
+                .try_get::<Option<i64>, _>("capacity_bytes")
+                .map_err(db)?
+                .map(|capacity| {
+                    u64::try_from(capacity).map_err(|_| ControlError::PersistenceIdentityMismatch)
+                })
+                .transpose()?,
+            archive: verified.reference,
+            archive_object_key: object_key,
+            actor_id,
+        })
+    }
+
+    /// Marks one staging session imported and schedules the staged archive for deletion.
+    pub async fn finish_platform_image_import(
+        &self,
+        upload_id: UploadSessionId,
+        catalog_id: PlatformImageId,
+        now: UtcTimestamp,
+    ) -> Result<(), ControlError> {
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        let row = sqlx::query(
+            "UPDATE control.platform_image_upload_sessions \
+             SET state='imported',imported_catalog_id=$2,completion_lease_token=NULL, \
+                 completion_lease_expires_at=NULL,updated_at=$3 \
+             WHERE upload_id=$1 AND state='importing' \
+               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
+             RETURNING object_key,object_version,completion_idempotency_key",
+        )
+        .bind(upload_id.as_uuid())
+        .bind(catalog_id.as_uuid())
+        .bind(now.get())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::OperationLeaseLost)?;
+        let object_key: String = row.try_get("object_key").map_err(db)?;
+        let object_version: Option<String> = row.try_get("object_version").map_err(db)?;
+        schedule_staged_archive_cleanup(
+            &mut transaction,
+            upload_id,
+            &object_key,
+            object_version.as_deref(),
+        )
+        .await?;
+        if let Some(completion_key) = row
+            .try_get::<Option<String>, _>("completion_idempotency_key")
+            .map_err(db)?
+        {
+            IdempotencyStore::complete(
+                &mut transaction,
+                Domain::Control,
+                COMPLETE_PLATFORM_IMAGE_UPLOAD,
+                &completion_key,
+                &json!({"uploadId": upload_id, "catalogId": catalog_id}),
+            )
+            .await
+            .map_err(|_| ControlError::PersistenceFailed)?;
+        }
+        transaction.commit().await.map_err(db)?;
+        Ok(())
+    }
+
+    /// Records one terminal import failure and schedules any frozen version for deletion.
+    ///
+    /// The upstream diagnostic from the Agent authority is stored verbatim so an administrator
+    /// can distinguish a registry rejection from a conflicting catalog binding.
+    pub async fn fail_platform_image_import(
+        &self,
+        upload_id: UploadSessionId,
+        diagnostic: &str,
+        now: UtcTimestamp,
+    ) -> Result<(), ControlError> {
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        let row = sqlx::query(
+            "UPDATE control.platform_image_upload_sessions \
+             SET state='failed',terminal_diagnostic=$2,completion_lease_token=NULL, \
+                 completion_lease_expires_at=NULL,updated_at=$3 \
+             WHERE upload_id=$1 AND state='importing' \
+               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
+             RETURNING object_key,object_version,completion_idempotency_key",
+        )
+        .bind(upload_id.as_uuid())
+        .bind(diagnostic)
+        .bind(now.get())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::OperationLeaseLost)?;
+        let object_key: String = row.try_get("object_key").map_err(db)?;
+        let object_version: Option<String> = row.try_get("object_version").map_err(db)?;
+        schedule_staged_archive_cleanup(
+            &mut transaction,
+            upload_id,
+            &object_key,
+            object_version.as_deref(),
+        )
+        .await?;
+        if let Some(completion_key) = row
+            .try_get::<Option<String>, _>("completion_idempotency_key")
+            .map_err(db)?
+        {
+            sqlx::query(
+                "DELETE FROM control.idempotency_ledger \
+                 WHERE operation=$1 AND idempotency_key=$2 AND state='in_progress'",
+            )
+            .bind(COMPLETE_PLATFORM_IMAGE_UPLOAD)
+            .bind(completion_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(db)?;
+        }
+        transaction.commit().await.map_err(db)?;
+        Ok(())
+    }
+
+    /// Counts non-withdrawn Environment template releases per pinned image digest.
+    ///
+    /// The key is exactly a catalog entry `resolvedDigest`; withdrawn releases are excluded so the
+    /// administrator impact hint only reflects what currently runs.
+    pub async fn platform_image_release_references(
+        &self,
+    ) -> Result<BTreeMap<String, u64>, ControlError> {
+        let rows = sqlx::query(
+            "SELECT refs.digest, count(*)::bigint AS references FROM ( \
+                 SELECT releases.contract->'artifact'->>'digest' AS digest \
+                   FROM control.environment_template_releases releases \
+                   LEFT JOIN control.release_withdrawals withdrawals \
+                          ON withdrawals.release_id=releases.release_id \
+                  WHERE withdrawals.release_id IS NULL \
+                    AND releases.contract->'artifact'->>'kind'='container' \
+                 UNION ALL \
+                 SELECT split_part( \
+                            releases.contract->'artifact'->'base_disk'->>'sourceRegistryDigest', \
+                            '@', 2) \
+                   FROM control.environment_template_releases releases \
+                   LEFT JOIN control.release_withdrawals withdrawals \
+                          ON withdrawals.release_id=releases.release_id \
+                  WHERE withdrawals.release_id IS NULL \
+                    AND releases.contract->'artifact'->>'kind'='virtual_machine' \
+             ) refs WHERE refs.digest IS NOT NULL GROUP BY refs.digest",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        let mut references = BTreeMap::new();
+        for row in rows {
+            let digest: String = row.try_get("digest").map_err(db)?;
+            let count: i64 = row.try_get("references").map_err(db)?;
+            references.insert(
+                digest,
+                u64::try_from(count).map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+            );
+        }
+        Ok(references)
+    }
+
     /// Activates one append-only course policy under a course-scoped lock.
     pub async fn activate_policy(
         &self,
@@ -2002,7 +2525,7 @@ impl ControlService {
         let image_artifact = resolve_candidate_image_artifact(
             &candidate,
             build.as_ref(),
-            &self.config.virtual_machine_base,
+            &self.config.virtual_machine_bases,
         );
         Ok(EnvironmentCandidateView {
             candidate,
@@ -2027,7 +2550,7 @@ impl ControlService {
         let image_artifact = resolve_candidate_image_artifact(
             &candidate,
             build.as_ref(),
-            &self.config.virtual_machine_base,
+            &self.config.virtual_machine_bases,
         );
         Ok(EnvironmentCandidateView {
             candidate,
@@ -2304,6 +2827,7 @@ impl ControlService {
         run: &contracts::authoring::AgentRun,
         environment: Option<&EnvironmentCandidate>,
         evaluation: Option<&EvaluationCandidate>,
+        environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<(), ControlError> {
         run.validate().map_err(|_| ControlError::ContractInvalid)?;
@@ -2371,6 +2895,7 @@ impl ControlService {
                 run.course_id,
                 run.package_id,
                 candidate,
+                environment_image_export,
                 generated_context,
                 candidate.created_at,
             )
@@ -2407,6 +2932,7 @@ impl ControlService {
         run: &contracts::authoring::AgentRun,
         environment: Option<&EnvironmentCandidate>,
         evaluation: Option<&EvaluationCandidate>,
+        environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<InboxDecision, ControlError> {
         let contract = EVENT_CONTRACTS
@@ -2522,6 +3048,7 @@ impl ControlService {
                 run.course_id,
                 run.package_id,
                 candidate,
+                environment_image_export,
                 generated_context,
                 event.time,
             )
@@ -3001,6 +3528,7 @@ impl ControlService {
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
+        catalog: &[PlatformImageEntry],
     ) -> Result<AuthoringApproval, ControlError> {
         if request.project_id != project_id
             || request.reason.trim().is_empty()
@@ -3291,6 +3819,7 @@ impl ControlService {
             &environment,
             &request.image_artifact,
             &self.config,
+            catalog,
         )
         .await?;
 
@@ -3628,6 +4157,7 @@ impl ControlService {
         approval: &AuthoringApproval,
         now: UtcTimestamp,
         trace_id: &str,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
         approval
             .validate()
@@ -3809,6 +4339,7 @@ impl ControlService {
             &environment,
             &approval.image_artifact,
             &self.config,
+            catalog,
         )
         .await?;
 
@@ -4535,13 +5066,11 @@ impl ControlService {
                 storage_class_binding,
                 ..
             } => {
-                let policy = &self.config.virtual_machine_base;
-                if provider_binding != &policy.provider_binding
-                    || storage_class_binding != &policy.storage_class_binding
-                    || base_disk != &policy.base_disk
-                {
-                    return Err(ControlError::ArtifactMismatch);
-                }
+                let policy = self
+                    .config
+                    .virtual_machine_bases
+                    .resolve(provider_binding, storage_class_binding, base_disk)
+                    .ok_or(ControlError::ArtifactMismatch)?;
                 ImageArtifact::VirtualMachine {
                     id: policy.artifact_id,
                     base_disk: policy.base_disk.clone(),
@@ -5473,6 +6002,125 @@ fn validate_upload_request(
     Ok(())
 }
 
+/// Verified platform image archive staged by Control for the Agent import.
+#[derive(Clone, Debug)]
+pub struct PlatformImageImportStaging {
+    /// Reviewed platform image kind.
+    pub kind: PlatformImageKind,
+    /// Catalog binding the imported image is registered under.
+    pub binding: String,
+    /// Reviewed `<registry-host>/<repository>:<tag>` the archive is tagged as.
+    pub target_reference: String,
+    /// Exact frozen object identity of the uploaded archive.
+    pub archive: contracts::ArtifactRef,
+    /// Object-store key of the frozen archive.
+    pub archive_object_key: String,
+    /// Reviewed supply-chain trust revision.
+    pub trust_revision: u64,
+    /// Administrator requesting the import.
+    pub actor_id: ActorId,
+    /// Administrator reason recorded with the catalog entry.
+    pub reason: String,
+    /// Declared virtual-machine disk encoding; absent for a container or registry-reference upload.
+    pub disk_format: Option<VirtualMachineDiskFormat>,
+    /// Relative path of the disk inside the frozen archive, when one was declared.
+    pub disk_path: Option<String>,
+    /// Declared virtual-machine disk capacity in bytes, when one was declared.
+    pub capacity_bytes: Option<u64>,
+}
+
+fn platform_image_upload_key(prefix: &str, upload_id: UploadSessionId) -> String {
+    format!(
+        "{}/platform-image-uploads/{upload_id}",
+        prefix.trim_matches('/')
+    )
+}
+
+fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, ControlError> {
+    match value {
+        "container" => Ok(PlatformImageKind::Container),
+        "virtual_machine" => Ok(PlatformImageKind::VirtualMachine),
+        _ => Err(ControlError::PersistenceIdentityMismatch),
+    }
+}
+
+const fn disk_format_str(format: VirtualMachineDiskFormat) -> &'static str {
+    match format {
+        VirtualMachineDiskFormat::Qcow2 => "qcow2",
+        VirtualMachineDiskFormat::Raw => "raw",
+    }
+}
+
+fn parse_disk_format(value: &str) -> Result<VirtualMachineDiskFormat, ControlError> {
+    match value {
+        "qcow2" => Ok(VirtualMachineDiskFormat::Qcow2),
+        "raw" => Ok(VirtualMachineDiskFormat::Raw),
+        _ => Err(ControlError::PersistenceIdentityMismatch),
+    }
+}
+
+fn validate_platform_image_upload(
+    request: &CreatePlatformImageUploadRequest,
+) -> Result<(), ControlError> {
+    if !contracts::http::valid_platform_image_binding(&request.binding)
+        || request.archive_media_type != contracts::http::PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE
+        || request.archive_bytes == 0
+        || request.trust_revision == 0
+        || request.reason.trim().is_empty()
+        || request.reason.chars().count() > 512
+        || !valid_platform_image_reference(&request.target_reference)
+        || !contracts::http::valid_vm_disk_upload(
+            request.kind,
+            request.disk_format,
+            request.disk_path.as_deref(),
+            request.capacity_bytes,
+        )
+    {
+        return Err(ControlError::PlatformImageUploadInvalid);
+    }
+    Ok(())
+}
+
+/// `registry-host/repository:tag` syntax only; the Agent authority decides host ownership.
+fn valid_platform_image_reference(reference: &str) -> bool {
+    if reference.is_empty()
+        || reference.contains(char::is_whitespace)
+        || reference.contains("://")
+        || reference.contains('@')
+    {
+        return false;
+    }
+    let Some((repository, tag)) = reference.rsplit_once(':') else {
+        return false;
+    };
+    let Some((host, path)) = repository.split_once('/') else {
+        return false;
+    };
+    !host.is_empty() && !path.is_empty() && !tag.is_empty() && !tag.contains('/')
+}
+
+async fn schedule_staged_archive_cleanup(
+    transaction: &mut Transaction<'_, Postgres>,
+    upload_id: UploadSessionId,
+    object_key: &str,
+    object_version: Option<&str>,
+) -> Result<(), ControlError> {
+    let Some(object_version) = object_version else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO control.object_cleanup_ledger (object_key,object_version,upload_id) \
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+    )
+    .bind(object_key)
+    .bind(object_version)
+    .bind(upload_id.as_uuid())
+    .execute(&mut **transaction)
+    .await
+    .map_err(db)?;
+    Ok(())
+}
+
 async fn advisory_project_lock(
     transaction: &mut Transaction<'_, Postgres>,
     project_id: ProjectId,
@@ -5603,6 +6251,7 @@ async fn enqueue_container_build(
     course_id: Option<CourseId>,
     package_id: ProblemPackageId,
     candidate: &EnvironmentCandidate,
+    environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
     generated_context: Option<&GeneratedArtifactRecord>,
     created_at: UtcTimestamp,
 ) -> Result<(), ControlError> {
@@ -5618,21 +6267,32 @@ async fn enqueue_container_build(
     let contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } =
         &candidate.spec.runtime
     else {
-        if generated_context.is_some() {
+        if generated_context.is_some() || environment_image_export.is_some() {
             return Err(ControlError::PersistenceIdentityMismatch);
         }
         return Ok(());
     };
+    if let Some(image) = environment_image_export {
+        image
+            .validate()
+            .map_err(|_| ControlError::ContractInvalid)?;
+    }
 
-    let context_object_key = resolve_container_context_object_key(
-        transaction,
-        project_id,
-        course_id,
-        package_id,
-        build_context,
-        generated_context,
-    )
-    .await?;
+    let context_object_key = if environment_image_export.is_some() {
+        None
+    } else {
+        Some(
+            resolve_container_context_object_key(
+                transaction,
+                project_id,
+                course_id,
+                package_id,
+                build_context,
+                generated_context,
+            )
+            .await?,
+        )
+    };
 
     let existing = sqlx::query(
         "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
@@ -5651,7 +6311,8 @@ async fn enqueue_container_build(
             project_id,
             course_id,
             candidate,
-            &context_object_key,
+            context_object_key.as_deref(),
+            environment_image_export,
         )?;
         return Ok(());
     }
@@ -5663,9 +6324,18 @@ async fn enqueue_container_build(
         candidate_id: candidate.id,
         candidate_revision: candidate.revision,
         builder_binding: config.container_build.builder_binding.clone(),
-        context: build_context.clone(),
-        context_object_key: context_object_key.clone(),
-        dockerfile_path: config.container_build.dockerfile_path.clone(),
+        source: match environment_image_export {
+            Some(image) => BuildSource::ExportedOci {
+                image: image.clone(),
+            },
+            None => BuildSource::Dockerfile {
+                context: build_context.clone(),
+                context_object_key: context_object_key
+                    .clone()
+                    .ok_or(ControlError::ContractInvalid)?,
+                dockerfile_path: config.container_build.dockerfile_path.clone(),
+            },
+        },
         output_repository: container_build_output_repository(
             config,
             project_id,
@@ -5735,7 +6405,8 @@ async fn enqueue_container_build(
             project_id,
             course_id,
             candidate,
-            &context_object_key,
+            context_object_key.as_deref(),
+            environment_image_export,
         )?;
         return Ok(());
     }
@@ -5793,7 +6464,8 @@ fn validate_existing_container_build_projection(
     project_id: ProjectId,
     course_id: Option<CourseId>,
     candidate: &EnvironmentCandidate,
-    context_object_key: &str,
+    context_object_key: Option<&str>,
+    environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
 ) -> Result<(), ControlError> {
     let build_request_id: Uuid = row.try_get("build_request_id").map_err(db)?;
     let persisted_project_id: Uuid = row.try_get("project_id").map_err(db)?;
@@ -5840,8 +6512,18 @@ fn validate_existing_container_build_projection(
         && command.request.course_id == course_id
         && command.request.candidate_id == candidate.id
         && command.request.candidate_revision == candidate.revision
-        && command.request.context == *build_context
-        && command.request.context_object_key == context_object_key
+        && match (&command.request.source, environment_image_export) {
+            (
+                BuildSource::Dockerfile {
+                    context,
+                    context_object_key: key,
+                    ..
+                },
+                None,
+            ) => context == build_context && context_object_key == Some(key.as_str()),
+            (BuildSource::ExportedOci { image }, Some(export)) => image == export,
+            _ => false,
+        }
         && command.idempotency_key == format!("build:{}", command.request.id)
         && command_sha256 == canonical_hash(&command)?;
     if !request_matches {
@@ -6035,8 +6717,9 @@ async fn append_project_sse(
 }
 
 /// Verifies that a requested authoring artifact is the exact artifact produced for the selected
-/// Environment candidate. VM artifacts are deployment-owned and therefore compared with the
-/// reviewed fixed base policy; container artifacts must have a succeeded build projection.
+/// Environment candidate. VM artifacts are resolved from the reviewed fixed base policy or an
+/// administrator-pinned active platform-image catalog entry; container artifacts must have a
+/// succeeded build projection.
 async fn validate_authoring_artifact(
     transaction: &mut Transaction<'_, Postgres>,
     project_id: ProjectId,
@@ -6044,6 +6727,7 @@ async fn validate_authoring_artifact(
     environment: &EnvironmentCandidate,
     artifact: &ImageArtifact,
     config: &ControlConfig,
+    catalog: &[PlatformImageEntry],
 ) -> Result<(), ControlError> {
     if artifact.runtime_kind() != environment.spec.runtime.kind() {
         return Err(ControlError::ArtifactMismatch);
@@ -6103,17 +6787,14 @@ async fn validate_authoring_artifact(
             },
             ImageArtifact::VirtualMachine { .. },
         ) => {
-            let policy = &config.virtual_machine_base;
-            if provider_binding != &policy.provider_binding
-                || storage_class_binding != &policy.storage_class_binding
-                || base_disk != &policy.base_disk
-            {
-                return Err(ControlError::ArtifactMismatch);
-            }
+            let (artifact_id, format) = config
+                .virtual_machine_bases
+                .resolve_with_catalog(provider_binding, storage_class_binding, base_disk, catalog)
+                .ok_or(ControlError::ArtifactMismatch)?;
             let expected = ImageArtifact::VirtualMachine {
-                id: policy.artifact_id,
-                base_disk: policy.base_disk.clone(),
-                format: policy.format,
+                id: artifact_id,
+                base_disk: base_disk.clone(),
+                format,
             };
             if *artifact != expected {
                 return Err(ControlError::ArtifactMismatch);
@@ -6474,7 +7155,7 @@ async fn load_candidate_approvals(
 fn resolve_candidate_image_artifact(
     candidate: &EnvironmentCandidate,
     build: Option<&CandidateBuildView>,
-    virtual_machine_base: &VirtualMachineBasePolicy,
+    virtual_machine_bases: &VirtualMachineBaseCatalog,
 ) -> Result<Option<ImageArtifact>, ControlError> {
     let artifact = match &candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => build
@@ -6485,17 +7166,13 @@ fn resolve_candidate_image_artifact(
             base_disk,
             storage_class_binding,
             ..
-        } if provider_binding == &virtual_machine_base.provider_binding
-            && base_disk == &virtual_machine_base.base_disk
-            && storage_class_binding == &virtual_machine_base.storage_class_binding =>
-        {
-            Some(ImageArtifact::VirtualMachine {
-                id: virtual_machine_base.artifact_id,
-                base_disk: virtual_machine_base.base_disk.clone(),
-                format: virtual_machine_base.format,
-            })
-        }
-        contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => None,
+        } => virtual_machine_bases
+            .resolve(provider_binding, storage_class_binding, base_disk)
+            .map(|policy| ImageArtifact::VirtualMachine {
+                id: policy.artifact_id,
+                base_disk: policy.base_disk.clone(),
+                format: policy.format,
+            }),
     };
 
     if let Some(artifact) = &artifact
@@ -7015,6 +7692,12 @@ pub enum ControlError {
     UploadNotFound,
     #[error("LW_UPLOAD_STATE_CONFLICT")]
     UploadStateConflict,
+    #[error("LW_PLATFORM_IMAGE_UPLOAD_INVALID")]
+    PlatformImageUploadInvalid,
+    #[error("LW_PLATFORM_IMAGE_UPLOAD_NOT_FOUND")]
+    PlatformImageUploadNotFound,
+    #[error("LW_PLATFORM_IMAGE_UPLOAD_STATE_CONFLICT")]
+    PlatformImageUploadStateConflict,
     #[error("{0}")]
     PackageVerificationFailed(String),
     #[error("LW_PACKAGE_OBJECT_VERIFICATION_FAILED: {0}")]
@@ -7101,8 +7784,8 @@ mod tests {
 
     use super::{
         ContainerBuildPolicy, ControlConfig, ControlError, EvaluationRuntimePolicy,
-        VirtualMachineBasePolicy, authoring_submission_manifest, reject_sensitive_payload,
-        resolve_candidate_image_artifact, validate_upload_request,
+        VirtualMachineBaseCatalog, VirtualMachineBasePolicy, authoring_submission_manifest,
+        reject_sensitive_payload, resolve_candidate_image_artifact, validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -7129,20 +7812,24 @@ mod tests {
                 max_cpu_millicores: 2_000,
                 max_memory_bytes: 2_147_483_648,
             },
-            virtual_machine_base: VirtualMachineBasePolicy {
+            virtual_machine_bases: VirtualMachineBaseCatalog {
                 provider_binding: "kubevirt-primary-v1".to_owned(),
                 storage_class_binding: "vm-rwo-primary-v1".to_owned(),
-                artifact_id: contracts::ImageArtifactId::new(),
-                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
-                    binding: "ubuntu-24.04-v1".to_owned(),
-                    source_registry_digest: concat!(
-                        "docker://quay.io/containerdisks/ubuntu@",
-                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                    )
-                    .to_owned(),
-                    capacity_bytes: 10_737_418_240,
-                },
-                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                max_bases: 8,
+                max_capacity_bytes: 137_438_953_472,
+                bases: vec![VirtualMachineBasePolicy {
+                    artifact_id: contracts::ImageArtifactId::new(),
+                    base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                        binding: "ubuntu-24.04-v1".to_owned(),
+                        source_registry_digest: concat!(
+                            "docker://quay.io/containerdisks/ubuntu@",
+                            "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                        )
+                        .to_owned(),
+                        capacity_bytes: 10_737_418_240,
+                    },
+                    format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                }],
             },
             evaluation_runtime: EvaluationRuntimePolicy {
                 provider_binding: "evaluation-primary-v1".to_owned(),
@@ -7208,17 +7895,17 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let config = config()?;
         let candidate = vm_candidate(
-            &config.virtual_machine_base.provider_binding,
-            &config.virtual_machine_base.storage_class_binding,
-            &config.virtual_machine_base.base_disk,
+            &config.virtual_machine_bases.provider_binding,
+            &config.virtual_machine_bases.storage_class_binding,
+            &config.virtual_machine_bases.bases[0].base_disk,
         )?;
         let expected = ImageArtifact::VirtualMachine {
-            id: config.virtual_machine_base.artifact_id,
-            base_disk: config.virtual_machine_base.base_disk.clone(),
-            format: config.virtual_machine_base.format,
+            id: config.virtual_machine_bases.bases[0].artifact_id,
+            base_disk: config.virtual_machine_bases.bases[0].base_disk.clone(),
+            format: config.virtual_machine_bases.bases[0].format,
         };
         assert_eq!(
-            resolve_candidate_image_artifact(&candidate, None, &config.virtual_machine_base,)?,
+            resolve_candidate_image_artifact(&candidate, None, &config.virtual_machine_bases,)?,
             Some(expected.clone())
         );
 
@@ -7233,7 +7920,7 @@ mod tests {
             resolve_candidate_image_artifact(
                 &provider_mismatch,
                 None,
-                &config.virtual_machine_base,
+                &config.virtual_machine_bases,
             )?,
             None
         );
@@ -7250,7 +7937,7 @@ mod tests {
             resolve_candidate_image_artifact(
                 &storage_mismatch,
                 None,
-                &config.virtual_machine_base,
+                &config.virtual_machine_bases,
             )?,
             None
         );
@@ -7265,10 +7952,111 @@ mod tests {
             );
         }
         assert_eq!(
-            resolve_candidate_image_artifact(&disk_mismatch, None, &config.virtual_machine_base)?,
+            resolve_candidate_image_artifact(&disk_mismatch, None, &config.virtual_machine_bases)?,
             None
         );
         Ok(())
+    }
+
+    #[test]
+    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only() {
+        let catalog = multi_base_catalog();
+        assert!(catalog.validate());
+        let ubuntu = &catalog.bases[0].base_disk;
+        let cirros = &catalog.bases[1].base_disk;
+        assert_eq!(
+            catalog
+                .resolve(
+                    &catalog.provider_binding,
+                    &catalog.storage_class_binding,
+                    cirros,
+                )
+                .map(|entry| entry.base_disk.binding.as_str()),
+            Some("cirros-0.6-v1")
+        );
+
+        let mut unknown = cirros.clone();
+        unknown.binding = "alpine-3.22-v1".to_owned();
+        assert!(
+            catalog
+                .resolve(
+                    &catalog.provider_binding,
+                    &catalog.storage_class_binding,
+                    &unknown,
+                )
+                .is_none()
+        );
+
+        let mut drift = cirros.clone();
+        drift.source_registry_digest = format!(
+            "docker://quay.io/kubevirt/cirros-container-disk-demo@sha256:{}",
+            "b".repeat(64)
+        );
+        assert!(
+            catalog
+                .resolve(
+                    &catalog.provider_binding,
+                    &catalog.storage_class_binding,
+                    &drift,
+                )
+                .is_none()
+        );
+
+        let mut count_bounded = catalog.clone();
+        count_bounded.max_bases = 1;
+        assert!(!count_bounded.validate());
+
+        let mut capacity_bounded = catalog.clone();
+        capacity_bounded.max_capacity_bytes = cirros.capacity_bytes - 1;
+        assert!(!capacity_bounded.validate());
+
+        let mut duplicate = catalog.clone();
+        duplicate.bases = vec![
+            catalog.bases[0].clone(),
+            VirtualMachineBasePolicy {
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: ubuntu.clone(),
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            },
+        ];
+        assert!(!duplicate.validate());
+    }
+
+    fn multi_base_catalog() -> VirtualMachineBaseCatalog {
+        VirtualMachineBaseCatalog {
+            provider_binding: "kubevirt-primary-v1".to_owned(),
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+            max_bases: 8,
+            max_capacity_bytes: 137_438_953_472,
+            bases: vec![
+                VirtualMachineBasePolicy {
+                    artifact_id: contracts::ImageArtifactId::new(),
+                    base_disk: VirtualMachineBaseDisk {
+                        binding: "ubuntu-24.04-v1".to_owned(),
+                        source_registry_digest: concat!(
+                            "docker://quay.io/containerdisks/ubuntu@",
+                            "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                        )
+                        .to_owned(),
+                        capacity_bytes: 10_737_418_240,
+                    },
+                    format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                },
+                VirtualMachineBasePolicy {
+                    artifact_id: contracts::ImageArtifactId::new(),
+                    base_disk: VirtualMachineBaseDisk {
+                        binding: "cirros-0.6-v1".to_owned(),
+                        source_registry_digest: concat!(
+                            "docker://quay.io/kubevirt/cirros-container-disk-demo@",
+                            "sha256:e2a45211b1f4a73e40b5356e503786c6dc7b5fb003b5d1d4ffa0a450a3dfdefe"
+                        )
+                        .to_owned(),
+                        capacity_bytes: 1_073_741_824,
+                    },
+                    format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                },
+            ],
+        }
     }
 
     fn vm_candidate(

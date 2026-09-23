@@ -6,6 +6,7 @@ members = [
   "crates/auth",
   "crates/contracts",
   "crates/persistence-sqlx",
+  "crates/task-execution",
   "crates/telemetry",
   "xtask",
   "services/access-service",

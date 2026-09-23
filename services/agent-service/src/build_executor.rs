@@ -1,4 +1,4 @@
-//! Fixed-command `BuildKit`, Harbor, and Trivy executor backend.
+//! Fixed-command `BuildKit`, verified OCI import, and Harbor executor backend.
 #![allow(
     missing_docs,
     reason = "the deployment schema and stable failure codes document internal executor bindings"
@@ -21,6 +21,7 @@ use bollard::grpc::registry::ImageRegistryOutputBuilder;
 use bytes::Bytes;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
+use contracts::supply_chain::BuildSource;
 use flate2::read::GzDecoder;
 use futures::executor::block_on;
 use reqwest::{Certificate, Client, StatusCode, Url};
@@ -35,6 +36,8 @@ use crate::build_pipeline::{
     BuiltCandidate, PrivateRegistryProject, PublishedImage,
 };
 use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse};
+use crate::oci_import::parse_oci_layout;
+use crate::oci_registry::{OciRegistryError, OciRegistryPublisher, RegistryCredentials};
 
 const MAX_DOCKERFILE_BYTES: u64 = 256 * 1024;
 const MAX_CONTEXT_ENTRIES: usize = 10_000;
@@ -154,6 +157,10 @@ impl ProductionBuildExecutor {
                 .build(context, command, *identity)
                 .await
                 .map(|candidate| BuildExecutorResponse::Built { candidate }),
+            BuildExecutorRequest::Import { command, identity } => self
+                .import(context, command, *identity)
+                .await
+                .map(|candidate| BuildExecutorResponse::Built { candidate }),
             BuildExecutorRequest::Publish { candidate } => self
                 .publish(candidate)
                 .await
@@ -208,16 +215,21 @@ impl ProductionBuildExecutor {
         command: &AgentBuildRequested,
         identity: BuildIdentity,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        let BuildSource::Dockerfile {
+            context: build_context,
+            context_object_key,
+            dockerfile_path,
+        } = &command.request.source
+        else {
+            return Err(identity_mismatch());
+        };
         let repository = RepositoryIdentity::parse(
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
         let object = match self
             .objects
-            .read_verified(
-                &command.request.context_object_key,
-                &command.request.context,
-            )
+            .read_verified(context_object_key, build_context)
             .await
         {
             Ok(object) => object,
@@ -241,7 +253,7 @@ impl ProductionBuildExecutor {
         let workspace = TempDir::new_in(&self.config.work_directory).map_err(|_| unavailable())?;
         if let Err(failure) = unpack_context(
             &object.bytes,
-            &command.request.context.media_type,
+            &build_context.media_type,
             workspace.path(),
             self.config.max_unpacked_context_bytes,
         ) {
@@ -252,9 +264,7 @@ impl ProductionBuildExecutor {
             );
             return Err(failure);
         }
-        if let Err(failure) =
-            validate_dockerfile(workspace.path(), &command.request.dockerfile_path)
-        {
+        if let Err(failure) = validate_dockerfile(workspace.path(), dockerfile_path) {
             tracing::warn!(
                 event = "agent.build_executor.dockerfile_rejected",
                 component = "build-executor",
@@ -276,13 +286,112 @@ impl ProductionBuildExecutor {
         // digest is read back from the BuildKit history exporter response;
         // Harbor tag association is not guaranteed for BuildKit pushes.
         let digest = self
-            .run_buildkit(
-                context,
-                workspace.path(),
-                &command.request.dockerfile_path,
-                &tagged,
-            )
+            .run_buildkit(context, workspace.path(), dockerfile_path, &tagged)
             .await?;
+        self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
+            .await
+    }
+
+    /// Imports an admitted sandbox OCI export without ever trusting the sandbox registry path.
+    ///
+    /// The archive is verified entry-by-entry by [`parse_oci_layout`] and then published by exact
+    /// content digest; the executor remains the only authority that may push to Harbor.
+    async fn import(
+        &self,
+        context: &BuildProviderRequestContext,
+        command: &AgentBuildRequested,
+        identity: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        let BuildSource::ExportedOci { image } = &command.request.source else {
+            return Err(identity_mismatch());
+        };
+        let (layout, layout_object_key) = (&image.layout, &image.layout_object_key);
+        let repository = RepositoryIdentity::parse(
+            &command.request.output_repository,
+            &self.config.harbor_registry,
+        )?;
+        let object = match self.objects.read_verified(layout_object_key, layout).await {
+            Ok(object) => object,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agent.build_executor.import_layout_rejected",
+                    component = "build-executor",
+                    operation = "import.read",
+                    outcome = "rejected",
+                    duration_ms = 0_u64,
+                    build_request_id = %context.build_request_id,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "import_layout_rejected",
+                    failure_stage = "import.read",
+                    retryable = false,
+                    safe_detail = "import_layout_rejected",
+                );
+                return Err(rejected());
+            }
+        };
+        let image = match parse_oci_layout(&object.bytes) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agent.build_executor.import_layout_invalid",
+                    component = "build-executor",
+                    operation = "import.verify",
+                    outcome = "rejected",
+                    duration_ms = 0_u64,
+                    build_request_id = %context.build_request_id,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "import_layout_invalid",
+                    failure_stage = "import.verify",
+                    retryable = false,
+                    safe_detail = "import_layout_invalid",
+                );
+                return Err(rejected());
+            }
+        };
+        let base = Url::parse(&format!("https://{}/", self.config.harbor_registry))
+            .map_err(|_| rejected())?;
+        let publisher = OciRegistryPublisher::new(
+            base,
+            format!("{}/{}", repository.project, repository.repository),
+            self.client.clone(),
+            RegistryCredentials {
+                username: self.harbor_username.clone(),
+                password: self.harbor_password.clone(),
+            },
+        )
+        .map_err(|_| rejected())?;
+        let digest = match publisher.publish(&image).await {
+            Ok(digest) => digest,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agent.build_executor.import_publish_rejected",
+                    component = "build-executor",
+                    operation = "import.publish",
+                    outcome = "failed",
+                    duration_ms = 0_u64,
+                    build_request_id = %context.build_request_id,
+                    diagnostic_code = registry_error_code(error),
+                    error_kind = "import_publish_rejected",
+                    failure_stage = "import.publish",
+                    retryable = error == OciRegistryError::Unavailable,
+                    safe_detail = "import_publish_rejected",
+                );
+                return Err(if error == OciRegistryError::Unavailable {
+                    unavailable()
+                } else {
+                    rejected()
+                });
+            }
+        };
+        let tag = format!(
+            "import-{}",
+            digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&digest)
+                .chars()
+                .take(12)
+                .collect::<String>()
+        );
         self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
             .await
     }
@@ -978,6 +1087,16 @@ fn buildkit_tls_address(address: &str) -> Result<String, BuildProviderFailure> {
         })
         .ok_or_else(rejected)?;
     Ok(format!("https://{host}"))
+}
+
+const fn registry_error_code(error: OciRegistryError) -> &'static str {
+    match error {
+        OciRegistryError::Configuration => "LW_AGENT_OCI_REGISTRY_CONFIG_INVALID",
+        OciRegistryError::Denied => "LW_AGENT_OCI_REGISTRY_DENIED",
+        OciRegistryError::Rejected => "LW_AGENT_OCI_REGISTRY_REJECTED",
+        OciRegistryError::Unavailable => "LW_AGENT_OCI_REGISTRY_UNAVAILABLE",
+        OciRegistryError::DigestMismatch => "LW_AGENT_OCI_REGISTRY_DIGEST_MISMATCH",
+    }
 }
 
 fn valid_digest(value: &str) -> bool {

@@ -21,15 +21,18 @@ use contracts::http::{
     AuthoringPublicationAdmissionQuery, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
     EnvironmentPublicationAdmissionQuery, GeneratedArtifactKind, GeneratedArtifactRecord,
-    IdempotencyKey, ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
+    IdempotencyKey, PlatformImageEntry, PlatformImageKind, PlatformImageStatus,
+    ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
-use contracts::supply_chain::{EnvironmentTemplateRelease, ImageArtifact};
+use contracts::supply_chain::{
+    EnvironmentTemplateRelease, ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat,
+};
 use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, BuildRequestId, CandidateId,
     CourseId, DiagnosticCode, EnvironmentId, EvaluationReleaseId, EventId, ImageArtifactId,
-    PolicyId, ProblemPackageId, Project, ProjectId, ProjectState, ReleaseId, RetentionClass,
-    RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
+    PlatformImageId, PolicyId, ProblemPackageId, Project, ProjectId, ProjectState, ReleaseId,
+    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
 };
 use control_service::{
     AuthoringPublicationClaim, ContainerBuildPolicy, ControlConfig, ControlError, ControlService,
@@ -457,6 +460,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             Some(&environment_candidate),
             None,
             None,
+            None,
         )
         .await;
     assert!(matches!(
@@ -481,6 +485,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             EventId::new(),
             &run,
             Some(&environment_candidate),
+            None,
             None,
             None,
         )
@@ -561,10 +566,15 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         )
     );
     assert_eq!(
-        build_event.data.request.context,
+        match &build_event.data.request.source {
+            contracts::supply_chain::BuildSource::Dockerfile { context, .. } => context,
+            contracts::supply_chain::BuildSource::ExportedOci { .. } => {
+                return Err("fixture must use the Dockerfile source".into());
+            }
+        },
         match &environment_candidate.spec.runtime {
             contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } => {
-                build_context.clone()
+                build_context
             }
             contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
                 return Err("fixture must be Container".into());
@@ -854,6 +864,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             Some(&generated),
         )
         .await?;
@@ -863,11 +874,12 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             &run,
             Some(&environment),
             Some(&evaluation),
+            None,
             Some(&generated),
         )
         .await?;
     let object_key: String = sqlx::query_scalar(
-        "SELECT contract->'request'->>'contextObjectKey' \
+        "SELECT contract->'request'->'source'->>'contextObjectKey' \
          FROM control.container_build_projections WHERE candidate_id=$1",
     )
     .bind(environment.id.as_uuid())
@@ -889,6 +901,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
                 &run,
                 Some(&environment),
                 Some(&evaluation),
+                None,
                 Some(&wrong_revision),
             )
             .await,
@@ -903,6 +916,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
                 &run,
                 Some(&environment),
                 Some(&evaluation),
+                None,
                 Some(&changed_key),
             )
             .await,
@@ -918,13 +932,135 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
         1
     );
     let persisted_key: String = sqlx::query_scalar(
-        "SELECT contract->'request'->>'contextObjectKey' \
+        "SELECT contract->'request'->'source'->>'contextObjectKey' \
          FROM control.container_build_projections WHERE candidate_id=$1",
     )
     .bind(environment.id.as_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(persisted_key, generated.object_key);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn exported_sandbox_image_is_enqueued_as_an_import_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+    let project_id = ProjectId::new();
+    let course_id = CourseId::new();
+    let owner = ActorId::new();
+    insert_project(&pool, &project_fixture(project_id, owner, Some(course_id))?).await?;
+    let now: UtcTimestamp = "2026-07-16T08:00:00.000Z".parse()?;
+    let environment = environment_candidate(
+        project_id,
+        Some(course_id),
+        Sha256Digest::of_bytes(b"exported"),
+    )?;
+    let evaluation = evaluation_candidate(project_id, Some(course_id), environment.run_id, now)?;
+    let run = succeeded_agent_run(
+        project_id,
+        Some(course_id),
+        ProblemPackageId::new(),
+        PolicyId::new(),
+        environment.run_id,
+        environment.id,
+        Some(evaluation.id),
+        EnvironmentClass::Experiment,
+    )?;
+    let export = contracts::supply_chain::ExportedOciImage {
+        layout: ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: "object-store-v1".to_owned(),
+            object_version: "sandbox-export-version-1".to_owned(),
+            size_bytes: 4_096,
+            media_type: "application/vnd.oci.image.layout.v1+tar".to_owned(),
+        },
+        layout_object_key: format!("authoring-sandbox/{}/export.tar", environment.run_id),
+    };
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            Some(&export),
+            None,
+        )
+        .await?;
+    let source_kind: String = sqlx::query_scalar(
+        "SELECT contract->'request'->'source'->>'kind' \
+         FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(source_kind, "exported_oci");
+    let persisted_key: String = sqlx::query_scalar(
+        "SELECT contract->'request'->'source'->'image'->>'layoutObjectKey' \
+         FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(persisted_key, export.layout_object_key);
+    let object_version: String = sqlx::query_scalar(
+        "SELECT contract->'request'->'source'->'image'->'layout'->>'objectVersion' \
+         FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(object_version, export.layout.object_version);
+
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            Some(&export),
+            None,
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.outbox_events WHERE subject=$1",
+        )
+        .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED)
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    let mut changed_key = export.clone();
+    changed_key.layout_object_key.push_str("-changed");
+    assert!(matches!(
+        service
+            .project_candidates(
+                EventId::new(),
+                &run,
+                Some(&environment),
+                Some(&evaluation),
+                Some(&changed_key),
+                None,
+            )
+            .await,
+        Err(ControlError::ProjectionConflict)
+    ));
     Ok(())
 }
 
@@ -949,7 +1085,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             .await?,
     )?;
     let config = control_config()?;
-    let vm_base = config.virtual_machine_base.clone();
+    let vm_base = config.virtual_machine_bases.clone();
     let evaluation_runtime = EvaluationRuntimeIdentity {
         provider_binding: config.evaluation_runtime.provider_binding.clone(),
         runner_image: config.evaluation_runtime.runner_image.clone(),
@@ -1017,13 +1153,14 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             Some(&environment),
             Some(&evaluation),
             None,
+            None,
         )
         .await?;
 
     let image_artifact = ImageArtifact::VirtualMachine {
-        id: vm_base.artifact_id,
-        base_disk: vm_base.base_disk.clone(),
-        format: vm_base.format,
+        id: vm_base.bases[0].artifact_id,
+        base_disk: vm_base.bases[0].base_disk.clone(),
+        format: vm_base.bases[0].format,
     };
     let request = CompleteAuthoringApprovalRequest {
         project_id,
@@ -1046,6 +1183,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             &approval_key,
             now,
             "trace-authoring-approval",
+            &[],
         )
         .await?;
     assert_eq!(approval.package_id, package.id);
@@ -1073,6 +1211,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             &approval_key,
             now,
             "trace-authoring-approval",
+            &[],
         )
         .await?;
     assert_eq!(replay, approval);
@@ -1087,6 +1226,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
                 &approval_key,
                 now,
                 "trace-authoring-approval",
+                &[],
             )
             .await,
         Err(ControlError::IdempotencyConflict)
@@ -1125,6 +1265,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             &approval,
             now,
             "trace-authoring-environment-release",
+            &[],
         )
         .await
         .map_err(|error| format!("publish authoring environment release failed: {error:?}"))?;
@@ -1263,6 +1404,218 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
     Ok(())
 }
 
+/// A VM base an administrator registered in the Agent image catalog is publishable through the
+/// deployment policy only while the catalog entry still carries the exact reviewed disk identity.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_drift()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&pool)
+            .await?,
+    )?;
+    let config = control_config()?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        config.clone(),
+    )?;
+    let project_id = ProjectId::new();
+    let owner = ActorId::new();
+    let course_id = CourseId::new();
+    insert_project(&pool, &project_fixture(project_id, owner, Some(course_id))?).await?;
+
+    let policy = authoring_policy(project_id, Some(course_id), now)?;
+    service
+        .activate_project_policy(
+            project_id,
+            policy.clone(),
+            &IdempotencyKey::parse("vm-base-policy")?,
+        )
+        .await?;
+    let upload = service
+        .create_project_upload(
+            project_id,
+            &authoring_upload_request(project_id, Some(course_id))?,
+            &IdempotencyKey::parse("vm-base-upload")?,
+            now,
+        )
+        .await?;
+    let package = service
+        .complete_project_upload(
+            project_id,
+            upload.id,
+            upload.revision,
+            &IdempotencyKey::parse("vm-base-package")?,
+            now,
+        )
+        .await?;
+
+    let catalog_digest = format!("sha256:{}", Sha256Digest::of_bytes(b"catalog-vm-base"));
+    let catalog_base = VirtualMachineBaseDisk {
+        binding: "rocky-9-v1".to_owned(),
+        source_registry_digest: format!("docker://quay.io/containerdisks/rocky-9@{catalog_digest}"),
+        capacity_bytes: 21_474_836_480,
+    };
+    // The candidate declares the catalog base; the deployment policy only owns unrelated statics.
+    let mut declared = config.virtual_machine_bases.clone();
+    declared.bases[0].base_disk = catalog_base.clone();
+    let environment = vm_environment_candidate(
+        project_id,
+        Some(course_id),
+        &declared,
+        EnvironmentClass::Experiment,
+        now,
+    )?;
+    let evaluation =
+        system_facts_evaluation_candidate(project_id, Some(course_id), environment.run_id, now)?;
+    let run = succeeded_agent_run(
+        project_id,
+        Some(course_id),
+        package.id,
+        policy.id,
+        environment.run_id,
+        environment.id,
+        Some(evaluation.id),
+        EnvironmentClass::Experiment,
+    )?;
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            None,
+            None,
+        )
+        .await?;
+
+    let entry = PlatformImageEntry {
+        catalog_id: PlatformImageId::new(),
+        kind: PlatformImageKind::VirtualMachine,
+        binding: catalog_base.binding.clone(),
+        source_reference: "harbor.internal/labweaver-system/rocky-9:1".to_owned(),
+        resolved_digest: catalog_digest.clone(),
+        media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+        size_bytes: catalog_base.capacity_bytes,
+        status: PlatformImageStatus::Active,
+        trust_revision: 1,
+        repin_generation: 1,
+        capacity_bytes: Some(catalog_base.capacity_bytes),
+        disk_sha256: Some("c".repeat(64)),
+        format: Some(VirtualMachineDiskFormat::Qcow2),
+        pinned_at: now,
+        updated_at: now,
+    };
+    let catalog_artifact_id: ImageArtifactId = entry.catalog_id.to_string().parse()?;
+    let image_artifact = ImageArtifact::VirtualMachine {
+        id: catalog_artifact_id,
+        base_disk: catalog_base.clone(),
+        format: VirtualMachineDiskFormat::Qcow2,
+    };
+    let request = CompleteAuthoringApprovalRequest {
+        project_id,
+        course_id: Some(course_id),
+        package_id: package.id,
+        package_revision: package.revision,
+        environment_candidate_id: environment.id,
+        environment_candidate_revision: environment.revision,
+        evaluation_candidate_id: evaluation.id,
+        evaluation_candidate_revision: evaluation.revision,
+        image_artifact: image_artifact.clone(),
+        reason: "administrator catalog base reviewed".to_owned(),
+    };
+
+    let approval = service
+        .complete_authoring_approval(
+            project_id,
+            &request,
+            owner,
+            &IdempotencyKey::parse("vm-base-accept")?,
+            now,
+            "trace-vm-base-accept",
+            std::slice::from_ref(&entry),
+        )
+        .await?;
+    assert_eq!(approval.image_artifact, image_artifact);
+    assert_eq!(approval.image_artifact.id(), catalog_artifact_id);
+
+    let mut digest_drift = entry.clone();
+    digest_drift.resolved_digest = format!("sha256:{}", Sha256Digest::of_bytes(b"drifted"));
+    let mut capacity_drift = entry.clone();
+    capacity_drift.capacity_bytes = Some(catalog_base.capacity_bytes + 1);
+    let mut format_drift = entry.clone();
+    format_drift.format = Some(VirtualMachineDiskFormat::Raw);
+    let mut disabled = entry.clone();
+    disabled.status = PlatformImageStatus::Disabled;
+    let mut inventory_only = entry.clone();
+    inventory_only.disk_sha256 = None;
+
+    for (index, drifted) in [
+        digest_drift,
+        capacity_drift,
+        format_drift,
+        disabled,
+        inventory_only,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            matches!(
+                service
+                    .complete_authoring_approval(
+                        project_id,
+                        &request,
+                        owner,
+                        &IdempotencyKey::parse(&format!("vm-base-reject-{index}"))?,
+                        now,
+                        "trace-vm-base-reject",
+                        std::slice::from_ref(&drifted),
+                    )
+                    .await,
+                Err(ControlError::ArtifactMismatch)
+            ),
+            "drifted catalog entry {index} must be rejected"
+        );
+    }
+
+    // A declared artifact that names an id other than the resolved catalog entry is rejected too.
+    let mut unknown_id = request.clone();
+    unknown_id.image_artifact = ImageArtifact::VirtualMachine {
+        id: ImageArtifactId::new(),
+        base_disk: catalog_base,
+        format: VirtualMachineDiskFormat::Qcow2,
+    };
+    assert!(matches!(
+        service
+            .complete_authoring_approval(
+                project_id,
+                &unknown_id,
+                owner,
+                &IdempotencyKey::parse("vm-base-reject-identity")?,
+                now,
+                "trace-vm-base-reject",
+                std::slice::from_ref(&entry),
+            )
+            .await,
+        Err(ControlError::ArtifactMismatch)
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn authoring_publication_failure_is_durable_and_not_admissible()
@@ -1308,9 +1661,9 @@ async fn authoring_publication_failure_is_durable_and_not_admissible()
             runner_image: config.evaluation_runtime.runner_image.clone(),
         },
         image_artifact: ImageArtifact::VirtualMachine {
-            id: config.virtual_machine_base.artifact_id,
-            base_disk: config.virtual_machine_base.base_disk.clone(),
-            format: config.virtual_machine_base.format,
+            id: config.virtual_machine_bases.bases[0].artifact_id,
+            base_disk: config.virtual_machine_bases.bases[0].base_disk.clone(),
+            format: config.virtual_machine_bases.bases[0].format,
         },
         actor_id,
         reason: "fixture approval for durable publication failure".to_owned(),
@@ -1438,7 +1791,7 @@ async fn private_work_environment_approval_requires_project_owner()
 
     let now: UtcTimestamp = "2026-09-08T10:00:00.000Z".parse()?;
     let config = control_config()?;
-    let vm_base = config.virtual_machine_base.clone();
+    let vm_base = config.virtual_machine_bases.clone();
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -1469,7 +1822,7 @@ async fn private_work_environment_approval_requires_project_owner()
         EnvironmentClass::Work,
     )?;
     service
-        .project_candidates(EventId::new(), &run, Some(&environment), None, None)
+        .project_candidates(EventId::new(), &run, Some(&environment), None, None, None)
         .await?;
     let request = CandidateDecisionRequest {
         candidate_revision: environment.revision,
@@ -1979,7 +2332,7 @@ fn authoring_policy(
 fn vm_environment_candidate(
     project_id: ProjectId,
     course_id: Option<CourseId>,
-    base: &control_service::VirtualMachineBasePolicy,
+    base: &control_service::VirtualMachineBaseCatalog,
     class: EnvironmentClass,
     now: UtcTimestamp,
 ) -> Result<EnvironmentCandidate, Box<dyn std::error::Error>> {
@@ -1997,7 +2350,7 @@ fn vm_environment_candidate(
     value["spec"]["runtime"] = serde_json::json!({
         "kind":"virtual_machine",
         "provider_binding":base.provider_binding,
-        "base_disk":base.base_disk,
+        "base_disk":base.bases[0].base_disk,
         "storage_class_binding":base.storage_class_binding,
         "ssh_port":22
     });
@@ -2226,21 +2579,25 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             max_cpu_millicores: 2_000,
             max_memory_bytes: 2_147_483_648,
         },
-        virtual_machine_base: control_service::VirtualMachineBasePolicy {
+        virtual_machine_bases: control_service::VirtualMachineBaseCatalog {
             provider_binding: "kubevirt-primary-v1".to_owned(),
             storage_class_binding: "vm-rwo-primary-v1".to_owned(),
-            artifact_id: contracts::ImageArtifactId::new(),
-            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
-                binding: "ubuntu-24.04-v1".to_owned(),
-                source_registry_digest: concat!(
-                    "docker://quay.io/containerdisks/ubuntu@",
-                    "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-                )
-                .to_owned(),
+            max_bases: 8,
+            max_capacity_bytes: 137_438_953_472,
+            bases: vec![control_service::VirtualMachineBasePolicy {
+                artifact_id: contracts::ImageArtifactId::new(),
+                base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                    binding: "ubuntu-24.04-v1".to_owned(),
+                    source_registry_digest: concat!(
+                        "docker://quay.io/containerdisks/ubuntu@",
+                        "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
+                    )
+                    .to_owned(),
 
-                capacity_bytes: 10_737_418_240,
-            },
-            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+                    capacity_bytes: 10_737_418_240,
+                },
+                format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            }],
         },
         evaluation_runtime: control_service::EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),

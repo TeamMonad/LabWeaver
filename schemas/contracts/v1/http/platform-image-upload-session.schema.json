@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "PlatformImageKind": {
+      "description": "Reviewed platform image kinds.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "PlatformImageUploadTarget": {
+      "description": "Short-lived per-object upload authority for one OCI archive.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "requiredHeaders": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "uploadUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uploadUrl",
+        "requiredHeaders",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UploadSessionId": {
+      "description": "Strongly typed UUIDv7 identifier for `UploadSessionId`.",
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Staged OCI archive upload session owned by Control.",
+  "properties": {
+    "archiveBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "archiveMediaType": {
+      "type": "string"
+    },
+    "binding": {
+      "type": "string"
+    },
+    "capacityBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "diskFormat": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VirtualMachineDiskFormat"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diskPath": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "kind": {
+      "$ref": "#/$defs/PlatformImageKind"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "targetReference": {
+      "type": "string"
+    },
+    "uploadId": {
+      "$ref": "#/$defs/UploadSessionId"
+    },
+    "uploadTarget": {
+      "$ref": "#/$defs/PlatformImageUploadTarget"
+    }
+  },
+  "required": [
+    "uploadId",
+    "kind",
+    "binding",
+    "targetReference",
+    "archiveBytes",
+    "archiveMediaType",
+    "uploadTarget",
+    "expiresAt",
+    "revision"
+  ],
+  "title": "PlatformImageUploadSession",
+  "type": "object"
+}

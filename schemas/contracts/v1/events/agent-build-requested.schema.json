@@ -108,13 +108,6 @@
         "candidateRevision": {
           "$ref": "#/$defs/Revision"
         },
-        "context": {
-          "$ref": "#/$defs/ArtifactRef"
-        },
-        "contextObjectKey": {
-          "description": "Object-store key resolved by Control and bound to the immutable context reference.",
-          "type": "string"
-        },
         "courseId": {
           "anyOf": [
             {
@@ -127,9 +120,6 @@
         },
         "createdAt": {
           "$ref": "#/$defs/UtcTimestamp"
-        },
-        "dockerfilePath": {
-          "type": "string"
         },
         "id": {
           "$ref": "#/$defs/BuildRequestId"
@@ -157,6 +147,9 @@
         },
         "projectId": {
           "$ref": "#/$defs/ProjectId"
+        },
+        "source": {
+          "$ref": "#/$defs/BuildSource"
         }
       },
       "required": [
@@ -165,9 +158,7 @@
         "candidateId",
         "candidateRevision",
         "builderBinding",
-        "context",
-        "contextObjectKey",
-        "dockerfilePath",
+        "source",
         "outputRepository",
         "network",
         "maxDurationMilliseconds",
@@ -181,6 +172,54 @@
       "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
       "type": "string"
     },
+    "BuildSource": {
+      "description": "Approved, immutable build input source.\n\n`Dockerfile` is the deployment-owned `BuildKit` path. `ExportedOci` names an OCI\nlayout/tar archive produced by an admitted sandbox attempt: the build executor\nverifies every entry and content digest before publishing the exact image by\ndigest, so the sandbox itself never holds registry push credentials.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "contextObjectKey": {
+              "description": "Object-store key resolved by Control and bound to the immutable context reference.",
+              "type": "string"
+            },
+            "dockerfilePath": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "dockerfile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "context",
+            "contextObjectKey",
+            "dockerfilePath"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "$ref": "#/$defs/ExportedOciImage"
+            },
+            "kind": {
+              "const": "exported_oci",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "image"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CandidateId": {
       "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
       "type": "string"
@@ -192,6 +231,25 @@
     "EventId": {
       "description": "Strongly typed UUIDv7 identifier for `EventId`.",
       "type": "string"
+    },
+    "ExportedOciImage": {
+      "additionalProperties": false,
+      "description": "Frozen sandbox-exported OCI layout archive.\n\nThe agent freezes and hashes the exact uploaded version before Control may bind it into a\nbuild request, so the executor re-reads that immutable version instead of a current key.",
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/ArtifactRef",
+          "description": "Immutable object-store identity of the layout archive."
+        },
+        "layoutObjectKey": {
+          "description": "Object-store key of the layout archive.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "layout",
+        "layoutObjectKey"
+      ],
+      "type": "object"
     },
     "ProjectId": {
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",

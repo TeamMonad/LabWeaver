@@ -164,6 +164,7 @@ async fn main() -> Result<(), StartupError> {
     let build_consumer_control = state.control.clone();
     let build_consumer_agent = agent.clone();
     let authoring_consumer_control = state.control.clone();
+    let authoring_consumer_agent = agent.clone();
     let authoring_consumer_evaluation = evaluation;
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
@@ -176,7 +177,7 @@ async fn main() -> Result<(), StartupError> {
         result = cleanup_loop(service, interval) => result?,
         result = consumer_loop(consumer, consumer_control, agent) => result?,
         result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
-        result = authoring_consumer_loop(authoring_consumer, authoring_consumer_control, authoring_consumer_evaluation) => result?,
+        result = authoring_consumer_loop(authoring_consumer, authoring_consumer_control, authoring_consumer_evaluation, authoring_consumer_agent) => result?,
         result = outbox_loop(outbox, outbox_interval) => result?,
     }
     Ok(())
@@ -256,9 +257,10 @@ async fn authoring_consumer_loop(
     mut consumer: AuthoringPublicationConsumer,
     control: ControlService,
     evaluation: EvaluationClient,
+    agent: AgentClient,
 ) -> Result<(), StartupError> {
     loop {
-        consumer.process_next(&control, &evaluation).await?;
+        consumer.process_next(&control, &evaluation, &agent).await?;
     }
 }
 
@@ -360,7 +362,8 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
          AND to_regclass('control.sse_project_events') IS NOT NULL \
          AND to_regclass('control.image_artifact_projections') IS NOT NULL \
          AND to_regclass('control.container_build_projections') IS NOT NULL \
-         AND to_regclass('control.authoring_approval_publications') IS NOT NULL",
+         AND to_regclass('control.authoring_approval_publications') IS NOT NULL \
+         AND to_regclass('control.platform_image_upload_sessions') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;

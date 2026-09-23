@@ -214,6 +214,10 @@ platform_application_release_name: labweaver
 platform_application_namespace: labweaver-system
 platform_application_evaluation_namespace: labweaver-evaluation
 platform_application_evaluation_pull_secret_name: harbor-labweaver-system-pull
+platform_application_authoring_namespace: labweaver-authoring
+platform_application_authoring_pull_secret_name: harbor-labweaver-system-pull
+platform_application_authoring_service_account_name: authoring-runner
+platform_application_authoring_buildkit_config_name: authoring-buildkit-config
 platform_application_rollout_timeout: 10m
 platform_application_portal_route_namespace: ""
 platform_application_portal_route_name: ""
@@ -231,6 +235,19 @@ platform_application_object_store_backend_hostname: minio.labweaver-data.svc
 platform_application_object_store_external_cidr: ""
 platform_application_ssh_load_balancer_ip: ""
 platform_application_ssh_shared_ip_key: labweaver-platform-public
+# Reviewed Control policy bounds for the deployment-owned VM base catalog.
+# `deploy/config/control-plane.yaml.example` declares the same maxBases and
+# maxCapacityBytes, and the provider profile must cover exactly the reviewed
+# version-lock entries; the application role fails closed when either bound is
+# exceeded or the three catalogs disagree.
+platform_application_vm_base_max_count: 8
+platform_application_vm_base_max_capacity_bytes: 137438953472
+# Reviewed container base images the deployment verifies in the retained Harbor
+# project and renders into `agent-service-config/platform_registry.seed_images`.
+# The rendered seed catalog must agree exactly with this immutable list. The
+# platform has no image-copy tooling, so the operator mirrors each reviewed
+# digest into the project first and the role only proves presence.
+platform_application_container_images: "{{ platform_application_lock.platform_container_images }}"
 platform_application_workloads:
   - control-service
   - access-service
@@ -246,6 +263,7 @@ platform_application_workloads:
 platform_application_components:
   - access-service
   - agent-service
+  - authoring-sandbox
   - control-service
   - environment-service
   - evaluation-service
