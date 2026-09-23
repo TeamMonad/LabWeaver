@@ -14,6 +14,32 @@
       - public_ingress_tls_mode in ['selfsigned', 'acme']
     fail_msg: PUBLIC_INGRESS_TLS_MODE_UNKNOWN
 
+- name: Require a valid public route set
+  ansible.builtin.assert:
+    that:
+      - public_ingress_routes | length > 0
+      - >-
+        public_ingress_routes
+        | selectattr('name', 'match', '^[a-z0-9][a-z0-9-]*$')
+        | list | length == public_ingress_routes | length
+      - public_ingress_routes | rejectattr('hostnames') | list | length == 0
+      - >-
+        public_ingress_routes | map(attribute='hostnames') | map('length')
+        | select('equalto', 0) | list | length == 0
+      - >-
+        public_ingress_routes | selectattr('redirect', 'defined')
+        | map(attribute='redirect') | map(attribute='scheme')
+        | select('equalto', 'https') | list | length
+        == public_ingress_routes | selectattr('redirect', 'defined') | list | length
+      - >-
+        public_ingress_routes | rejectattr('rules', 'defined')
+        | rejectattr('redirect', 'defined') | list | length == 0
+      - >-
+        public_ingress_routes | selectattr('rules', 'defined')
+        | map(attribute='rules') | flatten
+        | rejectattr('paths') | rejectattr('service') | list | length == 0
+    fail_msg: PUBLIC_INGRESS_ROUTE_INVALID
+
 - name: Read the Cloudflare API token from the protected locator
   ansible.builtin.slurp:
     src: "{{ public_ingress_cloudflare_token_locator }}"
