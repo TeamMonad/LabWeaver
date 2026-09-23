@@ -245,26 +245,34 @@ class LocalDevBundleTests(unittest.TestCase):
     def test_local_gpu_capacity_configuration_observes_the_reviewed_binding(self) -> None:
         rendered = json.loads(
             local_dev.local_gpu_capacity_configuration(
-                (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8")
+                (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8"),
+                local_dev.local_environment_provider_binding(),
             )
         )
-        observer, = rendered["gpuObservers"]
-        self.assertEqual(observer["providerBinding"], "gpu-primary-v1")
-        self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
         self.assertEqual(
-            observer["bearerTokenFile"],
-            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            [observer["providerBinding"] for observer in rendered["gpuObservers"]],
+            ["gpu-primary-v1", "kubernetes-work-local-hostpath"],
         )
-        self.assertEqual(
-            observer["clusterCaFile"],
-            "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
-        )
+        for observer in rendered["gpuObservers"]:
+            self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
+            self.assertEqual(
+                observer["bearerTokenFile"],
+                "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            )
+            self.assertEqual(
+                observer["clusterCaFile"],
+                "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+            )
         classes = {seed["class"]: seed for seed in rendered["gpuCatalogSeed"]}
         self.assertEqual(
             classes["nvidia-cuda"]["allocationBinding"], "nvidia-cuda-primary-v1"
         )
+        self.assertEqual(classes["nvidia-cuda"]["providerBinding"], "gpu-primary-v1")
         self.assertEqual(classes["nvidia-cuda-local"]["allocationBinding"], "nvidia.com/gpu")
-        self.assertEqual(classes["nvidia-cuda-local"]["providerBinding"], "gpu-primary-v1")
+        # Resource resolves the allocation for the binding the Work environment runs under.
+        self.assertEqual(
+            classes["nvidia-cuda-local"]["providerBinding"], "kubernetes-work-local-hostpath"
+        )
         self.assertEqual(classes["nvidia-cuda-local"]["mode"], "exclusive")
         self.assertEqual(classes["nvidia-cuda-local"]["capacityUnits"], 1)
 
@@ -278,14 +286,24 @@ class LocalDevBundleTests(unittest.TestCase):
             "binding": {
                 **example,
                 "gpuCatalogSeed": [
-                    *example["gpuCatalogSeed"],
                     {
-                        "class": "nvidia-cuda-second",
+                        "class": "nvidia-cuda",
                         "mode": "exclusive",
-                        "providerBinding": "gpu-secondary-v1",
                         "capacityUnits": 1,
-                        "allocationBinding": "nvidia-cuda-secondary-v1",
-                    },
+                        "allocationBinding": "nvidia-cuda-primary-v1",
+                    }
+                ],
+            },
+            "local-binding": {
+                **example,
+                "gpuCatalogSeed": [
+                    {
+                        "class": "nvidia-cuda",
+                        "mode": "exclusive",
+                        "providerBinding": "kubernetes-work-local-hostpath",
+                        "capacityUnits": 1,
+                        "allocationBinding": "nvidia-cuda-primary-v1",
+                    }
                 ],
             },
             "local": {
@@ -304,7 +322,9 @@ class LocalDevBundleTests(unittest.TestCase):
         for label, configuration in cases.items():
             with self.subTest(label=label):
                 with self.assertRaises(local_dev.LocalDevError):
-                    local_dev.local_gpu_capacity_configuration(json.dumps(configuration))
+                    local_dev.local_gpu_capacity_configuration(
+                        json.dumps(configuration), "kubernetes-work-local-hostpath"
+                    )
 
     def test_provider_environment_rejects_extra_fields_and_path_is_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

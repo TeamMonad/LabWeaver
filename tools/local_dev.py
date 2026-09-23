@@ -354,19 +354,46 @@ def local_kubernetes_api_endpoint(kubeconfig: Path) -> str:
     return f"{parsed}/{parsed.max_prefixlen}"
 
 
-def local_gpu_capacity_configuration(example: str) -> str:
+def local_environment_provider_binding() -> str:
+    """Return the container provider binding this run's Environment service uses.
+
+    Resource resolves a GPU allocation for the provider binding of the Work
+    environment that will run the workload, so the local GPU class has to be
+    seeded under that exact binding.
+    """
+
+    providers = json.loads(
+        (ROOT / "deploy/config/environment-providers.local-hostpath.example.json").read_text()
+    )
+    if not isinstance(providers, list):
+        fail("local environment provider profile must be a list")
+    bindings = sorted(
+        {
+            provider.get("binding")
+            for provider in providers
+            if isinstance(provider, dict) and provider.get("providerKind") == "container"
+        }
+    )
+    if len(bindings) != 1 or not isinstance(bindings[0], str) or not bindings[0]:
+        fail("local environment provider profile must name exactly one container binding")
+    return bindings[0]
+
+
+def local_gpu_capacity_configuration(example: str, provider_binding: str) -> str:
     """Render the run's GPU capacity configuration from the reviewed example.
 
     Two things are local to this run. First, the example ships `gpuObservers: []`
     because an observer binds deployment-specific credentials; the owned cluster
     hands Resource its own projected service account token and CA through the
-    in-cluster API endpoint, so the reviewed provider binding of the lock becomes
-    observable instead of failing closed forever. Second, the local device plugin
-    advertises the stock `nvidia.com/gpu` extended resource, so a local class
-    named for that binding is seeded next to the lock's reviewed class: a class
-    whose binding no node advertises stays observed at zero units and refuses
-    every request, which is the correct production behaviour and useless for a
-    local acceptance. Neither addition rewrites the lock's entry.
+    in-cluster API endpoint, so every reviewed provider binding becomes
+    observable instead of failing closed forever. Second, Resource resolves a GPU
+    allocation for the exact provider binding that will run the workload, and the
+    local device plugin advertises the stock `nvidia.com/gpu` extended resource,
+    so a local class is seeded for this run's environment provider binding next to
+    the lock's reviewed classes: a class whose binding no node advertises stays
+    observed at zero units and refuses every request, which is the correct
+    production behaviour and useless for a local acceptance. No reviewed entry is
+    rewritten.
     """
 
     configuration = json.loads(example)
@@ -378,28 +405,17 @@ def local_gpu_capacity_configuration(example: str) -> str:
     seeds = configuration.get("gpuCatalogSeed")
     if not isinstance(seeds, list) or not seeds:
         fail("reviewed GPU capacity configuration must seed at least one GPU class")
-    provider_bindings = {
+    reviewed_bindings = {
         seed.get("providerBinding") for seed in seeds if isinstance(seed, dict)
     }
-    if len(provider_bindings) != 1 or None in provider_bindings:
-        fail("reviewed GPU capacity configuration must seed one provider binding")
-    provider_binding = provider_bindings.pop()
-    configuration["gpuObservers"] = [
-        {
-            "providerBinding": provider_binding,
-            "apiServer": "https://kubernetes.default.svc:443",
-            "bearerTokenFile": "/var/run/secrets/kubernetes.io/serviceaccount/token",
-            "clusterCaFile": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
-            "requestTimeoutMilliseconds": 5000,
-            "observationTtlSeconds": 60,
-            "maxNodes": 100,
-            "maxPods": 1000,
-        }
-    ]
+    if None in reviewed_bindings or not reviewed_bindings:
+        fail("reviewed GPU capacity configuration must name a provider binding")
     classes = {seed.get("class") for seed in seeds if isinstance(seed, dict)}
     local_class = "nvidia-cuda-local"
     if local_class in classes:
         fail("reviewed GPU capacity configuration already seeds the local class")
+    if provider_binding in reviewed_bindings:
+        fail("local environment provider binding is already a reviewed GPU binding")
     seeds.append(
         {
             "class": local_class,
@@ -409,6 +425,21 @@ def local_gpu_capacity_configuration(example: str) -> str:
             "allocationBinding": "nvidia.com/gpu",
         }
     )
+    # Resource records an observation per provider binding and resolves an allocation for the
+    # binding the workload will actually run under, so every seeded binding needs an observer.
+    configuration["gpuObservers"] = [
+        {
+            "providerBinding": binding,
+            "apiServer": "https://kubernetes.default.svc:443",
+            "bearerTokenFile": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+            "clusterCaFile": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+            "requestTimeoutMilliseconds": 5000,
+            "observationTtlSeconds": 60,
+            "maxNodes": 100,
+            "maxPods": 1000,
+        }
+        for binding in sorted(reviewed_bindings | {provider_binding})
+    ]
     return json.dumps(configuration, indent=2) + "\n"
 
 
@@ -2852,6 +2883,10 @@ def build_work_runtime_fixture() -> str:
     tag = f"{root}/work-runtime-fixture:{commit}"
     run([
         "docker", "buildx", "build", "--load", "--target", "work-runtime-fixture",
+        # The fixture provider copies exactly one reviewed image manifest, so the
+        # seed has to be that shape: buildx would otherwise attach provenance and
+        # publish an index whose platform manifest the copy never pushes.
+        "--provenance=false", "--sbom=false",
         "--build-arg", f"SOURCE_COMMIT={commit}",
         "--build-arg", f"SOURCE_DATE_EPOCH={epoch}",
         "--tag", tag, "--file", "containers/Containerfile.web", ".",
@@ -3307,7 +3342,8 @@ def make_app_input(
     (resource_root / "secrets" / "resource-service-secrets").mkdir(parents=True, exist_ok=True)
     http_config = (ROOT / "deploy/config/resource-service.yaml.example").read_text()
     capacity_config = local_gpu_capacity_configuration(
-        (ROOT / "deploy/config/resource-capacity.json.example").read_text()
+        (ROOT / "deploy/config/resource-capacity.json.example").read_text(),
+        local_environment_provider_binding(),
     )
     write(resource_root / "configmaps/resource-service-config/http.yaml", http_config)
     write(resource_root / "configmaps/resource-service-config/capacity.json", capacity_config)

@@ -86,8 +86,18 @@ copy_source_image() {
         *) exit 1 ;;
     esac
     case "$target_repository" in
-        ''|*'@'*|*'/'*'/'*'..'*|*[[:space:]]*) exit 1 ;;
+        ''|*'@'*|*'..'*|*[[:space:]]*) exit 1 ;;
     esac
+    # The reviewed output is exactly `<registry-host>/<project>/<repository>`; the
+    # registry host carries its port, so the reviewed separators are the two the
+    # project and repository add.
+    target_host=${target_repository%%/*}
+    target_remainder=${target_repository#*/}
+    target_project=${target_remainder%%/*}
+    target_name=${target_remainder#*/}
+    [ -n "$target_host" ] && [ -n "$target_project" ] && [ -n "$target_name" ]
+    [ "$target_name" != "$target_remainder" ]
+    [ "${target_name#*/}" = "$target_name" ]
 
     source_path=${source_repository#*/}
     target_path=${target_repository#*/}
@@ -97,12 +107,19 @@ copy_source_image() {
     temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
     manifest_file=$temp_dir/manifest.json
+    # The copy publishes exactly the reviewed image manifest with the blobs it
+    # references. An index would need its platform manifests too, so it is
+    # rejected here instead of failing as an opaque registry error.
     headers_file=$temp_dir/headers
     curl -fsS -D "$headers_file" \
         -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
         "$base/v2/$source_path/manifests/$source_digest" \
         -o "$manifest_file"
-    media_type=$(jq -er '.mediaType // "application/vnd.oci.image.manifest.v1+json"' "$manifest_file")
+    media_type=$(jq -er '.mediaType // empty' "$manifest_file")
+    case "$media_type" in
+        application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;
+        *) exit 1 ;;
+    esac
     blob_digests=$(jq -er '[.config.digest, (.layers[]?.digest)] | map(select(type == "string")) | unique | .[]' "$manifest_file")
     [ -n "$blob_digests" ]
     for blob in $blob_digests; do

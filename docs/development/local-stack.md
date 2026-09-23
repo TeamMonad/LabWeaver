@@ -65,9 +65,9 @@ python tools/local_dev_e2e.py run --project teacher
 **GPU**：Kind 节点是普通容器，需要把宿主设备与驱动库显式带入节点，再用 NVIDIA 容器工具包让容器内的 NVML 可用：
 
 1. 节点内 `mknod` 出 `/dev/nvidia0`、`/dev/nvidia1`、`/dev/nvidiactl`、`/dev/nvidia-uvm`、`/dev/nvidia-uvm-tools`、`/dev/nvidia-modeset`（主次设备号取自宿主），并把宿主的 `libnvidia-ml.so.*`、`libcuda.so.*` 放进节点的 `/usr/lib/x86_64-linux-gnu`。
-2. 节点内安装 `libnvidia-container1`、`libnvidia-container-tools`、`nvidia-container-toolkit-base`、`nvidia-container-toolkit`（`.deb` 在宿主机经代理下载后流式送入节点），执行 `nvidia-ctk runtime configure --runtime=containerd` 并重启 containerd，再创建 `nvidia` RuntimeClass。
-3. 部署 NVIDIA k8s device plugin（镜像可经 `nvcr.io` 缓存拉取），并以 `runtimeClassName: nvidia` 运行——**不设该 RuntimeClass 时 NVML 在容器内初始化失败**，因为容器的 procfs 里没有 `/proc/driver/nvidia`，而该路径不能通过 hostPath 挂载。
-4. 验收：节点 `capacity` 出现 `nvidia.com/gpu: 2`；`resources.limits."nvidia.com/gpu": 1` 的 Pod 在 `nvidia` RuntimeClass 下执行 `nvidia-smi` 能列出真实卡与显存。
+2. 节点内安装 `libnvidia-container1`、`libnvidia-container-tools`、`nvidia-container-toolkit-base`、`nvidia-container-toolkit`（`.deb` 在宿主机经代理下载后流式送入节点），执行 `nvidia-ctk runtime configure --runtime=containerd` 并重启 containerd，再执行 `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` 生成 CDI 规格。
+3. 部署 NVIDIA k8s device plugin（镜像可经 `nvcr.io` 缓存拉取；需 `ctr images import` 预载，因为节点直连不可用），并以 **CDI 注解**方式注入：`--device-discovery-strategy=nvml --device-list-strategy=cdi-annotations`，同时把节点根挂到 `/driver-root`（只读）、把 `/var/run/cdi` 挂进插件 Pod，并把节点的 `libnvidia-ml.so.1` 挂进插件（插件自身的 NVML 加载）。**只有 `cdi-annotations` 策略能让默认运行时（runc）的 Pod 拿到设备、驱动库与 `/proc/driver/nvidia`**；默认的 `envvar` 策略依赖 NVIDIA 容器运行时注入，在只有 runc 的节点上容器内看不到 GPU。插件无法加载 NVML 时会以 `nvml init failed` 退出，节点也就不会广播 `nvidia.com/gpu`。
+4. 验收：节点 `capacity` 出现 `nvidia.com/gpu: 2`；`resources.limits."nvidia.com/gpu": 1` 的 Pod（默认运行时即可）执行 `nvidia-smi -L` 能列出真实卡与显存。
 
 以上仅在本机验证过；生产节点由集群运维按同一职责边界（设备、驱动库、容器运行时、device plugin）提供。
 
