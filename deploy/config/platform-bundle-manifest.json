@@ -71,7 +71,8 @@
       "nats.creds",
       "service-client-secret",
       "tls.crt",
-      "tls.key"
+      "tls.key",
+      "portal-public-root.crt"
     ],
     "build-executor-secrets": [
       "outbound-ca.pem",
