@@ -691,7 +691,24 @@ helm -n labweaver-system history labweaver
 - 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
 
 ### 11.8 已知阻塞
-
+- **服务身份缺 scope-mapping（已定位并临时修复，角色本身有缺陷）**：authoring 的失败链最终落到
+  `agent.authoring.sandbox.stage_failed`（`failure_stage: sandbox.resource.create`）与
+  `auth.service_token.failed`（`failure_stage: token_audience_validation`、
+  `error_kind: Client(Token(TokenAudienceRejected))`）：agent-service 换到的服务令牌 `aud` 只有
+  `labweaver-environment`、`scope` 只有 `profile email`，因此 resource-service 调用被拒。
+  根因是 `identity_foundation` 的 provisioning Job **渲染失败**：
+  `Provision the LabWeaver service OIDC clients and roles` 以
+  `yaml.parser.ParserError … line 1315/1317` 失败，所以 `identity_service_role_assignments`
+  的 client scope-mapping 从未写入 Keycloak（service account 只有 `default-roles-workloads`）。
+  临时修复：按角色的 `identity_service_role_assignments` 逐条补齐
+  `/clients/{caller}/scope-mappings/clients/{target}`（46 条 user mapping + 7 条 scope mapping），
+  修复后 agent 令牌变为 `aud: [labweaver-resource, labweaver-environment]`。角色模板仍需 owner 修。
+- **authoring sandbox 的资源申请需要人工/管理员批准**：沙箱尝试会先 POST 一条 `task` 资源申请
+  （`resource.resource_requests`，`state=reviewing`），随后 `claim_after_approval` 最长等待
+  `sandbox.wall_time_seconds`（3600s）。平台当前**不会**自动批准该内部申请，
+  `lab` 旅程因此会长时间停在等待；批准入口是 BFF `POST /api/v1/resource-requests/{id}/approve`
+  （需要管理员会话 + `X-CSRF-Token` + `Origin`，body 需 `expectedRevision`/`providerBinding`/`resources`/`durationSeconds`/`reason`）。
+  这是产品决策点：要么给内部 authoring 任务预授权，要么旅程显式批准。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
