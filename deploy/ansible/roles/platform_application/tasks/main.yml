@@ -2733,16 +2733,16 @@
                   matchLabels:
                     kubernetes.io/metadata.name: "{{ platform_application_data_namespace }}"
             ports:
-              - port: "{{ platform_application_object_store_service_port }}"
+              - port: "{{ platform_application_object_store_service_port | int }}"
                 protocol: TCP
           - to:
               - namespaceSelector:
                   matchLabels:
                     kubernetes.io/metadata.name: kube-system
             ports:
-              - port: "53"
+              - port: 53
                 protocol: UDP
-              - port: "53"
+              - port: 53
                 protocol: TCP
 
 - name: Reconcile the permanent ansible probe namespace default deny
