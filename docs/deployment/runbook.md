@@ -591,3 +591,58 @@ helm -n labweaver-system history labweaver
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
+
+## 12. 用户验收（模拟真实用户操作）
+
+验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
+按旅程驱动的 Playwright 运行，以及落到 `artifacts/acceptance/<run-id>/` 的证据与 `summary.json`。
+
+前提（root 私密 → 运行者可读的 0600 副本）：
+
+```sh
+sudo install -d -m 700 -o wzh -g wzh /home/wzh/.private/labweaver-acceptance/credentials
+for role in teacher student admin; do
+  sudo install -m 600 -o wzh -g wzh \
+    /var/lib/labweaver/.private/v1/platform-application/keycloak-user-platform-$role-password \
+    /home/wzh/.private/labweaver-acceptance/credentials/$role.password
+done
+```
+
+预检与运行（证据目录必须可写；`artifacts/` 属 root，必要时用 root 运行或指定可写目录）：
+
+```sh
+python3 tools/user_acceptance.py preflight \
+  --base-url https://portal.labweaver.2018wzh.top \
+  --evidence-dir /home/wzh/LabWeaver/artifacts/acceptance
+
+python3 tools/user_acceptance.py run \
+  --base-url https://portal.labweaver.2018wzh.top \
+  --run-id <run-id> --journeys lab,work,admin --lab xv6 \
+  --evidence-dir /home/wzh/LabWeaver/artifacts/acceptance
+```
+
+旅程映射（与工具内写死的一致）：
+
+| key | project | spec | `--grep` 标题 | 额外 env |
+|---|---|---|---|---|
+| `lab` | teacher | `web/e2e/teacher/lab-experiment.live.spec.mjs` | `student completes a published lab experiment through the browser terminal` | `LABWEAVER_E2E_LAB=<xv6|cuda>` |
+| `work` | student | `web/e2e/student/sprint2-flow.live.spec.mjs` | `student provisions a Work environment, configures it, and releases its capacity` | `LABWEAVER_E2E_REAL_PROVIDER=1`、`LABWEAVER_E2E_SECURITY_BASE_IMAGE=<digest>` |
+| `admin` | platform-admin | `web/e2e/platform-admin/resource-approval.live.spec.mjs` | `platform administrator approves a real resource request and reads back its lease and charges` | — |
+| `authoring` | teacher | `web/e2e/teacher/authoring.live.spec.mjs` | `teacher authors an independent project and publishes its complete experiment package` | — |
+
+证据目录布局：
+
+```
+artifacts/acceptance/<run-id>/
+  summary.json                 # run_id、base_url、git_commit、package_manifest、helm_revision、bundle_sha256、逐旅程 status/diagnostic、起止时间
+  .credentials/                # 0700；每个 0600 口令文件（仅本次运行的副本）
+  <journey>/                   # playwright-report/{report.json,index.html} 与 test-results/**
+  <journey>.stdout.log         # 原始 stdout/stderr
+```
+
+失败分类与处置（不得放宽断言）：
+
+- 集群/沙箱/镜像/模型等前提缺失 → 回到 §6 与 §3 补齐后重跑。
+- 身份与路由配置错误（issuer、redirect、allowed_origins、realm client、hostAliases）→ 回到 §11.6 修正并重跑部署。
+- 产品缺陷（页面死路、错误不可读、假进度、刷新重试导致重复资源）→ 改源码与受影响测试，重新打包部署后重跑。
+- 已知但不阻塞的易用性打磨项 → 记入 §11.7，附截图与稳定诊断码。
