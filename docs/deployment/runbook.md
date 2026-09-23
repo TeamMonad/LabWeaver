@@ -655,11 +655,16 @@ helm -n labweaver-system history labweaver
   指向 `49.52.27.63:11434`）。**Pod 直连节点 IP 会被 Cilium 归类为 `host` entity**：即使
   NetworkPolicy 的 `ipBlock` 写了 `49.52.27.63/32:11434`，策略也不会命中，authoring 的 AgentRun 会以
   `LW_PROVIDER_UNAVAILABLE` 失败（`sandbox` 里的 Claude Code 既取不到模型也取不到包对象）。
-- 可用的形态是 **Cilium LB VIP**：给 ollama 建一个带手工 Endpoints 的 `type: LoadBalancer` Service
-  （本环境用 `10.99.0.150`），pod→VIP 在策略评估阶段仍是普通 ipBlock，DNAT 之后才落到宿主。
-  因此需要同时改三处：`agent-service-config/anthropic-base-url` = `http://10.99.0.150:11434`、
-  values 的 `network.externalServiceEndpoints` 加 `10.99.0.150/32:11434`、
-  `agent-service-config` 的 `sandbox.allowed_egress` 加 `10.99.0.150/32:11434`。
+- 可用的形态是**集群内代理**：在 `labweaver-llm` 里跑一个 TCP 转发 Pod（本环境用 nginx `stream`
+  转发到 `49.52.27.63:11434`，镜像取 Harbor 的 `base-web-runtime`，需要同命名空间的 Harbor
+  pull secret）并暴露 ClusterIP Service `ollama-proxy:11434`。sandbox 的每次尝试只允许
+  `NetworkPolicy`，而它对 host entity 无效；代理是**普通 Pod**，所以 ipBlock 能命中。
+  需要同时改三处：`agent-service-config/anthropic-base-url` =
+  `http://ollama-proxy.labweaver-llm.svc.cluster.local:11434`、
+  values 的 `network.externalServiceEndpoints` 加 `10.0.0.0/8:11434`、
+  `agent-service-config` 的 `sandbox.allowed_egress` 加 `10.0.0.0/8:11434`；角色的
+  `platform-model-egress`/`authoring-model-egress` 两条 `CiliumNetworkPolicy` 再按
+  `platform_application_model_namespace` 放行该端口。
 - 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
 
 ### 11.8 已知阻塞
