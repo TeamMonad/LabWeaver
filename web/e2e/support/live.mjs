@@ -41,7 +41,7 @@ export function policyFor(projectId, courseId = null, providerModel, budgetOverr
       maxInputTokens: 100000,
       maxOutputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_OUTPUT_TOKENS) || 20000,
       maxRequests: Number(process.env.LABWEAVER_E2E_LLM_MAX_REQUESTS) || 8,
-      maxCostMicrousd: 1000000,
+      maxCostMicrousd: Number(process.env.LABWEAVER_E2E_LLM_MAX_COST_MICROUSD) || 1000000,
       timeoutMilliseconds: Number(process.env.LABWEAVER_E2E_LLM_TIMEOUT_MS) || 120000,
       maxTransientRetries: 1,
       maxSchemaRepairs: Number(process.env.LABWEAVER_E2E_LLM_MAX_SCHEMA_REPAIRS) || 2,

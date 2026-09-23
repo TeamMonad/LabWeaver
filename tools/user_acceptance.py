@@ -222,6 +222,11 @@ def acceptance_environment(
     environment["LABWEAVER_BASE_URL"] = base_url
     environment["LABWEAVER_IGNORE_HTTPS_ERRORS"] = "1"
     environment[MODEL_ENV] = model
+    # The deployment serves the reviewed model from a host-side runtime, so a
+    # single request can take minutes and the CLI's notional per-run cost is
+    # higher than the harness default. Both stay overridable by the caller.
+    environment.setdefault("LABWEAVER_E2E_LLM_TIMEOUT_MS", "900000")
+    environment.setdefault("LABWEAVER_E2E_LLM_MAX_COST_MICROUSD", "50000000")
     for role, username in ROLE_USERNAMES.items():
         prefix = ROLE_ENV_PREFIX[role]
         environment[f"{prefix}_USERNAME"] = username
