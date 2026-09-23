@@ -25,6 +25,8 @@
       - sandbox_runtime_superseded_handler != sandbox_runtime_name
       - sandbox_runtime_superseded_dropin is match('^/')
       - sandbox_runtime_superseded_runtime_path is match('^/')
+      - sandbox_runtime_handler_path is match('^/')
+      - sandbox_runtime_translator_path is match('^/')
     fail_msg: SANDBOX_RUNTIME_INPUT_INVALID
 
 - name: Require the reviewed kubelet process bound
@@ -197,6 +199,43 @@
         mode: '0644'
       notify: Restart CRI-O
 
+    - name: Install the CRI annotation translator
+      ansible.builtin.copy:
+        src: translate-cri-annotations.py
+        dest: "{{ sandbox_runtime_translator_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the sandbox runtime wrapper
+      ansible.builtin.template:
+        src: labweaver-sandbox-runtime.j2
+        dest: "{{ sandbox_runtime_handler_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    # A CRI-O drop-in is TOML and CRI-O refuses to start at all when one of its
+    # drop-ins does not parse, which would take the node's container runtime
+    # down. Parse the installed configuration before any restart is applied, so
+    # an unparsable drop-in fails the play instead of the runtime.
+    - name: Parse the installed CRI-O configuration
+      ansible.builtin.command:
+        argv:
+          - crio
+          - --config-dir
+          - "{{ sandbox_runtime_crio_dropin | dirname }}"
+          - config
+      changed_when: false
+      failed_when: false
+      register: sandbox_runtime_dropin_parse
+
+    - name: Reject an unparsable CRI-O runtime drop-in
+      ansible.builtin.assert:
+        that:
+          - sandbox_runtime_dropin_parse.rc == 0
+        fail_msg: SANDBOX_RUNTIME_DROPIN_INVALID
+
     - name: Apply the reviewed kubelet process bound
       ansible.builtin.lineinfile:
         path: "{{ sandbox_runtime_kubelet_config }}"
@@ -207,6 +246,20 @@
         group: root
         mode: '0644'
       notify: Restart kubelet
+
+    # An earlier revision of this role repointed the node's default runtime at a
+    # dispatching wrapper. CRI-O does not create a Pod sandbox through that
+    # wrapper, so the node keeps its own default runtime.
+    - name: Retire the dispatching default runtime drop-in
+      ansible.builtin.file:
+        path: /etc/crio/crio.conf.d/99-labweaver-dispatch.conf
+        state: absent
+      notify: Restart CRI-O
+
+    - name: Retire the dispatching default runtime wrapper
+      ansible.builtin.file:
+        path: /usr/local/libexec/labweaver-sandbox/labweaver-dispatch
+        state: absent
 
     - name: Remove the superseded OJ runtime drop-in
       ansible.builtin.file:
@@ -232,7 +285,7 @@
         that:
           - ("[crio.runtime.runtimes." ~ sandbox_runtime_name ~ "]")
             in sandbox_runtime_crio_config.stdout
-          - ('runtime_path = "' ~ sandbox_runtime_install_dir ~ '/runsc"')
+          - ('runtime_path = "' ~ sandbox_runtime_handler_path ~ '"')
             in sandbox_runtime_crio_config.stdout
           - ('runtime_type = "' ~ sandbox_runtime_runtime_type ~ '"')
             in sandbox_runtime_crio_config.stdout

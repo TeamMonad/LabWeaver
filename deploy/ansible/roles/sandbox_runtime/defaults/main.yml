@@ -20,6 +20,16 @@ sandbox_runtime_crio_dropin: /etc/crio/crio.conf.d/99-labweaver-sandbox.conf
 # This CRI-O release refuses to start a runtime handler without a monitor path.
 sandbox_runtime_conmon_path: /usr/libexec/crio/conmon
 
+# CRI-O writes its own container annotations (`io.kubernetes.cri-o.*`) while
+# gVisor's OCI runtime reads the CRI-standard ones (`io.kubernetes.cri.*`) that
+# containerd writes. Without a translation `runsc` never recognises a Pod
+# sandbox container, never boots the sandbox, and every container of a Job fails
+# with `cannot load sandbox`. The handler's entry point is therefore a wrapper
+# that adds the standard annotations to the container bundle and then executes
+# `runsc`.
+sandbox_runtime_handler_path: "{{ sandbox_runtime_install_dir }}/labweaver-sandbox-runtime"
+sandbox_runtime_translator_path: "{{ sandbox_runtime_install_dir }}/translate-cri-annotations.py"
+
 # Node-wide kubelet process bound for one sandbox Pod. gVisor ignores the OCI
 # `linux.resources.pids` cap and rejects a base runtime spec without a mounts
 # array, so the reviewed bound is applied to the pod cgroup by the kubelet.

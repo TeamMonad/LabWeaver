@@ -73,7 +73,7 @@ CRI-O node registers a CRI-O runtime table named exactly like the handler:
 
 ```toml
 [crio.runtime.runtimes.labweaver-sandbox]
-runtime_path = "/usr/local/libexec/labweaver-sandbox/runsc"
+runtime_path = "/usr/local/libexec/labweaver-sandbox/labweaver-sandbox-runtime"
 runtime_type = "oci"
 monitor_path = "/usr/libexec/crio/conmon"
 ```
@@ -82,6 +82,26 @@ monitor_path = "/usr/libexec/crio/conmon"
 `deploy/versions.lock.yml`) on the CRI-O worker nodes and publishes the `RuntimeClass`. The handler
 must not set a `base_runtime_spec`: `runsc` refuses to start a container from a base spec that
 carries no `mounts` array, so the process bound is not expressed in the OCI spec.
+
+CRI-O and gVisor disagree about annotation names. gVisor's OCI runtime decides whether a container
+is a Pod sandbox and which sandbox a container belongs to from the CRI-standard annotations
+`io.kubernetes.cri.container-type`, `io.kubernetes.cri.sandbox-id`,
+`io.kubernetes.cri.sandbox-name`, `io.kubernetes.cri.sandbox-namespace` and
+`io.kubernetes.cri.container-name`, which containerd writes. CRI-O writes its own
+`io.kubernetes.cri-o.*` equivalents instead, so `runsc` never sees a sandbox container, never boots
+the sandbox, and every container of a sandbox Job fails with
+`cannot load sandbox: …_sandbox:….state: no such file or directory`. The handler's entry point is
+therefore the reviewed wrapper `labweaver-sandbox-runtime`
+(`deploy/ansible/roles/sandbox_runtime/templates/labweaver-sandbox-runtime.j2`), which adds the
+standard annotations to the container bundle — never overwriting a standard annotation that is
+already present — and then executes `runsc` unchanged. A bundle that cannot be translated fails
+closed instead of running the container without the sandbox boundary.
+
+`deploy/ansible/roles/sandbox_runtime` installs that table (and the reviewed gVisor release from
+`deploy/versions.lock.yml`) on the CRI-O worker nodes and publishes the `RuntimeClass`. The handler
+must not set a `base_runtime_spec`: `runsc` refuses to start a container from a base spec that
+carries no `mounts` array, so the process bound is not expressed in the OCI spec. The node keeps its
+own default runtime: the sandbox boundary applies only to Pods that ask for the handler.
 
 The process bound is enforced on the pod cgroup instead. Eligible nodes set the kubelet
 `podPidsLimit` to a reviewed finite value, so a fork bomb inside a sandbox is terminated instead of

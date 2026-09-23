@@ -1,0 +1,57 @@
+#!/bin/sh
+# Run the sandbox container under gVisor, translating CRI-O's annotation names
+# to the CRI-standard names gVisor reads.
+#
+# gVisor's OCI runtime decides whether a container is a Pod sandbox and which
+# sandbox a container belongs to from the CRI-standard annotations
+# `io.kubernetes.cri.container-type`, `io.kubernetes.cri.sandbox-id`,
+# `io.kubernetes.cri.sandbox-name`, `io.kubernetes.cri.sandbox-namespace` and
+# `io.kubernetes.cri.container-name`. containerd writes those names; CRI-O
+# writes its own `io.kubernetes.cri-o.*` equivalents instead, so `runsc` never
+# sees a sandbox container, never boots the sandbox, and every container of the
+# Job fails with `cannot load sandbox`.
+#
+# This wrapper is the sandbox runtime handler's entry point: it adds the
+# standard annotations to the container bundle when CRI-O supplied only its own
+# names, then executes `runsc` unchanged. An existing standard annotation is
+# never overwritten, and a bundle that cannot be translated fails closed.
+set -u
+
+sandbox_runtime={{ (sandbox_runtime_install_dir ~ '/runsc') | quote }}
+translator={{ (sandbox_runtime_install_dir ~ '/translate-cri-annotations.py') | quote }}
+
+bundle=""
+expects=""
+for argument in "$@"; do
+  if [ -n "$expects" ]; then
+    bundle=$argument
+    expects=""
+    continue
+  fi
+  case "$argument" in
+    --bundle) expects=bundle ;;
+    --bundle=*) bundle=${argument#--bundle=} ;;
+  esac
+done
+
+if [ -n "$bundle" ]; then
+  if [ ! -f "$bundle/config.json" ]; then
+    echo "labweaver-sandbox-runtime: bundle $bundle has no config.json" >&2
+    exit 127
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "labweaver-sandbox-runtime: python3 is required to translate CRI annotations" >&2
+    exit 127
+  fi
+  if ! python3 "$translator" "$bundle/config.json"; then
+    echo "labweaver-sandbox-runtime: cannot translate CRI annotations in $bundle" >&2
+    exit 127
+  fi
+fi
+
+if [ ! -x "$sandbox_runtime" ]; then
+  echo "labweaver-sandbox-runtime: $sandbox_runtime is missing or not executable" >&2
+  exit 127
+fi
+
+exec "$sandbox_runtime" "$@"
