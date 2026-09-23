@@ -11,7 +11,7 @@
     that:
       - identity_foundation_enabled | bool
       - identity_run_id is match('^infra-[a-z0-9-]+$')
-      - identity_hostname == 'keycloak.labweaver.internal'
+      - identity_hostname is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$')
       - identity_realm == 'workloads'
       - identity_service_clients | length == 6
       - (identity_service_clients | map(attribute='client_id') | list | unique | length) == (identity_service_clients | length)
@@ -430,6 +430,21 @@
       | grep -F '"issuer":"https://{{ identity_hostname }}/realms/{{ identity_realm }}"' >/dev/null
   args: {executable: /bin/bash}
   changed_when: false
+
+# The browser reaches the advertised issuer through the public entry, whose TLS
+# certificate comes from the public issuer rather than the identity CA, so this
+# check uses the system trust store. It proves the hostname a user's browser is
+# redirected to actually serves the configured issuer.
+- name: Verify the exact OIDC issuer through the public entry
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl --fail --silent --show-error \
+      --resolve {{ identity_hostname }}:443:{{ identity_public_address }} \
+      https://{{ identity_hostname }}/realms/{{ identity_realm }}/.well-known/openid-configuration \
+      | grep -F '"issuer":"https://{{ identity_hostname }}/realms/{{ identity_realm }}"' >/dev/null
+  args: {executable: /bin/bash}
+  changed_when: false
+  when: identity_public_address | length > 0
 
 - name: Verify every service token identity without exposing credentials or tokens
   ansible.builtin.shell: |

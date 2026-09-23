@@ -4,6 +4,11 @@ identity_foundation_verify_only: false
 identity_namespace: keycloak-system # noqa: var-naming[no-role-prefix]
 identity_name: labweaver-keycloak # noqa: var-naming[no-role-prefix]
 identity_hostname: keycloak.labweaver.internal # noqa: var-naming[no-role-prefix]
+# Optional public address that fronts `identity_hostname`. When set, the role
+# additionally verifies the advertised issuer through that entry (the public
+# Gateway certificate in the system trust store) instead of only through the
+# internal identity VIP, so a public hostname change is proven end to end.
+identity_public_address: "" # noqa: var-naming[no-role-prefix]
 identity_gateway_vip: 10.20.0.222 # noqa: var-naming[no-role-prefix]
 identity_gateway_class: cilium # noqa: var-naming[no-role-prefix]
 # Management subnet allowed to reach Keycloak directly and through the identity
