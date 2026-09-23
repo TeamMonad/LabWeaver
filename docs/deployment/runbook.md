@@ -113,6 +113,20 @@ cargo xtask package-validate \
 
 `connected` 会重新校验组件锁哈希、工具身份，并逐个 `docker-buildx imagetools inspect` 确认 Harbor 当前摘要与清单一致。
 
+### 2.9 迁移目录与在线 ledger 的前缀校验（部署前必做）
+
+`migrations/catalog.yaml` 是迁移的唯一真源，而每个域在数据库里都有 `schema_migrations`
+（`migration_id` + `sha256` + `outcome`）。发布前必须确认**在线 ledger 是目录的有序前缀**，否则
+服务启动会以 `DB_SCHEMA_CHECKSUM_MISMATCH`/`DB_SCHEMA_UNKNOWN` 失败关闭：
+
+```sh
+kubectl -n labweaver-data exec postgres-0 -- env PGPASSWORD="$(kubectl -n labweaver-data get secret postgres-secrets -o jsonpath='{.data.postgres-password}' | base64 -d)" \
+  psql -U postgres -d labweaver -tAF'|' -c "select 'control',migration_id,sha256,outcome from control.schema_migrations union all select 'access',migration_id,sha256,outcome from access.schema_migrations union all select 'environment',migration_id,sha256,outcome from environment.schema_migrations union all select 'agent',migration_id,sha256,outcome from agent.schema_migrations union all select 'evaluation',migration_id,sha256,outcome from evaluation.schema_migrations union all select 'resource',migration_id,sha256,outcome from resource.schema_migrations order by 1,2"
+```
+
+逐域比对（id 与 `sha256` 都要相等），新增迁移只能追加在末尾。`#127` 的 rebase 正是按这条规则把
+develop 的新迁移顺延编号，保持在线 ledger 不变。
+
 ## 3. 平台层干净重部署
 
 当前树**没有** foundation clean-redeploy 专用 playbook（`94-foundation-clean-redeploy.yml`、`platform_reset`、`foundation_clean_redeploy*` 已删除）。以下步骤用明确的 `helm`/`kubectl`/`ansible-playbook` 手工完成；每一步先记录、再删除，且删除范围必须精确。
