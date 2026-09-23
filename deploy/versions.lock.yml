@@ -80,6 +80,11 @@ containerd:
   version: v2.4.0
   linux_amd64_url: https://github.com/containerd/containerd/releases/download/v2.4.0/containerd-2.4.0-linux-amd64.tar.gz
   linux_amd64_sha256: b30cb53c6a212fcf3c3ac384db280c0e09be5a02e547f7f73cc27c62cbe2d8e7
+  # containerd runs containers through runc; the release tarball ships the shim
+  # only, so the runtime binary is pinned here as well.
+  runc_version: v1.5.1
+  runc_linux_amd64_url: https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.amd64
+  runc_linux_amd64_sha256: 177df879d50c913eb205e898d5c1c05a18f574053c0ce5524c471208eaf06f6f
   # Pause image the CRI creates for every Pod sandbox. The campus-network nodes
   # pull it through the reviewed proxy, so it stays the mirror the CRI-O nodes
   # already used.

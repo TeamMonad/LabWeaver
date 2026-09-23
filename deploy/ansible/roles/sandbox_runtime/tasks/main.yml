@@ -51,6 +51,9 @@
       - sandbox_runtime_lock.containerd.linux_amd64_url is match('^https://')
       - sandbox_runtime_lock.containerd.linux_amd64_sha256 is match('^[0-9a-f]{64}$')
       - sandbox_runtime_lock.containerd.sandbox_image is match('^[^\s]+:[^\s]+$')
+      - sandbox_runtime_lock.containerd.runc_version is match('^v[0-9]+\.[0-9]+\.[0-9]+$')
+      - sandbox_runtime_lock.containerd.runc_linux_amd64_url is match('^https://')
+      - sandbox_runtime_lock.containerd.runc_linux_amd64_sha256 is match('^[0-9a-f]{64}$')
     fail_msg: SANDBOX_RUNTIME_LOCK_INVALID
 
 - name: Select the reviewed node download proxy
@@ -131,6 +134,57 @@
         that:
           - sandbox_runtime_lock.containerd.version | regex_replace('^v', '') in sandbox_runtime_containerd_version.stdout
         fail_msg: SANDBOX_RUNTIME_CONTAINERD_VERSION_MISMATCH
+
+    # containerd's `runc` runtime needs the runtime binary itself on `PATH`;
+    # the release tarball ships only the shim.
+    - name: Download the locked runc release
+      ansible.builtin.get_url:
+        url: "{{ sandbox_runtime_lock.containerd.runc_linux_amd64_url }}"
+        dest: "{{ sandbox_runtime_archive_dir }}/runc-{{ sandbox_runtime_lock.containerd.runc_version }}.amd64"
+        checksum: "sha256:{{ sandbox_runtime_lock.containerd.runc_linux_amd64_sha256 }}"
+        mode: '0755'
+        timeout: 300
+      environment: "{{ sandbox_runtime_download_env }}"
+      register: sandbox_runtime_runc_archive
+      failed_when: false
+      retries: 3
+      delay: 5
+      until: sandbox_runtime_runc_archive is not failed
+
+    - name: Reject a runc binary that does not match the locked digest
+      ansible.builtin.assert:
+        that:
+          - "'Checksum mismatch' not in (sandbox_runtime_runc_archive.msg | default(''))"
+        fail_msg: SANDBOX_RUNTIME_RUNC_DIGEST_MISMATCH
+
+    - name: Require a verified runc release
+      ansible.builtin.assert:
+        that:
+          - sandbox_runtime_runc_archive is not failed
+          - sandbox_runtime_runc_archive.dest is defined
+        fail_msg: SANDBOX_RUNTIME_RUNC_ARCHIVE_UNAVAILABLE
+
+    - name: Install the locked runc runtime
+      ansible.builtin.copy:
+        src: "{{ sandbox_runtime_runc_archive.dest }}"
+        dest: "{{ sandbox_runtime_install_dir }}/runc"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+      notify: Restart containerd
+
+    - name: Read the installed runc version
+      ansible.builtin.command:
+        argv: ["{{ sandbox_runtime_install_dir }}/runc", --version]
+      changed_when: false
+      register: sandbox_runtime_runc_version
+
+    - name: Require the locked runc version
+      ansible.builtin.assert:
+        that:
+          - sandbox_runtime_lock.containerd.runc_version | regex_replace('^v', '') in sandbox_runtime_runc_version.stdout
+        fail_msg: SANDBOX_RUNTIME_RUNC_VERSION_MISMATCH
 
     - name: Read the installed gVisor release stamp
       ansible.builtin.slurp:
