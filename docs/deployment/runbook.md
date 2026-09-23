@@ -560,6 +560,15 @@ helm -n labweaver-system history labweaver
 
 - 打包需要 `LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf`、`LABWEAVER_PLATFORM_REGISTRY=harbor.lab.lan`，
   且源码树干净（含 untracked）。
+- **必须传 `LABWEAVER_BUILD_PROXY=http://49.52.27.95:7897`**：构建步骤（例如 agent-service 的
+  `npm pack @anthropic-ai/claude-code-linux-x64`）在 BuildKit 的 Pod 内出网，只有该变量会把它作为
+  `HTTP_PROXY/HTTPS_PROXY` 构建参数注入；缺省时步骤无代理，构建会以
+  `BuildKit platform image build failed … npm pack` 失败（Pod 本身能到代理，但构建步骤拿不到）。
+  另外 `npm pack` 产物必须与 `deploy/versions.lock.yml` 的 `claude_code_linux_x64_sha512` 一致。
+- root 的 `~/.cargo/config.toml` 若启用了 sccache，长时间打包可能遇到
+  `Failed to read response header`：以 `RUSTC_WRAPPER= SCCACHE_DISABLE=1` 运行可绕过缓存守护进程。
+- 本机 `docker buildx create --driver remote` 的 endpoint 需要独占本地端口；若默认 1234 已被残留
+  port-forward 占用，换端口（如 1235）重建 builder，`inspect` 显示 `inactive` 属正常（首次构建才探测）。
 - Harbor 的基础镜像必须按 `deploy/versions.lock.yml` 的原 digest 存在；若某个 `base-*` 仓库的 digest 漂移，
   用 `docker buildx imagetools create` 经校园代理重新镜像（保留原 digest），例如：
 
