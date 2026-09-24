@@ -569,7 +569,16 @@ export async function cancelProjectResourceRequestByUi(page, { projectName, proj
   const dialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
   await expect(dialog).toBeVisible()
   await dialog.locator('.filled-button').click()
-  await expectJson(await responsePromise, 'LW_ACCEPTANCE_RESOURCE_REQUEST_CANCEL_FAILED')
+  const cancelResponse = await responsePromise
+  if (!cancelResponse.ok()) {
+    // The request can be approved between rendering the row and clicking cancel;
+    // the platform then answers 409 because the lifecycle already moved on. That is
+    // a legitimate cleanup outcome, not a cleanup failure.
+    if (cancelResponse.status() === 409) {
+      return { ...rendered, requestKey, cancelled: false, superseded: true }
+    }
+    throw new Error(`LW_ACCEPTANCE_RESOURCE_REQUEST_CANCEL_FAILED:${cancelResponse.status()}`)
+  }
 
   const settled = await waitForRenderedState(page, {
     label: `LW_ACCEPTANCE_RESOURCE_REQUEST_CANCEL:${requestKey}`,

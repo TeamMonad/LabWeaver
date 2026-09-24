@@ -345,7 +345,7 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
     await expect(targetEnvironmentValue).toHaveCount(1)
     await expect(targetEnvironmentValue).toHaveText(requestBody.target.environmentId)
     await page.getByLabel('资源申请操作理由', { exact: true }).fill('已确认项目 Work 发布版本与 CPU 容量申请。')
-    await page.getByLabel(/执行后端绑定/).fill(WORK_PROVIDER_BINDING)
+    await page.getByRole('textbox', { name: '执行后端绑定', exact: true }).fill(WORK_PROVIDER_BINDING)
     await page.getByLabel('批准时长（秒）', { exact: true }).fill(String(requestBody.durationSeconds))
     const approveButton = page.getByRole('button', { name: '批准', exact: true })
     await expect(approveButton).toBeEnabled()

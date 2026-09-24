@@ -1091,6 +1091,13 @@ helm -n labweaver-system history labweaver
   `LW_ACCEPTANCE_JOURNEY_TIMEOUT`（`<key>:LW_ACCEPTANCE_JOURNEY_TIMEOUT`）落入证据汇总；此前
   `subprocess.run` 无超时，Playwright 卡在收尾时整轮会无限等待。单测覆盖「超时返回 124」与
   「超时旅程的诊断码」两条。
+- **审批表单里同名输入框有两个（已修）**：`ResourceApprovalView.vue` 同时渲染批量审批的
+  `aria-label="批量审批执行后端绑定"` 与单条的 `aria-label="执行后端绑定"`，因此 `getByLabel(/执行后端绑定/)`
+  会命中 2 个元素触发 Playwright strict mode 违规（`REAL_WORK_PRIMARY_FAILURE:locator.fill: strict mode violation`）。
+  验收侧改为 `getByRole('textbox', { name: '执行后端绑定', exact: true })`（只命中单条表单那个）。
+  同时 `cancelProjectResourceRequestByUi` 的清理可能撞上「渲染后、点击取消前请求已被批准」，平台答 409
+  （`LW_RESOURCE_LIFECYCLE_FAILED`）；该 409 属正常的生命周期竞态，现已作为「已被取代」的清理结果返回，
+  不再判失败。
 - **管理员审批表单的字段标签带后缀，旧断言按 `exact` 匹配会超时（已修）**：`ResourceApprovalView.vue` 的单条审批
   表单里 `<label for="provider-binding">执行后端绑定（CPU 必填）</label>` 与 `aria-label="执行后端绑定"` 并存，
   Playwright 的 `getByLabel('执行后端绑定', { exact: true })` 因关联标签文本带 `（CPU 必填）` 而**匹配不到**，
