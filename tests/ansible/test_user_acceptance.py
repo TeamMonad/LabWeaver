@@ -288,6 +288,63 @@ class RunJourneyTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(waiter.call_count, 0)
 
+    def test_cancel_stale_cancels_every_non_terminal_run(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def kubectl(argv):  # noqa: ANN001
+            return 0, "run-a|project-a\nrun-b|project-b", ""
+
+        def http(url, cookie, **kwargs):  # noqa: ANN001, ANN003
+            calls.append((url.rsplit("/", 1)[-1], kwargs.get("method", "GET")))
+            if url.endswith("/csrf"):
+                return 200, b'{"token":"t"}', {}
+            if kwargs.get("method") == "POST":
+                return 202, b"{}", {}
+            return 200, b"{}", {"etag": '"rev-1"'}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = Path(tmp)
+            (auth / "student.json").write_text(
+                json.dumps({"cookies": [{"name": "__Host-labweaver_session", "value": "v"}]}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "_http", http):
+                results = MODULE.cancel_superseded_runs(
+                    base_url="https://portal.example.test",
+                    auth_dir=auth,
+                    run_kubectl=kubectl,
+                )
+
+        self.assertEqual([r["outcome"] for r in results], ["http-202", "http-202"])
+        self.assertEqual(calls.count(("cancel", "POST")), 2)
+
+    def test_cancel_stale_keeps_the_requested_prefix(self) -> None:
+        def kubectl(argv):  # noqa: ANN001
+            return 0, "run-a|project-a\nrun-b|project-b", ""
+
+        def http(url, cookie, **kwargs):  # noqa: ANN001, ANN003
+            if url.endswith("/csrf"):
+                return 200, b'{"token":"t"}', {}
+            if kwargs.get("method") == "POST":
+                return 202, b"{}", {}
+            return 200, b"{}", {"etag": '"rev-1"'}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = Path(tmp)
+            (auth / "student.json").write_text(
+                json.dumps({"cookies": [{"name": "__Host-labweaver_session", "value": "v"}]}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "_http", http):
+                results = MODULE.cancel_superseded_runs(
+                    base_url="https://portal.example.test",
+                    auth_dir=auth,
+                    run_kubectl=kubectl,
+                    keep_prefix="run-b",
+                )
+
+        self.assertEqual([r["run_id"] for r in results], ["run-a"])
+
     def test_queue_wait_returns_as_soon_as_the_queue_is_empty(self) -> None:
         counts = iter([2, 1, 0])
 

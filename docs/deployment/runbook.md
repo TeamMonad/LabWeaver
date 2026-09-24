@@ -948,7 +948,12 @@ python3 tools/user_acceptance.py run \
 「数条排队运行 + 部署 15 分钟 LLM 界 + 镜像构建」放大（`FULL_CHAIN_TIMEOUT_MS` 4h、
 `AUTHORING_RUN_TIMEOUT_MS` 2.5h、`CANDIDATE_BUILD_TIMEOUT_MS` 1h）。
 
-**清理陈旧 run（操作步骤，已实测）**：worker 按 `created_at` 串行处理，被跳过的旅程会留下占用
+**清理陈旧 run（已实现为子命令，并实测）**：`tools/user_acceptance.py cancel-stale --base-url <url>
+[--auth-dir <dir>] [--keep <run-id 前缀>]` 会列出所有非终态 agent run，用 owner 会话逐个取消
+（`--keep` 保护正在验收的那一条），输出每条的 `http-<状态码>`。它要求 `<auth-dir>`（默认 `<repo>/.auth`）
+里已有该角色的 Playwright 会话，可先执行下面的 `--project=setup` 生成；手工等价步骤与稳定诊断码如下：
+
+**手工步骤（已实测）**：worker 按 `created_at` 串行处理，被跳过的旅程会留下占用
 worker 的运行，因此验收前应把它们取消。取消接口是用户态的，实测步骤如下：
 
 ```sh

@@ -23,11 +23,13 @@ import json
 import os
 import shutil
 import stat
+import ssl
 import subprocess
 import time
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -473,6 +475,142 @@ def _join(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
+CANCEL_STALE_REASONS = {
+    "reason": "acceptance harness cleanup of a superseded run",
+}
+
+
+def _auth_cookie(role_file: Path) -> str | None:
+    """Session cookie header from a Playwright storage state, if it exists."""
+
+    try:
+        state = json.loads(role_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    cookies = state.get("cookies") or []
+    if not cookies:
+        return None
+    return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+
+
+def _http(
+    url: str,
+    cookie: str,
+    *,
+    origin: str,
+    method: str = "GET",
+    body: Mapping[str, object] | None = None,
+    token: str | None = None,
+    etag: str | None = None,
+) -> tuple[int, bytes, Mapping[str, str]]:
+    headers = {
+        "Cookie": cookie,
+        "Accept": "application/json",
+        "Origin": origin,
+        "Content-Type": "application/json",
+    }
+    if token:
+        headers["X-CSRF-Token"] = token
+    if etag:
+        headers["If-Match"] = etag
+    if method == "POST":
+        headers["Idempotency-Key"] = str(uuid.uuid4())
+    request = urllib.request.Request(
+        url,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers=headers,
+    )
+    context = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, context=context, timeout=25.0) as response:
+            return response.status, response.read(4096), dict(response.headers)
+    except urllib.error.HTTPError as error:
+        return error.code, error.read(4096), dict(error.headers)
+
+
+def cancel_superseded_runs(
+    *,
+    base_url: str,
+    auth_dir: Path,
+    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+    keep_prefix: str = "",
+) -> list[dict[str, str]]:
+    """Cancel every non-terminal agent run so the worker serves fresh journeys.
+
+    The agent worker runs one reserved dispatch at a time in ``created_at``
+    order, so a journey that was abandoned keeps the worker busy. Cancelling
+    needs the project owner's session: the platform administrator is correctly
+    refused with ``lw_auth_scope_denied``.
+    """
+
+    query = (
+        "select r.run_id||'|'||r.project_id from agent.agent_runs r "
+        "where r.state in ('requested','running') order by r.created_at"
+    )
+    code, stdout, _ = run_kubectl(
+        [
+            "kubectl",
+            "--context",
+            KUBECTL_CONTEXT,
+            "-n",
+            DATA_NAMESPACE,
+            "exec",
+            "postgres-0",
+            "--",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "labweaver",
+            "-tAc",
+            query,
+        ]
+    )
+    if code != 0 or not stdout.strip():
+        return []
+    results: list[dict[str, str]] = []
+    for role in ("student", "teacher"):
+        cookie = _auth_cookie(auth_dir / f"{role}.json")
+        if not cookie:
+            continue
+        _, csrf_body, _ = _http(f"{base_url}/api/v1/auth/csrf", cookie, origin=base_url)
+        try:
+            token = json.loads(csrf_body).get("token")
+        except ValueError:
+            token = None
+        if not token:
+            continue
+        for line in stdout.strip().splitlines():
+            run_id, _, project_id = line.strip().partition("|")
+            if not run_id or not project_id:
+                continue
+            if keep_prefix and run_id.startswith(keep_prefix):
+                continue
+            if any(item["run_id"] == run_id for item in results):
+                continue
+            _, _, headers = _http(
+                f"{base_url}/api/v1/projects/{project_id}/agent-runs/{run_id}",
+                cookie,
+                origin=base_url,
+            )
+            etag = headers.get("etag") or headers.get("ETag")
+            if not etag:
+                results.append({"run_id": run_id, "outcome": "no-etag"})
+                continue
+            status, _, _ = _http(
+                f"{base_url}/api/v1/projects/{project_id}/agent-runs/{run_id}/cancel",
+                cookie,
+                origin=base_url,
+                method="POST",
+                body=dict(CANCEL_STALE_REASONS),
+                token=token,
+                etag=etag,
+            )
+            results.append({"run_id": run_id, "outcome": f"http-{status}"})
+    return results
+
+
 def queued_dispatch_count(
     run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
 ) -> int | None:
@@ -913,6 +1051,14 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--model", default=None)
     preflight.add_argument("--evidence-dir", default=DEFAULT_EVIDENCE_DIR)
 
+    stale = subparsers.add_parser(
+        "cancel-stale",
+        help="cancel superseded agent runs that still occupy the authoring worker",
+    )
+    stale.add_argument("--base-url", required=True)
+    stale.add_argument("--auth-dir", default=str(ROOT / ".auth"))
+    stale.add_argument("--keep", default="", help="run id prefix to leave untouched")
+
     run = subparsers.add_parser("run", help="run the selected browser journeys")
     run.add_argument("--base-url", required=True)
     run.add_argument("--run-id", required=True)
@@ -946,6 +1092,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         for code in result.diagnostics:
             print(code, file=sys.stderr)
         return result.exit_code
+
+    if args.command == "cancel-stale":
+        results = cancel_superseded_runs(
+            base_url=args.base_url,
+            auth_dir=Path(args.auth_dir),
+            run_kubectl=kubectl,
+            keep_prefix=args.keep,
+        )
+        if not results:
+            print("no superseded runs to cancel")
+        for item in results:
+            print(f"{item['run_id']} {item['outcome']}")
+        return 0
 
     result = run_acceptance(args)
     for code in result.diagnostics:
