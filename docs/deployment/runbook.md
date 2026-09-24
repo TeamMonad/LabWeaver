@@ -1012,6 +1012,11 @@ helm -n labweaver-system history labweaver
   lab 旅程在终端编辑步骤失败（与 11.8 里同一条目一致）。
   处置（产品决策）：强化提示词/在 schema 层强制容器实验环境必须带 `terminal`，或换满足该要求的上游模型；
   **不得**放宽旅程断言或改写素材来掩盖。
+  因果链（run 56，24.4 分钟失败）：候选不带 `terminal` → 控制台虽有 `/connect/console/` 请求但
+  `.xterm-host` 不挂载 → 终端编辑（改写 `student/auth.c`）无法完成 → evaluation-service 侧记录
+  `LW_COLLECT_SUBMISSION_NOT_FOUND`（收集不到学生提交内容）→ 冻结/结果等待以
+  `expect.poll(...).toBe(true)` 的 **300s 超时**告终。因此 lab 旅程的失败是**单一根因**（候选丢 terminal），
+  其余现象都是它的下游表现。
   历史佐证（同一现象的早期观测）：spec 已点「打开终端」并等待 `.xterm-host`，页面状态栏显示
   `环境已就绪，可以打开终端；重启会中断当前运行。`，但终端始终未挂载；对应环境实例
   （class `experiment`）的 contract 亦为 `"endpoints": []`/无 terminal。作为归因记录；同批 work 候选
