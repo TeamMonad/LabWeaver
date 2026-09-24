@@ -262,6 +262,7 @@ def build_summary(
     *,
     run_id: str,
     base_url: str,
+    provider_binding: str = "",
     git_commit: str | None,
     package_manifest: str | None,
     helm_revision: str | None,
@@ -277,6 +278,7 @@ def build_summary(
         "package_manifest": package_manifest,
         "helm_revision": helm_revision,
         "bundle_sha256": bundle_sha256,
+        "provider_binding": provider_binding or None,
         "started_at": started_at,
         "finished_at": finished_at,
         "journeys": list(journeys),
@@ -762,6 +764,7 @@ def run_acceptance(
     results_dir = ROOT / "web" / "test-results"
 
     started_at = datetime.now(timezone.utc).isoformat()
+    print(f"provider_binding={provider_binding or '<unset>'} model={model}")
     results: list[dict[str, object]] = []
     for journey in selected:
         journey_env = dict(environment)
@@ -792,6 +795,7 @@ def run_acceptance(
         package_manifest=args.package_manifest,
         helm_revision=deployment_identity,
         bundle_sha256=bundle_sha256,
+        provider_binding=provider_binding,
         journeys=results,
         started_at=started_at,
         finished_at=finished_at,
