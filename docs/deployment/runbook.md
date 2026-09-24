@@ -1345,7 +1345,11 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
 （该表只有 `diagnostic_code`）。因此 `LW_OJ_SANDBOX_UNAVAILABLE` 这类失败**没有任何可回溯的原始输出**，
 只能靠外部探针反推。
 
-同时确认**运行环境本身完好**：用同一 runner 镜像 + `labweaver-sandbox` 起探针 Job，镜像里
+另有一项更强的复现结论：把示例里的 starter（`examples/xv6-lab/student/student.c`）按 profile 的
+`compileArgv` 契约（source 在 submission 目录内、binary 在 `/work/build/` 下）喂给**同一个 runner 镜像**，
+在 `labweaver-sandbox` 下 `build-xv6.sh` **成功**（`BUILD_EXIT=0`，完整 make 日志显示 kernel、fs.img 与
+`user/_student` 均构建完成）。因此镜像、工具链、vendored xv6 源码与 starter 本身**都没有问题**，
+失败落在平台对 OJ 步骤的编排/取材环节。同时确认**运行环境本身完好**：用同一 runner 镜像 + `labweaver-sandbox` 起探针 Job，镜像里
 `/opt/labweaver/{scripts,profiles,xv6,hidden-tests}` 齐备（`build-xv6.sh`、`run-xv6.sh`、
 `profiles/xv6-riscv64.json`、`hidden-tests/xv6-riscv64/{smoke,filesystem}.{in,out}` 均在），探针可正常执行。
 即：问题不在镜像与沙箱，而在 compile 阶段本身**且其输出不可追溯**。
