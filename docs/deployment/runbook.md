@@ -1405,6 +1405,11 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 `agent-service` 只在正常应答 HTTP（前端轮询 200），日志里既没有 `agent.dispatch.worker_started` 也没有
 `agent.dispatch.claimed`，authoring 命名空间没有任何 Pod。
 
+**根因补充（后经证实）**：真正让队列不消化的不是派发循环本身，而是**看护的判别字段写错**
+（`target.kind` 被当成不存在的 `targetKind`，见 §11.18 上方与 `a0f7130`）与**容量同步把 task 租约喂给
+只处理 environment 的提供者**（`30334c3`）。两处修好并部署后，租约能获批、派发随即恢复；重启
+`agent-service` 只是当时的临时缓解。
+
 **处置（实测有效）**：`kubectl -n labweaver-system rollout restart deploy/agent-service`。重启后立刻出现
 `agent.dispatch.worker_started` 与 `agent.dispatch.claimed`，队列随即开始消化。因此遇到「旅程长时间卡在
 authoring、且集群里没有 authoring Pod」时，先确认派发循环是否在跑，再做重启，不要把它误判成产品缺陷。
