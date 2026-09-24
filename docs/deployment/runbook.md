@@ -1087,7 +1087,12 @@ helm -n labweaver-system history labweaver
   `LW_ACCEPTANCE_JOURNEY_TIMEOUT`（`<key>:LW_ACCEPTANCE_JOURNEY_TIMEOUT`）落入证据汇总；此前
   `subprocess.run` 无超时，Playwright 卡在收尾时整轮会无限等待。单测覆盖「超时返回 124」与
   「超时旅程的诊断码」两条。
-- **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
+- **管理员审批表单的字段标签带后缀，旧断言按 `exact` 匹配会超时（已修）**：`ResourceApprovalView.vue` 的单条审批
+  表单里 `<label for="provider-binding">执行后端绑定（CPU 必填）</label>` 与 `aria-label="执行后端绑定"` 并存，
+  Playwright 的 `getByLabel('执行后端绑定', { exact: true })` 因关联标签文本带 `（CPU 必填）` 而**匹配不到**，
+  work 旅程因此在 3.7 分钟处以 `TimeoutError: locator.fill` 失败（页面快照显示项目
+  `live-work-…-01a0d35f`，即已走到资源审批步骤）。验收侧已把匹配放宽为 `getByLabel(/执行后端绑定/)`；
+  该字段本身是真实的（CPU 类请求必填），产品无需改动。- **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
   审批线程，用 `web/.auth/platform-admin.json` 的会话每 5 秒查一次 `/api/v1/resource-requests`，对仍处于
   `reviewing` 的内部任务租约按管理员流程调用
   `POST /api/v1/resource-requests/{id}/approve`（`expectedRevision` / `providerBinding` / `resources` /
