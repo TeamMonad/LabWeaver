@@ -345,6 +345,57 @@ class RunJourneyTest(unittest.TestCase):
 
         self.assertEqual([r["run_id"] for r in results], ["run-a"])
 
+    def test_approve_pending_resource_requests_approves_reviewing_leases_only(self) -> None:
+        approved_posts: list[str] = []
+
+        def http(url, cookie, **kwargs):  # noqa: ANN001, ANN003
+            if url.endswith("/resource-requests"):
+                return 200, json.dumps(
+                    [
+                        {"id": "request-reviewing", "state": "reviewing"},
+                        {"id": "request-active", "state": "active"},
+                    ]
+                ).encode(), {}
+            if url.endswith("/csrf"):
+                return 200, b'{"csrfToken":"t"}', {}
+            if kwargs.get("method") == "POST":
+                approved_posts.append(url.split("/")[-2])
+                return 202, b"{}", {}
+            return 200, json.dumps(
+                {
+                    "id": url.rsplit("/", 1)[-1],
+                    "state": "reviewing",
+                    "revision": 3,
+                    "requestedResources": {"cpuMillicores": 2000},
+                    "requestedDurationSeconds": 3600,
+                }
+            ).encode(), {"etag": '"rev-3"'}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = Path(tmp) / "platform-admin.json"
+            auth.write_text(
+                json.dumps({"cookies": [{"name": "__Host-labweaver_session", "value": "v"}]}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "_http", http):
+                approved = MODULE.approve_pending_resource_requests(
+                    "https://portal.example.test", auth, "container-primary-v1"
+                )
+
+        self.assertEqual(approved, ["request-reviewing"])
+        self.assertEqual(approved_posts, ["request-reviewing"])
+
+    def test_approve_pending_resource_requests_needs_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = Path(tmp) / "platform-admin.json"
+            auth.write_text(json.dumps({"cookies": []}), encoding="utf-8")
+            self.assertEqual(
+                MODULE.approve_pending_resource_requests(
+                    "https://portal.example.test", auth, "container-primary-v1"
+                ),
+                [],
+            )
+
     def test_queue_wait_returns_as_soon_as_the_queue_is_empty(self) -> None:
         counts = iter([2, 1, 0])
 

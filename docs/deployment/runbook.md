@@ -1082,6 +1082,13 @@ helm -n labweaver-system history labweaver
   run 56 的 dispatch 只是按 `created_at` 排在它们之后。因此：**杀掉验收进程不会杀掉平台 run**，
   它们会继续占用 worker 直到跑完；新一轮验收会因此排队。排查时应先看 `agent.agent_track_work_items`
   的 `running` 轨迹归属与心跳，再判断是否真的停住；**不要**在 worker 忙碌时重启它（会中断在跑的 run）。
+- **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
+  审批线程，用 `web/.auth/platform-admin.json` 的会话每 5 秒查一次 `/api/v1/resource-requests`，对仍处于
+  `reviewing` 的内部任务租约按管理员流程调用
+  `POST /api/v1/resource-requests/{id}/approve`（`expectedRevision` / `providerBinding` / `resources` /
+  `durationSeconds` / `reason`，并带 `If-Match` 与 `X-CSRF-Token`），退出前停止。
+  这是对「平台不自动批准内部任务申请」这一产品决策点的验收侧对等动作（真实部署里就是管理员在
+  `/admin/resource-approval` 点批准）；单测覆盖「只批准 `reviewing`」与「无会话时不动作」两条边界。
 - **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
   （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
   run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队

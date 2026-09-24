@@ -25,6 +25,7 @@ import shutil
 import stat
 import ssl
 import subprocess
+import threading
 import time
 import sys
 import urllib.error
@@ -473,6 +474,9 @@ def probe_deployment_identity(
 def _join(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
+
+APPROVAL_REASON = "acceptance harness: approve the platform task resource request"
+APPROVAL_POLL_SECONDS = 5.0
 
 CANCEL_STALE_REASONS = {
     "reason": "acceptance harness cleanup of a superseded run",
@@ -929,6 +933,104 @@ def execute_journey(
     return completed.returncode
 
 
+def approve_pending_resource_requests(
+    base_url: str,
+    auth_state: Path,
+    provider_binding: str,
+) -> list[str]:
+    """Approve every platform task lease still waiting for an administrator.
+
+    The platform raises a ``reviewing`` resource request for each internal
+    authoring and evaluation task and waits for a human, so the acceptance performs
+    that approval the way an operator does in the admin console. Returns the ids it
+    approved.
+    """
+
+    cookie = _auth_cookie(auth_state)
+    if not cookie:
+        return []
+    status, body, _ = _http(
+        _join(base_url, "/api/v1/resource-requests"), cookie, origin=base_url
+    )
+    if status != 200:
+        return []
+    try:
+        items = json.loads(body)
+    except ValueError:
+        return []
+    if not isinstance(items, list):
+        return []
+
+    approved: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("state") != "reviewing":
+            continue
+        request_id = item.get("id")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        detail_status, detail_body, detail_headers = _http(
+            _join(base_url, f"/api/v1/resource-requests/{request_id}"),
+            cookie,
+            origin=base_url,
+        )
+        etag = detail_headers.get("etag") or detail_headers.get("ETag")
+        if detail_status != 200 or not etag:
+            continue
+        try:
+            detail = json.loads(detail_body)
+        except ValueError:
+            continue
+        _, csrf_body, _ = _http(
+            _join(base_url, "/api/v1/auth/csrf"), cookie, origin=base_url
+        )
+        try:
+            csrf = json.loads(csrf_body)
+        except ValueError:
+            csrf = {}
+        token = csrf.get("csrfToken") or csrf.get("token")
+        if not token:
+            continue
+        approve_status, _, _ = _http(
+            _join(base_url, f"/api/v1/resource-requests/{request_id}/approve"),
+            cookie,
+            origin=base_url,
+            method="POST",
+            body={
+                "expectedRevision": detail.get("revision"),
+                "providerBinding": provider_binding,
+                "resources": detail.get("requestedResources") or {},
+                "durationSeconds": detail.get("requestedDurationSeconds"),
+                "reason": APPROVAL_REASON,
+            },
+            token=token,
+            etag=etag,
+        )
+        if approve_status in {200, 201, 202}:
+            approved.append(request_id)
+    return approved
+
+
+def start_resource_approval_watchdog(
+    base_url: str,
+    auth_state: Path,
+    provider_binding: str,
+) -> "threading.Event":
+    """Approve platform task leases in the background until the stop event is set."""
+
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.is_set():
+            for request_id in approve_pending_resource_requests(
+                base_url, auth_state, provider_binding
+            ):
+                print(f"approved resource request {request_id}")
+            stop.wait(APPROVAL_POLL_SECONDS)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop
+
+
 def run_acceptance(
     args: argparse.Namespace,
     *,
@@ -989,6 +1091,11 @@ def run_acceptance(
             print(f"authoring queue still busy: {pending} dispatch(es) after waiting")
     started_at = datetime.now(timezone.utc).isoformat()
     print(f"provider_binding={provider_binding or '<unset>'} model={model}")
+    approval_stop = start_resource_approval_watchdog(
+        args.base_url,
+        ROOT / "web" / ".auth" / "platform-admin.json",
+        provider_binding or "container-primary-v1",
+    )
     results: list[dict[str, object]] = []
     for journey in selected:
         journey_env = dict(environment)
@@ -1010,6 +1117,7 @@ def run_acceptance(
         )
         collect_artifacts(report_dir, results_dir, run_dir / journey.key)
         print(f"{'PASS' if passed else 'FAIL'} {journey.key} ({journey.project})")
+    approval_stop.set()
     finished_at = datetime.now(timezone.utc).isoformat()
 
     summary = build_summary(
