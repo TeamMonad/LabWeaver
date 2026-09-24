@@ -1248,6 +1248,15 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
   但它要**重新打包并部署 agent-service 之后**才对集群生效；在该部署完成前，lab 旅程仍会因候选缺 terminal
   而红。本次已用全新 release 名（`issue127-sandbox-1`）重新打包并校验 manifest 的 `source_commit`
   等于该修复提交，避免与旧同名单据混淆。
+- **已知项（需产品决策）：environment 申请的审批窗口短于管理台人工审批的耗时**。run 59 的 work 段三次尝试
+  都在管理台审批步骤以 `TimeoutError: page.waitForResponse … POST /api/v1/resource-requests/{id}/approve`
+  收场。证据：`resource.resource_requests` 里该旅程创建的 `environment` 申请在创建后约 **86 秒**就由
+  `reviewing` 变为 `expiring` 并最终 `expired`（14:05:57→14:07:23、14:09:57→14:11:24、14:14:35→14:16:01
+  三次一致）；trace（`artifacts/acceptance/public-20260924-59-all/work/test-results/…-retry2/trace.zip`）
+  的网络记录里**只有一次** `resource-requests` 相关的 GET，**没有任何** `/approve` 请求；失败截图显示
+  该申请此刻已标为「即将到期」。也就是说：真实浏览器里「进页面→按 key 定位并展开行→填理由/执行后端
+  绑定/批准时长→点批准→在确认框点确认」这一串操作来不及在窗口内完成，POST 从未发出。处置属产品侧审批
+  窗口策略（放宽 environment 申请的人工审批窗口，或让审批入口更快/支持预填），本轮按证据记录、不放宽断言。
 - **已知项：并行验收要避开 worker 串行**。agent worker 一次只处理一个 reserved dispatch，验收前用
   `cancel-stale` 清路、或用 `run` 的默认队列等待；否则旅程会把轮询预算耗在排队上。
 
