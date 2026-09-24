@@ -799,6 +799,11 @@ helm -n labweaver-system history labweaver
   `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
   （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
   （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
+- **排查线索：受控 OIDC HTTP 客户端没有超时**。`auth::no_redirect_http_client`
+  （`crates/auth/src/provider.rs:266`）只设置 `no_proxy`/`redirect(none)`/TLS 信任，**没有 `timeout`**；
+  凡是用它发起的 OIDC 调用（service token 刷新、JWKS 刷新）在被网络黑洞吞掉时会**永久挂起**，与
+  「claim 之后没有任何后续事件」的现象一致。已确认启动期 discovery 是成功的（Pod Ready），
+  因此这只是候选原因，尚未定位到具体调用点。
 - **未解决（当前阻塞）：dispatch 被 claim 之后 worker 不再前进**。已修掉前置缺陷（seed 解析、工具策略、
   provider binding、凭据）后，重启 agent-service 可见 `agent.platform_image.seed_existing`（两个 seed 已在
   目录中）与 `agent.dispatch.claimed`，随后**没有任何后续事件**：没有 `agent.track.started`、
