@@ -51,7 +51,7 @@ const LABS = Object.freeze({
 })
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
-const REAL_PROVIDER_BUDGET = Object.freeze({ maxInputTokens: 200_000, maxOutputTokens: 220_000, maxRequests: 24 })
+const REAL_PROVIDER_BUDGET = Object.freeze({ maxInputTokens: 200_000, maxOutputTokens: 220_000, maxRequests: Number(process.env.LABWEAVER_E2E_LLM_MAX_REQUESTS) || 24 })
 const AGENT_RUN_TIMEOUT_MS = Number(process.env.LABWEAVER_E2E_AGENT_RUN_TIMEOUT_MS) || 1_800_000
 
 test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6 or LABWEAVER_E2E_LAB=cuda for a real lab acceptance run.')
