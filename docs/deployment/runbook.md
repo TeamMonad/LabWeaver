@@ -948,6 +948,22 @@ python3 tools/user_acceptance.py run \
 「数条排队运行 + 部署 15 分钟 LLM 界 + 镜像构建」放大（`FULL_CHAIN_TIMEOUT_MS` 4h、
 `AUTHORING_RUN_TIMEOUT_MS` 2.5h、`CANDIDATE_BUILD_TIMEOUT_MS` 1h）。
 
+**清理陈旧 run（操作步骤，已实测）**：worker 按 `created_at` 串行处理，被跳过的旅程会留下占用
+worker 的运行，因此验收前应把它们取消。取消接口是用户态的，实测步骤如下：
+
+```sh
+# 1) 取得对应角色（通常是 project owner）的新会话；会写 <repo>/.auth/<role>.json
+LABWEAVER_BASE_URL=https://portal.labweaver.2018wzh.top LABWEAVER_IGNORE_HTTPS_ERRORS=1   node web/node_modules/@playwright/test/cli.js test --config=web/playwright.config.mjs --project=setup
+# 2) GET /api/v1/auth/csrf 取 X-CSRF-Token；3) GET /api/v1/projects/<p>/agent-runs/<r> 取 ETag（形如 "rev-1"）
+# 4) POST /api/v1/projects/<p>/agent-runs/<r>/cancel
+#    headers: X-CSRF-Token、If-Match: "rev-N"、Idempotency-Key: <uuid>
+#    body:   {"reason": "..."}          -> 202 接受
+```
+
+实测要点：`platform-admin` 对项目范围内的 run 会得到 `lw_auth_scope_denied`（403，属正确的权限行为），
+必须用 **owner**（teacher/student）会话；缺 `If-Match` 为 `lw_if_match_required`（412），缺
+`Idempotency-Key` 为 `lw_idempotency_key_required`（400）；取消是异步的，接口返回 202 后队列会随之缩短。
+
 证据目录布局：
 
 ```
