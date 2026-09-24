@@ -887,6 +887,10 @@ helm -n labweaver-system history labweaver
   Pod 侧解析走 chart 的 `hostAliases`：`agent-service` 的 Pod 模板把 `keycloak.labweaver.2018wzh.top`
   映射到集群内 identity proxy `10.106.242.177`、`portal.labweaver.2018wzh.top` 映射到公网 Gateway VIP
   `10.99.0.140`，因此 Pod 用公网 issuer 完成 OIDC 发现与令牌交换。
+- **修复生效的首个证据**：清掉占用 worker 的陈旧 run（`cancel-stale`，见上文）后，work 旅程的
+  agent run（08:58 创建）在**首次尝试**即从 `requested` 走到 `environment:succeeded`（09:26 领取、
+  09:30 成功），说明「工具策略 / `--bare` / provider binding / 平台镜像 seed / Harbor 凭据」这几处
+  修复合起来已经让 authoring 真正跑通；随后 lab 旅程的 run 立即被领取并进入 authoring。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
