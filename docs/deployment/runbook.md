@@ -440,6 +440,35 @@ kubectl -n labweaver-evaluation delete job sandbox-probe --wait=true
 handler 不可用或 `runsc` 缺失时必须失败关闭：不要把沙箱降级为节点默认运行时，也不要放宽
 seccomp、no-new-privileges、drop caps 或只读 rootfs。
 
+### 6.1 本轮复验（2026-09-24，A2 判据）
+
+在两条 worker 上各跑一次 `runtimeClassName: labweaver-sandbox` 的探针 Job（镜像用 manifest 里 pin 的
+`base-rust-builder@sha256:14bc9c59…`，并带 `imagePullSecrets: harbor-labweaver-system-pull`，否则 worker
+拉不动 Harbor 私有仓库）：
+
+```sh
+kubectl --kubeconfig .private/kubeconfig-v1-admin.conf apply -f - <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata: { name: sandbox-probe-a2 }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      runtimeClassName: labweaver-sandbox
+      restartPolicy: Never
+      imagePullSecrets: [{ name: harbor-labweaver-system-pull }]
+      containers:
+        - name: probe
+          image: harbor.lab.lan/labweaver-system/base-rust-builder@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
+          command: ["/bin/sh","-c","cat /proc/version"]
+YAML
+```
+
+实测结果：`v1-worker-158` 与 `v1-worker-97`（后者用 `nodeName` 固定）都 `succeeded=1`，日志均为
+`Linux version 4.19.0-gvisor #1 SMP …`；`kubectl get runtimeclass` 只剩 `labweaver-sandbox` 与 `nvidia`，
+被取代的 `labweaver-oj` 已不存在。探针 Job 用完即删。
+
 ## 7. KubeVirt / VM 验证与 linux-nginx 材料链
 
 KubeVirt 由 `70-install-kubevirt.yml`/`kubevirt` 角色安装，且显式 `useEmulation: false`（禁止软件模拟回退）；CDI scratch 绑定 local-path。KVM 能力由 preflight 的 `/dev/kvm` 与 `vmx`/`svm` 检查保证。
