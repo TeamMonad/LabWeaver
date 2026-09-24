@@ -714,6 +714,11 @@ helm -n labweaver-system history labweaver
   `lab` 旅程因此会长时间停在等待；批准入口是 BFF `POST /api/v1/resource-requests/{id}/approve`
   （需要管理员会话 + `X-CSRF-Token` + `Origin`，body 需 `expectedRevision`/`providerBinding`/`resources`/`durationSeconds`/`reason`）。
   这是产品决策点：要么给内部 authoring 任务预授权，要么旅程显式批准。
+- **会话 TTL 必须覆盖验收旅程时长**：`access-service` 的 `browser.session_ttl_seconds`/`session_idle_ttl_seconds`
+  默认 1800（30 分钟），而 `lab` 旅程（上传 + 两次 authoring + 候选构建 + VM/控制台）实测超过 30 分钟，
+  中途所有 API 轮询开始返回 `401 {"diagnosticCode":"LW_AUTH_SESSION_REJECTED"}`，旅程以
+  `LAB_EXPERIMENT_AGENT_RUN_STATUS_FAILED:401` 失败。v1 私有配置已把两者提到 14400（4 小时）；
+  更长的旅程需要同步调大，或由前端实现会话续期。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
