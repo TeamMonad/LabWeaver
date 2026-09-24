@@ -1798,6 +1798,26 @@ spec 自己的 `Test timeout of 1800000ms exceeded`（不是断言失败），�
 即：lab 段当前的阻塞点是**环境控制台的终端交互**（与 §11.9 记录的「控制台状态文案滞后」相邻但不同：
 这次是等待本身耗尽了整段预算）。下一步应在终端桥/控制台可用性上取证，而不是继续调评测。
 
+### 12.2.4 lab 段 authoring run 被判 `cancelled:LW_CONFLICT`（平台侧，未定性）
+
+干净一轮（`public-20260924-3j-a1-20472`，队列已清空、无操作者干预）的第一次尝试在 **3.7 分钟**结束：
+
+```
+Error: LAB_EXPERIMENT_AGENT_RUN_FAILED:cancelled:LW_CONFLICT,LW_CONFLICT
+```
+
+判据与已知边界：
+
+- `LW_CONFLICT` 是**运行时对「调用被取消」的固定诊断码**（`services/agent-service/tests/claude_code_runtime.rs`
+  里 `FakeMode::Cancelled → "LW_CONFLICT"` 即是断言），因此这条 run 确实是被取消的，而不是模型失败。
+- 取消入口只有 agent-service 的 cancel API（`run_store.rs` 中 `CANCEL_OPERATION` 那条 UPDATE）；
+  旅程自身**不会**取消 agent run（spec/support 里只取消资源申请），我这次也没有在旅程中执行清理
+  （见 §12.0.1 的反例，时间线可区分）。
+- 沙箱墙钟是 3600 s、审批预算同值，远大于 3.7 分钟，所以不是超时；近 40 分钟内该库有 3 条 run 处于
+  `cancelled`，说明是**系统性**取消而非偶发。
+- 同一签名此前也出现在 admin 段（`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:cancelled:LW_CONFLICT`），
+  因此这是一个跨旅程的共同阻塞点，下一步应在「谁调用了 cancel API / 是否有平台侧自动取消」上取证。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
