@@ -1091,6 +1091,11 @@ helm -n labweaver-system history labweaver
   `LW_ACCEPTANCE_JOURNEY_TIMEOUT`（`<key>:LW_ACCEPTANCE_JOURNEY_TIMEOUT`）落入证据汇总；此前
   `subprocess.run` 无超时，Playwright 卡在收尾时整轮会无限等待。单测覆盖「超时返回 124」与
   「超时旅程的诊断码」两条。
+- **验收证据里的 Playwright 报告改为按旅程写盘（已修）**：平台内置的 HTML/JSON reporter 把配置里的
+  相对输出路径解析到**运行目录**上，验收工具原先只从 `web/playwright-report` 拷贝，可能拷到上一次无关
+  调用的旧报告。现在每次旅程都用 `PLAYWRIGHT_HTML_REPORT` / `PLAYWRIGHT_JSON_OUTPUT_NAME` 把报告
+  **绝对路径**指到 `artifacts/acceptance/<run-id>/<journey>/{index.html,report.json}`，`test-results/`
+  仍在旅程结束后拷贝；证据因此自包含，不再依赖仓库里的共享报告目录。
 - **审批表单里同名输入框有两个（已修）**：`ResourceApprovalView.vue` 同时渲染批量审批的
   `aria-label="批量审批执行后端绑定"` 与单条的 `aria-label="执行后端绑定"`，因此 `getByLabel(/执行后端绑定/)`
   会命中 2 个元素触发 Playwright strict mode 违规（`REAL_WORK_PRIMARY_FAILURE:locator.fill: strict mode violation`）。

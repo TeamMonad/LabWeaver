@@ -916,12 +916,16 @@ def materialise_credentials(source_dir: Path, target_dir: Path) -> None:
             ) from error
 
 
-def collect_artifacts(report_dir: Path, results_dir: Path, target_dir: Path) -> None:
+def collect_artifacts(results_dir: Path, target_dir: Path) -> None:
+    """Copy the per-journey traces/screenshots next to the run's other evidence.
+
+    The Playwright HTML/JSON reports are written straight into the journey directory by
+    ``PLAYWRIGHT_HTML_REPORT``/``PLAYWRIGHT_JSON_OUTPUT_NAME`` rather than copied here:
+    the reporters resolve their configured relative paths against the working directory
+    the runner is started in, so copying ``web/playwright-report`` could pick up a report
+    left behind by an unrelated invocation.
+    """
     target_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("report.json", "index.html"):
-        source = report_dir / name
-        if source.is_file():
-            shutil.copy2(source, target_dir / name)
     if results_dir.is_dir():
         shutil.copytree(results_dir, target_dir / "test-results", dirs_exist_ok=True)
 
@@ -1105,7 +1109,6 @@ def run_acceptance(
         deployment_identity = probe_deployment_identity(run_kubectl)
     bundle_sha256 = args.bundle_sha256 or deployment_identity
 
-    report_dir = ROOT / "web" / "playwright-report"
     results_dir = ROOT / "web" / "test-results"
 
     if not getattr(args, "no_queue_wait", False):
@@ -1126,6 +1129,12 @@ def run_acceptance(
     for journey in selected:
         journey_env = dict(environment)
         journey_env.update(journey_environment(journey, args.lab))
+        journey_dir = run_dir / journey.key
+        journey_dir.mkdir(parents=True, exist_ok=True)
+        # Absolute paths so each journey carries its own fresh report; the built-in
+        # reporters otherwise resolve their relative output paths against the CWD.
+        journey_env["PLAYWRIGHT_HTML_REPORT"] = str(journey_dir)
+        journey_env["PLAYWRIGHT_JSON_OUTPUT_NAME"] = str(journey_dir / "report.json")
         stdout_path = run_dir / f"{journey.key}.stdout.log"
         stderr_path = run_dir / f"{journey.key}.stderr.log"
         returncode = execute(playwright_command(journey), journey_env, stdout_path, stderr_path)
@@ -1147,7 +1156,7 @@ def run_acceptance(
                 "exit_code": returncode,
             }
         )
-        collect_artifacts(report_dir, results_dir, run_dir / journey.key)
+        collect_artifacts(results_dir, journey_dir)
         print(f"{'PASS' if passed else 'FAIL'} {journey.key} ({journey.project})")
     approval_stop.set()
     finished_at = datetime.now(timezone.utc).isoformat()
