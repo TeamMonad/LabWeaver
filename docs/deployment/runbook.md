@@ -1767,6 +1767,11 @@ worker。加这条是因为实测过并发危害：多次重启留下的进程�
 
 重复启动同一个验收（不同 `--run-id`）先确认没有在跑：`pgrep -af "user_acceptance.py run"`。
 
+**反例（实测踩坑，务必避免）**：在**旅程进行中**执行 `cancel-stale` 会把该旅程自己的 authoring run 一起取消，
+症状是 lab 段以 `LAB_EXPERIMENT_AGENT_RUN_FAILED:cancelled:LW_CONFLICT` 失败——那不是平台缺陷，
+而是操作者误伤。清队列只能在**旅程开始之前**做（`run` 的 preflight 等待就是为此），一旦 journeys
+已在跑，要么等它结束，要么整体停掉循环后重来。
+
 ### 12.2.2 evaluation rbacProfile 缺 `list jobs`：orphan 清理从未生效（已修）
 
 `deploy/helm/labweaver/templates/service-account.yaml` 的 `evaluation` 档位只给了
