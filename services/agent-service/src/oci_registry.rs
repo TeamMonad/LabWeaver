@@ -16,7 +16,17 @@ use persistence_sqlx::Sha256Digest;
 use crate::oci_import::{MANIFEST_MEDIA_TYPES, OciBlob, OciImage};
 
 const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
-const ACCEPTED_MANIFEST_TYPES: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+const ACCEPTED_MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+
+/// Multi-platform indexes the registry may return for a tag.
+///
+/// A reviewed seed names one platform image, so an index is followed to its
+/// `linux/amd64` entry instead of being rejected: Harbor answers a tag whose
+/// accept header omits these types with `MANIFEST_UNKNOWN`.
+const INDEX_MEDIA_TYPES: [&str; 2] = [
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+];
 
 /// Registry credentials scoped to one project robot account.
 #[derive(Clone)]
@@ -282,76 +292,62 @@ impl OciRegistryPublisher {
         if !valid_tag(tag) {
             return Err(OciRegistryError::Configuration);
         }
-        let path = format!("v2/{}/manifests/{tag}", self.repository);
-        let response = self
-            .request(Method::GET, &path)
-            .header(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
-        let status = response.status();
-        if denied(status) {
-            return Err(OciRegistryError::Denied);
+        // A tag may resolve to a multi-platform index; follow it to the
+        // `linux/amd64` entry once, then read that single-platform manifest.
+        let mut target = tag.to_owned();
+        for _ in 0..2 {
+            let path = format!("v2/{}/manifests/{target}", self.repository);
+            let response = self
+                .request(Method::GET, &path)
+                .header(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))
+                .send()
+                .await
+                .map_err(|_| OciRegistryError::Unavailable)?;
+            let status = response.status();
+            if denied(status) {
+                return Err(OciRegistryError::Denied);
+            }
+            if status != StatusCode::OK {
+                return Err(OciRegistryError::Rejected);
+            }
+            let media_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .ok_or(OciRegistryError::Rejected)?
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            let observed_header = response
+                .headers()
+                .get("docker-content-digest")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let body = response
+                .bytes()
+                .await
+                .map_err(|_| OciRegistryError::Unavailable)?;
+            let observed_digest = format!("sha256:{}", Sha256Digest::of_bytes(&body));
+            if observed_header.is_some_and(|header| header != observed_digest) {
+                return Err(OciRegistryError::DigestMismatch);
+            }
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&body).map_err(|_| OciRegistryError::Rejected)?;
+            if INDEX_MEDIA_TYPES.contains(&media_type.as_str()) {
+                target = index_platform_digest(&manifest)?;
+                continue;
+            }
+            if !MANIFEST_MEDIA_TYPES.contains(&media_type.as_str()) {
+                return Err(OciRegistryError::Rejected);
+            }
+            if declared_digest.is_some_and(|declared| declared != observed_digest) {
+                return Err(OciRegistryError::DigestMismatch);
+            }
+            return finish_manifest(&manifest, &media_type, observed_digest);
         }
-        if status != StatusCode::OK {
-            return Err(OciRegistryError::Rejected);
-        }
-        let media_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(OciRegistryError::Rejected)?
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
-        if !MANIFEST_MEDIA_TYPES.contains(&media_type.as_str()) {
-            return Err(OciRegistryError::Rejected);
-        }
-        let observed_header = response
-            .headers()
-            .get("docker-content-digest")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
-        let observed_digest = format!("sha256:{}", Sha256Digest::of_bytes(&body));
-        if observed_header.is_some_and(|header| header != observed_digest) {
-            return Err(OciRegistryError::DigestMismatch);
-        }
-        if declared_digest.is_some_and(|declared| declared != observed_digest) {
-            return Err(OciRegistryError::DigestMismatch);
-        }
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| OciRegistryError::Rejected)?;
-        if manifest.get("manifests").is_some() {
-            return Err(OciRegistryError::Rejected);
-        }
-        let config_size = manifest
-            .pointer("/config/size")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or(OciRegistryError::Rejected)?;
-        let layers = manifest
-            .get("layers")
-            .and_then(serde_json::Value::as_array)
-            .ok_or(OciRegistryError::Rejected)?;
-        let layer_bytes = layers.iter().try_fold(0_u64, |total, layer| {
-            total.checked_add(layer.get("size").and_then(serde_json::Value::as_u64)?)
-        });
-        let size_bytes = config_size
-            .checked_add(layer_bytes.ok_or(OciRegistryError::Rejected)?)
-            .ok_or(OciRegistryError::Rejected)?;
-        if size_bytes == 0 {
-            return Err(OciRegistryError::Rejected);
-        }
-        Ok(ResolvedRegistryImage {
-            digest: observed_digest,
-            media_type,
-            size_bytes,
-        })
+        Err(OciRegistryError::Rejected)
     }
 
     /// Reads one manifest back at `reference` and requires the registry to confirm `expected`.
@@ -397,6 +393,64 @@ impl OciRegistryPublisher {
             .request(method, url)
             .basic_auth(&self.credentials.username, Some(&self.credentials.password))
     }
+}
+
+/// Picks the `linux/amd64` manifest digest out of a multi-platform index.
+fn index_platform_digest(index: &serde_json::Value) -> Result<String, OciRegistryError> {
+    let entries = index
+        .get("manifests")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(OciRegistryError::Rejected)?;
+    for entry in entries {
+        let platform = entry.get("platform");
+        let is_amd64_linux = platform
+            .and_then(|value| value.get("os"))
+            .and_then(serde_json::Value::as_str)
+            == Some("linux")
+            && platform
+                .and_then(|value| value.get("architecture"))
+                .and_then(serde_json::Value::as_str)
+                == Some("amd64");
+        if !is_amd64_linux {
+            continue;
+        }
+        if let Some(digest) = entry.get("digest").and_then(serde_json::Value::as_str)
+            && validate_declared_digest(digest).is_ok()
+        {
+            return Ok(digest.to_owned());
+        }
+    }
+    Err(OciRegistryError::Rejected)
+}
+
+/// Reads one already fetched single-platform manifest into its resolved identity.
+fn finish_manifest(
+    manifest: &serde_json::Value,
+    media_type: &str,
+    observed_digest: String,
+) -> Result<ResolvedRegistryImage, OciRegistryError> {
+    let config_size = manifest
+        .pointer("/config/size")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(OciRegistryError::Rejected)?;
+    let layers = manifest
+        .get("layers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(OciRegistryError::Rejected)?;
+    let layer_bytes = layers.iter().try_fold(0_u64, |total, layer| {
+        total.checked_add(layer.get("size").and_then(serde_json::Value::as_u64)?)
+    });
+    let size_bytes = config_size
+        .checked_add(layer_bytes.ok_or(OciRegistryError::Rejected)?)
+        .ok_or(OciRegistryError::Rejected)?;
+    if size_bytes == 0 {
+        return Err(OciRegistryError::Rejected);
+    }
+    Ok(ResolvedRegistryImage {
+        digest: observed_digest,
+        media_type: media_type.to_owned(),
+        size_bytes,
+    })
 }
 
 fn denied(status: StatusCode) -> bool {
@@ -461,7 +515,45 @@ mod tests {
 
     use crate::oci_import::{OciBlob, OciImage};
 
-    use super::{OciRegistryError, OciRegistryPublisher, RegistryCredentials};
+    use super::{
+        OciRegistryError, OciRegistryPublisher, RegistryCredentials, index_platform_digest,
+    };
+
+    #[test]
+    fn index_resolution_picks_the_linux_amd64_entry() {
+        let index = serde_json::json!({
+            "manifests": [
+                {
+                    "digest": format!("sha256:{}", "a".repeat(64)),
+                    "platform": {"os": "linux", "architecture": "arm64"},
+                },
+                {
+                    "digest": format!("sha256:{}", "b".repeat(64)),
+                    "platform": {"os": "linux", "architecture": "amd64"},
+                },
+            ],
+        });
+        assert_eq!(
+            index_platform_digest(&index).expect("amd64 entry"),
+            format!("sha256:{}", "b".repeat(64))
+        );
+    }
+
+    #[test]
+    fn index_resolution_rejects_an_index_without_linux_amd64() {
+        let index = serde_json::json!({
+            "manifests": [
+                {
+                    "digest": format!("sha256:{}", "c".repeat(64)),
+                    "platform": {"os": "windows", "architecture": "amd64"},
+                },
+            ],
+        });
+        assert!(matches!(
+            index_platform_digest(&index),
+            Err(OciRegistryError::Rejected)
+        ));
+    }
 
     #[derive(Default)]
     struct RegistryState {
