@@ -1009,8 +1009,12 @@ def approve_pending_resource_requests(
             detail = json.loads(detail_body)
         except ValueError:
             continue
-        target_kind = item.get("targetKind") or detail.get("targetKind")
-        if target_kind != "task":
+        target = item.get("target")
+        if not isinstance(target, dict):
+            target = detail.get("target")
+        if not isinstance(target, dict) or target.get("kind") != "task":
+            # Only platform task leases are approved here; the journeys approve the
+            # environment requests themselves through the admin console.
             continue
         _, csrf_body, _ = _http(
             _join(base_url, "/api/v1/auth/csrf"), cookie, origin=base_url

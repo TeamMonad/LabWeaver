@@ -1137,6 +1137,11 @@ helm -n labweaver-system history labweaver
   而 `lab-experiment` 的 xv6 实验冻结的是 `student/student.c`，因此该断言永远不可能满足——run 59 的 lab 段
   在 UI 冻结成功后仍以 `expect(...).toBe(true)` 超时 300s 收场。现在该参数的期望路径由调用方传入
   （`real-experiment` 传 `student/auth.c`，`lab-experiment` 传自己的 `LAB.frozenPath`）。
+- **看护的目标判别字段写错了（已修 `30334c3` 之后）**：`/api/v1/resource-requests` 的列表与详情里，
+  目标类型在 **`target.kind`**（值 `task`/`environment`），**没有** `targetKind` 这个字段。`561d6a9`
+  当初按 `targetKind` 过滤，导致看护把**所有**申请都跳过（`None != 'task'`），平台任务租约因此长期停在
+  `reviewing`，authoring 派发拿不到租约而不推进——这正是后续几轮「队列不消化」的直接原因。现在读
+  `target.kind`，单测夹具同步改为真实形状（35 passed）。
 - **自动审批看护曾与旅程自身的审批抢跑（已修）**：`tools/user_acceptance.py` 的后台看护会批准**所有**
   `reviewing` 申请，包括旅程自己要在管理台手动批准的那一条——run 58 的 work 旅程因此报
   `TimeoutError: locator.fill … 执行后端绑定`（申请已被看护批准，单条审批表单随 `selectedRequest.state`
