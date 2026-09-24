@@ -935,6 +935,14 @@ python3 tools/user_acceptance.py run \
 | `admin` | platform-admin | `web/e2e/platform-admin/resource-approval.live.spec.mjs` | `platform administrator approves a real resource request and reads back its lease and charges` | — |
 | `authoring` | teacher | `web/e2e/teacher/authoring.live.spec.mjs` | `teacher authors an independent project and publishes its complete experiment package` | — |
 
+**排队等待（重要）**：agent worker 一次只处理一个 reserved dispatch（`created_at` 先到先处理），
+单次运行实测 10-40 分钟，因此 `run` 默认先等待队列排空再启动旅程（每 30 秒查一次
+`agent_run_dispatches` 的 `pending/preparing/claimed`，上限 1 小时，深度变化时打印一行）。需要
+立刻开始时用 `--no-queue-wait` 跳过；`preflight` 的 `authoring_queue` 检查始终报告当前深度
+（非零时带 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY`，仅告警不阻断）。旅程自身的轮询上限已按
+「数条排队运行 + 部署 15 分钟 LLM 界 + 镜像构建」放大（`FULL_CHAIN_TIMEOUT_MS` 4h、
+`AUTHORING_RUN_TIMEOUT_MS` 2.5h、`CANDIDATE_BUILD_TIMEOUT_MS` 1h）。
+
 证据目录布局：
 
 ```

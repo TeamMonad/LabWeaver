@@ -518,10 +518,14 @@ def wait_for_authoring_queue(
     """
 
     deadline = time.monotonic() + timeout
+    reported: int | None = None
     while True:
         pending = queued_dispatch_count(run_kubectl)
-        if pending in (None, 0) or time.monotonic() >= deadline:
+        if pending is None or pending == 0 or time.monotonic() >= deadline:
             return pending
+        if pending != reported:
+            print(f"waiting for {pending} queued authoring dispatch(es) to finish")
+            reported = pending
         time.sleep(QUEUE_WAIT_POLL_SECONDS)
 
 
