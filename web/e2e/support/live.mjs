@@ -40,12 +40,15 @@ export function policyFor(projectId, courseId = null, providerModel, budgetOverr
     budget: {
       // An authoring candidate runs for up to sixty provider turns and each turn
       // re-sends the reviewed prompt, so the ceilings cover a whole multi-turn
-      // session rather than a single short request. A project's real policy comes
-      // from the teacher-facing form; these are the acceptance harness defaults.
-      maxInputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_INPUT_TOKENS) || 4000000,
-      maxOutputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_OUTPUT_TOKENS) || 1000000,
+      // session rather than a single short request. They are deliberately far
+      // above what sixty turns can consume: the binding limits are the CLI's
+      // --max-turns and the wall clock, not the token accounting, which counts
+      // cached prompt prefixes on every turn. A project's real policy comes from
+      // the teacher-facing form; these are the acceptance harness defaults.
+      maxInputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_INPUT_TOKENS) || 20000000,
+      maxOutputTokens: Number(process.env.LABWEAVER_E2E_LLM_MAX_OUTPUT_TOKENS) || 5000000,
       maxRequests: Number(process.env.LABWEAVER_E2E_LLM_MAX_REQUESTS) || 200,
-      maxCostMicrousd: Number(process.env.LABWEAVER_E2E_LLM_MAX_COST_MICROUSD) || 50000000,
+      maxCostMicrousd: Number(process.env.LABWEAVER_E2E_LLM_MAX_COST_MICROUSD) || 500000000,
       timeoutMilliseconds: Number(process.env.LABWEAVER_E2E_LLM_TIMEOUT_MS) || 900000,
       maxTransientRetries: 1,
       maxSchemaRepairs: Number(process.env.LABWEAVER_E2E_LLM_MAX_SCHEMA_REPAIRS) || 2,

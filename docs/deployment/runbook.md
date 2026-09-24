@@ -698,12 +698,29 @@ helm -n labweaver-system history labweaver
   `maxRequests=8/24`、`maxInputTokens=200_000` 的验收策略在本机 27B 模型下会在 2–3 分钟内被
   `BudgetExceeded` 打断。
   验收预算现在只有一处定义：`web/e2e/support/live.mjs` 的 `policyFor` 默认
-  `maxInputTokens=4000000`、`maxOutputTokens=1000000`、`maxRequests=200`、
-  `maxCostMicrousd=50000000`（50 USD）、`timeoutMilliseconds=900000`，全部可用
+  `maxInputTokens=20000000`、`maxOutputTokens=5000000`、`maxRequests=200`、
+  `maxCostMicrousd=500000000`、`timeoutMilliseconds=900000`，全部可用
   `LABWEAVER_E2E_LLM_MAX_INPUT_TOKENS` / `_MAX_OUTPUT_TOKENS` / `_MAX_REQUESTS` /
   `_MAX_COST_MICROUSD` / `LABWEAVER_E2E_LLM_TIMEOUT_MS` 覆盖；`tools/user_acceptance.py` 不再重复
   定义这些默认值，直接透传调用方环境。`real-experiment` spec 只保留 `maxTransientRetries=0`
   这一条刻意的覆盖（真实链路必须证明单次未重试的尝试）。
+- **实测用量（据此定上限，不要凭感觉调）**：从对象存储读回沙箱的 `result.json`
+  （`labweaver-artifacts` 桶，`problem-packages/authoring-sandbox/<attempt-id>/result.json`，
+  内容是按行分隔的 stream-json，取最后一条 `type=result` 的 envelope；TLS 用
+  `agent-service-secrets/minio-ca.pem` 校验、把 `minio.labweaver-data.svc` 指到 port-forward
+  的 127.0.0.1 即可在宿主机读），两次真实 authoring 尝试为：
+  | attempt | CLI subtype | turns | input tokens | output tokens | cost USD |
+  |---|---|---|---|---|---|
+  | `01a0d2ebf7…`（environment） | `success` | 2 | 211,022 | 2,754 | 1.12 |
+  | `01a0d2ee-c215…`（evaluation） | `success` | 7 | 756,663 | 3,915 | 3.88 |
+  即**单回合输入约 10 万 token**（materials 整体进提示词），所以 `maxInputTokens=200_000`
+  在第二回合就会被打穿（这正是「CLI `exit 0` 但 runtime 报 `BudgetExceeded`」的成因）；
+  `maxRequests`/`maxOutputTokens`/`maxCostMicrousd` 从来不是瓶颈（turns ≤ 7、output ≤ 4k、
+  cost ≤ 4 USD）。真正的边界是 CLI 的 `--max-turns 60` 与墙上时间，因此上限设成
+  60 回合也吃不完的量级（20M / 5M / 200 / 500 USD）。
+- **诊断缺口（待补）**：`enforce_budget` 只返回 `BudgetExceeded`，不记录是哪一个维度越界
+  （`services/agent-service/src/claude_code.rs:2839`），日志里也没有 usage；本轮只能靠从对象存储
+  读回 `result.json` 才能定性。建议后续在该分支补上越界维度与「观测值/上限」两个字段。
 
 ### 11.8 已知阻塞
 - **服务身份缺 scope-mapping（已定位并临时修复，角色本身有缺陷）**：authoring 的失败链最终落到
