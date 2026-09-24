@@ -1252,7 +1252,7 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
   （附 run 60 复核：三次尝试的 `environment` 申请存活 **59.9s / 85.4s / 86.2s**；每次尝试本身持续 2–4 分钟，
   申请**远早于**该次尝试的清理就离开 `reviewing`，因此窗口是平台侧行为，不是旅程清理造成的假象；
   在 resource-service 的 Rust/SQL 里按 `reviewing`+过期/截止条件检索未找到该窗口的定义，触发者应在更上层策略，
-  定位留待产品/owner。）
+  定位留待产品/owner。另据 `services/resource-service/src/lib.rs:464` 的单测，旅程清理发出的取消会落到 `Cancelled` 而不是 `Expired`，因此观测到的 `expired` 不是清理造成的，确实来自平台侧过期。）
   都在管理台审批步骤以 `TimeoutError: page.waitForResponse … POST /api/v1/resource-requests/{id}/approve`
   收场。证据：`resource.resource_requests` 里该旅程创建的 `environment` 申请在创建后约 **86 秒**就由
   `reviewing` 变为 `expiring` 并最终 `expired`（14:05:57→14:07:23、14:09:57→14:11:24、14:14:35→14:16:01
