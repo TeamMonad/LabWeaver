@@ -1403,7 +1403,15 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 **注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
 需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
 
-### 11.14 OJ 失败的可诊断性缺口（run 61/63 观察，2026-09-24）
+### 11.14 OJ 失败的可诊断性缺口（**已部分修复**：编译输出现在进容器日志）
+
+**更新（`6b98326`）**：`persist_evidence` 只把 stdout/stderr 的**哈希与字节数**写进 `/evidence/evidence.json`，
+而该文件位于 Job 自己的卷里、随清理消失——所以编译失败曾**完全没有可回溯的输出**。现在编译失败时会把
+**有界的编译器 stdout/stderr（8 KiB，标注是否截断）**镜像到 `program-runner` 的容器日志，平台与
+`kubectl logs` 都能读到。诊断码的混淆也已随之消解（见 §11.19：失败从
+`LW_OJ_SANDBOX_UNAVAILABLE` 变为语义正确的 `LW_OJ_COMPILE_ERROR`）。
+
+（run 61/63 观察，2026-09-24）
 
 复核确认：**失败之后 OJ 的 Job/Pod 会立即消失**（`labweaver-evaluation` 里只剩历史探针 Job，`lw-oj-*`
 查不到、`kubectl logs` 无从取），平台也没有把容器 stderr 记进任何事件或 `evaluation_step_attempts`
