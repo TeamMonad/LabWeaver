@@ -1246,6 +1246,28 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
 - **已知项：并行验收要避开 worker 串行**。agent worker 一次只处理一个 reserved dispatch，验收前用
   `cancel-stale` 清路、或用 `run` 的默认队列等待；否则旅程会把轮询预算耗在排队上。
 
+### 11.10 本轮重新部署的读回证据（2026-09-24，terminal 补齐上线）
+
+terminal 补齐修复（`f66a824`）随新包上线，实测记录：
+
+- 打包：`cargo xtask package --env v1 --release issue127-sandbox-3 --profile platform --yes`，
+  环境变量为 root 侧 `LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf`、
+  `LABWEAVER_PLATFORM_REGISTRY=harbor.lab.lan`、
+  **`LABWEAVER_BUILD_PROXY=http://49.52.27.95:7897`**（漏传会命中 `agent-service` 镜像里
+  `npm pack @anthropic-ai/claude-code-linux-x64` 的构建步骤失败）、`RUSTC_WRAPPER=`（避免 root
+  下 sccache 连不上自己的 server）。产物
+  `artifacts/package/pkg-v1-issue127-sandbox-3-79173741bcf9/PlatformImagePackageManifest.json`，
+  `source_commit=79173741bcf9…`（`git merge-base --is-ancestor f66a824… <commit>` 为真）。
+- 校验：`package-validate --mode static` 与 `--mode connected --env v1` 均 **exit 0**。connected
+  会先 `docker buildx inspect --bootstrap` 核对 BuildKit 身份，因此本地 `docker buildx use` 选中的
+  builder 必须指向**真实在跑的**端口转发（本轮把失联的 `bk-local`（1236）换成指向 1234 的 `bk-local2`
+  后才通过）。
+- 部署：`cargo xtask platform-application --env v1 --infra --yes --package-manifest <新包>`，
+  复用 `application-vars-public-20260924.yml`；**exit 0**，helm `labweaver` 升到 revision 78 / deployed。
+- 读回：11 个 workload 的镜像 digest 与 manifest **逐项 MATCH**（`agent-service`/`build-executor`
+  由 `c4d46c12…` 换为 `3b8f99a3634b…`，`environment-service` 及其执行器为 `dc2e4ccd…`，
+  `web` 为 `e56fef48…`，`resource-service` 属 resource 包未变）；部署后 `preflight` exit 0。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
