@@ -709,7 +709,11 @@ test('student provisions a Work environment, configures it, and releases its cap
     await expect(connectLink).toBeVisible({ timeout: 120_000 })
     await connectLink.click()
     await expect(page).toHaveURL(new RegExp(`[?&]environmentId=${encodeURIComponent(environmentId)}(?:&|$)`))
-    await expect(page.locator('.resource-title-row').getByRole('heading', { name: environmentId, exact: true })).toBeVisible({ timeout: 120_000 })
+    // The console titles a Work environment `work-<environment id>`, so match the
+    // rendered heading by containment rather than by an exact id comparison.
+    await expect(
+      page.locator('.resource-title-row').getByRole('heading', { name: environmentId }),
+    ).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.env-meta-grid')).toContainText('容器')
     const environment = await waitForEnvironment(page.request, environmentId, 'ready')
     expect(environment.class).toBe('work')
