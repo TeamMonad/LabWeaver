@@ -1748,6 +1748,16 @@ Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留
 `LW_OJ_JOB_MISSING`，说明 Job 是**真的缺席超过了两分钟**，而不是观察与清理的短窗口竞态；同窗口
 `evaluation.orphan.reconcile_failed` 持续出现（`14ed6fe` 之后会带 `error_kind`，用于判定是否由它删除）。
 
+### 12.0.1 同一时刻只允许一个验收运行（有独占锁）
+
+`tools/user_acceptance.py run` 在证据根目录上取 `.acceptance.lock` 的独占 `flock`：已有运行时新的
+调用会立刻以 `LW_ACCEPTANCE_RUN_IN_PROGRESS`（退出码 2）失败，而不是并行去抢那唯一的 authoring
+worker。加这条是因为实测过并发危害：多次重启留下的进程互相排队，队列里出现 4 条 `requested`，
+正在跑的旅程被迫等它们。锁是进程级的（`flock`），子进程实测被阻塞；同进程内重复获取不受限，
+因此**不要**在同一进程里并发调用。
+
+重复启动同一个验收（不同 `--run-id`）先确认没有在跑：`pgrep -af "user_acceptance.py run"`。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：

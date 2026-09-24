@@ -19,6 +19,7 @@ classified without reading the logs.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -70,6 +71,9 @@ CLUSTER_UNREACHABLE = "LW_ACCEPTANCE_CLUSTER_UNREACHABLE"
 PORTAL_UNREACHABLE = "LW_ACCEPTANCE_PORTAL_UNREACHABLE"
 LOGIN_REDIRECT_INVALID = "LW_ACCEPTANCE_LOGIN_REDIRECT_INVALID"
 CREDENTIALS_MISSING = "LW_ACCEPTANCE_CREDENTIALS_MISSING"
+# Two concurrent runs fight over the single authoring worker and poison each other's queue (observed:
+# four orphans queued behind the live run), so `run` takes one exclusive lock per evidence root.
+RUN_IN_PROGRESS = "LW_ACCEPTANCE_RUN_IN_PROGRESS"
 MODEL_MISSING = "LW_ACCEPTANCE_MODEL_MISSING"
 AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
 # The worker serves one reserved dispatch at a time, so a run waits for the
@@ -1072,6 +1076,23 @@ def start_resource_approval_watchdog(
     return stop
 
 
+
+def acquire_run_lock(evidence_root: Path):
+    """Take the evidence root's exclusive run lock, or return None when another run holds it."""
+
+    handle = (evidence_root / ".acceptance.lock").open("w", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    # The handle must outlive this call: closing it would release the lock.
+    _RUN_LOCK.append(handle)
+    return handle
+
+
+_RUN_LOCK: list = []
+
 def run_acceptance(
     args: argparse.Namespace,
     *,
@@ -1098,6 +1119,12 @@ def run_acceptance(
         return RunResult(exit_code=2, diagnostics=[MODEL_MISSING])
 
     evidence_root = Path(args.evidence_dir).resolve()
+    try:
+        evidence_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return RunResult(exit_code=2, diagnostics=[EVIDENCE_DIR_UNWRITABLE])
+    if acquire_run_lock(evidence_root) is None:
+        return RunResult(exit_code=2, diagnostics=[RUN_IN_PROGRESS])
     run_dir = evidence_root / run_id
     credentials_dir = run_dir / ".credentials"
     try:
