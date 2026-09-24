@@ -1767,6 +1767,23 @@ worker。加这条是因为实测过并发危害：多次重启留下的进程�
 
 重复启动同一个验收（不同 `--run-id`）先确认没有在跑：`pgrep -af "user_acceptance.py run"`。
 
+### 12.2.2 evaluation rbacProfile 缺 `list jobs`：orphan 清理从未生效（已修）
+
+`deploy/helm/labweaver/templates/service-account.yaml` 的 `evaluation` 档位只给了
+`jobs: [get, create, patch, delete]`，而 orphan reconciler 需要**枚举**命名空间里的 Job 才能发现终态
+尝试的残留。实测判据（一次命令即可复核）：
+
+```sh
+kubectl auth can-i list jobs -n labweaver-evaluation \
+  --as=system:serviceaccount:labweaver-system:evaluation-service   # 修复前输出 no
+```
+
+后果：每轮 reconcile 都以 403 失败，日志为
+`LW_EVALUATION_ORPHAN_RECONCILE_FAILED` + `error_kind: kubernetes`（该判别字段由 `14ed6fe` 补上，
+正是它把「读不到」与「配置/控制面」区分开）。`edeb2d0` 在 jobs 动词里补上 `list`；施加方式与普通平台
+配置一致（下一次 `platform-application`），因此**不需要**重新打包镜像。注意该 reconciler 只能
+`get`/`delete` 具名对象，无法列举，所以它**不是** `LW_OJ_JOB_MISSING` 的删除者。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
