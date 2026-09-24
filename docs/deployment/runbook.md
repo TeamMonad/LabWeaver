@@ -811,6 +811,22 @@ helm -n labweaver-system history labweaver
   `authoring_queue` 检查会以 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY` 报出。
   推断卡点在 authoring 之后、构建命令之前（候选物化/对象存储调用），尚未定位到具体代码行；
   需要 agent-service 侧更细的诊断（当前该步没有可区分阶段的日志）。
+- **平台镜像 seed 解析失败的真实原因：accept 头不含 OCI index 类型**。`agent-service` 启动时
+  解析 `platform_registry.seed_images`，`OciRegistryPublisher::resolve_tag` 只声明
+  `application/vnd.oci.image.manifest.v1+json` 与 `application/vnd.docker.distribution.manifest.v2+json`；
+  Harbor 对这类镜像返回 **OCI index**，accept 不支持 index 时直接以 404
+  `MANIFEST_UNKNOWN: OCI index found, but accept header does not support OCI indexes` 拒绝，于是
+  `rust-builder-v1`、`distroless-runtime-v1` 两个 seed 都失败（`LW_PLATFORM_IMAGE_SEED_FAILED`），
+  目录里没有固定基础镜像，后续 authoring 无法解析基础镜像。对照实验：
+  ```sh
+  curl -sk -u "$ROBOT:$SECRET" -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+    https://harbor.lab.lan/v2/labweaver-system/rust/manifests/1.97.1-bookworm
+  # 404 MANIFEST_UNKNOWN: OCI index found, but accept header does not support OCI indexes
+  ```
+  **已修复**：accept 头补上 index/manifest-list 类型，tag 解析到 index 时**跟随一次**到
+  `linux/amd64` 条目（保持 pin 的是单平台镜像），并新增 `index_platform_digest` 的选择/拒绝回归测试。
+- **另一处易混点**：seed 失败的日志只带稳定诊断码，`cause` 字段不会出现在 JSON 日志里；已在
+  `resolve` 失败分支补记 `error_kind`，便于区分凭据被拒、注册表不可达与媒体类型不支持。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
