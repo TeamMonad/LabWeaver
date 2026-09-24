@@ -1403,7 +1403,20 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 **注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
 需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
 
-### 11.14b 即便镜像内已打印编译输出，捕获窗口仍然极短
+### 11.14c 编译失败的耗时只有约 2 秒（新证据，指向脚本早退）
+
+run 69 期间从 `labweaver-evaluation` 的事件里读到 OJ Job 的完整生命周期：
+`Pulled`(3m22s) → `Created` → `Container started`(3m21s) → **`Completed  job/lw-oj-…`(3m19s)**，
+即容器**从启动到结束只有约 2 秒**；而对照探针里同一 runner 镜像跑 `build-xv6.sh` 需要 **60–90 秒**
+（解包 + `make kernel/kernel fs.img user/_student`）。因此这**不是**编译耗时或超时（`wallTimeSeconds: 30`
+也没触发），而是脚本在**极早期就退出**——最可能是 `build-xv6.sh` 的前置校验分支：`exit 64`（参数个数）、
+`exit 65`（source/binary 路径契约）、`exit 66`（`$evaluator_dir/xv6/xv6-source.tar.gz` 缺失，或
+`$build_dir/xv6` 已存在）。平台侧路径来自 `OJ_SUBMISSION_ROOT=/input/submission`、
+`PROGRAM_BINARY_PATH=/work/build/program`、`SUPPORT_ROOT=/support`，与契约一致；素材包也确认含该 tar
+（153 KB）。**下一步应当直接看 `/support` 的落盘结果与容器 stderr**——这也再次说明「失败即删 Pod」
+（§11.14b）是当前唯一的取证障碍。
+
+，捕获窗口仍然极短
 
 `6b98326` 让编译失败把有界的 stdout/stderr 打进 `program-runner` 的容器日志。实测（run 69，
 evaluation run `01a0d4b7-d7d5…`，18:40:14）：OJ Pod 从创建到被平台清理**不到 50 秒**
