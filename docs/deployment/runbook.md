@@ -774,6 +774,14 @@ helm -n labweaver-system history labweaver
   **已修复**：`tool_use` 块改为跳过（候选只取 assistant 的 `text` 块），真正被策略拒绝的工具
   仍通过 envelope 的 `permission_denials` 失败；新增回归测试
   `tool_use_turns_do_not_discard_the_final_candidate`（改前失败、改后通过）。
+- **同一解析器的第三个拒绝点：工具结果回合**。CLI 在每次工具调用后回灌一个
+  `type=user` + `content=[{"type":"tool_result",...}]` 的回合，而 `valid_synthetic_user_event`
+  要求 `isSynthetic=true` 且内容全是 `text`，于是该回合被判 `ProtocolInvalid`
+  → `LW_EVIDENCE_INVALID`（实测：`ToolDenied` 修掉之后紧接着出现的就是它）。
+  **已修复**：新增 `valid_tool_result_user_event`，只接受**全部为 `tool_result` 块**的 user
+  回合（真实用户消息带 `text` 块，仍被拒绝，注入防护不变）；同时让非 schema 的解析失败也
+  记录同样的有界 `stdout_preview`，便于定位协议类拒绝。回归测试覆盖
+  `tool_use` + `tool_result` 循环。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
