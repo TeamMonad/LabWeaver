@@ -30,11 +30,13 @@ const WORK_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
 
-const FULL_CHAIN_TIMEOUT_MS = 3_600_000
-// The deployment's own LLM bound is 15 minutes per candidate; the authoring and
-// image-build polls must not be shorter than the work they wait for.
-const AUTHORING_RUN_TIMEOUT_MS = 1_200_000
-const CANDIDATE_BUILD_TIMEOUT_MS = 900_000
+// The agent worker runs one reserved dispatch at a time, so a journey can sit
+// behind earlier runs before its own authoring starts. These ceilings cover a
+// queued run plus the deployment's own fifteen minute per-candidate LLM bound
+// and the image build that follows it.
+const FULL_CHAIN_TIMEOUT_MS = 7_200_000
+const AUTHORING_RUN_TIMEOUT_MS = 2_700_000
+const CANDIDATE_BUILD_TIMEOUT_MS = 1_800_000
 const REAL_WORK_CONFIG = realWorkConfig()
 const REAL_WORK_RESUME = realWorkResumeConfig()
 const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME)
