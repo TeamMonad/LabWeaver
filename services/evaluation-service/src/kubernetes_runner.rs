@@ -75,6 +75,10 @@ const DEFAULT_RESOURCE_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_ANSIBLE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_ANSIBLE_FACTS_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_ANSIBLE_OUTPUT_BYTES: u64 = 1024 * 1024;
+/// How long an OJ Job may stay missing before the step is reported as failed. Bounded on purpose:
+/// an observation that races the attempt's own cleanup must not decide the step.
+const OJ_JOB_MISSING_GRACE: Duration = Duration::from_mins(2);
+
 const DEFAULT_ANSIBLE_MAX_ASSERTIONS: u32 = 32;
 
 enum StartedExecution {
@@ -1723,6 +1727,7 @@ impl KubernetesEvaluationRunner {
         request: &OjExecutionRequest,
         recovery: Option<&EvaluationExecutionResources>,
     ) -> Result<(TerminalResult, ExecutionTiming), ExecutionError> {
+        let mut missing_since: Option<Instant> = None;
         loop {
             if context.cancellation.is_cancelled()
                 || self.run_is_cancelling(context.lease.run_id).await?
@@ -1752,10 +1757,24 @@ impl KubernetesEvaluationRunner {
                     .await;
                 }
                 OjJobObservation::Missing => {
-                    return Ok((
-                        TerminalResult::Failed("LW_OJ_JOB_MISSING".to_owned()),
-                        ExecutionTiming::unknown(),
-                    ));
+                    // A missing Job is not proof that the step failed: the platform deletes the
+                    // attempt's objects as part of the same lifecycle, so an observation landing in
+                    // the handoff window would otherwise kill the whole step (the lab's compile step
+                    // has `failurePolicy: stop`). Give the Job a bounded window to reappear and only
+                    // then report the terminal diagnostic. See runbook 12.2.
+                    let first_missing = missing_since.get_or_insert_with(Instant::now);
+                    if first_missing.elapsed() < OJ_JOB_MISSING_GRACE {
+                        tokio::time::sleep(Duration::from_millis(
+                            self.configuration
+                                .execution_observe_poll_interval_milliseconds,
+                        ))
+                        .await;
+                    } else {
+                        return Ok((
+                            TerminalResult::Failed("LW_OJ_JOB_MISSING".to_owned()),
+                            ExecutionTiming::unknown(),
+                        ));
+                    }
                 }
                 OjJobObservation::Completed {
                     receipt,
