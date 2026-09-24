@@ -1056,6 +1056,14 @@ helm -n labweaver-system history labweaver
   一次」一致：**claim 循环会在若干次运行后停住且不留日志**，长跑验收会因此空等。处置：需要 agent-service
   owner 给该循环补上「停住即失败/重启」的可观测性与自恢复；验收期间的可重复缓解是发现 dispatch 超过
   ~2 分钟仍为 `pending` 时重启该 Deployment（本轮即如此）。
+- **同一卡点的更强证据（run 56）**：重启后 worker 的事件序列恰好是
+  `artifact_store.s3_client_ready` → `agent.dispatch.worker_started` → `agent.platform_image.seed_existing`×2 →
+  **`agent.dispatch.claimed`**，**之后再无任何事件**（无 `agent.track.started`、无沙箱 Job、无
+  `preparation_failed`、无 ERROR 行）；同一 dispatch 在 `agent_run_dispatches` 里于 `prepared` 与 `pending`
+  之间来回、`agent_runs.state` 始终 `requested`（`environment:requested,evaluation:requested`）。
+  即卡点稳定落在 `claimed` 之后的「绑定/执行」段，且该段**没有可观测输出**——这是本轮验收中
+  最需要 owner 处理的产品缺陷；验收侧只能靠周期性重启争取一次成功执行（run 54 的两次 authoring 即
+  在重启后正常执行过，说明该路径可用但不可靠）。
 - **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
   （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
   run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
