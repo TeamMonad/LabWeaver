@@ -2731,10 +2731,45 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
             _ => return Err(ClaudeCodeRuntimeError::ProtocolInvalid),
         }
     }
+    let candidate = normalize_candidate(&candidate);
     Ok(ParsedClaudeCodeStream {
         envelope: envelope.ok_or(ClaudeCodeRuntimeError::ProtocolInvalid)?,
         candidate: (!candidate.is_empty()).then_some(candidate),
     })
+}
+
+/// Strips one Markdown code fence wrapped around the candidate.
+///
+/// The reviewed prompts ask for bare JSON, but a smaller hosted model answers
+/// with a fenced block often enough to matter: the fence then made an otherwise
+/// well-formed candidate fail JSON parsing and surface as a schema rejection.
+/// The fence is presentation, not content — every JSON, protected-field,
+/// materialization, and schema gate still runs on the text inside it, so removing
+/// it cannot admit a candidate that would otherwise be rejected.
+fn normalize_candidate(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed.to_owned();
+    };
+    let Some((info, body)) = rest.split_once('\n') else {
+        return trimmed.to_owned();
+    };
+    if !is_fence_info(info) {
+        return trimmed.to_owned();
+    }
+    match body.trim_end().strip_suffix("```") {
+        Some(inner) => inner.trim().to_owned(),
+        None => trimmed.to_owned(),
+    }
+}
+
+/// A fence info string is a language tag such as `json` and nothing else.
+fn is_fence_info(info: &str) -> bool {
+    let info = info.trim();
+    info.is_empty()
+        || info
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '+'))
 }
 
 fn valid_synthetic_user_event(event: &Value) -> bool {
@@ -3321,6 +3356,57 @@ mod tests {
             parsed.candidate.as_deref(),
             Some("{\"scriptContent\":\"true\"}")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_fenced_candidate_is_unwrapped_before_validation() -> Result<(), Box<dyn Error>> {
+        fn stream_with(text: &str) -> String {
+            [
+                json!({
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "01900000-0000-7000-8000-000000000003",
+                }),
+                json!({
+                    "type": "assistant",
+                    "session_id": "01900000-0000-7000-8000-000000000003",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+                }),
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "session_id": "01900000-0000-7000-8000-000000000003",
+                    "num_turns": 1,
+                    "total_cost_usd": 0,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "modelUsage": {},
+                    "permission_denials": [],
+                    "api_error_status": null,
+                    "terminal_reason": "completed",
+                }),
+            ]
+            .map(|event| event.to_string())
+            .join("\n")
+        }
+
+        let candidate = "{\"scriptContent\":\"true\"}";
+        for text in [
+            format!("```json\n{candidate}\n```"),
+            format!("```\n{candidate}\n```"),
+            format!("  ```json\n{candidate}\n```  "),
+            candidate.to_owned(),
+        ] {
+            let parsed = super::parse_stream_output(stream_with(&text).as_bytes())?;
+            assert_eq!(parsed.candidate.as_deref(), Some(candidate), "{text:?}");
+        }
+
+        // The unwrapping is limited to a fence that wraps the whole response:
+        // prose around it is still rejected rather than searched for JSON.
+        let prose = format!("Here it is:\n```json\n{candidate}\n```");
+        let parsed = super::parse_stream_output(stream_with(&prose).as_bytes())?;
+        assert_ne!(parsed.candidate.as_deref(), Some(candidate));
         Ok(())
     }
 
