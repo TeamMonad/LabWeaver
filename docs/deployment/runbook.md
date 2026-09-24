@@ -1406,8 +1406,13 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 收据修复部署后（helm rev 84）跑 run 70，其 authoring 出现 **`environment` 轨 failed、`evaluation` 轨
 succeeded**（run 终态 `partially_succeeded`），近期 agent-service 诊断只有 `LW_PROVIDER_UNAVAILABLE`×2
 与 **`LW_EVIDENCE_INVALID`×2**——即**候选没过受审 schema**，属模型/提示词质量边界（与 §11.13 的
-「构建配方被 BuildKit 拒绝」同类）。因此这一轮**没有走到 OJ**，`evaluation.oj.compile_failed` 事件
-（携带编译退出码）仍处于「已部署、待触发」状态：下次有 run 真正进入 OJ 时即可见。
+「构建配方被 BuildKit 拒绝」同类）。因此这一轮**没有走到 OJ**。
+
+**后续已触发（2026-09-24 20:33 起）**：收据修复随 `ojsig` 系列部署上线后，`evaluation.oj.compile_failed`
+实际打出了两条 `diagnostic_code=LW_OJ_COMPILE_ERROR` 事件——说明「编译失败」已从误导性的
+`LW_OJ_SANDBOX_UNAVAILABLE` 中分离出来（§11.19 的另一半由此闭环）。同一部署还补上了
+`exit_code`/`signal`/`timed_out` 三个字段，用于区分「脚本早退 64/65/66」「被信号杀死（如 OOM）」与
+「墙钟超时」；此后 lab 段的失败点已不再是编译，而是 §12.2 记录的 OJ 步骤误判。
 
 ### 11.14d 为什么编译输出目前无法进入平台记录（架构性结论）
 
