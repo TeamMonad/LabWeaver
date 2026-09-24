@@ -1320,7 +1320,12 @@ run 61 的 lab 段已越过 authoring（provider 重试生效）与冻结提交�
   项目实验镜像），随后以 `BackoffLimitExceeded` 结束——即容器**反复非零退出**；
 - 平台把「重试耗尽」统一映射为 `LW_OJ_SANDBOX_UNAVAILABLE`。
 
-因此待查项是：OJ 容器在这份 xv6 实验镜像与 gVisor 运行时下为何非零退出，以及「测试未通过」与
+独立探针已排除「镜像+gVisor 不可用」这一可能：用**同一个 runner 镜像**、`runtimeClassName: labweaver-sandbox`、
+符合 `labweaver-evaluation` 命名空间 `PodSecurity: restricted` 的 securityContext 提交探针 Job，**成功**执行
+（`/proc/version` = `Linux version 4.19.0-gvisor`，uid 1000，根文件系统正常）。因此失败落在
+`evaluation.yaml` 的 `compile` 门（`runner.kind=program`、`toolchainProfile: xv6-riscv64`、`phase: compile`、
+`input: student/student.c`）本身：编译阶段返回非零。注意该任务一开始把**所有非零退出**都映射成
+`LW_OJ_SANDBOX_UNAVAILABLE`，所以待查项是：OJ 容器在这份 xv6 实验镜像与 gVisor 运行时下为何非零退出，以及「测试未通过」与
 「沙箱不可用」是否被混为同一诊断码（后者会让用户看到误导性的不可用提示）。属执行/评测侧 owner 决策。
 
 ## 12. 用户验收（模拟真实用户操作）
