@@ -136,6 +136,7 @@ class RunJourneyTest(unittest.TestCase):
         return MODULE.build_parser().parse_args(
             [
                 "run",
+                "--no-queue-wait",
                 "--base-url",
                 "https://portal.example.test",
                 "--run-id",
@@ -167,7 +168,7 @@ class RunJourneyTest(unittest.TestCase):
 
     def test_cli_fails_fast_on_unknown_journey(self) -> None:
         exit_code = MODULE.main(
-            ["run", "--journeys", "nope", "--base-url", "https://example.invalid", "--run-id", "x"]
+            ["run", "--no-queue-wait", "--journeys", "nope", "--base-url", "https://example.invalid", "--run-id", "x"]
         )
         self.assertNotEqual(exit_code, 0)
 
@@ -176,6 +177,9 @@ class RunJourneyTest(unittest.TestCase):
             args = MODULE.build_parser().parse_args(
                 [
                     "run",
+                    "--no-queue-wait",
+                "--no-queue-wait",
+                    "--no-queue-wait",
                     "--base-url",
                     "https://portal.example.test",
                     "--run-id",
@@ -241,6 +245,9 @@ class RunJourneyTest(unittest.TestCase):
             args = MODULE.build_parser().parse_args(
                 [
                     "run",
+                    "--no-queue-wait",
+                "--no-queue-wait",
+                    "--no-queue-wait",
                     "--base-url",
                     "https://portal.example.test",
                     "--run-id",

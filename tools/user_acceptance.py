@@ -24,6 +24,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 import sys
 import urllib.error
 import urllib.request
@@ -68,6 +69,9 @@ LOGIN_REDIRECT_INVALID = "LW_ACCEPTANCE_LOGIN_REDIRECT_INVALID"
 CREDENTIALS_MISSING = "LW_ACCEPTANCE_CREDENTIALS_MISSING"
 MODEL_MISSING = "LW_ACCEPTANCE_MODEL_MISSING"
 AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
+# The worker serves one reserved dispatch at a time, so a run waits for the
+# queue in front of it; see docs/deployment/runbook.md.
+QUEUE_WAIT_SECONDS = 3600.0
 BROWSER_MISSING = "LW_ACCEPTANCE_BROWSER_MISSING"
 EVIDENCE_DIR_UNWRITABLE = "LW_ACCEPTANCE_EVIDENCE_DIR_UNWRITABLE"
 JOURNEY_UNKNOWN = "LW_ACCEPTANCE_JOURNEY_UNKNOWN"
@@ -468,16 +472,10 @@ def _join(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
-def check_authoring_queue(
+def queued_dispatch_count(
     run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
-) -> Check:
-    """Report queued authoring dispatches.
-
-    The agent worker runs one reserved dispatch at a time in ``created_at``
-    order, so a journey started while dispatches are queued waits behind them
-    and can exceed its own poll ceiling. Reported as a warning, not a failure:
-    the queue drains on its own.
-    """
+) -> int | None:
+    """Number of reserved dispatches the agent worker has not finished yet."""
 
     query = (
         "select count(*) from agent.agent_run_dispatches "
@@ -503,8 +501,37 @@ def check_authoring_queue(
         ]
     )
     if code != 0 or not stdout.strip().isdigit():
+        return None
+    return int(stdout.strip())
+
+
+def wait_for_authoring_queue(
+    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+    timeout: float,
+) -> int | None:
+    """Wait until no queued dispatch is left, or the timeout elapses.
+
+    The agent worker runs one reserved dispatch at a time in ``created_at``
+    order, so a journey started while dispatches are queued waits behind them
+    and can exceed its own poll ceiling. Returns the last observed count.
+    """
+
+    deadline = time.monotonic() + timeout
+    while True:
+        pending = queued_dispatch_count(run_kubectl)
+        if pending in (None, 0) or time.monotonic() >= deadline:
+            return pending
+        time.sleep(30.0)
+
+
+def check_authoring_queue(
+    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+) -> Check:
+    """Report queued authoring dispatches."""
+
+    pending = queued_dispatch_count(run_kubectl)
+    if pending is None:
         return Check("authoring_queue", True, None, "queue state unavailable")
-    pending = int(stdout.strip())
     return Check(
         "authoring_queue",
         True,
@@ -812,6 +839,10 @@ def run_acceptance(
     report_dir = ROOT / "web" / "playwright-report"
     results_dir = ROOT / "web" / "test-results"
 
+    if not getattr(args, "no_queue_wait", False):
+        pending = wait_for_authoring_queue(run_kubectl, QUEUE_WAIT_SECONDS)
+        if pending:
+            print(f"authoring queue still busy: {pending} dispatch(es) after waiting")
     started_at = datetime.now(timezone.utc).isoformat()
     print(f"provider_binding={provider_binding or '<unset>'} model={model}")
     results: list[dict[str, object]] = []
@@ -884,6 +915,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--lab", default=DEFAULT_LAB)
     run.add_argument("--evidence-dir", default=DEFAULT_EVIDENCE_DIR)
     run.add_argument("--model", default=None)
+    run.add_argument(
+        "--no-queue-wait",
+        action="store_true",
+        help="start without waiting for queued authoring dispatches to drain",
+    )
     run.add_argument(
         "--provider-binding",
         default=None,
