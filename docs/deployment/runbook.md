@@ -953,6 +953,24 @@ helm -n labweaver-system history labweaver
     尝试落地之前，且 `agent.agent_run_dispatches` 已是 `prepared`。
   处置：按 §12「产品缺陷」改源码后重新打包部署，并补上该段的失败诊断；不得以 Mock 或降级断言绕过。
 
+## 11.9 已知项与未覆盖项
+
+- **未覆盖：GPU / CUDA 旅程**。验收默认只跑 `lab`（xv6）/`work`/`admin` 三条；`LABWEAVER_E2E_LAB=cuda`
+  未执行。原因：节点广播的是 `nvidia.com/gpu`（仅 `v1-worker-97`），而 `deploy/versions.lock.yml`
+  的 reviewed class 用 `allocation_binding: nvidia-cuda-primary-v1`，且 `resource-service-config/capacity.json`
+  未配置 GPU observer（只有 `container-primary-v1`）。条件不满足时不替换为 Mock、也不宣称成功，
+  按实记录为未覆盖。
+- **未覆盖：`authoring` 旅程的易用性检查点**。`tools/user_acceptance.py` 的旅程表里有 `authoring`
+  （教师独立出题），但它属可选旅程，`web/e2e/teacher/authoring.live.spec.mjs` 未接入
+  `usability.mjs` 的三个断言；默认三旅程（lab/work/admin）已全部接入。
+- **未覆盖：KubeVirt VM 与 linux-nginx 材料链**。virt-api/virt-controller/virt-operator 长期
+  CrashLoop（见 §7 与上面的说明），因此 VM 类实验与 Probe 链路未在本轮验收范围内。
+- **已知项：环境控制台的状态文案可能短暂滞后**。环境已 `运行中`、端点表已出现「健康」时，页面上
+  仍可能残留 `当前正在创建环境，请在操作完成后继续。`；不阻断旅程（`assertNoStuckProgress` 只检查
+  加载指示器与虚构百分比），附本次截图证据于 §12 的失败快照目录。
+- **已知项：并行验收要避开 worker 串行**。agent worker 一次只处理一个 reserved dispatch，验收前用
+  `cancel-stale` 清路、或用 `run` 的默认队列等待；否则旅程会把轮询预算耗在排队上。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
