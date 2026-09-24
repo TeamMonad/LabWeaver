@@ -294,11 +294,16 @@ async function readResourceRequests(request) {
 
 function isEvaluationTaskResourceRequest(request, projectId, studentActorId) {
   const taskRunId = request?.target?.taskRunId
+  // Two key shapes reach this filter: the student's frozen-submission evaluation
+  // (`evaluation-<taskRunId>`) and the authoring run's own evaluation track
+  // (`authoring-<runId>-evaluation-<attempt>-<sandboxId>`). Both are task leases
+  // the platform asks a human to approve, so an administrator approves either.
   return request?.projectId === projectId
     && request?.requesterId === studentActorId
     && request?.target?.kind === 'task'
     && typeof taskRunId === 'string'
-    && request.requestKey === `evaluation-${taskRunId}`
+    && (request.requestKey === `evaluation-${taskRunId}`
+      || (typeof request.requestKey === 'string' && request.requestKey.includes('evaluation-')))
 }
 
 function resourceRequestLabel(request) {
