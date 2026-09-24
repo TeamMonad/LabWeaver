@@ -1404,6 +1404,17 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 `agent.dispatch.worker_started` 与 `agent.dispatch.claimed`，队列随即开始消化。因此遇到「旅程长时间卡在
 authoring、且集群里没有 authoring Pod」时，先确认派发循环是否在跑，再做重启，不要把它误判成产品缺陷。
 
+### 11.18 清理「认领后卡住」的旧 AgentRun（运维要点）
+
+楔死期间留下的 `requested` run 会让验收入口的队列等待一直不收敛，需要人工清理。两条实测细节：
+
+- **取消 AgentRun**：`POST /api/v1/projects/{projectId}/agent-runs/{runId}/cancel`，必须带 **`If-Match`**
+  （用详情响应的 `ETag`；只带 body 里的 `expectedRevision` 会得到 `412 lw_urn:if_match_required`）。
+  用 **teacher 会话**（项目所有者）即可，`admin` 对他人项目会 `LW_AUTH_SCOPE_DENIED`。成功返回 `202`。
+- **清理孤儿租约**：`POST /api/v1/resource-leases/{id}/revoke`，body 需 `expectedRevision`
+  （缺字段是 422），同样用有 scope 的会话。
+- 队列不收敛时也可给验收入口加 `--no-queue-wait` 直接开跑（该 flag 语义是「不等排队的 authoring 派发」）。
+
 ### 11.17 孤儿 task 租约会永久拖住容量同步（本轮阻塞验收的集群状态问题）
 
 **现象**：run 61 之后集群的 authoring 队列不再消化——`agent.agent_runs` 多条停在 `requested`，
