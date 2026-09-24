@@ -2432,8 +2432,15 @@ fn build_command_from_bytes(
     } else {
         ("1".to_owned(), String::new(), "dontAsk")
     };
-    let args = vec![
-        "--bare".to_owned(),
+    // Authoring sessions need the reviewed builtin tool set; the CLI's --bare
+    // mode narrows it to Bash/Edit/Read, which makes the model's Write/Glob/Grep
+    // calls fail as denied tool use. Non-authoring candidates call no tools at
+    // all, so they keep the minimal --bare mode.
+    let mut args = Vec::new();
+    if !authoring {
+        args.push("--bare".to_owned());
+    }
+    args.extend([
         "--print".to_owned(),
         "--output-format".to_owned(),
         "stream-json".to_owned(),
@@ -2457,7 +2464,7 @@ fn build_command_from_bytes(
         "--system-prompt".to_owned(),
         SYSTEM_PROMPT.to_owned(),
         prompt.to_owned(),
-    ];
+    ]);
     let env = BTreeMap::from([
         (
             "API_TIMEOUT_MS".to_owned(),
@@ -2875,11 +2882,11 @@ fn generated_build_recipe_is_complete(plan: &Value, dockerfile_path: &str) -> bo
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
 
-const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
+const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":false,"builtinTools":["Bash","Edit","Glob","Grep","Read","Write"],"maxTurnsPerCandidate":60,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"bypassPermissions","sessionPersistence":false}"#;
 
 const AUTHORING_MAX_TURNS: u32 = 60;
 const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
-const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create files there with Bash (for example a heredoc) and edit them with Edit, and run commands with Bash. Your available tools are exactly Bash, Edit and Read; do not call any other tool. A rootless BuildKit daemon is reachable through BUILDKIT_HOST for image builds and may only pull from the platform Harbor registry; when you build a container image, export its OCI layout to exactly /workspace/labweaver-export.tar (for example: buildctl build --frontend dockerfile.v0 --local context=/workspace/context --local dockerfile=/workspace/context --output type=oci,dest=/workspace/labweaver-export.tar). Only that exact exported layout is imported and published by the platform. The final response must still be exactly one JSON object satisfying the required schema.";
+const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. A rootless BuildKit daemon is reachable through BUILDKIT_HOST for image builds and may only pull from the platform Harbor registry; when you build a container image, export its OCI layout to exactly /workspace/labweaver-export.tar (for example: buildctl build --frontend dockerfile.v0 --local context=/workspace/context --local dockerfile=/workspace/context --output type=oci,dest=/workspace/labweaver-export.tar). Only that exact exported layout is imported and published by the platform. The final response must still be exactly one JSON object satisfying the required schema.";
 
 fn platform_image_prompt(images: &[PlatformImageEntry]) -> String {
     use std::fmt::Write as _;
