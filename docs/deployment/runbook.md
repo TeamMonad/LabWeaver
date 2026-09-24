@@ -720,12 +720,14 @@ helm -n labweaver-system history labweaver
   `LAB_EXPERIMENT_AGENT_RUN_STATUS_FAILED:401` 失败。v1 私有配置已把两者提到 14400（4 小时）；
   更长的旅程需要同步调大，或由前端实现会话续期。
 - **本地模型的候选 JSON 是本轮最后的阻塞**：沙箱内 CLI 能以 `exit_code=0` 完成
-  （`terminal_reason: completed`，`result.json` 135–382 KiB，`model: qwen3.6:27b`），但 runtime 报
-  `agent.llm.candidate_parse_failed`（`stdout_preview` 有内容、`retryable: true`）→ 该 track 以
-  `LW_PROVIDER_UNAVAILABLE` 失败。原因候选是**模型最后一条消息不是所要求的 JSON 对象**，而不是链路问题。
-  契约把 `max_schema_repairs` 限制为 **≤ 2**（`crates/contracts/src/authoring.rs:172`），所以不能靠加大修复次数解决；
-  换用更大的同族模型（`qwen3.6:35b`）后失败形态不变。处置方向：强化候选提示/放宽 schema，
-  或改用更强的模型——属于产品决策，不得用 Mock 或放宽断言替代。
+  （`terminal_reason: completed`，`result.json` 135–382 KiB），但 runtime 报
+  `agent.llm.candidate_parse_failed`，其完整字段为
+  `diagnostic_code=LW_EVIDENCE_INVALID`、**`error_kind=SchemaInvalid`**、`retryable=true`：
+  即**模型输出的候选 JSON 不满足所审阅的 schema**（不是提取失败）。契约把 `max_schema_repairs`
+  限制为 **≤ 2**（`crates/contracts/src/authoring.rs:172`），不能靠加大修复次数解决；已实测
+  `qwen3.6:27b`、`qwen3.6:35b`、`glm-4.7-flash:latest` 三种本地模型均为同一形态。
+  处置方向：强化候选提示/放宽 schema，或接入满足该 schema 的模型——属于产品决策，
+  不得用 Mock 或放宽断言替代。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
