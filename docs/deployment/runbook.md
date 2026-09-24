@@ -1726,6 +1726,28 @@ Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留
 `:443` 是 Cilium Gateway 生成 Location 时补上的。浏览器对 `https://host:443` 与 `https://host` 视为
 同一来源，因此不影响可用性与会话 cookie（`__Host-` 仅看主机名）。记录为已知项，不做模板改动。
 
+### 12.2.1 部署后 evaluation-service 崩溃循环会让所有评测结果读取 503（已修一处，附取证）
+
+现象与因果链（2026-09-24 22:15-22:21 实测）：
+
+1. `evaluation-service` 的 `round` 观察路径在 K8s 观察调用出错时返回
+   `ExecutionError::Backend("oj_observe_failed")`，而执行循环 `run()` 把它当作 durable control-plane
+   failure 上抛到 `main`，进程直接退出——日志末行即
+   `Error: Process(Execution(Backend("oj_observe_failed")))`，Pod 反复重启（`restartCount` 递增、`ready=false`）。
+2. 该服务不可用期间，access-service 对 `GET /api/v1/projects/{id}/me/evaluation-results` 一律 503
+   `LW_AUTH_EVALUATION_UNAVAILABLE`（**所有项目**都失败，而不是个别项目），lab/work/admin 三条旅程
+   因此全部卡在这一步。
+3. `kubectl set image` 回滚到上一版镜像后 Pod 变为 `ready=true`，同一读取立刻恢复（6/6 成功）——证明
+   503 的成因就是该服务崩溃循环，不是路由或证书问题。
+
+修复：`daf0a90` 让观察失败在**与「Job 缺失」相同的有界窗口**内重试，只有窗口耗尽才返回后端错误；
+结构性的「资源包缺失」仍然立即失败。**尚存的边界**：窗口耗尽后仍返回 `Backend`，而循环依旧把它当致命错误，
+所以彻底止血还需要让**步骤级**后端错误不再终止进程（属执行侧 owner 的下一步）。
+
+另有一条独立观察：最新一次评测（run `01a0d57c…`，22:15，已在跑宽限修复的镜像）结果仍为
+`LW_OJ_JOB_MISSING`，说明 Job 是**真的缺席超过了两分钟**，而不是观察与清理的短窗口竞态；同窗口
+`evaluation.orphan.reconcile_failed` 持续出现（`14ed6fe` 之后会带 `error_kind`，用于判定是否由它删除）。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
