@@ -953,6 +953,13 @@ helm -n labweaver-system history labweaver
     尝试落地之前，且 `agent.agent_run_dispatches` 已是 `prepared`。
   处置：按 §12「产品缺陷」改源码后重新打包部署，并补上该段的失败诊断；不得以 Mock 或降级断言绕过。
 
+### 11.9.0 佐证：lab 遗留 run 的终态
+
+killed 旅程留下的 lab run `01a0d2d3-003e-7930-9b9e-d0bf49e14e7b` 最终为 **`partially_succeeded`**，
+两条轨迹 `environment:failed, evaluation:succeeded`：evaluation 侧可被接受，environment 侧失败，
+与「experiment 候选丢掉了 materials 声明的 terminal/entry（contract 为 `"endpoints": []`）」的诊断
+一致；这也说明环境轨迹的失败**不是** provider、凭据或集群问题（同一 run 的另一条轨迹成功落地）。
+
 ### 11.9.1 三条旅程的共同依赖
 
 `lab`、`work`、`admin` 三条旅程都包含「生成 Work 模板 → 候选 → 构建 → 批准」这一段（`admin` 的
