@@ -1006,6 +1006,13 @@ helm -n labweaver-system history labweaver
   `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE`；同一时段 **lab 包的 environment + evaluation 两条轨迹
   双双 succeeded**。即：同一模型在「实验包」两条 schema 上已能产出被接受的候选，而「Work 模板」这条
   仍未通过，属提示/模型能力边界，不是链路或权限问题；work 旅程会重试，失败时按此诊断记录。
+- **materials 声明的环境面现在由平台补齐（已修，需重新打包部署 agent-service）**：提示词早已要求
+  「逐字保留 materials 的 `terminal`/`entries`/`service_port`」，但本机模型会漏抄（run 53 的 experiment
+  候选 `runtime` 段就没有 `terminal`，实验室因此打不开控制台）。现在 `agent-service` 在 **Environment 轨**
+  物化候选时，从受验证信封里取出 materials 声明的 `EnvironmentSpec`，把候选**漏掉**的面（`runtime.terminal`、
+  `runtime.service_port`、`entries`）按声明值补回：候选显式给了值就以候选为准，运行时变体不同则一概不继承，
+  并记 `agent.candidate_materialization.declared_surfaces_restored` 事件。这样 Web 控制台与终端绑定的解析
+  不再依赖模型是否照抄，且不引入静默降级——补的是教师已批准素材里的声明值。
 - **lab 旅程下一步的真实缺口：experiment 候选没有带 terminal/entry（已定位到「模型漏抄」这一步）**。
   **决定性对照（本轮 run 56 实测）**：示例包 `examples/xv6-lab/environment.yaml` **明确声明**了
   `runtime.terminal: {executable: /bin/sh, args: [], workingDirectory: /workspace}` 与

@@ -1969,6 +1969,20 @@ impl ClaudeCodeRuntime {
                     );
                     failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
                 })?;
+            let declared = declared_environment_spec_from_bytes(&input.bytes());
+            if let Some(declared) = declared.as_ref() {
+                let restored = preserve_declared_environment_surfaces(&mut output, declared);
+                if !restored.is_empty() {
+                    tracing::info!(
+                        event = "agent.candidate_materialization.declared_surfaces_restored",
+                        component = "agent-service",
+                        operation = "candidate.materialize",
+                        outcome = "restored",
+                        track = ?track,
+                        surfaces = ?restored,
+                    );
+                }
+            }
             output["runtime"]["build_context"] = serde_json::to_value(artifact).map_err(|_| {
                 tracing::error!(
                     event = "agent.candidate_materialization.failed",
@@ -2957,6 +2971,74 @@ fn contains_protected_field(output: &Value) -> bool {
 /// rules the candidate materializer enforces. Delegating to the materializer
 /// keeps authoring repair (a retryable schema rejection) in lockstep with
 /// materialization, so a rejected plan never becomes a non-retryable failure.
+/// Recovers the materials' declared `EnvironmentSpec` from a verified egress envelope.
+///
+/// The envelope embeds teacher material as JSON strings, so the spec has to be recovered by
+/// parsing each embedded document; both an `environmentSpec` member and a bare spec document are
+/// accepted because the authoring prompt tells the candidate about both shapes.
+fn declared_environment_spec_from_bytes(bytes: &[u8]) -> Option<Value> {
+    let envelope: Value = serde_json::from_slice(bytes).ok()?;
+    envelope
+        .get("files")?
+        .as_array()?
+        .iter()
+        .find_map(|file| {
+            let content = file.get("content")?.as_str()?;
+            let document: Value = serde_json::from_str(content).ok()?;
+            if document.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec") {
+                return Some(document);
+            }
+            let spec = document.get("environmentSpec")?.clone();
+            (spec.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec")).then_some(spec)
+        })
+}
+
+/// Fills the declared surfaces a candidate left out.
+///
+/// The authoring contract requires the candidate to carry the materials' terminal, service port and
+/// entries over verbatim, because the web console and terminal access resolve their binding from
+/// them: an environment built from a candidate that dropped them is unusable even though its schema
+/// is satisfied. Only surfaces the candidate omitted are filled, so an explicit candidate value
+/// always wins, and a candidate that switched the runtime variant inherits nothing.
+fn preserve_declared_environment_surfaces(output: &mut Value, declared: &Value) -> Vec<&'static str> {
+    let mut restored = Vec::new();
+    let Some(declared_runtime) = declared.get("runtime") else {
+        return restored;
+    };
+    let Some(output_object) = output.as_object_mut() else {
+        return restored;
+    };
+    let entries_missing = match output_object.get("entries") {
+        None => true,
+        Some(value) => value.as_array().is_none_or(Vec::is_empty),
+    };
+    if let Some(runtime) = output_object
+        .get_mut("runtime")
+        .and_then(Value::as_object_mut)
+        .filter(|runtime| runtime.get("kind") == declared_runtime.get("kind"))
+    {
+        for key in ["service_port", "terminal"] {
+            let missing = runtime.get(key).is_none_or(Value::is_null);
+            let declared_value = declared_runtime
+                .get(key)
+                .filter(|value| !value.is_null());
+            if let Some(value) = declared_value.filter(|_| missing) {
+                runtime.insert(key.to_owned(), value.clone());
+                restored.push(key);
+            }
+        }
+    }
+    let declared_entries = declared
+        .get("entries")
+        .and_then(Value::as_array)
+        .filter(|entries| !entries.is_empty() && entries_missing);
+    if let Some(declared_entries) = declared_entries {
+        output_object.insert("entries".to_owned(), Value::Array(declared_entries.clone()));
+        restored.push("entries");
+    }
+    restored
+}
+
 fn generated_build_recipe_is_complete(plan: &Value, dockerfile_path: &str) -> bool {
     crate::candidate_materializer::generated_recipe_is_valid(plan, dockerfile_path)
 }
@@ -3512,5 +3594,114 @@ mod tests {
         );
         writer_task.abort();
         Ok(())
+    }
+
+    #[test]
+    fn declared_environment_surfaces_are_restored() {
+        let envelope = json!({
+            "files": [{
+                "path": "environment.yaml",
+                "content": json!({
+                    "apiVersion": "environment.labweaver.io/v1",
+                    "kind": "EnvironmentSpec",
+                    "name": "xv6-riscv-user-lab",
+                    "entries": [{ "name": "public-files", "protocol": "http", "servicePort": 8080 }],
+                    "runtime": {
+                        "kind": "container",
+                        "provider_binding": "container-primary-v1",
+                        "service_port": 8080,
+                        "terminal": {
+                            "executable": "/bin/sh",
+                            "args": [],
+                            "workingDirectory": "/workspace"
+                        }
+                    }
+                })
+                .to_string()
+            }]
+        })
+        .to_string();
+        let declared = super::declared_environment_spec_from_bytes(envelope.as_bytes());
+        assert!(declared.is_some(), "the envelope must expose its declared spec");
+        let declared = declared.unwrap_or_else(|| json!({}));
+        let mut candidate = json!({
+            "kind": "EnvironmentSpec",
+            "entries": [],
+            "runtime": { "kind": "container", "provider_binding": "container-primary-v1" }
+        });
+        let restored = super::preserve_declared_environment_surfaces(&mut candidate, &declared);
+        assert_eq!(restored, vec!["service_port", "terminal", "entries"]);
+        assert_eq!(candidate["runtime"]["service_port"], 8080);
+        assert_eq!(candidate["runtime"]["terminal"]["executable"], "/bin/sh");
+        assert_eq!(candidate["runtime"]["terminal"]["workingDirectory"], "/workspace");
+        assert_eq!(candidate["entries"][0]["name"], "public-files");
+    }
+
+    #[test]
+    fn explicit_candidate_surfaces_win_over_the_declared_ones() {
+        let declared = json!({
+            "kind": "EnvironmentSpec",
+            "entries": [{ "name": "public-files", "protocol": "http", "servicePort": 8080 }],
+            "runtime": {
+                "kind": "container",
+                "service_port": 8080,
+                "terminal": { "executable": "/bin/sh", "args": [], "workingDirectory": "/workspace" }
+            }
+        });
+        let mut candidate = json!({
+            "kind": "EnvironmentSpec",
+            "entries": [{ "name": "console", "protocol": "http", "servicePort": 3000 }],
+            "runtime": {
+                "kind": "container",
+                "service_port": 3000,
+                "terminal": { "executable": "/bin/bash", "args": ["-l"], "workingDirectory": "/srv" }
+            }
+        });
+        assert!(
+            super::preserve_declared_environment_surfaces(&mut candidate, &declared).is_empty()
+        );
+        assert_eq!(candidate["runtime"]["service_port"], 3000);
+        assert_eq!(candidate["runtime"]["terminal"]["executable"], "/bin/bash");
+        assert_eq!(candidate["entries"][0]["name"], "console");
+    }
+
+    #[test]
+    fn a_switched_runtime_variant_never_inherits_console_surfaces() {
+        let declared = json!({
+            "kind": "EnvironmentSpec",
+            "runtime": {
+                "kind": "virtual_machine",
+                "ssh_port": 22,
+                "terminal": { "executable": "/bin/sh", "args": [], "workingDirectory": "/workspace" }
+            }
+        });
+        let mut candidate = json!({
+            "kind": "EnvironmentSpec",
+            "runtime": { "kind": "container", "provider_binding": "container-primary-v1" }
+        });
+        assert!(
+            super::preserve_declared_environment_surfaces(&mut candidate, &declared).is_empty()
+        );
+        assert!(candidate["runtime"].get("terminal").is_none());
+        assert!(candidate["runtime"].get("service_port").is_none());
+    }
+
+    #[test]
+    fn an_envelope_without_a_declared_spec_restores_nothing() {
+        let envelope = json!({
+            "files": [{ "path": "notes.md", "content": "# no spec here" }]
+        })
+        .to_string();
+        assert!(super::declared_environment_spec_from_bytes(envelope.as_bytes()).is_none());
+        let mut candidate = json!({
+            "kind": "EnvironmentSpec",
+            "runtime": { "kind": "container", "provider_binding": "container-primary-v1" }
+        });
+        assert!(super::preserve_declared_environment_surfaces(
+            &mut candidate,
+            &json!({ "kind": "EnvironmentSpec" })
+        )
+        .is_empty());
+        assert!(candidate["runtime"].get("terminal").is_none());
     }
 }
