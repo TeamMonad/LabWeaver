@@ -582,7 +582,10 @@ def cancel_superseded_runs(
     )
     if code != 0 or not stdout.strip():
         return []
-    results: list[dict[str, str]] = []
+    # Every run is offered to every role: a run the first role cannot read would otherwise be
+    # recorded as `no-etag` and skipped for the role that owns it (the earlier order-dependent
+    # version did exactly that). Keep the best outcome seen per run.
+    results: dict[str, dict[str, str]] = {}
     for role in ("student", "teacher"):
         cookie = _auth_cookie(auth_dir / f"{role}.json")
         if not cookie:
@@ -602,7 +605,7 @@ def cancel_superseded_runs(
                 continue
             if keep_prefix and run_id.startswith(keep_prefix):
                 continue
-            if any(item["run_id"] == run_id for item in results):
+            if results.get(run_id, {}).get("outcome", "").startswith("http-2"):
                 continue
             _, _, headers = _http(
                 f"{base_url}/api/v1/projects/{project_id}/agent-runs/{run_id}",
@@ -611,7 +614,7 @@ def cancel_superseded_runs(
             )
             etag = headers.get("etag") or headers.get("ETag")
             if not etag:
-                results.append({"run_id": run_id, "outcome": "no-etag"})
+                results.setdefault(run_id, {"run_id": run_id, "outcome": "no-etag"})
                 continue
             status, _, _ = _http(
                 f"{base_url}/api/v1/projects/{project_id}/agent-runs/{run_id}/cancel",
@@ -622,8 +625,8 @@ def cancel_superseded_runs(
                 token=token,
                 etag=etag,
             )
-            results.append({"run_id": run_id, "outcome": f"http-{status}"})
-    return results
+            results[run_id] = {"run_id": run_id, "outcome": f"http-{status}"}
+    return list(results.values())
 
 
 def queued_dispatch_count(
