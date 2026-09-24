@@ -1650,6 +1650,31 @@ artifacts/acceptance/<run-id>/
 「日志存在却无法定位」。已加单元测试固定这层契约（`safe_log_field_separates_safe_sensitive_and_unknown_field_names`），
 新增日志字段时必须使用名单里已有的名字。
 
+### 12.2 lab 段当前的真实阻塞：OJ 步骤被判 `LW_OJ_JOB_MISSING`（平台缺陷，已定位未修）
+
+本轮（`public-20260924-3j-a1-9233`）lab 段的失败不再是编译，而是评测结果读取：
+`REAL_EXPERIMENT_EVALUATION_RESULTS_READ_FAILED:503 {"diagnosticCode":"LW_AUTH_EVALUATION_UNAVAILABLE"}`；
+随后用真实 student 会话直接读 `/api/v1/projects/{id}/me/evaluation-results` 得到 **200**，内容为
+`{"runId":"01a0d52c-89cb-7b52-b995-3731906ab643","diagnosticCode":"LW_OJ_JOB_MISSING","maxScore":100,"createdAt":"2026-09-24T20:47:40.997Z"}`。
+即：**503 是该次读取的瞬时抖动，评测本身以 `LW_OJ_JOB_MISSING` 终态失败**。
+
+证据链与代码位置：
+
+- `labweaver-evaluation` 里同一时间窗存在 `job/lw-oj-01a0d52c8a327030bb20`，事件链
+  `Pulled(3m) → Created → Started → Completed`，Job 名 = `lw-oj-<attempt_id 前 20 位>`
+  （`services/evaluation-service/src/oj_executor.rs:481`）；
+- `services/evaluation-service/src/kubernetes_runner.rs:1755` 把观察到的
+  `OjJobObservation::Missing` **直接判为终态失败** `LW_OJ_JOB_MISSING`；
+- 同一时刻 evaluation-service 侧出现 `evaluation.orphan.reconcile_failed`
+  （`LW_EVALUATION_ORPHAN_RECONCILE_FAILED`，3 次）与 54 条 `http.tls.handshake_failed`。
+
+结论：`Missing` 在正常路径上意味着「Job 已被清理」，但生命周期里存在一段
+「attempt 仍被 coordinator 视为在跑、其 Job 已被清理」的窗口，观察者一旦落进该窗口就把整个
+**评测步骤**判死（`examples/xv6-lab/evaluation.yaml` 的 compile 步 `failurePolicy: stop`，不重试）。
+Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留期不是原因，清理与观察的
+顺序才是。修法应在执行/评测侧 owner 决定（让 `Missing` 在应用后的一段有界窗口内可重观察，或让
+清理与 coordinator 的 attempt 终态严格串行），本轮按证据记录、不放宽旅程断言。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
