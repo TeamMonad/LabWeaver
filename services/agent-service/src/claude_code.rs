@@ -2685,7 +2685,12 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
                                 .and_then(Value::as_str)
                                 .ok_or(ClaudeCodeRuntimeError::ProtocolInvalid)?,
                         ),
-                        Some("tool_use") => return Err(ClaudeCodeRuntimeError::ToolDenied),
+                        // A tool call is legitimate inside an authoring session: the
+                        // sandbox prompt tells the model to read /materials, write
+                        // /workspace and run Bash, and the CLI reports those turns as
+                        // assistant messages. Only the text blocks form the candidate,
+                        // so tool-use blocks are skipped rather than treated as a denial.
+                        Some("tool_use") => {}
                         _ => return Err(ClaudeCodeRuntimeError::ProtocolInvalid),
                     }
                 }
@@ -3190,6 +3195,60 @@ mod tests {
         assert_eq!(
             super::tool_policy_sha256(false),
             Sha256Digest::of_canonical(&document)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tool_use_turns_do_not_discard_the_final_candidate() -> Result<(), Box<dyn Error>> {
+        let stream = [
+            json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "01900000-0000-7000-8000-000000000002",
+            }),
+            json!({
+                "type": "assistant",
+                "session_id": "01900000-0000-7000-8000-000000000002",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                },
+            }),
+            json!({
+                "type": "user",
+                "session_id": "01900000-0000-7000-8000-000000000002",
+                "isSynthetic": true,
+                "message": {"role": "user", "content": [{"type": "text", "text": "ok"}]},
+            }),
+            json!({
+                "type": "assistant",
+                "session_id": "01900000-0000-7000-8000-000000000002",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "{\"scriptContent\":\"true\"}"}],
+                },
+            }),
+            json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "session_id": "01900000-0000-7000-8000-000000000002",
+                "num_turns": 3,
+                "total_cost_usd": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "modelUsage": {},
+                "permission_denials": [],
+                "api_error_status": null,
+                "terminal_reason": "completed",
+            }),
+        ]
+        .map(|event| event.to_string())
+        .join("\n");
+        let parsed = super::parse_stream_output(stream.as_bytes())?;
+        assert_eq!(
+            parsed.candidate.as_deref(),
+            Some("{\"scriptContent\":\"true\"}")
         );
         Ok(())
     }
