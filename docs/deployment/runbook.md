@@ -925,6 +925,11 @@ helm -n labweaver-system history labweaver
   即候选没有声明任何 entry/terminal —— 与提示词里「容器环境若保留终端，必须带上 terminal 对象
   （executable/args/workingDirectory），否则 Web 控制台无法打开」的约束不符。作为当前 lab 旅程的
   归因记录；同批 work 候选（`01a0d2cc`）声明了 `http` 端点且观测为 `healthy`。
+- **提示词修复已在部署产物中核实**：从运行的 agent-service 镜像
+  （`sha256:17e5e5ce…`，`docker create` + `docker cp` 取出 `/usr/local/bin/labweaver-service`）中
+  grep 到 `terminal object`（环境提示词新增的“逐字保留 materials 声明的每个面”）与
+  `Generate exactly one WorkConfigurationDraft`；`verificationScriptContent` 出现 3 次（提示词与 schema）。
+  即 `issue127-public-12` 部署后，两条提示词修复确实在集群里生效，而不是只落在源码里。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
