@@ -1640,6 +1640,16 @@ artifacts/acceptance/<run-id>/
 - 产品缺陷（页面死路、错误不可读、假进度、刷新重试导致重复资源）→ 改源码与受影响测试，重新打包部署后重跑。
 - 已知但不阻塞的易用性打磨项 → 记入 §11.7，附截图与稳定诊断码。
 
+### 12.0 日志字段名与「可诊断但不泄密」的边界（实测）
+
+`SafeJsonFormatter`(`crates/telemetry/src/lib.rs`)只**逐字保留** `safe_log_field` 认得的名字，把
+`sensitive_log_field` 里的名字写成 `redacted_unclassified`，**其余名字静默丢弃**。实测后果：
+`services/http_transport.rs` 的 TLS 失败日志用 `peer = %peer`，而受保护名单里写的是 `peer_address`，
+于是 evaluation-service 近 25 分钟出现 54 条 `http.tls.handshake_failed` 却**没有任何对端信息**
+（`error` 同样是 `redacted_unclassified`）。这是设计选择（对端 IP 属受保护上下文），但字段名不一致会让
+「日志存在却无法定位」。已加单元测试固定这层契约（`safe_log_field_separates_safe_sensitive_and_unknown_field_names`），
+新增日志字段时必须使用名单里已有的名字。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：

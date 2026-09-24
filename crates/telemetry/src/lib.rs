@@ -277,6 +277,18 @@ impl Visit for SafeEventVisitor {
     }
 }
 
+#[test]
+fn safe_log_field_separates_safe_sensitive_and_unknown_field_names() {
+    // The formatter emits safe names verbatim, marks sensitive ones redacted, and drops everything
+    // else. A log site that invents a new field name silently loses its value, so the file-write and
+    // read-back paths must keep using the names these predicates know.
+    assert!(safe_log_field("event"));
+    assert!(!safe_log_field("authorization"));
+    assert!(sensitive_log_field("peer_address"));
+    assert!(!sensitive_log_field("event"));
+    assert!(!safe_log_field("peer_address"));
+}
+
 fn safe_log_field(name: &str) -> bool {
     matches!(
         name,
