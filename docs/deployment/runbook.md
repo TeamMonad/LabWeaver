@@ -912,6 +912,12 @@ helm -n labweaver-system history labweaver
   （`01a0d2c7-c42c-7d02-90d7-b53dac0a69a5`）以 `provider_binding=container-primary-v1` 从
   `provisioning` 走到 **`observed_state=ready`**，说明「发布包 → 候选 → 环境实例 → 就绪」整段在
   真实集群上可用；同一时段 work 旅程的 authoring 也在并行推进。
+- **Work 模板（environment/evaluation 之外的第三条 authoring 轨迹）仍会拿到 schema 不适配的候选**：
+  work 旅程的 run `01a0d2c3-7877-7a10-96b1-acba622c1894` 的沙箱尝试为 `environment|released|exit_code=0`
+  （CLI 正常退出），但 worker 侧记录到 `SchemaInvalid` → `LW_EVIDENCE_INVALID`，另有一次
+  `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE`；同一时段 **lab 包的 environment + evaluation 两条轨迹
+  双双 succeeded**。即：同一模型在「实验包」两条 schema 上已能产出被接受的候选，而「Work 模板」这条
+  仍未通过，属提示/模型能力边界，不是链路或权限问题；work 旅程会重试，失败时按此诊断记录。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
