@@ -782,6 +782,23 @@ helm -n labweaver-system history labweaver
   回合（真实用户消息带 `text` 块，仍被拒绝，注入防护不变）；同时让非 schema 的解析失败也
   记录同样的有界 `stdout_preview`，便于定位协议类拒绝。回归测试覆盖
   `tool_use` + `tool_result` 循环。
+- **Work 环境失败的真实原因：候选里的 `provider_binding` 不是集群注册的那个**。模型只能
+  从提示词里得知可用的 provider binding，而提示词此前**没有**任何 binding 列表，于是候选写的是
+  示例包里的开发值 `kubernetes-work-local-hostpath`；环境服务只注册 `container-primary-v1`
+  （`environment-service-config/providers.json`），`ProviderRegistry::resolve` 直接返回
+  `LW_ENVIRONMENT_PROVIDER_UNAVAILABLE`（reconcile 第 1 步、`duration_ms: 0`）。
+  **已修复**：`DeploymentFile.authoring_provider_bindings`（可选，默认空）经
+  `ClaudeCodeRuntime::with_provider_bindings` 进入 authoring 提示词的
+  `PLATFORM PROVIDER BINDINGS (authoritative)` 段，候选只能复用可用的 binding 名；v1 私有
+  bundle 里设为 `[container-primary-v1]`。同时验收侧不再硬编码开发值：
+  `tools/user_acceptance.py` 从 `environment-service-config/providers.json` 读出容器 provider 的
+  `binding` 并以 `LABWEAVER_E2E_PROVIDER_BINDING` 注入旅程，`real-experiment.mjs` 还会把该值写回
+  上传的示例包 manifest（示例包本身仍保留开发默认值）。
+- **私有 render-input 与仓库里的 bundle manifest 不同步**：`deploy/config/platform-bundle-manifest.json`
+  列出的 configmap/secret 比 `render-input/` 实际内容多，直接用它渲染会得到
+  `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
+  （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
+  （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
