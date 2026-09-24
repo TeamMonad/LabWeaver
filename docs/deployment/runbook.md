@@ -565,8 +565,28 @@ helm -n labweaver-system history labweaver
   `HTTP_PROXY/HTTPS_PROXY` 构建参数注入；缺省时步骤无代理，构建会以
   `BuildKit platform image build failed … npm pack` 失败（Pod 本身能到代理，但构建步骤拿不到）。
   另外 `npm pack` 产物必须与 `deploy/versions.lock.yml` 的 `claude_code_linux_x64_sha512` 一致。
-- root 的 `~/.cargo/config.toml` 若启用了 sccache，长时间打包可能遇到
-  `Failed to read response header`：以 `RUSTC_WRAPPER= SCCACHE_DISABLE=1` 运行可绕过缓存守护进程。
+- **编译器缓存 wrapper 会让打包整体失败（已实测更正）**：本机在 `/home/wzh/.cargo/config.toml` 里把
+  `build.rustc-wrapper` 指向 `/home/wzh/.cargo/bin/sccache`。cargo 会**按目录向上**读配置，所以在
+  `/home/wzh/LabWeaver` 下的任何一次构建（**包括以 root 运行的 `xtask package`**）都会命中它；
+  该 sccache 服务端一旦不可达，cargo 连探测 `rustc -vV` 都失败，打包在 0.2 秒内以
+  `process didn't exit successfully: …/sccache … rustc -vV (exit status: 2)` +
+  `sccache: Failed to read response header` 结束。
+  实测**无效**的绕过：`RUSTC_WRAPPER= SCCACHE_DISABLE=1`（cargo 把空值当未设置，仍回落到目录配置）、
+  以 root 重启 sccache（用 `sudo -i -u root bash -lc 'sccache --start-server'` 起的服务端会随该 shell 退出，
+  下一次调用仍是 `Failed to read response header`）、或删掉 `/root/.cargo/config.toml`（该文件本就不存在）。
+  实测**有效**的做法：打包期间把那行注释掉，结束再还原——
+  ```sh
+  CFG=/home/wzh/.cargo/config.toml; cp "$CFG" /tmp/cargo-config-wzh.bak
+  python3 - "$CFG" <<'PY'
+  import sys; p=sys.argv[1]; t=open(p).read()
+  open(p,'w').write(t.replace('rustc-wrapper = "/home/wzh/.cargo/bin/sccache"',
+                              '# rustc-wrapper disabled for this packaging run'))
+  PY
+  # …运行 cargo xtask package…；随后 cp /tmp/cargo-config-wzh.bak "$CFG" 还原
+  ```
+  验证方式（与 cargo 的探测完全一致）：
+  `sudo -i -u root env PATH=/usr/local/bin:/usr/bin:/bin bash -lc 'cd /home/wzh/LabWeaver && cargo check -p task-execution'`
+  ——关掉 wrapper 后应在数十秒内 `Finished … profile`。
 - 本机 `docker buildx create --driver remote` 的 endpoint 需要独占本地端口；若默认 1234 已被残留
   port-forward 占用，换端口（如 1235）重建 builder，`inspect` 显示 `inactive` 属正常（首次构建才探测）。
 - Harbor 的基础镜像必须按 `deploy/versions.lock.yml` 的原 digest 存在；若某个 `base-*` 仓库的 digest 漂移，
