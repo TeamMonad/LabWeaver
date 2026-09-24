@@ -965,6 +965,10 @@ helm -n labweaver-system history labweaver
   `sha256:36e3edba7443df8467b5e2eb6f6373c92a9b2f79ec22d8d6e0c2ed48244d91d2`（即新渲染的
   `configuration-bundle-public-20260924b.yml`，含刷新后的 NATS 凭据）；`agent-service` 镜像 digest
   由 `sha256:0f210313…` 变为 **`sha256:c4d46c121aae3530…`**（含 `normalize_candidate` 围栏修复）。
+- **部署后仅追加了格式归一化提交**：在线包 `pkg-v1-issue127-public-13-e17f8d966d3d` 的 `source_commit` 是
+  `e17f8d966d3d`；此后为通过 `cargo fmt --all -- --check` 提交了 `d043ada`（3 个文件，逐行核对为 rustfmt
+  自身的换行/导入折行，`git diff -w` 对 `main.rs` 为空、对其余两处仅剩 rustfmt 归一化），**语义未变**，
+  因此实机镜像与验证结论仍然成立；后续若再打包，注意以新的 `source_commit` 重新记录一次部署身份。
 - **A4 复核（当前实机状态）**：`https://keycloak.labweaver.2018wzh.top/realms/workloads/.well-known/openid-configuration`
   的 `issuer`、`authorization_endpoint`、`token_endpoint` 全部是公网主机名；`/auth/login` 返回 307 且
   `Location` 指向公网 Keycloak；`/api/v1/auth/csrf` 在无会话时返回 401（`preflight` 的 portal-csrf 即按此断言）。
