@@ -896,6 +896,13 @@ helm -n labweaver-system history labweaver
   真正注册的那个）并走到 `desired_state=running / observed_state=ready`；与之对照，本轮之前的环境实例
   都是 `kubernetes-work-local-hostpath` + `failed/expiring` + `LW_ENVIRONMENT_PROVIDER_UNAVAILABLE`。
   说明「候选只能使用平台实际注册的 binding」这一改动在真实链路上生效。
+- **已修（验收脚本缺陷）**：work 旅程等待资源标题时用 `exact: true` 匹配裸环境 id，而控制台把 Work
+  环境命名为 `work-<环境 id>`，因此页面渲染正确也会超时。改为按包含匹配（`.resource-title-row`
+  范围内），提交 `4acf1c5`。
+- **已知易用性项（有证据，未修）**：失败快照显示环境已 `运行中`、端点表也已出现「健康」，但同一页面
+  仍有 `status: 当前正在创建环境，请在操作完成后继续。` 的残留提示；即运行状态与提示文案短暂不一致。
+  它不阻断旅程（`assertNoStuckProgress` 只看加载指示器与虚构百分比），作为已知项记录，附截图与本次
+  证据（`web/test-results/student-sprint2-flow.live--3dbb6-t-and-releases-its-capacity-student/`）。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
