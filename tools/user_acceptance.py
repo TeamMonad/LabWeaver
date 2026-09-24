@@ -475,11 +475,13 @@ def _join(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
-# One journey may legitimately run for half an hour (the lab spec allows 30
-# minutes), so the ceiling only exists to keep a hung browser from stalling the
-# whole suite. A timeout is reported as its own diagnostic instead of a generic
-# failure.
-JOURNEY_TIMEOUT_SECONDS = 2700.0
+# The specs own their chain budget (`FULL_CHAIN_TIMEOUT_MS` is four hours in the
+# student and admin specs, and the lab spec allows thirty minutes per attempt
+# plus retries), so this ceiling only exists to keep a hung browser from
+# stalling the whole suite. It must not be tighter than the spec it wraps:
+# a 45-minute cap killed a legitimately running admin journey
+# (`LW_ACCEPTANCE_JOURNEY_TIMEOUT`) while the spec still had budget left.
+JOURNEY_TIMEOUT_SECONDS = 15_000.0
 JOURNEY_TIMEOUT = "LW_ACCEPTANCE_JOURNEY_TIMEOUT"
 JOURNEY_TIMEOUT_EXIT_CODE = 124
 
