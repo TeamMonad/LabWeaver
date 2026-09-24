@@ -745,6 +745,12 @@ helm -n labweaver-system history labweaver
   | `ornith:35b` | `exit 1` | `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE` |
 
   实验后已把 `anthropic-model` 恢复为部署原值 `qwen3.6:27b`。
+- **`ToolDenied` 是另一条独立失败路径（同样落在 `LW_PROVIDER_UNAVAILABLE`）**：`work` 旅程的
+  authoring 尝试报 `agent.claude_code.failed` / `agent.llm.candidate_parse_failed`，其
+  `error_kind=ToolDenied`（`retryable=false`）。沙箱 CLI 启动时声明可用工具为 `["Bash","Edit","Read"]`，
+  模型尝试了列表外的工具即被拒。工具清单来自已审阅的 tool policy（`tool_policy_sha256(authoring)`），
+  放宽它等于扩大沙箱能力，属产品/安全决策；`lab` 旅程则是同一段的 schema 失败（见上）。两条路径
+  都需要产品侧决定后再复跑。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
