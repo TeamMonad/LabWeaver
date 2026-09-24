@@ -14,7 +14,6 @@ import {
   addProjectStudentByUi,
   readActorId,
   snapshotProjectResourceRequestIds,
-  startEvaluationResourceApprovalLoop,
   startExperimentRunByUi,
   uploadPackageDirectoryByUi,
   waitForEnvironment,
@@ -359,7 +358,6 @@ test('student completes a published lab experiment through the browser terminal'
   let environmentId
   let studentContext
   let adminContext
-  let evaluationApprovalLoop
   try {
     await cp(LAB.root, packageCopy, { recursive: true })
     const project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
@@ -390,15 +388,6 @@ test('student completes a published lab experiment through the browser terminal'
     const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(page, project.id, studentActorId)
-    // A real deployment approves this project's platform task leases in the admin
-    // console. Start that approval as soon as the project has an owner and a
-    // student so it also covers the authoring run's own leases.
-    evaluationApprovalLoop = startEvaluationResourceApprovalLoop({
-      browser,
-      baseURL,
-      projectId: project.id,
-      studentActorId,
-    })
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     const adminPage = await adminContext.newPage()
     environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
@@ -474,7 +463,6 @@ test('student completes a published lab experiment through the browser terminal'
         if (!studentContext) await cleanupContext.close()
       }
     } finally {
-      await evaluationApprovalLoop?.stop().catch(() => {})
       await studentContext?.close()
       await adminContext?.close()
       await rm(packageCopy, { recursive: true, force: true })
