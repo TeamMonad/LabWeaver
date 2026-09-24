@@ -1064,6 +1064,12 @@ helm -n labweaver-system history labweaver
   即卡点稳定落在 `claimed` 之后的「绑定/执行」段，且该段**没有可观测输出**——这是本轮验收中
   最需要 owner 处理的产品缺陷；验收侧只能靠周期性重启争取一次成功执行（run 54 的两次 authoring 即
   在重启后正常执行过，说明该路径可用但不可靠）。
+- **更正（同轮更晚的实测，重要）**：上面这条「停住」有相当一部分其实是**串行 worker 正被更早的 run 占用**：
+  同一时刻 `agent_track_work_items` 里 4 条 `running` 轨迹分别属于 11:39 与 11:44 两个**已被 kill 的验收
+  spec 留下的平台 run**，且 `heartbeat_at` 仍在刷新（11:55–11:56），说明它们在正常推进、并非卡死；
+  run 56 的 dispatch 只是按 `created_at` 排在它们之后。因此：**杀掉验收进程不会杀掉平台 run**，
+  它们会继续占用 worker 直到跑完；新一轮验收会因此排队。排查时应先看 `agent.agent_track_work_items`
+  的 `running` 轨迹归属与心跳，再判断是否真的停住；**不要**在 worker 忙碌时重启它（会中断在跑的 run）。
 - **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
   （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
   run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
