@@ -745,12 +745,14 @@ helm -n labweaver-system history labweaver
   | `ornith:35b` | `exit 1` | `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE` |
 
   实验后已把 `anthropic-model` 恢复为部署原值 `qwen3.6:27b`。
-- **`ToolDenied` 是另一条独立失败路径（同样落在 `LW_PROVIDER_UNAVAILABLE`）**：`work` 旅程的
-  authoring 尝试报 `agent.claude_code.failed` / `agent.llm.candidate_parse_failed`，其
-  `error_kind=ToolDenied`（`retryable=false`）。沙箱 CLI 启动时声明可用工具为 `["Bash","Edit","Read"]`，
-  模型尝试了列表外的工具即被拒。工具清单来自已审阅的 tool policy（`tool_policy_sha256(authoring)`），
-  放宽它等于扩大沙箱能力，属产品/安全决策；`lab` 旅程则是同一段的 schema 失败（见上）。两条路径
-  都需要产品侧决定后再复跑。
+- **`ToolDenied` 的精确原因：声明的工具清单与 CLI 实际提供的工具不一致**。runtime 传给 CLI 的是
+  `AUTHORING_TOOLS = "Bash,Edit,Glob,Grep,Read,Write"`（canonical policy
+  `AUTHORING_TOOL_POLICY_CANONICAL_JSON` 里也是这 6 个），但沙箱内 CLI 的 init 事件只列出
+  `["Bash","Edit","Read"]` —— 模型按提示去写文件时调用 `Write`/`Glob`/`Grep` 即被拒，
+  `error_kind=ToolDenied`（`retryable=false`），最终落在 `LW_PROVIDER_UNAVAILABLE`。
+  这是**声明清单与 CLI `--bare` 能力不一致**的缺陷：要么按 CLI 实际支持的工具收敛清单
+  （同时更新 canonical JSON 与其 sha256 断言），要么确认 `--bare` 下如何启用这三个工具。
+  属产品/契约决定，未擅自修改。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
