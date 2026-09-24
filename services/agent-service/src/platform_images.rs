@@ -461,6 +461,17 @@ pub async fn seed_platform_images(
         let resolved = match registry.resolve(&seed.source_reference).await {
             Ok(resolved) => resolved,
             Err(error) => {
+                // The outcome only carries the stable code; log the closed error
+                // kind too, otherwise an unreachable registry and a wrong
+                // credential are indistinguishable in production.
+                tracing::error!(
+                    event = "agent.platform_image.seed_resolve_failed",
+                    binding = %seed.binding,
+                    source_reference = %seed.source_reference,
+                    error_kind = ?error,
+                    diagnostic_code = error.diagnostic_code(),
+                    outcome = "failed",
+                );
                 outcomes.push(PlatformImageSeedOutcome::Failed {
                     cause: error.diagnostic_code(),
                 });
