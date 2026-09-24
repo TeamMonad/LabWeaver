@@ -735,7 +735,16 @@ helm -n labweaver-system history labweaver
   ```
 
   即模型给出的是**结构合理但字段不全**的候选（缺必填字段/空 metadata），因此是提示与 schema
-  严格度的问题，而不是链路或权限问题。
+  严格度的问题，而不是链路或权限问题。已实测的模型矩阵（同一旅程、同一 schema）：
+
+  | 模型 | sandbox CLI | runtime 结果 |
+  |---|---|---|
+  | `qwen3.6:27b`（部署原值） | `exit 0`，`result.json` 135–382 KiB | `SchemaInvalid` → `LW_EVIDENCE_INVALID` |
+  | `qwen3.6:35b` | `exit 0` | 同上 |
+  | `glm-4.7-flash:latest` | `exit 0`，`subtype=success` | 同上（候选字段不全） |
+  | `ornith:35b` | `exit 1` | `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE` |
+
+  实验后已把 `anthropic-model` 恢复为部署原值 `qwen3.6:27b`。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
