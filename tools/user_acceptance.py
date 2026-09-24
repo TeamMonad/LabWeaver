@@ -475,6 +475,14 @@ def _join(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
+# One journey may legitimately run for half an hour (the lab spec allows 30
+# minutes), so the ceiling only exists to keep a hung browser from stalling the
+# whole suite. A timeout is reported as its own diagnostic instead of a generic
+# failure.
+JOURNEY_TIMEOUT_SECONDS = 2700.0
+JOURNEY_TIMEOUT = "LW_ACCEPTANCE_JOURNEY_TIMEOUT"
+JOURNEY_TIMEOUT_EXIT_CODE = 124
+
 APPROVAL_REASON = "acceptance harness: approve the platform task resource request"
 APPROVAL_POLL_SECONDS = 5.0
 
@@ -923,13 +931,28 @@ def execute_journey(
     environment: Mapping[str, str],
     stdout_path: Path,
     stderr_path: Path,
+    timeout: float = JOURNEY_TIMEOUT_SECONDS,
 ) -> int:
+    """Run one journey, bounded so a hung browser cannot stall the whole suite."""
+
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr:
-        completed = subprocess.run(
-            list(command), cwd=ROOT, env=dict(environment), stdout=stdout, stderr=stderr
-        )
+        try:
+            completed = subprocess.run(
+                list(command),
+                cwd=ROOT,
+                env=dict(environment),
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"journey exceeded {timeout:.0f}s and was stopped",
+                file=sys.stderr,
+            )
+            return JOURNEY_TIMEOUT_EXIT_CODE
     return completed.returncode
 
 
@@ -1111,7 +1134,13 @@ def run_acceptance(
                 "spec": journey.spec,
                 "grep": journey.grep,
                 "status": "passed" if passed else "failed",
-                "diagnostic": None if passed else JOURNEY_FAILED,
+                "diagnostic": (
+                    None
+                    if passed
+                    else JOURNEY_TIMEOUT
+                    if returncode == JOURNEY_TIMEOUT_EXIT_CODE
+                    else JOURNEY_FAILED
+                ),
                 "exit_code": returncode,
             }
         )
@@ -1138,7 +1167,9 @@ def run_acceptance(
 
     exit_code = journey_exit_code(results)
     diagnostics = [] if exit_code == 0 else [
-        f"{item['key']}:{JOURNEY_FAILED}" for item in results if item["status"] != "passed"
+        f"{item['key']}:{item.get('diagnostic') or JOURNEY_FAILED}"
+        for item in results
+        if item["status"] != "passed"
     ]
     return RunResult(exit_code=exit_code, diagnostics=diagnostics, summary=summary)
 

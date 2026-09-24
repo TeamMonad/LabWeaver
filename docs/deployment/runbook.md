@@ -1082,6 +1082,11 @@ helm -n labweaver-system history labweaver
   run 56 的 dispatch 只是按 `created_at` 排在它们之后。因此：**杀掉验收进程不会杀掉平台 run**，
   它们会继续占用 worker 直到跑完；新一轮验收会因此排队。排查时应先看 `agent.agent_track_work_items`
   的 `running` 轨迹归属与心跳，再判断是否真的停住；**不要**在 worker 忙碌时重启它（会中断在跑的 run）。
+- **每个旅程都有上限，卡死的浏览器不再拖死整轮**：`tools/user_acceptance.py` 以
+  `JOURNEY_TIMEOUT_SECONDS=2700`（45 分钟）为单个 Playwright 旅程设上限，超时即终止并以
+  `LW_ACCEPTANCE_JOURNEY_TIMEOUT`（`<key>:LW_ACCEPTANCE_JOURNEY_TIMEOUT`）落入证据汇总；此前
+  `subprocess.run` 无超时，Playwright 卡在收尾时整轮会无限等待。单测覆盖「超时返回 124」与
+  「超时旅程的诊断码」两条。
 - **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
   审批线程，用 `web/.auth/platform-admin.json` 的会话每 5 秒查一次 `/api/v1/resource-requests`，对仍处于
   `reviewing` 的内部任务租约按管理员流程调用

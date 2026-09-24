@@ -7,6 +7,7 @@ rule. They never exercise the live cluster or the browser.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -344,6 +345,59 @@ class RunJourneyTest(unittest.TestCase):
                 )
 
         self.assertEqual([r["run_id"] for r in results], ["run-a"])
+
+    def test_execute_journey_stops_a_hung_browser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout_path = Path(tmp) / "journey.stdout.log"
+            stderr_path = Path(tmp) / "journey.stderr.log"
+            code = MODULE.execute_journey(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                {},
+                stdout_path,
+                stderr_path,
+                timeout=0.5,
+            )
+            self.assertEqual(code, MODULE.JOURNEY_TIMEOUT_EXIT_CODE)
+            self.assertTrue(stderr_path.exists())
+
+    def test_a_timed_out_journey_reports_its_own_diagnostic(self) -> None:
+        def execute(command, environment, stdout_path, stderr_path):  # noqa: ANN001
+            Path(stdout_path).write_text("", encoding="utf-8")
+            Path(stderr_path).write_text("", encoding="utf-8")
+            return MODULE.JOURNEY_TIMEOUT_EXIT_CODE
+
+        def kubectl(argv):  # noqa: ANN001
+            return 1, "", ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                base_url="https://portal.example.test",
+                run_id="run-timeout",
+                journeys="lab",
+                lab="xv6",
+                evidence_dir=tmp,
+                credentials_dir=Path(tmp) / "creds",
+                model="qwen3.6:27b",
+                provider_binding="container-primary-v1",
+                no_queue_wait=True,
+                bundle_sha256=None,
+                package_manifest=None,
+            )
+            (Path(tmp) / "creds").mkdir(parents=True, exist_ok=True)
+            for name in ("teacher.password", "student.password", "admin.password"):
+                (Path(tmp) / "creds" / name).write_text("secret", encoding="utf-8")
+            result = MODULE.run_acceptance(
+                args,
+                environ={MODULE.MODEL_ENV: "qwen3.6:27b"},
+                execute=execute,
+                run_kubectl=kubectl,
+                git_commit=None,
+                deployment_identity=None,
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.diagnostics, [f"lab:{MODULE.JOURNEY_TIMEOUT}"])
+        self.assertEqual(result.summary["journeys"][0]["diagnostic"], MODULE.JOURNEY_TIMEOUT)
 
     def test_approve_pending_resource_requests_approves_reviewing_leases_only(self) -> None:
         approved_posts: list[str] = []
