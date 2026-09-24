@@ -815,6 +815,10 @@ helm -n labweaver-system history labweaver
   影响：任何 in-cluster 服务调用（agent-service → Keycloak 的 service token/JWKS、worker 的
   对象存储与后续步骤）在 DNS 超时后长时间挂起，表现为「`agent.dispatch.claimed` 之后再无事件」。
   需要节点级恢复（控制平面节点重启或 Cilium datapath 重放），属于基础设施操作，本轮未执行。
+  已尝试的非破坏性恢复（均未成功）：删除并重建崩溃的 CoreDNS 副本（两副本恢复 1/1，但 Pod 内 DNS
+  仍超时）、重启该节点上的 Cilium agent（换 pod 名后同一端点仍报错）、
+  `cilium-dbg endpoint regenerate 938`（状态在 `regenerating → not-ready → waiting-to-regenerate`
+  之间循环，DNS 始终超时）。因此该端点需要节点级恢复才能回到 `ready`。
 - **排查线索：受控 OIDC HTTP 客户端没有超时**。`auth::no_redirect_http_client`
   （`crates/auth/src/provider.rs:266`）只设置 `no_proxy`/`redirect(none)`/TLS 信任，**没有 `timeout`**；
   凡是用它发起的 OIDC 调用（service token 刷新、JWKS 刷新）在被网络黑洞吞掉时会**永久挂起**，与
