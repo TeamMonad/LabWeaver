@@ -1353,6 +1353,14 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
   `smoke-tests` 因依赖 `skipped`），即**平台层缺陷已消除**：OJ 现在能正常建立陆锁沙箱、跑完容器，
   并把「编译失败」作为真实诊断报出来（而不是误报为沙箱不可用）。
 
+**编译失败的排查线索**：冻结提交 `01a0d49b-b0ab…` 的内容与
+`examples/xv6-lab/student/student.c` **完全一致（同为 114 字节）**，而独立探针证明该文件在同一 runner 镜像里
+`build-xv6.sh` 可 `BUILD_EXIT=0`。因此差异不在源码，而在**平台侧的调用环境**——最可能是
+`supportFiles`（`scripts/build-xv6.sh`、`xv6/xv6-source.tar.gz`）materialize 到 `/support` 这一步：
+profile 的 `compileArgv` 用 `{evaluator_dir}`（= `/support`）而不是镜像内的 `/opt/labweaver`，若
+`/support/xv6/xv6-source.tar.gz` 缺失，脚本会以 66 退出并被记成编译错误。下一步应核对这一步的落盘结果
+（顺序即：先看 `/support` 内容，再看 `compile` 的容器输出，后者目前仍未落盘）。
+
 **仍未覆盖**：失败切换成了编译本身——而独立探针证明 starter（`examples/xv6-lab/student/student.c`）
 在同一 runner 镜像里 `build-xv6.sh` 是 `BUILD_EXIT=0`。因此下一步是查**冻结后的提交内容**为何编译不过
 （实验材料/冻结语义），另外 `compile` 的容器输出目前仍未落入平台日志或尝试记录（§11.14 的建议只完成了
