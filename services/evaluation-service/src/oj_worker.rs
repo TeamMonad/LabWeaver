@@ -161,6 +161,10 @@ pub async fn run_oj_worker() -> Result<OjEvidenceReceipt, OjWorkerError> {
     .map_err(|_| OjWorkerError::ProfileInvalid)?;
     let compile = Box::pin(compile_program(&request, &profile, &paths, &support_paths)).await?;
     if !compile.status.success() || compile.capture.timed_out || compile.capture.output_exceeded {
+        // The evidence records only hashes and sizes, and it is written into this container's
+        // `/evidence` volume, so the actual compiler output would otherwise be unrecoverable once
+        // the Job is cleaned up. Mirror it into the container log (bounded) for diagnosis.
+        emit_compile_output(&compile.capture);
         let evidence = compile_failure_evidence(&request, request_sha256, &compile)?;
         return persist_evidence(&request, &evidence);
     }
@@ -1254,6 +1258,20 @@ fn compile_success_evidence(
     };
     evidence.validate_for(request)?;
     Ok(evidence)
+}
+
+/// Writes the bounded compiler output to the container log.
+fn emit_compile_output(capture: &ProcessCapture) {
+    const MAX_LOGGED_BYTES: usize = 8 * 1024;
+    for (stream, bytes) in [("stdout", &capture.stdout), ("stderr", &capture.stderr)] {
+        let truncated = bytes.len() > MAX_LOGGED_BYTES;
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_LOGGED_BYTES)]);
+        eprintln!(
+            "oj compile {stream} ({} bytes{}):\n{text}",
+            bytes.len(),
+            if truncated { ", truncated" } else { "" }
+        );
+    }
 }
 
 fn persist_evidence(
