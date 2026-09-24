@@ -30,7 +30,11 @@ const WORK_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
 
-const FULL_CHAIN_TIMEOUT_MS = 1_800_000
+const FULL_CHAIN_TIMEOUT_MS = 3_600_000
+// The deployment's own LLM bound is 15 minutes per candidate; the authoring and
+// image-build polls must not be shorter than the work they wait for.
+const AUTHORING_RUN_TIMEOUT_MS = 1_200_000
+const CANDIDATE_BUILD_TIMEOUT_MS = 900_000
 const REAL_WORK_CONFIG = realWorkConfig()
 const REAL_WORK_RESUME = realWorkResumeConfig()
 const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME)
@@ -88,7 +92,9 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
       `/api/v1/projects/${project.id}/agent-runs/${acceptedRun.id}`,
       (value) => terminalRunState(value.state),
       'WORK_TEMPLATE_RUN_STATUS_FAILED',
-      300_000,
+      // A real authoring run drives the sandbox CLI against the deployment's
+      // model, so it can take as long as the harness LLM timeout allows.
+      AUTHORING_RUN_TIMEOUT_MS,
     )
     if (run.state !== 'succeeded') {
       throw new Error(`WORK_TEMPLATE_RUN_FAILED:${run.state}:${run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'}`)
@@ -102,7 +108,7 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
       environmentTrack.candidateId,
       (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
       'WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
-      300_000,
+      CANDIDATE_BUILD_TIMEOUT_MS,
     )
     if (candidate.candidate?.spec?.class !== 'work') throw new Error('WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
     if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
