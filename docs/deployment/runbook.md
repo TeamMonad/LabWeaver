@@ -1355,11 +1355,12 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
 
 **编译失败的排查线索**：冻结提交 `01a0d49b-b0ab…` 的内容与
 `examples/xv6-lab/student/student.c` **完全一致（同为 114 字节）**，而独立探针证明该文件在同一 runner 镜像里
-`build-xv6.sh` 可 `BUILD_EXIT=0`。因此差异不在源码，而在**平台侧的调用环境**——最可能是
-`supportFiles`（`scripts/build-xv6.sh`、`xv6/xv6-source.tar.gz`）materialize 到 `/support` 这一步：
-profile 的 `compileArgv` 用 `{evaluator_dir}`（= `/support`）而不是镜像内的 `/opt/labweaver`，若
-`/support/xv6/xv6-source.tar.gz` 缺失，脚本会以 66 退出并被记成编译错误。下一步应核对这一步的落盘结果
-（顺序即：先看 `/support` 内容，再看 `compile` 的容器输出，后者目前仍未落盘）。
+`build-xv6.sh` 可 `BUILD_EXIT=0`。因此差异不在源码。已排除「素材包缺 supportFiles」这一可能：`examples/xv6-lab/manifest.json` 共 96 个文件，
+`xv6/xv6-source.tar.gz`（153 KB）与 `scripts/*` 都在其中，磁盘上也在。平台侧调用与探针的差异因此只剩
+**运行资源与路径契约**：runner 容器的限制是 `cpu: "1"`、`memory = 请求值 + 256MiB`（下限 512MiB）、
+`ephemeral-storage: 256Mi`，`build` 卷 `sizeLimit: 128Mi`，而 profile 用 `{evaluator_dir}`（= `/support`）。
+下一步应核对 `/support` 的落盘结果与 `compile` 的容器输出——后者目前仍未落盘（§11.14 的建议只完成了
+「换对诊断码」这一半）。
 
 **仍未覆盖**：失败切换成了编译本身——而独立探针证明 starter（`examples/xv6-lab/student/student.c`）
 在同一 runner 镜像里 `build-xv6.sh` 是 `BUILD_EXIT=0`。因此下一步是查**冻结后的提交内容**为何编译不过
