@@ -1299,6 +1299,8 @@ fn persist_evidence(
         awarded_points: evidence.aggregate.awarded_points,
         max_points: evidence.aggregate.max_points,
         compile_exit_code: evidence.compile.exit_code,
+        compile_signal: evidence.compile.signal,
+        compile_timed_out: evidence.compile.timed_out,
     };
     receipt.validate_for(request)?;
     Ok(receipt)

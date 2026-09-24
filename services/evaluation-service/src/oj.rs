@@ -496,6 +496,11 @@ pub struct OjEvidenceReceipt {
     /// is otherwise indistinguishable from a `make` failure once the Job and its `/evidence`
     /// volume are gone.
     pub compile_exit_code: Option<i32>,
+    /// Signal that killed the compiler, when it was not a plain exit. An OOM kill leaves no exit
+    /// code at all, so this is the only field that distinguishes it from a script early exit.
+    pub compile_signal: Option<i32>,
+    /// Whether the compile stage hit the profile's wall-clock budget.
+    pub compile_timed_out: bool,
 }
 
 impl OjEvidenceReceipt {
