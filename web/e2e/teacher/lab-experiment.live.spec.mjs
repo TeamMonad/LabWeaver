@@ -248,7 +248,7 @@ async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPat
   if (statusMatch?.[1] !== projectId || !statusMatch?.[2]) {
     throw new Error('LAB_EXPERIMENT_FREEZE_STATUS_URL_INVALID')
   }
-  const frozen = await waitForFrozenSubmission(page.request, projectId, statusMatch[2])
+  const frozen = await waitForFrozenSubmission(page.request, projectId, statusMatch[2], frozenPath)
   await expect(page.locator('.evidence-card')).toContainText(statusMatch[2], { timeout: 120_000 })
   return frozen
 }

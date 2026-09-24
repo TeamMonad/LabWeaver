@@ -213,7 +213,7 @@ export async function waitForEnvironment(request, environmentId, expectedState =
   )
 }
 
-export async function waitForFrozenSubmission(request, projectId, submissionId, timeout = 300_000) {
+export async function waitForFrozenSubmission(request, projectId, submissionId, requiredPath, timeout = 300_000) {
   let latest
   let failure
   await expect.poll(async () => {
@@ -231,7 +231,7 @@ export async function waitForFrozenSubmission(request, projectId, submissionId, 
       return true
     }
     return latest?.id === submissionId && Array.isArray(latest.files)
-      && latest.files.some((file) => file.path === 'student/auth.c')
+      && latest.files.some((file) => file.path === requiredPath)
   }, { timeout, intervals: [1000, 2000, 3000] }).toBe(true)
   if (failure) throw failure
   return latest
@@ -279,7 +279,7 @@ export async function freezeStudentSourceByUi(page, projectId, environmentId) {
   const submissionId = statusMatch?.[2]
   if (statusMatch?.[1] !== projectId) throw new Error('REAL_EXPERIMENT_FREEZE_STATUS_PROJECT_INVALID')
   if (!submissionId) throw new Error('REAL_EXPERIMENT_FREEZE_STATUS_URL_INVALID')
-  const frozen = await waitForFrozenSubmission(page.request, projectId, submissionId)
+  const frozen = await waitForFrozenSubmission(page.request, projectId, submissionId, 'student/auth.c')
   await expect(page.locator('.evidence-card')).toContainText(submissionId, { timeout: 120_000 })
   return frozen
 }

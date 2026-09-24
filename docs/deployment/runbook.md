@@ -1132,6 +1132,11 @@ helm -n labweaver-system history labweaver
   调用的旧报告。现在每次旅程都用 `PLAYWRIGHT_HTML_REPORT` / `PLAYWRIGHT_JSON_OUTPUT_NAME` 把报告
   **绝对路径**指到 `artifacts/acceptance/<run-id>/<journey>/{index.html,report.json}`，`test-results/`
   仍在旅程结束后拷贝；证据因此自包含，不再依赖仓库里的共享报告目录。
+- **lab 旅程的冻结提交等待器写死了另一实验的路径（已修）**：`waitForFrozenSubmission` 在 API 层轮询
+  `/frozen-submissions/{id}` 时硬编码要求文件 `student/auth.c`（那是 `real-experiment` 密码实验的路径），
+  而 `lab-experiment` 的 xv6 实验冻结的是 `student/student.c`，因此该断言永远不可能满足——run 59 的 lab 段
+  在 UI 冻结成功后仍以 `expect(...).toBe(true)` 超时 300s 收场。现在该参数的期望路径由调用方传入
+  （`real-experiment` 传 `student/auth.c`，`lab-experiment` 传自己的 `LAB.frozenPath`）。
 - **自动审批看护曾与旅程自身的审批抢跑（已修）**：`tools/user_acceptance.py` 的后台看护会批准**所有**
   `reviewing` 申请，包括旅程自己要在管理台手动批准的那一条——run 58 的 work 旅程因此报
   `TimeoutError: locator.fill … 执行后端绑定`（申请已被看护批准，单条审批表单随 `selectedRequest.state`
