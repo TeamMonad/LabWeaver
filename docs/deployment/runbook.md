@@ -1204,6 +1204,11 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
 - **已知项：环境控制台的状态文案可能短暂滞后**。环境已 `运行中`、端点表已出现「健康」时，页面上
   仍可能残留 `当前正在创建环境，请在操作完成后继续。`；不阻断旅程（`assertNoStuckProgress` 只检查
   加载指示器与虚构百分比），附本次截图证据于 §12 的失败快照目录。
+- **待生效（已修，等重新部署）：lab 旅程的 terminal 补齐**。`f66a824` 已在 `agent-service` 里把
+  materials 声明的 `terminal`/`entries`/`service_port` 按声明值补回候选（见 §11.8 对应条目与本节上一条），
+  但它要**重新打包并部署 agent-service 之后**才对集群生效；在该部署完成前，lab 旅程仍会因候选缺 terminal
+  而红。本次已用全新 release 名（`issue127-sandbox-1`）重新打包并校验 manifest 的 `source_commit`
+  等于该修复提交，避免与旧同名单据混淆。
 - **已知项：并行验收要避开 worker 串行**。agent worker 一次只处理一个 reserved dispatch，验收前用
   `cancel-stale` 清路、或用 `run` 的默认队列等待；否则旅程会把轮询预算耗在排队上。
 
