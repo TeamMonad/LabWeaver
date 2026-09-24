@@ -969,8 +969,10 @@ def approve_pending_resource_requests(
 
     The platform raises a ``reviewing`` resource request for each internal
     authoring and evaluation task and waits for a human, so the acceptance performs
-    that approval the way an operator does in the admin console. Returns the ids it
-    approved.
+    that approval the way an operator does in the admin console. Requests that target
+    an environment are left alone: the journeys approve those themselves through the
+    admin console, and approving them here would race that step and hide the form the
+    journey is about to fill in. Returns the ids it approved.
     """
 
     cookie = _auth_cookie(auth_state)
@@ -1006,6 +1008,9 @@ def approve_pending_resource_requests(
         try:
             detail = json.loads(detail_body)
         except ValueError:
+            continue
+        target_kind = item.get("targetKind") or detail.get("targetKind")
+        if target_kind != "task":
             continue
         _, csrf_body, _ = _http(
             _join(base_url, "/api/v1/auth/csrf"), cookie, origin=base_url

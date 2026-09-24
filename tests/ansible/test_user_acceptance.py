@@ -406,8 +406,9 @@ class RunJourneyTest(unittest.TestCase):
             if url.endswith("/resource-requests"):
                 return 200, json.dumps(
                     [
-                        {"id": "request-reviewing", "state": "reviewing"},
-                        {"id": "request-active", "state": "active"},
+                        {"id": "request-reviewing", "state": "reviewing", "targetKind": "task"},
+                        {"id": "request-active", "state": "active", "targetKind": "task"},
+                        {"id": "request-environment", "state": "reviewing", "targetKind": "environment"},
                     ]
                 ).encode(), {}
             if url.endswith("/csrf"):
@@ -419,6 +420,7 @@ class RunJourneyTest(unittest.TestCase):
                 {
                     "id": url.rsplit("/", 1)[-1],
                     "state": "reviewing",
+                    "targetKind": "task",
                     "revision": 3,
                     "requestedResources": {"cpuMillicores": 2000},
                     "requestedDurationSeconds": 3600,
