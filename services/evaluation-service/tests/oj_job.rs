@@ -139,9 +139,11 @@ fn job_plan_is_non_root_bounded_read_only_and_has_no_network_egress()
         pointer(job, "/spec/template/spec/automountServiceAccountToken"),
         false
     );
+    // The OJ program sandbox is the worker's own Landlock ruleset, and the gVisor RuntimeClass
+    // does not implement the Landlock syscalls, so this pod must stay on the default runtime.
     assert_eq!(
         pointer(job, "/spec/template/spec/runtimeClassName"),
-        "labweaver-sandbox"
+        &Value::Null
     );
     assert_eq!(
         pointer(job, "/metadata/annotations/labweaver.io~1trace-id"),

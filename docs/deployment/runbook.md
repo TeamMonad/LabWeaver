@@ -1338,6 +1338,30 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
 两次都得到同一结果。这与 lab 的 terminal 缺口同源：本地 27B 模型产出的候选质量边界，处置属产品决策
 （收紧提示词/schema 或换模型），不放宽断言。证据：`artifacts/acceptance/public-20260924-62-all/admin/`。
 
+### 11.15 OJ `LW_OJ_SANDBOX_UNAVAILABLE` 的根因：Landlock 与 gVisor 不兼容（已修，待部署验证）
+
+**根因（已证实）**：评测服务的 OJ 程序沙箱用 **Landlock**（`services/evaluation-service/src/oj_worker.rs`
+的 `apply_compiler_filesystem_sandbox`：`CompatLevel::HardRequirement`，要求 `RulesetStatus::FullyEnforced`
+且 `no_new_privs`，否则返回 `SandboxUnavailable`）。而 develop 把一次性工作负载统一到了 gVisor 的
+`labweaver-sandbox` RuntimeClass，**gVisor 不实现 Landlock 系统调用**。
+
+**直接证据（同镜像、同 securityContext、只换 RuntimeClass 的对照探针）**：
+
+| RuntimeClass | `landlock_create_ruleset` 结果 |
+|---|---|
+| `labweaver-sandbox`（gVisor） | `-1` / `errno=38`（`Function not implemented`，ENOSYS） |
+| 默认（runc） | 进入真实内核（返回 `EFAULT`，说明系统调用存在） |
+
+同一探针也证明镜像里的 xv6 编译链路本身可用（`build-xv6.sh` 以正确契约跑出 `BUILD_EXIT=0`），
+即失败不在镜像、工具链或源码。
+
+**修复**：`oj_job.rs` 不再给 OJ Job 设置 `runtimeClassName`（改用节点默认运行时），OJ 的隔离由它
+**自己**的 Landlock 规则集提供，而 authoring/probe 等仍留在 gVisor。测试
+`services/evaluation-service/tests/oj_job.rs` 相应改为断言该字段为空，并注明原因。
+
+**注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
+需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
+
 ### 11.14 OJ 失败的可诊断性缺口（run 61/63 观察，2026-09-24）
 
 复核确认：**失败之后 OJ 的 Job/Pod 会立即消失**（`labweaver-evaluation` 里只剩历史探针 Job，`lw-oj-*`
