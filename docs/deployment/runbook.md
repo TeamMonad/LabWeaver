@@ -1640,6 +1640,29 @@ artifacts/acceptance/<run-id>/
 - 产品缺陷（页面死路、错误不可读、假进度、刷新重试导致重复资源）→ 改源码与受影响测试，重新打包部署后重跑。
 - 已知但不阻塞的易用性打磨项 → 记入 §11.7，附截图与稳定诊断码。
 
+### 11.2.1 施加部署必须与打包一样以 root 运行（实测）
+
+`platform_application` 的第一个任务就是 `Load the reviewed private application variable locator`，
+它读取 `LABWEAVER_APPLICATION_VARS_FILE`（`/var/lib/labweaver/.private/v1/platform-application/application-vars-*.yml`，
+**root-only**）。若像打包那样只把 `cargo xtask package` 放进 root、而把
+`cargo xtask platform-application` 留在 `wzh` 下，该任务会以 `no_log: true` 的方式失败：
+`fatal: [localhost]: FAILED! => {"censored": "…'no_log: true'…"}`，`xtask` 只会打印
+`allowlisted infrastructure playbook failed`，而**工作负载镜像不会变更**（digest 与部署前一致）。
+
+正确形态（与打包同一层级的 root 身份，并把 venv 放进 PATH 以便解析 ansible）：
+
+```sh
+sudo -i -u root env PATH=/opt/labweaver/venv/bin:/usr/local/bin:/usr/bin:/bin \
+  LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf \
+  LABWEAVER_ANSIBLE_DEPENDENCY_ROOT=/var/lib/labweaver/v1-controller \
+  LABWEAVER_APPLICATION_VARS_FILE=/var/lib/labweaver/.private/v1/platform-application/application-vars-<run>.yml \
+  LABWEAVER_RUN_ID=<run> LABWEAVER_TESTFLIGHT_RUN_ID=<run> \
+  bash -lc 'cd /home/wzh/LabWeaver && cargo xtask platform-application --env v1 --infra --yes --package-manifest <manifest>'
+```
+
+判据：结束后 `kubectl -n labweaver-system get deploy <component> -o jsonpath='{.spec.template.spec.containers[0].image}'`
+必须等于 manifest 里该组件的 digest（实测 `evaluation-service` 由 `…842dd6dda89da152` 变为 `…beaf9a2199b8bc3b7d7`）。
+
 ### 12.0 日志字段名与「可诊断但不泄密」的边界（实测）
 
 `SafeJsonFormatter`(`crates/telemetry/src/lib.rs`)只**逐字保留** `safe_log_field` 认得的名字，把
