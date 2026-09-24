@@ -1415,6 +1415,11 @@ authoring、且集群里没有 authoring Pod」时，先确认派发循环是否
 `targetKind=task` 的新申请），而租约状态长期停在 `active`。用平台自己的 API 撤销后两租约进入
 `expiring`，但同步仍失败、计数不降（重启 `resource-service` 亦然）。
 
+**进一步确认**：两租约**连同它们的 request** 都已被平台推进到 `expiring`（`resource_requests.state=expiring`、
+`revision=4`），对该 request 再发 `cancel` 得到 409 `LW_RESOURCE_LIFECYCLE_FAILED`——即状态机已经走完它
+能走的部分，卡点在「release/同步需要 task owner」这一步。重启 `agent-service` 后派发只认领了一次
+（`agent.dispatch.claimed`），随后再次停摆，authoring 命名空间始终无任何 Pod。
+
 **判断**：这是资源域的一个健壮性缺口——**task 租约的 task owner 消失后，租约不会自行终结，容量同步
 因此永久失败**，并可阻塞后续派发。为验收放行我做了两件都在平台能力内的事：`rollout restart`
 `agent-service`（见 §11.16，可短暂恢复派发）与用 **teacher 会话**（admin 会话对该租约是
