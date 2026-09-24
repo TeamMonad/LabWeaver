@@ -1744,7 +1744,12 @@ Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留
 `/api/v1/auth/csrf` 401 正常——只有「读评测结果」在崩溃窗口内 503，因此整机并未不可用，但三条验收旅程
 都会卡在这一个端点上。
 
-修复：`daf0a90` 让观察失败在**与「Job 缺失」相同的有界窗口**内重试，只有窗口耗尽才返回后端错误；
+修复（已上线并实测）：`fa4042a` 让观察失败在**与「Job 缺失」相同的有界窗口**内重试，窗口耗尽后把该步骤
+判为稳定失败 `LW_OJ_OBSERVE_UNAVAILABLE`，**不再退出进程**（`daf0a90` 是它的前半步）。上线后实测：
+运行中的 `evaluation-service` 镜像 tag = `git-fa4042a82100`，Pod `ready=true`、`restartCount=0`，
+此后 15 分钟内 `oj_observe_failed` / `LW_OJ_OBSERVE_UNAVAILABLE` / `compile_failed` 计数为 0。
+
+**尚存的边界**：窗口耗尽后仍返回 `Backend` 的旧路径已不存在，但同一 `run()` 对其他 durable 失败仍会退出；
 结构性的「资源包缺失」仍然立即失败。**尚存的边界**：窗口耗尽后仍返回 `Backend`，而循环依旧把它当致命错误，
 所以彻底止血还需要让**步骤级**后端错误不再终止进程（属执行侧 owner 的下一步）。
 
