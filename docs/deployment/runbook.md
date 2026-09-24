@@ -1338,6 +1338,21 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
 两次都得到同一结果。这与 lab 的 terminal 缺口同源：本地 27B 模型产出的候选质量边界，处置属产品决策
 （收紧提示词/schema 或换模型），不放宽断言。证据：`artifacts/acceptance/public-20260924-62-all/admin/`。
 
+### 11.14 OJ 失败的可诊断性缺口（run 61/63 观察，2026-09-24）
+
+复核确认：**失败之后 OJ 的 Job/Pod 会立即消失**（`labweaver-evaluation` 里只剩历史探针 Job，`lw-oj-*`
+查不到、`kubectl logs` 无从取），平台也没有把容器 stderr 记进任何事件或 `evaluation_step_attempts`
+（该表只有 `diagnostic_code`）。因此 `LW_OJ_SANDBOX_UNAVAILABLE` 这类失败**没有任何可回溯的原始输出**，
+只能靠外部探针反推。
+
+同时确认**运行环境本身完好**：用同一 runner 镜像 + `labweaver-sandbox` 起探针 Job，镜像里
+`/opt/labweaver/{scripts,profiles,xv6,hidden-tests}` 齐备（`build-xv6.sh`、`run-xv6.sh`、
+`profiles/xv6-riscv64.json`、`hidden-tests/xv6-riscv64/{smoke,filesystem}.{in,out}` 均在），探针可正常执行。
+即：问题不在镜像与沙箱，而在 compile 阶段本身**且其输出不可追溯**。
+
+按「保留正常诊断上下文、不能让故障无法诊断」的要求，建议执行/评测侧补齐：Job 失败时保留最后一次
+容器日志（事件或尝试记录），并把「测试未通过」与「沙箱不可用」分开诊断码。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
