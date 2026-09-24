@@ -87,6 +87,12 @@ struct DeploymentFile {
     sandbox: SandboxFileConfig,
     /// Optional platform registry used by the administrator image catalog.
     platform_registry: Option<PlatformRegistryFileConfig>,
+    /// Container provider bindings this deployment registers.
+    ///
+    /// Stated in the authoring prompt so a candidate can never name a binding
+    /// that the environment service cannot resolve.
+    #[serde(default)]
+    authoring_provider_bindings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -457,6 +463,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         dispatch_lease: Duration::from_secs(deployment.dispatch_lease_seconds),
         track_lease: Duration::from_secs(deployment.track_lease_seconds),
         poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
+        provider_bindings: deployment.authoring_provider_bindings.clone(),
     };
     let review_worker = LlmReviewWorker {
         store: llm_reviews,
@@ -785,6 +792,7 @@ struct Worker {
     dispatch_lease: Duration,
     track_lease: Duration,
     poll_interval: Duration,
+    provider_bindings: Vec<String>,
 }
 
 impl Worker {
@@ -854,7 +862,8 @@ impl Worker {
                 lease.policy.clone(),
                 self.process.clone(),
                 materializer,
-            )?;
+            )?
+            .with_provider_bindings(self.provider_bindings.clone());
             let service = AgentRunService::new(
                 self.store.clone(),
                 runtime,

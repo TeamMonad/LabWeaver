@@ -1189,6 +1189,12 @@ pub struct ClaudeCodeRuntime {
     work_materializer: Option<Arc<dyn WorkConfigurationArtifactMaterializer>>,
     version_check: Arc<OnceCell<Result<(), ClaudeCodeRuntimeError>>>,
     in_flight: Arc<Semaphore>,
+    /// Container provider bindings the deployment actually registers.
+    ///
+    /// The model has no other way to learn them, and a candidate that names an
+    /// unregistered binding can never be provisioned, so the authoring prompt
+    /// states them explicitly.
+    provider_bindings: Vec<String>,
 }
 
 /// Validated advisory review returned by one Claude Code invocation.
@@ -1261,7 +1267,19 @@ impl ClaudeCodeRuntime {
             work_materializer: None,
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
+            provider_bindings: Vec::new(),
         })
+    }
+
+    /// Declares the container provider bindings this deployment registers.
+    #[must_use]
+    pub fn with_provider_bindings(mut self, bindings: Vec<String>) -> Self {
+        self.provider_bindings = bindings
+            .into_iter()
+            .map(|binding| binding.trim().to_owned())
+            .filter(|binding| !binding.is_empty())
+            .collect();
+        self
     }
 
     /// Creates a runtime whose container candidates must be materialized into an immutable
@@ -1285,6 +1303,7 @@ impl ClaudeCodeRuntime {
             work_materializer: Some(materializer),
             version_check: Arc::new(OnceCell::new()),
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
+            provider_bindings: Vec::new(),
         })
     }
 
@@ -1401,7 +1420,8 @@ impl ClaudeCodeRuntime {
         };
         let prompt = if authoring {
             format!(
-                "{prompt}\n\n{AUTHORING_SANDBOX_PROMPT}{}",
+                "{prompt}\n\n{AUTHORING_SANDBOX_PROMPT}{}{}",
+                provider_binding_prompt(&self.provider_bindings),
                 platform_image_prompt(platform_images)
             )
         } else {
@@ -2680,19 +2700,19 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
                     .ok_or(ClaudeCodeRuntimeError::ProtocolInvalid)?;
                 for block in content {
                     match block.get("type").and_then(Value::as_str) {
-                        Some("thinking") => {}
+                        // A tool call is legitimate inside an authoring session: the
+                        // sandbox prompt tells the model to read /materials, write
+                        // /workspace and run Bash, and the CLI reports those turns as
+                        // assistant messages. Only the text blocks form the candidate,
+                        // so tool-use blocks are skipped rather than treated as a denial.
+                        Some("thinking" | "tool_use") => {}
                         Some("text") => candidate.push_str(
                             block
                                 .get("text")
                                 .and_then(Value::as_str)
                                 .ok_or(ClaudeCodeRuntimeError::ProtocolInvalid)?,
                         ),
-                        // A tool call is legitimate inside an authoring session: the
-                        // sandbox prompt tells the model to read /materials, write
-                        // /workspace and run Bash, and the CLI reports those turns as
-                        // assistant messages. Only the text blocks form the candidate,
-                        // so tool-use blocks are skipped rather than treated as a denial.
-                        Some("tool_use") => {}
+
                         _ => return Err(ClaudeCodeRuntimeError::ProtocolInvalid),
                     }
                 }
@@ -2913,6 +2933,24 @@ const AUTHORING_TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":false,"builtinTo
 const AUTHORING_MAX_TURNS: u32 = 60;
 const AUTHORING_TOOLS: &str = "Bash,Edit,Glob,Grep,Read,Write";
 const AUTHORING_SANDBOX_PROMPT: &str = "LABWEAVER SANDBOX EXECUTION: The classified approved package files are extracted read-only under /materials/. Read them with your file tools instead of relying only on the text above. /workspace is your private writable directory; create and edit files there and run commands with Bash. A rootless BuildKit daemon is reachable through BUILDKIT_HOST for image builds and may only pull from the platform Harbor registry; when you build a container image, export its OCI layout to exactly /workspace/labweaver-export.tar (for example: buildctl build --frontend dockerfile.v0 --local context=/workspace/context --local dockerfile=/workspace/context --output type=oci,dest=/workspace/labweaver-export.tar). Only that exact exported layout is imported and published by the platform. The final response must still be exactly one JSON object satisfying the required schema.";
+
+/// Names the container provider bindings the deployment registers, so the model
+/// never invents one that cannot be provisioned.
+fn provider_binding_prompt(bindings: &[String]) -> String {
+    if bindings.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "\n\nPLATFORM PROVIDER BINDINGS (authoritative): container environments on this \
+         platform must use exactly one of these provider_binding values, copied verbatim; \
+         never invent a binding name:",
+    );
+    for binding in bindings {
+        text.push_str("\n- ");
+        text.push_str(binding);
+    }
+    text
+}
 
 fn platform_image_prompt(images: &[PlatformImageEntry]) -> String {
     use std::fmt::Write as _;
@@ -3284,6 +3322,14 @@ mod tests {
             Some("{\"scriptContent\":\"true\"}")
         );
         Ok(())
+    }
+
+    #[test]
+    fn provider_binding_prompt_names_the_registered_bindings_only() {
+        assert_eq!(super::provider_binding_prompt(&[]), "");
+        let text = super::provider_binding_prompt(&["container-primary-v1".to_owned()]);
+        assert!(text.contains("container-primary-v1"));
+        assert!(text.contains("never invent a binding name"));
     }
 
     fn provider_result_envelope(
