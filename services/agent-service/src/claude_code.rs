@@ -1511,7 +1511,9 @@ impl ClaudeCodeRuntime {
                 if schema_invalid {
                     persist_failed_stdout(track, repairs, process_output.stdout());
                 }
-                let preview = schema_invalid.then(|| {
+                let preview = (schema_invalid
+                    || failure.error == ClaudeCodeRuntimeError::ProtocolInvalid)
+                    .then(|| {
                     String::from_utf8_lossy(process_output.stdout())
                         .chars()
                         .take(2_000)
@@ -2696,7 +2698,7 @@ fn parse_stream_output(stdout: &[u8]) -> Result<ParsedClaudeCodeStream, ClaudeCo
                 }
             }
             Some("user") => {
-                if !valid_synthetic_user_event(&event) {
+                if !valid_synthetic_user_event(&event) && !valid_tool_result_user_event(&event) {
                     return Err(ClaudeCodeRuntimeError::ProtocolInvalid);
                 }
             }
@@ -2729,6 +2731,25 @@ fn valid_synthetic_user_event(event: &Value) -> bool {
                     block.get("type").and_then(Value::as_str) == Some("text")
                         && block.get("text").is_some_and(Value::is_string)
                 })
+            })
+}
+
+/// Tool results the CLI feeds back after a tool call are machine-generated turns
+/// of the sandbox loop, not user input. Only `tool_result` blocks qualify, so a
+/// real user message (which carries text) is still rejected.
+fn valid_tool_result_user_event(event: &Value) -> bool {
+    let Some(message) = event.get("message").and_then(Value::as_object) else {
+        return false;
+    };
+    message.get("role").and_then(Value::as_str) == Some("user")
+        && message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                !content.is_empty()
+                    && content.iter().all(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    })
             })
 }
 
@@ -3220,6 +3241,18 @@ mod tests {
                 "session_id": "01900000-0000-7000-8000-000000000002",
                 "isSynthetic": true,
                 "message": {"role": "user", "content": [{"type": "text", "text": "ok"}]},
+            }),
+            json!({
+                "type": "user",
+                "session_id": "01900000-0000-7000-8000-000000000002",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }],
+                },
             }),
             json!({
                 "type": "assistant",
