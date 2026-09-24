@@ -727,7 +727,15 @@ helm -n labweaver-system history labweaver
   限制为 **≤ 2**（`crates/contracts/src/authoring.rs:172`），不能靠加大修复次数解决；已实测
   `qwen3.6:27b`、`qwen3.6:35b`、`glm-4.7-flash:latest` 三种本地模型均为同一形态。
   处置方向：强化候选提示/放宽 schema，或接入满足该 schema 的模型——属于产品决策，
-  不得用 Mock 或放宽断言替代。
+  不得用 Mock 或放宽断言替代。实测取到的最新一代模型输出（CLI `result.subtype=success`、
+  `is_error=false`，即 CLI 成功）是：
+
+  ```json
+  {"evaluation":{"apiVersion":"evaluation.labweaver.io/v1","kind":"EvaluationSpec","metadata":{}},"runnerBuildRecipe":{"mode":"package"}}
+  ```
+
+  即模型给出的是**结构合理但字段不全**的候选（缺必填字段/空 metadata），因此是提示与 schema
+  严格度的问题，而不是链路或权限问题。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
