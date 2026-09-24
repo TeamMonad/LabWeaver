@@ -1415,6 +1415,10 @@ authoring、且集群里没有 authoring Pod」时，先确认派发循环是否
 `targetKind=task` 的新申请），而租约状态长期停在 `active`。用平台自己的 API 撤销后两租约进入
 `expiring`，但同步仍失败、计数不降（重启 `resource-service` 亦然）。
 
+**与派发停摆的关系**：重启 `agent-service` 后只有 `agent.dispatch.worker_started` 与**一次**
+`agent.dispatch.claimed`（run `01a0d432-ffeb…`），此后再无任何派发事件、该 run 也没有任何 track 启动——
+即 §11.9 里曾记录过的「认领后不推进」形态，且它正好发生在容量模块被孤儿租约拖住期间，两者表现一致。
+
 **进一步确认**：两租约**连同它们的 request** 都已被平台推进到 `expiring`（`resource_requests.state=expiring`、
 `revision=4`），对该 request 再发 `cancel` 得到 409 `LW_RESOURCE_LIFECYCLE_FAILED`——即状态机已经走完它
 能走的部分，卡点在「release/同步需要 task owner」这一步。重启 `agent-service` 后派发只认领了一次
