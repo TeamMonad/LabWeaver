@@ -1404,6 +1404,23 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 `agent.dispatch.worker_started` 与 `agent.dispatch.claimed`，队列随即开始消化。因此遇到「旅程长时间卡在
 authoring、且集群里没有 authoring Pod」时，先确认派发循环是否在跑，再做重启，不要把它误判成产品缺陷。
 
+### 11.17 孤儿 task 租约会永久拖住容量同步（本轮阻塞验收的集群状态问题）
+
+**现象**：run 61 之后集群的 authoring 队列不再消化——`agent.agent_runs` 多条停在 `requested`，
+`labweaver` 各命名空间没有 authoring Pod，`agent-service` 只在应答前端轮询；`resource-service` 日志持续
+以每秒数条刷 `resource.lease.sync_failed` + `diagnostic_code=LW_RESOURCE_TASK_OWNER_REQUIRED`。
+
+**证据**：日志里失败集中在两条**昨天遗留**的租约上（`01a0d012-e369-…` 与 `01a0d008-bdeb-…`，各自
+每分钟上百次），它们的 `task_run_id` 早已不存在（`resource_requests` 近 30 分钟无新行、也不再有
+`targetKind=task` 的新申请），而租约状态长期停在 `active`。用平台自己的 API 撤销后两租约进入
+`expiring`，但同步仍失败、计数不降（重启 `resource-service` 亦然）。
+
+**判断**：这是资源域的一个健壮性缺口——**task 租约的 task owner 消失后，租约不会自行终结，容量同步
+因此永久失败**，并可阻塞后续派发。为验收放行我做了两件都在平台能力内的事：`rollout restart`
+`agent-service`（见 §11.16，可短暂恢复派发）与用 **teacher 会话**（admin 会话对该租约是
+`LW_AUTH_SCOPE_DENIED`）按契约调用 `POST /api/v1/resource-leases/{id}/revoke` + `expectedRevision`
+（返回 200）。修复「owner 消失即终结租约」属资源域 owner 决策，本轮按证据记录，不改数据库。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
