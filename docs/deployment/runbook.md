@@ -1639,3 +1639,18 @@ artifacts/acceptance/<run-id>/
 - 身份与路由配置错误（issuer、redirect、allowed_origins、realm client、hostAliases）→ 回到 §11.6 修正并重跑部署。
 - 产品缺陷（页面死路、错误不可读、假进度、刷新重试导致重复资源）→ 改源码与受影响测试，重新打包部署后重跑。
 - 已知但不阻塞的易用性打磨项 → 记入 §11.7，附截图与稳定诊断码。
+
+### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
+
+`web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
+JS 的 `console.error` 与未捕获异常（`pageerror`）。Chromium 对任何失败的子资源/请求都会额外打一条
+`console` 类型为 `error` 的 **`Failed to load resource: …`**，即便应用已经处理（例：环境刚创建时控制台页
+轮询 `GET /api/v1/access-grants/{grant_id}/console-capabilities`，平台在环境就绪前返回 503，页面继续等待）。
+这类浏览器日志**不再**触发 `LW_ACCEPTANCE_CONSOLE_ERROR`，但仍然被收集为 `networkErrors`，并在每个检查点
+以 `console.warn` 打印出来，供证据留档；断言覆盖的仍然是「用户无法处理」的那两类。
+
+实测依据（run `public-20260924-3j-a1-5685` 的 work 段，2026-09-24）：目标用例在 3.2 分钟处失败，抛出
+`student-work-environment:LW_ACCEPTANCE_CONSOLE_ERROR:console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)`；
+`access-service` 同窗口的日志确认该 503 只出现在
+`route=/api/v1/access-grants/{grant_id}/console-capabilities`（2 次，其它服务 0 次），且页面在断言点
+已正常渲染控制台。即：应用侧无未处理错误，失败来自浏览器对该轮询的记录。
