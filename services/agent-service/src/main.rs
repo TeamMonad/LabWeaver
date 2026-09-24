@@ -832,58 +832,58 @@ impl Worker {
             return Ok(());
         };
         tracing::info!(event = "agent.dispatch.claimed", run_id = %lease.run.id);
-            let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
-                objects: Arc::clone(&self.objects),
-                locators: lease.object_locators.clone(),
-            });
-            let gate = ProblemPackageEgressGate::new(reader, Arc::clone(&self.classifier));
-            let now = timestamp()?;
-            let input = match gate.prepare(&lease.package, &lease.policy).await {
-                Ok(input) => input,
-                Err(error) => {
-                    let run = self
-                        .store
-                        .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
-                        .await?;
-                    tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false, safe_detail = error.safe_detail());
-                    return Ok(());
-                }
-            };
-            self.store
-                .bind_prepared_dispatch(&lease, input.sha256())
-                .await?;
-            let materializer = Arc::new(S3EnvironmentCandidateMaterializer::new(
-                Arc::clone(&self.objects),
-                lease.package.clone(),
-                self.generated_artifacts.clone(),
-                lease.object_locators.clone(),
-            ));
-            let runtime = agent_service::claude_code::ClaudeCodeRuntime::new_with_materializer(
-                lease.policy.clone(),
-                self.process.clone(),
-                materializer,
-            )?
-            .with_provider_bindings(self.provider_bindings.clone());
-            let service = AgentRunService::new(
-                self.store.clone(),
-                runtime,
-                self.runtime_identity.clone(),
-                self.track_lease,
-            )?;
-            let outcome = service
-                .execute_reserved_dispatch(lease, input, RunCancellation::new(), now)
-                .await?;
-            let run_id = match &outcome {
-                agent_service::run_store::AgentRunDispatch::Executed(value) => value.run.id,
-                agent_service::run_store::AgentRunDispatch::Replayed(run)
-                | agent_service::run_store::AgentRunDispatch::Progressed(run) => run.id,
-            };
-            let dispatch_outcome = match outcome {
-                agent_service::run_store::AgentRunDispatch::Executed(_) => "executed",
-                agent_service::run_store::AgentRunDispatch::Replayed(_) => "replayed",
-                agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
-            };
-            tracing::info!(event = "agent.dispatch.completed", run_id = %run_id, outcome = dispatch_outcome);
+        let reader: Arc<dyn ProblemPackageReader> = Arc::new(DispatchReader {
+            objects: Arc::clone(&self.objects),
+            locators: lease.object_locators.clone(),
+        });
+        let gate = ProblemPackageEgressGate::new(reader, Arc::clone(&self.classifier));
+        let now = timestamp()?;
+        let input = match gate.prepare(&lease.package, &lease.policy).await {
+            Ok(input) => input,
+            Err(error) => {
+                let run = self
+                    .store
+                    .fail_dispatch_preparation(&lease, error.diagnostic_code(), now)
+                    .await?;
+                tracing::warn!(event = "agent.dispatch.preparation_failed", run_id = %run.id, diagnostic_code = error.diagnostic_code(), failure_stage = "egress_gate", error_kind = "policy", retryable = false, safe_detail = error.safe_detail());
+                return Ok(());
+            }
+        };
+        self.store
+            .bind_prepared_dispatch(&lease, input.sha256())
+            .await?;
+        let materializer = Arc::new(S3EnvironmentCandidateMaterializer::new(
+            Arc::clone(&self.objects),
+            lease.package.clone(),
+            self.generated_artifacts.clone(),
+            lease.object_locators.clone(),
+        ));
+        let runtime = agent_service::claude_code::ClaudeCodeRuntime::new_with_materializer(
+            lease.policy.clone(),
+            self.process.clone(),
+            materializer,
+        )?
+        .with_provider_bindings(self.provider_bindings.clone());
+        let service = AgentRunService::new(
+            self.store.clone(),
+            runtime,
+            self.runtime_identity.clone(),
+            self.track_lease,
+        )?;
+        let outcome = service
+            .execute_reserved_dispatch(lease, input, RunCancellation::new(), now)
+            .await?;
+        let run_id = match &outcome {
+            agent_service::run_store::AgentRunDispatch::Executed(value) => value.run.id,
+            agent_service::run_store::AgentRunDispatch::Replayed(run)
+            | agent_service::run_store::AgentRunDispatch::Progressed(run) => run.id,
+        };
+        let dispatch_outcome = match outcome {
+            agent_service::run_store::AgentRunDispatch::Executed(_) => "executed",
+            agent_service::run_store::AgentRunDispatch::Replayed(_) => "replayed",
+            agent_service::run_store::AgentRunDispatch::Progressed(_) => "progressed",
+        };
+        tracing::info!(event = "agent.dispatch.completed", run_id = %run_id, outcome = dispatch_outcome);
         Ok(())
     }
 }

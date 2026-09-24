@@ -36,9 +36,8 @@ use contracts::http::{
     EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactKind,
     GeneratedArtifactRecord, IdempotencyKey, InternalPublishEvaluationReleaseRequest,
     PlatformImageEntry, PlatformImageKind, PlatformImageStatus, PlatformImageUploadSession,
-    PlatformImageUploadTarget,
-    ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
-    RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
+    PlatformImageUploadTarget, ProblemPackageUploadFile, ProblemPackageUploadSession,
+    ProblemPackageUploadTarget, RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
     WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
 };
 use contracts::supply_chain::{

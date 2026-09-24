@@ -1534,11 +1534,11 @@ impl ClaudeCodeRuntime {
                 let preview = (schema_invalid
                     || failure.error == ClaudeCodeRuntimeError::ProtocolInvalid)
                     .then(|| {
-                    String::from_utf8_lossy(process_output.stdout())
-                        .chars()
-                        .take(2_000)
-                        .collect::<String>()
-                });
+                        String::from_utf8_lossy(process_output.stdout())
+                            .chars()
+                            .take(2_000)
+                            .collect::<String>()
+                    });
                 tracing::warn!(
                     event = "agent.llm.candidate_parse_failed",
                     component = "agent-service",
@@ -2767,9 +2767,9 @@ fn normalize_candidate(text: &str) -> String {
 fn is_fence_info(info: &str) -> bool {
     let info = info.trim();
     info.is_empty()
-        || info
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '+'))
+        || info.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '+')
+        })
 }
 
 fn valid_synthetic_user_event(event: &Value) -> bool {
