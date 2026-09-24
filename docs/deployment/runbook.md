@@ -1355,6 +1355,11 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
 同一探针也证明镜像里的 xv6 编译链路本身可用（`build-xv6.sh` 以正确契约跑出 `BUILD_EXIT=0`），
 即失败不在镜像、工具链或源码。
 
+**运行期直接证据**：在清理之前抢到的 OJ Pod 容器状态与日志为
+`init:materialize-input=Completed`、`main:program-runner=Error`，`program-runner` 的输出是
+**`Error: OjWorker(SandboxUnavailable)`**——即取件（init）已成功，失败精确落在 worker 自己的
+Landlock 步骤上，与代码位置和对照组探针结论一致。
+
 **修复**：`oj_job.rs` 不再给 OJ Job 设置 `runtimeClassName`（改用节点默认运行时），OJ 的隔离由它
 **自己**的 Landlock 规则集提供，而 authoring/probe 等仍留在 gVisor。测试
 `services/evaluation-service/tests/oj_job.rs` 相应改为断言该字段为空，并注明原因。
