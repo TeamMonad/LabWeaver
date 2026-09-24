@@ -1607,7 +1607,10 @@ python3 tools/user_acceptance.py run \
 
 **清理陈旧 run（已实现为子命令，并实测）**：`tools/user_acceptance.py cancel-stale --base-url <url>
 [--auth-dir <dir>] [--keep <run-id 前缀>]` 会列出所有非终态 agent run，用 owner 会话逐个取消
-（`--keep` 保护正在验收的那一条），输出每条的 `http-<状态码>`。它要求 `<auth-dir>`（默认 `<repo>/.auth`）
+（`--keep` 保护正在验收的那一条），输出每条的 `http-<状态码>`。**每条 run 都会依次交给全部角色会话尝试**
+（早期版本按 `student→teacher` 顺序遇到第一条读不到的 run 就记 `no-etag` 并跳过，导致只对 teacher
+可见的 run 永远清不掉；`b5b9a05` 已改为按 run 保留最佳结果，实测同一批 4 条 `no-etag` 全部变为
+`http-202`，`pending/preparing/claimed` 随之归零）。它要求 `<auth-dir>`（默认 `<repo>/.auth`）
 里已有该角色的 Playwright 会话，可先执行下面的 `--project=setup` 生成；手工等价步骤与稳定诊断码如下：
 
 **手工步骤（已实测）**：worker 按 `created_at` 串行处理，被跳过的旅程会留下占用
