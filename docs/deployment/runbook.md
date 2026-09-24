@@ -1002,13 +1002,20 @@ helm -n labweaver-system history labweaver
   `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE`；同一时段 **lab 包的 environment + evaluation 两条轨迹
   双双 succeeded**。即：同一模型在「实验包」两条 schema 上已能产出被接受的候选，而「Work 模板」这条
   仍未通过，属提示/模型能力边界，不是链路或权限问题；work 旅程会重试，失败时按此诊断记录。
-- **lab 旅程下一步的真实缺口：experiment 候选没有带 terminal/entry**。失败点在教学端「浏览器终端」
-  面板：spec 已点「打开终端」并等待 `.xterm-host`，页面状态栏显示
-  `环境已就绪，可以打开终端；重启会中断当前运行。`，但终端始终未挂载。对应环境实例
-  `01a0d2c7-c42c-7d02-90d7-b53dac0a69a5`（class `experiment`）的 contract 为 **`"endpoints": []`**，
-  即候选没有声明任何 entry/terminal —— 与提示词里「容器环境若保留终端，必须带上 terminal 对象
-  （executable/args/workingDirectory），否则 Web 控制台无法打开」的约束不符。作为当前 lab 旅程的
-  归因记录；同批 work 候选（`01a0d2cc`）声明了 `http` 端点且观测为 `healthy`。
+- **lab 旅程下一步的真实缺口：experiment 候选没有带 terminal/entry（已定位到「模型漏抄」这一步）**。
+  **决定性对照（本轮 run 56 实测）**：示例包 `examples/xv6-lab/environment.yaml` **明确声明**了
+  `runtime.terminal: {executable: /bin/sh, args: [], workingDirectory: /workspace}` 与
+  `entries: [{name: public-files, protocol: http, servicePort: 8080}]`；而同一包生成的候选所落成的学生环境
+  （project `01a0d341-ff64-71e0-b9c2-43083c12e319`）合同里 `entries` 只有那个 http 端点、
+  `runtime` 段**没有 `terminal`**。即**素材里有、模型漏抄**——提示词已要求「逐字保留 materials 声明的每个面」，
+  27B 本地模型仍会丢字段。后果：控制台能连上（`/connect/console/` 有请求）但 `.xterm-host` 不挂载，
+  lab 旅程在终端编辑步骤失败（与 11.8 里同一条目一致）。
+  处置（产品决策）：强化提示词/在 schema 层强制容器实验环境必须带 `terminal`，或换满足该要求的上游模型；
+  **不得**放宽旅程断言或改写素材来掩盖。
+  历史佐证（同一现象的早期观测）：spec 已点「打开终端」并等待 `.xterm-host`，页面状态栏显示
+  `环境已就绪，可以打开终端；重启会中断当前运行。`，但终端始终未挂载；对应环境实例
+  （class `experiment`）的 contract 亦为 `"endpoints": []`/无 terminal。作为归因记录；同批 work 候选
+  （`01a0d2cc`）声明了 `http` 端点且观测为 `healthy`。
 - **提示词修复已在部署产物中核实**：从运行的 agent-service 镜像
   （`sha256:17e5e5ce…`，`docker create` + `docker cp` 取出 `/usr/local/bin/labweaver-service`）中
   grep 到 `terminal object`（环境提示词新增的“逐字保留 materials 声明的每个面”）与
