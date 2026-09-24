@@ -766,6 +766,14 @@ helm -n labweaver-system history labweaver
   实测同一环境下去掉 `--bare` 后 init 列出全部 6 个工具且 `--model $ANTHROPIC_MODEL` 正常解析
   （`qwen3.6:27b`），因此 6 工具策略与 CLI 能力重新一致。附带代价：去掉 `--bare` 会重新启用
   hooks/LSP/插件/CLAUDE.md 自动发现——沙箱 `/workspace` 为空且出网仅限 Harbor，实测无额外副作用。
+- **`ToolDenied` 的第二条、也是真正的阻塞原因：流解析器把任何 `tool_use` 块判为拒绝**。
+  `parse_stream_output` 在 assistant 消息里遇到 `tool_use` 直接返回
+  `ClaudeCodeRuntimeError::ToolDenied`，而 authoring 提示词恰好要求模型读 `/materials`、写
+  `/workspace`、用 Bash 跑命令——于是**只要模型真的用了工具，整次 authoring 就以
+  `LW_PROVIDER_UNAVAILABLE` 失败**（这与工具是否可用无关，`--bare` 只是让它更早触发）。
+  **已修复**：`tool_use` 块改为跳过（候选只取 assistant 的 `text` 块），真正被策略拒绝的工具
+  仍通过 envelope 的 `permission_denials` 失败；新增回归测试
+  `tool_use_turns_do_not_discard_the_final_candidate`（改前失败、改后通过）。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
