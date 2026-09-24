@@ -891,6 +891,11 @@ helm -n labweaver-system history labweaver
   agent run（08:58 创建）在**首次尝试**即从 `requested` 走到 `environment:succeeded`（09:26 领取、
   09:30 成功），说明「工具策略 / `--bare` / provider binding / 平台镜像 seed / Harbor 凭据」这几处
   修复合起来已经让 authoring 真正跑通；随后 lab 旅程的 run 立即被领取并进入 authoring。
+- **provider binding 修复的端到端验证**：work 旅程随后的环境实例
+  （`01a0d2c0-a89c-7fb2-8b8b-7d7475b0e1bb`）带 `provider_binding = container-primary-v1`（即环境服务
+  真正注册的那个）并走到 `desired_state=running / observed_state=ready`；与之对照，本轮之前的环境实例
+  都是 `kubernetes-work-local-hostpath` + `failed/expiring` + `LW_ENVIRONMENT_PROVIDER_UNAVAILABLE`。
+  说明「候选只能使用平台实际注册的 binding」这一改动在真实链路上生效。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
