@@ -1114,9 +1114,12 @@ def run_acceptance(
             print(f"authoring queue still busy: {pending} dispatch(es) after waiting")
     started_at = datetime.now(timezone.utc).isoformat()
     print(f"provider_binding={provider_binding or '<unset>'} model={model}")
+    # The Playwright setups resolve `.auth` against the directory the runner is
+    # started in, which is the repository root, so that is where the browser
+    # sessions the approval watchdog signs in with live.
     approval_stop = start_resource_approval_watchdog(
         args.base_url,
-        ROOT / "web" / ".auth" / "platform-admin.json",
+        Path(getattr(args, "auth_dir", None) or ROOT / ".auth") / "platform-admin.json",
         provider_binding or "container-primary-v1",
     )
     results: list[dict[str, object]] = []
@@ -1219,6 +1222,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--credentials-dir", default=str(DEFAULT_CREDENTIALS_DIR))
     run.add_argument("--package-manifest", default=None)
     run.add_argument("--bundle-sha256", default=None)
+    # Where the Playwright setups write their browser sessions; the approval
+    # watchdog signs in with the platform-admin one.
+    run.add_argument("--auth-dir", default=str(ROOT / ".auth"))
 
     return parser
 
