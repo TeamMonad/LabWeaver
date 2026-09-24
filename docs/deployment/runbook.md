@@ -1248,11 +1248,9 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
 - **已知项：环境控制台的状态文案可能短暂滞后**。环境已 `运行中`、端点表已出现「健康」时，页面上
   仍可能残留 `当前正在创建环境，请在操作完成后继续。`；不阻断旅程（`assertNoStuckProgress` 只检查
   加载指示器与虚构百分比），附本次截图证据于 §12 的失败快照目录。
-- **待生效（已修，等重新部署）：lab 旅程的 terminal 补齐**。`f66a824` 已在 `agent-service` 里把
-  materials 声明的 `terminal`/`entries`/`service_port` 按声明值补回候选（见 §11.8 对应条目与本节上一条），
-  但它要**重新打包并部署 agent-service 之后**才对集群生效；在该部署完成前，lab 旅程仍会因候选缺 terminal
-  而红。本次已用全新 release 名（`issue127-sandbox-1`）重新打包并校验 manifest 的 `source_commit`
-  等于该修复提交，避免与旧同名单据混淆。
+- **已生效：lab 旅程的 terminal 补齐**（`f66a824`，2026-09-24 已随后续部署上线）。该修复把 materials
+  声明的 `terminal`/`entries`/`service_port` 按声明值补回候选；此后多轮验收里 lab 段都**越过了候选与终端
+  这一步**（失败点后移到评测/OJ，见 §12.2），因此不再需要在验收前额外确认候选字段。
 - **已知项（需产品决策）：environment 申请的审批窗口短于管理台人工审批的耗时**。run 59 的 work 段三次尝试
   （附 run 60 复核：三次尝试的 `environment` 申请存活 **59.9s / 85.4s / 86.2s**；每次尝试本身持续 2–4 分钟，
   申请**远早于**该次尝试的清理就离开 `reviewing`，因此窗口是平台侧行为，不是旅程清理造成的假象；
