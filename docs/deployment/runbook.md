@@ -960,6 +960,13 @@ killed 旅程留下的 lab run `01a0d2d3-003e-7930-9b9e-d0bf49e14e7b` 最终为 
 与「experiment 候选丢掉了 materials 声明的 terminal/entry（contract 为 `"endpoints": []`）」的诊断
 一致；这也说明环境轨迹的失败**不是** provider、凭据或集群问题（同一 run 的另一条轨迹成功落地）。
 
+### 11.9.2 lab environment 轨迹失败的 kind
+
+worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（另有少量 `BudgetExceeded` →
+`LW_RESOURCE_EXHAUSTED`）。与环境实例的 contract（`"endpoints": []`）合起来看：候选既没通过 schema，
+声明里也缺 `entries`/`terminal`。因此 11.8 里「environment 提示词必须逐字保留 materials 声明的每个面」
+这条修复正是对应它的杠杆；确认修复是否生效以重新部署后的轨迹为准。
+
 ### 11.9.1 三条旅程的共同依赖
 
 `lab`、`work`、`admin` 三条旅程都包含「生成 Work 模板 → 候选 → 构建 → 批准」这一段（`admin` 的
