@@ -51,7 +51,6 @@ const LABS = Object.freeze({
 })
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
-const REAL_PROVIDER_BUDGET = Object.freeze({ maxInputTokens: 200_000, maxOutputTokens: 220_000, maxRequests: Number(process.env.LABWEAVER_E2E_LLM_MAX_REQUESTS) || 24 })
 const AGENT_RUN_TIMEOUT_MS = Number(process.env.LABWEAVER_E2E_AGENT_RUN_TIMEOUT_MS) || 1_800_000
 
 test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6 or LABWEAVER_E2E_LAB=cuda for a real lab acceptance run.')
@@ -363,7 +362,7 @@ test('student completes a published lab experiment through the browser terminal'
     await cp(LAB.root, packageCopy, { recursive: true })
     const project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
-    await createProjectPolicy(request, baseURL, project.id, REAL_PROVIDER_BUDGET)
+    await createProjectPolicy(request, baseURL, project.id)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.frozenPath)

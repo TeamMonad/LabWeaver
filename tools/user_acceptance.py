@@ -242,14 +242,10 @@ def acceptance_environment(
     environment[MODEL_ENV] = model
     if provider_binding:
         environment[PROVIDER_BINDING_ENV] = provider_binding
-    # The deployment serves the reviewed model from a host-side runtime, so a
-    # single request can take minutes and the CLI's notional per-run cost is
-    # higher than the harness default. Both stay overridable by the caller.
-    environment.setdefault("LABWEAVER_E2E_LLM_TIMEOUT_MS", "900000")
-    environment.setdefault("LABWEAVER_E2E_LLM_MAX_COST_MICROUSD", "50000000")
-    # A local model needs more turns than the harness default of eight to finish a
-    # candidate, and the platform rejects the run once the bound is hit.
-    environment.setdefault("LABWEAVER_E2E_LLM_MAX_REQUESTS", "64")
+    # The provider budget ceilings live with the harness that builds the project
+    # policy (`web/e2e/support/live.mjs`) so there is exactly one definition.
+    # Callers override them through LABWEAVER_E2E_LLM_MAX_* in the ambient
+    # environment, which is inherited here unchanged.
     for role, username in ROLE_USERNAMES.items():
         prefix = ROLE_ENV_PREFIX[role]
         environment[f"{prefix}_USERNAME"] = username

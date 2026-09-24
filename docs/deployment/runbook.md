@@ -689,11 +689,21 @@ helm -n labweaver-system history labweaver
   `platform-model-egress`/`authoring-model-egress` 两条 `CiliumNetworkPolicy` 再按
   `platform_application_model_namespace` 放行该端口。
 - 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
-- **预算也要按本机模型调**：单个请求可能耗时分分钟，`web/e2e/support/live.mjs` 的策略默认
-  `timeoutMilliseconds=120000`、`maxCostMicrousd=1000000`（1 USD）会让 CLI 以
-  `error_max_budget_usd` / 超时结束（沙箱尝试 `exit_code=1`、`LW_AGENT_SANDBOX_FAILED`）。
-  `tools/user_acceptance.py` 现在默认下发 `LABWEAVER_E2E_LLM_TIMEOUT_MS=900000` 与
-  `LABWEAVER_E2E_LLM_MAX_COST_MICROUSD=50000000`，两者都可用环境变量覆盖。
+- **预算必须按「一次 authoring 会话」而不是「一次请求」来设**。authoring 的 provider 调用由
+  `AUTHORING_MAX_TURNS = 60` 限次（`services/agent-service/src/claude_code.rs:2933`），每回合都会
+  重发审阅过的提示词，`enforce_budget` 用**单次会话累计用量**比对项目策略的四个上限
+  （`max_input_tokens`/`max_output_tokens`/`max_requests`/`max_cost_microusd`，`claude_code.rs:2839-2860`），
+  任一越界即 `BudgetExceeded` → `LW_RESOURCE_EXHAUSTED`（CLI 本身仍以 `exit 0` 结束，沙箱尝试
+  记录为 `terminal|exit_code=0`，因此**必须看 worker 事件而不是沙箱退出码**）。实测：早期
+  `maxRequests=8/24`、`maxInputTokens=200_000` 的验收策略在本机 27B 模型下会在 2–3 分钟内被
+  `BudgetExceeded` 打断。
+  验收预算现在只有一处定义：`web/e2e/support/live.mjs` 的 `policyFor` 默认
+  `maxInputTokens=4000000`、`maxOutputTokens=1000000`、`maxRequests=200`、
+  `maxCostMicrousd=50000000`（50 USD）、`timeoutMilliseconds=900000`，全部可用
+  `LABWEAVER_E2E_LLM_MAX_INPUT_TOKENS` / `_MAX_OUTPUT_TOKENS` / `_MAX_REQUESTS` /
+  `_MAX_COST_MICROUSD` / `LABWEAVER_E2E_LLM_TIMEOUT_MS` 覆盖；`tools/user_acceptance.py` 不再重复
+  定义这些默认值，直接透传调用方环境。`real-experiment` spec 只保留 `maxTransientRetries=0`
+  这一条刻意的覆盖（真实链路必须证明单次未重试的尝试）。
 
 ### 11.8 已知阻塞
 - **服务身份缺 scope-mapping（已定位并临时修复，角色本身有缺陷）**：authoring 的失败链最终落到

@@ -29,11 +29,9 @@ import {
 } from '../support/real-experiment.mjs'
 
 const REAL_CHAIN_TIMEOUT_MS = 3_600_000
-const REAL_PROVIDER_BUDGET = Object.freeze({
-  maxOutputTokens: 32_000,
-  timeoutMilliseconds: 300_000,
-  maxTransientRetries: 0,
-})
+// The real chain must prove a single uncontested provider attempt, so it opts out
+// of the shared harness retry. Everything else comes from the acceptance budget.
+const REAL_PROVIDER_BUDGET = Object.freeze({ maxTransientRetries: 0 })
 const config = realProviderConfig()
 const resume = realExperimentResumeConfig()
 
