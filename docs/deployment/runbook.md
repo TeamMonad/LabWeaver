@@ -799,6 +799,18 @@ helm -n labweaver-system history labweaver
   `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
   （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
   （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
+- **未解决：authoring 成功后 worker 停在该 track 上（当前阻塞）**。证据链：authoring 沙箱
+  尝试正常结束（`agent.authoring_sandbox_attempts` 的 `environment|terminal|exit_code=0`），
+  但 `agent.agent_track_work_items` 的该 track 长期停在 `running`：`heartbeat_at` 只在 claim 后
+  ~2 分钟更新过一次（`07:21:17` / `07:27:42`），`lease_expires_at` 随后过期且不再续租；同时
+  ① 没有新的 `agent.build_commands` 行（构建命令从未发出）、② `environment-service` 日志自部署后
+  无任何调用、③ 无沙箱 Pod、④ `pg_stat_activity` 无阻塞查询、⑤ agent-service 的最后一个
+  `artifact_store` 事件与 claim 同一秒（`endpoint` 已 redaction）。
+  重启 `deploy/agent-service` 只能让 worker 重新 claim 一次，随后再次停住；因此队列会稳定积压
+  （`agent_run_dispatches` 的 `pending`），`tools/user_acceptance.py preflight` 的
+  `authoring_queue` 检查会以 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY` 报出。
+  推断卡点在 authoring 之后、构建命令之前（候选物化/对象存储调用），尚未定位到具体代码行；
+  需要 agent-service 侧更细的诊断（当前该步没有可区分阶段的日志）。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
