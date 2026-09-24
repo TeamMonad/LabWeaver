@@ -953,6 +953,13 @@ helm -n labweaver-system history labweaver
     尝试落地之前，且 `agent.agent_run_dispatches` 已是 `prepared`。
   处置：按 §12「产品缺陷」改源码后重新打包部署，并补上该段的失败诊断；不得以 Mock 或降级断言绕过。
 
+### 11.9.1 三条旅程的共同依赖
+
+`lab`、`work`、`admin` 三条旅程都包含「生成 Work 模板 → 候选 → 构建 → 批准」这一段（`admin` 的
+`resource-approval.live.spec.mjs` 用同一个 `publishWorkTemplate` 助手建项目与 Work 模板），因此
+**Work 模板候选的 schema 适配是三条旅程的共同前置**；`lab` 包另有 environment/evaluation 两条轨迹
+（已可双双成功）。修 Work 模板提示词（四个字段必填）后需重新打包部署，三条旅程才能一起转绿。
+
 ## 11.9 已知项与未覆盖项
 
 - **未覆盖：GPU / CUDA 旅程**。验收默认只跑 `lab`（xv6）/`work`/`admin` 三条；`LABWEAVER_E2E_LAB=cuda`
