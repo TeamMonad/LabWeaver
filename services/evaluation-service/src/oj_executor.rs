@@ -149,6 +149,20 @@ impl OjKubernetesExecutor {
                 receipt
                     .validate_for(request)
                     .map_err(|_| OjExecutorError::ReceiptInvalid)?;
+                if receipt.compile_exit_code.is_some_and(|code| code != 0) {
+                    // The compile output only exists inside the Job (the evidence file and the pod
+                    // are both gone after cleanup), so at least the outcome travels with the
+                    // receipt: the lab's build script uses 64/65/66 for its own early exits, which
+                    // is otherwise indistinguishable from a make failure.
+                    tracing::warn!(
+                        event = "evaluation.oj.compile_failed",
+                        component = "evaluation-service",
+                        operation = "oj.observe_job",
+                        outcome = "failed",
+                        exit_code = receipt.compile_exit_code,
+                        diagnostic_code = %receipt.diagnostic_code,
+                    );
+                }
                 Ok(OjJobObservation::Completed {
                     receipt,
                     observation,

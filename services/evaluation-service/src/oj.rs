@@ -491,6 +491,11 @@ pub struct OjEvidenceReceipt {
     pub diagnostic_code: String,
     pub awarded_points: u32,
     pub max_points: u32,
+    /// Compiler exit code. One integer keeps the payload-free receipt small while making a failed
+    /// compile diagnosable: the lab's `build-xv6.sh` uses 64/65/66 for its own early exits, which
+    /// is otherwise indistinguishable from a `make` failure once the Job and its `/evidence`
+    /// volume are gone.
+    pub compile_exit_code: Option<i32>,
 }
 
 impl OjEvidenceReceipt {

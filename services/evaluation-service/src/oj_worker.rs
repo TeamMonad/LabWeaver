@@ -1298,6 +1298,7 @@ fn persist_evidence(
         diagnostic_code: evidence.diagnostic_code.clone(),
         awarded_points: evidence.aggregate.awarded_points,
         max_points: evidence.aggregate.max_points,
+        compile_exit_code: evidence.compile.exit_code,
     };
     receipt.validate_for(request)?;
     Ok(receipt)
