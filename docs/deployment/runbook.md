@@ -721,6 +721,10 @@ helm -n labweaver-system history labweaver
 - **诊断缺口（待补）**：`enforce_budget` 只返回 `BudgetExceeded`，不记录是哪一个维度越界
   （`services/agent-service/src/claude_code.rs:2839`），日志里也没有 usage；本轮只能靠从对象存储
   读回 `result.json` 才能定性。建议后续在该分支补上越界维度与「观测值/上限」两个字段。
+- **产品含义（成本/时延，非阻塞）**：单回合约 10 万输入 token 意味着 materials 是整体进提示词的，
+  按真实云端模型计费时一次 authoring（数十回合）会显著计费并拖长首字时延。本轮验收用本机模型
+  不受影响；若后续要用真实 provider，应把「按对象引用 materials」而不是整体内联作为优化项
+  （属产品/性能范围，本轮不擅自改动提示词结构）。
 
 ### 11.8 已知阻塞
 - **服务身份缺 scope-mapping（已定位并临时修复，角色本身有缺陷）**：authoring 的失败链最终落到
