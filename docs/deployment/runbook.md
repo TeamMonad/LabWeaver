@@ -908,6 +908,10 @@ helm -n labweaver-system history labweaver
   使用已注册 provider binding」「平台镜像 seed 解析」「`--bare`/工具策略」「沙箱流解析」四处修复
   合起来让 environment 与 evaluation 两侧都能产出被接受的候选（本轮之前两侧都停在候选生成）。
   同一时段 work 旅程的 authoring run 紧接着被领取并进入 `environment:running`，worker 吞吐正常。
+- **lab 旅程的学生环境已真正就绪**：实验包发布与审批之后，学生环境实例
+  （`01a0d2c7-c42c-7d02-90d7-b53dac0a69a5`）以 `provider_binding=container-primary-v1` 从
+  `provisioning` 走到 **`observed_state=ready`**，说明「发布包 → 候选 → 环境实例 → 就绪」整段在
+  真实集群上可用；同一时段 work 旅程的 authoring 也在并行推进。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
