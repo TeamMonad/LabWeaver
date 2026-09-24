@@ -1750,24 +1750,26 @@ impl KubernetesEvaluationRunner {
                     None => return Err(ExecutionError::Backend("oj_resources_missing".to_owned())),
                 },
             };
-            let observation = match observed {
-                Ok(observation) => observation,
-                Err(_) => {
-                    // A transient observation failure is not a durable control-plane failure. The
-                    // worker retries it inside the same bounded window it grants a missing Job and
-                    // only then reports the backend error: escaping from here terminated the whole
-                    // service, which took the evaluation API and every result read down with it.
-                    let first_error = missing_since.get_or_insert_with(Instant::now);
-                    if first_error.elapsed() < OJ_JOB_MISSING_GRACE {
-                        tokio::time::sleep(Duration::from_millis(
-                            self.configuration
-                                .execution_observe_poll_interval_milliseconds,
-                        ))
-                        .await;
-                        continue;
-                    }
-                    return Err(ExecutionError::Backend("oj_observe_failed".to_owned()));
+            let Ok(observation) = observed else {
+                // A transient observation failure is not a durable control-plane failure. The worker
+                // retries it inside the same bounded window it grants a missing Job; escaping from
+                // here terminated the whole service, which took the evaluation API and every result
+                // read down with it.
+                let first_error = missing_since.get_or_insert_with(Instant::now);
+                if first_error.elapsed() < OJ_JOB_MISSING_GRACE {
+                    tokio::time::sleep(Duration::from_millis(
+                        self.configuration
+                            .execution_observe_poll_interval_milliseconds,
+                    ))
+                    .await;
+                    continue;
                 }
+                // The Job stayed unobservable for the whole window: fail the step with a stable
+                // diagnostic instead of exiting the process.
+                return Ok((
+                    TerminalResult::Failed("LW_OJ_OBSERVE_UNAVAILABLE".to_owned()),
+                    ExecutionTiming::unknown(),
+                ));
             };
             match observation {
                 OjJobObservation::Running => {
