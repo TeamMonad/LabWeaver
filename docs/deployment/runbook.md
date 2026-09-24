@@ -1047,6 +1047,15 @@ helm -n labweaver-system history labweaver
   `POST /api/v1/resource-requests/{id}/approve` 即此路径）。
   验收侧可重复的做法是把 ② 写进 lab 旅程的学生结果阶段（等价于真实部署里管理员批准学生评测），
   但**不得**用 Mock 或放宽断言替代。
+- **本轮实测复现：worker 的 claim 循环会静默停住（需 owner 修）**。run 55 的 lab dispatch
+  （`run_id=01a0d33b-7f65-7542-810f-f0178ace8163`，创建 11:44:47）在 `agent.agent_run_dispatches`
+  里保持 `pending` 超过 2 分钟，而 agent-service（`sha256:c4d46c12…`，本次部署的新镜像）近 20 分钟
+  **只打出一条非 HTTP 事件**（`agent.outbox.published`），没有任何 `agent.dispatch.claimed`；
+  `kubectl rollout restart deploy/agent-service` 之后立刻出现 `agent.dispatch.worker_started`（×2）与
+  **`agent.dispatch.claimed`（×2）**，dispatch 随即被取走。与 §11.8 早先记录的「重启只能让它再 claim
+  一次」一致：**claim 循环会在若干次运行后停住且不留日志**，长跑验收会因此空等。处置：需要 agent-service
+  owner 给该循环补上「停住即失败/重启」的可观测性与自恢复；验收期间的可重复缓解是发现 dispatch 超过
+  ~2 分钟仍为 `pending` 时重启该 Deployment（本轮即如此）。
 - **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
   （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
   run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
