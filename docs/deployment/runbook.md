@@ -1711,6 +1711,13 @@ Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留
 顺序才是。修法应在执行/评测侧 owner 决定（让 `Missing` 在应用后的一段有界窗口内可重观察，或让
 清理与 coordinator 的 attempt 终态严格串行），本轮按证据记录、不放宽旅程断言。
 
+### 11.6.1 apex 跳转目标带 `:443` 属良性（实测）
+
+`https://labweaver.2018wzh.top/` 返回 `301` 到 `https://portal.labweaver.2018wzh.top:443/`。查已施加的
+`portal-apex-redirect` 可见 `RequestRedirect` 只设了 `scheme/hostname/statusCode`，**没有 `port`**——
+`:443` 是 Cilium Gateway 生成 Location 时补上的。浏览器对 `https://host:443` 与 `https://host` 视为
+同一来源，因此不影响可用性与会话 cookie（`__Host-` 仅看主机名）。记录为已知项，不做模板改动。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
