@@ -1658,8 +1658,23 @@ sudo -i -u root env PATH=/opt/labweaver/venv/bin:/usr/local/bin:/usr/bin:/bin \
   bash -lc 'cd /home/wzh/LabWeaver && cargo xtask platform-application --env v1 --infra --yes --package-manifest <manifest>'
 ```
 
-判据：结束后 `kubectl -n labweaver-system get deploy <component> -o jsonpath='{.spec.template.spec.containers[0].image}'`
+判据一：结束后 `kubectl -n labweaver-system get deploy <component> -o jsonpath='{.spec.template.spec.containers[0].image}'`
 必须等于 manifest 里该组件的 digest（实测 `evaluation-service` 由 `…842dd6dda89da152` 变为 `…beaf9a2199b8bc3b7d7`）。
+
+判据二（更省事，一次 API 查询即可证明「跑的是哪个提交」）：Harbor 给每个构建产物打的 tag 就是
+`git-<source_commit 前 12 位>`，所以查**当前运行 digest 的 tag** 就能确认部署是否真的换成了本次提交：
+
+```sh
+D=$(kubectl -n labweaver-system get deploy evaluation-service \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*@//')
+curl -sS -u "admin:$(cat /var/lib/labweaver/.private/v1/platform-application/harbor-admin-password)" \
+  "https://harbor.lab.lan/api/v2.0/projects/labweaver-system/repositories/evaluation-service/artifacts/$D" \
+  | python3 -c 'import json,sys; print([t["name"] for t in json.load(sys.stdin).get("tags") or []])'
+# 期望：['git-<本次 source_commit 前 12 位>']
+```
+
+实测（2026-09-24）：修复 `033f47c` 打包进行中时，运行中的 digest 仍带 tag `git-d8e202187fe4`，
+即修复**尚未上线**——这条判据把「打包成功」与「部署已生效」干净地区分开。
 
 ### 12.0 日志字段名与「可诊断但不泄密」的边界（实测）
 
