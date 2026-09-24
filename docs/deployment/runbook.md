@@ -1403,6 +1403,14 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 **注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
 需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
 
+### 11.14e run 70（验证收据修复的那一轮）的实际阻塞：模型候选质量
+
+收据修复部署后（helm rev 84）跑 run 70，其 authoring 出现 **`environment` 轨 failed、`evaluation` 轨
+succeeded**（run 终态 `partially_succeeded`），近期 agent-service 诊断只有 `LW_PROVIDER_UNAVAILABLE`×2
+与 **`LW_EVIDENCE_INVALID`×2**——即**候选没过受审 schema**，属模型/提示词质量边界（与 §11.13 的
+「构建配方被 BuildKit 拒绝」同类）。因此这一轮**没有走到 OJ**，`evaluation.oj.compile_failed` 事件
+（携带编译退出码）仍处于「已部署、待触发」状态：下次有 run 真正进入 OJ 时即可见。
+
 ### 11.14d 为什么编译输出目前无法进入平台记录（架构性结论）
 
 尝试在证据里携带编译输出时确认了平台的既有设计：`OjEvidenceReceipt` 被明确注释为
