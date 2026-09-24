@@ -1305,6 +1305,21 @@ run 60（`lab,work`）复跑后两段的失败点也各前进了一步：`lab` �
 旅程自身审批的抢跑（`561d6a9`）。修复后由 run 60（`lab,work`）与后续 run 验证；`environment` 申请
 的审批窗口竞态未在任何环节放宽断言。
 
+### 11.12 lab 旅程的新阻塞：OJ 评测沙箱（run 61，2026-09-24）
+
+run 61 的 lab 段已越过 authoring（provider 重试生效）与冻结提交，停在评测结果：
+`REAL_EXPERIMENT_EVALUATION_FAILED:failed`。证据链：
+
+- `evaluation.evaluation_runs` 最近四次均为 `failed` / `diagnostic_code=LW_OJ_SANDBOX_UNAVAILABLE` / `awarded_score=0`；
+- `evaluation.evaluation_step_attempts` 对**同一 runner 镜像**出现 `failed(LW_OJ_SANDBOX_UNAVAILABLE)`
+  与 `succeeded` 交替，说明 OJ 执行链路本身可用，失败是**部分步骤**；
+- `labweaver-evaluation` 里对应 Job（`lw-oj-01a0d40b…`）先是容器正常 Start（镜像来自 Harbor 的
+  项目实验镜像），随后以 `BackoffLimitExceeded` 结束——即容器**反复非零退出**；
+- 平台把「重试耗尽」统一映射为 `LW_OJ_SANDBOX_UNAVAILABLE`。
+
+因此待查项是：OJ 容器在这份 xv6 实验镜像与 gVisor 运行时下为何非零退出，以及「测试未通过」与
+「沙箱不可用」是否被混为同一诊断码（后者会让用户看到误导性的不可用提示）。属执行/评测侧 owner 决策。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
