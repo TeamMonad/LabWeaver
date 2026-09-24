@@ -1343,6 +1343,21 @@ build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buil
 两次都得到同一结果。这与 lab 的 terminal 缺口同源：本地 27B 模型产出的候选质量边界，处置属产品决策
 （收紧提示词/schema 或换模型），不放宽断言。证据：`artifacts/acceptance/public-20260924-62-all/admin/`。
 
+### 11.19 OJ 运行时修复的端到端验证（run 68，2026-09-24）
+
+修复部署后第一个真实 OJ 执行（evaluation run `01a0d49b-b8a0…`，18:09:31）得到**决定性证据**：
+
+- 抢到的 OJ Pod `lw-oj-01a0d49bb9e17f519916-sd47f`：**`runtimeClassName` 为空（默认 runc）**，
+  `program-runner` 容器状态 **`Completed`**——此前同一镜像下它是 `Error` + `OjWorker(SandboxUnavailable)`；
+- 评测结果随之从 `LW_OJ_SANDBOX_UNAVAILABLE` 变为 **`LW_OJ_COMPILE_ERROR`**（`compile` 门 `failed`，
+  `smoke-tests` 因依赖 `skipped`），即**平台层缺陷已消除**：OJ 现在能正常建立陆锁沙箱、跑完容器，
+  并把「编译失败」作为真实诊断报出来（而不是误报为沙箱不可用）。
+
+**仍未覆盖**：失败切换成了编译本身——而独立探针证明 starter（`examples/xv6-lab/student/student.c`）
+在同一 runner 镜像里 `build-xv6.sh` 是 `BUILD_EXIT=0`。因此下一步是查**冻结后的提交内容**为何编译不过
+（实验材料/冻结语义），另外 `compile` 的容器输出目前仍未落入平台日志或尝试记录（§11.14 的建议只完成了
+「换对诊断码」这一半）。
+
 ### 11.15 OJ `LW_OJ_SANDBOX_UNAVAILABLE` 的根因：Landlock 与 gVisor 不兼容（已修，待部署验证）
 
 **根因（已证实）**：评测服务的 OJ 程序沙箱用 **Landlock**（`services/evaluation-service/src/oj_worker.rs`
