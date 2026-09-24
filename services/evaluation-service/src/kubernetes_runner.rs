@@ -1734,20 +1734,41 @@ impl KubernetesEvaluationRunner {
             {
                 return Ok((TerminalResult::Cancelled, ExecutionTiming::unknown()));
             }
-            let observation = match recovery {
-                Some(recovery) => self.oj.observe_recovery(recovery, request).await,
-                None => {
-                    self.oj
-                        .observe(
-                            resources.ok_or_else(|| {
-                                ExecutionError::Backend("oj_resources_missing".to_owned())
-                            })?,
-                            request,
-                        )
-                        .await
+            // A missing resource bundle is structural: the persisted checkpoint does not describe
+            // this attempt, so it fails immediately.
+            let started_resources = match (recovery, resources) {
+                (Some(_), _) => None,
+                (None, Some(resources)) => Some(resources),
+                (None, None) => {
+                    return Err(ExecutionError::Backend("oj_resources_missing".to_owned()));
                 }
-            }
-            .map_err(|_| ExecutionError::Backend("oj_observe_failed".to_owned()))?;
+            };
+            let observed = match recovery {
+                Some(recovery) => self.oj.observe_recovery(recovery, request).await,
+                None => match started_resources {
+                    Some(resources) => self.oj.observe(resources, request).await,
+                    None => return Err(ExecutionError::Backend("oj_resources_missing".to_owned())),
+                },
+            };
+            let observation = match observed {
+                Ok(observation) => observation,
+                Err(_) => {
+                    // A transient observation failure is not a durable control-plane failure. The
+                    // worker retries it inside the same bounded window it grants a missing Job and
+                    // only then reports the backend error: escaping from here terminated the whole
+                    // service, which took the evaluation API and every result read down with it.
+                    let first_error = missing_since.get_or_insert_with(Instant::now);
+                    if first_error.elapsed() < OJ_JOB_MISSING_GRACE {
+                        tokio::time::sleep(Duration::from_millis(
+                            self.configuration
+                                .execution_observe_poll_interval_milliseconds,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(ExecutionError::Backend("oj_observe_failed".to_owned()));
+                }
+            };
             match observation {
                 OjJobObservation::Running => {
                     tokio::time::sleep(Duration::from_millis(
