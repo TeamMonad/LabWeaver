@@ -1328,6 +1328,16 @@ run 61 的 lab 段已越过 authoring（provider 重试生效）与冻结提交�
 `LW_OJ_SANDBOX_UNAVAILABLE`，所以待查项是：OJ 容器在这份 xv6 实验镜像与 gVisor 运行时下为何非零退出，以及「测试未通过」与
 「沙箱不可用」是否被混为同一诊断码（后者会让用户看到误导性的不可用提示）。属执行/评测侧 owner 决策。
 
+### 11.13 admin 段的候选构建：BuildKit 拒绝 solve（run 62，2026-09-24）
+
+run 62 的 admin 段两次尝试都在候选构建处以
+`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:LW_AGENT_BUILD_PROVIDER_UNAVAILABLE` 结束。
+build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buildkit_solve_failed`，
+`error_kind=buildkit_solve_rejected`、`diagnostic_code=LW_AGENT_BUILD_SOLVE_FAILED`——即 **Work 模板候选的
+构建配方本身不可解**；旅程侧的 provider 重试（`979ed79`）确实执行过（run 62 用的就是带重试的 spec），
+两次都得到同一结果。这与 lab 的 terminal 缺口同源：本地 27B 模型产出的候选质量边界，处置属产品决策
+（收紧提示词/schema 或换模型），不放宽断言。证据：`artifacts/acceptance/public-20260924-62-all/admin/`。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
