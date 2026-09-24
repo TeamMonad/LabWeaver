@@ -371,6 +371,7 @@ class PreflightTest(unittest.TestCase):
                 "model",
                 "browser",
                 "evidence-dir",
+                "authoring_queue",
             ],
         )
 

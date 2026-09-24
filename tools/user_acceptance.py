@@ -37,6 +37,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 KUBECTL_CONTEXT = "kubernetes-admin@kubernetes"
 NAMESPACE = "labweaver-system"
+# Business facts live in the data namespace; the authoring queue is read there.
+DATA_NAMESPACE = "labweaver-data"
 # Helm release that owns the platform profile workloads; the Resource profile
 # renders the same chart under its own release and bundle identity.
 PLATFORM_RELEASE = "labweaver"
@@ -65,6 +67,7 @@ PORTAL_UNREACHABLE = "LW_ACCEPTANCE_PORTAL_UNREACHABLE"
 LOGIN_REDIRECT_INVALID = "LW_ACCEPTANCE_LOGIN_REDIRECT_INVALID"
 CREDENTIALS_MISSING = "LW_ACCEPTANCE_CREDENTIALS_MISSING"
 MODEL_MISSING = "LW_ACCEPTANCE_MODEL_MISSING"
+AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
 BROWSER_MISSING = "LW_ACCEPTANCE_BROWSER_MISSING"
 EVIDENCE_DIR_UNWRITABLE = "LW_ACCEPTANCE_EVIDENCE_DIR_UNWRITABLE"
 JOURNEY_UNKNOWN = "LW_ACCEPTANCE_JOURNEY_UNKNOWN"
@@ -465,6 +468,51 @@ def _join(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + path
 
 
+def check_authoring_queue(
+    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+) -> Check:
+    """Report queued authoring dispatches.
+
+    The agent worker runs one reserved dispatch at a time in ``created_at``
+    order, so a journey started while dispatches are queued waits behind them
+    and can exceed its own poll ceiling. Reported as a warning, not a failure:
+    the queue drains on its own.
+    """
+
+    query = (
+        "select count(*) from agent.agent_run_dispatches "
+        "where state in ('pending','preparing','claimed')"
+    )
+    code, stdout, _ = run_kubectl(
+        [
+            "kubectl",
+            "--context",
+            KUBECTL_CONTEXT,
+            "-n",
+            DATA_NAMESPACE,
+            "exec",
+            "postgres-0",
+            "--",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "labweaver",
+            "-tAc",
+            query,
+        ]
+    )
+    if code != 0 or not stdout.strip().isdigit():
+        return Check("authoring_queue", True, None, "queue state unavailable")
+    pending = int(stdout.strip())
+    return Check(
+        "authoring_queue",
+        True,
+        AUTHORING_QUEUE_BUSY if pending else None,
+        f"{pending} queued authoring dispatch(es)",
+    )
+
+
 def check_cluster(run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]]) -> Check:
     command = [
         "kubectl",
@@ -606,6 +654,7 @@ def preflight_checks(
         check_model(model, run_kubectl),
         check_browser(repo_root, browsers_path, run_version),
         check_evidence_dir(Path(args.evidence_dir)),
+        check_authoring_queue(run_kubectl),
     ]
 
 
