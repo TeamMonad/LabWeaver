@@ -874,6 +874,13 @@ helm -n labweaver-system history labweaver
   `runtimeClassName: labweaver-sandbox` + `nodeSelector` 的探针 Job（`busybox`，`cat /proc/version`），
   两者都输出 `Linux version 4.19.0-gvisor` 并在数秒内完成，证明 gVisor 运行时在 worker-97 与
   worker-158 上仍然可用；探针 Job 用完即删。
+- **A3 复核（当前实机状态，rev 72）**：`helm -n labweaver-system status labweaver` = `deployed`
+  （revision 72）；`deploy -l app.kubernetes.io/instance=labweaver` 的 **12/12** 个 workload 都带
+  `labweaver.io/configuration-bundle-sha256` 注解，且取值唯一，等于本地 bundle
+  `configuration-bundle-public-20260923s.yml` 的 `sha256sum`
+  （`sha256:e3c5a25efdcc81edb81db6ad2561ecb827639e4a7bda5894e678c20277579e7f`）；带 digest 的 workload
+  镜像 12 个中 11 个与平台包 manifest（`pkg-v1-issue127-public-10-72401d01c2ce`）完全一致，剩下
+  `resource-service` 来自 resource 包（独立 profile 与 release），属预期。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
