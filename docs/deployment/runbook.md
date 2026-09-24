@@ -918,6 +918,13 @@ helm -n labweaver-system history labweaver
   `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE`；同一时段 **lab 包的 environment + evaluation 两条轨迹
   双双 succeeded**。即：同一模型在「实验包」两条 schema 上已能产出被接受的候选，而「Work 模板」这条
   仍未通过，属提示/模型能力边界，不是链路或权限问题；work 旅程会重试，失败时按此诊断记录。
+- **lab 旅程下一步的真实缺口：experiment 候选没有带 terminal/entry**。失败点在教学端「浏览器终端」
+  面板：spec 已点「打开终端」并等待 `.xterm-host`，页面状态栏显示
+  `环境已就绪，可以打开终端；重启会中断当前运行。`，但终端始终未挂载。对应环境实例
+  `01a0d2c7-c42c-7d02-90d7-b53dac0a69a5`（class `experiment`）的 contract 为 **`"endpoints": []`**，
+  即候选没有声明任何 entry/terminal —— 与提示词里「容器环境若保留终端，必须带上 terminal 对象
+  （executable/args/workingDirectory），否则 Web 控制台无法打开」的约束不符。作为当前 lab 旅程的
+  归因记录；同批 work 候选（`01a0d2cc`）声明了 `http` 端点且观测为 `healthy`。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
