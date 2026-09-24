@@ -1301,6 +1301,7 @@ fn persist_evidence(
         compile_exit_code: evidence.compile.exit_code,
         compile_signal: evidence.compile.signal,
         compile_timed_out: evidence.compile.timed_out,
+        compile_output_exceeded: evidence.compile.output_exceeded,
     };
     receipt.validate_for(request)?;
     Ok(receipt)

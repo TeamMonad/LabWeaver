@@ -501,6 +501,9 @@ pub struct OjEvidenceReceipt {
     pub compile_signal: Option<i32>,
     /// Whether the compile stage hit the profile's wall-clock budget.
     pub compile_timed_out: bool,
+    /// Whether the compile stage exceeded the profile's bounded output budget; the worker stops it
+    /// early in that case, which also leaves no exit code.
+    pub compile_output_exceeded: bool,
 }
 
 impl OjEvidenceReceipt {

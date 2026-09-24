@@ -162,6 +162,7 @@ impl OjKubernetesExecutor {
                         exit_code = receipt.compile_exit_code,
                         signal = receipt.compile_signal,
                         timed_out = receipt.compile_timed_out,
+                        output_exceeded = receipt.compile_output_exceeded,
                         diagnostic_code = %receipt.diagnostic_code,
                     );
                 }
