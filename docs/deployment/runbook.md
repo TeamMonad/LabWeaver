@@ -1044,6 +1044,21 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
 声明里也缺 `entries`/`terminal`。因此 11.8 里「environment 提示词必须逐字保留 materials 声明的每个面」
 这条修复正是对应它的杠杆；确认修复是否生效以重新部署后的轨迹为准。
 
+**更新（已定位并修复其中一个真实缺陷：候选被 ``` 围栏包裹）**。从对象存储读回失败尝试的
+`result.json`（`problem-packages/authoring-sandbox/<attempt>/result.json`，取最后一条 `type=result`
+的 envelope）可见 CLI 侧是成功的（`subtype=success`、`is_error=false`、`turns` 仅 2），
+模型的最终文本是一条**带 ```json 围栏**的 `EnvironmentSpec`：
+字段基本齐全（`runtime.kind=container`、`provider_binding=container-primary-v1`、
+`terminal.executable=/bin/sh`、`entries[...]`），但 `runtime` 里混用了 `service_port` 这样的 snake_case。
+而 `parse_stream_output` 只是把 assistant 的 `text` 块**原样拼接**成候选，
+`serde_json::from_str` 遇到围栏必然失败，于是表现为 `SchemaInvalid`。
+**已修复**：新增 `normalize_candidate`，在校验前去掉**整体包裹**候选的那一层 Markdown 围栏
+（语言标签只允许 `[A-Za-z0-9_+-]*`）；JSON 解析、受保护字段、typed schema、物化等所有闸门仍在围栏内的
+文本上运行，因此不可能放进本该被拒的候选；围栏外的散文仍然判 `SchemaInvalid`（不去“搜 JSON”）。
+回归测试 `a_fenced_candidate_is_unwrapped_before_validation` 覆盖围栏/无围栏/前后空白/散文包裹四种输入，
+`cargo test -p agent-service --lib` 80 用例通过、`clippy -D warnings` 干净。提交 `2b9e726`，
+随 `issue127-public-13` 重新打包部署后生效。
+
 ### 11.9.1 三条旅程的共同依赖
 
 `lab`、`work`、`admin` 三条旅程都包含「生成 Work 模板 → 候选 → 构建 → 批准」这一段（`admin` 的
