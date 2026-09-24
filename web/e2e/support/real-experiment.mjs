@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect } from '@playwright/test'
 import {
+  AUTH_STATE,
   expectJson,
   pollJson,
   selectProjectByUi,
@@ -416,6 +417,62 @@ export async function approveEvaluationTaskResourceRequestByUi(page, request, pr
     throw new Error(`REAL_EXPERIMENT_RESOURCE_REQUEST_APPROVAL_CONTRACT_INVALID:${request.id}`)
   }
   return approval
+}
+
+/**
+ * Approve evaluation-task resource requests as soon as the platform raises them.
+ *
+ * A real deployment approves a student's evaluation resource request in the admin
+ * console. The result wait below does the same, but only while it is already
+ * waiting for a result, so an approval can arrive after the request's own
+ * deadline. Starting this loop before the freeze keeps approval ahead of that
+ * deadline and mirrors the administrator's console work.
+ */
+export function startEvaluationResourceApprovalLoop({ browser, baseURL, projectId, studentActorId }) {
+  if (!browser || typeof projectId !== 'string' || typeof studentActorId !== 'string') {
+    throw new Error('REAL_EXPERIMENT_RESOURCE_APPROVAL_LOOP_ARGUMENTS_REQUIRED')
+  }
+  const approvedRequestIds = new Set()
+  let stopped = false
+  let failure
+  const loop = (async () => {
+    const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+    const page = await context.newPage()
+    try {
+      while (!stopped) {
+        const requests = await readResourceRequests(context.request)
+        const candidates = requests.filter((item) =>
+          isEvaluationTaskResourceRequest(item, projectId, studentActorId)
+          && typeof item.id === 'string'
+          && !approvedRequestIds.has(item.id)
+          && item.state === 'reviewing',
+        )
+        for (const candidate of candidates) {
+          await approveEvaluationTaskResourceRequestByUi(page, candidate, projectId, studentActorId)
+          approvedRequestIds.add(candidate.id)
+        }
+        if (candidates.length === 0 && !stopped) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, RESOURCE_APPROVAL_POLL_INTERVAL_MS * 3)
+          })
+        }
+      }
+    } catch (error) {
+      failure = error instanceof Error
+        ? error
+        : new Error('REAL_EXPERIMENT_RESOURCE_APPROVAL_LOOP_FAILED', { cause: error })
+    } finally {
+      await context.close().catch(() => {})
+    }
+  })()
+  return {
+    async stop() {
+      stopped = true
+      await loop.catch(() => {})
+      if (failure) throw failure
+      return [...approvedRequestIds]
+    },
+  }
 }
 
 export async function waitForProjectEvaluationResultWithResourceApproval({

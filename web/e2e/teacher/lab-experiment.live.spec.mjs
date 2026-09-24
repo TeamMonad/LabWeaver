@@ -14,6 +14,7 @@ import {
   addProjectStudentByUi,
   readActorId,
   snapshotProjectResourceRequestIds,
+  startEvaluationResourceApprovalLoop,
   startExperimentRunByUi,
   uploadPackageDirectoryByUi,
   waitForEnvironment,
@@ -358,6 +359,7 @@ test('student completes a published lab experiment through the browser terminal'
   let environmentId
   let studentContext
   let adminContext
+  let evaluationApprovalLoop
   try {
     await cp(LAB.root, packageCopy, { recursive: true })
     const project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
@@ -395,6 +397,15 @@ test('student completes a published lab experiment through the browser terminal'
     await assertNoStuckProgress(studentPage, 'student-environment')
     await auditAccessibility(studentPage, 'student-environment', testInfo)
     const beforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
+    // A real deployment approves the student's evaluation resource request in the
+    // admin console. Start that approval before the freeze so it cannot arrive
+    // after the request's own deadline.
+    evaluationApprovalLoop = startEvaluationResourceApprovalLoop({
+      browser,
+      baseURL,
+      projectId: project.id,
+      studentActorId,
+    })
 
     const terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
     const frames = []
@@ -463,6 +474,7 @@ test('student completes a published lab experiment through the browser terminal'
         if (!studentContext) await cleanupContext.close()
       }
     } finally {
+      await evaluationApprovalLoop?.stop().catch(() => {})
       await studentContext?.close()
       await adminContext?.close()
       await rm(packageCopy, { recursive: true, force: true })
