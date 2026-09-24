@@ -227,9 +227,6 @@ def acceptance_environment(
     # higher than the harness default. Both stay overridable by the caller.
     environment.setdefault("LABWEAVER_E2E_LLM_TIMEOUT_MS", "900000")
     environment.setdefault("LABWEAVER_E2E_LLM_MAX_COST_MICROUSD", "50000000")
-    # The local runtime needs more repair rounds before its candidate JSON
-    # satisfies the reviewed schema; the harness default of two is not enough.
-    environment.setdefault("LABWEAVER_E2E_LLM_MAX_SCHEMA_REPAIRS", "6")
     for role, username in ROLE_USERNAMES.items():
         prefix = ROLE_ENV_PREFIX[role]
         environment[f"{prefix}_USERNAME"] = username
