@@ -209,6 +209,85 @@ class RunJourneyTest(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(result.diagnostics, [MODULE.EVIDENCE_DIR_UNWRITABLE])
 
+    def test_run_waits_for_the_queue_before_starting_journeys(self) -> None:
+        providers = json.dumps([{"providerKind": "container", "binding": "container-live-v1"}])
+
+        def kubectl(argv):  # noqa: ANN001
+            joined = " ".join(argv)
+            if "agent-service-config" in argv:
+                return 0, "qwen3.6:27b", ""
+            if "providers" in joined:
+                return 0, providers, ""
+            if "agent_run_dispatches" in joined:
+                return 0, "0", ""
+            return 0, "{}", ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            credentials = make_credentials(Path(tmp) / "creds")
+            args = MODULE.build_parser().parse_args(
+                [
+                    "run",
+                    "--base-url",
+                    "https://portal.example.test",
+                    "--run-id",
+                    "run-1",
+                    "--journeys",
+                    "admin",
+                    "--credentials-dir",
+                    str(credentials),
+                    "--evidence-dir",
+                    str(Path(tmp) / "evidence"),
+                ]
+            )
+            with mock.patch.object(
+                MODULE, "wait_for_authoring_queue", return_value=0
+            ) as waiter:
+                result = MODULE.run_acceptance(
+                    args, environ={}, execute=lambda *args: 0, run_kubectl=kubectl
+                )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(waiter.call_count, 1)
+
+    def test_run_can_skip_the_queue_wait(self) -> None:
+        providers = json.dumps([{"providerKind": "container", "binding": "container-live-v1"}])
+
+        def kubectl(argv):  # noqa: ANN001
+            joined = " ".join(argv)
+            if "agent-service-config" in argv:
+                return 0, "qwen3.6:27b", ""
+            if "providers" in joined:
+                return 0, providers, ""
+            if "agent_run_dispatches" in joined:
+                return 0, "0", ""
+            return 0, "{}", ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            credentials = make_credentials(Path(tmp) / "creds")
+            args = MODULE.build_parser().parse_args(
+                [
+                    "run",
+                    "--base-url",
+                    "https://portal.example.test",
+                    "--run-id",
+                    "run-1",
+                    "--journeys",
+                    "admin",
+                    "--no-queue-wait",
+                    "--credentials-dir",
+                    str(credentials),
+                    "--evidence-dir",
+                    str(Path(tmp) / "evidence"),
+                ]
+            )
+            with mock.patch.object(
+                MODULE, "wait_for_authoring_queue", return_value=0
+            ) as waiter:
+                result = MODULE.run_acceptance(
+                    args, environ={}, execute=lambda *args: 0, run_kubectl=kubectl
+                )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(waiter.call_count, 0)
+
     def test_queue_wait_returns_as_soon_as_the_queue_is_empty(self) -> None:
         counts = iter([2, 1, 0])
 
