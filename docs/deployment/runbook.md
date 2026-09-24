@@ -1403,6 +1403,19 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 **注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
 需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
 
+### 11.14d 为什么编译输出目前无法进入平台记录（架构性结论）
+
+尝试在证据里携带编译输出时确认了平台的既有设计：`OjEvidenceReceipt` 被明确注释为
+**payload-free**（只含身份、摘要、`evidence_sha256`/`evidence_size_bytes`、终态与分数），它经容器的
+**termination message** 回传给 evaluation-service；真正的载荷写在 Job 自己的 `/evidence/evidence.json`
+（`EVIDENCE_PATH`），而该卷**没有被平台回收**——`/evidence` 是 `emptyDir`，随 Pod 消失。
+所以「把编译输出写进 evidence」在当前架构下**不会**到达平台记录，而把 payload 塞进 receipt 又与该
+「payload-free receipt + 有界 termination message」的设计相悖。
+
+**要根治，需要在执行侧做一件事**（任一即可）：把失败 Job 保留一段时间（或失败时不删）以便读容器日志；
+或由 evaluation-service 在删除前读取容器日志/回收 `/evidence` 卷；或允许 receipt 携带**有界**诊断尾巴。
+本轮已把 §11.14/§11.14b/§11.14c 的现场证据与这条架构结论一并留给执行侧 owner。
+
 ### 11.14c 编译失败的耗时只有约 2 秒（新证据，指向脚本早退）
 
 run 69 期间从 `labweaver-evaluation` 的事件里读到 OJ Job 的完整生命周期：
