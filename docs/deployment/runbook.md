@@ -1415,6 +1415,14 @@ authoring、且集群里没有 authoring Pod」时，先确认派发循环是否
 `targetKind=task` 的新申请），而租约状态长期停在 `active`。用平台自己的 API 撤销后两租约进入
 `expiring`，但同步仍失败、计数不降（重启 `resource-service` 亦然）。
 
+**根因（已定位并修复）**：容量同步的取件 SQL `next_unsynced_active_lease` 只按
+`c.state='handed_off' AND l.state='active' AND c.lease_synced_revision < l.revision` 选租约，**没有**
+按 `r.target_kind` 过滤；而同文件的 `next_lease_cleanup` 等路径都带 `r.target_kind='environment'`。于是
+**task 目标的租约被送进了只处理 Environment 的容量提供者**，在 `capacity.rs` 的
+`let ResourceTarget::Environment {..} = .. else { TaskOwnerRequired }` 处必然报错，并且**永久重试**。
+修复：给该取件 SQL 补上 `r.target_kind='environment'`（与既有过滤一致）。`cargo test -p resource-service`
+的 17+4+22 个用例全过（含直接覆盖该取件的 postgres 用例）。
+
 **与派发停摆的关系**：重启 `agent-service` 后只有 `agent.dispatch.worker_started` 与**一次**
 `agent.dispatch.claimed`（run `01a0d432-ffeb…`），此后再无任何派发事件、该 run 也没有任何 track 启动——
 即 §11.9 里曾记录过的「认领后不推进」形态，且它正好发生在容量模块被孤儿租约拖住期间，两者表现一致。

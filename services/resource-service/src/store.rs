@@ -2948,7 +2948,8 @@ impl PgResourceStore {
              FROM resource.capacity_claims c \
              JOIN resource.resource_requests r ON r.request_id=c.request_id \
              JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
-             WHERE c.state='handed_off' AND l.state='active' \
+             WHERE r.target_kind='environment' \
+               AND c.state='handed_off' AND l.state='active' \
                AND c.lease_synced_revision < l.revision \
              ORDER BY l.updated_at,l.lease_id LIMIT 1",
         )
