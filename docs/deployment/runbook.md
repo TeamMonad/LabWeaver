@@ -1096,7 +1096,13 @@ helm -n labweaver-system history labweaver
   Playwright 的 `getByLabel('执行后端绑定', { exact: true })` 因关联标签文本带 `（CPU 必填）` 而**匹配不到**，
   work 旅程因此在 3.7 分钟处以 `TimeoutError: locator.fill` 失败（页面快照显示项目
   `live-work-…-01a0d35f`，即已走到资源审批步骤）。验收侧已把匹配放宽为 `getByLabel(/执行后端绑定/)`；
-  该字段本身是真实的（CPU 类请求必填），产品无需改动。- **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
+  该字段本身是真实的（CPU 类请求必填），产品无需改动。- **admin 旅程首跑失败于候选构建（也已定位到候选质量）**：run 56 的 admin 用例在 4.0 分钟处以
+  `LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:LW_AGENT_BUILD_PROVIDER_UNAVAILABLE` 失败；build-executor
+  的原始事件是 `agent.build_executor.buildkit_solve_failed`（`diagnostic_code=LW_AGENT_BUILD_SOLVE_FAILED`、
+  `error_kind=buildkit_solve_rejected`、`failure_stage=build.solve`、`retryable=false`），即 **BuildKit 拒绝了
+  该 Work 模板候选的构建配方**（同批另 4 条构建 succeeded，说明构建链路本身正常）。与 lab 的 terminal 缺口同源：
+  都是本地 27B 模型产出的候选质量边界，处置属产品决策（提示词/schema 收紧或换模型），不得放宽断言。
+- **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
   审批线程，用 `web/.auth/platform-admin.json` 的会话每 5 秒查一次 `/api/v1/resource-requests`，对仍处于
   `reviewing` 的内部任务租约按管理员流程调用
   `POST /api/v1/resource-requests/{id}/approve`（`expectedRevision` / `providerBinding` / `resources` /
