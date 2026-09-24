@@ -721,6 +721,29 @@ helm -n labweaver-system history labweaver
 - **诊断缺口（待补）**：`enforce_budget` 只返回 `BudgetExceeded`，不记录是哪一个维度越界
   （`services/agent-service/src/claude_code.rs:2839`），日志里也没有 usage；本轮只能靠从对象存储
   读回 `result.json` 才能定性。建议后续在该分支补上越界维度与「观测值/上限」两个字段。
+- **已修（部署态缺陷）：集群里的 NATS 用户凭据比权威权限表旧，导致 evaluation-service 无法发布 release 事件**。
+  证据链：lab 旅程走到「发布」时报 `LAB_EXPERIMENT_PUBLICATION_FAILED:LW_EVALUATION_RELEASE_PUBLISH_UNAVAILABLE`
+  （`control-service/src/messaging.rs:1017` 的 `evaluation.publish → DownstreamError::Unavailable`）；
+  `evaluation-service` Pod 处于 `CrashLoopBackOff`，其启动期 outbox 反复报
+  `Error: Process(Outbox(PublishRejected { subject: "labweaver.evaluation.release.published.v1",
+  reason: "timeout", stage: "publish_ack" }))`，同时 NATS 服务端对同一 subject 记录
+  **`Publish Violation`**（权限拒绝，而非网络问题）。解码集群里的
+  `labweaver-system/evaluation-service-secrets/nats.creds` 得到 `pub.allow` 只有
+  `{$JS.ACK.>, $JS.API.>, submission.freeze_requested.v1, submission.frozen.v1}`，
+  而权威表 `tools/prepare_platform_foundation.py` 的 `NATS_USERS["evaluation-service"]` 有 9 个 subject
+  （含 `labweaver.evaluation.release.published.v1`）；`nsc describe user` 显示**私钥库里的用户 JWT 是对的**
+  （发布者与 subject 完全一致），说明**只有下发到集群的那份 creds 是旧的**。同一类问题还有
+  `access-service` 缺 `labweaver.environment.instance.state_changed.v1` 订阅等。
+  处置（已执行，逐服务）：用**权威 nsc store**（`/var/lib/labweaver/.private/v1/platform-foundation/nsc`）
+  `nsc --all-dirs <store> generate creds --account WORKLOADS --name <svc> --output-file <tmp>` 重新生成，
+  把内容写回 `labweaver-system/<svc>-secrets` 的 `nats.creds` 键与私有
+  `platform-application/render-input/secrets/<svc>-secrets/nats.creds`，再 `kubectl rollout restart` 该 Deployment；
+  `evaluation-service` 随即 `1/1 Running`（未再出现 Publish Violation）。
+  操作注意：`nsc` 生成的 creds 是 `0600 root`，非 root 直接 `base64` 会读到空内容——必须用 `sudo base64`（本轮曾因此把 9 个
+  `nats.creds` 键写空后立即用同一流程修复，最终校验每个键 1520–2300 字符且 JWT 段可解析）。
+  根因（部署态）：NATS 用户凭据只在最初建基础时生成一次，之后权限表新增 subject 不会再刷新；
+  重新建立基础需要重跑 `prepare_platform_foundation.py`（输出目录 create-once），因此这类「权限表新增 subject」
+  必须显式刷新凭据并滚动服务，否则会出现「服务启动即崩、且只有权限违规日志」的隐性故障。
 - **产品含义（成本/时延，非阻塞）**：单回合约 10 万输入 token 意味着 materials 是整体进提示词的，
   按真实云端模型计费时一次 authoring（数十回合）会显著计费并拖长首字时延。本轮验收用本机模型
   不受影响；若后续要用真实 provider，应把「按对象引用 materials」而不是整体内联作为优化项
