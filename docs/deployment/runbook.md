@@ -1393,6 +1393,17 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 按「保留正常诊断上下文、不能让故障无法诊断」的要求，建议执行/评测侧补齐：Job 失败时保留最后一次
 容器日志（事件或尝试记录），并把「测试未通过」与「沙箱不可用」分开诊断码。
 
+### 11.16 重新施加部署后 agent 派发循环会停摆（运维要点）
+
+本轮多次观察到：`cargo xtask platform-application` 重新施加后，`agent-service` 的派发循环有时**不再认领
+新的 AgentRun**——`agent.agent_runs` 里 run 长时间停在 `requested`（`environment:requested`），
+`agent-service` 只在正常应答 HTTP（前端轮询 200），日志里既没有 `agent.dispatch.worker_started` 也没有
+`agent.dispatch.claimed`，authoring 命名空间没有任何 Pod。
+
+**处置（实测有效）**：`kubectl -n labweaver-system rollout restart deploy/agent-service`。重启后立刻出现
+`agent.dispatch.worker_started` 与 `agent.dispatch.claimed`，队列随即开始消化。因此遇到「旅程长时间卡在
+authoring、且集群里没有 authoring Pod」时，先确认派发循环是否在跑，再做重启，不要把它误判成产品缺陷。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
