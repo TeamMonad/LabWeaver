@@ -948,13 +948,16 @@ helm -n labweaver-system history labweaver
   `runtimeClassName: labweaver-sandbox` + `nodeSelector` 的探针 Job（`busybox`，`cat /proc/version`），
   两者都输出 `Linux version 4.19.0-gvisor` 并在数秒内完成，证明 gVisor 运行时在 worker-97 与
   worker-158 上仍然可用；探针 Job 用完即删。
-- **A3 复核（当前实机状态，rev 72）**：`helm -n labweaver-system status labweaver` = `deployed`
-  （revision 72）；`deploy -l app.kubernetes.io/instance=labweaver` 的 **12/12** 个 workload 都带
+- **A3 复核（当前实机状态，rev 74）**：`helm -n labweaver-system status labweaver` = `deployed`
+  （revision 74）；`deploy -l app.kubernetes.io/instance=labweaver` 的 **11/11** 个 workload 都带
   `labweaver.io/configuration-bundle-sha256` 注解，且取值唯一，等于本地 bundle
   `configuration-bundle-public-20260923s.yml` 的 `sha256sum`
-  （`sha256:e3c5a25efdcc81edb81db6ad2561ecb827639e4a7bda5894e678c20277579e7f`）；带 digest 的 workload
-  镜像 12 个中 11 个与平台包 manifest（`pkg-v1-issue127-public-10-72401d01c2ce`）完全一致，剩下
-  `resource-service` 来自 resource 包（独立 profile 与 release），属预期。
+  （`sha256:e3c5a25efdcc81edb81db6ad2561ecb827639e4a7bda5894e678c20277579e7f`；本轮验收目录里的
+  `deployment-readback.txt` 记录了逐 workload 的镜像 digest 与本地校验和命令）；带 digest 的 workload
+  镜像与平台包 manifest（`pkg-v1-issue127-public-12-299d2216e2b8`，commit `299d2216e2b8`）逐组件一致
+  （`build-executor`/`container-executor`/`kubevirt-*` 复用 agent/environment 镜像，`resource-service`
+  来自 resource 包，属预期）。补一条更正：早先记的 12 个 workload 含一个非 Deployment 负载，
+  以 `-l app.kubernetes.io/instance=labweaver` 的 Deployment 口径为准。
 - **A4 复核（当前实机状态）**：`https://keycloak.labweaver.2018wzh.top/realms/workloads/.well-known/openid-configuration`
   的 `issuer`、`authorization_endpoint`、`token_endpoint` 全部是公网主机名；`/auth/login` 返回 307 且
   `Location` 指向公网 Keycloak；`/api/v1/auth/csrf` 在无会话时返回 401（`preflight` 的 portal-csrf 即按此断言）。
