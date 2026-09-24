@@ -958,6 +958,13 @@ helm -n labweaver-system history labweaver
   （`build-executor`/`container-executor`/`kubevirt-*` 复用 agent/environment 镜像，`resource-service`
   来自 resource 包，属预期）。补一条更正：早先记的 12 个 workload 含一个非 Deployment 负载，
   以 `-l app.kubernetes.io/instance=labweaver` 的 Deployment 口径为准。
+- **本轮部署身份（current，含围栏修复与刷新凭据）**：平台包 `pkg-v1-issue127-public-13-e17f8d966d3d`
+  （release `issue127-public-13`，commit `e17f8d966d3d`，8 个组件）；`package-validate` 的 static 与
+  connected 均通过，`platform-application` 退出码 0。部署后实机为：`helm status` = `deployed`
+  **rev 76**；11/11 Deployment 就绪，`labweaver.io/configuration-bundle-sha256` 取值唯一 =
+  `sha256:36e3edba7443df8467b5e2eb6f6373c92a9b2f79ec22d8d6e0c2ed48244d91d2`（即新渲染的
+  `configuration-bundle-public-20260924b.yml`，含刷新后的 NATS 凭据）；`agent-service` 镜像 digest
+  由 `sha256:0f210313…` 变为 **`sha256:c4d46c121aae3530…`**（含 `normalize_candidate` 围栏修复）。
 - **A4 复核（当前实机状态）**：`https://keycloak.labweaver.2018wzh.top/realms/workloads/.well-known/openid-configuration`
   的 `issuer`、`authorization_endpoint`、`token_endpoint` 全部是公网主机名；`/auth/login` 返回 307 且
   `Location` 指向公网 Keycloak；`/api/v1/auth/csrf` 在无会话时返回 401（`preflight` 的 portal-csrf 即按此断言）。
