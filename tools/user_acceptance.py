@@ -72,6 +72,7 @@ AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
 # The worker serves one reserved dispatch at a time, so a run waits for the
 # queue in front of it; see docs/deployment/runbook.md.
 QUEUE_WAIT_SECONDS = 3600.0
+QUEUE_WAIT_POLL_SECONDS = 30.0
 BROWSER_MISSING = "LW_ACCEPTANCE_BROWSER_MISSING"
 EVIDENCE_DIR_UNWRITABLE = "LW_ACCEPTANCE_EVIDENCE_DIR_UNWRITABLE"
 JOURNEY_UNKNOWN = "LW_ACCEPTANCE_JOURNEY_UNKNOWN"
@@ -521,7 +522,7 @@ def wait_for_authoring_queue(
         pending = queued_dispatch_count(run_kubectl)
         if pending in (None, 0) or time.monotonic() >= deadline:
             return pending
-        time.sleep(30.0)
+        time.sleep(QUEUE_WAIT_POLL_SECONDS)
 
 
 def check_authoring_queue(

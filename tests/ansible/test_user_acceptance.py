@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -207,6 +208,29 @@ class RunJourneyTest(unittest.TestCase):
             result = MODULE.run_acceptance(args, environ={}, execute=lambda *args: 0)
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(result.diagnostics, [MODULE.EVIDENCE_DIR_UNWRITABLE])
+
+    def test_queue_wait_returns_as_soon_as_the_queue_is_empty(self) -> None:
+        counts = iter([2, 1, 0])
+
+        def kubectl(argv):  # noqa: ANN001
+            return 0, str(next(counts, 0)), ""
+
+        with mock.patch.object(MODULE, "QUEUE_WAIT_POLL_SECONDS", 0.0):
+            self.assertEqual(MODULE.wait_for_authoring_queue(kubectl, 30.0), 0)
+
+    def test_queue_wait_gives_up_at_the_timeout(self) -> None:
+        def kubectl(argv):  # noqa: ANN001
+            return 0, "3", ""
+
+        # A busy queue must not spin forever: the wait is bounded and reports the
+        # last observed depth so the caller can still start the run.
+        self.assertEqual(MODULE.wait_for_authoring_queue(kubectl, 0.0), 3)
+
+    def test_queue_wait_treats_an_unreadable_registry_as_empty(self) -> None:
+        def kubectl(argv):  # noqa: ANN001
+            return 1, "", "no postgres"
+
+        self.assertIsNone(MODULE.wait_for_authoring_queue(kubectl, 30.0))
 
     def test_provider_binding_is_resolved_from_the_live_provider_registry(self) -> None:
         providers = json.dumps(
