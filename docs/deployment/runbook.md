@@ -881,6 +881,12 @@ helm -n labweaver-system history labweaver
   （`sha256:e3c5a25efdcc81edb81db6ad2561ecb827639e4a7bda5894e678c20277579e7f`）；带 digest 的 workload
   镜像 12 个中 11 个与平台包 manifest（`pkg-v1-issue127-public-10-72401d01c2ce`）完全一致，剩下
   `resource-service` 来自 resource 包（独立 profile 与 release），属预期。
+- **A4 复核（当前实机状态）**：`https://keycloak.labweaver.2018wzh.top/realms/workloads/.well-known/openid-configuration`
+  的 `issuer`、`authorization_endpoint`、`token_endpoint` 全部是公网主机名；`/auth/login` 返回 307 且
+  `Location` 指向公网 Keycloak；`/api/v1/auth/csrf` 在无会话时返回 401（`preflight` 的 portal-csrf 即按此断言）。
+  Pod 侧解析走 chart 的 `hostAliases`：`agent-service` 的 Pod 模板把 `keycloak.labweaver.2018wzh.top`
+  映射到集群内 identity proxy `10.106.242.177`、`portal.labweaver.2018wzh.top` 映射到公网 Gateway VIP
+  `10.99.0.140`，因此 Pod 用公网 issuer 完成 OIDC 发现与令牌交换。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
