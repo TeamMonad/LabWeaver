@@ -1412,7 +1412,12 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 所以「把编译输出写进 evidence」在当前架构下**不会**到达平台记录，而把 payload 塞进 receipt 又与该
 「payload-free receipt + 有界 termination message」的设计相悖。
 
-**要根治，需要在执行侧做一件事**（任一即可）：把失败 Job 保留一段时间（或失败时不删）以便读容器日志；
+**已实现的最小方案（`4a17a1d`）**：把**编译退出码**放进 payload-free receipt（`compile_exit_code`），
+并在 evaluation-service 侧于失败时打 `evaluation.oj.compile_failed` 事件（含 exit code 与诊断码）。
+一个整数不破坏 receipt 的精简约定，却足以区分失败类别——`build-xv6.sh` 自己的早退是 64/65/66，
+其它码就是 `make` 的真实失败。载荷（完整 stdout/stderr）仍留在 §11.14 的容器日志路径上。
+
+**若要拿到完整输出，仍需在执行侧做一件事**（任一即可）：把失败 Job 保留一段时间（或失败时不删）以便读容器日志；
 或由 evaluation-service 在删除前读取容器日志/回收 `/evidence` 卷；或允许 receipt 携带**有界**诊断尾巴。
 本轮已把 §11.14/§11.14b/§11.14c 的现场证据与这条架构结论一并留给执行侧 owner。
 
