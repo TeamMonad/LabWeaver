@@ -943,6 +943,24 @@ helm -n labweaver-system history labweaver
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
+- **上线阻塞（需产品决定）：项目 LLM 出站策略没有任何应用内建立入口**。证据：
+  - 权威读取只认项目行：`services/control-service/src/lib.rs:1963` 的 `active_project_policy`
+    是 `WHERE project_id=$1 AND superseded_at IS NULL`，**没有课程级或平台级回退**；
+    在线库里 `control.project_llm_policies` 共 198 行，`project_id IS NULL` 的行为 0，即不存在课程策略。
+  - 唯一的建立路径是 `POST /api/v1/projects/{id}/llm-egress-policies`
+    （`services/control-service/src/api.rs:631`）。前端 SDK 里有 `createProjectLlmPolicy`
+    但**没有任何页面调用它**；`web/src/views/teacher/MaterialUploadView.vue` 只读展示
+    「项目 AI 设置」（无策略时 `AsyncStateView` 只给重试），`web/src/views/admin/PolicyListView.vue`
+    仍是 `PlaceholderPane`（「策略管理」占位）。
+  - 项目创建不会自动建立策略（`api.rs:403` 的 `create_project` 只建项目）；文档、`tools/`、`xtask`
+    里也没有任何建立策略的运维步骤（全仓 grep `llm-egress-policies` 只命中服务端路由、契约、
+    生成 SDK 与 `web/e2e/**` 的验收 spec）。
+  - 结论：`web/e2e/**` 的各条旅程用 API 预先建立策略，**替代了一个尚不存在的产品能力**。
+    真实教师在一手新项目上会停在「材料上传与 AgentRun」页的错误态，无法启动 AgentRun。
+  - 处置（需产品决定，本轮不擅自选定默认策略的 `deniedDataClasses`/`studentContentMode`/预算）：
+    ①由平台在项目创建时写入一份审阅过的默认策略（模型/版本/运行时绑定来自部署配置），
+    教师只做确认与预算调整；或 ②提供教师/管理员表单（需要先有暴露平台模型与绑定的接口，
+    当前 web 无任何平台模型来源）。二者都需要改契约与前端，属产品范围。
 - **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
   （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
   run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
