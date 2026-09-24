@@ -1423,6 +1423,16 @@ authoring、且集群里没有 authoring Pod」时，先确认派发循环是否
 修复：给该取件 SQL 补上 `r.target_kind='environment'`（与既有过滤一致）。`cargo test -p resource-service`
 的 17+4+22 个用例全过（含直接覆盖该取件的 postgres 用例）。
 
+**上线与实测效果**：`cargo xtask package --env v1 --release issue127-res-1 --profile resource` 产出
+`artifacts/package/pkg-v1-issue127-res-1-30334c3a4b83/`（`source_commit=30334c3a…`，单组件 `resource-service`），
+`package-validate` 的 `static`/`connected` 均通过。注意 **`resource-application` 角色读的是另一套环境变量**
+（`LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE` / `LABWEAVER_RESOURCE_VALUES_FILE` /
+`LABWEAVER_ACCESS_SEED_FILE` / `LABWEAVER_POSTGRES_SERVICE(_FILE)`，见
+`deploy/ansible/roles/resource_application/defaults/main.yml`），与平台档的 `LABWEAVER_APPLICATION_VARS_FILE`
+不是一回事；本轮因未备该套变量，改用 `kubectl -n labweaver-system set image deploy/resource-service
+resource-service=<新包 digest>` 上线（rollout 成功）。**实测效果**：上线后 2 分钟内
+`LW_RESOURCE_TASK_OWNER_REQUIRED` 由约 190 条/2 分钟降为 **0 条**，`succeeded` 的 run 数上升，楔死解除。
+
 **与派发停摆的关系**：重启 `agent-service` 后只有 `agent.dispatch.worker_started` 与**一次**
 `agent.dispatch.claimed`（run `01a0d432-ffeb…`），此后再无任何派发事件、该 run 也没有任何 track 启动——
 即 §11.9 里曾记录过的「认领后不推进」形态，且它正好发生在容量模块被孤儿租约拖住期间，两者表现一致。
