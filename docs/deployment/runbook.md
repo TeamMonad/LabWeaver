@@ -799,7 +799,16 @@ helm -n labweaver-system history labweaver
   `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
   （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
   （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
-- **已定位的真实阻塞：控制平面节点的 Cilium datapath 卡住，Pod 内 DNS 全部超时**。
+- **更正（重要）：上面的「Pod DNS 全域失效」是探针假象，不是平台故障**。用 `busybox` 裸 Pod 直接
+  探 `kube-dns` ClusterIP 与 CoreDNS Pod IP（`10.0.0.9`、`10.0.1.40`）都超时，是因为
+  `labweaver-system` 等命名空间带默认拒绝的出口策略，裸探针不在放行集内；**同一时刻平台自身的
+  集群内调用全部正常**：`agent.platform_image.seed_existing`、`artifact_store` 客户端初始化、
+  authoring 沙箱拉取 Harbor 镜像并完成、`agent.agent_track_work_items.heartbeat_at` 持续刷新。
+  结论：agent-service 所在 worker-97 的 Cilium 与 DNS 都健康；worker 卡在「claim 之后无事件」
+  的真实原因是**每次运行耗时远长于验收轮询上限**（worker 一次只跑一个 reserved dispatch，
+  `created_at` 先到先处理，队列里还有更早的 run），而不是网络或 datapath 故障。
+  排查网络时应使用带平台标签的探针或直接观察平台自身的成功事件，不要用裸 Pod 判断。
+- **历史记录（已被上面的更正取代）：控制平面节点的 Cilium datapath 卡住、Pod 内 DNS 全部超时**。
   证据链（本轮实测）：
   - 集群内探针（`labweaver-system` 与 `labweaver-authoring` 两个命名空间）里 `nslookup`/`wget` 对
     `kube-dns` 的 `10.96.0.10:53` 一律 `connection timed out; no servers could be reached`，
