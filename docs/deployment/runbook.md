@@ -1413,7 +1413,12 @@ run 69 期间从 `labweaver-evaluation` 的事件里读到 OJ Job 的完整生�
 `exit 65`（source/binary 路径契约）、`exit 66`（`$evaluator_dir/xv6/xv6-source.tar.gz` 缺失，或
 `$build_dir/xv6` 已存在）。平台侧路径来自 `OJ_SUBMISSION_ROOT=/input/submission`、
 `PROGRAM_BINARY_PATH=/work/build/program`、`SUPPORT_ROOT=/support`，与契约一致；素材包也确认含该 tar
-（153 KB）。**下一步应当直接看 `/support` 的落盘结果与容器 stderr**——这也再次说明「失败即删 Pod」
+（153 KB）。**镜像与 profile 已核对无误**（就地探针读取当次 OJ 的 runner 镜像）：`/opt/labweaver/profiles/xv6-riscv64.json`
+的 `compileArgv`/`runArgv` 与示例一致，`supportFiles` 正是
+`scripts/{build,run}-xv6.sh`、`scripts/run-xv6.py`、`xv6/xv6-source.tar.gz`；`/opt/labweaver/xv6/xv6-source.tar.gz`
+**存在且为 153385 字节**，`/opt/labweaver/scripts/*` 四个脚本齐备。因此「素材缺失」这一支也被排除。
+
+**下一步应当直接看 `/support` 的落盘结果与容器 stderr**——这也再次说明「失败即删 Pod」
 （§11.14b）是当前唯一的取证障碍。
 
 ，捕获窗口仍然极短
