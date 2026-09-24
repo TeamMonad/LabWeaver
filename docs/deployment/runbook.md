@@ -799,7 +799,15 @@ helm -n labweaver-system history labweaver
   `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
   （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
   （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
-- **未解决：authoring 成功后 worker 停在该 track 上（当前阻塞）**。证据链：authoring 沙箱
+- **未解决（当前阻塞）：dispatch 被 claim 之后 worker 不再前进**。已修掉前置缺陷（seed 解析、工具策略、
+  provider binding、凭据）后，重启 agent-service 可见 `agent.platform_image.seed_existing`（两个 seed 已在
+  目录中）与 `agent.dispatch.claimed`，随后**没有任何后续事件**：没有 `agent.track.started`、
+  没有沙箱 Pod、没有新的 `agent.build_commands`、`environment-service` 日志无调用、
+  `pg_stat_activity` 无阻塞查询、track 一直停在 `requested`（旧 run 则停在 `running` 且租约已过期）。
+  即卡点在 claim 与 track 启动之间（dispatch 绑定/egress 输入物化一带），该段目前没有可区分阶段的日志。
+  重启 worker 只能让它再 claim 一次并再次停住；`tools/user_acceptance.py preflight` 的
+  `authoring_queue` 会以 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY` 报出积压。
+- **历史记录：authoring 成功后 worker 停在该 track 上**。证据链：authoring 沙箱
   尝试正常结束（`agent.authoring_sandbox_attempts` 的 `environment|terminal|exit_code=0`），
   但 `agent.agent_track_work_items` 的该 track 长期停在 `running`：`heartbeat_at` 只在 claim 后
   ~2 分钟更新过一次（`07:21:17` / `07:27:42`），`lease_expires_at` 随后过期且不再续租；同时
