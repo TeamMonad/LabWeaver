@@ -1035,6 +1035,18 @@ helm -n labweaver-system history labweaver
     ①由平台在项目创建时写入一份审阅过的默认策略（模型/版本/运行时绑定来自部署配置），
     教师只做确认与预算调整；或 ②提供教师/管理员表单（需要先有暴露平台模型与绑定的接口，
     当前 web 无任何平台模型来源）。二者都需要改契约与前端，属产品范围。
+- **lab 旅程最后一步的真实阻塞（需产品决定）：学生评测 run 需要资源审批，平台不自动批准**。实测（本轮 run 54）：
+  authoring 双轨迹 succeeded、候选 `validated`、构建 succeeded、批准与发布成功（学生环境
+  `01a0d330-a006` 达到 `running|ready`），随后学生的评测 run `01a0d331-1f65-74d3-98fb-304eaf1f65f3`
+  以 **`LW_EVALUATION_RESOURCE_APPROVAL_TIMEOUT`** 失败（`evaluation.evaluation_runs`，11:33:27；
+  同日 2026-09-19 05:26 也有同样一条，属长期行为）。即评测任务会先申请资源（`task` 资源申请，
+  与 authoring 沙箱同类），平台**不会**自动批准内部申请，等待超时即判失败。
+  两条路径（产品决策，本轮不擅自选定）：
+  ①**平台预授权**平台自有的内部任务（authoring 沙箱 + 学生评测）在一份已审阅的额度内自动批准；
+  ②**显式审批**：由管理员/课程负责人（或验收旅程）按真实流程批准该申请（`admin` 旅程的
+  `POST /api/v1/resource-requests/{id}/approve` 即此路径）。
+  验收侧可重复的做法是把 ② 写进 lab 旅程的学生结果阶段（等价于真实部署里管理员批准学生评测），
+  但**不得**用 Mock 或放宽断言替代。
 - **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
   （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
   run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
