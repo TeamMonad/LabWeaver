@@ -799,6 +799,22 @@ helm -n labweaver-system history labweaver
   `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
   （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
   （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
+- **已定位的真实阻塞：控制平面节点的 Cilium datapath 卡住，Pod 内 DNS 全部超时**。
+  证据链（本轮实测）：
+  - 集群内探针（`labweaver-system` 与 `labweaver-authoring` 两个命名空间）里 `nslookup`/`wget` 对
+    `kube-dns` 的 `10.96.0.10:53` 一律 `connection timed out; no servers could be reached`，
+    对 `keycloak-internal.keycloak-system.svc` 也拿不到地址；同一时刻从宿主访问公网入口正常
+    （`portal=200`、`/auth/login` 307），说明 Keycloak 本身健康、**故障在集群内网络**。
+  - `kubectl -n kube-system get pods -l k8s-app=cilium`：`v1-cp-63`（控制平面）上的 agent 报
+    `error in controller endpoint-938-regeneration-recovery: regeneration recovery failed`；
+    `cilium-dbg endpoint list` 显示 **938 就是该控制平面节点的 host endpoint**，状态 `Disabled`、
+    阶段 `regenerating`。重启该 agent 后仍是同一端点卡住（换 pod 名后错误依旧）。
+  - CoreDNS 也因此受影响：曾有一个副本 `0/1 Running, 227 restarts`（日志
+    `plugin/kubernetes: Failed to watch`），删掉重建后两副本 `1/1`，但**Pod 内 DNS 仍然超时**，
+    证明问题在 datapath 而不在 CoreDNS 进程。
+  影响：任何 in-cluster 服务调用（agent-service → Keycloak 的 service token/JWKS、worker 的
+  对象存储与后续步骤）在 DNS 超时后长时间挂起，表现为「`agent.dispatch.claimed` 之后再无事件」。
+  需要节点级恢复（控制平面节点重启或 Cilium datapath 重放），属于基础设施操作，本轮未执行。
 - **排查线索：受控 OIDC HTTP 客户端没有超时**。`auth::no_redirect_http_client`
   （`crates/auth/src/provider.rs:266`）只设置 `no_proxy`/`redirect(none)`/TLS 信任，**没有 `timeout`**；
   凡是用它发起的 OIDC 调用（service token 刷新、JWKS 刷新）在被网络黑洞吞掉时会**永久挂起**，与
