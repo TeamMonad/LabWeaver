@@ -390,6 +390,15 @@ test('student completes a published lab experiment through the browser terminal'
     const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(page, project.id, studentActorId)
+    // A real deployment approves this project's platform task leases in the admin
+    // console. Start that approval as soon as the project has an owner and a
+    // student so it also covers the authoring run's own leases.
+    evaluationApprovalLoop = startEvaluationResourceApprovalLoop({
+      browser,
+      baseURL,
+      projectId: project.id,
+      studentActorId,
+    })
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     const adminPage = await adminContext.newPage()
     environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
@@ -397,15 +406,6 @@ test('student completes a published lab experiment through the browser terminal'
     await assertNoStuckProgress(studentPage, 'student-environment')
     await auditAccessibility(studentPage, 'student-environment', testInfo)
     const beforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
-    // A real deployment approves the student's evaluation resource request in the
-    // admin console. Start that approval before the freeze so it cannot arrive
-    // after the request's own deadline.
-    evaluationApprovalLoop = startEvaluationResourceApprovalLoop({
-      browser,
-      baseURL,
-      projectId: project.id,
-      studentActorId,
-    })
 
     const terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
     const frames = []
