@@ -1364,6 +1364,13 @@ Landlock 步骤上，与代码位置和对照组探针结论一致。
 **自己**的 Landlock 规则集提供，而 authoring/probe 等仍留在 gVisor。测试
 `services/evaluation-service/tests/oj_job.rs` 相应改为断言该字段为空，并注明原因。
 
+**部署与读回**：`cargo xtask package --env v1 --release issue127-oj-1 --profile platform --yes`
+（root、带 `LABWEAVER_BUILD_PROXY` 与 `RUSTC_WRAPPER=`）产出
+`artifacts/package/pkg-v1-issue127-oj-1-a895dcb9d7a0/`，`source_commit=a895dcb9d7a0…`（即该修复提交）；
+`package-validate` 的 `static` 与 `connected --env v1` 均 **exit 0**；重新施加后 helm `labweaver` 到
+**revision 80 / deployed**，读回 `evaluation-service` 的 digest 与 manifest **MATCH**
+（`sha256:a9a149dfe902f9b…`）。随后以 run 65 复跑 lab 段做端到端验证。
+
 **注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
 需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
 
