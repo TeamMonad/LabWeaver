@@ -761,9 +761,11 @@ helm -n labweaver-system history labweaver
   即 **`--bare`（内部置 `CLAUDE_CODE_SIMPLE=1`）会把内置工具集收敛为 3 个**，与 `--tools`
   取值无关；模型按提示去写文件时调用 `Write`/`Glob`/`Grep` 即被拒，
   `error_kind=ToolDenied`（`retryable=false`），最终落在 `LW_PROVIDER_UNAVAILABLE`。
-  修法二选一：authoring 调用去掉 `--bare`（会重新启用 hooks/LSP/插件/CLAUDE.md 自动发现，
-  与 `--bare` 的初衷冲突，需安全评审），或把 canonical tool policy 收敛到 CLI 实际支持的
-  3 个工具（同步 canonical JSON 与 sha256 断言）。属产品/契约决定，未擅自修改。
+  **已修复**：authoring 调用不再传 `--bare`（非 authoring 候选不调用任何工具，仍保持最小
+  `--bare` 模式），`AUTHORING_TOOL_POLICY_CANONICAL_JSON` 同步记录 `"bare":false`；在沙箱镜像内
+  实测同一环境下去掉 `--bare` 后 init 列出全部 6 个工具且 `--model $ANTHROPIC_MODEL` 正常解析
+  （`qwen3.6:27b`），因此 6 工具策略与 CLI 能力重新一致。附带代价：去掉 `--bare` 会重新启用
+  hooks/LSP/插件/CLAUDE.md 自动发现——沙箱 `/workspace` 为空且出网仅限 Harbor，实测无额外副作用。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
