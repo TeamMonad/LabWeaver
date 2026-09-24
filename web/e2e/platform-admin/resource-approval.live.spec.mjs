@@ -42,6 +42,7 @@ const WORK_TEMPLATE_APPROVAL_REASON = '已核对 Work EnvironmentSpec、容器 a
 // LLM bound and the image build that follows it.
 const JOURNEY_TIMEOUT_MS = 7_200_000
 const SETTLE_TIMEOUT_MS = 1_800_000
+const WORK_TEMPLATE_RUN_ATTEMPTS = 2
 const AUTHORING_RUN_TIMEOUT_MS = 2_700_000
 const CANDIDATE_BUILD_TIMEOUT_MS = 1_800_000
 
@@ -82,24 +83,36 @@ async function publishWorkTemplateByUi(page, projectId) {
     expect(packageData).toMatchObject({ projectId, revision: expect.any(Number) })
     await expect(page.locator('.package-summary').getByText(/材料包已归档：/)).toBeVisible({ timeout: SETTLE_TIMEOUT_MS })
 
-    const runResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
-    })
-    await page.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
-    const acceptedRun = await expectJson(await runResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
-    expect(acceptedRun).toMatchObject({ id: expect.any(String), projectId })
-    const run = await pollJson(
-      page.request,
-      `/api/v1/projects/${projectId}/agent-runs/${acceptedRun.id}`,
-      (value) => terminalRunState(value.state),
-      'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_STATUS_FAILED',
-      AUTHORING_RUN_TIMEOUT_MS,
-    )
-    if (run.state !== 'succeeded') {
-      const attempts = run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'
-      throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:${run.state}:${attempts}`)
+    // The local model service answers `LW_PROVIDER_UNAVAILABLE` in a small share of authoring
+    // runs; a real user would simply start the run again, so the journey does the same. Any other
+    // failure is reported as-is and never retried.
+    let run = null
+    let runDiagnostics = 'no tracks'
+    for (let attempt = 1; attempt <= WORK_TEMPLATE_RUN_ATTEMPTS; attempt += 1) {
+      const runResponsePromise = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'POST'
+          && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
+      })
+      await page.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
+      const acceptedRun = await expectJson(await runResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
+      expect(acceptedRun).toMatchObject({ id: expect.any(String), projectId })
+      run = await pollJson(
+        page.request,
+        `/api/v1/projects/${projectId}/agent-runs/${acceptedRun.id}`,
+        (value) => terminalRunState(value.state),
+        'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_STATUS_FAILED',
+        AUTHORING_RUN_TIMEOUT_MS,
+      )
+      if (run.state === 'succeeded') break
+      runDiagnostics = run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'
+      const transient = runDiagnostics.includes('LW_PROVIDER_UNAVAILABLE')
+      if (!transient || attempt === WORK_TEMPLATE_RUN_ATTEMPTS) {
+        throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:${run.state}:${runDiagnostics}`)
+      }
+      // The start button is the real precondition for another run: it stays disabled while the
+      // previous run is still attached to the form.
+      await expect(page.getByRole('button', { name: '启动 Work AgentRun', exact: true })).toBeEnabled({ timeout: SETTLE_TIMEOUT_MS })
     }
     const environmentTrack = run.tracks.find((track) => track.kind === 'environment')
     if (!environmentTrack?.candidateId) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_MISSING')
