@@ -1289,9 +1289,13 @@ failed，逐段定性如下（每段证据都在 `artifacts/acceptance/public-20
 
 | 段 | 结果 | 根因 | 处置 |
 |---|---|---|---|
-| `lab` | failed（12.1m + 重试） | 共享等待器把冻结提交的必需文件写死为 `student/auth.c`（属另一实验），xv6 实验冻结的是 `student/student.c`，断言永不满足 | **已修** `fc3a8ce`（路径由调用方传入，并与 `examples/xv6-lab/manifest.json` 交叉核对） |
+| `lab` | failed（run 59 12.1m；run 60 同因） | 共享等待器把冻结提交的必需文件写死为 `student/auth.c`（属另一实验），xv6 实验冻结的是 `student/student.c`，断言永不满足 | **已修** `fc3a8ce`（路径由调用方传入，并与 `examples/xv6-lab/manifest.json` 交叉核对） |
 | `work` | failed（1.9m/3.9m/…） | 管理台人工审批来不及在 environment 申请的审批窗口内完成（实测窗口≈86s，trace 中无 `/approve`） | **留证，待产品决策**（§11.9 末条） |
-| `admin` | failed | Work 模板 authoring run 撞上模型服务的瞬时 provider 不可用（`LW_PROVIDER_UNAVAILABLE`，`duration_ms: 0`） | **已加固** `589dce0`（仅对该诊断重试一次，其它失败原样上报） |
+| `admin` | failed（provider 抖动，已加固） | Work 模板 authoring run 撞上模型服务的瞬时 provider 不可用（`LW_PROVIDER_UNAVAILABLE`，`duration_ms: 0`） | **已加固** `589dce0`（仅对该诊断重试一次，其它失败原样上报） |
+
+run 60（`lab,work`）复跑后两段的失败点也各前进了一步：`lab` 已越过冻结提交那段，改为 authoring run
+以 `partially_succeeded:LW_PROVIDER_UNAVAILABLE` 结束（模型服务瞬时抖动，`fc3a8ce` 的冻结路径修复本身已
+生效）；`work` 仍卡在审批填写（`执行后端绑定` 定位超时，说明申请已离开 `reviewing`），与上表一致。
 
 另有两处更早定位并修复的旅程缺陷：审批表单同名输入框的定位歧义（`7ea6ba6`）、后台自动审批看护与
 旅程自身审批的抢跑（`561d6a9`）。修复后由 run 60（`lab,work`）与后续 run 验证；`environment` 申请

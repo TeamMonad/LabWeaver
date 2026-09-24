@@ -51,6 +51,7 @@ const LABS = Object.freeze({
 })
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
+const LAB_EXPERIMENT_RUN_ATTEMPTS = 2
 const AGENT_RUN_TIMEOUT_MS = Number(process.env.LABWEAVER_E2E_AGENT_RUN_TIMEOUT_MS) || 1_800_000
 
 test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6 or LABWEAVER_E2E_LAB=cuda for a real lab acceptance run.')
@@ -366,8 +367,22 @@ test('student completes a published lab experiment through the browser terminal'
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.frozenPath)
-    const run = await startExperimentRunByUi(page, project.id)
-    const completed = await waitForExperimentRun(request, project.id, run.id)
+    // The local model service answers LW_PROVIDER_UNAVAILABLE for a small share of authoring
+    // runs; a real teacher would simply start the run again, so the journey does the same once.
+    // Every other outcome is reported unchanged.
+    let completed = null
+    for (let attempt = 1; attempt <= LAB_EXPERIMENT_RUN_ATTEMPTS; attempt += 1) {
+      const startButton = page.getByRole('button', { name: /启动.*AgentRun/, exact: false })
+      if (attempt > 1) await expect(startButton).toBeEnabled({ timeout: 120_000 })
+      const run = await startExperimentRunByUi(page, project.id)
+      try {
+        completed = await waitForExperimentRun(request, project.id, run.id)
+        break
+      } catch (error) {
+        const message = String(error?.message ?? error)
+        if (!message.includes('LW_PROVIDER_UNAVAILABLE') || attempt === LAB_EXPERIMENT_RUN_ATTEMPTS) throw error
+      }
+    }
     const built = await waitForBuiltCandidate(request, project.id, completed.environmentCandidateId)
     const published = await approveAndPublish(
       page,
