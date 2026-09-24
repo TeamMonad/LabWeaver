@@ -36,8 +36,14 @@ import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } fro
  */
 const WORK_TEMPLATE_PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
 const WORK_TEMPLATE_APPROVAL_REASON = '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。'
-const JOURNEY_TIMEOUT_MS = 1_800_000
-const SETTLE_TIMEOUT_MS = 120_000
+// The agent worker runs one reserved dispatch at a time, so the Work template
+// authoring this journey drives can sit behind earlier runs; these ceilings cover
+// a queued authoring run plus the deployment's own fifteen minute per-candidate
+// LLM bound and the image build that follows it.
+const JOURNEY_TIMEOUT_MS = 7_200_000
+const SETTLE_TIMEOUT_MS = 1_800_000
+const AUTHORING_RUN_TIMEOUT_MS = 2_700_000
+const CANDIDATE_BUILD_TIMEOUT_MS = 1_800_000
 
 function diagnosticCode(value) {
   return value?.diagnosticCode ?? value?.diagnostic_code ?? 'diagnostic missing'
@@ -89,7 +95,7 @@ async function publishWorkTemplateByUi(page, projectId) {
       `/api/v1/projects/${projectId}/agent-runs/${acceptedRun.id}`,
       (value) => terminalRunState(value.state),
       'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_STATUS_FAILED',
-      300_000,
+      AUTHORING_RUN_TIMEOUT_MS,
     )
     if (run.state !== 'succeeded') {
       const attempts = run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'
@@ -104,7 +110,7 @@ async function publishWorkTemplateByUi(page, projectId) {
       environmentTrack.candidateId,
       (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
       'LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
-      300_000,
+      CANDIDATE_BUILD_TIMEOUT_MS,
     )
     if (candidate.candidate?.spec?.class !== 'work') throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
     if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
