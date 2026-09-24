@@ -1301,6 +1301,9 @@ run 60（`lab,work`）复跑后两段的失败点也各前进了一步：`lab` �
 以 `partially_succeeded:LW_PROVIDER_UNAVAILABLE` 结束（模型服务瞬时抖动，`fc3a8ce` 的冻结路径修复本身已
 生效）；`work` 仍卡在审批填写（`执行后端绑定` 定位超时，说明申请已离开 `reviewing`），与上表一致。
 
+- **admin 旅程的候选构建同样受 provider 抖动影响（已加固）**：run 61 的 admin 段先越过 authoring（provider 重试生效），
+  随后的**候选构建**以 `LW_AGENT_BUILD_PROVIDER_UNAVAILABLE` 失败——同一类瞬时抖动发生在平台紧随其后的构建步骤上。
+  现在构建失败也纳入同一重试循环（仅限该诊断，重试时等「启动 Work AgentRun」重新可用），其它失败原样上报。
 另有两处更早定位并修复的旅程缺陷：审批表单同名输入框的定位歧义（`7ea6ba6`）、后台自动审批看护与
 旅程自身审批的抢跑（`561d6a9`）。修复后由 run 60（`lab,work`）与后续 run 验证；`environment` 申请
 的审批窗口竞态未在任何环节放宽断言。

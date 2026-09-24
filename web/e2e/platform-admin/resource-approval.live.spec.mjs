@@ -87,6 +87,8 @@ async function publishWorkTemplateByUi(page, projectId) {
     // runs; a real user would simply start the run again, so the journey does the same. Any other
     // failure is reported as-is and never retried.
     let run = null
+    let candidate = null
+    let environmentTrack = null
     let runDiagnostics = 'no tracks'
     for (let attempt = 1; attempt <= WORK_TEMPLATE_RUN_ATTEMPTS; attempt += 1) {
       const runResponsePromise = page.waitForResponse((response) => {
@@ -104,30 +106,37 @@ async function publishWorkTemplateByUi(page, projectId) {
         'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_STATUS_FAILED',
         AUTHORING_RUN_TIMEOUT_MS,
       )
-      if (run.state === 'succeeded') break
-      runDiagnostics = run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'
-      const transient = runDiagnostics.includes('LW_PROVIDER_UNAVAILABLE')
-      if (!transient || attempt === WORK_TEMPLATE_RUN_ATTEMPTS) {
-        throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:${run.state}:${runDiagnostics}`)
+      // A transient model outage is worth another run; every other outcome is reported as-is.
+      if (run.state !== 'succeeded') {
+        runDiagnostics = run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'
+        const transient = runDiagnostics.includes('LW_PROVIDER_UNAVAILABLE')
+        if (!transient || attempt === WORK_TEMPLATE_RUN_ATTEMPTS) {
+          throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:${run.state}:${runDiagnostics}`)
+        }
+        // The start button is the real precondition for another run: it stays disabled while the
+        // previous run is still attached to the form.
+        await expect(page.getByRole('button', { name: '启动 Work AgentRun', exact: true })).toBeEnabled({ timeout: SETTLE_TIMEOUT_MS })
+        continue
       }
-      // The start button is the real precondition for another run: it stays disabled while the
-      // previous run is still attached to the form.
+      environmentTrack = run.tracks.find((track) => track.kind === 'environment')
+      if (!environmentTrack?.candidateId) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_MISSING')
+      candidate = await pollEnvironmentCandidate(
+        page.request,
+        projectId,
+        environmentTrack.candidateId,
+        (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
+        'LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
+        CANDIDATE_BUILD_TIMEOUT_MS,
+      )
+      if (candidate.candidate?.spec?.class !== 'work') throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
+      if (candidate.build?.state === 'succeeded' && candidate.imageArtifact) break
+      // The same outage can hit the build provider the platform uses right after the run, so a
+      // build that failed for that reason is retried exactly like the run itself.
+      const buildDiagnostic = candidate.build?.diagnosticCode ?? 'artifact missing'
+      if (!buildDiagnostic.includes('LW_PROVIDER_UNAVAILABLE') || attempt === WORK_TEMPLATE_RUN_ATTEMPTS) {
+        throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${buildDiagnostic}`)
+      }
       await expect(page.getByRole('button', { name: '启动 Work AgentRun', exact: true })).toBeEnabled({ timeout: SETTLE_TIMEOUT_MS })
-    }
-    const environmentTrack = run.tracks.find((track) => track.kind === 'environment')
-    if (!environmentTrack?.candidateId) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_MISSING')
-
-    const candidate = await pollEnvironmentCandidate(
-      page.request,
-      projectId,
-      environmentTrack.candidateId,
-      (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
-      'LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
-      CANDIDATE_BUILD_TIMEOUT_MS,
-    )
-    if (candidate.candidate?.spec?.class !== 'work') throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
-    if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
-      throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
     }
 
     const candidateCard = page.getByTestId('work-template-candidate')
