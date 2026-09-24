@@ -1784,6 +1784,15 @@ kubectl auth can-i list jobs -n labweaver-evaluation \
 配置一致（下一次 `platform-application`），因此**不需要**重新打包镜像。注意该 reconciler 只能
 `get`/`delete` 具名对象，无法列举，所以它**不是** `LW_OJ_JOB_MISSING` 的删除者。
 
+### 12.2.3 评测恢复后 lab 段的失败点前移到「浏览器终端」
+
+修复评测读取与进程退出后，`public-20260924-3j-a1-2694` 的第一次尝试在 **30.1 分钟**结束，错误是
+spec 自己的 `Test timeout of 1800000ms exceeded`（不是断言失败），页面快照停在「终端」等待态；
+评测侧同一窗口**只有** `LW_EVALUATION_ORPHAN_RECONCILE_FAILED`，**没有任何 OJ/编译事件**——说明这一轮
+根本没走到评测。access-service 在该窗口的请求里也看不到 `/connect/console/...` 的升级记录。
+即：lab 段当前的阻塞点是**环境控制台的终端交互**（与 §11.9 记录的「控制台状态文案滞后」相邻但不同：
+这次是等待本身耗尽了整段预算）。下一步应在终端桥/控制台可用性上取证，而不是继续调评测。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
