@@ -1282,6 +1282,21 @@ terminal 补齐修复（`f66a824`）随新包上线，实测记录：
   由 `c4d46c12…` 换为 `3b8f99a3634b…`，`environment-service` 及其执行器为 `dc2e4ccd…`，
   `web` 为 `e56fef48…`，`resource-service` 属 resource 包未变）；部署后 `preflight` exit 0。
 
+### 11.11 三条旅程的本轮结论（run 59，2026-09-24）
+
+run 59（`public-20260924-59-all`，`lab,work,admin`，公网域名、真实 Keycloak、真实模型）三段均为
+failed，逐段定性如下（每段证据都在 `artifacts/acceptance/public-20260924-59-all/<段>/`）：
+
+| 段 | 结果 | 根因 | 处置 |
+|---|---|---|---|
+| `lab` | failed（12.1m + 重试） | 共享等待器把冻结提交的必需文件写死为 `student/auth.c`（属另一实验），xv6 实验冻结的是 `student/student.c`，断言永不满足 | **已修** `fc3a8ce`（路径由调用方传入，并与 `examples/xv6-lab/manifest.json` 交叉核对） |
+| `work` | failed（1.9m/3.9m/…） | 管理台人工审批来不及在 environment 申请的审批窗口内完成（实测窗口≈86s，trace 中无 `/approve`） | **留证，待产品决策**（§11.9 末条） |
+| `admin` | failed | Work 模板 authoring run 撞上模型服务的瞬时 provider 不可用（`LW_PROVIDER_UNAVAILABLE`，`duration_ms: 0`） | **已加固** `589dce0`（仅对该诊断重试一次，其它失败原样上报） |
+
+另有两处更早定位并修复的旅程缺陷：审批表单同名输入框的定位歧义（`7ea6ba6`）、后台自动审批看护与
+旅程自身审批的抢跑（`561d6a9`）。修复后由 run 60（`lab,work`）与后续 run 验证；`environment` 申请
+的审批窗口竞态未在任何环节放宽断言。
+
 ## 12. 用户验收（模拟真实用户操作）
 
 验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
