@@ -903,6 +903,11 @@ helm -n labweaver-system history labweaver
   仍有 `status: 当前正在创建环境，请在操作完成后继续。` 的残留提示；即运行状态与提示文案短暂不一致。
   它不阻断旅程（`assertNoStuckProgress` 只看加载指示器与虚构百分比），作为已知项记录，附截图与本次
   证据（`web/test-results/student-sprint2-flow.live--3dbb6-t-and-releases-its-capacity-student/`）。
+- **lab 旅程的双轨迹首次全部成功**：xv6 实验包的 authoring run（09:29 领取、09:38 结束）以
+  `succeeded` 收尾，两条轨迹都是 `environment:succeeded, evaluation:succeeded` —— 说明「模型只能
+  使用已注册 provider binding」「平台镜像 seed 解析」「`--bare`/工具策略」「沙箱流解析」四处修复
+  合起来让 environment 与 evaluation 两侧都能产出被接受的候选（本轮之前两侧都停在候选生成）。
+  同一时段 work 旅程的 authoring run 紧接着被领取并进入 `environment:running`，worker 吞吐正常。
 - KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
   `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
 - worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
