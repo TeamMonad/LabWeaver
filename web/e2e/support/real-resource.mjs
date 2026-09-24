@@ -2,7 +2,10 @@ import { expect } from '@playwright/test'
 import { expectJson } from './live.mjs'
 
 /** The Work capacity provider binding the platform configures for real Work runs. */
-export const WORK_PROVIDER_BINDING = 'kubernetes-work-local-hostpath'
+// See real-experiment.mjs: the shipped default targets the local development
+// stack, while a live cluster registers its own binding.
+export const WORK_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 
 const RESOURCE_PAGE_TIMEOUT_MS = 120_000
 const RESOURCE_SETTLE_TIMEOUT_MS = 240_000

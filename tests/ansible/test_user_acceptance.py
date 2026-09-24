@@ -204,6 +204,34 @@ class RunJourneyTest(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(result.diagnostics, [MODULE.EVIDENCE_DIR_UNWRITABLE])
 
+    def test_provider_binding_is_resolved_from_the_live_provider_registry(self) -> None:
+        providers = json.dumps(
+            [
+                {"providerKind": "container", "binding": "container-live-v1"},
+                {"providerKind": "kubevirt", "binding": "vm-primary-v1"},
+            ]
+        )
+
+        def kubectl(argv):  # noqa: ANN001
+            return 0, providers, ""
+
+        self.assertEqual(
+            MODULE.resolve_provider_binding(None, {}, kubectl), "container-live-v1"
+        )
+        self.assertEqual(
+            MODULE.resolve_provider_binding(None, {"LABWEAVER_E2E_PROVIDER_BINDING": "env-v1"}, kubectl),
+            "env-v1",
+        )
+        self.assertEqual(
+            MODULE.resolve_provider_binding("flag-v1", {}, kubectl), "flag-v1"
+        )
+
+    def test_provider_binding_is_absent_when_the_registry_has_no_container_provider(self) -> None:
+        def kubectl(argv):  # noqa: ANN001
+            return 0, json.dumps([{"providerKind": "kubevirt", "binding": "vm-primary-v1"}]), ""
+
+        self.assertEqual(MODULE.resolve_provider_binding(None, {}, kubectl), "")
+
     def test_run_reports_missing_model(self) -> None:
         def kubectl(argv):  # noqa: ANN001
             return 1, "", "no configmap"

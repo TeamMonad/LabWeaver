@@ -52,6 +52,13 @@ DEFAULT_LAB = "xv6"
 MODEL_CONFIG_MAP = "agent-service-config"
 MODEL_CONFIG_MAP_KEY = "anthropic-model"
 
+# The container provider binding is cluster-specific too: the shipped example
+# packages target the local development stack, so the acceptance run resolves
+# the binding the live environment service actually registers.
+PROVIDER_BINDING_ENV = "LABWEAVER_E2E_PROVIDER_BINDING"
+PROVIDER_CONFIG_MAP = "environment-service-config"
+PROVIDER_CONFIG_MAP_KEY = "providers.json"
+
 # Stable diagnostics, prefixed so a caller can classify a failure mechanically.
 CLUSTER_UNREACHABLE = "LW_ACCEPTANCE_CLUSTER_UNREACHABLE"
 PORTAL_UNREACHABLE = "LW_ACCEPTANCE_PORTAL_UNREACHABLE"
@@ -215,6 +222,7 @@ def acceptance_environment(
     credentials_dir: Path,
     model: str,
     environ: Mapping[str, str],
+    provider_binding: str = "",
 ) -> dict[str, str]:
     """The full Playwright environment for a journey invocation."""
 
@@ -222,6 +230,8 @@ def acceptance_environment(
     environment["LABWEAVER_BASE_URL"] = base_url
     environment["LABWEAVER_IGNORE_HTTPS_ERRORS"] = "1"
     environment[MODEL_ENV] = model
+    if provider_binding:
+        environment[PROVIDER_BINDING_ENV] = provider_binding
     # The deployment serves the reviewed model from a host-side runtime, so a
     # single request can take minutes and the CLI's notional per-run cost is
     # higher than the harness default. Both stay overridable by the caller.
@@ -351,6 +361,45 @@ def resolve_model(
         ]
     )
     return stdout.strip() if code == 0 else ""
+
+
+def resolve_provider_binding(
+    explicit: str | None,
+    environ: Mapping[str, str],
+    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+) -> str:
+    """Resolve the live container provider binding from the flag, env or cluster."""
+
+    value = (explicit or environ.get(PROVIDER_BINDING_ENV) or "").strip()
+    if value:
+        return value
+    escaped_key = PROVIDER_CONFIG_MAP_KEY.replace(".", "\\.")
+    code, stdout, _ = run_kubectl(
+        [
+            "kubectl",
+            "--context",
+            KUBECTL_CONTEXT,
+            "-n",
+            NAMESPACE,
+            "get",
+            "cm",
+            PROVIDER_CONFIG_MAP,
+            "-o",
+            "jsonpath={.data." + escaped_key + "}",
+        ]
+    )
+    if code != 0 or not stdout.strip():
+        return ""
+    try:
+        providers = json.loads(stdout)
+    except ValueError:
+        return ""
+    for provider in providers:
+        if isinstance(provider, dict) and provider.get("providerKind") == "container":
+            binding = str(provider.get("binding", "")).strip()
+            if binding:
+                return binding
+    return ""
 
 
 def probe_git_commit() -> str | None:
@@ -692,11 +741,15 @@ def run_acceptance(
     except AcceptanceError as error:
         return RunResult(exit_code=2, diagnostics=[error.code])
 
+    provider_binding = resolve_provider_binding(
+        getattr(args, "provider_binding", None), environment, run_kubectl
+    )
     environment = acceptance_environment(
         base_url=args.base_url,
         credentials_dir=credentials_dir,
         model=model,
         environ=environment,
+        provider_binding=provider_binding,
     )
 
     if git_commit is None:
@@ -778,6 +831,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--lab", default=DEFAULT_LAB)
     run.add_argument("--evidence-dir", default=DEFAULT_EVIDENCE_DIR)
     run.add_argument("--model", default=None)
+    run.add_argument(
+        "--provider-binding",
+        default=None,
+        help="container provider binding; defaults to the one the live environment service registers",
+    )
     run.add_argument("--credentials-dir", default=str(DEFAULT_CREDENTIALS_DIR))
     run.add_argument("--package-manifest", default=None)
     run.add_argument("--bundle-sha256", default=None)

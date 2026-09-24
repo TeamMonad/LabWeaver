@@ -11,7 +11,12 @@ import {
 } from './live.mjs'
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../examples/security-controlled')
-const EVALUATION_RESOURCE_PROVIDER_BINDING = 'kubernetes-work-local-hostpath'
+// The live cluster registers its own container provider binding; the value baked
+// into the shipped example package targets the local development stack. A real
+// operator authors their package against their cluster, so the acceptance run
+// overrides both the approval form and the uploaded manifest.
+const EVALUATION_RESOURCE_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const EVALUATION_RESOURCE_APPROVAL_REASON = 'teacher real experiment task resource approval'
 const RESOURCE_REQUEST_TERMINAL_STATES = new Set(['expired', 'rejected', 'cancelled'])
 const RESOURCE_APPROVAL_POLL_INTERVAL_MS = 1000
@@ -109,6 +114,9 @@ export async function createSecurityControlledPackage(goldenBaseImage) {
     const dockerfileEntry = manifest.spec?.files?.find((entry) => entry.path === 'Dockerfile')
     if (!dockerfileEntry) throw new Error('LABWEAVER_E2E_MANIFEST_DOCKERFILE_ENTRY_MISSING')
     dockerfileEntry.sha256 = createHash('sha256').update(rewrittenDockerfile).digest('hex')
+    if (manifest.spec?.runtime) {
+      manifest.spec.runtime.providerBinding = EVALUATION_RESOURCE_PROVIDER_BINDING
+    }
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
     return {

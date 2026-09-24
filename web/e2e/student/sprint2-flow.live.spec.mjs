@@ -26,7 +26,8 @@ import {
 } from '../support/real-work.mjs'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 
-const WORK_PROVIDER_BINDING = 'kubernetes-work-local-hostpath'
+const WORK_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
 
 const FULL_CHAIN_TIMEOUT_MS = 1_800_000
