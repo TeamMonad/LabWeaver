@@ -576,9 +576,11 @@ def cancel_superseded_runs(
             continue
         _, csrf_body, _ = _http(f"{base_url}/api/v1/auth/csrf", cookie, origin=base_url)
         try:
-            token = json.loads(csrf_body).get("token")
+            payload = json.loads(csrf_body)
         except ValueError:
-            token = None
+            payload = {}
+        # The endpoint has used both spellings; accept either.
+        token = payload.get("token") or payload.get("csrfToken")
         if not token:
             continue
         for line in stdout.strip().splitlines():
