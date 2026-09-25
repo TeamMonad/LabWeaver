@@ -1795,7 +1795,9 @@ kubectl auth can-i list jobs -n labweaver-evaluation \
 spec 自己的 `Test timeout of 1800000ms exceeded`（不是断言失败），页面快照停在「终端」等待态；
 评测侧同一窗口**只有** `LW_EVALUATION_ORPHAN_RECONCILE_FAILED`，**没有任何 OJ/编译事件**——说明这一轮
 根本没走到评测。access-service 在该窗口的请求里也看不到 `/connect/console/...` 的升级记录。
-即：lab 段当前的阻塞点是**环境控制台的终端交互**（与 §11.9 记录的「控制台状态文案滞后」相邻但不同：
+复现（`public-20260924-3j-a1-20472`，队列已清空、无操作者干预）：第 1 次尝试 3.7 分钟失败于
+`cancelled:LW_CONFLICT`，retry #1 则整整跑满 spec 的 30 分钟上限（`Test timeout of 1800000ms exceeded`），
+两次的页面快照都显示环境为「运行中」、发布为「已发布」，并带有「等待」态。即：lab 段当前的阻塞点是**环境控制台的终端交互**（与 §11.9 记录的「控制台状态文案滞后」相邻但不同：
 这次是等待本身耗尽了整段预算）。下一步应在终端桥/控制台可用性上取证，而不是继续调评测。
 
 ### 12.2.4 lab 段 authoring run 被判 `cancelled:LW_CONFLICT`（平台侧，未定性）
