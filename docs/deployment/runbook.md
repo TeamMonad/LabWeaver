@@ -1858,6 +1858,36 @@ authoring/evaluation 的内部 task 资源申请从未被批准：
 （产品决策未变），验收工具以管理员会话模拟操作者（BFF `/approve`）；work 旅程 environment 申请的
 ~86s 窗口（§11.11 run 59 表）与此修复无关，需在批准链路恢复后复测。
 
+### 12.2.6 2026-09-25：候选构建失败 `LW_AGENT_BUILD_SOLVE_FAILED` —— 目录绑定未转回 Harbor 引用（已修 306df67）
+
+批准链路恢复后，admin 旅程的 Work 模板 authoring run 能走到 `succeeded`，但**随后**的候选镜像构建
+每次都失败（`01a0d8d1`/`01a0d8d7` 等 run succeeded 后紧跟
+`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:LW_AGENT_BUILD_PROVIDER_UNAVAILABLE`，
+构建耗时 12s）。build-executor 侧为 `LW_AGENT_BUILD_SOLVE_FAILED`（`error_kind:
+buildkit_solve_rejected`），BuildKit 日志给出精确原因：
+
+```
+scope="repository:library/rust-builder-v1:pull"
+error="pull access denied, repository does not exist or may require authorization"
+= rust-builder-v1@sha256:e544a8ee…（docker.io/library 解析）
+```
+
+根因：`platform_image_prompt`（develop `e363dcc` 起）只把平台镜像目录以 **binding + digest** 呈现给模型
+（测试断言 `!prompt.contains(":24.04")`，不向模型暴露 registry 全名），模型按提示正确输出
+`FROM rust-builder-v1@sha256:e544…`——但服务端**没有任何地方**把 binding/digest 映射回评审过的
+`source_reference`（`harbor.lab.lan/labweaver-system/rust:1.97.1-bookworm@sha256:e544…`）。
+物化器原样打包 recipe，build-executor 原样交给 BuildKit，受限网络下只能按默认 registry 解析而被拒。
+22:29 之前的成功构建是因为当时模型正好输出过完整 Harbor 引用（同 digest 可被目录匹配）。
+
+修复 `306df67`（`build_executor.rs`）：solve 前用平台镜像目录重写 Dockerfile 的 `FROM` 引用——
+按 **binding**、按 **source_reference**、或按 **resolved_digest** 匹配（digest 存在时以 digest 为准，
+错误 digest 不得被 binding 静默改挂），重写为 `<source_reference>@<resolved_digest>`；`$ARG`、
+`scratch` 与未知镜像原样保留。两个单测覆盖 binding/digest/全名匹配、`--platform` 形态、`${ARG}` 与
+错误 digest 拒绝。
+
+验证：`cargo test -p agent-service` 12/12（build_executor 相关）、`cargo clippy -p agent-service
+--all-targets -- -D warnings` 通过。部署包 `pkg-v1-issue127-buildfix-1` 上线后按 §11.10 读回，再复跑旅程。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
