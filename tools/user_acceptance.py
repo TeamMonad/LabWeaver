@@ -539,11 +539,16 @@ def _http(
         headers=headers,
     )
     context = ssl.create_default_context()
+    # The admin resource-request list routinely exceeds 4 KiB (one row per
+    # historical request), so a 4 KiB read silently truncated JSON and made the
+    # task-lease watchdog approve nothing. 8 MiB bounds the harness without
+    # corrupting real list responses.
+    max_body_bytes = 8 * 1024 * 1024
     try:
         with urllib.request.urlopen(request, context=context, timeout=25.0) as response:
-            return response.status, response.read(4096), dict(response.headers)
+            return response.status, response.read(max_body_bytes), dict(response.headers)
     except urllib.error.HTTPError as error:
-        return error.code, error.read(4096), dict(error.headers)
+        return error.code, error.read(max_body_bytes), dict(error.headers)
 
 
 def cancel_superseded_runs(
