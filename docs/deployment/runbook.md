@@ -1800,6 +1800,13 @@ spec 自己的 `Test timeout of 1800000ms exceeded`（不是断言失败），�
 两次的页面快照都显示环境为「运行中」、发布为「已发布」，并带有「等待」态。即：lab 段当前的阻塞点是**环境控制台的终端交互**（与 §11.9 记录的「控制台状态文案滞后」相邻但不同：
 这次是等待本身耗尽了整段预算）。下一步应在终端桥/控制台可用性上取证，而不是继续调评测。
 
+**终端段的进一步定位（同一轮）**：`issueAccessGrantAndConnect` 走的是
+`/student/environments?...` → 签发授权 → 轮询 `access-grants`（120 s）→ 点「Web 控制台」→ 等 `.console-panel`。
+而 access-service 近 45 分钟里**没有任何 console 路由、也没有一条 `http_status:101`（WebSocket 升级）**，
+说明浏览器**从未发起控制台连接**——等待发生在面板出现之前的 UI 环节，而不是终端桥或授权服务。
+下一步应带 trace 逐帧确认是哪一次 `expect` 吃满了预算（spec 内多数 UI 等待是 120 s，能烧到 30 分钟说明
+落在未显式设超时的那一步）。
+
 ### 12.2.4 lab 段 authoring run 被判 `cancelled:LW_CONFLICT`（平台侧，未定性）
 
 干净一轮（`public-20260924-3j-a1-20472`，队列已清空、无操作者干预）的第一次尝试在 **3.7 分钟**结束：
