@@ -3888,20 +3888,17 @@ impl ControlService {
                         runner_artifact,
                     )
                     .await?;
-                    let ImageArtifact::Container {
-                        repository, digest, ..
-                    } = runner_artifact
-                    else {
-                        return Err(ControlError::ArtifactMismatch);
-                    };
-                    let identity = EvaluationRuntimeIdentity {
-                        provider_binding: self.config.evaluation_runtime.provider_binding.clone(),
-                        runner_image: format!("{repository}@{digest}"),
-                    };
-                    identity
-                        .validate()
-                        .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
-                    (identity, Some(runner_artifact.clone()))
+                    // The evaluation runner runs the deployment-owned
+                    // evaluation-service image, never the model-chosen runner
+                    // artifact. The artifact is still required and recorded for
+                    // the authoring audit, but letting the model pin the runner
+                    // image makes the OJ evidence schema drift with every model
+                    // pick and the observer on the current service image
+                    // rejects the stale receipts.
+                    (
+                        self.config.evaluation_runtime.identity()?,
+                        Some(runner_artifact.clone()),
+                    )
                 }
                 contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
                     if request.evaluation_runner_image_artifact.is_some() {
