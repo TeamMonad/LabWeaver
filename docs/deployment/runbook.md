@@ -1888,6 +1888,23 @@ error="pull access denied, repository does not exist or may require authorizatio
 验证：`cargo test -p agent-service` 12/12（build_executor 相关）、`cargo clippy -p agent-service
 --all-targets -- -D warnings` 通过。部署包 `pkg-v1-issue127-buildfix-1` 上线后按 §11.10 读回，再复跑旅程。
 
+### 12.2.7 2026-09-25：打包机的两个环境性构建阻塞（已修 3fe71d4 / c295bcf 之后 apk pin 校准）
+
+部署修复（`306df67`）的打包过程暴露出两个与代码无关的构建前提：
+
+1. **npm registry 不可达**：authoring-sandbox/agent 镜像的 claude-tools 阶段用 `npm pack
+   @anthropic-ai/claude-code-linux-x64@…`，而部署代理对 registry.npmjs.org 返回 502
+   （`gvisor`/`storage.googleapis.com` 同代理可通，npm 被上游 ACL 拒绝）；直接访问因跨越骨干网
+   极慢（~1 MB/s）。修复：锁内 sha512 对应的 tarball 由打包机从 npm 镜像站取回（校验后与锁 pin
+   逐字节一致），放入构建上下文，Dockerfile 阶段改为 COPY + 校验 + 解包（完全离线）；
+   `cargo xtask package` 自动确保该 tarball 存在且校验通过（`containers/claude-code-linux-x64-<v>.tgz`，
+   已 gitignore）。
+2. **Alpine 版本 pin 过期**：`access-gateway/Dockerfile` 钉的 `openssh 9.9_p2-r0` 与 `musl-dev
+   1.2.5-r11` 已从 dl-cdn 仓库索引轮换（索引是活数据，digest-pinned 的 base 不能冻结远端索引）。
+   实测当前索引版本为 `10.0_p1-r10` / `1.2.5-r12`（经部署代理读 APKINDEX 验证），已更新 pin。
+   运维要点：镜像的 apk 版本 pin 会随 Alpine 索引轮换而过期，重打包遇到 `apk add … exit 2`
+   时按本段的方法对活索引校准 pin。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
