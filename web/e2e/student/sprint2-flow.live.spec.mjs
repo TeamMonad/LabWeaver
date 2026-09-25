@@ -954,12 +954,12 @@ test('student provisions a Work environment, configures it, and releases its cap
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('button', { name: '续期', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.getByRole('button', { name: '续期', exact: true }).first()).toBeVisible({ timeout: 120_000 })
     const renewResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${lease.id}/renew`
     })
-    await page.getByRole('button', { name: '续期', exact: true }).click()
+    await page.getByRole('button', { name: '续期', exact: true }).first().click()
     const renewedLease = await expectJson(await renewResponsePromise, 'RESOURCE_LEASE_RENEW_FAILED')
     expect(renewedLease).toMatchObject({ id: lease.id, state: 'active', revision: expect.any(Number) })
     expect(new Date(renewedLease.expiresAt).getTime()).toBeGreaterThan(new Date(lease.expiresAt).getTime())
