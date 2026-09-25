@@ -35,6 +35,7 @@ RUN --network=none \
 
 FROM ${GATEWAY_RUNTIME} AS runtime
 ARG SOURCE_COMMIT
+COPY containers/alpine-3.21-pkgs /vendor/alpine
 RUN apk add --no-network --allow-untrusted \
       /vendor/alpine/openssh-keygen-9.9_p2-r0.apk \
       /vendor/alpine/openssh-server-common-9.9_p2-r0.apk \
