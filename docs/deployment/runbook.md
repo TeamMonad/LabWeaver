@@ -1888,28 +1888,34 @@ error="pull access denied, repository does not exist or may require authorizatio
 验证：`cargo test -p agent-service` 12/12（build_executor 相关）、`cargo clippy -p agent-service
 --all-targets -- -D warnings` 通过。部署包 `pkg-v1-issue127-buildfix-1` 上线后按 §11.10 读回，再复跑旅程。
 
-### 12.2.7 2026-09-25：打包机的两个构建阻塞（已修 3fe71d4 / 7a8b0c0 前后离线化）
+### 12.2.7 2026-09-25：镜像构建的离线化（已修 3fe71d4 / 82563eb / a68dd1f，包 `pkg-v1-issue127-buildfix-1` 上线）
 
-部署修复（`306df67`）的打包过程暴露出两个与代码无关的构建前提：
+构建修复（`306df67`）重打包时，集群内 BuildKit 的出网被证明是**窄白名单**：
 
-1. **npm registry 不可达**：authoring-sandbox/agent 镜像的 claude-tools 阶段用 `npm pack
-   @anthropic-ai/claude-code-linux-x64@…`，而部署代理对 registry.npmjs.org 返回 502
-   （`gvisor`/`storage.googleapis.com` 同代理可通，npm 被上游 ACL 拒绝）；直接访问因跨越骨干网
-   极慢（~1 MB/s）。修复：锁内 sha512 对应的 tarball 由打包机从 npm 镜像站取回（校验后与锁 pin
-   逐字节一致），放入构建上下文，Dockerfile 阶段改为 COPY + 校验 + 解包（完全离线）；
-   `cargo xtask package` 自动确保该 tarball 存在且校验通过（`containers/claude-code-linux-x64-<v>.tgz`，
-   已 gitignore）。
-2. **Alpine repo 索引经部署代理不可靠**：builder 的 `apk add` 走代理访问 dl-cdn.alpinelinux.org，
-   代理对该域间歇拒绝（60 s 后 `Permission denied`，索引根本没取到；apk 退回到 base 镜像自带
-   DB 里已装的旧版本，报形如 `musl-dev-1.2.5-r11 breaks: world[musl-dev=1.2.5-r12]` 的假性
-   “版本不匹配”）。代理偶尔放行时还夹带**缓存翻转**：同一天两个探测命中不同状态的索引
-   （`openssh 9.9_p2-r0`↔`10.0_p1-r10`、`musl-dev 1.2.5-r11`↔`-r12`），曾误导按错误索引改 pin。
-   真源核对：绕过代理直连 dl-cdn 连续三次取索引，字节一致，即当前真索引就是原 pin
-   （`9.9_p2-r0`/`1.2.5-r11`）；故 **pin 未改，只修通路**——打包构建参数的
-   `NO_PROXY` 中加入 `dl-cdn.alpinelinux.org`，让 apk 直连官方 CDN。
-   运维要点：遇到 `apk add … exit 1/2` 先看是“取不到索引”还是“pin 版本号不在索引里”；
-   对 dl-cdn 的判断必须**绕过代理**实测（`curl --noproxy '*' …/APKINDEX.tar.gz`），不要信经
-   代理读到的索引版本。
+- npmjs/npmmirror/deb.debian.org/dl-cdn 等常用源对构建 Pod 一律 403（代理 ACL），
+  直连被防火墙丢弃（20 s 超时）。同代理对少数域（storage.googleapis）放行，
+  且其 dl-cdn 缓存会在新旧索引状态间**翻转**，曾误导按错误索引修改 apk pin
+  （真源核对必须 `curl --noproxy '*' …/APKINDEX.tar.gz`，直连索引才是权威）。
+- 结论：镜像构建不再依赖任何远端软件源，全部离线化、校验锁定：
+  - **Claude Code CLI**（3fe71d4）：锁内 sha512 的 tarball 由打包机一次取回，
+    `containers/claude-code-linux-x64-<v>.tgz`（已 gitignore），镜像内 COPY+校验+解包。
+  - **Alpine 包**（82563eb 起）：`containers/alpine-3.21-pkgs/` 24 个 .apk
+    （openssh 系、musl-dev、coreutils/util-linux + 依赖），`apk add --no-network
+    --allow-untrusted`，逐文件 sha256 锁定；gateway 的 runtime 阶段曾漏掉自身
+    COPY（0fc92ee 补上），教训：每个使用 /vendor 的阶段都要自带 COPY。
+  - **Debian 包**（82563eb）：`containers/debian-bookworm-pkgs/` 45 个 .deb
+    （git/curl/python3/ca-certificates 及闭包，32 MiB），`apt-get install`
+    `Dir::Etc::sourcelist=/dev/null` 纯本地解析。
+  - **Web 前端**（a68dd1f）：构建 Pod 拿不到 pnpm/npm，dist 改为打包机用锁文件
+    构建后整体入仓（`containers/web-dist/`，12 MiB，gitignore）；web 镜像变成
+    纯 nginx 静态运行时不带 node；xtask 用 web/ 源码树+锁文件哈希钉住 dist，
+    过期即报 `LW_PACKAGE_INPUT_STALE`。
+- `cargo xtask package` 自动确保上述全部输入存在且校验通过（`LW_PACKAGE_INPUT_MISSING /
+  INVALID / STALE` 三段失败闭合）；打包机需能直连 dl-cdn.alpinelinux.org /
+  deb.debian.org（慢但可控）。本次包全部 9 个组件构建成功，`package-validate`
+  static+connected 通过，`platform-application --infra` 部署成功，集群读回镜像
+  digest 与 manifest 一致、配置 bundle 注解不变；新 build-executor（目录绑定转
+  Harbor 引用）上线。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
