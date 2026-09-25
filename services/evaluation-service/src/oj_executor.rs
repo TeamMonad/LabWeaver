@@ -144,11 +144,39 @@ impl OjKubernetesExecutor {
                 message,
                 observation,
             } => {
-                let receipt: OjEvidenceReceipt =
-                    serde_json::from_str(&message).map_err(|_| OjExecutorError::ReceiptInvalid)?;
-                receipt
-                    .validate_for(request)
-                    .map_err(|_| OjExecutorError::ReceiptInvalid)?;
+                let receipt: OjEvidenceReceipt = match serde_json::from_str(&message) {
+                    Ok(receipt) => receipt,
+                    Err(parse_error) => {
+                        tracing::error!(
+                            event = "evaluation.oj.receipt_unparseable",
+                            component = "evaluation-service",
+                            operation = "oj.observe_job",
+                            outcome = "failed",
+                            attempt_id = %request.attempt_id,
+                            phase = ?request.phase,
+                            parse_error = %parse_error,
+                            receipt_message = truncate_debug(&message, 512),
+                            diagnostic_code = "LW_OJ_RECEIPT_INVALID",
+                            "the completed OJ job produced an unparseable evidence receipt",
+                        );
+                        return Err(OjExecutorError::ReceiptInvalid);
+                    }
+                };
+                receipt.validate_for(request).map_err(|validation_error| {
+                    tracing::error!(
+                        event = "evaluation.oj.receipt_validation_failed",
+                        component = "evaluation-service",
+                        operation = "oj.observe_job",
+                        outcome = "failed",
+                        attempt_id = %request.attempt_id,
+                        phase = ?request.phase,
+                        validation_error = %validation_error,
+                        receipt_message = truncate_debug(&message, 512),
+                        diagnostic_code = "LW_OJ_RECEIPT_INVALID",
+                        "the completed OJ job evidence receipt failed validation",
+                    );
+                    OjExecutorError::ReceiptInvalid
+                })?;
                 if receipt.compile_exit_code != Some(0) {
                     // The compile output only exists inside the Job (the evidence file and the pod
                     // are both gone after cleanup), so at least the outcome travels with the
@@ -1450,5 +1478,18 @@ mod tests {
             cancellation_observation(true),
             OjCancellationObservation::Cancelled
         );
+    }
+}
+
+fn truncate_debug(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        value.to_owned()
+    } else {
+        let truncated = value
+            .char_indices()
+            .take_while(|(index, _)| *index < max_len)
+            .map(|(_, character)| character)
+            .collect::<String>();
+        format!("{truncated}…(truncated {})", value.len())
     }
 }
