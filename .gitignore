@@ -67,3 +67,7 @@ __pycache__/
 
 # Pinned Claude Code CLI tarball vendored into the image build context
 containers/claude-code-linux-x64-*.tgz
+# Vendored Alpine 3.21 apk closure for offline image builds
+containers/alpine-3.21-pkgs/
+# Vendored Debian bookworm deb closure for offline image builds
+containers/debian-bookworm-pkgs/

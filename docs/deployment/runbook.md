@@ -1888,7 +1888,7 @@ error="pull access denied, repository does not exist or may require authorizatio
 验证：`cargo test -p agent-service` 12/12（build_executor 相关）、`cargo clippy -p agent-service
 --all-targets -- -D warnings` 通过。部署包 `pkg-v1-issue127-buildfix-1` 上线后按 §11.10 读回，再复跑旅程。
 
-### 12.2.7 2026-09-25：打包机的两个环境性构建阻塞（已修 3fe71d4 / c295bcf 之后 apk pin 校准）
+### 12.2.7 2026-09-25：打包机的两个构建阻塞（已修 3fe71d4 / 7a8b0c0 前后离线化）
 
 部署修复（`306df67`）的打包过程暴露出两个与代码无关的构建前提：
 
@@ -1899,11 +1899,17 @@ error="pull access denied, repository does not exist or may require authorizatio
    逐字节一致），放入构建上下文，Dockerfile 阶段改为 COPY + 校验 + 解包（完全离线）；
    `cargo xtask package` 自动确保该 tarball 存在且校验通过（`containers/claude-code-linux-x64-<v>.tgz`，
    已 gitignore）。
-2. **Alpine 版本 pin 过期**：`access-gateway/Dockerfile` 钉的 `openssh 9.9_p2-r0` 与 `musl-dev
-   1.2.5-r11` 已从 dl-cdn 仓库索引轮换（索引是活数据，digest-pinned 的 base 不能冻结远端索引）。
-   实测当前索引版本为 `10.0_p1-r10` / `1.2.5-r12`（经部署代理读 APKINDEX 验证），已更新 pin。
-   运维要点：镜像的 apk 版本 pin 会随 Alpine 索引轮换而过期，重打包遇到 `apk add … exit 2`
-   时按本段的方法对活索引校准 pin。
+2. **Alpine repo 索引经部署代理不可靠**：builder 的 `apk add` 走代理访问 dl-cdn.alpinelinux.org，
+   代理对该域间歇拒绝（60 s 后 `Permission denied`，索引根本没取到；apk 退回到 base 镜像自带
+   DB 里已装的旧版本，报形如 `musl-dev-1.2.5-r11 breaks: world[musl-dev=1.2.5-r12]` 的假性
+   “版本不匹配”）。代理偶尔放行时还夹带**缓存翻转**：同一天两个探测命中不同状态的索引
+   （`openssh 9.9_p2-r0`↔`10.0_p1-r10`、`musl-dev 1.2.5-r11`↔`-r12`），曾误导按错误索引改 pin。
+   真源核对：绕过代理直连 dl-cdn 连续三次取索引，字节一致，即当前真索引就是原 pin
+   （`9.9_p2-r0`/`1.2.5-r11`）；故 **pin 未改，只修通路**——打包构建参数的
+   `NO_PROXY` 中加入 `dl-cdn.alpinelinux.org`，让 apk 直连官方 CDN。
+   运维要点：遇到 `apk add … exit 1/2` 先看是“取不到索引”还是“pin 版本号不在索引里”；
+   对 dl-cdn 的判断必须**绕过代理**实测（`curl --noproxy '*' …/APKINDEX.tar.gz`），不要信经
+   代理读到的索引版本。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 

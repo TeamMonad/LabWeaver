@@ -92,19 +92,25 @@ FROM runtime-base AS runtime
 FROM ${NODE_BUILDER} AS authoring-sandbox
 COPY --from=claude-tools --chown=65532:65532 /out/claude /usr/local/bin/claude
 COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
-RUN apt-get update && \
+COPY containers/debian-bookworm-pkgs /vendor/debian
+RUN cd /vendor/debian && \
     apt-get install --yes --no-install-recommends \
-        bash ca-certificates coreutils curl git python3 && \
-    rm -rf /var/lib/apt/lists/*
+        -o Dir::Etc::sourcelist=/dev/null \
+        -o Dir::Etc::sourceparts=/dev/null \
+        ./*.deb && \
+    rm -rf /vendor/debian /var/lib/apt/lists/*
 USER 65532:65532
 CMD ["/bin/sh"]
 
 FROM ${NODE_BUILDER} AS authoring-sandbox-fixture
 COPY --from=claude-tools-fixture --chown=65532:65532 /out/claude /usr/local/bin/claude
 COPY --from=buildkit-tools /usr/bin/buildctl /usr/local/bin/buildctl
-RUN apt-get update && \
+COPY containers/debian-bookworm-pkgs /vendor/debian
+RUN cd /vendor/debian && \
     apt-get install --yes --no-install-recommends \
-        bash ca-certificates coreutils curl git python3 && \
-    rm -rf /var/lib/apt/lists/*
+        -o Dir::Etc::sourcelist=/dev/null \
+        -o Dir::Etc::sourceparts=/dev/null \
+        ./*.deb && \
+    rm -rf /vendor/debian /var/lib/apt/lists/*
 USER 65532:65532
 CMD ["/bin/sh"]

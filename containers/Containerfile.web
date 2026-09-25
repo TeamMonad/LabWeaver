@@ -21,7 +21,9 @@ FROM ${WEB_RUNTIME} AS runtime-base
 # the Environment Container seed and runtime security contract.
 FROM runtime-base AS work-runtime-fixture
 USER root
-RUN apk add --no-cache coreutils util-linux \
+COPY containers/alpine-3.21-pkgs /vendor/alpine
+RUN apk add --no-network --allow-untrusted /vendor/alpine/*.apk \
+    && rm -rf /vendor/alpine \
     && mkdir -p /opt/labweaver/workspace-seed /workspace /tmp \
     && printf '%s' 'This workspace seed is provided by the explicit local integration fixture.' > /opt/labweaver/workspace-seed/README.md \
     && chmod -R a+rX /opt/labweaver/workspace-seed \
