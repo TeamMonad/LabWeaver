@@ -1973,6 +1973,36 @@ e68330c1…），worker 二进制永远取自部署中的服务镜像，收据 s
 termination message 应为 16 字段（LEN 约 700+）且 `schemaVersion` 为
 `oj-evidence-receipt/v1`。
 
+### 12.2.9 2026-09-25：OJ worker 二进制的部署级钉定（提交 56fa5cb，包 `pkg-v1-issue127-runnerpin2` 上线）
+
+承接 §12.2.8：runner 镜像由模型配方（工具链镜像）构建，worker 二进制通过
+`COPY --from=<evaluation-service digest>` 取入——该 digest 是模型挑选的，经常
+是旧 schema 时代的构建。修复（`a16ac7d` → `56fa5cb`）在 agent 构建执行器里把
+`evaluation/Dockerfile` 中所有引用 evaluation-service 的 `FROM`（防御）与
+`COPY --from`（真正漂移点）改写为 `${LABWEAVER_SERVICE_IMAGE}`；该构建参数由
+`build-executor-config` 的 `executor.serviceImage` 提供，钉定为当前部署的
+evaluation-service digest。临时把容器审批路径运行时身份改成配置身份的做法
+（842350a）会丢弃模型工具链（OJ 编译在镜像内跑 make，裸 evaluation 镜像没有
+riscv64 工具链），已回滚（295df09）。
+
+部署（21:0x，`oj-runnerpin-2`）：新包 validate static+connected 均过；
+platform-application 应用后三个服务 digest 与 manifest 一致（control
+`0cbe2404…`、agent `d46e127e…`、eval `4207b841…`）；build-executor-config
+`executor.serviceImage` 与 control-service-config `evaluationRuntime.runnerImage`
+同步到 `4207b841…`。本地复现证明：该 runner 镜像 + 真实 xv6 归档 + 114 字节
+starter 的 `build-xv6.sh` 完整编译通过（BUILD_EXIT=0），工具链/归档/布局均无问题。
+
+随后验收（attempt-1 `public-20260925-3j-a1-13004`、attempt-2 `-a2-9900`）：
+lab 段的 `LW_OJ_RECEIPT_INVALID` 消失（收据 16 字段可解析，`observe_oj` 打出
+`evaluation.oj.compile_failed: LW_OJ_COMPILE_ERROR`），但编译 gate 仍失败；
+work 段出现 `WORK_CONFIGURATION_RUN_FAILED`（agent run 的 work_configuration 轨
+`LW_AGENT_WORK_EXECUTION_FAILED`，模型生成的配置脚本执行失败）；admin 段的
+「已发布版本」下拉在 120s 内无非空 option（release 投影未按时发布，与 authoring
+draft 质量相关）。三段的共同下风仍是模型候选质量（qwen 生成失效 draft 的
+幸运值问题），按已记录 blocker 由循环重试吸收；编译 gate 的进一步定位依赖 OJ
+pod 的 terminated message / 容器日志抓取（watcher 已加强为 2s 轮询并采集 command
+configMap 与容器日志）。
+
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
