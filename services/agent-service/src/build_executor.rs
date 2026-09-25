@@ -475,11 +475,11 @@ impl ProductionBuildExecutor {
         let path = workspace.join(dockerfile_path);
         let text = std::fs::read_to_string(&path).map_err(|_| rejected())?;
         let rewritten = rewrite_dockerfile_base_images_text(&text, &entries);
-        if !self.config.service_image.is_empty() {
-            let pinned = rewrite_runner_base_image_text(&rewritten)?;
-            std::fs::write(&path, pinned).map_err(|_| rejected())?;
-        } else {
+        if self.config.service_image.is_empty() {
             std::fs::write(&path, rewritten).map_err(|_| rejected())?;
+        } else {
+            let pinned = rewrite_runner_base_image_text(&rewritten);
+            std::fs::write(&path, pinned).map_err(|_| rejected())?;
         }
         Ok(())
     }
@@ -1036,7 +1036,7 @@ fn rewrite_dockerfile_base_images_text(text: &str, entries: &[PlatformImageEntry
 /// (`LW_OJ_OBSERVE_UNAVAILABLE`). Both the base-image reference (defensive) and
 /// the `COPY --from` source (the observable drift point) are rewritten to
 /// `${LABWEAVER_SERVICE_IMAGE}`; other references fall through untouched.
-fn rewrite_runner_base_image_text(text: &str) -> Result<String, BuildProviderFailure> {
+fn rewrite_runner_base_image_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(32));
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -1069,7 +1069,7 @@ fn rewrite_runner_base_image_text(text: &str) -> Result<String, BuildProviderFai
                 out.push('\n');
                 continue;
             }
-            let replacement = format!("--from=${{LABWEAVER_SERVICE_IMAGE}}");
+            let replacement = "--from=${LABWEAVER_SERVICE_IMAGE}".to_owned();
             let target = format!("--from={reference}");
             out.push_str(&line.replace(&target, &replacement));
             out.push('\n');
@@ -1104,7 +1104,7 @@ fn rewrite_runner_base_image_text(text: &str) -> Result<String, BuildProviderFai
         }
         out.push('\n');
     }
-    Ok(out)
+    out
 }
 #[derive(Deserialize)]
 struct HarborTokenResponse {
@@ -1850,7 +1850,7 @@ mod tests {
             "FROM toolchain\n",
             "ENTRYPOINT [\"/usr/local/bin/labweaver-service\"]\n",
         );
-        let rewritten = rewrite_runner_base_image_text(source).expect("rewrite succeeds");
+        let rewritten = rewrite_runner_base_image_text(source);
         assert!(
             !rewritten.contains("evaluation-service@sha256"),
             "the stale evaluation reference must be replaced"
