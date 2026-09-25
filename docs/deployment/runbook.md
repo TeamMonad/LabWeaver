@@ -1917,6 +1917,30 @@ error="pull access denied, repository does not exist or may require authorizatio
   digest 与 manifest 一致、配置 bundle 注解不变；新 build-executor（目录绑定转
   Harbor 引用）上线。
 
+### 12.2.8 2026-09-25：评测轨 `LW_OJ_RECEIPT_INVALID` —— OJ worker 镜像与观察端镜像不同步
+
+lab 旅程的「编译」gate 持续失败 `LW_OJ_OBSERVE_UNAVAILABLE`（进阶诊断
+`LW_OJ_RECEIPT_INVALID`）。证据链（经三版诊断包 727cd99/3514ae7 的日志补全）：
+
+1. 观察端（当前 evaluation-service）的 `OjEvidenceReceipt` 为 17 字段（含
+   compileExitCode/compileSignal/compileTimedOut/compileOutputExceeded）；
+2. 实际 OJ Job 的 `program-runner` 容器（由 evaluationRuntime.runnerImage 决定）
+   产出的 /dev/termination-log 收据只有 13 字段（无以上 4 字段，即 OJ 收据加宽
+   之前的旧 schema）→ `serde_json::from_str` 因缺 `compileTimedOut`（非 Option）
+   直接解析失败；
+3. 控制面配置 `control-service-config` 的 `evaluationRuntime.runnerImage` 停在一个
+   更早的 evaluation-service digest（d87dd7b7…，且 ops baseline v5 也钉了
+   98defd89…），没有随每次部署更新；冻结工 `workerImage` 同理。
+
+修复：将 baseline 与在线 configmap 的 `evaluationRuntime.runnerImage`（及
+`runtimeArtifactSha256`、coordinator `workerImage`）更新为当前部署的
+evaluation-service digest（本日 e68330c1…= 包 `pkg-v1-issue127-ojdiag-2`），
+滚动 control-service；下一个 release 的运行时身份即绑定新镜像，编译 gate 恢复。
+运维要点：**OJ 的 runner 镜像身份必须与部署的 evaluation-service 镜像保持一致**——
+收据 schema 是双端契约（worker 写、observer 读），镜像错位时表现为观察端静默解析
+失败。排查脚本：用 watcher 抓 `lw-oj-*` pod 的 `state.terminated.message` 对账
+schema 字段数。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
