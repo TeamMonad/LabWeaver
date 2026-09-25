@@ -64,3 +64,6 @@ deploy/ansible/inventories/*/.vault-password
 *.retry
 __pycache__/
 .cache/
+
+# Pinned Claude Code CLI tarball vendored into the image build context
+containers/claude-code-linux-x64-*.tgz

@@ -36,13 +36,16 @@ RUN --network=none \
 FROM ${BUILDKIT_IMAGE} AS buildkit-tools
 
 FROM ${NODE_BUILDER} AS claude-tools
-ARG CLAUDE_CODE_VERSION
+ARG CLAUDE_CODE_PACKAGE_PATH
 ARG CLAUDE_CODE_LINUX_X64_SHA512
 WORKDIR /tmp/claude-code
-RUN test -n "${CLAUDE_CODE_VERSION}" && test -n "${CLAUDE_CODE_LINUX_X64_SHA512}" && \
-    archive="$(npm pack "@anthropic-ai/claude-code-linux-x64@${CLAUDE_CODE_VERSION}" --pack-destination . --silent)" && \
-    printf '%s  %s\n' "${CLAUDE_CODE_LINUX_X64_SHA512}" "${archive}" | sha512sum --check --strict && \
-    tar --extract --gzip --file "${archive}" && \
+# The deployment proxy cannot reach the npm registry, so the pinned tarball is
+# vendored into the build context and only checksum-verified here (same pin as
+# deploy/versions.lock.yml).
+COPY ${CLAUDE_CODE_PACKAGE_PATH} ./package.tgz
+RUN test -n "${CLAUDE_CODE_PACKAGE_PATH}" && \
+    printf '%s  %s\n' "${CLAUDE_CODE_LINUX_X64_SHA512}" "package.tgz" | sha512sum --check --strict && \
+    tar --extract --gzip --file package.tgz && \
     test -x package/claude && \
     install -D -m 0555 package/claude /out/claude
 

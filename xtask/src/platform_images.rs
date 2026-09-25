@@ -10,7 +10,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 use super::AppError;
 
@@ -438,6 +438,7 @@ fn package_linux(
     })?;
     verify_tools(&lock)?;
     verify_rust_toolchain(root, &lock.platform_images)?;
+    ensure_claude_code_package(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     validate_registry(&registry)?;
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
@@ -576,6 +577,13 @@ fn build_image(
             ),
         ]);
     }
+    command.args([
+        "--build-arg",
+        &format!(
+            "CLAUDE_CODE_PACKAGE_PATH=containers/claude-code-linux-x64-{}.tgz",
+            lock.claude_code
+        ),
+    ]);
     command.args(["--tag", tag]);
     for argument in build_proxy_arguments() {
         command.arg("--build-arg").arg(argument);
@@ -661,6 +669,70 @@ fn prior_component_reference(root: &Path, component: &str) -> Result<Option<Stri
             })
         });
     Ok(reference)
+}
+
+#[cfg(target_os = "linux")]
+fn sha512_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha512::digest(bytes))
+}
+
+/// Ensures the pinned Claude Code CLI tarball exists in the build context and
+/// matches the reviewed sha512. The deployment proxy cannot reach the npm
+/// registry, so the packaging host downloads the tarball directly from npm
+/// once; every image build then verifies the same checksum offline.
+#[cfg(target_os = "linux")]
+fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+    let version = &lock.claude_code;
+    let expected = &lock.claude_code_linux_x64_sha512;
+    let relative = format!("containers/claude-code-linux-x64-{version}.tgz");
+    if !version
+        .chars()
+        .all(|character| character.is_ascii_digit() || character == '.')
+    {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_INVALID",
+            detail: format!("claude_code version is not a dotted numeric string: {version}"),
+        });
+    }
+    let path = root.join(&relative);
+    let present_and_valid = path.exists()
+        && std::fs::read(&path)
+            .map(|bytes| sha512_bytes(&bytes) == *expected)
+            .unwrap_or(false);
+    if !present_and_valid {
+        let url = format!(
+            "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/\
+             claude-code-linux-x64-{version}.tgz"
+        );
+        run_checked(
+            Command::new("curl").args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--retry",
+                "3",
+                "--output",
+                &path.to_string_lossy(),
+                &url,
+            ]),
+            "download pinned claude-code package",
+        )?;
+    }
+    let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_INPUT_MISSING",
+        detail: relative,
+    })?;
+    let actual = sha512_bytes(&actual);
+    if actual != *expected {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_INVALID",
+            detail: format!(
+                "claude-code package sha512 mismatch: expected {expected}, observed {actual}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1320,7 +1392,7 @@ mod tests {
             );
         }
         assert!(containerfile.contains("RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN}"));
-        assert!(containerfile.contains("@anthropic-ai/claude-code-linux-x64@"));
+        assert!(containerfile.contains("CLAUDE_CODE_PACKAGE_PATH"));
         assert!(containerfile.contains("sha512sum --check --strict"));
         assert!(containerfile.contains("/usr/local/bin/claude"));
         assert!(
