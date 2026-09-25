@@ -8,7 +8,7 @@ ARG SOURCE_DATE_EPOCH
 ENV CARGO_INCREMENTAL=0 \
     RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
-RUN apk add --no-cache musl-dev=1.2.5-r11
+RUN apk add --no-cache musl-dev=1.2.5-r12
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY .cargo .cargo
@@ -35,8 +35,8 @@ RUN --network=none \
 FROM ${GATEWAY_RUNTIME} AS runtime
 ARG SOURCE_COMMIT
 RUN apk add --no-cache \
-      openssh-client-default=9.9_p2-r0 \
-      openssh-server=9.9_p2-r0 \
+      openssh-client-default=10.0_p1-r10 \
+      openssh-server=10.0_p1-r10 \
     && adduser -D -H -s /sbin/nologin gateway-auth \
     && adduser -D -H -s /bin/sh gateway \
     && passwd -d gateway \
