@@ -1827,6 +1827,37 @@ Error: LAB_EXPERIMENT_AGENT_RUN_FAILED:cancelled:LW_CONFLICT,LW_CONFLICT
 - 同一签名此前也出现在 admin 段（`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:cancelled:LW_CONFLICT`），
   因此这是一个跨旅程的共同阻塞点，下一步应在「谁调用了 cancel API / 是否有平台侧自动取消」上取证。
 
+### 12.2.5 2026-09-25：验收三段同败的根因是看护线程 4 KiB 截断（已修 dc4053b）
+
+`public-20260924-3j-a1-20472`（attempt 1）：`lab`/`work`/`admin` 三段的失败签名都指向同一处——
+authoring/evaluation 的内部 task 资源申请从未被批准：
+
+- `lab`：`waitForExperimentRun` 轮询超时（authoring run 停在 `running`，重试 3 次共 1.1h）。
+- `work`：`WORK_TEMPLATE_RUN_FAILED:failed:LW_PROVIDER_UNAVAILABLE`（2.6h/1.1h/15.1m，均卡在 Work
+  模板 authoring run）。
+- `admin`：45 分钟谓词超时（`Expected: true / Received: false`，同样卡在其模板 authoring run）。
+
+数据库证据（`resource.resource_requests` + `resource_request_transitions`）：每次尝试都新建一条
+`authoring-…-<track>-1-…` 的 `reviewing` 申请，然后被 agent 在约 1 小时后自行
+`reviewing → cancelled`（`actor_id` 为 agent 身份，`LW_PROVIDER_UNAVAILABLE`）；自 2026-09-24 22:33 起
+没有任何 `reviewing → allocating`。22:09–22:33 那段成功的 authoring 对应的批准记录
+（`resource_approvals.reason = 'acceptance operator approving the internal authoring task lease'`）
+是**上一轮会话人工**以管理员身份点的（同一产物立即 `→ allocating → active`）。
+
+根因：`tools/user_acceptance.py` 的看护线程（`start_resource_approval_watchdog`，每 5s 轮询一次）从未
+生效——`_http` 只读 `response.read(4096)`，而管理员 `GET /api/v1/resource-requests` 的清单超过 4 KiB
+（每个历史申请一行），JSON 被截断后 `json.loads` 失败，函数静默返回 `[]`，看护全程零批准
+（`grep 'approved resource request' artifacts/acceptance` 无输出）。
+
+修复 `dc4053b`：`_http` 响应上限提到 8 MiB（附注释说明 4 KiB 截断如何让看护失效）。验证：
+`tests/ansible/test_user_acceptance.py` 35 passed；修复后看护立即批准了 5 条积压 `reviewing` 的 task
+申请；卡住 run 的沙箱 Job `lw-auth-01a0d8bf…` 由 Running→Completed，ollama 实际装载 `qwen3.6:27b`
+（真实生成，非 Mock）。
+
+运维要点（与 §11.8 末条呼应）：该部署下内部 authoring/evaluation task 租约仍需要「操作者」批准
+（产品决策未变），验收工具以管理员会话模拟操作者（BFF `/approve`）；work 旅程 environment 申请的
+~86s 窗口（§11.11 run 59 表）与此修复无关，需在批准链路恢复后复测。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
