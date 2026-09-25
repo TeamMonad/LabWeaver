@@ -446,7 +446,7 @@ fn package_linux(
         DEBIAN_BOOKWORM_PKGS,
     )?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
-    validate_registry(&registry)?;
+    ensure_web_dist(root)?;
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
     let run_dir = root.join("artifacts/package").join(&run_id);
     fs::create_dir_all(&run_dir)
@@ -828,11 +828,6 @@ const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
         "https://deb.debian.org/debian/pool/main/c/curl/curl_7.88.1-10+deb12u15_amd64.deb",
     ),
     (
-        "git-man_2.39.5-0+deb12u3_all.deb",
-        "904dbd8dbc3db34c6780fb0abfe35816d4a90a490126ef0a055a77a0c5dcab82",
-        "https://deb.debian.org/debian/pool/main/g/git/git-man_2.39.5-0+deb12u3_all.deb",
-    ),
-    (
         "git_2.39.5-0+deb12u3_amd64.deb",
         "637a85ddd6247fab13bdd0592f2f39aff04ce4dbf0655d3ab553ac359a38ce6f",
         "https://deb.debian.org/debian/pool/main/g/git/git_2.39.5-0+deb12u3_amd64.deb",
@@ -1053,6 +1048,7 @@ fn ensure_offline_pkg_closure(
             .unwrap_or(false);
         if !present {
             let output_path = path.to_string_lossy().into_owned();
+
             run_checked(
                 Command::new("curl").args([
                     "--fail",
@@ -1083,6 +1079,41 @@ fn ensure_offline_pkg_closure(
                 ),
             });
         }
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+/// The web frontend is built outside the cluster (the build network cannot
+/// reach any npm registry) and vendored into the context. Verify the vendored
+/// dist matches the current web/ source tree and lockfile before packaging.
+fn ensure_web_dist(root: &Path) -> Result<(), AppError> {
+    let dist = root.join("containers/web-dist");
+    let tree = run_checked(
+        Command::new("git").args(["ls-tree", "-r", "HEAD", "web"]),
+        "resolve current web source tree",
+    )?;
+    let lock_bytes =
+        std::fs::read(root.join("web/pnpm-lock.yaml")).map_err(|_| AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_MISSING",
+            detail: "web/pnpm-lock.yaml".to_owned(),
+        })?;
+    let mut hasher = Sha256::new();
+    hasher.update(tree.as_bytes());
+    hasher.update(&lock_bytes);
+    let observed = format!("{:x}", hasher.finalize());
+    let pinned = std::fs::read_to_string(dist.join(".web-tree-sha256")).map_err(|_| {
+        AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_MISSING",
+            detail: "containers/web-dist/.web-tree-sha256".to_owned(),
+        }
+    })?;
+    if pinned.trim() != observed {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_STALE",
+            detail: format!(
+                "web/ changed after the vendored dist build (expected {pinned}, observed {observed}); rebuild it against web/"
+            ),
+        });
     }
     Ok(())
 }
@@ -1148,10 +1179,7 @@ fn build_base_images<'a>(
     lock: &'a PlatformImageLock,
 ) -> Vec<(&'static str, &'a str)> {
     match component {
-        "web" => vec![
-            ("NODE_BUILDER", lock.bases.node_builder.as_str()),
-            ("WEB_RUNTIME", lock.bases.web_runtime.as_str()),
-        ],
+        "web" => vec![("WEB_RUNTIME", lock.bases.web_runtime.as_str())],
         "openssh-gateway" => vec![
             ("RUST_BUILDER", lock.bases.gateway_builder.as_str()),
             ("GATEWAY_RUNTIME", lock.bases.gateway_runtime.as_str()),

@@ -2978,19 +2978,15 @@ fn contains_protected_field(output: &Value) -> bool {
 /// accepted because the authoring prompt tells the candidate about both shapes.
 fn declared_environment_spec_from_bytes(bytes: &[u8]) -> Option<Value> {
     let envelope: Value = serde_json::from_slice(bytes).ok()?;
-    envelope
-        .get("files")?
-        .as_array()?
-        .iter()
-        .find_map(|file| {
-            let content = file.get("content")?.as_str()?;
-            let document: Value = serde_json::from_str(content).ok()?;
-            if document.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec") {
-                return Some(document);
-            }
-            let spec = document.get("environmentSpec")?.clone();
-            (spec.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec")).then_some(spec)
-        })
+    envelope.get("files")?.as_array()?.iter().find_map(|file| {
+        let content = file.get("content")?.as_str()?;
+        let document: Value = serde_json::from_str(content).ok()?;
+        if document.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec") {
+            return Some(document);
+        }
+        let spec = document.get("environmentSpec")?.clone();
+        (spec.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec")).then_some(spec)
+    })
 }
 
 /// Fills the declared surfaces a candidate left out.
@@ -3000,7 +2996,10 @@ fn declared_environment_spec_from_bytes(bytes: &[u8]) -> Option<Value> {
 /// them: an environment built from a candidate that dropped them is unusable even though its schema
 /// is satisfied. Only surfaces the candidate omitted are filled, so an explicit candidate value
 /// always wins, and a candidate that switched the runtime variant inherits nothing.
-fn preserve_declared_environment_surfaces(output: &mut Value, declared: &Value) -> Vec<&'static str> {
+fn preserve_declared_environment_surfaces(
+    output: &mut Value,
+    declared: &Value,
+) -> Vec<&'static str> {
     let mut restored = Vec::new();
     let Some(declared_runtime) = declared.get("runtime") else {
         return restored;
@@ -3019,9 +3018,7 @@ fn preserve_declared_environment_surfaces(output: &mut Value, declared: &Value) 
     {
         for key in ["service_port", "terminal"] {
             let missing = runtime.get(key).is_none_or(Value::is_null);
-            let declared_value = declared_runtime
-                .get(key)
-                .filter(|value| !value.is_null());
+            let declared_value = declared_runtime.get(key).filter(|value| !value.is_null());
             if let Some(value) = declared_value.filter(|_| missing) {
                 runtime.insert(key.to_owned(), value.clone());
                 restored.push(key);
@@ -3622,7 +3619,10 @@ mod tests {
         })
         .to_string();
         let declared = super::declared_environment_spec_from_bytes(envelope.as_bytes());
-        assert!(declared.is_some(), "the envelope must expose its declared spec");
+        assert!(
+            declared.is_some(),
+            "the envelope must expose its declared spec"
+        );
         let declared = declared.unwrap_or_else(|| json!({}));
         let mut candidate = json!({
             "kind": "EnvironmentSpec",
@@ -3633,7 +3633,10 @@ mod tests {
         assert_eq!(restored, vec!["service_port", "terminal", "entries"]);
         assert_eq!(candidate["runtime"]["service_port"], 8080);
         assert_eq!(candidate["runtime"]["terminal"]["executable"], "/bin/sh");
-        assert_eq!(candidate["runtime"]["terminal"]["workingDirectory"], "/workspace");
+        assert_eq!(
+            candidate["runtime"]["terminal"]["workingDirectory"],
+            "/workspace"
+        );
         assert_eq!(candidate["entries"][0]["name"], "public-files");
     }
 
@@ -3697,11 +3700,13 @@ mod tests {
             "kind": "EnvironmentSpec",
             "runtime": { "kind": "container", "provider_binding": "container-primary-v1" }
         });
-        assert!(super::preserve_declared_environment_surfaces(
-            &mut candidate,
-            &json!({ "kind": "EnvironmentSpec" })
-        )
-        .is_empty());
+        assert!(
+            super::preserve_declared_environment_surfaces(
+                &mut candidate,
+                &json!({ "kind": "EnvironmentSpec" })
+            )
+            .is_empty()
+        );
         assert!(candidate["runtime"].get("terminal").is_none());
     }
 }

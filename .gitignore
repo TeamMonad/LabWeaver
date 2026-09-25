@@ -71,3 +71,5 @@ containers/claude-code-linux-x64-*.tgz
 containers/alpine-3.21-pkgs/
 # Vendored Debian bookworm deb closure for offline image builds
 containers/debian-bookworm-pkgs/
+# Vendored web frontend build (dist built on the packaging host)
+containers/web-dist/
