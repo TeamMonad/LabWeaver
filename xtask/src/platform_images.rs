@@ -586,6 +586,14 @@ fn build_image(
             &format!("{name}={}", pinned_mirror(registry, name, source)?),
         ]);
     }
+    if let Some(reference) = prior_component_reference(root, component)? {
+        // The cluster BuildKit keeps only ephemeral storage, so after a daemon
+        // restart every layer rebuilds and the sandbox image's npm stage has to
+        // fetch from the npm registry, which the deployment proxy cannot reach.
+        // Restoring the last published image as the layer cache keeps unchanged
+        // stages offline (same Dockerfile + same build args hit the history).
+        command.args(["--cache-from", &format!("type=registry,ref={reference}")]);
+    }
     command.arg(".");
     run_checked(&mut command, "BuildKit platform image build").map(|_| ())
 }
@@ -607,6 +615,52 @@ fn build_proxy_arguments() -> Vec<String> {
         format!("HTTPS_PROXY={proxy}"),
         format!("NO_PROXY={no_proxy}"),
     ]
+}
+
+#[cfg(target_os = "linux")]
+fn prior_component_reference(root: &Path, component: &str) -> Result<Option<String>, AppError> {
+    let packages = root.join("artifacts/package");
+    let entries =
+        std::fs::read_dir(&packages).map_err(|error| io_error("read package dir", error))?;
+    let mut manifests: Vec<(std::time::SystemTime, String, serde_json::Value)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let manifest_path = entry.path().join("PlatformImagePackageManifest.json");
+            let text = std::fs::read_to_string(manifest_path).ok()?;
+            let value = serde_json::from_str(&text).ok()?;
+            let modified = entry
+                .path()
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((
+                modified,
+                entry.file_name().to_string_lossy().into_owned(),
+                value,
+            ))
+        })
+        .collect();
+    manifests.sort_by_key(|right| std::cmp::Reverse(right.0));
+    let images = manifests
+        .first()
+        .map(|(_, _, manifest)| manifest.get("images").cloned().unwrap_or_default());
+    let reference = images
+        .as_ref()
+        .and_then(|images| images.as_array())
+        .and_then(|images| {
+            images.iter().find_map(|image| {
+                if image.get("component").and_then(serde_json::Value::as_str) == Some(component) {
+                    image
+                        .get("reference")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+        });
+    Ok(reference)
 }
 
 #[cfg(target_os = "linux")]
