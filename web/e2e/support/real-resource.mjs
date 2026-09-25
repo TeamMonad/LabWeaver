@@ -188,6 +188,13 @@ export async function requestProjectResourceByUi(page, {
 
   const releaseSelect = page.getByLabel('已发布版本')
   await expect(releaseSelect).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
+  // The release set is an event-sourced read model: the template release is
+  // projected asynchronously, so a bare evaluateAll can observe the empty
+  // state before the projection lands. Poll for a usable option like the
+  // student journey does, then read the rendered list.
+  await expect(releaseSelect.locator('option:not([value=""])').first()).toBeAttached({
+    timeout: RESOURCE_PAGE_TIMEOUT_MS,
+  })
   const releases = await releaseSelect.locator('option').evaluateAll((elements) => elements
     .map((element) => ({ value: element.value, label: (element.textContent ?? '').trim() }))
     .filter((option) => option.value !== ''))
