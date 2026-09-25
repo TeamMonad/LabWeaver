@@ -42,6 +42,7 @@ use crate::build_pipeline::{
 use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse};
 use crate::oci_import::parse_oci_layout;
 use crate::oci_registry::{OciRegistryError, OciRegistryPublisher, RegistryCredentials};
+use crate::platform_images::{PgPlatformImageCatalog, PlatformImageEntry};
 
 const MAX_DOCKERFILE_BYTES: u64 = 256 * 1024;
 const MAX_CONTEXT_ENTRIES: usize = 10_000;
@@ -449,6 +450,34 @@ impl ProductionBuildExecutor {
         })
     }
 
+    /// Rewrites generated Dockerfile `FROM` references that name a reviewed
+    /// platform image into the pinned Harbor pull reference.
+    ///
+    /// The model-facing catalog prompt exposes only a binding and the pinned
+    /// digest (`platform_image_prompt`), so a generated recipe legitimately
+    /// refers to the catalog as `rust-builder-v1@sha256:…` — a name `BuildKit`
+    /// would otherwise resolve against the default registry and reject under
+    /// the restricted build network. Matching by binding and digest maps the
+    /// reference back to the reviewed `source_reference` so the solve pulls
+    /// exclusively from the platform Harbor registry.
+    async fn rewrite_dockerfile_base_images(
+        &self,
+        workspace: &Path,
+        dockerfile_path: &str,
+    ) -> Result<(), BuildProviderFailure> {
+        let entries = PgPlatformImageCatalog::new(self.pool.clone())
+            .active_list()
+            .await
+            .map_err(|_| unavailable())?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let path = workspace.join(dockerfile_path);
+        let text = std::fs::read_to_string(&path).map_err(|_| rejected())?;
+        let rewritten = rewrite_dockerfile_base_images_text(&text, &entries);
+        std::fs::write(&path, rewritten).map_err(|_| rejected())?;
+        Ok(())
+    }
     /// Run the build through the deployment-owned `BuildKit` daemon using the
     /// `bollard` gRPC client. No `buildctl` binary and no shell are involved.
     async fn run_buildkit(
@@ -462,6 +491,8 @@ impl ProductionBuildExecutor {
         if !self.config.service_image.is_empty() {
             ensure_global_service_image_arg(workspace, dockerfile_path)?;
         }
+        self.rewrite_dockerfile_base_images(workspace, dockerfile_path)
+            .await?;
         let context = tar_context(workspace)?;
         let endpoint = self.buildkit_endpoint()?;
         let daemon = BuildkitDaemon::new(endpoint.clone());
@@ -915,6 +946,82 @@ impl ProductionBuildExecutor {
     }
 }
 
+/// Returns the reviewed pull reference for one Dockerfile base image, honored
+/// by an exact binding, an exact source reference, or the pinned digest.
+fn catalog_pull_reference(reference: &str, entries: &[PlatformImageEntry]) -> Option<String> {
+    let (name, digest) = reference
+        .split_once('@')
+        .map_or((reference, ""), |(name, digest)| (name, digest));
+    entries.iter().find_map(|entry| {
+        let matches = if digest.is_empty() {
+            entry.binding == name || entry.source_reference == name
+        } else {
+            // A pinned digest is authoritative: a recipe that names the catalog
+            // binding with a foreign digest must not be silently retargeted.
+            entry.resolved_digest == digest
+        };
+        matches.then(|| format!("{}@{}", entry.source_reference, entry.resolved_digest))
+    })
+}
+
+/// Rewrites every `FROM` base reference in a Dockerfile text that names a
+/// reviewed platform image, preserving all other lines and line structure.
+fn rewrite_dockerfile_base_images_text(text: &str, entries: &[PlatformImageEntry]) -> String {
+    let mut out = String::with_capacity(text.len().saturating_add(64));
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.to_ascii_uppercase().starts_with("FROM ") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        // `FROM [--platform=<value>] <image> [AS <stage>]`: the token after the
+        // `FROM` keyword, past any instruction flags, is the base image.
+        let index = tokens
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, token)| !token.starts_with("--"))
+            .map(|(position, _)| position);
+        let Some(index) = index else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let Some(image) = tokens.get(index) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        if image.starts_with('$') {
+            // Build-argument bases (`${LABWEAVER_SERVICE_IMAGE}`) are injected
+            // by the executor and are not catalog references.
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let Some(replacement) = catalog_pull_reference(image, entries) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        out.push_str(&line[..line.len() - trimmed.len()]);
+        for (position, token) in tokens.iter().enumerate() {
+            if position > 0 {
+                out.push(' ');
+            }
+            if position == index {
+                out.push_str(&replacement);
+            } else {
+                out.push_str(token);
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[derive(Deserialize)]
 struct HarborTokenResponse {
     token: String,
@@ -1284,6 +1391,8 @@ const fn output_invalid() -> BuildProviderFailure {
 mod tests {
     use std::io::Write as _;
 
+    use crate::platform_images::{PlatformImageKind, PlatformImageStatus};
+
     use super::*;
 
     #[test]
@@ -1300,6 +1409,101 @@ mod tests {
         ] {
             assert!(buildkit_tls_address(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn catalog_pull_reference_matches_binding_source_and_digest() {
+        let entry = PlatformImageEntry {
+            catalog_id: contracts::PlatformImageId::new(),
+            kind: PlatformImageKind::Container,
+            binding: "rust-builder-v1".to_owned(),
+            source_reference: "harbor.example/labweaver-system/rust:1.97.1-bookworm".to_owned(),
+            resolved_digest: format!("sha256:{}", "e".repeat(64)),
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            size_bytes: 4_096,
+            capacity_bytes: None,
+            disk_sha256: None,
+            format: None,
+            status: PlatformImageStatus::Active,
+            trust_revision: 1,
+            repin_generation: 1,
+            pinned_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+            updated_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+        };
+        let entries = std::slice::from_ref(&entry);
+        let expected = format!("{}@{}", entry.source_reference, entry.resolved_digest);
+        // The model names the catalog by binding and digest only.
+        assert_eq!(
+            catalog_pull_reference("rust-builder-v1", entries),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            catalog_pull_reference(
+                &format!("rust-builder-v1@{}", entry.resolved_digest),
+                entries
+            ),
+            Some(expected.clone())
+        );
+        // A fully qualified reference is honored and pinned to the same digest.
+        assert_eq!(
+            catalog_pull_reference(&entry.source_reference, entries),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            catalog_pull_reference(
+                &format!("{}@{}", entry.source_reference, entry.resolved_digest),
+                entries
+            ),
+            Some(expected)
+        );
+        // Non-catalog images and mismatched digests are left untouched.
+        assert_eq!(catalog_pull_reference("scratch", entries), None);
+        assert_eq!(catalog_pull_reference("busybox", entries), None);
+        assert_eq!(
+            catalog_pull_reference("rust-builder-v1@sha256:deadbeef", entries),
+            None
+        );
+    }
+
+    #[test]
+    fn dockerfile_from_lines_are_rewritten_to_the_reviewed_reference() {
+        let entry = PlatformImageEntry {
+            catalog_id: contracts::PlatformImageId::new(),
+            kind: PlatformImageKind::Container,
+            binding: "rust-builder-v1".to_owned(),
+            source_reference: "harbor.example/labweaver-system/rust:1.97.1-bookworm".to_owned(),
+            resolved_digest: format!("sha256:{}", "e".repeat(64)),
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            size_bytes: 4_096,
+            capacity_bytes: None,
+            disk_sha256: None,
+            format: None,
+            status: PlatformImageStatus::Active,
+            trust_revision: 1,
+            repin_generation: 1,
+            pinned_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+            updated_at: "2026-09-20T08:00:00.000Z".parse().expect("timestamp"),
+        };
+        let entries = std::slice::from_ref(&entry);
+        let pinned = format!("{}@{}", entry.source_reference, entry.resolved_digest);
+        let input = concat!(
+            "FROM rust-builder-v1@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee AS build\n",
+            "RUN echo hi\n",
+            "FROM --platform=linux/amd64 rust-builder-v1\n",
+            "FROM ${LABWEAVER_SERVICE_IMAGE} AS service\n",
+            "FROM scratch\n",
+        );
+        let expected = format!(
+            "FROM {pinned} AS build\n\
+             RUN echo hi\n\
+             FROM --platform=linux/amd64 {pinned}\n\
+             FROM ${{LABWEAVER_SERVICE_IMAGE}} AS service\n\
+             FROM scratch\n"
+        );
+        assert_eq!(
+            rewrite_dockerfile_base_images_text(input, entries),
+            expected
+        );
     }
 
     #[test]
