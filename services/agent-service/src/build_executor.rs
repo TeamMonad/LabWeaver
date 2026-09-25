@@ -475,7 +475,12 @@ impl ProductionBuildExecutor {
         let path = workspace.join(dockerfile_path);
         let text = std::fs::read_to_string(&path).map_err(|_| rejected())?;
         let rewritten = rewrite_dockerfile_base_images_text(&text, &entries);
-        std::fs::write(&path, rewritten).map_err(|_| rejected())?;
+        if !self.config.service_image.is_empty() {
+            let pinned = rewrite_runner_base_image_text(&rewritten)?;
+            std::fs::write(&path, pinned).map_err(|_| rejected())?;
+        } else {
+            std::fs::write(&path, rewritten).map_err(|_| rejected())?;
+        }
         Ok(())
     }
     /// Run the build through the deployment-owned `BuildKit` daemon using the
@@ -1020,6 +1025,59 @@ fn rewrite_dockerfile_base_images_text(text: &str, entries: &[PlatformImageEntry
         out.push('\n');
     }
     out
+}
+
+/// Replaces the runner recipe's base image with the deployment-owned service
+/// image argument. The evaluation runner must run the exact evaluation-service
+/// build the platform deploys; a recipe that pins its own (stale) digest makes
+/// the OJ evidence schema drift undetectable until the observer rejects the
+/// receipt. Only `FROM` lines referencing an evaluation-service image are
+/// rewritten; other bases fall through untouched.
+fn rewrite_runner_base_image_text(text: &str) -> Result<String, BuildProviderFailure> {
+    let mut out = String::with_capacity(text.len().saturating_add(32));
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.to_ascii_uppercase().starts_with("FROM ") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        let index = tokens
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, token)| !token.starts_with("--"))
+            .map(|(position, _)| position);
+        let Some(index) = index else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let Some(image) = tokens.get(index) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        if image.starts_with('$') || !image.contains("evaluation-service") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        out.push_str(&line[..line.len() - trimmed.len()]);
+        for (position, token) in tokens.iter().enumerate() {
+            if position > 0 {
+                out.push(' ');
+            }
+            if position == index {
+                out.push_str("${LABWEAVER_SERVICE_IMAGE}");
+            } else {
+                out.push_str(token);
+            }
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -1753,5 +1811,24 @@ mod tests {
             .expect("open unpacked file");
         file.write_all(b"# verified\n")
             .expect("write unpacked file");
+    }
+
+    #[test]
+    fn runner_base_rewrite_pins_evaluation_service_bases() {
+        let source = concat!(
+            "# evaluation runner recipe\n",
+            "FROM harbor.lab.lan/labweaver-system/evaluation-service@sha256:98defd89\n",
+            "COPY --from=something /x /x\n",
+            "FROM docker.io/library/alpine:3.21 AS helper\n",
+            "RUN true\n",
+        );
+        let rewritten = rewrite_runner_base_image_text(source).expect("rewrite succeeds");
+        assert!(rewritten.contains("FROM ${LABWEAVER_SERVICE_IMAGE}"));
+        assert!(
+            !rewritten.contains("evaluation-service@sha256"),
+            "the stale evaluation base must be replaced"
+        );
+        assert!(rewritten.contains("FROM docker.io/library/alpine:3.21 AS helper"));
+        assert!(rewritten.contains("COPY --from=something /x /x"));
     }
 }
