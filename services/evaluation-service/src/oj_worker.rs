@@ -588,7 +588,13 @@ async fn compile_program(
         argv,
         PathBuf::from(BUILD_ROOT),
         compiler_read_paths(support_paths),
-        vec![PathBuf::from(BUILD_ROOT)],
+        // The compile script family (for example xv6's Makefile) probes the
+        // toolchain with `command -v … >/dev/null` redirections. Landlock treats
+        // the declared `/dev/null` read path as read-only, which makes every
+        // such probe fail with `cannot create /dev/null: Permission denied` and
+        // the compile collapse with a bogus "toolchain not found". `/dev/null`
+        // discards writes, so it joins the writable set.
+        vec![PathBuf::from(BUILD_ROOT), PathBuf::from("/dev/null")],
     )?;
     write_invocation(Path::new(COMPILE_INVOCATION_PATH), &invocation)?;
     let mut command = Command::new(SERVICE_PATH);
@@ -640,7 +646,7 @@ async fn run_case(
         argv,
         case_path.clone(),
         execution_read_paths(support_paths),
-        vec![case_path.clone()],
+        vec![case_path.clone(), PathBuf::from("/dev/null")],
     )?;
     write_invocation(Path::new(CASE_INVOCATION_PATH), &invocation)?;
     let mut command = Command::new(SERVICE_PATH);
