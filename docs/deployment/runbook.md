@@ -1922,7 +1922,7 @@ error="pull access denied, repository does not exist or may require authorizatio
 lab 旅程的「编译」gate 持续失败 `LW_OJ_OBSERVE_UNAVAILABLE`（进阶诊断
 `LW_OJ_RECEIPT_INVALID`）。证据链（经三版诊断包 727cd99/3514ae7 的日志补全）：
 
-1. 观察端（当前 evaluation-service）的 `OjEvidenceReceipt` 为 17 字段（含
+1. 观察端（当前 evaluation-service）的 `OjEvidenceReceipt` 为 16 字段（含
    compileExitCode/compileSignal/compileTimedOut/compileOutputExceeded）；
 2. 实际 OJ Job 的 `program-runner` 容器（由 evaluationRuntime.runnerImage 决定）
    产出的 /dev/termination-log 收据只有 13 字段（无以上 4 字段，即 OJ 收据加宽
@@ -1968,7 +1968,7 @@ evaluation-service digest（本次 e68330c1…）。
 `runtimeArtifactSha256` + 冻结工 `workerImage`（control-service-config）和
 `executor.serviceImage`（build-executor-config）。验证：release 的
 `runtimeIdentity.runnerImage` 应等于当前 evaluation-service 的 Harbor 引用；
-OJ Job 的 termination message 应为 17 字段（LEN 约 700+）。
+OJ Job 的 termination message 应为 16 字段（LEN 约 700+）。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
