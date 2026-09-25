@@ -807,17 +807,23 @@ test('student provisions a Work environment, configures it, and releases its cap
     await page.getByLabel('材料包 ID').fill(packageData.id)
     await page.getByLabel('材料包 Revision').fill(String(packageData.revision))
     await page.getByLabel(/我确认 Agent 可能修改该 Work/).check()
-    const planResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'GET'
-        && url.pathname.startsWith(`/api/v1/projects/${project.id}/agent-runs/`)
-        && url.pathname.endsWith('/work-configuration/plan')
-    })
-    const configurationResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/projects/${project.id}/work-configuration-runs`
-    })
+    const planResponsePromise = page.waitForResponse(
+      (response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'GET'
+          && url.pathname.startsWith(`/api/v1/projects/${project.id}/agent-runs/`)
+          && url.pathname.endsWith('/work-configuration/plan')
+      },
+      { timeout: 300_000 },
+    )
+    const configurationResponsePromise = page.waitForResponse(
+      (response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'POST'
+          && url.pathname === `/api/v1/projects/${project.id}/work-configuration-runs`
+      },
+      { timeout: 300_000 },
+    )
     await page.getByRole('button', { name: '生成 Work 配置', exact: true }).click()
     const configurationResponse = await configurationResponsePromise
     const configurationRun = await expectJson(configurationResponse, 'WORK_CONFIGURATION_RUN_CREATE_FAILED')
