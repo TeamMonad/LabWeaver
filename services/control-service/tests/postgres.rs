@@ -1651,7 +1651,6 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
             .await?,
     )?;
     let config = control_config()?;
-    let pinned_runner_image = config.evaluation_runtime.runner_image.clone();
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -1887,11 +1886,17 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
         approval.evaluation_runner_image_artifact,
         Some(runner_artifact.clone())
     );
-    // The evaluation runner runs the deployment-owned evaluation-service
-    // image, not the model-chosen runner artifact; the artifact is recorded
+    let expected_runner_image = match &runner_artifact {
+        ImageArtifact::Container {
+            repository, digest, ..
+        } => format!("{repository}@{digest}"),
+        ImageArtifact::VirtualMachine { .. } => {
+            return Err("runner fixture must be a Container artifact".into());
+        }
+    };
     assert_eq!(
         approval.evaluation_runtime_identity.runner_image,
-        pinned_runner_image
+        expected_runner_image
     );
     let persisted_runner_artifact: Option<Uuid> = sqlx::query_scalar(
         "SELECT evaluation_runner_image_artifact_id FROM control.authoring_approvals \
