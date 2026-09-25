@@ -1027,33 +1027,60 @@ fn rewrite_dockerfile_base_images_text(text: &str, entries: &[PlatformImageEntry
     out
 }
 
-/// Replaces the runner recipe's base image with the deployment-owned service
-/// image argument. The evaluation runner must run the exact evaluation-service
-/// build the platform deploys; a recipe that pins its own (stale) digest makes
-/// the OJ evidence schema drift undetectable until the observer rejects the
-/// receipt. Only `FROM` lines referencing an evaluation-service image are
-/// rewritten; other bases fall through untouched.
+/// Replaces the runner recipe's evaluation-service references with the
+/// deployment-owned service image argument. The evaluation runner image the
+/// model produces is a toolchain image whose entrypoint binary comes from a
+/// `COPY --from=<evaluation-service digest>` stage; the digest frequently pins
+/// an older build whose OJ evidence schema no longer matches the observer's,
+/// and the observer then rejects the termination receipt
+/// (`LW_OJ_OBSERVE_UNAVAILABLE`). Both the base-image reference (defensive) and
+/// the `COPY --from` source (the observable drift point) are rewritten to
+/// `${LABWEAVER_SERVICE_IMAGE}`; other references fall through untouched.
 fn rewrite_runner_base_image_text(text: &str) -> Result<String, BuildProviderFailure> {
     let mut out = String::with_capacity(text.len().saturating_add(32));
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if !trimmed.to_ascii_uppercase().starts_with("FROM ") {
-            out.push_str(line);
+        let upper = trimmed.to_ascii_uppercase();
+        let copy_from = upper
+            .strip_prefix("COPY ")
+            .and_then(|rest| {
+                rest.split_whitespace()
+                    .position(|token| token.starts_with("--FROM="))
+            })
+            .and_then(|position| {
+                trimmed
+                    .split_whitespace()
+                    .nth(position + 1)
+                    .and_then(|token| token.strip_prefix("--from=").map(str::to_owned))
+            });
+        let from_index = if upper.starts_with("FROM ") {
+            trimmed
+                .split_whitespace()
+                .enumerate()
+                .skip(1)
+                .find(|(_, token)| !token.starts_with("--"))
+                .map(|(position, _)| position)
+        } else {
+            None
+        };
+        if let Some(reference) = copy_from {
+            if reference.starts_with('$') || !reference.contains("evaluation-service") {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let replacement = format!("--from=${{LABWEAVER_SERVICE_IMAGE}}");
+            let target = format!("--from={reference}");
+            out.push_str(&line.replace(&target, &replacement));
             out.push('\n');
             continue;
         }
-        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        let index = tokens
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, token)| !token.starts_with("--"))
-            .map(|(position, _)| position);
-        let Some(index) = index else {
+        let Some(index) = from_index else {
             out.push_str(line);
             out.push('\n');
             continue;
         };
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
         let Some(image) = tokens.get(index) else {
             out.push_str(line);
             out.push('\n');
@@ -1079,7 +1106,6 @@ fn rewrite_runner_base_image_text(text: &str) -> Result<String, BuildProviderFai
     }
     Ok(out)
 }
-
 #[derive(Deserialize)]
 struct HarborTokenResponse {
     token: String,
@@ -1817,18 +1843,23 @@ mod tests {
     fn runner_base_rewrite_pins_evaluation_service_bases() {
         let source = concat!(
             "# evaluation runner recipe\n",
-            "FROM harbor.lab.lan/labweaver-system/evaluation-service@sha256:98defd89\n",
-            "COPY --from=something /x /x\n",
-            "FROM docker.io/library/alpine:3.21 AS helper\n",
-            "RUN true\n",
+            "FROM docker.io/library/debian:bookworm AS toolchain\n",
+            "RUN apt-get install -y gcc\n",
+            "COPY --from=harbor.lab.lan/labweaver-system/evaluation-service@sha256:98defd89 \
+             /usr/local/bin/labweaver-service /usr/local/bin/labweaver-service\n",
+            "FROM toolchain\n",
+            "ENTRYPOINT [\"/usr/local/bin/labweaver-service\"]\n",
         );
         let rewritten = rewrite_runner_base_image_text(source).expect("rewrite succeeds");
-        assert!(rewritten.contains("FROM ${LABWEAVER_SERVICE_IMAGE}"));
         assert!(
             !rewritten.contains("evaluation-service@sha256"),
-            "the stale evaluation base must be replaced"
+            "the stale evaluation reference must be replaced"
         );
-        assert!(rewritten.contains("FROM docker.io/library/alpine:3.21 AS helper"));
-        assert!(rewritten.contains("COPY --from=something /x /x"));
+        assert!(
+            rewritten.contains("COPY --from=${LABWEAVER_SERVICE_IMAGE}"),
+            "the runner binary COPY must be pinned to the deployment service image"
+        );
+        assert!(rewritten.contains("FROM docker.io/library/debian:bookworm AS toolchain"));
+        assert!(rewritten.contains("RUN apt-get install -y gcc"));
     }
 }

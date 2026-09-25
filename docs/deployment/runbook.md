@@ -1953,22 +1953,26 @@ OJ Job 的 `program-runner` 永远跑旧 schema 的 worker，观察端（e68330c
 13 字段收据，全部失败为 `LW_OJ_OBSERVE_UNAVAILABLE`。控制面把 `evaluationRuntime`
 配置钉到当前 digest 只能影响 VM 路径与评审展示，治不了容器路径。
 
-具体修复（commit `842350a`）：`control-service` 的容器审批路径现在始终使用
-`self.config.evaluation_runtime.identity()`（部署拥有的 evaluation-service
-镜像）作为运行时身份；模型 runner 工件仍然**必须提交且校验**，并随审批行落库
-留存作 authoring 审计证据，只是不再决定运行时身份。
-提交 `a16ac7d`：agent 构建执行器在候选上下文里对 `evaluation/Dockerfile` 的
-`FROM …evaluation-service@…` 一律改写到 `${LABWEAVER_SERVICE_IMAGE}`（部署级
-服务镜像构建参数，来自 build-executor-config 的 `executor.serviceImage`），
-双保险。`build-executor-config` 的 `serviceImage` 必须指向当前部署的
-evaluation-service digest（本次 e68330c1…）。
+具体修复（两次修订后定稿）：runner 镜像=模型的工具链镜像（debian+riscv
+toolchain+`COPY --from` 进来的 `labweaver-service`），OJ 编译需要它里面的
+工具链，所以运行时身份**保持**为模型 runner 工件，不能改为裸 evaluation
+镜像。`a16ac7d`/`295df09`：agent 构建执行器把 `evaluation/Dockerfile` 中
+引用 evaluation-service 的 `FROM`（防御）与 `COPY --from=<digest>`（真正的
+漂移点）一律改写为 `${LABWEAVER_SERVICE_IMAGE}`；`build-executor-config` 的
+`executor.serviceImage` 指向当前部署的 evaluation-service digest（本次
+e68330c1…），worker 二进制永远取自部署中的服务镜像，收据 schema 与观察端
+（16 字段）强制一致。控制面身份在 VM 路径取配置、容器路径取模型工件，均
+不再把模型挑选的 worker digest 带进运行。
 
-运维要点（更新）：**OJ runner 的镜像身份由控制面配置单向决定，不随模型候选漂移**；
+运维要点（更新）：**OJ runner 的 worker 二进制版本由
+`executor.serviceImage`（build-executor-config）单向决定，不随模型候选漂移**；
 每次升级 evaluation-service 后需要同步三处：`evaluationRuntime.runnerImage` +
 `runtimeArtifactSha256` + 冻结工 `workerImage`（control-service-config）和
 `executor.serviceImage`（build-executor-config）。验证：release 的
-`runtimeIdentity.runnerImage` 应等于当前 evaluation-service 的 Harbor 引用；
-OJ Job 的 termination message 应为 16 字段（LEN 约 700+）。
+`runtimeIdentity.runnerImage` 应等于模型 runner 工件的 Harbor 引用；OJ Job 的
+termination message 应为 16 字段（LEN 约 700+）且 `schemaVersion` 为
+`oj-evidence-receipt/v1`。
+
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
