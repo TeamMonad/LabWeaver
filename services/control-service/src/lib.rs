@@ -2706,6 +2706,12 @@ impl ControlService {
                     releases.candidate_revision AS release_candidate_revision,\
                     releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract,\
                     projects.owner_actor_id,\
+                    (projects.owner_actor_id=$4 OR EXISTS( \
+                         SELECT 1 FROM access.project_memberships m \
+                          WHERE m.project_id=projects.project_id AND m.actor_id=$4 \
+                            AND m.state='active' \
+                            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
+                         AS actor_can_view_work,\
                     candidates.project_id AS candidate_project_id,candidates.course_id AS candidate_course_id,\
                     candidates.revision AS candidate_revision,candidates.contract AS candidate_contract,\
                     publications.contract AS publication_contract \
@@ -2758,6 +2764,12 @@ impl ControlService {
                     releases.candidate_revision AS release_candidate_revision,\
                     releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract,\
                     projects.owner_actor_id,\
+                    (projects.owner_actor_id=$5 OR EXISTS( \
+                         SELECT 1 FROM access.project_memberships m \
+                          WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
+                            AND m.state='active' \
+                            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
+                         AS actor_can_view_work,\
                     candidates.project_id AS candidate_project_id,candidates.course_id AS candidate_course_id,\
                     candidates.revision AS candidate_revision,candidates.contract AS candidate_contract,\
                     publications.contract AS publication_contract \
@@ -7866,12 +7878,7 @@ fn project_release_view(
     {
         return Err(ControlError::PersistenceIdentityMismatch);
     }
-    let owner_actor_id = ActorId::from_str(
-        &row.try_get::<Uuid, _>("owner_actor_id")
-            .map_err(db)?
-            .to_string(),
-    )
-    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let actor_can_view_work: bool = row.try_get("actor_can_view_work").map_err(db)?;
     let candidate_project_id = ProjectId::from_str(
         &row.try_get::<Uuid, _>("candidate_project_id")
             .map_err(db)?
@@ -7903,7 +7910,7 @@ fn project_release_view(
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     match candidate.spec.class {
         EnvironmentClass::Work => {
-            if owner_actor_id != actor_id {
+            if !actor_can_view_work {
                 return Err(ControlError::NotFound);
             }
             if row
