@@ -2777,14 +2777,14 @@ impl ControlService {
              WHERE releases.project_id=$1 \
                AND ($2::uuid IS NULL OR releases.course_id IS NOT DISTINCT FROM $2) \
                AND releases.version>$3 \
-               AND ((candidates.contract->'spec'->>'class'='work' \
-                    AND (projects.owner_actor_id=$5 OR EXISTS( \
-                         SELECT 1 FROM access.project_memberships m \
-                          WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
-                            AND m.state='active' \
-                            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
-                    OR (candidates.contract->'spec'->>'class'='experiment' \
-                        AND publications.environment_release_id=releases.release_id)) \
+               AND ( (candidates.contract->'spec'->>'class'='work' \
+                     AND (projects.owner_actor_id=$5 OR EXISTS( \
+                          SELECT 1 FROM access.project_memberships m \
+                           WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
+                             AND m.state='active' \
+                             AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()) ))) \
+                     OR (candidates.contract->'spec'->>'class'='experiment' \
+                         AND publications.environment_release_id=releases.release_id) ) \
              ORDER BY releases.version,releases.release_id LIMIT $4",
         )
         .bind(project_id.as_uuid())
