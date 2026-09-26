@@ -588,13 +588,12 @@ async fn compile_program(
         argv,
         PathBuf::from(BUILD_ROOT),
         compiler_read_paths(support_paths),
-        // The compile script family (for example xv6's Makefile) probes the
-        // toolchain with `command -v … >/dev/null` redirections. Landlock treats
-        // the declared `/dev/null` read path as read-only, which makes every
-        // such probe fail with `cannot create /dev/null: Permission denied` and
-        // the compile collapse with a bogus "toolchain not found". `/dev/null`
-        // discards writes, so it joins the writable set.
-        vec![PathBuf::from(BUILD_ROOT), PathBuf::from("/dev/null")],
+        // The helper validates this list with exact equality, so the writable
+        // set stays the build root alone; the helper-side sandbox application
+        // additionally grants /dev/null write access (see
+        // apply_compiler_filesystem_sandbox) for `command -v … >/dev/null`
+        // style probes made by compile scripts such as xv6's Makefile.
+        vec![PathBuf::from(BUILD_ROOT)],
     )?;
     write_invocation(Path::new(COMPILE_INVOCATION_PATH), &invocation)?;
     let mut command = Command::new(SERVICE_PATH);
@@ -646,7 +645,7 @@ async fn run_case(
         argv,
         case_path.clone(),
         execution_read_paths(support_paths),
-        vec![case_path.clone(), PathBuf::from("/dev/null")],
+        vec![case_path.clone()],
     )?;
     write_invocation(Path::new(CASE_INVOCATION_PATH), &invocation)?;
     let mut command = Command::new(SERVICE_PATH);
@@ -919,7 +918,11 @@ fn apply_submission_filesystem_sandbox(
     read_paths: &[String],
     write_paths: &[String],
 ) -> Result<(), OjWorkerError> {
-    validate_sandbox_paths(read_paths, write_paths)?;
+    let mut writable = write_paths.to_vec();
+    if !writable.iter().any(|path| path == "/dev/null") {
+        writable.push("/dev/null".to_owned());
+    }
+    validate_sandbox_paths(read_paths, &writable)?;
     let abi = ABI::V3;
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
@@ -938,7 +941,7 @@ fn apply_submission_filesystem_sandbox(
         EVALUATOR_ROOT,
         (AccessFs::Execute | AccessFs::ReadDir).into(),
     )?;
-    let ruleset = add_sandbox_path_rules(ruleset, write_paths, abi, true)?;
+    let ruleset = add_sandbox_path_rules(ruleset, &writable, abi, true)?;
     let ruleset = add_sandbox_path_rules(ruleset, &[CASE_HELPER_READY_PATH.to_owned()], abi, true)?;
     let status = ruleset
         .restrict_self()
@@ -1096,7 +1099,18 @@ fn apply_compiler_filesystem_sandbox(
     read_paths: &[String],
     write_paths: &[String],
 ) -> Result<(), OjWorkerError> {
-    validate_sandbox_paths(read_paths, write_paths)?;
+    // The compile scripts (for example xv6's Makefile) probe the toolchain with
+    // `command -v … >/dev/null` redirections. The declared read paths include
+    // `/dev/null` read-only, which makes every such probe fail with `cannot
+    // create /dev/null: Permission denied` and the compile collapse with a bogus
+    // "toolchain not found". `/dev/null` discards writes, so it always joins the
+    // writable set here on the helper side; the invocation's write-path list is
+    // validated exactly and therefore stays the declared build root.
+    let mut writable = write_paths.to_vec();
+    if !writable.iter().any(|path| path == "/dev/null") {
+        writable.push("/dev/null".to_owned());
+    }
+    validate_sandbox_paths(read_paths, &writable)?;
     let abi = ABI::V3;
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
@@ -1107,7 +1121,7 @@ fn apply_compiler_filesystem_sandbox(
     let ruleset = add_sandbox_path_rule(ruleset, WORK_ROOT, AccessFs::Execute.into())?;
     let ruleset = add_sandbox_path_rules(ruleset, read_paths, abi, false)?;
     let ruleset = add_sandbox_path_rule(ruleset, "/input", AccessFs::Execute.into())?;
-    let ruleset = add_sandbox_path_rules(ruleset, write_paths, abi, true)?;
+    let ruleset = add_sandbox_path_rules(ruleset, &writable, abi, true)?;
     let ruleset =
         add_sandbox_path_rules(ruleset, &[COMPILE_HELPER_READY_PATH.to_owned()], abi, true)?;
     let status = ruleset
