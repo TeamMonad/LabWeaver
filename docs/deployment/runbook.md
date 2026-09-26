@@ -2173,7 +2173,39 @@ resources 页 30s 超时。根因：该页列出项目全部租约，config 沙�
 前面，spec 用 `.first()` 定位续期/回收按钮，实际点到了 config 租约 →
 `/resource-leases/{id}/renew` 请求永不发出（原租约 id 的续期/回收也未发生）。
 修复：先定位含 `a[href*="/researcher/environments"]` 的 `li.resource-row`，再取
-其中的续期/回收按钮。配置本身全绿，修复待 end-to-end 验证。
+其中的续期/回收按钮。配置本身全绿。
+
+**work 旅程回收未点确认框（提交 a369ddc）**：续期修复后 work 前进到回收
+（sprint2 spec ~1049），但 回收 按钮的确认框（`dialog` "回收资源使用授权"）未被
+点击 → `POST /resource-leases/{id}/revoke` 永不发出 → 30s `waitForResponse`
+超时（a5 三个尝试同一死法，失败时页面快照里确认框正处于打开状态）。修复：点击
+回收后先确认对话框（与 admin 释放助手同一选择器），再等待 revoke 响应。
+
+**端到端验证（run `public-20260926-3j-a6-23379`，12:30）：work 旅程首个全绿**
+——student 自建项目、work 类模板配置、环境启动、终端写盘/重启持久化、租约到期
+续期、回收租约（含确认框）、环境停止、真实费用记录全部通过；journey 判定
+`passed`（summary.json `status: "passed"`，retry1 通过，attempt1 因人工取消
+作废）。这是续期修复（3da4429）与回收确认框修复（a369ddc）的直接 e2e 证据。
+
+#### 12.2.11.4 同轮：`#!/bin/sh` + bash 语法仍死在 dash（提交 29fd7c5）与 lab 旅程的 LLM 间歇卡顿
+
+`public-20260926-3j-a4` 的 work 配置执行收据暴露残差：模型生成的 `primary.sh`
+写成 `#!/bin/sh` + `set -o pipefail`。12.2.11.1 的 shebang 派发会忠实执行
+`/bin/sh`（Debian 上为 dash），dash 拒绝 `set -o pipefail` → exit 2
+（`set: Illegal option -o pipefail`）。修复：basename 为 `sh` 的 shebang 视为
+POSIX 声明，存在 `/bin/bash`（POSIX 超集）时改用 bash；显式
+`/bin/dash`/`/bin/bash` 仍按原样执行。`services/environment-service/tests/
+work_configuration_runner.py` 11 项全绿，env-service 以 `6354f5df…` 滚动上线。
+
+**lab 旅程当前未通过的原因（环境侧，非产品缺陷）**：本地模型后端
+（ollama `qwen3.6:27b` 经 `ollama-proxy`）在 authoring 的 Claude Code 轮次上间歇
+整轮卡死——run 停在 `running` 且无任何后续事件，直到 60 分钟的执行边界才
+`ExecutionFailed`，而 e2e 的整测超时为 30 分钟。a4-a6 的 lab 尝试全部死于该
+窗口（另有若干次由人工 `cancel-stale` 误伤在线尝试，已记录）。重启
+`ollama-proxy` 后 authoring 立即恢复为分钟级成功（a6 的 10:35-12:35 连续
+succeeded 可证），但卡死可再次出现。产品代码侧无对应缺陷：同一 authoring 在
+健康窗口内于 4 分钟内产出三个可构建候选。该卡顿是当前 lab 端到端绿灯的唯一
+已知阻塞。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
