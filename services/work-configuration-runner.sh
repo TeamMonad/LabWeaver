@@ -88,7 +88,16 @@ script_interpreter() {
             fi
             ;;
         *)
-            interpreter=/bin/sh
+            # Scripts without a usable shebang historically ran under /bin/sh,
+            # which is dash on Debian-derived images and rejects bash-only
+            # constructs (set -o pipefail) that the LLM writes routinely. Bash
+            # is a superset of POSIX sh and exists on the platform images, so
+            # prefer it when present and fall back to /bin/sh otherwise.
+            if [ -x /bin/bash ]; then
+                interpreter=/bin/bash
+            else
+                interpreter=/bin/sh
+            fi
             interpreter_arg=
             ;;
     esac
