@@ -65,6 +65,36 @@ require_tools() {
     return 0
 }
 
+script_interpreter() {
+    # Resolve the interpreter for a user script.  A shebang naming an absolute
+    # path is honored (for example the bash-only `set -o pipefail` that agents
+    # legitimately emit); otherwise the script runs under /bin/sh as before.
+    # Only the interpreter path and one optional argument are taken from the
+    # first line; user script content is never interpolated into a command.
+    script_file=$1
+    first_line=$(head -n 1 "$script_file") || return 1
+    case "$first_line" in
+        \#!/*)
+            shebang=${first_line#\#!}
+            # POSIX word splitting over the shebang tail: the interpreter
+            # path as the first word and at most one optional argument.
+            set -- $shebang
+            interpreter=$1
+            [ -n "$interpreter" ] && [ -x "$interpreter" ] || return 1
+            if [ "$#" -ge 2 ]; then
+                interpreter_arg=$2
+            else
+                interpreter_arg=
+            fi
+            ;;
+        *)
+            interpreter=/bin/sh
+            interpreter_arg=
+            ;;
+    esac
+    return 0
+}
+
 valid_exit_code() {
     value=$1
     case "$value" in
@@ -348,6 +378,11 @@ run_script() {
     phase=$5
     deadline_seconds=$6
 
+    if ! script_interpreter "$script_file"; then
+        printf '%s\n' LW_ENVIRONMENT_WORK_EXECUTION_SCRIPT_INTERPRETER_INVALID > "$execution_directory/runner_error" || exit 125
+        write_phase "$execution_directory" failed
+        exit 125
+    fi
     write_phase "$execution_directory" "$phase"
     now=$(date +%s) || fail_locked "$execution_directory" LW_ENVIRONMENT_WORK_EXECUTION_CLOCK_FAILED
     remaining=$((deadline_seconds - now))
@@ -356,7 +391,6 @@ run_script() {
         printf '124\n' > "$execution_directory/$exit_file" || fail_locked "$execution_directory" LW_ENVIRONMENT_WORK_EXECUTION_WRITE_FAILED
         return 0
     fi
-
     if ! acquire_control "$execution_directory"; then
         fail_locked "$execution_directory" LW_ENVIRONMENT_WORK_EXECUTION_CANCELLATION_TIMEOUT
     fi
@@ -374,16 +408,32 @@ run_script() {
     # setsid makes this process the leader of a private session/process group.
     # The shell keeps that PID when it execs timeout, so the persisted PID is
     # also the group leader used by cancellation and the deadline timeout.
-    setsid /bin/sh -c '
-        if [ -f "$1/cancel" ]; then exit 143; fi
-        pid=$$
-        start=$(awk '\''{ line=$0; sub(/^.*\) /, "", line); n=split(line, fields, /[[:space:]]+/); if (n < 20) exit 1; print fields[20] }'\'' /proc/$pid/stat) || exit 127
-        if [ -f "$1/cancel" ]; then exit 143; fi
-        printf '\''%s %s\n'\'' "$pid" "$start" > "$1/pid" || exit 125
-        cd -- "$3" || exit 126
-        if [ -f "$1/cancel" ]; then exit 143; fi
-        exec timeout --signal=TERM --kill-after=1s "$4" /bin/sh "$2"
-    ' labweaver-work "$execution_directory" "$script_file" "$work_directory" "$remaining"         > "$execution_directory/output.pipe" 2>&1 &
+    # The interpreter resolved from the script's shebang replaces the historical
+    # hardcoded /bin/sh; scripts without a usable shebang still run under
+    # /bin/sh, and the interpreter's optional argument is passed verbatim.
+    if [ -n "$interpreter_arg" ]; then
+        setsid /bin/sh -c '
+            if [ -f "$1/cancel" ]; then exit 143; fi
+            pid=$$
+            start=$(awk '\''{ line=$0; sub(/^.*\) /, "", line); n=split(line, fields, /[[:space:]]+/); if (n < 20) exit 1; print fields[20] }'\'' /proc/$pid/stat) || exit 127
+            if [ -f "$1/cancel" ]; then exit 143; fi
+            printf '\''%s %s\n'\'' "$pid" "$start" > "$1/pid" || exit 125
+            cd -- "$3" || exit 126
+            if [ -f "$1/cancel" ]; then exit 143; fi
+            exec timeout --signal=TERM --kill-after=1s "$4" "$5" "$6" "$2"
+        ' labweaver-work "$execution_directory" "$script_file" "$work_directory" "$remaining" "$interpreter" "$interpreter_arg"         > "$execution_directory/output.pipe" 2>&1 &
+    else
+        setsid /bin/sh -c '
+            if [ -f "$1/cancel" ]; then exit 143; fi
+            pid=$$
+            start=$(awk '\''{ line=$0; sub(/^.*\) /, "", line); n=split(line, fields, /[[:space:]]+/); if (n < 20) exit 1; print fields[20] }'\'' /proc/$pid/stat) || exit 127
+            if [ -f "$1/cancel" ]; then exit 143; fi
+            printf '\''%s %s\n'\'' "$pid" "$start" > "$1/pid" || exit 125
+            cd -- "$3" || exit 126
+            if [ -f "$1/cancel" ]; then exit 143; fi
+            exec timeout --signal=TERM --kill-after=1s "$4" "$5" "$2"
+        ' labweaver-work "$execution_directory" "$script_file" "$work_directory" "$remaining" "$interpreter"         > "$execution_directory/output.pipe" 2>&1 &
+    fi
     script_pid=$!
 
     # Do not release the cancellation mutex until the PID has been persisted
