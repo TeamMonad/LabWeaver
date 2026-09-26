@@ -2845,6 +2845,7 @@ impl ControlService {
     }
 
     /// Projects Agent-owned candidates using their exact source event identity.
+    #[allow(clippy::too_many_arguments)] // one transaction-wide projection API; a struct would churn every caller
     pub async fn project_candidates(
         &self,
         event_id: EventId,
@@ -2966,6 +2967,7 @@ impl ControlService {
     }
 
     /// Consumes one sequenced Agent event and its authoritative readback in one transaction.
+    #[allow(clippy::too_many_arguments)] // one transaction-wide inbox API; a struct would churn every caller
     pub async fn consume_agent_run_event(
         &self,
         event: &CloudEvent<AgentRunEvent>,
