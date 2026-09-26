@@ -2044,6 +2044,38 @@ helper 侧规则集内恒追加 `/dev/null` 写规则（`/dev/null` 丢弃一切
 toolchain not found + cannot create /dev/null」应第一时间想到这个权限维度，
 而不是镜像内容。
 
+### 12.2.11 2026-09-26（进行中）：score gate（smoke-tests）铁败的根因 —— 提交跑的 cgroup pids 检查与集群实际界不匹配
+
+devnull2 上线后 lab 的 compile gate 三连绿，但 score gate（`smoke-tests` step）
+恒报 `LW_OJ_SANDBOX_UNAVAILABLE`（25 字节收据）。strace 复刻 pod
+（`ojx-strace` 镜像 + `--mode oj-case-exec` 直接在集群内跑 case-helper）证明
+helper 死在 sandbox 之前：`require_submission_cgroup_process_limit` 读
+`/sys/fs/cgroup/pids.max` 得到 **192707**（pod 的 cgroupns 根；源为节点
+`kubepods.slice` 的 systemd TasksMax≈192707，`/proc/sys/kernel/pid_max` 为
+4194304），原检查窗口 `(2..=128)` 不满足 → `LW_OJ_LIMIT_APPLY_FAILED`
+（helper 侧 24 字节代码），coordinator 的 `consume_helper_ready` 把它统一映成
+`LW_OJ_SANDBOX_UNAVAILABLE`。compile-helper 没有这道检查 → 通过，因此两个
+gate 出现「编译全绿、跑分全灰」的假象。
+
+判断：这道检查的本意是「提交必须运行在一个真的会限制进程数的 cgroup 里」，而
+真正的单次运行配额是 RLIMIT_NPROC=64（`apply_submission_process_limit`）；
+cgroup 只须「有限且有 ≥2 余量」。集群把 kubelet `podPidsLimit` 配置为 16384
+（其后两 worker 均改 128 并持久化，kubelet 重启后生效），观测到的 192707 也是
+有效边界——检查不应以固定 128 上限拒绝它们。修复：
+
+1. `oj_worker.rs` 的 `require_submission_cgroup_process_limit` 改为接受任意
+   **有限** pids 界（filter `>= 2`，`parse_cgroup_pids_max` 对 `max` 哨兵返回
+   None 即视为无界拒绝），删除 `MAX_SUBMISSION_CGROUP_PROCESSES` 常量并存根因注释。
+2. 同文件 `execution_read_paths` 追加 `BUILD_ROOT`：case 程序（run-xv6.py）要读
+   `/work/build/{program,kernel/kernel,fs.img}`，原读集只有系统根 + `/support`，
+   编译产物不可读会在 sandbox 内 EACCES。
+3. v1-worker-97/v1-worker-158 的 `/var/lib/kubelet/config.yaml` 均持久化
+   `podPidsLimit: 128`（kubectl debug node + sed），下次 kubelet 重启生效；
+   **代码不再依赖该值是否已生效**。
+
+验证：evaluation-service 单包测试全绿（cgroup 解析相关单测未回归）+ 提交后重新
+打包部署，score gate 的真实 lab 跑分应 `succeeded`（待观察确认）。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：

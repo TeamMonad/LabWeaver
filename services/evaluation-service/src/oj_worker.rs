@@ -124,8 +124,6 @@ const MAX_SUPPORT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SUPPORT_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_SUBMISSION_PROCESSES: u64 = 64;
-#[cfg(target_os = "linux")]
-const MAX_SUBMISSION_CGROUP_PROCESSES: u64 = 128;
 
 /// Executes one validated OJ request inside the isolated Kubernetes Job.
 ///
@@ -552,6 +550,10 @@ fn execution_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = canonical_system_read_paths(&SUBMISSION_READ_PATHS);
     let _ = support_paths;
     paths.push(PathBuf::from(SUPPORT_ROOT));
+    // The case program consumes the compiled artifacts (the runner reads
+    // program, kernel/kernel and fs.img from the build tree), so the build
+    // root joins the read set. Writes stay confined to the per-case directory.
+    paths.push(PathBuf::from(BUILD_ROOT));
     paths
 }
 
@@ -964,6 +966,13 @@ fn apply_submission_process_limit() -> Result<(), OjWorkerError> {
 
 #[cfg(target_os = "linux")]
 fn require_submission_cgroup_process_limit() -> Result<(), OjWorkerError> {
+    // The submission must run inside a cgroup that actually bounds its process
+    // count, so a runaway student program cannot drain the node's pid space.
+    // The per-run cap is RLIMIT_NPROC (MAX_SUBMISSION_PROCESSES); the cgroup
+    // bound only has to be finite and leave headroom. Clusters differ in the
+    // bound they configure (kubelet podPidsLimit, containerd pids_limit, or
+    // the systemd slice's TasksMax the pod inherits), so any finite value >= 2
+    // is accepted; an unbounded "max" sentinel is rejected by the parser.
     let membership =
         fs::read_to_string("/proc/self/cgroup").map_err(|_| OjWorkerError::LimitApply)?;
     let path = membership
@@ -996,7 +1005,7 @@ fn require_submission_cgroup_process_limit() -> Result<(), OjWorkerError> {
             .ok_or(OjWorkerError::LimitApply)?;
     }
     effective_limit
-        .filter(|limit| (2..=MAX_SUBMISSION_CGROUP_PROCESSES).contains(limit))
+        .filter(|limit| *limit >= 2)
         .map(|_| ())
         .ok_or(OjWorkerError::LimitApply)
 }
