@@ -2026,13 +2026,23 @@ cc1: error: bad value 'rv64gc' for '-march=' switch
 工具链齐全（本地直接编译成功）与此不矛盾：失败是内核 sandbox 的权限问题，不是
 镜像内容问题。
 
-修复（`ed43625`）：`compile_program` 与 `run_case` 的 `HelperInvocation` 写路径各
-追加 `/dev/null`（它会丢弃写入，加入可写集无安全后果；只读集里的 `/dev/urandom`
-不受影响）。复刻 pod 的失败画面（stderr 全文）与集群完全一致，修复随
-`pkg-v1-issue127-devnull` 部署后由下一轮 lab 旅程直接验证。运维要点：OJ
-编译/运行的 Landlock 写集合必须包含脚本所需的重定向目标，遇到「编译期 toolchain
-not found + cannot create /dev/null」应第一时间想到这个权限维度，而不是镜像
-内容。
+修复经历了两轮：第一版（ed43625）把 `/dev/null` 直接追加进
+`compile_program`/`run_case` 的 `HelperInvocation` 写路径，但
+`run_oj_compile_exec`/`run_oj_case_exec` 对写路径做**精确相等校验**
+（`write_paths != vec![BUILD_ROOT]`），追加后所有编译立刻变成
+`LW_OJ_COMMAND_INVALID`/`LW_OJ_SANDBOX_UNAVAILABLE`，越改越坏。第二版
+（38a2d6d，包 `pkg-v1-issue127-devnull2`）把写路径保持在声明根目录，改为在
+`apply_compiler_filesystem_sandbox`/`apply_submission_filesystem_sandbox` 的
+helper 侧规则集内恒追加 `/dev/null` 写规则（`/dev/null` 丢弃一切写入，加入可写
+集无安全后果；读集里的 `/dev/urandom` 不受影响）。验证：用同一 runner 基础镜像
+（df048e5b…，含工具链）叠加新 evaluation-service 的
+`/usr/local/bin/labweaver-service`（`ojx-repro-fixed:devnull2`）重建复刻 pod，
+同样真实材料下收据从 `LW_OJ_COMPILE_ERROR`（exit 2）变为
+**`LW_OJ_ACCEPTED`（exit 0，terminalStatus=accepted）**——编译 gate 证据链闭合。
+运维要点：OJ 编译/运行的 Landlock 写集合必须包含脚本所需的重定向目标；helper
+对写路径数组做精确校验，扩展写权限只能在 helper 侧规则集做；遇到「编译期
+toolchain not found + cannot create /dev/null」应第一时间想到这个权限维度，
+而不是镜像内容。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
