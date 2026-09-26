@@ -2570,15 +2570,25 @@
               | from_yaml
               | combine(
                   {
-                    'evaluationRuntime': (
+                    'control': (
                       (
                         platform_application_control_configuration_object.data['config.yaml']
                         | from_yaml
-                      ).evaluationRuntime
+                      ).control
                       | combine(
                           {
-                            'runnerImage':
-                              platform_application_evaluation_worker_image
+                            'evaluationRuntime': (
+                              (
+                                platform_application_control_configuration_object.data['config.yaml']
+                                | from_yaml
+                              ).control.evaluationRuntime
+                              | combine(
+                                  {
+                                    'runnerImage':
+                                      platform_application_evaluation_worker_image
+                                  }
+                                )
+                            )
                           }
                         )
                     )
@@ -2587,7 +2597,6 @@
               | to_nice_yaml(indent=2, sort_keys=false)
             )
           }}
-  no_log: true
 
 - name: Bind the build executor service to the immutable package image
   ansible.builtin.set_fact:
