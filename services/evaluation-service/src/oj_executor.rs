@@ -617,6 +617,19 @@ impl OjExecutorError {
     }
 }
 
+fn truncate_debug(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        value.to_owned()
+    } else {
+        let truncated = value
+            .char_indices()
+            .take_while(|(index, _)| *index < max_len)
+            .map(|(_, character)| character)
+            .collect::<String>();
+        format!("{truncated}…(truncated {})", value.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1478,18 +1491,5 @@ mod tests {
             cancellation_observation(true),
             OjCancellationObservation::Cancelled
         );
-    }
-}
-
-fn truncate_debug(value: &str, max_len: usize) -> String {
-    if value.len() <= max_len {
-        value.to_owned()
-    } else {
-        let truncated = value
-            .char_indices()
-            .take_while(|(index, _)| *index < max_len)
-            .map(|(_, character)| character)
-            .collect::<String>();
-        format!("{truncated}…(truncated {})", value.len())
     }
 }
