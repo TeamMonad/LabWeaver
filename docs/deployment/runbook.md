@@ -2088,6 +2088,12 @@ dash；Agent 生成的脚本用 bash 专属的 `set -o pipefail` 直接死掉。
 （修复前该用例失败）。`python3 services/environment-service/tests/work_configuration_runner.py`
 = 10 用例全绿。
 
+后续实跑补证（`public-20260926-3j-a1-9330`）：work 配置三连收据中两绿
+（exit 0）、一红仍为 `Illegal option -o pipefail`（exit 2）——该次脚本**没有
+shebang**，落入 `/bin/sh`（dash）回退路径。修复（提交 13085f6）：无 shebang
+时优先用 `/bin/bash`（POSIX 超集，平台镜像均带），无 bash 才回退 `/bin/sh`；
+新增同形态黑盒回归（11 用例全绿）。
+
 #### 12.2.11.2 同轮发现：work 类模板版本对项目成员不可见（提交将同包）
 
 `public-20260926-3j-a1` 的 admin 旅程三连败在 student 发起资源申请的「已发布版本」
