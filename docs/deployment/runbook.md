@@ -2111,6 +2111,18 @@ evaluation-service digest `5445bf8b…`。**部署后又发现并修复一处流
 evaluation-service reference（提交 cdff09a），线上三处 CM 已同步
 `5445bf8b…` 并滚动三部署。后续每次 `platform-application` 都应自动保持四方一致。
 
+**score gate 线上验证**（包 `pkg-v1-issue127-cgroup3-9ed5c6dffa9d`，run-id
+`oj-cgroup3b-20260926a`，evaluation-service `85223de8…`，含 9ed5c6d 括号修正后的
+control）：03:47 的真实 lab 评估 run `01a0dbd2-ee14…` 三连绿——
+`source-present ✓ compile ✓ smoke-tests ✓`（此前同步三处 run 均
+`smoke-tests ✗ LW_OJ_SANDBOX_UNAVAILABLE`）。cgroup 检查改为「任意有限界」+
+case 读集含 `/work/build` 后，真实 OJ 的 score step 恢复正常。
+
+同包还修复了 work 配置脚本 shebang 派发（提交 498117c）与 work 类版本对项目成员
+可见（提交 7d11646 + 9ed5c6d）。未验证项：跑分后的评估分数（0/100，正确性由后续
+验收判定）、work/admin 旅程端到端绿、以及管理员审批 UI 的 30s 偶发超时
+（后端 approve 202 约 31ms，浏览器侧偶现收不到响应，待观察）。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
