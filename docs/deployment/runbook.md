@@ -2101,6 +2101,16 @@ DB 证据：该项目的 `control.environment_template_releases` 有 1 行、且
 修复：work 类版本对「owner 或本项目 active 成员」均可见（同
 `access.project_memberships` 的既有可见性判定，含过期成员过滤）。
 
+部署（包 `pkg-v1-issue127-cgroup-7d116465cad8`，run-id `oj-cgroup20260926a`）：
+evaluation-service digest `5445bf8b…`。**部署后又发现并修复一处流水线回归**：本轮
+`platform-application --infra` 把 build-executor-config/control-service-config
+按 bundle 原样应用，而 bundle 里这两处仍钉着更早的 evaluation-service digest
+（`d87dd7b7…`，13 字段收据时代）——正是 12.2.8 记录的「OJ runner 镜像身份与
+部署镜像不一致」复发。修复：playbook 在包绑定阶段对这两个 CM 的
+`evaluationRuntime.runnerImage` / `executor.serviceImage` 也改绑当前包的
+evaluation-service reference（提交 cdff09a），线上三处 CM 已同步
+`5445bf8b…` 并滚动三部署。后续每次 `platform-application` 都应自动保持四方一致。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
