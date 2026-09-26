@@ -1051,6 +1051,11 @@ test('student provisions a Work environment, configures it, and releases its cap
       return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${lease.id}/revoke`
     })
     await workLeaseReclaimButton.click()
+    // 回收 opens the same confirm dialog as the admin release helper; the
+    // revoke POST only fires after the confirm action.
+    const reclaimDialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
+    await expect(reclaimDialog).toBeVisible()
+    await reclaimDialog.locator('.filled-button').click()
     const revokedLease = await expectJson(await reclaimResponsePromise, 'RESOURCE_LEASE_RECLAIM_FAILED')
     expect(revokedLease).toMatchObject({ id: lease.id })
     const finalLease = await pollJson(
