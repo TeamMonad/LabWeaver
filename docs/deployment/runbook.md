@@ -2094,6 +2094,12 @@ shebang**，落入 `/bin/sh`（dash）回退路径。修复（提交 13085f6）�
 时优先用 `/bin/bash`（POSIX 超集，平台镜像均带），无 bash 才回退 `/bin/sh`；
 新增同形态黑盒回归（11 用例全绿）。
 
+bashfb 部署后（包 `pkg-v1-issue127-bashfb-13085f69dcec`，env-service `bba22341…`）
+实跑验证：`public-20260926-3j-a2-2260` 的 work 配置收据一键即绿
+（`01a0dc22-9743…` exit 0 "OK: persistence marker verified"）。同一部署窗口内
+evaluation 五次全绿（03:47/04:06/04:52/05:02/05:09，步全部 source-present+compile+
+smoke-tests 三连绿）——cgroup 与 build-reads 修复的稳定复现证据。
+
 #### 12.2.11.2 同轮发现：work 类模板版本对项目成员不可见（提交将同包）
 
 `public-20260926-3j-a1` 的 admin 旅程三连败在 student 发起资源申请的「已发布版本」
