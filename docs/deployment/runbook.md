@@ -2132,8 +2132,18 @@ case 读集含 `/work/build` 后，真实 OJ 的 score step 恢复正常。
 
 同包还修复了 work 配置脚本 shebang 派发（提交 498117c）与 work 类版本对项目成员
 可见（提交 7d11646 + 9ed5c6d）。未验证项：跑分后的评估分数（0/100，正确性由后续
-验收判定）、work/admin 旅程端到端绿、以及管理员审批 UI 的 30s 偶发超时
-（后端 approve 202 约 31ms，浏览器侧偶现收不到响应，待观察）。
+验收判定）、work/admin 旅程端到端绿。
+
+**lab 旅程 30s 审批超时的根因（提交 d79df76）**：BFF 审批看门狗（
+`tools/user_acceptance.py approve_pending_resource_requests`）会把 `evaluation-…`
+task 租约（冻结提交评估与 authoring 自有评估轨）也批成 active，而这些正是 lab
+旅程自己通过管理台 UI 审批的对象。看门狗先赢的轮次里，UI 的确认框在
+`performRequestAction`（useResourceApproval.ts）读到 latest request 已非 reviewing
+后短路不发 POST，`real-experiment.mjs:383` 的 `waitForResponse` 空等 30s 超时——
+跨 3 个验收 run（a1-a3）十余次复现，后端 approve 本身恒 202（13–31ms）。修复：
+看门狗跳过 `requestKey` 含 `evaluation-` 的请求（与既有的“environment 目标留给旅程”
+同构）；authoring/work 等其余 task 租约仍由看门狗审批。此后 lab 为首次可判定的
+端到端轮次。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
