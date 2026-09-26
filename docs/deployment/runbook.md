@@ -2187,6 +2187,12 @@ resources 页 30s 超时。根因：该页列出项目全部租约，config 沙�
 `passed`（summary.json `status: "passed"`，retry1 通过，attempt1 因人工取消
 作废）。这是续期修复（3da4429）与回收确认框修复（a369ddc）的直接 e2e 证据。
 
+**同 run 的 admin 旅程也全绿（`public-20260926-3j-a6-23379`，13:00）**：teacher
+发布 work 模板、student 发起申请、「已发布版本」下拉选取、platform-admin 审批、
+lease 回读、费用页、GPU 目录与最终回收清理均通过；a6 的 summary.json 为
+`lab=failed / work=passed / admin=passed`——单轮两旅程全绿，仅剩 lab 受
+12.2.11.4 记录的 LLM 间歇卡顿阻塞。
+
 #### 12.2.11.4 同轮：`#!/bin/sh` + bash 语法仍死在 dash（提交 29fd7c5）与 lab 旅程的 LLM 间歇卡顿
 
 `public-20260926-3j-a4` 的 work 配置执行收据暴露残差：模型生成的 `primary.sh`
