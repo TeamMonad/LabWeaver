@@ -2162,6 +2162,12 @@ SQL 层可见、在视图层被拒 → `GET /api/v1/projects/{id}/environment-te
 访问面不变。部署 `98ee0e89…`（包 `pkg-v1-issue127-fix404-…`）后
 student/teacher 同请求均 200 且含同一 release。
 
+**端到端验证（run `public-20260926-3j-a4-3313`，09:10）：admin 旅程首个全绿**——
+teacher 发布 work 类模板、student 发起 CPU 资源申请（「已发布版本」下拉即所选
+release）、platform-admin 审批、lease 回读、费用页与 GPU 目录、lease 回收清理
+全部通过；journey 判定 `passed`（summary.json `status: "passed"`）。这是该修复
+的直接 e2e 证据（下拉与整个申请-审批-回收链路）。
+
 **work 旅程续期/回收点错租约（提交 3da4429）**：某次复现后 work 反复死于
 resources 页 30s 超时。根因：该页列出项目全部租约，config 沙箱的 task 租约排在
 前面，spec 用 `.first()` 定位续期/回收按钮，实际点到了 config 租约 →
