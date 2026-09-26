@@ -954,12 +954,20 @@ test('student provisions a Work environment, configures it, and releases its cap
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('button', { name: '续期', exact: true }).first()).toBeVisible({ timeout: 120_000 })
+    // The resources page lists every project lease, including the authoring
+    // config sandbox's task lease, so the FIRST 续期 button is not necessarily
+    // this Work environment's. Scope to the lease row that links into the
+    // environments console (only environment-targeted leases carry it).
+    const workLeaseRenewButton = page
+      .locator('li.resource-row')
+      .filter({ has: page.locator('a[href*="/researcher/environments"]') })
+      .getByRole('button', { name: '续期', exact: true })
+    await expect(workLeaseRenewButton).toBeVisible({ timeout: 120_000 })
     const renewResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${lease.id}/renew`
     })
-    await page.getByRole('button', { name: '续期', exact: true }).first().click()
+    await workLeaseRenewButton.click()
     const renewedLease = await expectJson(await renewResponsePromise, 'RESOURCE_LEASE_RENEW_FAILED')
     expect(renewedLease).toMatchObject({ id: lease.id, state: 'active', revision: expect.any(Number) })
     expect(new Date(renewedLease.expiresAt).getTime()).toBeGreaterThan(new Date(lease.expiresAt).getTime())
@@ -1033,12 +1041,16 @@ test('student provisions a Work environment, configures it, and releases its cap
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('button', { name: '回收', exact: true })).toBeVisible({ timeout: 120_000 })
+    const workLeaseReclaimButton = page
+      .locator('li.resource-row')
+      .filter({ has: page.locator('a[href*="/researcher/environments"]') })
+      .getByRole('button', { name: '回收', exact: true })
+    await expect(workLeaseReclaimButton).toBeVisible({ timeout: 120_000 })
     const reclaimResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${lease.id}/revoke`
     })
-    await page.getByRole('button', { name: '回收', exact: true }).click()
+    await workLeaseReclaimButton.click()
     const revokedLease = await expectJson(await reclaimResponsePromise, 'RESOURCE_LEASE_RECLAIM_FAILED')
     expect(revokedLease).toMatchObject({ id: lease.id })
     const finalLease = await pollJson(
