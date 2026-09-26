@@ -69,8 +69,13 @@ script_interpreter() {
     # Resolve the interpreter for a user script.  A shebang naming an absolute
     # path is honored (for example the bash-only `set -o pipefail` that agents
     # legitimately emit); otherwise the script runs under /bin/sh as before.
-    # Only the interpreter path and one optional argument are taken from the
-    # first line; user script content is never interpolated into a command.
+    # A `/bin/sh` shebang is treated like a plain POSIX claim: bash is a
+    # superset of POSIX sh, exists on the platform images, and accepts the
+    # bash-only constructs the LLM emits under `#!/bin/sh` (dash rejects
+    # `set -o pipefail` and similar), so prefer it when present and fall back
+    # to the named shell otherwise.  Only the interpreter path and one optional
+    # argument are taken from the first line; user script content is never
+    # interpolated into a command.
     script_file=$1
     first_line=$(head -n 1 "$script_file") || return 1
     case "$first_line" in
@@ -86,6 +91,16 @@ script_interpreter() {
             else
                 interpreter_arg=
             fi
+            case "$interpreter" in
+                */sh)
+                    # `/bin/sh` is dash on Debian-derived images; run POSIX
+                    # claims under bash when it is available.
+                    if [ -x /bin/bash ]; then
+                        interpreter=/bin/bash
+                        interpreter_arg=
+                    fi
+                    ;;
+            esac
             ;;
         *)
             # Scripts without a usable shebang historically ran under /bin/sh,
