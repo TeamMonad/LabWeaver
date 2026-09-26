@@ -1026,6 +1026,20 @@ def approve_pending_resource_requests(
         target = item.get("target")
         if not isinstance(target, dict):
             target = detail.get("target")
+        request_key = item.get("requestKey")
+        if not isinstance(request_key, str):
+            request_key = detail.get("requestKey")
+        if isinstance(request_key, str) and "evaluation-" in request_key:
+            # The evaluation-track task leases (the frozen-submission
+            # `evaluation-<taskRunId>` and the authoring run's own
+            # `authoring-<runId>-evaluation-<attempt>-<sandboxId>`) are the ones
+            # the lab journey approves itself through the admin console
+            # (approveEvaluationTaskResourceRequestByUi). Approving them here
+            # races that step: the UI's confirm dialog then short-circuits on a
+            # no-longer-reviewing latest request and never posts, failing the
+            # journey. Leave them to the journey exactly like the environment
+            # requests below.
+            continue
         if not isinstance(target, dict) or target.get("kind") != "task":
             # Only platform task leases are approved here; the journeys approve the
             # environment requests themselves through the admin console.
