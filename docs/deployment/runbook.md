@@ -2004,6 +2004,36 @@ pod 的 terminated message / 容器日志抓取（watcher 已加强为 2s 轮询
 configMap 与容器日志）。
 
 
+### 12.2.10 2026-09-26：编译 gate 铁败的最终根因 —— Landlock 把 `/dev/null` 只读化（提交 ed43625，包 `pkg-v1-issue127-devnull`）
+
+attempt-1..5 的 lab 段在 schema 修复后仍然每次都
+`LW_OJ_COMPILE_ERROR`（收据 16 字段、`compileExitCode=2`、`compileTimedOut=false`）。
+本地裸跑 `build-xv6.sh`（容器内直接执行、无 sandbox）能通过，因此工具链/归档/布局
+全部排除。最终用**手动 OJ 复刻 pod**（同一 runner 镜像 3b0bb954… 时代 + 真实
+material 文件 + 与 OJ Job 相同的 securityContext/Landlock/init 物化布局）在集群里
+复现出完全一致的失败，pod 容器日志给出决定性输出：
+
+```text
+/bin/sh: 1: cannot create /dev/null: Permission denied
+*** Error: Couldn't find a riscv64 version of GCC/binutils.
+cc1: error: bad value 'rv64gc' for '-march=' switch
+```
+
+根因：xv6 Makefile 用 `command -v … >/dev/null` 探测工具链。OJ 编译助手把
+`/dev/null` 列入 **read-only** 的编译读路径（`COMPILER_READ_PATHS` 包含
+`/dev/null` 与 `/dev/urandom`，Landlock 按只读加规则），重定向写入被 Landlock
+拒绝 → 探测恒失败 → make 报「找不到 riscv64 GCC」并以 exit 2 退出。容器镜像里
+工具链齐全（本地直接编译成功）与此不矛盾：失败是内核 sandbox 的权限问题，不是
+镜像内容问题。
+
+修复（`ed43625`）：`compile_program` 与 `run_case` 的 `HelperInvocation` 写路径各
+追加 `/dev/null`（它会丢弃写入，加入可写集无安全后果；只读集里的 `/dev/urandom`
+不受影响）。复刻 pod 的失败画面（stderr 全文）与集群完全一致，修复随
+`pkg-v1-issue127-devnull` 部署后由下一轮 lab 旅程直接验证。运维要点：OJ
+编译/运行的 Landlock 写集合必须包含脚本所需的重定向目标，遇到「编译期 toolchain
+not found + cannot create /dev/null」应第一时间想到这个权限维度，而不是镜像
+内容。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
