@@ -2076,6 +2076,31 @@ cgroup 只须「有限且有 ≥2 余量」。集群把 kubelet `podPidsLimit` �
 验证：evaluation-service 单包测试全绿（cgroup 解析相关单测未回归）+ 提交后重新
 打包部署，score gate 的真实 lab 跑分应 `succeeded`（待观察确认）。
 
+#### 12.2.11.1 同轮发现：work 配置脚本在 dash 下执行失败（提交 498117c）
+
+`public-20260926-3j-a1` 的 work 旅程在「批准并执行 Work 配置」后失败：收据
+`/tmp/labweaver-work-executions/…/primary.sh: 2: set: Illegal option -o pipefail`、
+exit 2。根因：`services/work-configuration-runner.sh` 用硬编码 `/bin/sh` 执行
+primary.sh/verification.sh，而工作镜像（Ubuntu/debian 系）的 `/bin/sh` 是
+dash；Agent 生成的脚本用 bash 专属的 `set -o pipefail` 直接死掉。修复：runner
+按脚本 shebang 派发（绝对路径解释器 + 至多一个可选参数原样透传，无 shebang 回退
+`/bin/sh`）。新增黑盒回归：`#!/bin/bash` + pipefail 脚本经真实 debian 容器跑通
+（修复前该用例失败）。`python3 services/environment-service/tests/work_configuration_runner.py`
+= 10 用例全绿。
+
+#### 12.2.11.2 同轮发现：work 类模板版本对项目成员不可见（提交将同包）
+
+`public-20260926-3j-a1` 的 admin 旅程三连败在 student 发起资源申请的「已发布版本」
+下拉（`web/e2e/support/real-resource.mjs:195` `option:not([value=""])` 永不复现）。
+DB 证据：该项目的 `control.environment_template_releases` 有 1 行、且
+`environment.release_projections` 有对应投影行——列表查询本身没问题。根因：
+`control-service` 的 `project_releases` SQL 对 work 类版本要求
+`projects.owner_actor_id=$5`（仅项目 owner 可见）；admin 旅程的项目由 teacher
+创建、由 student 成员发起资源申请 → student 的列表恒空。work 旅程不受影响是因为
+其项目由 student 自建（owner 即 requester），这解释了「work 能过、admin 不能过」。
+修复：work 类版本对「owner 或本项目 active 成员」均可见（同
+`access.project_memberships` 的既有可见性判定，含过期成员过滤）。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
