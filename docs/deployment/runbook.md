@@ -2145,6 +2145,30 @@ task 租约（冻结提交评估与 authoring 自有评估轨）也批成 active
 同构）；authoring/work 等其余 task 租约仍由看门狗审批。此后 lab 为首次可判定的
 端到端轮次。
 
+#### 12.2.11.3 admin 旅程「已发布版本」下拉恒 404 的终局（提交 e274397）
+
+12.2.11.2 的 SQL 修复（member 可见）只改了一半：列表 SQL 已放行「owner 或 active
+成员」，但共享视图 `project_release_view` 对 work 类版本仍保留 owner-only 守卫
+（`owner_actor_id != actor_id → ControlError::NotFound`）——student 成员的行在
+SQL 层可见、在视图层被拒 → `GET /api/v1/projects/{id}/environment-template-releases`
+对 student 恒 404 `LW_CONTROL_NOT_FOUND`（teacher=owner 同请求 200 含 release）。
+已排除 access 授权（decision=permitted）、SQL 本身（直接 psql 同结构 1 行）、部署
+陈旧（三个全新构建逐一复现）。诊断链：在 handler 的
+`state.control.project_releases(...)` 调用外加 match 打印错误变体，
+`debug.release.error` 事件的 `error_kind=NotFound` 直接指向视图 7906 行守卫。
+修复：`project_release` 与 `project_releases` 两个 SQL 均投影
+`actor_can_view_work` 布尔（owner 或 `access.project_memberships` active 未过期
+成员，与列表 WHERE 同式），视图改校验该列；get-one 的 WHERE 保持 owner-only，
+访问面不变。部署 `98ee0e89…`（包 `pkg-v1-issue127-fix404-…`）后
+student/teacher 同请求均 200 且含同一 release。
+
+**work 旅程续期/回收点错租约（提交 3da4429）**：某次复现后 work 反复死于
+resources 页 30s 超时。根因：该页列出项目全部租约，config 沙箱的 task 租约排在
+前面，spec 用 `.first()` 定位续期/回收按钮，实际点到了 config 租约 →
+`/resource-leases/{id}/renew` 请求永不发出（原租约 id 的续期/回收也未发生）。
+修复：先定位含 `a[href*="/researcher/environments"]` 的 `li.resource-row`，再取
+其中的续期/回收按钮。配置本身全绿，修复待 end-to-end 验证。
+
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 
 `web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
