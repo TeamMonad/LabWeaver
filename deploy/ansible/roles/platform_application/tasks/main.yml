@@ -2541,6 +2541,102 @@
           }}
   no_log: true
 
+- name: Bind the control evaluation runner to the immutable package image
+  ansible.builtin.set_fact:
+    platform_application_control_configuration_object: >-
+      {{
+        platform_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'control-service-config')
+        | first
+      }}
+  no_log: true
+
+- name: Apply the package-bound control evaluation configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: >-
+        {{ platform_application_control_configuration_object.metadata }}
+      data:
+        config.yaml: >-
+          {{
+            (
+              platform_application_control_configuration_object.data['config.yaml']
+              | from_yaml
+              | combine(
+                  {
+                    'evaluationRuntime': (
+                      (
+                        platform_application_control_configuration_object.data['config.yaml']
+                        | from_yaml
+                      ).evaluationRuntime
+                      | combine(
+                          {
+                            'runnerImage':
+                              platform_application_evaluation_worker_image
+                          }
+                        )
+                    )
+                  }
+                )
+              | to_nice_yaml(indent=2, sort_keys=false)
+            )
+          }}
+  no_log: true
+
+- name: Bind the build executor service to the immutable package image
+  ansible.builtin.set_fact:
+    platform_application_build_executor_configuration_object: >-
+      {{
+        platform_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'build-executor-config')
+        | first
+      }}
+  no_log: true
+
+- name: Apply the package-bound build executor configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: >-
+        {{ platform_application_build_executor_configuration_object.metadata }}
+      data:
+        config.yaml: >-
+          {{
+            (
+              platform_application_build_executor_configuration_object.data['config.yaml']
+              | from_yaml
+              | combine(
+                  {
+                    'executor': (
+                      (
+                        platform_application_build_executor_configuration_object.data['config.yaml']
+                        | from_yaml
+                      ).executor
+                      | combine(
+                          {
+                            'serviceImage':
+                              platform_application_evaluation_worker_image
+                          }
+                        )
+                    )
+                  }
+                )
+              | to_nice_yaml(indent=2, sort_keys=false)
+            )
+          }}
+  no_log: true
+
 - name: Bind the authoring sandbox to the immutable package image
   ansible.builtin.set_fact:
     platform_application_agent_configuration_object: >-
