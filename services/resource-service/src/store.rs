@@ -2992,6 +2992,12 @@ impl PgResourceStore {
 
     /// Claims one due or explicitly revoked handed-off Lease. Natural expiry
     /// first enters the same durable `expiring` state used by revocation.
+    ///
+    /// Cleanup is eventual: a claim whose `expire_environment`/`release_capacity`
+    /// attempt is in `retry` or `failed` is still eligible once its `next_attempt_at`
+    /// backoff has passed, so a transient rejection (for example an Environment that
+    /// was still provisioning and has since become deletable) is retried instead of
+    /// leaking the Lease and its capacity reservation permanently.
     pub async fn next_lease_cleanup(
         &self,
         actor: contracts::ActorId,
@@ -3009,13 +3015,7 @@ impl PgResourceStore {
                  SELECT 1 FROM resource.capacity_attempts a \
                  WHERE a.claim_id=c.claim_id \
                    AND a.step IN ('expire_environment','release_capacity') \
-                   AND a.state='failed' \
-               )\
-               AND NOT EXISTS (\
-                 SELECT 1 FROM resource.capacity_attempts a \
-                 WHERE a.claim_id=c.claim_id \
-                   AND a.step IN ('expire_environment','release_capacity') \
-                   AND a.state='retry' \
+                   AND a.state IN ('retry','failed') \
                    AND a.next_attempt_at>clock_timestamp() \
                )\
              ORDER BY l.expires_at,l.updated_at FOR UPDATE OF c,l SKIP LOCKED LIMIT 1",

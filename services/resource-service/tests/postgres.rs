@@ -465,6 +465,173 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
 }
 
 #[tokio::test]
+async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let resources = WorkloadResources {
+        cpu_millicores: 500,
+        memory_bytes: 512 * 1024 * 1024,
+        storage_bytes: 1024 * 1024 * 1024,
+        gpu: None,
+    };
+    let request = ResourceRequest {
+        id: ResourceRequestId::new(),
+        generation: 1,
+        request_key: "cleanup-retry-1".into(),
+        requester_id: ActorId::new(),
+        course_id: Some(CourseId::new()),
+        project_id: ProjectId::new(),
+        target: ResourceTarget::Environment {
+            environment_id: EnvironmentId::new(),
+            release_id: ReleaseId::new(),
+            release_version: 1,
+        },
+        requested_resources: resources.clone(),
+        requested_duration_seconds: 600,
+        state: ResourceRequestState::Reviewing,
+        revision: Revision::new(1)?,
+        created_at: now,
+        updated_at: now,
+        diagnostic_code: None,
+    };
+    store
+        .create("resource-create-cleanup", &request, "trace-create-cleanup")
+        .await?;
+    let approval = ResourceApproval {
+        id: ResourceApprovalId::new(),
+        request_id: request.id,
+        request_revision: Revision::new(1)?,
+        approver_id: ActorId::new(),
+        provider_binding: "kubernetes-standard".into(),
+        approved_resources: resources.clone(),
+        approved_duration_seconds: 600,
+        reason: "capacity approved".into(),
+        valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?,
+        created_at: now,
+    };
+    let allocation = PendingAllocation {
+        claim: CapacityClaim {
+            id: CapacityClaimId::new(),
+            request_id: request.id,
+            approval_id: approval.id,
+            provider_binding: approval.provider_binding.clone(),
+            workload_resources: resources.clone(),
+            quota_resources: resources,
+            gpu_allocation: None,
+            state: contracts::resource::CapacityClaimState::Reserved,
+            revision: Revision::new(1)?,
+        },
+        lease_id: LeaseId::new(),
+    };
+    store
+        .approve(
+            "resource-approve-cleanup",
+            request.id,
+            &approval,
+            &allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 3600,
+            },
+            "trace-approve-cleanup",
+        )
+        .await?;
+    let provisioning = store
+        .claim_next_capacity_shell()
+        .await?
+        .expect("one reserved capacity claim");
+    let _ready = store
+        .mark_capacity_shell_ready(
+            provisioning.claim.id,
+            provisioning.claim.revision,
+            "lw-work-test",
+            "namespace-uid",
+            "quota-uid",
+        )
+        .await?;
+    let active_from = store.current_time().await?;
+    let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
+    let active = store
+        .activate_lease(
+            allocation.lease_id,
+            Revision::new(1)?,
+            active_from,
+            active_expires,
+            approval.approver_id,
+            "trace-activate-cleanup",
+        )
+        .await?;
+    let handoff = store
+        .next_ready_capacity_handoff()
+        .await?
+        .expect("ready shell remains Resource-owned until Environment acknowledges");
+    let handed_off = store
+        .mark_capacity_handed_off(
+            handoff.claim.id,
+            handoff.claim.revision,
+            handoff.lease.id,
+            handoff.lease.revision,
+        )
+        .await?;
+    let expiring = store
+        .begin_lease_expiry(
+            active.id,
+            active.revision,
+            Some("researcher requested reclaim".to_owned()),
+            approval.approver_id,
+            "trace-expire-cleanup",
+        )
+        .await?;
+
+    // Three transient cleanup rejections move the attempt ledger past its retry budget
+    // into the terminal-looking "failed" row that used to permanently suppress the claim.
+    for _ in 0..3 {
+        store
+            .record_reconciliation_failure(
+                handed_off.id,
+                "expire_environment",
+                "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
+            )
+            .await?;
+    }
+    let failed_state: String = sqlx::query_scalar(
+        "SELECT state FROM resource.capacity_attempts WHERE claim_id=$1 AND step='expire_environment' ORDER BY attempt DESC LIMIT 1",
+    )
+    .bind(handed_off.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(failed_state, "failed");
+
+    // While the failed attempt's backoff has not elapsed, the claim is legitimately
+    // suppressed so the driver does not hot-loop it.
+    assert!(
+        store
+            .next_lease_cleanup(approval.approver_id)
+            .await?
+            .is_none(),
+        "a cleanup attempt still inside its backoff must not be re-picked"
+    );
+
+    // Once the backoff elapses (the Environment may have become deletable in the
+    // meantime), cleanup must be re-attempted instead of permanently leaking the lease.
+    sqlx::query(
+        "UPDATE resource.capacity_attempts SET next_attempt_at=clock_timestamp()-interval '1 minute' \
+         WHERE claim_id=$1 AND step='expire_environment'",
+    )
+    .bind(handed_off.id.as_uuid())
+    .execute(&pool)
+    .await?;
+    let retried = store
+        .next_lease_cleanup(approval.approver_id)
+        .await?
+        .expect("cleanup must re-pick after the failed attempt backoff elapses");
+    assert_eq!(retried.lease.id, expiring.id);
+    Ok(())
+}
+
+#[tokio::test]
 async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
