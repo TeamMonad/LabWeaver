@@ -1135,7 +1135,7 @@ impl EnvironmentInstance {
             }
             Operation::Retry | Operation::Recover => state == State::Failed,
             Operation::Cancel => !matches!(state, State::Deleted | State::Deleting),
-            Operation::Expire => matches!(state, State::Ready | State::Stopped | State::Failed),
+            Operation::Expire => !matches!(state, State::Deleted | State::Deleting),
             Operation::Delete => state != State::Deleted,
             Operation::Cleanup => {
                 matches!(state, State::Expiring | State::Deleting | State::Failed)
@@ -1754,9 +1754,7 @@ mod tests {
                     }
                     Operation::Retry | Operation::Recover => state == State::Failed,
                     Operation::Cancel => !matches!(state, State::Deleted | State::Deleting),
-                    Operation::Expire => {
-                        matches!(state, State::Ready | State::Stopped | State::Failed)
-                    }
+                    Operation::Expire => !matches!(state, State::Deleted | State::Deleting),
                     Operation::Delete => state != State::Deleted,
                     Operation::Cleanup => {
                         matches!(state, State::Expiring | State::Deleting | State::Failed)
