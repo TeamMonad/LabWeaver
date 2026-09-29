@@ -117,12 +117,12 @@ workloads:
     kubernetesApi: true
     # One VM disk import can hold the staged archive, expanded disk, and
     # containerdisk layer concurrently. The import gate permits one such
-    # operation per Agent process, so reserve a smaller normal request while
-    # allowing the bounded 18 GiB worst case plus headroom.
-    tmpSizeLimit: 20Gi
+    # operation per Agent process; reserve 8 GiB and allow the bounded 24 GiB
+    # working set plus headroom.
+    tmpSizeLimit: 32Gi
     resources:
-      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 4Gi}
-      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 20Gi}
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 8Gi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 32Gi}
     env:
       LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
       # Acceptance-only VM candidate diagnostics. The directory is backed by

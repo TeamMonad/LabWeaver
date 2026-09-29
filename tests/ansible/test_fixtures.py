@@ -581,6 +581,16 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("maxSurge: 0", evaluation)
         self.assertIn("maxUnavailable: 1", evaluation)
 
+    def test_agent_platform_image_import_has_bounded_storage_budget(self) -> None:
+        values = yaml.safe_load(
+            (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
+        )
+        agent = values["workloads"]["agent-service"]
+
+        self.assertEqual(agent["tmpSizeLimit"], "32Gi")
+        self.assertEqual(agent["resources"]["requests"]["ephemeral-storage"], "8Gi")
+        self.assertEqual(agent["resources"]["limits"]["ephemeral-storage"], "32Gi")
+
     def test_object_store_route_uses_existing_web_workload_with_verified_tls(self) -> None:
         backend = (
             ROOT / "deploy/helm/labweaver/templates/object-store-backend.yaml"
