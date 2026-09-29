@@ -9,7 +9,9 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
+use artifact_store::{
+    ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject, VerifiedObjectFile,
+};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{Method, StatusCode, Uri, header};
@@ -91,6 +93,14 @@ impl ImmutableObjectStore for FakeObjects {
             reference: expected.clone(),
             bytes: self.bytes.clone(),
         })
+    }
+
+    async fn read_verified_file(
+        &self,
+        _: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        VerifiedObjectFile::from_bytes(expected.clone(), &self.bytes)
     }
 
     async fn freeze_current(

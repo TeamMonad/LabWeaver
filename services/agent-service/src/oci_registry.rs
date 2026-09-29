@@ -6,14 +6,64 @@
 //! so a tag or a mutable reference can never become the runtime identity.
 
 use reqwest::{
-    Client, Method, StatusCode, Url,
+    Body, Client, Method, StatusCode, Url,
     header::{ACCEPT, CONTENT_TYPE, HeaderValue, LOCATION},
 };
+use sha2::Digest;
+use tempfile::TempPath;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 
 use persistence_sqlx::Sha256Digest;
 
 use crate::oci_import::{MANIFEST_MEDIA_TYPES, OciBlob, OciImage};
+
+/// One verified OCI blob stored in a temporary file instead of a process-memory buffer.
+pub struct OciFileBlob {
+    pub digest: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub path: TempPath,
+}
+
+impl OciFileBlob {
+    fn path(&self) -> &std::path::Path {
+        self.path.as_ref()
+    }
+}
+
+impl std::fmt::Debug for OciFileBlob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OciFileBlob")
+            .field("digest", &self.digest)
+            .field("media_type", &self.media_type)
+            .field("size_bytes", &self.size_bytes)
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// Verified OCI image whose large blobs are retained in temporary files.
+pub struct OciFileImage {
+    pub manifest_digest: String,
+    pub manifest_media_type: String,
+    pub manifest_bytes: Vec<u8>,
+    pub blobs: Vec<OciFileBlob>,
+}
+
+impl std::fmt::Debug for OciFileImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OciFileImage")
+            .field("manifest_digest", &self.manifest_digest)
+            .field("manifest_media_type", &self.manifest_media_type)
+            .field("manifest_bytes", &self.manifest_bytes.len())
+            .field("blobs", &self.blobs)
+            .finish()
+    }
+}
 
 const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
 const ACCEPTED_MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
@@ -166,6 +216,21 @@ impl OciRegistryPublisher {
             .await
     }
 
+    /// Uploads a verified file-backed OCI image without buffering its blobs in memory.
+    pub async fn publish_file(&self, image: &OciFileImage) -> Result<String, OciRegistryError> {
+        for blob in &image.blobs {
+            self.ensure_file_blob(blob).await?;
+        }
+        self.put_manifest(
+            &image.manifest_digest,
+            &image.manifest_media_type,
+            &image.manifest_bytes,
+        )
+        .await?;
+        self.read_manifest_digest(&image.manifest_digest, &image.manifest_digest)
+            .await
+    }
+
     /// Publishes the manifest under one mutable tag so the reviewed reference stays resolvable.
     ///
     /// The immutable identity is still the digest: the tag is written last and only after the
@@ -176,6 +241,20 @@ impl OciRegistryPublisher {
     /// Returns [`OciRegistryError::Configuration`] for an unusable tag and the mapped registry
     /// failure otherwise.
     pub async fn tag(&self, tag: &str, image: &OciImage) -> Result<String, OciRegistryError> {
+        if !valid_tag(tag) {
+            return Err(OciRegistryError::Configuration);
+        }
+        self.put_manifest(tag, &image.manifest_media_type, &image.manifest_bytes)
+            .await?;
+        self.read_manifest_digest(tag, &image.manifest_digest).await
+    }
+
+    /// Publishes a file-backed image under one mutable tag after digest publication succeeds.
+    pub async fn tag_file(
+        &self,
+        tag: &str,
+        image: &OciFileImage,
+    ) -> Result<String, OciRegistryError> {
         if !valid_tag(tag) {
             return Err(OciRegistryError::Configuration);
         }
@@ -231,6 +310,73 @@ impl OciRegistryPublisher {
             .request(Method::PUT, upload.as_str())
             .header(CONTENT_TYPE, HeaderValue::from_static(BLOB_MEDIA_TYPE))
             .body(blob.bytes.clone())
+            .send()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        let status = response.status();
+        if denied(status) {
+            return Err(OciRegistryError::Denied);
+        }
+        if status != StatusCode::CREATED {
+            return Err(OciRegistryError::Rejected);
+        }
+        Ok(())
+    }
+
+    async fn ensure_file_blob(&self, blob: &OciFileBlob) -> Result<(), OciRegistryError> {
+        verify_file_blob(blob).await?;
+        let path = format!("v2/{}/blobs/{}", self.repository, blob.digest);
+        let response = self
+            .request(Method::HEAD, &path)
+            .send()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        match response.status() {
+            StatusCode::OK => Ok(()),
+            StatusCode::NOT_FOUND => self.upload_file_blob(blob).await,
+            status if denied(status) => Err(OciRegistryError::Denied),
+            _ => Err(OciRegistryError::Rejected),
+        }
+    }
+
+    async fn upload_file_blob(&self, blob: &OciFileBlob) -> Result<(), OciRegistryError> {
+        let start_path = format!("v2/{}/blobs/uploads/", self.repository);
+        let response = self
+            .request(Method::POST, &start_path)
+            .send()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        let status = response.status();
+        if denied(status) {
+            return Err(OciRegistryError::Denied);
+        }
+        if status != StatusCode::ACCEPTED {
+            return Err(OciRegistryError::Rejected);
+        }
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(OciRegistryError::Rejected)?;
+        let location = self
+            .base
+            .join(location)
+            .map_err(|_| OciRegistryError::Rejected)?;
+        if location.scheme() != self.base.scheme() || location.host_str() != self.base.host_str() {
+            return Err(OciRegistryError::Rejected);
+        }
+        let separator = if location.query().is_some() { '&' } else { '?' };
+        let upload = format!("{location}{separator}digest={}", blob.digest);
+        let file = tokio::fs::File::open(blob.path())
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        let content_length = HeaderValue::from_str(&blob.size_bytes.to_string())
+            .map_err(|_| OciRegistryError::Configuration)?;
+        let response = self
+            .request(Method::PUT, upload.as_str())
+            .header(CONTENT_TYPE, HeaderValue::from_static(BLOB_MEDIA_TYPE))
+            .header(reqwest::header::CONTENT_LENGTH, content_length)
+            .body(Body::wrap_stream(ReaderStream::new(file)))
             .send()
             .await
             .map_err(|_| OciRegistryError::Unavailable)?;
@@ -421,6 +567,42 @@ fn index_platform_digest(index: &serde_json::Value) -> Result<String, OciRegistr
         }
     }
     Err(OciRegistryError::Rejected)
+}
+
+async fn verify_file_blob(blob: &OciFileBlob) -> Result<(), OciRegistryError> {
+    let metadata = tokio::fs::metadata(blob.path())
+        .await
+        .map_err(|_| OciRegistryError::Unavailable)?;
+    if metadata.len() != blob.size_bytes {
+        return Err(OciRegistryError::DigestMismatch);
+    }
+    let mut file = tokio::fs::File::open(blob.path())
+        .await
+        .map_err(|_| OciRegistryError::Unavailable)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        if read == 0 {
+            break;
+        }
+        size = size
+            .checked_add(u64::try_from(read).map_err(|_| OciRegistryError::DigestMismatch)?)
+            .ok_or(OciRegistryError::DigestMismatch)?;
+        hasher.update(&buffer[..read]);
+    }
+    if size != blob.size_bytes {
+        return Err(OciRegistryError::DigestMismatch);
+    }
+    let digest = format!("sha256:{:x}", hasher.finalize());
+    if digest != blob.digest {
+        return Err(OciRegistryError::DigestMismatch);
+    }
+    Ok(())
 }
 
 /// Reads one already fetched single-platform manifest into its resolved identity.

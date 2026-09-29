@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+mod stream;
+pub use stream::VerifiedObjectFile;
+
 /// Non-secret S3 binding. Credentials are supplied separately from Secret locators.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -144,6 +147,18 @@ pub trait ImmutableObjectStore: Send + Sync {
         expected: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError>;
 
+    /// Streams one large immutable object into a temporary file owned by the returned guard.
+    ///
+    /// Implementations that do not support file-backed reads retain the byte-oriented contract
+    /// and return a stable unsupported error.
+    async fn read_verified_file(
+        &self,
+        _key: &str,
+        _expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
     /// Resolves the current upload version once, then verifies and freezes that exact version.
     async fn freeze_current(
         &self,
@@ -151,6 +166,16 @@ pub trait ImmutableObjectStore: Send + Sync {
         expected_size: u64,
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError>;
+
+    /// Resolves and streams one current version into a temporary file.
+    async fn freeze_current_file(
+        &self,
+        _key: &str,
+        _expected_size: u64,
+        _media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
 
     /// Writes bytes once under Governance Object Lock and verifies the exact retained version.
     async fn put_governance_locked(
@@ -386,6 +411,73 @@ impl S3ImmutableObjectStore {
         self.read_verified(key, &expected).await
     }
 
+    async fn stream_read_verified_file(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.validate_key(key)?;
+        if expected.store_binding != self.config.binding
+            || expected.object_version.trim().is_empty()
+            || expected.size_bytes == 0
+            || expected.size_bytes > self.config.max_object_bytes
+            || expected.media_type.trim().is_empty()
+            || expected
+                .media_type
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .version_id(&expected.object_version)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        stream::response_to_tempfile(response, expected.clone(), self.config.max_object_bytes).await
+    }
+
+    async fn stream_freeze_current_file(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.validate_key(key)?;
+        if expected_size == 0
+            || expected_size > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        let version = head
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        let expected = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes: expected_size,
+            media_type: media_type.to_owned(),
+        };
+        self.stream_read_verified_file(key, &expected).await
+    }
+
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
         if key.is_empty()
@@ -556,6 +648,14 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         })
     }
 
+    async fn read_verified_file(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.stream_read_verified_file(key, expected).await
+    }
+
     async fn freeze_current(
         &self,
         key: &str,
@@ -584,6 +684,16 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             media_type: media_type.to_owned(),
         };
         self.read_verified(key, &expected).await
+    }
+
+    async fn freeze_current_file(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.stream_freeze_current_file(key, expected_size, media_type)
+            .await
     }
 
     async fn put_governance_locked(
@@ -773,6 +883,9 @@ pub enum ObjectStoreError {
     /// Stored retention mode, deadline, metadata, or version differs from the request.
     #[error("LW_OBJECT_LOCK_IDENTITY_MISMATCH")]
     ObjectLockIdentityMismatch,
+    /// This object-store binding exposes only the byte-oriented API.
+    #[error("LW_OBJECT_STREAMING_UNSUPPORTED")]
+    StreamingUnsupported,
 }
 
 impl ObjectStoreError {
@@ -791,6 +904,7 @@ impl ObjectStoreError {
             Self::VersioningRequired => "LW_OBJECT_VERSIONING_REQUIRED",
             Self::ObjectLockRequired => "LW_OBJECT_LOCK_REQUIRED",
             Self::ObjectLockIdentityMismatch => "LW_OBJECT_LOCK_IDENTITY_MISMATCH",
+            Self::StreamingUnsupported => "LW_OBJECT_STREAMING_UNSUPPORTED",
         }
     }
 }
@@ -803,13 +917,26 @@ mod tests {
     use aws_smithy_runtime_api::http::{Response, StatusCode};
     use aws_smithy_types::body::SdkBody;
     use contracts::{ArtifactRef, UtcTimestamp};
+    use sha2::{Digest, Sha256};
     use testcontainers::core::{IntoContainerPort, WaitFor};
-    use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
+    use testcontainers::{GenericImage, ImageExt, bollard::Docker, runners::AsyncRunner};
 
     use super::{
         BehaviorVersion, Credentials, ImmutableObjectStore, Region, S3ConfigBuilder,
         S3ImmutableObjectStore, S3StoreConfig, s3_upload_diagnostics,
     };
+
+    async fn local_minio_image() -> Result<GenericImage, Box<dyn std::error::Error>> {
+        let descriptor = std::env::var("LABWEAVER_TEST_MINIO_IMAGE")
+            .map_err(|_| "LABWEAVER_TEST_MINIO_IMAGE must name a locally prepared image")?;
+        let (name, tag) = descriptor
+            .rsplit_once(':')
+            .filter(|(name, tag)| !name.is_empty() && !tag.is_empty() && !tag.contains('/'))
+            .ok_or("LABWEAVER_TEST_MINIO_IMAGE must be a local name:tag reference")?;
+        let docker = Docker::connect_with_local_defaults()?;
+        docker.inspect_image(&descriptor).await?;
+        Ok(GenericImage::new(name.to_owned(), tag.to_owned()))
+    }
 
     #[test]
     fn upload_diagnostics_extract_service_metadata() -> Result<(), Box<dyn std::error::Error>> {
@@ -856,10 +983,8 @@ mod tests {
     )]
     async fn minio_versioning_object_lock_and_cleanup_are_fail_closed()
     -> Result<(), Box<dyn std::error::Error>> {
-        let minio = GenericImage::new(
-            "quay.io/minio/minio",
-            "RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
-        )
+        let minio = local_minio_image()
+            .await?
             .with_exposed_port(9000.tcp())
             .with_wait_for(WaitFor::message_on_stderr("API:"))
             .with_env_var("MINIO_ROOT_USER", "labweaver-test")
@@ -1035,6 +1160,13 @@ mod tests {
         let reread = store.read_verified(key, &frozen.reference).await?;
         assert_eq!(reread.reference, frozen.reference);
         assert_eq!(reread.bytes, bytes);
+        let streamed = store.read_verified_file(key, &frozen.reference).await?;
+        let streamed_path = streamed.path().to_owned();
+        assert_eq!(streamed.reference(), &frozen.reference);
+        assert_eq!(std::fs::read(&streamed_path)?, bytes);
+        assert_eq!(streamed.sha256(), format!("{:x}", Sha256::digest(bytes)));
+        drop(streamed);
+        assert!(!streamed_path.exists());
 
         let package_bytes = b"approved package playbook";
         let package_key = "problem-packages/course/package/playbook";

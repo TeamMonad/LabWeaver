@@ -6,17 +6,24 @@
 //! blob bytes, and returns the exact manifest identity that the registry publication step may
 //! push by digest. No untrusted path is ever written to disk.
 
-use std::collections::BTreeMap;
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use flate2::read::GzDecoder;
 use persistence_sqlx::Sha256Digest;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 use thiserror::Error;
+
+use crate::oci_registry::{OciFileBlob, OciFileImage};
 
 const OCI_LAYOUT_VERSION: &str = "1.0.0";
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
+const MAX_TAR_EXTENSION_BYTES: u64 = 64 * 1024;
 pub(crate) const MANIFEST_MEDIA_TYPES: [&str; 2] = [
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
@@ -170,7 +177,10 @@ pub fn parse_oci_layout_with_limits(
     let mut blobs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut total_bytes = 0_u64;
     let mut archive = tar::Archive::new(archive_bytes.as_slice());
-    let entries = archive.entries().map_err(|_| OciImportError::Invalid)?;
+    let entries = archive
+        .entries()
+        .map_err(|_| OciImportError::Invalid)?
+        .raw(true);
     for (position, entry) in entries.enumerate() {
         if position >= MAX_ARCHIVE_ENTRIES {
             return Err(OciImportError::TooLarge);
@@ -181,6 +191,13 @@ pub fn parse_oci_layout_with_limits(
             .filter(|total| *total <= limits.max_total_bytes)
             .ok_or(OciImportError::TooLarge)?;
         let kind = entry.header().entry_type();
+        if kind.is_pax_local_extensions() || kind.is_pax_global_extensions() {
+            consume_pax_extension(&mut entry)?;
+            continue;
+        }
+        if kind.is_gnu_longname() || kind.is_gnu_longlink() {
+            return Err(OciImportError::Invalid);
+        }
         if kind.is_dir() {
             continue;
         }
@@ -223,27 +240,232 @@ pub fn parse_oci_layout_with_limits(
             EntryKind::Unknown => return Err(OciImportError::Invalid),
         }
     }
-    let layout: LayoutFile = serde_json::from_value(layout.ok_or(OciImportError::Invalid)?)
+    let layout_value = layout.ok_or(OciImportError::Invalid)?;
+    let index_value = index.ok_or(OciImportError::Invalid)?;
+    let manifest_digest = manifest_digest_from_index(&index_value)?;
+    let manifest_bytes = blobs
+        .get(&manifest_digest)
+        .ok_or(OciImportError::Invalid)?
+        .clone();
+    let blob_sizes = blobs
+        .iter()
+        .map(|(digest, bytes)| {
+            (
+                digest.clone(),
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            )
+        })
+        .collect();
+    let validated = validate_manifest_graph(
+        layout_value,
+        index_value,
+        &manifest_digest,
+        manifest_bytes,
+        &blob_sizes,
+    )?;
+    let mut verified = Vec::new();
+    let mut seen = BTreeSet::new();
+    for descriptor in &validated.ordered_blobs {
+        let bytes = blobs
+            .get(&descriptor.digest)
+            .ok_or(OciImportError::Invalid)?;
+        if seen.insert(descriptor.digest.clone()) {
+            verified.push(OciBlob {
+                digest: descriptor.digest.clone(),
+                media_type: descriptor.media_type.clone(),
+                bytes: bytes.clone(),
+            });
+        }
+    }
+    Ok(OciImage {
+        manifest_digest: validated.manifest_digest,
+        manifest_media_type: validated.manifest_media_type,
+        manifest_bytes: validated.manifest_bytes,
+        config_digest: validated
+            .ordered_blobs
+            .first()
+            .ok_or(OciImportError::Invalid)?
+            .digest
+            .clone(),
+        blobs: verified,
+    })
+}
+
+/// Parses and verifies an OCI layout directly from a temporary archive file.
+///
+/// The byte-oriented parser above remains useful for small deterministic fixtures. Platform
+/// imports use this variant so the archive and every large blob stay on disk while their digest
+/// and declared size are checked. Raw tar iteration bounds PAX metadata and rejects extensions
+/// that could replace paths, sizes, links, or sparse-file contents before the tar crate can
+/// materialize an unbounded body.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one audit boundary verifies the archive, descriptor graph and blob digests in order"
+)]
+pub(crate) fn parse_oci_layout_file(
+    path: &Path,
+    limits: OciLimits,
+) -> Result<OciFileImage, OciImportError> {
+    const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
+
+    let archive_size = std::fs::metadata(path)
+        .map_err(|_| OciImportError::Invalid)?
+        .len();
+    if archive_size == 0 || archive_size > limits.max_archive_bytes {
+        return Err(OciImportError::TooLarge);
+    }
+    let mut source = File::open(path).map_err(|_| OciImportError::Invalid)?;
+    let mut magic = [0_u8; 2];
+    let is_gzip = source
+        .read_exact(&mut magic)
+        .is_ok_and(|()| magic == [0x1f, 0x8b]);
+    source
+        .seek(SeekFrom::Start(0))
         .map_err(|_| OciImportError::Invalid)?;
+    let reader: Box<dyn Read> = if is_gzip {
+        Box::new(GzDecoder::new(source))
+    } else {
+        Box::new(source)
+    };
+    let mut archive = tar::Archive::new(reader);
+    let entries = archive
+        .entries()
+        .map_err(|_| OciImportError::Invalid)?
+        .raw(true);
+    let mut layout: Option<Value> = None;
+    let mut index: Option<Value> = None;
+    let mut blobs: BTreeMap<String, OciFileBlob> = BTreeMap::new();
+    let mut total_bytes = 0_u64;
+    for (position, entry) in entries.enumerate() {
+        if position >= MAX_ARCHIVE_ENTRIES {
+            return Err(OciImportError::TooLarge);
+        }
+        let mut entry = entry.map_err(|_| OciImportError::Invalid)?;
+        let declared_size = entry.size();
+        total_bytes = total_bytes
+            .checked_add(declared_size)
+            .filter(|total| *total <= limits.max_total_bytes)
+            .ok_or(OciImportError::TooLarge)?;
+        let kind = entry.header().entry_type();
+        if kind.is_pax_local_extensions() || kind.is_pax_global_extensions() {
+            consume_pax_extension(&mut entry)?;
+            continue;
+        }
+        if kind.is_gnu_longname() || kind.is_gnu_longlink() {
+            return Err(OciImportError::Invalid);
+        }
+        if kind.is_dir() {
+            continue;
+        }
+        if !kind.is_file() || kind.is_gnu_sparse() {
+            return Err(OciImportError::Invalid);
+        }
+        let path = entry.path().map_err(|_| OciImportError::Invalid)?;
+        if !safe_entry_path(&path) {
+            return Err(OciImportError::Invalid);
+        }
+        let name = path
+            .to_str()
+            .ok_or(OciImportError::Invalid)?
+            .trim_start_matches("./");
+        match classify_entry(name) {
+            EntryKind::Layout => layout = Some(read_json_bounded(&mut entry, MAX_JSON_BYTES)?),
+            EntryKind::Index => index = Some(read_json_bounded(&mut entry, MAX_JSON_BYTES)?),
+            EntryKind::Blob(digest) => {
+                if blobs.len() >= limits.max_blobs {
+                    return Err(OciImportError::TooLarge);
+                }
+                let blob = copy_blob_to_temp(&mut entry, declared_size)?;
+                if blob.digest != digest {
+                    return Err(OciImportError::BlobMismatch);
+                }
+                if blobs.insert(digest, blob).is_some() {
+                    return Err(OciImportError::Invalid);
+                }
+            }
+            EntryKind::Unknown => return Err(OciImportError::Invalid),
+        }
+    }
+
+    let layout_value = layout.ok_or(OciImportError::Invalid)?;
+    let index_value = index.ok_or(OciImportError::Invalid)?;
+    let manifest_digest = manifest_digest_from_index(&index_value)?;
+    let manifest_blob = blobs.get(&manifest_digest).ok_or(OciImportError::Invalid)?;
+    let manifest_bytes = read_file_bounded(&manifest_blob.path, MAX_JSON_BYTES)?;
+    let blob_sizes = blobs
+        .iter()
+        .map(|(digest, blob)| (digest.clone(), blob.size_bytes))
+        .collect();
+    let validated = validate_manifest_graph(
+        layout_value,
+        index_value,
+        &manifest_digest,
+        manifest_bytes,
+        &blob_sizes,
+    )?;
+    let mut verified = Vec::new();
+    let mut seen = BTreeSet::new();
+    for descriptor in &validated.ordered_blobs {
+        if seen.insert(descriptor.digest.clone()) {
+            let mut blob = blobs
+                .remove(&descriptor.digest)
+                .ok_or(OciImportError::Invalid)?;
+            blob.media_type.clone_from(&descriptor.media_type);
+            verified.push(blob);
+        }
+    }
+    Ok(OciFileImage {
+        manifest_digest: validated.manifest_digest,
+        manifest_media_type: validated.manifest_media_type,
+        manifest_bytes: validated.manifest_bytes,
+        blobs: verified,
+    })
+}
+
+struct ValidatedManifest {
+    manifest_digest: String,
+    manifest_media_type: String,
+    manifest_bytes: Vec<u8>,
+    ordered_blobs: Vec<Descriptor>,
+}
+
+/// Validates the shared layout, manifest descriptor graph, and blob metadata for both the
+/// byte-backed fixture path and the file-backed production path.
+fn validate_manifest_graph(
+    layout_value: Value,
+    index_value: Value,
+    expected_manifest_digest: &str,
+    manifest_bytes: Vec<u8>,
+    blob_sizes: &BTreeMap<String, u64>,
+) -> Result<ValidatedManifest, OciImportError> {
+    let layout: LayoutFile =
+        serde_json::from_value(layout_value).map_err(|_| OciImportError::Invalid)?;
     if layout.image_layout_version != OCI_LAYOUT_VERSION {
         return Err(OciImportError::Invalid);
     }
-    let index: IndexFile = serde_json::from_value(index.ok_or(OciImportError::Invalid)?)
-        .map_err(|_| OciImportError::Invalid)?;
+    let index: IndexFile =
+        serde_json::from_value(index_value).map_err(|_| OciImportError::Invalid)?;
+    if index.manifests.len() != 1 {
+        return Err(OciImportError::Invalid);
+    }
     let manifest_descriptor = index
         .manifests
         .into_iter()
         .next()
         .ok_or(OciImportError::Invalid)?;
+    if manifest_descriptor.digest != expected_manifest_digest {
+        return Err(OciImportError::Invalid);
+    }
     if !MANIFEST_MEDIA_TYPES.contains(&manifest_descriptor.media_type.as_str()) {
         return Err(OciImportError::UnsupportedMediaType);
     }
     validate_descriptor(&manifest_descriptor)?;
-    let manifest_bytes = blobs
-        .get(&manifest_descriptor.digest)
-        .ok_or(OciImportError::Invalid)?
-        .clone();
-    if u64::try_from(manifest_bytes.len()).ok() != Some(manifest_descriptor.size) {
+    if blob_sizes.get(&manifest_descriptor.digest) != Some(&manifest_descriptor.size)
+        || u64::try_from(manifest_bytes.len()).ok() != Some(manifest_descriptor.size)
+    {
+        return Err(OciImportError::BlobMismatch);
+    }
+    if digest_reference(&manifest_bytes) != manifest_descriptor.digest {
         return Err(OciImportError::BlobMismatch);
     }
     let manifest: ManifestFile =
@@ -255,40 +477,39 @@ pub fn parse_oci_layout_with_limits(
     if manifest.layers.is_empty() {
         return Err(OciImportError::Invalid);
     }
-    let mut ordered = vec![manifest.config.clone()];
+    let mut ordered_blobs = vec![manifest.config.clone()];
     for layer in &manifest.layers {
         if !LAYER_MEDIA_TYPES.contains(&layer.media_type.as_str()) {
             return Err(OciImportError::UnsupportedMediaType);
         }
         validate_descriptor(layer)?;
-        ordered.push(layer.clone());
+        ordered_blobs.push(layer.clone());
     }
-    let mut verified = Vec::new();
-    for descriptor in ordered {
-        let bytes = blobs
-            .get(&descriptor.digest)
-            .ok_or(OciImportError::Invalid)?;
-        if u64::try_from(bytes.len()).ok() != Some(descriptor.size) {
+    for descriptor in &ordered_blobs {
+        if blob_sizes.get(&descriptor.digest) != Some(&descriptor.size) {
             return Err(OciImportError::BlobMismatch);
         }
-        if !verified
-            .iter()
-            .any(|blob: &OciBlob| blob.digest == descriptor.digest)
-        {
-            verified.push(OciBlob {
-                digest: descriptor.digest,
-                media_type: descriptor.media_type,
-                bytes: bytes.clone(),
-            });
-        }
     }
-    Ok(OciImage {
+    Ok(ValidatedManifest {
         manifest_digest: manifest_descriptor.digest,
         manifest_media_type: manifest_descriptor.media_type,
         manifest_bytes,
-        config_digest: manifest.config.digest,
-        blobs: verified,
+        ordered_blobs,
     })
+}
+
+fn manifest_digest_from_index(index_value: &Value) -> Result<String, OciImportError> {
+    let index: IndexFile =
+        serde_json::from_value(index_value.clone()).map_err(|_| OciImportError::Invalid)?;
+    if index.manifests.len() != 1 {
+        return Err(OciImportError::Invalid);
+    }
+    index
+        .manifests
+        .into_iter()
+        .next()
+        .map(|descriptor| descriptor.digest)
+        .ok_or(OciImportError::Invalid)
 }
 
 enum EntryKind {
@@ -323,6 +544,106 @@ fn read_json<R: Read>(reader: &mut R) -> Result<Value, OciImportError> {
     serde_json::from_reader(reader).map_err(|_| OciImportError::Invalid)
 }
 
+fn read_json_bounded<R: Read>(reader: &mut R, max_bytes: u64) -> Result<Value, OciImportError> {
+    let bytes = read_bounded(reader, max_bytes)?;
+    serde_json::from_slice(&bytes).map_err(|_| OciImportError::Invalid)
+}
+
+fn read_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, OciImportError> {
+    let mut file = File::open(path).map_err(|_| OciImportError::Invalid)?;
+    read_bounded(&mut file, max_bytes)
+}
+
+fn read_bounded<R: Read>(reader: &mut R, max_bytes: u64) -> Result<Vec<u8>, OciImportError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| OciImportError::Invalid)?;
+    if u64::try_from(bytes.len()).map_or(true, |size| size > max_bytes) {
+        return Err(OciImportError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+fn consume_pax_extension<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<(), OciImportError> {
+    if entry.size() > MAX_TAR_EXTENSION_BYTES {
+        return Err(OciImportError::TooLarge);
+    }
+    let bytes = read_bounded(entry, MAX_TAR_EXTENSION_BYTES)?;
+    if u64::try_from(bytes.len()).ok() != Some(entry.size()) {
+        return Err(OciImportError::Invalid);
+    }
+    for record in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b' ')
+            .ok_or(OciImportError::Invalid)?;
+        let length = std::str::from_utf8(&record[..separator])
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or(OciImportError::Invalid)?;
+        if length != record.len().saturating_add(1) {
+            return Err(OciImportError::Invalid);
+        }
+        let key_end = record[separator + 1..]
+            .iter()
+            .position(|byte| *byte == b'=')
+            .ok_or(OciImportError::Invalid)?
+            + separator
+            + 1;
+        let key = std::str::from_utf8(&record[separator + 1..key_end])
+            .map_err(|_| OciImportError::Invalid)?;
+        if matches!(key, "path" | "linkpath" | "size") || key.starts_with("GNU.sparse.") {
+            return Err(OciImportError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+fn copy_blob_to_temp<R: Read>(
+    entry: &mut R,
+    declared_size: u64,
+) -> Result<OciFileBlob, OciImportError> {
+    let temporary = NamedTempFile::new().map_err(|_| OciImportError::Invalid)?;
+    let mut output = temporary.reopen().map_err(|_| OciImportError::Invalid)?;
+    let mut input = entry.take(declared_size.saturating_add(1));
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut copied = 0_u64;
+    let mut hasher = Sha256::new();
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|_| OciImportError::Invalid)?;
+        if read == 0 {
+            break;
+        }
+        copied = copied
+            .checked_add(u64::try_from(read).map_err(|_| OciImportError::TooLarge)?)
+            .ok_or(OciImportError::TooLarge)?;
+        if copied > declared_size {
+            return Err(OciImportError::BlobMismatch);
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|_| OciImportError::Invalid)?;
+        hasher.update(&buffer[..read]);
+    }
+    if copied != declared_size {
+        return Err(OciImportError::BlobMismatch);
+    }
+    output.sync_all().map_err(|_| OciImportError::Invalid)?;
+    Ok(OciFileBlob {
+        digest: format!("sha256:{:x}", hasher.finalize()),
+        media_type: String::new(),
+        size_bytes: declared_size,
+        path: temporary.into_temp_path(),
+    })
+}
+
 fn validate_descriptor(descriptor: &Descriptor) -> Result<(), OciImportError> {
     if descriptor.size == 0 || !valid_digest(&descriptor.digest) || descriptor.media_type.is_empty()
     {
@@ -332,7 +653,10 @@ fn validate_descriptor(descriptor: &Descriptor) -> Result<(), OciImportError> {
 }
 
 fn safe_entry_path(path: &std::path::Path) -> bool {
-    !path.is_absolute()
+    let raw = path.as_os_str().to_string_lossy();
+    !raw.starts_with('/')
+        && !raw.starts_with('\\')
+        && !path.is_absolute()
         && !path.components().any(|component| {
             matches!(
                 component,
@@ -376,9 +700,11 @@ mod tests {
     use std::io::Write;
 
     use flate2::{Compression, write::GzEncoder};
+    use tempfile::NamedTempFile;
 
     use super::{
-        OciImportError, OciLimits, digest_reference, parse_oci_layout, parse_oci_layout_with_limits,
+        OciImportError, OciLimits, digest_reference, parse_oci_layout, parse_oci_layout_file,
+        parse_oci_layout_with_limits,
     };
 
     struct LayoutBuilder {
@@ -418,6 +744,14 @@ mod tests {
     }
 
     fn fixture(tamper_layer: bool, manifest_media_type: &str) -> ImageFixture {
+        fixture_with_duplicate_layer(tamper_layer, manifest_media_type, false)
+    }
+
+    fn fixture_with_duplicate_layer(
+        tamper_layer: bool,
+        manifest_media_type: &str,
+        duplicate_layer: bool,
+    ) -> ImageFixture {
         let config = br#"{"architecture":"amd64","os":"linux"}"#.to_vec();
         let config_digest = digest_reference(&config);
         let layer = b"layer-bytes".to_vec();
@@ -427,6 +761,16 @@ mod tests {
             layer.clone()
         };
         let layer_digest = digest_reference(&layer);
+        let layer_descriptor = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "digest": layer_digest,
+            "size": layer.len(),
+        });
+        let layers = if duplicate_layer {
+            serde_json::json!([layer_descriptor.clone(), layer_descriptor])
+        } else {
+            serde_json::json!([layer_descriptor])
+        };
         let manifest = serde_json::json!({
             "schemaVersion": 2,
             "mediaType": manifest_media_type,
@@ -435,11 +779,7 @@ mod tests {
                 "digest": config_digest,
                 "size": config.len(),
             },
-            "layers": [{
-                "mediaType": "application/vnd.oci.image.layer.v1.tar",
-                "digest": layer_digest,
-                "size": layer.len(),
-            }],
+            "layers": layers,
         });
         let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest json");
         let manifest_digest = digest_reference(&manifest_bytes);
@@ -497,6 +837,29 @@ mod tests {
             digest_reference(&image.manifest_bytes),
             image.manifest_digest
         );
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_layer_descriptor_is_deduplicated_for_byte_and_file_parsers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture =
+            fixture_with_duplicate_layer(false, "application/vnd.oci.image.manifest.v1+json", true);
+        let image = parse_oci_layout(&fixture.archive)?;
+        assert_eq!(image.blobs.len(), 2);
+        assert_eq!(image.blobs[1].digest, fixture.layer_digest);
+
+        let archive = NamedTempFile::new()?;
+        std::fs::write(archive.path(), &fixture.archive)?;
+        let file_image = parse_oci_layout_file(archive.path(), OciLimits::default())?;
+        assert_eq!(file_image.blobs.len(), 2);
+        let blob_paths: Vec<_> = file_image
+            .blobs
+            .iter()
+            .map(|blob| blob.path.to_path_buf())
+            .collect();
+        drop(file_image);
+        assert!(blob_paths.iter().all(|path| !path.exists()));
         Ok(())
     }
 
@@ -574,6 +937,29 @@ mod tests {
             parse_oci_layout_with_limits(&fixture.archive, tight).err(),
             Some(OciImportError::TooLarge)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn file_layout_keeps_blobs_out_of_process_memory_and_cleans_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = fixture(false, "application/vnd.oci.image.manifest.v1+json");
+        let archive = NamedTempFile::new()?;
+        std::fs::write(archive.path(), &fixture.archive)?;
+        let image = parse_oci_layout_file(archive.path(), OciLimits::default())?;
+        assert_eq!(
+            image.manifest_digest,
+            digest_reference(&image.manifest_bytes)
+        );
+        assert_eq!(image.blobs.len(), 2);
+        assert!(image.blobs.iter().all(|blob| blob.path.exists()));
+        let blob_paths: Vec<_> = image
+            .blobs
+            .iter()
+            .map(|blob| blob.path.to_path_buf())
+            .collect();
+        drop(image);
+        assert!(blob_paths.iter().all(|path| !path.exists()));
         Ok(())
     }
 }

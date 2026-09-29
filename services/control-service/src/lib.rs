@@ -11,7 +11,7 @@ pub mod messaging;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
 use contracts::authoring::{
@@ -60,6 +60,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 use time::Duration;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 const CREATE_UPLOAD: &str = "control_create_problem_package_upload_v1";
@@ -82,6 +83,17 @@ const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED;
 const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
 const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
 const AUTHORING_APPROVAL_SUBJECT: &str = subjects::AUTHORING_APPROVAL_COMPLETED;
+
+// Completing an image stages an archive on ephemeral storage while its immutable identity is
+// verified. Serialize this bounded heavy path per Control process before it claims a database
+// lease, so waiting requests do not hold a transaction or consume an expiring completion lease.
+static PLATFORM_IMAGE_COMPLETION_GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn platform_image_completion_gate() -> Arc<Semaphore> {
+    PLATFORM_IMAGE_COMPLETION_GATE
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+}
 
 /// Non-secret Control behavior configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1545,6 +1557,11 @@ impl ControlService {
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
     ) -> Result<PlatformImageImportStaging, ControlError> {
+        let gate = platform_image_completion_gate();
+        let _permit = gate
+            .acquire()
+            .await
+            .map_err(|_| ControlError::PersistenceFailed)?;
         let request_hash = canonical_hash(&json!({"actorId": actor_id, "uploadId": upload_id}))?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         match IdempotencyStore::reserve(
@@ -1617,7 +1634,7 @@ impl ControlService {
         let archive_media_type: String = row.try_get("archive_media_type").map_err(db)?;
         let stored_version: Option<String> = row.try_get("object_version").map_err(db)?;
         let stored_artifact: Option<Uuid> = row.try_get("artifact_id").map_err(db)?;
-        let verified = match (stored_version, stored_artifact) {
+        let verified_reference = match (stored_version, stored_artifact) {
             (Some(version), Some(artifact_id)) => {
                 let expected = contracts::ArtifactRef {
                     artifact_id: artifact_id_from_uuid(artifact_id)?,
@@ -1627,14 +1644,16 @@ impl ControlService {
                     media_type: archive_media_type,
                 };
                 self.objects
-                    .read_verified(&object_key, &expected)
+                    .read_verified_file(&object_key, &expected)
                     .await
+                    .map(|file| file.reference().clone())
                     .map_err(ControlError::from)
             }
             (None, None) => self
                 .objects
-                .freeze_current(&object_key, archive_bytes, &archive_media_type)
+                .freeze_current_file(&object_key, archive_bytes, &archive_media_type)
                 .await
+                .map(|file| file.reference().clone())
                 .map_err(ControlError::from),
             _ => Err(ControlError::PersistenceIdentityMismatch),
         }?;
@@ -1647,8 +1666,8 @@ impl ControlService {
         )
         .bind(upload_id.as_uuid())
         .bind(lease_token)
-        .bind(verified.reference.artifact_id.as_uuid())
-        .bind(&verified.reference.object_version)
+        .bind(verified_reference.artifact_id.as_uuid())
+        .bind(&verified_reference.object_version)
         .bind(now.get())
         .execute(&self.pool)
         .await
@@ -1676,7 +1695,7 @@ impl ControlService {
                     u64::try_from(capacity).map_err(|_| ControlError::PersistenceIdentityMismatch)
                 })
                 .transpose()?,
-            archive: verified.reference,
+            archive: verified_reference,
             archive_object_key: object_key,
             actor_id,
         })

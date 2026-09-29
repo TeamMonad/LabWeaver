@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use crate::oci_import::OciImage;
 use crate::oci_registry::{
-    OciRegistryError, OciRegistryPublisher, RegistryCredentials, ResolvedRegistryImage,
+    OciFileImage, OciRegistryError, OciRegistryPublisher, RegistryCredentials,
+    ResolvedRegistryImage,
 };
 
 pub use contracts::http::{
@@ -903,6 +904,24 @@ impl PlatformImageRegistry {
         let publisher = self.publisher(repository)?;
         publisher.publish(image).await.map_err(map_registry_error)?;
         publisher.tag(tag, image).await.map_err(map_registry_error)
+    }
+
+    /// Pushes one verified file-backed OCI image by digest and tags it after readback.
+    pub async fn publish_file(
+        &self,
+        reference: &str,
+        image: &OciFileImage,
+    ) -> Result<String, PlatformImageRegistryError> {
+        let (repository, tag) = self.parse_reference(reference)?;
+        let publisher = self.publisher(repository)?;
+        publisher
+            .publish_file(image)
+            .await
+            .map_err(map_registry_error)?;
+        publisher
+            .tag_file(tag, image)
+            .await
+            .map_err(map_registry_error)
     }
 
     fn publisher(

@@ -14,7 +14,9 @@ use std::{
     },
 };
 
-use artifact_store::{ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject};
+use artifact_store::{
+    ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject, VerifiedObjectFile,
+};
 use async_trait::async_trait;
 use auth::{
     ServiceAuthConfig, ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenVerifier,
@@ -814,6 +816,15 @@ impl ImmutableObjectStore for PlatformImageObjects {
         }
     }
 
+    async fn read_verified_file(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        let verified = self.read_verified(key, expected).await?;
+        VerifiedObjectFile::from_bytes(verified.reference, &verified.bytes)
+    }
+
     async fn freeze_current(
         &self,
         key: &str,
@@ -835,6 +846,16 @@ impl ImmutableObjectStore for PlatformImageObjects {
             reference,
             bytes: self.bytes.clone(),
         })
+    }
+
+    async fn freeze_current_file(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        let verified = self.freeze_current(key, expected_size, media_type).await?;
+        VerifiedObjectFile::from_bytes(verified.reference, &verified.bytes)
     }
 
     async fn delete_orphan(&self, _key: &str, _version: &str) -> Result<(), ObjectStoreError> {
