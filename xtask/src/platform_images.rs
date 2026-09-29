@@ -53,6 +53,7 @@ struct PlatformImageLock {
     buildkit_image: String,
     buildx: String,
     helm: String,
+    pnpm: String,
     claude_code: String,
     claude_code_linux_x64_sha512: String,
     bases: BaseImageLock,
@@ -529,7 +530,7 @@ fn prepare_inputs(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError>
         "containers/debian-bookworm-pkgs",
         DEBIAN_BOOKWORM_PKGS,
     )?;
-    prepare_web_dist(root)?;
+    prepare_web_dist(root, &lock.pnpm)?;
     ensure_web_dist(root)
 }
 
@@ -1151,7 +1152,7 @@ fn ensure_web_dist(root: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(target_os = "linux")]
-fn prepare_web_dist(root: &Path) -> Result<(), AppError> {
+fn prepare_web_dist(root: &Path, pnpm_version: &str) -> Result<(), AppError> {
     let dist = root.join("containers/web-dist");
     let expected = web_tree_hash(root)?;
     let marker = dist.join(".web-tree-sha256");
@@ -1162,8 +1163,10 @@ fn prepare_web_dist(root: &Path) -> Result<(), AppError> {
         return Ok(());
     }
 
+    let pnpm = format!("pnpm@{pnpm_version}");
     run_checked(
-        Command::new("pnpm").current_dir(root).args([
+        Command::new("corepack").current_dir(root).args([
+            pnpm.as_str(),
             "--dir",
             "web",
             "install",
@@ -1172,9 +1175,9 @@ fn prepare_web_dist(root: &Path) -> Result<(), AppError> {
         "install locked web dependencies",
     )?;
     run_checked(
-        Command::new("pnpm")
+        Command::new("corepack")
             .current_dir(root)
-            .args(["--dir", "web", "build"]),
+            .args([pnpm.as_str(), "--dir", "web", "build"]),
         "build web frontend",
     )?;
 

@@ -1,0 +1,46 @@
+# Build the MinIO integration-test image from the official source repository.
+# The public MinIO container registry is no longer the source of maintained
+# community images, so this file intentionally builds the pinned release.
+ARG MINIO_GO_IMAGE="docker.io/library/golang:1.24-alpine@sha256:757779acac4af1b349a20f357c7296097b4a0b89da4ad0e370b339060077282a"
+ARG MINIO_RUNTIME_IMAGE="docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
+
+FROM ${MINIO_GO_IMAGE} AS builder
+
+ARG MINIO_SOURCE_COMMIT
+ARG MINIO_RELEASE
+
+ENV CGO_ENABLED=0 \
+    GOOS=linux \
+    GOARCH=amd64 \
+    GOTOOLCHAIN=local
+
+RUN apk add --no-cache ca-certificates git
+WORKDIR /src
+RUN git init . \
+    && git remote add origin https://github.com/minio/minio.git \
+    && git fetch --depth=1 origin "${MINIO_SOURCE_COMMIT}" \
+    && git checkout --detach "${MINIO_SOURCE_COMMIT}" \
+    && test "$(git rev-parse HEAD)" = "${MINIO_SOURCE_COMMIT}"
+
+RUN MINIO_RELEASE="${MINIO_RELEASE}" \
+    go build -tags kqueue -trimpath \
+      --ldflags "$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go "${MINIO_RELEASE#RELEASE.}")" \
+      -o /out/minio . \
+    && test -x /out/minio
+
+FROM ${MINIO_RUNTIME_IMAGE}
+
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S minio \
+    && adduser -S -G minio -h /home/minio minio \
+    && mkdir -p /data \
+    && chown minio:minio /data
+
+COPY --from=builder /out/minio /usr/bin/minio
+
+USER minio
+WORKDIR /home/minio
+VOLUME ["/data"]
+EXPOSE 9000
+ENTRYPOINT ["/usr/bin/minio"]
+CMD ["server", "/data"]
