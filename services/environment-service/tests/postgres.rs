@@ -1665,6 +1665,7 @@ fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan
         base_disk_disk_sha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
             .to_owned(),
         storage_class_name: "local-path".to_owned(),
+        vm_vgpu_licensing: None,
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
     }
@@ -1771,6 +1772,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         base_disk_disk_sha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
             .to_owned(),
         storage_class_name: "local-path".to_owned(),
+        vm_vgpu_licensing: None,
         resources: Vec::new(),
         plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
     };

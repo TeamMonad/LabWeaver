@@ -36,9 +36,10 @@ use environment_service::{
     KubeVirtBaseDiskIdentity, KubeVirtBaseDiskImport, KubeVirtCleanupPlan,
     KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
     KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResourceBudget,
-    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, ProviderFailure, ReconcileAction, ReleaseProjectionError,
-    ResolvedContainerRelease, RuntimeVmBasePolicy, ensure_base_disk,
+    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSecretRef, KubeVirtSshBootstrap,
+    KubeVirtStoppedObservation, KubeVirtVmVgpuLicenseMode, KubeVirtVmVgpuLicensingConfiguration,
+    ProviderFailure, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
+    RuntimeVmBasePolicy, ensure_base_disk,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::json;
@@ -644,6 +645,65 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
             .pointer("/spec/hard/limits.nvidia.com~1grid-t4-4c"),
         Some(&json!("2"))
     );
+    assert_vgpu_license_projection(&plan);
+}
+
+fn assert_vgpu_license_projection(plan: &KubeVirtResourcePlan) {
+    let virtual_machine = resource(plan, "VirtualMachine");
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/metadata/labels/labweaver.io~1gpu-mode"),
+        Some(&json!("vm_vgpu"))
+    );
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/metadata/labels/labweaver.io~1gpu-mode"),
+        Some(&json!("vm_vgpu"))
+    );
+    let license_policy = named_resource(plan, "CiliumNetworkPolicy", "vm-vgpu-license-egress");
+    assert_eq!(
+        license_policy
+            .document
+            .pointer("/spec/egress/0/toEndpoints/0/matchLabels/k8s:io.kubernetes.pod.namespace"),
+        Some(&json!("kube-system"))
+    );
+    assert_eq!(
+        license_policy
+            .document
+            .pointer("/spec/egress/1/toEndpoints/0/matchLabels/app.kubernetes.io~1name"),
+        Some(&json!("fastapi-dls"))
+    );
+    let serialized_plan = serde_json::to_string(plan).expect("serialize VM vGPU plan");
+    assert!(!serialized_plan.contains("secret-token"));
+}
+
+#[test]
+fn vm_vgpu_without_deployment_licensing_configuration_fails_closed() {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(GpuRequest {
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU VM projection");
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(GpuAllocation {
+        entry_id: GpuCatalogEntryId::new(),
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::VmVgpu,
+        provider_binding: "kubevirt-primary-v1".to_owned(),
+        allocation_binding: "nvidia.com/grid-t4-4c".to_owned(),
+        catalog_revision: revision(1),
+    });
+    let provider =
+        provider_without_vgpu_licensing(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
 }
 
 #[test]
@@ -1040,6 +1100,40 @@ fn provider_with_budget(
     backend: Arc<FixtureBackend>,
     resource_budget: KubeVirtResourceBudget,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    provider_with_budget_and_licensing(
+        projection,
+        backend,
+        resource_budget,
+        Some(test_vgpu_licensing()),
+    )
+}
+
+fn provider_without_vgpu_licensing(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    provider_with_budget_and_licensing(
+        projection,
+        backend,
+        KubeVirtResourceBudget::new(
+            536_870_912,
+            1_000,
+            4_000,
+            262_144_000,
+            1_073_741_824,
+            10_737_418_240,
+        )
+        .expect("KubeVirt resource budget"),
+        None,
+    )
+}
+
+fn provider_with_budget_and_licensing(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+    resource_budget: KubeVirtResourceBudget,
+    licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
     KubeVirtProvider::new(
         "kubevirt-primary-v1".to_owned(),
         backend,
@@ -1063,9 +1157,34 @@ fn provider_with_budget(
             .expect("SSH bootstrap"),
             resource_budget,
         )
+        .and_then(|configuration| configuration.with_vm_vgpu_licensing(licensing))
         .expect("provider configuration"),
     )
     .expect("provider configuration")
+}
+
+fn test_vgpu_licensing() -> KubeVirtVmVgpuLicensingConfiguration {
+    KubeVirtVmVgpuLicensingConfiguration {
+        mode: KubeVirtVmVgpuLicenseMode::FastapiDls,
+        license_url: "https://fastapi-dls.labweaver-gpu-license.svc.cluster.local/"
+            .parse()
+            .expect("license URL"),
+        token_secret_ref: KubeVirtSecretRef {
+            namespace: "labweaver-gpu-license".to_owned(),
+            name: "fastapi-dls-client-token".to_owned(),
+            key: "client-token".to_owned(),
+        },
+        tls_ca_secret_ref: KubeVirtSecretRef {
+            namespace: "labweaver-gpu-license".to_owned(),
+            name: "fastapi-dls-tls".to_owned(),
+            key: "ca.crt".to_owned(),
+        },
+        fastapi_dls_signing_root_ca_secret_ref: Some(KubeVirtSecretRef {
+            namespace: "labweaver-gpu-license".to_owned(),
+            name: "fastapi-dls-signing-root".to_owned(),
+            key: "ca.crt".to_owned(),
+        }),
+    }
 }
 
 fn ubuntu_base_disk(

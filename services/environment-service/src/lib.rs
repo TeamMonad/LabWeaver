@@ -59,8 +59,9 @@ pub use kubevirt_provider::{
     KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtExecutorResponseEnvelope,
     KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
     KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
-    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, NatsKubeVirtExecutorServer, NatsKubeVirtProviderBackend,
+    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSecretRef,
+    KubeVirtSshBootstrap, KubeVirtStoppedObservation, KubeVirtVmVgpuLicenseMode,
+    KubeVirtVmVgpuLicensingConfiguration, NatsKubeVirtExecutorServer, NatsKubeVirtProviderBackend,
     PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore, ResolvedVmBaseDisk,
     RuntimeVmBasePolicy,
 };

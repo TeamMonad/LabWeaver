@@ -18,12 +18,13 @@ use crate::{
     FreezeBindingConfiguration, FreezeBindingService, JetStreamCommandConsumer,
     JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtBaseDiskBinding, KubeVirtProvider,
     KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtSshBootstrap,
-    KubernetesWorkExecutionBackend, LifecycleCommand, NatsAccessRevoker,
-    NatsContainerProviderBackend, NatsEnvironmentProvider, NatsKubeVirtProviderBackend,
-    NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher,
-    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry,
-    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler, RuntimeVmBasePolicy,
-    VmFreezeBindingConfiguration, WorkAdmissionClient, connect_nats_mtls,
+    KubeVirtVmVgpuLicensingConfiguration, KubernetesWorkExecutionBackend, LifecycleCommand,
+    NatsAccessRevoker, NatsContainerProviderBackend, NatsEnvironmentProvider,
+    NatsKubeVirtProviderBackend, NatsMessagingError, NatsResourceLeaseVerifier,
+    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, PgKubeVirtObservationStore,
+    PgReleaseProjectionStore, ProviderRegistry, ReconcileError, ReconcileWorker,
+    ReconcileWorkerError, Reconciler, RuntimeVmBasePolicy, VmFreezeBindingConfiguration,
+    WorkAdmissionClient, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -293,7 +294,8 @@ impl EnvironmentProcessRuntime {
                                     .cdi_scratch_storage_bytes
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             )?,
-                        )?,
+                        )?
+                        .with_vm_vgpu_licensing(configuration.vm_vgpu_licensing()?)?,
                     )?;
                     registry.register(Arc::new(provider))?;
                 }
@@ -825,6 +827,7 @@ struct ProviderBindingConfiguration {
     active_trust_revision: Option<u64>,
     base_disks: Option<Vec<BaseDiskConfiguration>>,
     runtime_vm_base: Option<RuntimeVmBaseConfiguration>,
+    vm_vgpu_licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
     gateway_pod_label: Option<String>,
     collector_namespace: Option<String>,
     collector_pod_label: Option<String>,
@@ -946,6 +949,18 @@ impl ProviderBindingConfiguration {
         .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)
     }
 
+    fn vm_vgpu_licensing(
+        &self,
+    ) -> Result<Option<KubeVirtVmVgpuLicensingConfiguration>, EnvironmentProcessRuntimeError> {
+        let Some(configuration) = self.vm_vgpu_licensing.as_ref() else {
+            return Ok(None);
+        };
+        configuration
+            .validate()
+            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?;
+        Ok(Some(configuration.clone()))
+    }
+
     fn vm_guest_user(&self) -> Result<String, EnvironmentProcessRuntimeError> {
         let bases = self
             .base_disks
@@ -991,6 +1006,7 @@ impl ProviderBindingConfiguration {
     fn has_kubevirt_fields(&self) -> bool {
         self.base_disks.is_some()
             || self.runtime_vm_base.is_some()
+            || self.vm_vgpu_licensing.is_some()
             || self.gateway_pod_label.is_some()
             || self.collector_namespace.is_some()
             || self.collector_pod_label.is_some()

@@ -1,5 +1,6 @@
 //! Restricted Kubernetes API backend for the deployment-owned runtime executor.
 
+use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +22,8 @@ use crate::{
     ContainerExecutorRequest, ContainerExecutorResponse, ContainerResource, ContainerResourcePlan,
     KubeVirtBackendFence, KubeVirtCleanupPlan, KubeVirtExecutorBackend, KubeVirtExecutorRequest,
     KubeVirtExecutorResponse, KubeVirtResource, KubeVirtResourcePlan, KubeVirtRunningObservation,
-    KubeVirtStoppedObservation, ProviderFailure, ProviderFailureCode,
+    KubeVirtSecretRef, KubeVirtStoppedObservation, KubeVirtVmVgpuLicenseMode,
+    KubeVirtVmVgpuLicensingConfiguration, ProviderFailure, ProviderFailureCode,
     cdi_import::{
         BASE_DISK_IMPORT_TIMEOUT, CdiImportError, KubeVirtBaseDiskImport,
         KubernetesCdiImportClient, ensure_base_disk,
@@ -30,6 +32,9 @@ use crate::{
 
 const FIELD_MANAGER: &str = "labweaver-runtime-executor";
 const CLEANUP_MEDIA_TYPE: &str = "application/vnd.labweaver.environment-cleanup+json";
+const VM_VGPU_PRIVATE_CLOUD_INIT_SECRET: &str = "vm-vgpu-cloud-init";
+const MAX_VGPU_BOOTSTRAP_SECRET_BYTES: usize = 64 * 1024;
+const FASTAPI_DLS_GUEST_PATCHER_PATH: &str = "/usr/local/bin/gridd-unlock-patcher";
 
 fn valid_dns_label(value: &str) -> bool {
     !value.is_empty()
@@ -487,51 +492,146 @@ impl KubernetesContainerExecutor {
         plan: &KubeVirtResourcePlan,
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_plan(plan)?;
+        let vm_vgpu_licensing = vm_vgpu_licensing_configuration(plan)?;
+        let namespace_resource = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == "Namespace")
+            .ok_or_else(rejected)?;
+        validate_kubevirt_resource(plan, namespace_resource)?;
+        self.apply_kubevirt_resource(plan, namespace_resource)
+            .await?;
         self.ensure_base_disk(plan).await?;
+        if let Some(licensing) = vm_vgpu_licensing.as_ref() {
+            self.apply_vgpu_private_cloud_init(plan, licensing).await?;
+        }
         for resource in &plan.resources {
+            if resource.kind == "Namespace" {
+                continue;
+            }
             validate_kubevirt_resource(plan, resource)?;
-            let url = self.kubevirt_resource_url(resource)?;
-            let response = self
-                .authorized(
-                    self.client
-                        .request(Method::PATCH, url)
-                        .query(&[("fieldManager", FIELD_MANAGER), ("force", "false")])
-                        .header("content-type", "application/apply-patch+yaml")
-                        .body(serde_json::to_vec(&resource.document).map_err(|_| rejected())?),
-                )
-                .send()
-                .await
-                .map_err(|_error| {
-                    tracing::warn!(
-                        event = "environment.kubevirt_executor.kubernetes_request_failed",
-                        diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
-                        failure_stage = "apply",
-                        environment_id = %plan.environment_id,
-                        resource_kind = %resource.kind,
-                        resource_name = %resource.name,
-                        error_kind = "provider_transport",
-                        retryable = true
-                    );
-                    unavailable()
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                let failure = status_failure(status);
+            let mut resource = resource.clone();
+            if vm_vgpu_licensing.is_some() && resource.kind == "VirtualMachine" {
+                point_vm_to_private_cloud_init(&mut resource)?;
+            }
+            self.apply_kubevirt_resource(plan, &resource).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_kubevirt_resource(
+        &self,
+        plan: &KubeVirtResourcePlan,
+        resource: &KubeVirtResource,
+    ) -> Result<(), ProviderFailure> {
+        validate_kubevirt_resource(plan, resource)?;
+        let url = self.kubevirt_resource_url(resource)?;
+        let response = self
+            .authorized(
+                self.client
+                    .request(Method::PATCH, url)
+                    .query(&[("fieldManager", FIELD_MANAGER), ("force", "false")])
+                    .header("content-type", "application/apply-patch+yaml")
+                    .body(serde_json::to_vec(&resource.document).map_err(|_| rejected())?),
+            )
+            .send()
+            .await
+            .map_err(|_error| {
                 tracing::warn!(
-                    event = "environment.kubevirt_executor.kubernetes_response_rejected",
-                    diagnostic_code = failure.diagnostic_code(),
+                    event = "environment.kubevirt_executor.kubernetes_request_failed",
+                    diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
                     failure_stage = "apply",
                     environment_id = %plan.environment_id,
                     resource_kind = %resource.kind,
                     resource_name = %resource.name,
-                    status_code = status.as_u16(),
-                    error_kind = "provider_response",
-                    retryable = failure.retryable
+                    error_kind = "provider_transport",
+                    retryable = true
                 );
-                return Err(failure);
-            }
+                unavailable()
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let failure = status_failure(status);
+            tracing::warn!(
+                event = "environment.kubevirt_executor.kubernetes_response_rejected",
+                diagnostic_code = failure.diagnostic_code(),
+                failure_stage = "apply",
+                environment_id = %plan.environment_id,
+                resource_kind = %resource.kind,
+                resource_name = %resource.name,
+                status_code = status.as_u16(),
+                error_kind = "provider_response",
+                retryable = failure.retryable
+            );
+            return Err(failure);
         }
         Ok(())
+    }
+
+    async fn apply_vgpu_private_cloud_init(
+        &self,
+        plan: &KubeVirtResourcePlan,
+        licensing: &KubeVirtVmVgpuLicensingConfiguration,
+    ) -> Result<(), ProviderFailure> {
+        let base_secret = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == "Secret" && resource.name == "cloud-init")
+            .ok_or_else(rejected)?;
+        let base_userdata = secret_data_field(&base_secret.document, "userdata")?;
+        let networkdata = secret_data_field(&base_secret.document, "networkdata")?;
+        let token = self.read_secret_data(&licensing.token_secret_ref).await?;
+        let tls_ca = self.read_secret_data(&licensing.tls_ca_secret_ref).await?;
+        let signing_root = match licensing.mode {
+            KubeVirtVmVgpuLicenseMode::NvidiaDls => None,
+            KubeVirtVmVgpuLicenseMode::FastapiDls => Some(
+                self.read_secret_data(
+                    licensing
+                        .fastapi_dls_signing_root_ca_secret_ref
+                        .as_ref()
+                        .ok_or_else(rejected)?,
+                )
+                .await?,
+            ),
+        };
+        let userdata = render_vm_vgpu_cloud_init(
+            &base_userdata,
+            &token,
+            &tls_ca,
+            signing_root.as_deref(),
+            licensing,
+        )?;
+        let mut document = base_secret.document.clone();
+        document["metadata"]["name"] = json!(VM_VGPU_PRIVATE_CLOUD_INIT_SECRET);
+        document["metadata"]["annotations"]["labweaver.io/private-bootstrap"] = json!("true");
+        document["data"]["userdata"] = json!(BASE64_STANDARD.encode(userdata.as_bytes()));
+        document["data"]["networkdata"] = json!(BASE64_STANDARD.encode(networkdata));
+        let private_secret = KubeVirtResource {
+            kind: "Secret".to_owned(),
+            namespace: Some(plan.namespace.clone()),
+            name: VM_VGPU_PRIVATE_CLOUD_INIT_SECRET.to_owned(),
+            document,
+        };
+        self.apply_kubevirt_resource(plan, &private_secret).await
+    }
+
+    async fn read_secret_data(
+        &self,
+        reference: &KubeVirtSecretRef,
+    ) -> Result<Vec<u8>, ProviderFailure> {
+        let secret = self
+            .get_json("Secret", &reference.namespace, &reference.name)
+            .await?
+            .ok_or_else(rejected)?;
+        let encoded = secret
+            .pointer(&format!("/data/{}", json_pointer_escape(&reference.key)))
+            .and_then(Value::as_str)
+            .ok_or_else(rejected)?;
+        let data = BASE64_STANDARD.decode(encoded).map_err(|_| rejected())?;
+        if data.is_empty() || data.len() > MAX_VGPU_BOOTSTRAP_SECRET_BYTES {
+            return Err(rejected());
+        }
+        Ok(data)
     }
 
     /// Imports and identity-checks the base disk the plan's clone `DataVolume` sources from.
@@ -982,6 +1082,143 @@ impl KubernetesContainerExecutor {
     }
 }
 
+fn vm_vgpu_licensing_configuration(
+    plan: &KubeVirtResourcePlan,
+) -> Result<Option<&KubeVirtVmVgpuLicensingConfiguration>, ProviderFailure> {
+    let vm = plan
+        .resources
+        .iter()
+        .find(|resource| resource.kind == "VirtualMachine")
+        .ok_or_else(rejected)?;
+    let gpu_devices = vm
+        .document
+        .pointer("/spec/template/spec/domain/devices/gpus")
+        .and_then(Value::as_array)
+        .ok_or_else(rejected)?;
+    let has_vgpu = !gpu_devices.is_empty();
+    match (has_vgpu, plan.vm_vgpu_licensing.as_ref()) {
+        (false, None) => Ok(None),
+        (true, Some(configuration)) => {
+            configuration.validate().map_err(|_| rejected())?;
+            Ok(Some(configuration))
+        }
+        _ => Err(rejected()),
+    }
+}
+
+fn secret_data_field(document: &Value, key: &str) -> Result<Vec<u8>, ProviderFailure> {
+    let encoded = document
+        .pointer(&format!("/data/{}", json_pointer_escape(key)))
+        .and_then(Value::as_str)
+        .ok_or_else(rejected)?;
+    let data = BASE64_STANDARD.decode(encoded).map_err(|_| rejected())?;
+    if data.is_empty() || data.len() > MAX_VGPU_BOOTSTRAP_SECRET_BYTES {
+        return Err(rejected());
+    }
+    Ok(data)
+}
+
+fn json_pointer_escape(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn point_vm_to_private_cloud_init(resource: &mut KubeVirtResource) -> Result<(), ProviderFailure> {
+    let volumes = resource
+        .document
+        .pointer_mut("/spec/template/spec/volumes")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(rejected)?;
+    let volume = volumes
+        .iter_mut()
+        .find(|volume| volume.get("name").and_then(Value::as_str) == Some("cloudinit"))
+        .ok_or_else(rejected)?;
+    let cloud_init = volume
+        .get_mut("cloudInitNoCloud")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(rejected)?;
+    cloud_init["secretRef"]["name"] = json!(VM_VGPU_PRIVATE_CLOUD_INIT_SECRET);
+    cloud_init["networkDataSecretRef"]["name"] = json!(VM_VGPU_PRIVATE_CLOUD_INIT_SECRET);
+    Ok(())
+}
+
+fn render_vm_vgpu_cloud_init(
+    base_userdata: &[u8],
+    token: &[u8],
+    tls_ca: &[u8],
+    signing_root: Option<&[u8]>,
+    licensing: &KubeVirtVmVgpuLicensingConfiguration,
+) -> Result<String, ProviderFailure> {
+    licensing.validate().map_err(|_| rejected())?;
+    if token.is_empty() || token.len() > MAX_VGPU_BOOTSTRAP_SECRET_BYTES {
+        return Err(rejected());
+    }
+    let base_userdata = std::str::from_utf8(base_userdata).map_err(|_| rejected())?;
+    if !tls_ca
+        .windows(b"-----BEGIN CERTIFICATE-----".len())
+        .any(|window| window == b"-----BEGIN CERTIFICATE-----")
+    {
+        return Err(rejected());
+    }
+    if matches!(licensing.mode, KubeVirtVmVgpuLicenseMode::FastapiDls)
+        && !signing_root.is_some_and(|value| {
+            value
+                .windows(b"-----BEGIN CERTIFICATE-----".len())
+                .any(|window| window == b"-----BEGIN CERTIFICATE-----")
+        })
+    {
+        return Err(rejected());
+    }
+    let token_b64 = BASE64_STANDARD.encode(token);
+    let tls_ca_b64 = BASE64_STANDARD.encode(tls_ca);
+    let gridd_config_b64 = BASE64_STANDARD.encode(format!(
+        "FeatureType=1\nClientConfigTokenPath={}\n",
+        KubeVirtVmVgpuLicensingConfiguration::token_directory_path()
+    ));
+    let mut write_files = format!(
+        "  - path: /usr/local/share/ca-certificates/labweaver-vgpu-license.crt\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {tls_ca_b64}\n  - path: {gridd_config_path}\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {gridd_config_b64}\n  - path: {token_path}\n    owner: root:root\n    permissions: '0600'\n    encoding: b64\n    content: {token_b64}\n",
+        gridd_config_path = KubeVirtVmVgpuLicensingConfiguration::gridd_config_path(),
+        token_path = KubeVirtVmVgpuLicensingConfiguration::token_path(),
+    );
+    let patch_command = match licensing.mode {
+        KubeVirtVmVgpuLicenseMode::NvidiaDls => String::new(),
+        KubeVirtVmVgpuLicenseMode::FastapiDls => {
+            let signing_root_b64 = BASE64_STANDARD.encode(signing_root.ok_or_else(rejected)?);
+            let _ = write!(
+                write_files,
+                "  - path: {path}\n    owner: root:root\n    permissions: '0644'\n    encoding: b64\n    content: {signing_root_b64}\n",
+                path = KubeVirtVmVgpuLicensingConfiguration::fastapi_signing_root_path(),
+            );
+            format!(
+                "  - [{patcher}, -g, {gridd}, -c, {root}]\n",
+                patcher = FASTAPI_DLS_GUEST_PATCHER_PATH,
+                gridd = KubeVirtVmVgpuLicensingConfiguration::nvidia_gridd_path(),
+                root = KubeVirtVmVgpuLicensingConfiguration::fastapi_signing_root_path(),
+            )
+        }
+    };
+    let marker = "\nruncmd:\n";
+    let marker_index = base_userdata.find(marker).ok_or_else(rejected)?;
+    let (before, after) = base_userdata.split_at(marker_index);
+    let mut rendered = String::with_capacity(base_userdata.len() + write_files.len() + 256);
+    rendered.push_str(before);
+    rendered.push('\n');
+    if !before.lines().any(|line| line.trim() == "write_files:") {
+        rendered.push_str("write_files:\n");
+    }
+    rendered.push_str(&write_files);
+    rendered.push_str(marker);
+    rendered.push_str("  - [update-ca-certificates]\n");
+    rendered.push_str(&patch_command);
+    // The guest image may already have nvidia-gridd running before cloud-init
+    // writes the deployment-owned token and trust roots.  Enabling alone does
+    // not reload an active daemon, so always restart it after the private
+    // bootstrap has been installed.
+    rendered.push_str("  - [systemctl, enable, nvidia-gridd]\n");
+    rendered.push_str("  - [systemctl, restart, nvidia-gridd]\n");
+    rendered.push_str(&after[marker.len()..]);
+    Ok(rendered)
+}
+
 #[async_trait]
 impl ContainerExecutorBackend for KubernetesContainerExecutor {
     async fn execute(
@@ -1171,7 +1408,18 @@ fn validate_kubevirt_plan(plan: &KubeVirtResourcePlan) -> Result<(), ProviderFai
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || plan.base_disk.validate().is_err()
+        || plan.resources.iter().any(|resource| {
+            resource.kind == "Secret" && resource.name == VM_VGPU_PRIVATE_CLOUD_INIT_SECRET
+        })
     {
+        return Err(rejected());
+    }
+    let virtual_machines = plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == "VirtualMachine")
+        .collect::<Vec<_>>();
+    if virtual_machines.len() != 1 || virtual_machines[0].name != plan.virtual_machine_name {
         return Err(rejected());
     }
     Ok(())
@@ -1242,6 +1490,7 @@ fn resource_path(kind: &str) -> Result<(&'static str, &'static str, bool), Provi
         "Secret" => Ok(("/api/v1", "secrets", true)),
         "Deployment" => Ok(("/apis/apps/v1", "deployments", true)),
         "NetworkPolicy" => Ok(("/apis/networking.k8s.io/v1", "networkpolicies", true)),
+        "CiliumNetworkPolicy" => Ok(("/apis/cilium.io/v2", "ciliumnetworkpolicies", true)),
         "HTTPRoute" => Ok(("/apis/gateway.networking.k8s.io/v1", "httproutes", true)),
         "DataVolume" => Ok(("/apis/cdi.kubevirt.io/v1beta1", "datavolumes", true)),
         "VirtualMachine" => Ok(("/apis/kubevirt.io/v1", "virtualmachines", true)),
@@ -1500,10 +1749,10 @@ const fn invalid_observation() -> ProviderFailure {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::ReconcileAction;
+    use crate::{KubeVirtBaseDiskIdentity, ReconcileAction};
     use axum::{
         Router,
-        body::Body,
+        body::{Body, to_bytes},
         extract::State,
         http::{Method, Request, StatusCode},
         response::{IntoResponse, Response},
@@ -1547,6 +1796,338 @@ mod tests {
         );
         assert!(workspace_claim_is_bound(Some(&json!({"status":{"phase":"Lost"}}))).is_err());
         assert!(workspace_claim_is_bound(Some(&json!({"status":{"phase":1}}))).is_err());
+    }
+
+    fn vgpu_licensing(mode: KubeVirtVmVgpuLicenseMode) -> KubeVirtVmVgpuLicensingConfiguration {
+        KubeVirtVmVgpuLicensingConfiguration {
+            mode,
+            license_url: "https://fastapi-dls.labweaver-gpu-license.svc.cluster.local/"
+                .parse()
+                .expect("fixture URL"),
+            token_secret_ref: KubeVirtSecretRef {
+                namespace: "labweaver-gpu-license".to_owned(),
+                name: "fastapi-dls-client-token".to_owned(),
+                key: "client-token".to_owned(),
+            },
+            tls_ca_secret_ref: KubeVirtSecretRef {
+                namespace: "labweaver-gpu-license".to_owned(),
+                name: "fastapi-dls-tls".to_owned(),
+                key: "ca.crt".to_owned(),
+            },
+            fastapi_dls_signing_root_ca_secret_ref: (mode == KubeVirtVmVgpuLicenseMode::FastapiDls)
+                .then(|| KubeVirtSecretRef {
+                    namespace: "labweaver-gpu-license".to_owned(),
+                    name: "fastapi-dls-signing-root".to_owned(),
+                    key: "ca.crt".to_owned(),
+                }),
+        }
+    }
+
+    #[test]
+    fn fastapi_vgpu_cloud_init_is_private_and_runs_the_fixed_guest_bootstrap() {
+        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls);
+        let token = b"secret-client-token";
+        let tls_ca = b"-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n";
+        let signing_root = b"-----BEGIN CERTIFICATE-----\nsigning\n-----END CERTIFICATE-----\n";
+        let rendered = render_vm_vgpu_cloud_init(
+            b"#cloud-config\nwrite_files:\n  - path: /etc/base\n    content: base\nruncmd:\n  - [true]\n",
+            token,
+            tls_ca,
+            Some(signing_root),
+            &licensing,
+        )
+        .expect("valid private bootstrap");
+
+        assert!(rendered.contains("/usr/local/share/ca-certificates/labweaver-vgpu-license.crt"));
+        assert!(rendered.contains(KubeVirtVmVgpuLicensingConfiguration::token_path()));
+        assert!(rendered.contains(KubeVirtVmVgpuLicensingConfiguration::gridd_config_path()));
+        assert!(rendered.contains(&BASE64_STANDARD.encode(format!(
+            "FeatureType=1\nClientConfigTokenPath={}\n",
+            KubeVirtVmVgpuLicensingConfiguration::token_directory_path()
+        ))));
+        assert!(
+            rendered.contains(KubeVirtVmVgpuLicensingConfiguration::fastapi_signing_root_path())
+        );
+        assert!(rendered.contains("/usr/local/bin/gridd-unlock-patcher"));
+        assert!(rendered.contains("/usr/bin/nvidia-gridd"));
+        assert!(rendered.contains("[update-ca-certificates]"));
+        assert!(rendered.contains("[systemctl, enable, nvidia-gridd]"));
+        assert!(rendered.contains("[systemctl, restart, nvidia-gridd]"));
+        assert!(rendered.contains(&BASE64_STANDARD.encode(token)));
+        assert!(!rendered.contains(std::str::from_utf8(token).expect("fixture token")));
+        assert!(rendered.contains("/etc/base"));
+    }
+
+    #[test]
+    fn official_dls_cloud_init_does_not_run_fastapi_patcher() {
+        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::NvidiaDls);
+        let rendered = render_vm_vgpu_cloud_init(
+            b"#cloud-config\nwrite_files:\n  - path: /etc/base\n    content: base\nruncmd:\n",
+            b"official-token",
+            b"-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n",
+            None,
+            &licensing,
+        )
+        .expect("valid official DLS bootstrap");
+
+        assert!(rendered.contains(KubeVirtVmVgpuLicensingConfiguration::token_path()));
+        assert!(!rendered.contains("gridd-unlock-patcher"));
+        assert!(
+            !rendered.contains(KubeVirtVmVgpuLicensingConfiguration::fastapi_signing_root_path())
+        );
+    }
+
+    #[test]
+    fn vgpu_private_cloud_init_rejects_missing_fastapi_signing_root() {
+        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls);
+        assert!(
+            render_vm_vgpu_cloud_init(
+                b"#cloud-config\nwrite_files:\n  - path: /etc/base\n    content: base\nruncmd:\n",
+                b"token",
+                b"-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n",
+                None,
+                &licensing,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vm_vgpu_private_secret_repoints_both_cloud_init_documents() {
+        let mut resource = KubeVirtResource {
+            kind: "VirtualMachine".to_owned(),
+            namespace: Some("lw-env-test".to_owned()),
+            name: "runtime".to_owned(),
+            document: json!({
+                "spec": {"template": {"spec": {"volumes": [{
+                    "name": "cloudinit",
+                    "cloudInitNoCloud": {
+                        "secretRef": {"name": "cloud-init"},
+                        "networkDataSecretRef": {"name": "cloud-init"}
+                    }
+                }]}}}
+            }),
+        };
+
+        point_vm_to_private_cloud_init(&mut resource).expect("cloud-init volume is valid");
+        assert_eq!(
+            resource
+                .document
+                .pointer("/spec/template/spec/volumes/0/cloudInitNoCloud/secretRef/name"),
+            Some(&json!(VM_VGPU_PRIVATE_CLOUD_INIT_SECRET))
+        );
+        assert_eq!(
+            resource.document.pointer(
+                "/spec/template/spec/volumes/0/cloudInitNoCloud/networkDataSecretRef/name"
+            ),
+            Some(&json!(VM_VGPU_PRIVATE_CLOUD_INIT_SECRET))
+        );
+    }
+
+    async fn test_kubevirt_executor(
+        mock: &MockKubernetes,
+    ) -> Result<(tempfile::TempDir, KubernetesContainerExecutor), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let token_file = directory.path().join("token");
+        let ca_file = directory.path().join("ca.pem");
+        let registry_file = directory.path().join("registry.json");
+        std::fs::write(&token_file, "test-token\n")?;
+        std::fs::write(&ca_file, mock.ca_pem.as_bytes())?;
+        std::fs::write(
+            &registry_file,
+            br#"{"auths":{"registry.example":{"auth":"opaque"}}}"#,
+        )?;
+        let configuration = RuntimeExecutorConfiguration {
+            api_server: mock.endpoint.clone(),
+            bearer_token_file: token_file,
+            cluster_ca_file: ca_file,
+            request_timeout_milliseconds: 2_000,
+            cleanup_poll_milliseconds: 1,
+            cleanup_retention_seconds: 3_600,
+            ssh_handshake_timeout_milliseconds: 1_000,
+            registry_pull_secret_file: registry_file,
+            registry_pull_secret_name: "registry-pull".to_owned(),
+        };
+        let objects = Arc::new(
+            S3ImmutableObjectStore::new(
+                artifact_store::S3StoreConfig {
+                    binding: "test-store".to_owned(),
+                    endpoint: "https://object-store.invalid".parse()?,
+                    bucket: "test-bucket".to_owned(),
+                    region: "test-region".to_owned(),
+                    object_prefix: "test".to_owned(),
+                    upload_ttl_seconds: 60,
+                    max_object_bytes: 1_024,
+                    force_path_style: true,
+                    ca_bundle_file: None,
+                },
+                artifact_store::S3Credential {
+                    access_key_id: "test-access".to_owned(),
+                    secret_access_key: "test-secret".to_owned(),
+                    session_token: None,
+                },
+            )
+            .await?,
+        );
+        let executor = KubernetesContainerExecutor::new(configuration, objects)
+            .map_err(|error| format!("executor configuration rejected: {error:?}"))?;
+        Ok((directory, executor))
+    }
+
+    fn vm_vgpu_plan_for_test(
+        environment_id: contracts::EnvironmentId,
+        namespace: &str,
+        licensing: KubeVirtVmVgpuLicensingConfiguration,
+    ) -> KubeVirtResourcePlan {
+        let labels = json!({"labweaver.io/environment-id": environment_id.to_string()});
+        let base_userdata =
+            "#cloud-config\nwrite_files:\n  - path: /etc/base\n    content: base\nruncmd:\n";
+        KubeVirtResourcePlan {
+            environment_id,
+            namespace: namespace.to_owned(),
+            virtual_machine_name: "runtime".to_owned(),
+            data_volume_name: "rootdisk".to_owned(),
+            base_disk: contracts::supply_chain::VirtualMachineBaseDisk {
+                binding: "ubuntu-vgpu".to_owned(),
+                source_registry_digest:
+                    "docker://registry.example/ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                capacity_bytes: 1,
+            },
+            base_disk_format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            base_disk_identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
+            base_disk_data_source_namespace: "labweaver-system".to_owned(),
+            base_disk_data_source_name: "ubuntu-vgpu".to_owned(),
+            base_disk_disk_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            storage_class_name: "local-path".to_owned(),
+            vm_vgpu_licensing: Some(licensing),
+            // Deliberately put the namespace last.  The executor must establish
+            // it before reading deployment Secrets or applying the VM's private
+            // bootstrap, regardless of plan resource order.
+            resources: vec![
+                KubeVirtResource {
+                    kind: "Secret".to_owned(),
+                    namespace: Some(namespace.to_owned()),
+                    name: "cloud-init".to_owned(),
+                    document: json!({
+                        "apiVersion":"v1",
+                        "kind":"Secret",
+                        "metadata":{"name":"cloud-init","namespace":namespace,"labels":labels},
+                        "data":{
+                            "userdata":BASE64_STANDARD.encode(base_userdata),
+                            "networkdata":BASE64_STANDARD.encode("version: 2\n")
+                        }
+                    }),
+                },
+                KubeVirtResource {
+                    kind: "VirtualMachine".to_owned(),
+                    namespace: Some(namespace.to_owned()),
+                    name: "runtime".to_owned(),
+                    document: json!({
+                        "apiVersion":"kubevirt.io/v1",
+                        "kind":"VirtualMachine",
+                        "metadata":{"name":"runtime","namespace":namespace,"labels":labels},
+                        "spec":{"template":{"spec":{
+                            "domain":{"devices":{"gpus":[{"name":"gpu","deviceName":"nvidia.com/GRID_V100DX-2Q"}]}},
+                            "volumes":[{"name":"cloudinit","cloudInitNoCloud":{
+                                "secretRef":{"name":"cloud-init"},
+                                "networkDataSecretRef":{"name":"cloud-init"}
+                            }}]
+                        }}}
+                    }),
+                },
+                KubeVirtResource {
+                    kind: "Namespace".to_owned(),
+                    namespace: None,
+                    name: namespace.to_owned(),
+                    document: json!({
+                        "apiVersion":"v1",
+                        "kind":"Namespace",
+                        "metadata":{"name":namespace,"labels":labels}
+                    }),
+                },
+            ],
+            plan_sha256: Sha256Digest::of_bytes(b"vm-vgpu-private-bootstrap"),
+        }
+    }
+
+    #[tokio::test]
+    async fn vm_vgpu_apply_reads_named_secrets_and_only_applies_private_bootstrap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let environment_id = contracts::EnvironmentId::new();
+        let namespace = format!("lw-env-{environment_id}");
+        let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls);
+        let plan = vm_vgpu_plan_for_test(environment_id, &namespace, licensing);
+
+        executor
+            .apply_kubevirt_plan(&plan)
+            .await
+            .map_err(|error| format!("vGPU plan apply rejected: {error:?}"))?;
+        let private_secret = mock
+            .applied_private_secret
+            .lock()
+            .await
+            .clone()
+            .ok_or("private bootstrap Secret was not applied")?;
+        assert_eq!(
+            private_secret.pointer("/metadata/name"),
+            Some(&json!("vm-vgpu-cloud-init"))
+        );
+        let private_userdata = BASE64_STANDARD.decode(
+            private_secret
+                .pointer("/data/userdata")
+                .and_then(Value::as_str)
+                .ok_or("private userdata missing")?,
+        )?;
+        let private_userdata = String::from_utf8(private_userdata)?;
+        assert!(private_userdata.contains(&BASE64_STANDARD.encode("secret-client-token")));
+        assert!(!private_userdata.contains("secret-client-token"));
+        assert!(!serde_json::to_string(&plan)?.contains("secret-client-token"));
+        let events = mock.events.lock().await.clone();
+        let namespace_apply = events
+            .iter()
+            .position(|event| event == &format!("PATCH /api/v1/namespaces/{namespace}"))
+            .ok_or("environment Namespace was not applied")?;
+        let private_secret_apply = events
+            .iter()
+            .position(|event| {
+                event == &format!(
+                    "PATCH /api/v1/namespaces/{namespace}/secrets/{VM_VGPU_PRIVATE_CLOUD_INIT_SECRET}"
+                )
+            })
+            .ok_or("private bootstrap Secret was not applied")?;
+        let vm_apply = events
+            .iter()
+            .position(|event| {
+                event
+                    == &format!(
+                        "PATCH /apis/kubevirt.io/v1/namespaces/{namespace}/virtualmachines/runtime"
+                    )
+            })
+            .ok_or("VirtualMachine was not applied")?;
+        assert!(
+            namespace_apply < private_secret_apply && private_secret_apply < vm_apply,
+            "namespace/private Secret/VM apply ordering was not preserved: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { event.ends_with("/secrets/fastapi-dls-client-token") })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.ends_with("/secrets/fastapi-dls-tls"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.ends_with("/secrets/fastapi-dls-signing-root"))
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1693,12 +2274,14 @@ mod tests {
     struct MockKubernetesState {
         deployment_applied: Arc<std::sync::atomic::AtomicBool>,
         events: Arc<Mutex<Vec<String>>>,
+        applied_private_secret: Arc<Mutex<Option<Value>>>,
     }
 
     struct MockKubernetes {
         endpoint: Url,
         ca_pem: String,
         events: Arc<Mutex<Vec<String>>>,
+        applied_private_secret: Arc<Mutex<Option<Value>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -1718,9 +2301,11 @@ mod tests {
         let endpoint: Url =
             format!("https://localhost:{}", listener.local_addr()?.port()).parse()?;
         let events = Arc::new(Mutex::new(Vec::new()));
+        let applied_private_secret = Arc::new(Mutex::new(None));
         let state = MockKubernetesState {
             deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: Arc::clone(&events),
+            applied_private_secret: Arc::clone(&applied_private_secret),
         };
         let router = Router::new()
             .fallback(mock_kubernetes_handler)
@@ -1732,6 +2317,7 @@ mod tests {
             endpoint,
             ca_pem,
             events,
+            applied_private_secret,
             task,
         })
     }
@@ -1743,6 +2329,8 @@ mod tests {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
         let is_deployment_patch = method == Method::PATCH && path.ends_with("/deployments/runtime");
+        let is_private_secret_patch =
+            method == Method::PATCH && path.ends_with("/secrets/vm-vgpu-cloud-init");
         let is_workspace_claim = path.ends_with("/persistentvolumeclaims/workspace");
         let event = if method == Method::GET && is_workspace_claim {
             let phase = if state
@@ -1762,6 +2350,50 @@ mod tests {
             state
                 .deployment_applied
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+        if method == Method::GET && path.ends_with("/secrets/fastapi-dls-client-token") {
+            return axum::Json(json!({
+                "data": {"client-token": BASE64_STANDARD.encode("secret-client-token")}
+            }))
+            .into_response();
+        }
+        if method == Method::GET && path.ends_with("/secrets/fastapi-dls-tls") {
+            return axum::Json(json!({
+                "data": {"ca.crt": BASE64_STANDARD.encode(
+                    "-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n"
+                )}
+            }))
+            .into_response();
+        }
+        if method == Method::GET && path.ends_with("/secrets/fastapi-dls-signing-root") {
+            return axum::Json(json!({
+                "data": {"ca.crt": BASE64_STANDARD.encode(
+                    "-----BEGIN CERTIFICATE-----\nsigning\n-----END CERTIFICATE-----\n"
+                )}
+            }))
+            .into_response();
+        }
+        if method == Method::GET && path.ends_with("/datasources/ubuntu-vgpu") {
+            return axum::Json(json!({
+                "metadata": {"annotations": {
+                    "labweaver.io/source-registry":
+                        "docker://registry.example/ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "labweaver.io/disk-sha256":
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "labweaver.io/base-disk-capacity-bytes": "1"
+                }}
+            }))
+            .into_response();
+        }
+        if is_private_secret_patch {
+            let Ok(body) = to_bytes(request.into_body(), 1024 * 1024).await else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let Ok(document) = serde_json::from_slice::<Value>(&body) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            *state.applied_private_secret.lock().await = Some(document);
+            return StatusCode::OK.into_response();
         }
         if method == Method::GET && is_workspace_claim {
             let phase = if state
@@ -1801,6 +2433,10 @@ mod tests {
         assert!(matches!(
             resource_path("VirtualMachine"),
             Ok(("/apis/kubevirt.io/v1", "virtualmachines", true))
+        ));
+        assert!(matches!(
+            resource_path("CiliumNetworkPolicy"),
+            Ok(("/apis/cilium.io/v2", "ciliumnetworkpolicies", true))
         ));
     }
 

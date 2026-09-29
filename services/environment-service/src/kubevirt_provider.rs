@@ -23,6 +23,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -35,6 +36,127 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const GATEWAY_LABEL_KEY: &str = "app.kubernetes.io/name";
 const KUBEVIRT_NODE_LABEL_KEY: &str = "labweaver.io/kubevirt";
 const KUBEVIRT_NODE_LABEL_VALUE: &str = "true";
+const NVIDIA_GRIDD_PATH: &str = "/usr/bin/nvidia-gridd";
+const NVIDIA_GRIDD_CONFIG_PATH: &str = "/etc/nvidia/gridd.conf";
+const FASTAPI_DLS_SIGNING_ROOT_PATH: &str = "/etc/nvidia/labweaver-fastapi-dls-signing-root-ca.pem";
+const VGPU_CLIENT_TOKEN_DIRECTORY: &str = "/etc/nvidia/ClientConfigToken/";
+const VGPU_CLIENT_TOKEN_PATH: &str = "/etc/nvidia/ClientConfigToken/client_configuration_token.tok";
+
+/// Deployment-owned Secret reference used by the VM vGPU licensing bootstrap.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KubeVirtSecretRef {
+    pub namespace: String,
+    pub name: String,
+    pub key: String,
+}
+
+impl KubeVirtSecretRef {
+    fn validate(&self) -> Result<(), ReleaseProjectionError> {
+        if !valid_dns_label(&self.namespace)
+            || !valid_dns_label(&self.name)
+            || self.key.is_empty()
+            || self.key.len() > 253
+            || !self
+                .key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(())
+    }
+}
+
+/// The two supported NVIDIA licensing service implementations.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KubeVirtVmVgpuLicenseMode {
+    NvidiaDls,
+    FastapiDls,
+}
+
+/// Non-secret, deployment-owned VM vGPU licensing configuration.
+///
+/// Secret values are deliberately represented only by Kubernetes Secret references. They are
+/// resolved by the restricted `KubeVirt` executor at apply time and never become part of the
+/// public resource plan or image.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KubeVirtVmVgpuLicensingConfiguration {
+    pub mode: KubeVirtVmVgpuLicenseMode,
+    /// HTTPS endpoint that must match the endpoint encoded in the deployment-issued client token.
+    /// The executor keeps the token opaque and uses this value for the exact egress boundary.
+    pub license_url: Url,
+    pub token_secret_ref: KubeVirtSecretRef,
+    pub tls_ca_secret_ref: KubeVirtSecretRef,
+    #[serde(default)]
+    pub fastapi_dls_signing_root_ca_secret_ref: Option<KubeVirtSecretRef>,
+}
+
+impl KubeVirtVmVgpuLicensingConfiguration {
+    /// Validates the supported deployment modes and all non-secret references.
+    pub fn validate(&self) -> Result<(), ReleaseProjectionError> {
+        if self.license_url.scheme() != "https"
+            || self.license_url.host_str().is_none()
+            || self.license_url.username() != ""
+            || self.license_url.password().is_some()
+            || self.license_url.path() != "/"
+            || self.license_url.query().is_some()
+            || self.license_url.fragment().is_some()
+            || (self.mode == KubeVirtVmVgpuLicenseMode::FastapiDls
+                && self.license_url.port_or_known_default() != Some(443))
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        self.token_secret_ref.validate()?;
+        self.tls_ca_secret_ref.validate()?;
+        match self.mode {
+            KubeVirtVmVgpuLicenseMode::NvidiaDls => {
+                if self.fastapi_dls_signing_root_ca_secret_ref.is_some() {
+                    return Err(ReleaseProjectionError::ConfigurationInvalid);
+                }
+            }
+            KubeVirtVmVgpuLicenseMode::FastapiDls => {
+                self.fastapi_dls_signing_root_ca_secret_ref
+                    .as_ref()
+                    .ok_or(ReleaseProjectionError::ConfigurationInvalid)?
+                    .validate()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fixed path used by the prebuilt guest image for the NVIDIA DLS token.
+    #[must_use]
+    pub const fn token_path() -> &'static str {
+        VGPU_CLIENT_TOKEN_PATH
+    }
+
+    /// Fixed directory configured in `gridd.conf` for the prebuilt guest image.
+    #[must_use]
+    pub const fn token_directory_path() -> &'static str {
+        VGPU_CLIENT_TOKEN_DIRECTORY
+    }
+
+    /// Fixed NVIDIA Grid daemon configuration path in the prebuilt guest image.
+    #[must_use]
+    pub const fn gridd_config_path() -> &'static str {
+        NVIDIA_GRIDD_CONFIG_PATH
+    }
+
+    /// Fixed path used by the prebuilt guest image for FastAPI-DLS signing trust.
+    #[must_use]
+    pub const fn fastapi_signing_root_path() -> &'static str {
+        FASTAPI_DLS_SIGNING_ROOT_PATH
+    }
+
+    /// Fixed guest daemon path passed to `gridd-unlock-patcher`.
+    #[must_use]
+    pub const fn nvidia_gridd_path() -> &'static str {
+        NVIDIA_GRIDD_PATH
+    }
+}
 
 /// Durable Environment operation identity carried across the KubeVirt/CDI boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -112,6 +234,9 @@ pub struct KubeVirtResourcePlan {
     /// runtime-registered base.
     pub base_disk_disk_sha256: String,
     pub storage_class_name: String,
+    /// Non-secret deployment-owned licensing references used only by a VM vGPU executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_vgpu_licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
     pub resources: Vec<KubeVirtResource>,
     pub plan_sha256: Sha256Digest,
 }
@@ -1185,6 +1310,8 @@ pub struct KubeVirtProviderConfiguration {
     pub base_disks: Vec<KubeVirtBaseDiskBinding>,
     /// Optional runtime policy admitting release-declared base disks that are not seeded.
     pub runtime_vm_base: Option<RuntimeVmBasePolicy>,
+    /// Optional deployment-owned VM vGPU licensing configuration. A VM vGPU plan requires it.
+    pub vm_vgpu_licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
     pub ssh: KubeVirtSshBootstrap,
     pub resource_budget: KubeVirtResourceBudget,
 }
@@ -1250,9 +1377,22 @@ impl KubeVirtProviderConfiguration {
             trust_revision,
             base_disks,
             runtime_vm_base,
+            vm_vgpu_licensing: None,
             ssh,
             resource_budget,
         })
+    }
+
+    /// Adds the optional deployment-owned VM vGPU licensing configuration.
+    pub fn with_vm_vgpu_licensing(
+        mut self,
+        licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if let Some(configuration) = licensing.as_ref() {
+            configuration.validate()?;
+        }
+        self.vm_vgpu_licensing = licensing;
+        Ok(self)
     }
 
     fn base_disk_binding(&self, binding: &str) -> Option<&KubeVirtBaseDiskBinding> {
@@ -1843,6 +1983,23 @@ where
         }
         let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
             approved_resources(instance, projection)?;
+        let vm_vgpu = gpu_allocation
+            .as_ref()
+            .is_some_and(|allocation| allocation.mode == GpuAllocationMode::VmVgpu);
+        let vm_vgpu_licensing = if vm_vgpu {
+            Some(
+                self.configuration
+                    .vm_vgpu_licensing
+                    .clone()
+                    .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?,
+            )
+        } else {
+            None
+        };
+        if let Some(licensing) = vm_vgpu_licensing.as_ref() {
+            licensing.validate()?;
+            labels["labweaver.io/gpu-mode"] = json!("vm_vgpu");
+        }
         let cpu = format!("{cpu_millicores}m");
         let memory = memory_bytes.to_string();
         let storage = storage_bytes.to_string();
@@ -1905,6 +2062,9 @@ where
         });
         if let Some(course_id) = instance.course_id {
             pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
+        if vm_vgpu {
+            pod_labels["labweaver.io/gpu-mode"] = json!("vm_vgpu");
         }
         let mut quota_hard = serde_json::Map::from_iter([
             ("requests.cpu".to_owned(), json!(quota_cpu_request)),
@@ -2105,6 +2265,21 @@ where
                 }),
             ));
         }
+        if vm_vgpu {
+            let licensing = vm_vgpu_licensing
+                .as_ref()
+                .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+            documents.push(resource(
+                "CiliumNetworkPolicy",
+                Some(&namespace),
+                "vm-vgpu-license-egress",
+                json!({
+                    "apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy",
+                    "metadata":{"name":"vm-vgpu-license-egress","namespace":namespace,"labels":labels},
+                    "spec":{"endpointSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"egress":vm_vgpu_license_egress(licensing)?}
+                }),
+            ));
+        }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "releaseId": projection.release.id,
@@ -2112,6 +2287,7 @@ where
             "baseDisk": base_disk,
             "format": format,
             "storageClassName": base_binding.storage_class_name,
+            "vmVgpuLicensing": &vm_vgpu_licensing,
             "resources": documents,
         }))?;
         Ok(KubeVirtResourcePlan {
@@ -2126,6 +2302,7 @@ where
             base_disk_data_source_name: base_binding.data_source_name.clone(),
             base_disk_disk_sha256: base_binding.disk_sha256.clone(),
             storage_class_name: base_binding.storage_class_name.clone(),
+            vm_vgpu_licensing,
             resources: documents,
             plan_sha256,
         })
@@ -2534,6 +2711,58 @@ fn experiment_gpu_allocation(
     }
 }
 
+fn vm_vgpu_license_egress(
+    licensing: &KubeVirtVmVgpuLicensingConfiguration,
+) -> Result<Vec<Value>, ReleaseProjectionError> {
+    licensing.validate()?;
+    let mut egress = vec![json!({
+        "toEndpoints":[{"matchLabels":{
+            "k8s:io.kubernetes.pod.namespace":"kube-system",
+            "k8s:k8s-app":"kube-dns"
+        }}],
+        "toPorts":[{"ports":[{"protocol":"UDP","port":"53"},{"protocol":"TCP","port":"53"}],"rules":{"dns":[{"matchPattern":"*"}]}}]
+    })];
+    match licensing.mode {
+        KubeVirtVmVgpuLicenseMode::NvidiaDls => {
+            let host = licensing
+                .license_url
+                .host_str()
+                .ok_or(ReleaseProjectionError::ConfigurationInvalid)?;
+            let destination = if let Ok(address) = IpAddr::from_str(host) {
+                let prefix = if address.is_ipv4() { 32 } else { 128 };
+                json!({"toCIDR":[format!("{address}/{prefix}")]})
+            } else {
+                json!({"toFQDNs":[{"matchName":host}]})
+            };
+            let mut destination = destination;
+            destination["toPorts"] = json!([{"ports":[{"protocol":"TCP","port":licensing.license_url.port_or_known_default().unwrap_or(443).to_string()}]}]);
+            egress.push(destination);
+        }
+        KubeVirtVmVgpuLicenseMode::FastapiDls => {
+            let host = licensing
+                .license_url
+                .host_str()
+                .ok_or(ReleaseProjectionError::ConfigurationInvalid)?;
+            let parts = host.split('.').collect::<Vec<_>>();
+            if parts.len() != 5
+                || !valid_dns_label(parts[0])
+                || parts[2..] != ["svc", "cluster", "local"]
+                || !valid_dns_label(parts[1])
+            {
+                return Err(ReleaseProjectionError::ConfigurationInvalid);
+            }
+            egress.push(json!({
+                "toEndpoints":[{"matchLabels":{
+                    "k8s:io.kubernetes.pod.namespace":parts[1],
+                    "app.kubernetes.io/name":"fastapi-dls"
+                }}],
+                "toPorts":[{"ports":[{"protocol":"TCP","port":"8443"}]}]
+            }));
+        }
+    }
+    Ok(egress)
+}
+
 fn valid_subject(value: &str) -> bool {
     valid_binding(value) && !value.contains('*') && !value.contains('>')
 }
@@ -2595,5 +2824,39 @@ const fn configuration_invalid() -> ProviderFailure {
     ProviderFailure {
         code: ProviderFailureCode::Rejected,
         retryable: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_nvidia_dls_egress_uses_exact_fqdn_and_port() -> Result<(), ReleaseProjectionError> {
+        let license_url = "https://licenses.example.test:8443/"
+            .parse()
+            .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
+        let licensing = KubeVirtVmVgpuLicensingConfiguration {
+            mode: KubeVirtVmVgpuLicenseMode::NvidiaDls,
+            license_url,
+            token_secret_ref: KubeVirtSecretRef {
+                namespace: "license-system".to_owned(),
+                name: "client-token".to_owned(),
+                key: "token".to_owned(),
+            },
+            tls_ca_secret_ref: KubeVirtSecretRef {
+                namespace: "license-system".to_owned(),
+                name: "license-tls".to_owned(),
+                key: "ca.crt".to_owned(),
+            },
+            fastapi_dls_signing_root_ca_secret_ref: None,
+        };
+        let egress = vm_vgpu_license_egress(&licensing)?;
+        assert_eq!(
+            egress[1]["toFQDNs"][0]["matchName"],
+            json!("licenses.example.test")
+        );
+        assert_eq!(egress[1]["toPorts"][0]["ports"][0]["port"], json!("8443"));
+        Ok(())
     }
 }
