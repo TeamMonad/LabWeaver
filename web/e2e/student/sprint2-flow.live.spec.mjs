@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
@@ -648,7 +648,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     await page.goto(`/researcher/workspaces?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
   }
   await selectProjectByUi(page, project.id)
-  if (!resumed) await createProjectPolicy(page.request, baseURL, project.id)
+  if (!resumed) await configureProjectPolicyByUi(page, project.id)
   const packageCopy = REAL_WORK_CONFIG ? await createRealWorkPackage(REAL_WORK_CONFIG.goldenBaseImage) : null
   let trackedEnvironmentId = null
   let trackedLeaseId = null

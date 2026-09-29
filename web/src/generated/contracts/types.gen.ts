@@ -11056,6 +11056,144 @@ export type WithdrawEvaluationReleaseResponses = {
 
 export type WithdrawEvaluationReleaseResponse = WithdrawEvaluationReleaseResponses[keyof WithdrawEvaluationReleaseResponses];
 
+export type CreateCourseLlmPolicyData = {
+    body: ProjectLlmEgressPolicySchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match'?: string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/llm-egress-policies';
+};
+
+export type CreateCourseLlmPolicyErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateCourseLlmPolicyError = CreateCourseLlmPolicyErrors[keyof CreateCourseLlmPolicyErrors];
+
+export type CreateCourseLlmPolicyResponses = {
+    /**
+     * Successful response
+     */
+    201: ProjectLlmEgressPolicySchema;
+};
+
+export type CreateCourseLlmPolicyResponse = CreateCourseLlmPolicyResponses[keyof CreateCourseLlmPolicyResponses];
+
+export type GetActiveCourseLlmPolicyData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/llm-egress-policies/active';
+};
+
+export type GetActiveCourseLlmPolicyErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetActiveCourseLlmPolicyError = GetActiveCourseLlmPolicyErrors[keyof GetActiveCourseLlmPolicyErrors];
+
+export type GetActiveCourseLlmPolicyResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectLlmEgressPolicySchema;
+};
+
+export type GetActiveCourseLlmPolicyResponse = GetActiveCourseLlmPolicyResponses[keyof GetActiveCourseLlmPolicyResponses];
+
 export type ListEnvironmentsData = {
     body?: never;
     path?: never;

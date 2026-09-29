@@ -12,6 +12,11 @@ const RESOURCE_SETTLE_TIMEOUT_MS = 240_000
 const RESOURCE_POLL_INTERVAL_MS = 5_000
 const RESOURCE_APPROVAL_REASON = '平台管理员已核对资源申请的目标环境、发布版本与容量规格。'
 const REQUEST_KEY_OPTION = /^([0-9a-fA-F-]{36}):(\d+)$/
+const GPU_MODE_LABELS = Object.freeze({
+  exclusive: '独占',
+  container_time_slice: '容器时间片',
+  vm_vgpu: 'VM vGPU',
+})
 
 /** Request states as the researcher resource page renders them. */
 export const RESEARCHER_REQUEST_STATE = Object.freeze({
@@ -167,10 +172,11 @@ async function readResourceLists(page) {
  * Submit one real resource request from the researcher resource page.
  *
  * `kind` selects the requested capacity: `cpu` requests CPU, memory, and
- * storage only, `gpu` additionally selects an active GPU catalog entry that
- * already has a current rate. A project without a published environment
- * template cannot express a request at all; that prerequisite gap fails with a
- * stable diagnostic instead of submitting a different request.
+ * storage only, `gpu` additionally selects the named active GPU catalog mode
+ * and optional class that already has a current rate. A project without a
+ * published environment template cannot express a request at all; that
+ * prerequisite gap fails with a stable diagnostic instead of submitting a
+ * different request.
  */
 export async function requestProjectResourceByUi(page, {
   projectName,
@@ -180,8 +186,16 @@ export async function requestProjectResourceByUi(page, {
   memoryGiB = 2,
   storageGiB = 10,
   durationHours = 1,
+  gpuMode = null,
+  gpuClass = null,
 } = {}) {
   if (!['cpu', 'gpu'].includes(kind)) throw new Error(`LW_ACCEPTANCE_RESOURCE_KIND_UNSUPPORTED:${kind}`)
+  if (gpuMode !== null && !Object.hasOwn(GPU_MODE_LABELS, gpuMode)) {
+    throw new Error(`LW_ACCEPTANCE_GPU_MODE_UNSUPPORTED:${gpuMode}`)
+  }
+  if (kind === 'gpu' && gpuMode === null) {
+    throw new Error('LW_ACCEPTANCE_GPU_MODE_REQUIRED')
+  }
   const selectedProjectId = await openResourcePage(page, { projectName, projectId })
   await waitForResourceLists(page)
   const scope = projectName ?? selectedProjectId ?? 'unscoped'
@@ -220,12 +234,21 @@ export async function requestProjectResourceByUi(page, {
       .map((element) => ({ value: element.value, label: (element.textContent ?? '').trim() }))
       .filter((option) => option.value !== ''))
     if (entries.length === 0) throw new Error(`LW_ACCEPTANCE_GPU_CATALOG_EMPTY:${scope}`)
-    gpuCatalogEntry = entries[0]
+    const modeLabel = GPU_MODE_LABELS[gpuMode]
+    gpuCatalogEntry = entries.find((entry) => {
+      const [entryClass, entryMode] = entry.label.split(' · ', 3)
+      return entryMode === modeLabel && (!gpuClass || entryClass === gpuClass)
+    }) ?? null
+    if (!gpuCatalogEntry) {
+      throw new Error(`LW_ACCEPTANCE_GPU_CATALOG_MODE_MISSING:${gpuMode}:${gpuClass ?? 'any'}`)
+    }
     await gpuSelect.selectOption(gpuCatalogEntry.value)
     const detail = page.locator('.gpu-detail')
     await expect(detail).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
     const detailText = (await detail.textContent()) ?? ''
     if (/尚未配置|冲突/.test(detailText)) throw new Error(`LW_ACCEPTANCE_GPU_RATE_MISSING:${gpuCatalogEntry.label}`)
+    if (!detailText.includes(modeLabel)) throw new Error(`LW_ACCEPTANCE_GPU_MODE_RENDERED_MISMATCH:${gpuMode}`)
+    if (gpuClass && !detailText.includes(gpuClass)) throw new Error(`LW_ACCEPTANCE_GPU_CLASS_RENDERED_MISMATCH:${gpuClass}`)
   }
 
   const submitButton = page.getByRole('button', { name: '提交资源申请', exact: true })
@@ -277,6 +300,8 @@ export async function requestProjectResourceByUi(page, {
     releaseVersion: Number(releaseVersion),
     durationSeconds: requestBody.durationSeconds,
     gpuCatalogEntry: gpuCatalogEntry?.label ?? null,
+    gpuMode: gpuMode ?? null,
+    gpuClass: gpuClass ?? null,
     state: rendered.state,
   }
 }
@@ -530,7 +555,10 @@ export async function assertProjectChargesByUi(page, project) {
  * The GPU catalog must render real entries; an empty catalog must show its
  * explicit empty state instead of an empty table that looks like success.
  */
-export async function assertGpuCatalogByUi(page) {
+export async function assertGpuCatalogByUi(page, { requiredModes = [], requiredClass = null } = {}) {
+  for (const mode of requiredModes) {
+    if (!Object.hasOwn(GPU_MODE_LABELS, mode)) throw new Error(`LW_ACCEPTANCE_GPU_MODE_UNSUPPORTED:${mode}`)
+  }
   await page.goto('/admin/gpu-catalog', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: 'GPU 目录', exact: true, level: 2 })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   const rows = page.locator('.catalog-table tbody tr.data-table__row')
@@ -541,13 +569,23 @@ export async function assertGpuCatalogByUi(page) {
   ).toBe(true)
   if (await rows.count() === 0) {
     await expect(emptyCatalog).toBeVisible()
+    if (requiredModes.length > 0) {
+      throw new Error(`LW_ACCEPTANCE_GPU_CATALOG_MODE_MISSING:${requiredModes.join(',')}:${requiredClass ?? 'any'}`)
+    }
     return { kind: 'empty' }
   }
   await expect(page.getByRole('region', { name: 'GPU 目录' })).toBeVisible()
   const firstRow = rows.first()
   await expect(firstRow.locator('code').first()).toHaveText(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/)
   await expect(firstRow.locator('.state-chip')).toHaveText(/可用|已停用/)
-  return { kind: 'catalog', rows: await rows.count() }
+  const rowText = await rows.allTextContents()
+  for (const mode of requiredModes) {
+    const label = GPU_MODE_LABELS[mode]
+    if (!rowText.some((text) => text.includes(label) && (!requiredClass || text.includes(requiredClass)))) {
+      throw new Error(`LW_ACCEPTANCE_GPU_CATALOG_MODE_MISSING:${mode}:${requiredClass ?? 'any'}`)
+    }
+  }
+  return { kind: 'catalog', rows: await rows.count(), requiredModes, requiredClass }
 }
 
 export async function cancelProjectResourceRequestByUi(page, { projectName, projectId = null, requestKey } = {}) {

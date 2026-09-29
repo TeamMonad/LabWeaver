@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
@@ -396,7 +396,6 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     await revokeEnvironmentAccessGrants(studentContext.request, baseURL, environmentId)
     const terminal = await issueTerminalAccessAndConnect(studentPage, projectId, environmentId)
     await editThroughTerminal({ page: studentPage, ...terminal })
-    await studentPage.screenshot({ path: testInfo.outputPath('environment-terminal.png'), fullPage: true })
     await assertNoPendingEvaluationTaskResourceRequests(adminPage.request, projectId, studentActorId)
     const afterRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, projectId)
     const after = await freezeStudentSourceByUi(studentPage, projectId, environmentId)
@@ -451,7 +450,6 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     await expect(studentPage).toHaveURL(
       (url) => url.pathname === '/student/results' && url.searchParams.get('projectId') === projectId,
     )
-    await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
   } catch (error) {
     hasPrimaryError = true
     primaryError = error
@@ -508,12 +506,11 @@ test('teacher publishes a real security experiment and student repairs it throug
   try {
     const project = await createProjectByUi(page, `real-security-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
-    await createProjectPolicy(request, baseURL, project.id, REAL_PROVIDER_BUDGET)
+    await configureProjectPolicyByUi(page, project.id, REAL_PROVIDER_BUDGET)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
     await expect(page.getByRole('heading', { name: '材料上传与 AgentRun', exact: true })).toBeVisible()
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy.directory)
-    await page.screenshot({ path: testInfo.outputPath('materials.png'), fullPage: true })
 
     const run = await startExperimentRunByUi(page, project.id)
     await expect(page).toHaveURL(new RegExp(`[?&]runId=${encodeURIComponent(run.id)}(?:&|$)`), { timeout: 30_000 })
@@ -530,7 +527,6 @@ test('teacher publishes a real security experiment and student repairs it throug
       completed.evaluationCandidateId,
       built.artifact,
     )
-    await page.screenshot({ path: testInfo.outputPath('approval.png'), fullPage: true })
     await continueStudentAcceptance({
       browser,
       teacherPage: page,

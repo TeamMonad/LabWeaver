@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, Semaphore, watch};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -813,12 +814,12 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
             stdin_sha256: Sha256Digest::of_bytes(&[]),
             timeout: Duration::from_secs(10),
         };
-        let output = timeout(
-            command.timeout,
-            execute_process(command, Arc::clone(&self.environment)),
+        let output = execute_process(
+            command,
+            Arc::clone(&self.environment),
+            RunCancellation::default(),
         )
-        .await
-        .map_err(|_| ClaudeCodeProcessError::TimedOut)??;
+        .await?;
         if !output.is_success() {
             return Err(ClaudeCodeProcessError::Unavailable);
         }
@@ -843,20 +844,14 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
         if cancellation.is_cancelled() {
             return Err(ClaudeCodeProcessError::Cancelled);
         }
-        let duration = command.timeout;
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => Err(ClaudeCodeProcessError::Cancelled),
-            result = timeout(duration, execute_process(command, Arc::clone(&self.environment))) => {
-                result.map_err(|_| ClaudeCodeProcessError::TimedOut)?
-            }
-        }
+        execute_process(command, Arc::clone(&self.environment), cancellation).await
     }
 }
 
 async fn execute_process(
     command: ClaudeCodeCommand,
     environment: Arc<BTreeMap<String, String>>,
+    cancellation: RunCancellation,
 ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
     let workspace = tempfile::Builder::new()
         .prefix("labweaver-claude-")
@@ -907,31 +902,163 @@ async fn execute_process(
     });
     let read_stdout = tokio::spawn(read_stream_until_result(stdout, MAX_RESULT_BYTES));
     let read_stderr = tokio::spawn(read_limited(stderr, MAX_STDERR_BYTES));
-    let (stdout, terminal_result) = read_stdout
-        .await
-        .map_err(|_| ClaudeCodeProcessError::Io)??;
-    let status = if terminal_result {
-        if let Some(status) = child.try_wait().map_err(|_| ClaudeCodeProcessError::Io)? {
-            status.code()
-        } else {
-            child.kill().await.map_err(|_| ClaudeCodeProcessError::Io)?;
-            child.wait().await.map_err(|_| ClaudeCodeProcessError::Io)?;
-            Some(0)
+    let mut lifecycle = ProcessLifecycle {
+        child: Some(child),
+        write_stdin: Some(write_stdin),
+        read_stdout: Some(read_stdout),
+        read_stderr: Some(read_stderr),
+    };
+
+    // Keep the timeout and cancellation inside the process owner. Dropping a future that owns
+    // only a `Child` and detached reader tasks can leave those tasks attached to the pipes and
+    // makes the next lease observe a still-live worker. The terminal stream result only tells us
+    // that stdout contains a candidate envelope; the child must still exit and its real status is
+    // retained below.
+    let outcome = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => ProcessOutcome::Cancelled,
+        () = tokio::time::sleep(command.timeout) => ProcessOutcome::TimedOut,
+        result = lifecycle.complete() => ProcessOutcome::Finished(result),
+    };
+    match outcome {
+        ProcessOutcome::Finished(result) => {
+            if result.is_err() {
+                lifecycle.abort().await;
+            }
+            result
         }
-    } else {
-        child
+        ProcessOutcome::Cancelled => {
+            lifecycle.abort().await;
+            Err(ClaudeCodeProcessError::Cancelled)
+        }
+        ProcessOutcome::TimedOut => {
+            lifecycle.abort().await;
+            Err(ClaudeCodeProcessError::TimedOut)
+        }
+    }
+}
+
+enum ProcessOutcome {
+    Finished(Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError>),
+    Cancelled,
+    TimedOut,
+}
+
+struct ProcessLifecycle {
+    child: Option<Child>,
+    write_stdin: Option<JoinHandle<StdinWriteResult>>,
+    read_stdout: Option<JoinHandle<StdoutReadResult>>,
+    read_stderr: Option<JoinHandle<StderrReadResult>>,
+}
+
+type StdinWriteResult = Result<(), ClaudeCodeProcessError>;
+type StdoutReadResult = Result<(Vec<u8>, bool), ClaudeCodeProcessError>;
+type StderrReadResult = Result<Vec<u8>, ClaudeCodeProcessError>;
+
+impl ProcessLifecycle {
+    async fn complete(&mut self) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        let stdout_task = await_task(&mut self.read_stdout).await?;
+        self.read_stdout = None;
+        let (stdout, terminal_result) = stdout_task?;
+        let finish = self.finish_after_stdout(stdout);
+        if terminal_result {
+            timeout(Duration::from_secs(30), finish)
+                .await
+                .map_err(|_| ClaudeCodeProcessError::TimedOut)?
+        } else {
+            finish.await
+        }
+    }
+
+    async fn finish_after_stdout(
+        &mut self,
+        stdout: Vec<u8>,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        let mut stderr = None;
+
+        while self.write_stdin.is_some() || self.read_stderr.is_some() {
+            tokio::select! {
+                result = await_task(&mut self.read_stderr), if self.read_stderr.is_some() => {
+                    self.read_stderr = None;
+                    stderr = Some(result??);
+                }
+                result = await_task(&mut self.write_stdin), if self.write_stdin.is_some() => {
+                    self.write_stdin = None;
+                    result??;
+                }
+            }
+        }
+
+        let status = self
+            .child
+            .as_mut()
+            .ok_or(ClaudeCodeProcessError::Io)?
             .wait()
             .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?
-            .code()
-    };
-    write_stdin
-        .await
-        .map_err(|_| ClaudeCodeProcessError::Io)??;
-    let stderr = read_stderr
-        .await
-        .map_err(|_| ClaudeCodeProcessError::Io)??;
-    Ok(ClaudeCodeProcessOutput::from_raw(status, stdout, &stderr))
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        Ok(ClaudeCodeProcessOutput::from_raw(
+            status.code(),
+            stdout,
+            &stderr.ok_or(ClaudeCodeProcessError::Io)?,
+        ))
+    }
+
+    async fn abort(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let should_kill = child.try_wait().map_or(true, |status| status.is_none());
+            if should_kill {
+                let _ = child.kill().await;
+            }
+        }
+        // `kill` reaps a running child, while `wait` is still required when the child exited
+        // between `try_wait` and the cleanup branch.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait().await;
+        }
+        abort_task(self.write_stdin.take()).await;
+        abort_task(self.read_stdout.take()).await;
+        abort_task(self.read_stderr.take()).await;
+    }
+}
+
+impl Drop for ProcessLifecycle {
+    fn drop(&mut self) {
+        // The async paths explicitly kill, wait, and join. This synchronous fallback is for a
+        // caller that drops the enclosing future (for example, a worker shutdown) before those
+        // paths run: abort pipe tasks so they cannot remain detached, and request child teardown
+        // through Tokio's process handle. `kill_on_drop(true)` remains enabled as a second guard.
+        if let Some(task) = self.write_stdin.take() {
+            task.abort();
+        }
+        if let Some(task) = self.read_stdout.take() {
+            task.abort();
+        }
+        if let Some(task) = self.read_stderr.take() {
+            task.abort();
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
+        }
+    }
+}
+
+async fn await_task<T>(
+    task: &mut Option<JoinHandle<Result<T, ClaudeCodeProcessError>>>,
+) -> Result<Result<T, ClaudeCodeProcessError>, ClaudeCodeProcessError> {
+    let task = task.as_mut().ok_or(ClaudeCodeProcessError::Io)?;
+    task.await.map_err(|_| ClaudeCodeProcessError::Io)
+}
+
+async fn abort_task<T>(task: Option<JoinHandle<T>>) {
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 async fn read_stream_until_result(
@@ -3241,9 +3368,10 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        CLAUDE_RUNTIME_PATH, ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError,
-        TokioClaudeCodeProcess, decimal_to_microusd, generated_build_recipe_is_complete,
-        microusd_to_usd, platform_image_prompt, read_stream_until_result, usd_number_to_microusd,
+        CLAUDE_RUNTIME_PATH, ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
+        ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError, RunCancellation, TokioClaudeCodeProcess,
+        decimal_to_microusd, execute_process, generated_build_recipe_is_complete, microusd_to_usd,
+        platform_image_prompt, read_stream_until_result, usd_number_to_microusd,
     };
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
 
@@ -3340,6 +3468,120 @@ mod tests {
             process.environment.get("PATH").map(String::as_str),
             Some("/fixture/bin")
         );
+    }
+
+    #[test]
+    fn process_exit_status_is_not_replaced_with_success() {
+        let failed = ClaudeCodeProcessOutput::from_raw(Some(143), Vec::new(), b"terminated");
+        let signalled = ClaudeCodeProcessOutput::from_raw(None, Vec::new(), b"killed");
+
+        assert!(!failed.is_success());
+        assert!(!signalled.is_success());
+    }
+
+    fn shell_program() -> &'static str {
+        #[cfg(windows)]
+        {
+            "cmd"
+        }
+        #[cfg(not(windows))]
+        {
+            "sh"
+        }
+    }
+
+    fn shell_command(script: &str, process_timeout: Duration) -> ClaudeCodeCommand {
+        #[cfg(windows)]
+        let args = vec!["/C".to_owned(), script.to_owned()];
+        #[cfg(not(windows))]
+        let args = vec!["-c".to_owned(), script.to_owned()];
+        ClaudeCodeCommand {
+            program: shell_program(),
+            args,
+            env: std::collections::BTreeMap::new(),
+            stdin: std::sync::Arc::from([]),
+            stdin_sha256: Sha256Digest::of_bytes(&[]),
+            timeout: process_timeout,
+        }
+    }
+
+    fn shell_environment(
+        result: bool,
+    ) -> std::sync::Arc<std::collections::BTreeMap<String, String>> {
+        let value = if result {
+            r#"{"type":"result","subtype":"success"}"#
+        } else {
+            r#"{"type":"system"}"#
+        };
+        let mut environment = std::collections::BTreeMap::new();
+        environment.insert("LABWEAVER_TEST_JSON".to_owned(), value.to_owned());
+        std::sync::Arc::new(environment)
+    }
+
+    fn shell_script(result: bool, delay: bool) -> &'static str {
+        #[cfg(windows)]
+        {
+            if !result && delay {
+                r"echo %LABWEAVER_TEST_JSON% & for /L %i in (1,1,100000000) do @rem"
+            } else {
+                r"echo %LABWEAVER_TEST_JSON% & exit /B 23"
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if !result && delay {
+                r#"printf '%s\n' "$LABWEAVER_TEST_JSON"; sleep 60"#
+            } else {
+                r#"printf '%s\n' "$LABWEAVER_TEST_JSON"; exit 23"#
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_result_keeps_the_real_nonzero_exit_status() -> Result<(), Box<dyn Error>> {
+        let output = execute_process(
+            shell_command(shell_script(true, false), Duration::from_secs(2)),
+            shell_environment(true),
+            RunCancellation::default(),
+        )
+        .await?;
+
+        assert_eq!(output.exit_code, Some(23));
+        assert!(!output.is_success());
+        assert!(String::from_utf8_lossy(output.stdout()).contains("\"type\":\"result\""));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_hanging_process_reaps_it_within_the_cleanup_budget()
+    -> Result<(), Box<dyn Error>> {
+        let cancellation = RunCancellation::new();
+        let process = tokio::spawn(execute_process(
+            shell_command(shell_script(false, true), Duration::from_secs(30)),
+            shell_environment(false),
+            cancellation.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancellation.cancel();
+
+        let result = timeout(Duration::from_secs(2), process)
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn Error>)?
+            .map_err(|error| Box::new(error) as Box<dyn Error>)?;
+        assert!(matches!(result, Err(ClaudeCodeProcessError::Cancelled)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timing_out_a_hanging_process_does_not_return_success() {
+        let result = execute_process(
+            shell_command(shell_script(false, true), Duration::from_millis(50)),
+            shell_environment(false),
+            RunCancellation::default(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ClaudeCodeProcessError::TimedOut)));
     }
 
     #[test]

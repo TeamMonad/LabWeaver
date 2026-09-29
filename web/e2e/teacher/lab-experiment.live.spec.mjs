@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
@@ -40,11 +40,13 @@ const LABS = Object.freeze({
   cuda: Object.freeze({
     root: join(LAB_ROOT, 'cuda-lab'),
     frozenPath: 'student/gpu_stats.cu',
+    gpuMode: process.env.LABWEAVER_E2E_GPU_MODE?.trim() || 'exclusive',
+    gpuClass: process.env.LABWEAVER_E2E_GPU_CLASS?.trim() || 'v100-exclusive',
     // The starter launches too few threads. The student corrects the coverage
     // and captures the statistics from a real GPU run in the GPU environment.
     fixCommands: [
       "sed -i 's/#define BLOCKS 2/#define BLOCKS 8/' student/gpu_stats.cu",
-      '/usr/local/cuda/bin/nvcc -o gpu_stats student/gpu_stats.cu && ./gpu_stats > student/result.txt',
+      '/usr/local/cuda/bin/nvcc -o gpu_stats student/gpu_stats.cu && ./gpu_stats > student/result.txt && grep -Fx \'N=256\' student/result.txt && grep -Fx \'sum=32640\' student/result.txt && grep -Fx \'max=255\' student/result.txt',
     ],
     expectImprovement: true,
   }),
@@ -212,6 +214,7 @@ async function issueAccessGrantAndConnect(page, projectId, environmentId) {
 }
 
 async function typeTerminalCommand(page, input, frames, command, marker) {
+  const firstFrame = frames.length
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
@@ -223,6 +226,7 @@ async function typeTerminalCommand(page, input, frames, command, marker) {
   await expect
     .poll(() => frames.join(''), { timeout: 180_000, intervals: [250, 500, 1000] })
     .toContain(marker)
+  return frames.slice(firstFrame).join('')
 }
 
 async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPath) {
@@ -363,7 +367,7 @@ test('student completes a published lab experiment through the browser terminal'
     await cp(LAB.root, packageCopy, { recursive: true })
     const project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
-    await createProjectPolicy(request, baseURL, project.id)
+    await configureProjectPolicyByUi(page, project.id)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.frozenPath)
@@ -393,7 +397,6 @@ test('student completes a published lab experiment through the browser terminal'
       completed.evaluationCandidateId,
       built.artifact,
     )
-    await page.screenshot({ path: testInfo.outputPath('approval.png'), fullPage: true })
     await assertNoStuckProgress(page, 'teacher-approval')
     await auditAccessibility(page, 'teacher-approval', testInfo)
     teacherGuards.assertCleanConsole('teacher-approval')
@@ -406,7 +409,11 @@ test('student completes a published lab experiment through the browser terminal'
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     const adminPage = await adminContext.newPage()
     environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
-    await waitForEnvironment(studentContext.request, environmentId)
+    const environment = await waitForEnvironment(studentContext.request, environmentId)
+    if (LAB.gpuMode) {
+      expect(environment.gpuAllocation?.mode, 'LAB_EXPERIMENT_GPU_MODE_MISSING').toBe(LAB.gpuMode)
+      expect(environment.gpuAllocation?.class, 'LAB_EXPERIMENT_GPU_CLASS_MISSING').toBe(LAB.gpuClass)
+    }
     await assertNoStuckProgress(studentPage, 'student-environment')
     await auditAccessibility(studentPage, 'student-environment', testInfo)
     const beforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
@@ -418,7 +425,6 @@ test('student completes a published lab experiment through the browser terminal'
         frames.push(typeof payload === 'string' ? payload : Buffer.from(payload).toString('utf8'))
       })
     })
-    await studentPage.screenshot({ path: testInfo.outputPath('environment-console.png'), fullPage: true })
     const frozen = await freezeStudentSourceByUi(studentPage, project.id, environmentId, LAB.frozenPath)
     const firstResult = await waitForProjectEvaluationResultWithResourceApproval({
       request: studentContext.request,
@@ -438,9 +444,11 @@ test('student completes a published lab experiment through the browser terminal'
       await revokeEnvironmentAccessGrants(studentContext.request, baseURL, environmentId)
       await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
       for (const [index, command] of LAB.fixCommands.entries()) {
-        await typeTerminalCommand(studentPage, terminal.input, frames, command, `LABWEAVER_LAB_DONE_${index}`)
+        const output = await typeTerminalCommand(studentPage, terminal.input, frames, command, `LABWEAVER_LAB_DONE_${index}`)
+        if (LAB.gpuMode && index === LAB.fixCommands.length - 1) {
+          expect(output, 'LAB_EXPERIMENT_GPU_RESULT_MISSING').toMatch(/N=256[\s\S]*sum=32640[\s\S]*max=255/)
+        }
       }
-      await studentPage.screenshot({ path: testInfo.outputPath('lab-terminal.png'), fullPage: true })
       await revokeEnvironmentAccessGrants(studentContext.request, baseURL, environmentId)
       const afterRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
       const afterFrozen = await freezeStudentSourceByUi(studentPage, project.id, environmentId, LAB.frozenPath)
@@ -454,17 +462,15 @@ test('student completes a published lab experiment through the browser terminal'
       })
       expect(afterResult.awardedScore).toBeGreaterThan(firstResult.awardedScore)
       expect(afterResult.awardedScore).toBe(afterResult.maxScore)
-      await studentPage.goto(`/student/results?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+        await studentPage.goto(`/student/results?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
       const card = studentPage.locator('.result-card').filter({ hasText: afterResult.runId })
       await expect(card).toHaveCount(1, { timeout: 120_000 })
       await expect(card.locator('.result-score')).toHaveText(`${afterResult.awardedScore} / ${afterResult.maxScore}`)
-      await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
     } else {
       await studentPage.goto(`/student/results?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
       const card = studentPage.locator('.result-card').filter({ hasText: firstResult.runId })
       await expect(card).toHaveCount(1, { timeout: 120_000 })
       await expect(card.locator('.result-score')).toHaveText(`${firstResult.awardedScore} / ${firstResult.maxScore}`)
-      await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
     }
     await assertNoStuckProgress(studentPage, 'student-results')
     await auditAccessibility(studentPage, 'student-results', testInfo)

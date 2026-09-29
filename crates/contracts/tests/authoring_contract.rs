@@ -349,3 +349,26 @@ fn environment_spec_gpu_is_optional_and_validated() -> Result<(), Box<dyn std::e
     }
     Ok(())
 }
+
+#[test]
+fn course_policy_operation_exposes_optional_if_match() -> Result<(), Box<dyn std::error::Error>> {
+    let operation = contracts::http::operation_contract("createCourseLlmPolicy")
+        .ok_or("course policy operation missing")?;
+    assert_eq!(
+        operation.path,
+        "/api/v1/courses/{courseId}/llm-egress-policies"
+    );
+    assert_eq!(operation.scope, contracts::http::OperationScopeKind::Course);
+    let document: Value = serde_json::from_str(include_str!(
+        "../../../schemas/openapi/labweaver-public.v1.json"
+    ))?;
+    let parameters = document["paths"][operation.path]["post"]["parameters"]
+        .as_array()
+        .ok_or("course policy parameters missing")?;
+    assert!(parameters.iter().any(|parameter| {
+        parameter["name"] == "If-Match"
+            && parameter["in"] == "header"
+            && parameter["required"] == json!(false)
+    }));
+    Ok(())
+}

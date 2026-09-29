@@ -259,6 +259,93 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
 }
 
 #[tokio::test]
+async fn project_policy_updates_require_current_revision_and_replay_idempotently()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+
+    let project_id = ProjectId::new();
+    let project = project_fixture(project_id, ActorId::new(), None)?;
+    insert_project(&pool, &project).await?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+
+    let created = service
+        .activate_project_policy(
+            project_id,
+            authoring_policy(project_id, None, "2026-07-16T08:00:00.000Z".parse()?)?,
+            &IdempotencyKey::parse("project-policy-create")?,
+            None,
+        )
+        .await?;
+    assert_eq!(created.revision, Revision::new(1)?);
+
+    let update_key = IdempotencyKey::parse("project-policy-update")?;
+    let update_policy = authoring_policy(project_id, None, "2026-07-16T08:00:01.000Z".parse()?)?;
+    let updated = service
+        .activate_project_policy(
+            project_id,
+            update_policy.clone(),
+            &update_key,
+            Some(created.revision),
+        )
+        .await?;
+    assert_eq!(updated.revision, Revision::new(2)?);
+
+    let stale = service
+        .activate_project_policy(
+            project_id,
+            authoring_policy(project_id, None, "2026-07-16T08:00:02.000Z".parse()?)?,
+            &IdempotencyKey::parse("project-policy-stale")?,
+            Some(created.revision),
+        )
+        .await;
+    assert!(matches!(stale, Err(ControlError::RevisionConflict)));
+
+    let missing = service
+        .activate_project_policy(
+            project_id,
+            authoring_policy(project_id, None, "2026-07-16T08:00:03.000Z".parse()?)?,
+            &IdempotencyKey::parse("project-policy-missing-fence")?,
+            None,
+        )
+        .await;
+    assert!(matches!(missing, Err(ControlError::RevisionConflict)));
+
+    let replay = service
+        .activate_project_policy(
+            project_id,
+            update_policy,
+            &update_key,
+            Some(created.revision),
+        )
+        .await?;
+    assert_eq!(replay, updated);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.project_llm_policies WHERE project_id=$1",
+        )
+        .bind(project_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    assert_eq!(service.active_project_policy(project_id).await?, updated);
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn candidate_decision_route_kind_is_bound_before_approval()
 -> Result<(), Box<dyn std::error::Error>> {

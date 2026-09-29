@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   expectJson,
   pollEnvironmentCandidate,
   pollJson,
@@ -36,6 +36,8 @@ import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } fro
  */
 const WORK_TEMPLATE_PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
 const WORK_TEMPLATE_APPROVAL_REASON = '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。'
+const GPU_MODE = process.env.LABWEAVER_E2E_GPU_MODE?.trim() || null
+const GPU_CLASS = process.env.LABWEAVER_E2E_GPU_CLASS?.trim() || null
 // The agent worker runs one reserved dispatch at a time, so the Work template
 // authoring this journey drives can sit behind earlier runs; these ceilings cover
 // a queued authoring run plus the deployment's own fifteen minute per-candidate
@@ -201,22 +203,22 @@ test('platform administrator approves a real resource request and reads back its
 
     project = await createProjectByUi(teacherPage, `live-admin-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(teacherPage, project.id)
-    await createProjectPolicy(teacherPage.request, baseURL, project.id)
+    await configureProjectPolicyByUi(teacherPage, project.id)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(teacherPage, project.id, studentActorId)
     await publishWorkTemplateByUi(teacherPage, project.id)
-    await teacherPage.screenshot({ path: testInfo.outputPath('work-template-published.png'), fullPage: true })
 
     resourceRequest = await requestProjectResourceByUi(studentPage, {
       projectName: project.name,
       projectId: project.id,
-      kind: 'cpu',
+      kind: GPU_MODE ? 'gpu' : 'cpu',
+      gpuMode: GPU_MODE,
+      gpuClass: GPU_CLASS,
     })
     expect(resourceRequest.state).toBe(RESEARCHER_REQUEST_STATE.reviewing)
     await assertNoStuckProgress(studentPage, 'researcher-resources')
     await auditAccessibility(studentPage, 'researcher-resources', testInfo)
     studentGuards.assertCleanConsole('researcher-resources')
-    await studentPage.screenshot({ path: testInfo.outputPath('resource-request.png'), fullPage: true })
 
     approval = await approveResourceRequestByUi(page, {
       projectName: project.name,
@@ -235,7 +237,6 @@ test('platform administrator approves a real resource request and reads back its
     await assertNoStuckProgress(page, 'admin-resource-approval')
     await auditAccessibility(page, 'admin-resource-approval', testInfo)
     adminGuards.assertCleanConsole('admin-resource-approval')
-    await page.screenshot({ path: testInfo.outputPath('resource-approval.png'), fullPage: true })
 
     const lease = await readBackLeaseByUi(studentPage, {
       projectName: project.name,
@@ -246,19 +247,19 @@ test('platform administrator approves a real resource request and reads back its
     expect(lease.state).toBe(RESEARCHER_LEASE_STATE.active)
     expect(lease.expiresAtLabel, 'LW_ACCEPTANCE_LEASE_EXPIRY_MISSING').toContain('到期')
     expect(Date.parse(lease.expiresAt), 'LW_ACCEPTANCE_LEASE_EXPIRY_NOT_FUTURE').toBeGreaterThan(Date.now())
-    await studentPage.screenshot({ path: testInfo.outputPath('lease-readback.png'), fullPage: true })
 
     const finance = await assertProjectChargesByUi(page, project)
     await assertNoStuckProgress(page, 'admin-resource-finance')
     await auditAccessibility(page, 'admin-resource-finance', testInfo)
     adminGuards.assertCleanConsole('admin-resource-finance')
-    await page.screenshot({ path: testInfo.outputPath('resource-finance.png'), fullPage: true })
 
-    const catalog = await assertGpuCatalogByUi(page)
+    const catalog = await assertGpuCatalogByUi(page, {
+      requiredModes: GPU_MODE ? [GPU_MODE] : [],
+      requiredClass: GPU_CLASS,
+    })
     await assertNoStuckProgress(page, 'admin-gpu-catalog')
     await auditAccessibility(page, 'admin-gpu-catalog', testInfo)
     adminGuards.assertCleanConsole('admin-gpu-catalog')
-    await page.screenshot({ path: testInfo.outputPath('gpu-catalog.png'), fullPage: true })
 
     testInfo.annotations.push({
       type: 'acceptance',
@@ -271,6 +272,8 @@ test('platform administrator approves a real resource request and reads back its
         leaseExpiresAt: approval.expiresAt,
         finance: finance.kind,
         gpuCatalog: catalog.kind,
+        gpuMode: resourceRequest.gpuMode,
+        gpuClass: resourceRequest.gpuClass,
       }),
     })
   } catch (error) {

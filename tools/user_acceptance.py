@@ -5,12 +5,12 @@ The tool has two subcommands:
 
 * ``preflight`` asserts every precondition the browser journeys need (cluster
   reachable, public portal serving, Keycloak redirect, private credentials,
-  provider model, Playwright browser, writable evidence directory) and fails
-  closed with a stable ``LW_ACCEPTANCE_*`` diagnostic code.
-* ``run`` materialises the private credentials into a private directory,
+  provider model and Playwright browser) and fails closed with a stable
+  ``LW_ACCEPTANCE_*`` diagnostic code.
+* ``run`` materialises the private credentials into a temporary directory,
   assembles the Playwright environment and drives each selected journey
-  through the real browser harness, then collects the run evidence and writes
-  ``summary.json``.
+  through the real browser harness. Credentials, browser state and test output
+  are removed when the run exits.
 
 Every check fails with a stable diagnostic code so a failed run can be
 classified without reading the logs.
@@ -19,14 +19,12 @@ classified without reading the logs.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
-import shutil
 import stat
 import ssl
 import subprocess
-import threading
+import tempfile
 import time
 import sys
 import urllib.error
@@ -49,15 +47,10 @@ DATA_NAMESPACE = "labweaver-data"
 PLATFORM_RELEASE = "labweaver"
 BUNDLE_ANNOTATION = "labweaver.io/configuration-bundle-sha256"
 MODEL_ENV = "LABWEAVER_E2E_PROVIDER_MODEL"
-DEFAULT_CREDENTIALS_DIR = Path("/home/wzh/.private/labweaver-acceptance/credentials")
-DEFAULT_EVIDENCE_DIR = "artifacts/acceptance"
+ANTHROPIC_MODEL_ENV = "ANTHROPIC_MODEL"
+DEFAULT_CREDENTIALS_DIR = Path(".private/labweaver-acceptance/credentials")
 DEFAULT_JOURNEYS = "lab,work,admin"
 DEFAULT_LAB = "xv6"
-
-# The provider model is a lazily fetched identifier: resolve it from the cluster
-# so the acceptance run never hard-codes a deployment-specific model name.
-MODEL_CONFIG_MAP = "agent-service-config"
-MODEL_CONFIG_MAP_KEY = "anthropic-model"
 
 # The container provider binding is cluster-specific too: the shipped example
 # packages target the local development stack, so the acceptance run resolves
@@ -71,9 +64,6 @@ CLUSTER_UNREACHABLE = "LW_ACCEPTANCE_CLUSTER_UNREACHABLE"
 PORTAL_UNREACHABLE = "LW_ACCEPTANCE_PORTAL_UNREACHABLE"
 LOGIN_REDIRECT_INVALID = "LW_ACCEPTANCE_LOGIN_REDIRECT_INVALID"
 CREDENTIALS_MISSING = "LW_ACCEPTANCE_CREDENTIALS_MISSING"
-# Two concurrent runs fight over the single authoring worker and poison each other's queue (observed:
-# four orphans queued behind the live run), so `run` takes one exclusive lock per evidence root.
-RUN_IN_PROGRESS = "LW_ACCEPTANCE_RUN_IN_PROGRESS"
 MODEL_MISSING = "LW_ACCEPTANCE_MODEL_MISSING"
 AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
 # The worker serves one reserved dispatch at a time, so a run waits for the
@@ -81,7 +71,6 @@ AUTHORING_QUEUE_BUSY = "LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY"
 QUEUE_WAIT_SECONDS = 3600.0
 QUEUE_WAIT_POLL_SECONDS = 30.0
 BROWSER_MISSING = "LW_ACCEPTANCE_BROWSER_MISSING"
-EVIDENCE_DIR_UNWRITABLE = "LW_ACCEPTANCE_EVIDENCE_DIR_UNWRITABLE"
 JOURNEY_UNKNOWN = "LW_ACCEPTANCE_JOURNEY_UNKNOWN"
 JOURNEY_FAILED = "LW_ACCEPTANCE_JOURNEY_FAILED"
 RUN_ID_INVALID = "LW_ACCEPTANCE_RUN_ID_INVALID"
@@ -235,6 +224,8 @@ def acceptance_environment(
     *,
     base_url: str,
     credentials_dir: Path,
+    auth_dir: Path,
+    output_dir: Path,
     model: str,
     environ: Mapping[str, str],
     provider_binding: str = "",
@@ -244,7 +235,10 @@ def acceptance_environment(
     environment = dict(environ)
     environment["LABWEAVER_BASE_URL"] = base_url
     environment["LABWEAVER_IGNORE_HTTPS_ERRORS"] = "1"
+    environment[ANTHROPIC_MODEL_ENV] = model
     environment[MODEL_ENV] = model
+    environment["LABWEAVER_AUTH_DIR"] = str(auth_dir)
+    environment["LABWEAVER_PLAYWRIGHT_OUTPUT_DIR"] = str(output_dir)
     if provider_binding:
         environment[PROVIDER_BINDING_ENV] = provider_binding
     # The provider budget ceilings live with the harness that builds the project
@@ -352,31 +346,49 @@ def run_command(argv: Sequence[str], timeout: float = 60.0) -> tuple[int, str]:
         return 1, str(error)
 
 
+def load_dotenv(path: Path) -> dict[str, str]:
+    """Read the small local environment file without invoking a shell."""
+
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if text.startswith("export "):
+            text = text[7:].lstrip()
+        key, separator, value = text.partition("=")
+        key = key.strip()
+        if not separator or not key or any(character.isspace() for character in key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def load_acceptance_environment(environ: Mapping[str, str] | None) -> dict[str, str]:
+    """Return process variables, loading the root `.env` only for real CLI runs."""
+
+    if environ is not None:
+        return dict(environ)
+    values = load_dotenv(ROOT / ".env")
+    values.update(os.environ)
+    return values
+
+
 def resolve_model(
     explicit: str | None,
     environ: Mapping[str, str],
-    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
+    _run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
 ) -> str:
-    """Resolve the provider model from the flag, the environment or the cluster."""
+    """Resolve the provider model from the root `ANTHROPIC_MODEL` target only."""
 
-    value = (explicit or environ.get(MODEL_ENV) or "").strip()
-    if value:
-        return value
-    code, stdout, _ = run_kubectl(
-        [
-            "kubectl",
-            "--context",
-            KUBECTL_CONTEXT,
-            "-n",
-            NAMESPACE,
-            "get",
-            "cm",
-            MODEL_CONFIG_MAP,
-            "-o",
-            f"jsonpath={{.data.{MODEL_CONFIG_MAP_KEY}}}",
-        ]
-    )
-    return stdout.strip() if code == 0 else ""
+    return (explicit or environ.get(ANTHROPIC_MODEL_ENV) or "").strip()
 
 
 def resolve_provider_binding(
@@ -489,12 +501,7 @@ JOURNEY_TIMEOUT_SECONDS = 15_000.0
 JOURNEY_TIMEOUT = "LW_ACCEPTANCE_JOURNEY_TIMEOUT"
 JOURNEY_TIMEOUT_EXIT_CODE = 124
 
-APPROVAL_REASON = "acceptance harness: approve the platform task resource request"
-APPROVAL_POLL_SECONDS = 5.0
-
-CANCEL_STALE_REASONS = {
-    "reason": "acceptance harness cleanup of a superseded run",
-}
+RESOURCE_CANCEL_REASON = "acceptance harness cleanup of this run's resource request"
 
 
 def _auth_cookie(role_file: Path) -> str | None:
@@ -539,10 +546,8 @@ def _http(
         headers=headers,
     )
     context = ssl.create_default_context()
-    # The admin resource-request list routinely exceeds 4 KiB (one row per
-    # historical request), so a 4 KiB read silently truncated JSON and made the
-    # task-lease watchdog approve nothing. 8 MiB bounds the harness without
-    # corrupting real list responses.
+    # Resource request details can contain long provider metadata. Keep the
+    # response bounded without truncating a normal request payload.
     max_body_bytes = 8 * 1024 * 1024
     try:
         with urllib.request.urlopen(request, context=context, timeout=25.0) as response:
@@ -551,91 +556,66 @@ def _http(
         return error.code, error.read(max_body_bytes), dict(error.headers)
 
 
-def cancel_superseded_runs(
+def cancel_resource_request(
     *,
     base_url: str,
-    auth_dir: Path,
-    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
-    keep_prefix: str = "",
-) -> list[dict[str, str]]:
-    """Cancel every non-terminal agent run so the worker serves fresh journeys.
+    auth_state: Path,
+    project_id: str,
+    request_id: str,
+    request_key: str,
+) -> dict[str, object] | None:
+    """Cancel one request after checking its exact project and request key.
 
-    The agent worker runs one reserved dispatch at a time in ``created_at``
-    order, so a journey that was abandoned keeps the worker busy. Cancelling
-    needs the project owner's session: the platform administrator is correctly
-    refused with ``lw_auth_scope_denied``.
+    This command is intentionally incapable of discovering or selecting stale
+    requests. The caller must pass the identifiers returned by the current
+    journey; a mismatched project or request key is rejected before mutation.
     """
 
-    query = (
-        "select r.run_id||'|'||r.project_id from agent.agent_runs r "
-        "where r.state in ('requested','running') order by r.created_at"
+    if not project_id.strip() or not request_id.strip() or not request_key.strip():
+        raise AcceptanceError(JOURNEY_FAILED, "project, request and request key are required")
+    cookie = _auth_cookie(auth_state)
+    if not cookie:
+        return None
+    status, body, headers = _http(
+        _join(base_url, f"/api/v1/resource-requests/{request_id}"),
+        cookie,
+        origin=base_url,
     )
-    code, stdout, _ = run_kubectl(
-        [
-            "kubectl",
-            "--context",
-            KUBECTL_CONTEXT,
-            "-n",
-            DATA_NAMESPACE,
-            "exec",
-            "postgres-0",
-            "--",
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "labweaver",
-            "-tAc",
-            query,
-        ]
+    if status != 200:
+        return None
+    try:
+        detail = json.loads(body)
+    except ValueError:
+        return None
+    if (
+        detail.get("projectId") != project_id
+        or detail.get("requestKey") != request_key
+        or detail.get("state") not in {"requested", "reviewing"}
+    ):
+        return None
+    _, csrf_body, _ = _http(_join(base_url, "/api/v1/auth/csrf"), cookie, origin=base_url)
+    try:
+        csrf = json.loads(csrf_body)
+    except ValueError:
+        return None
+    token = csrf.get("csrfToken") or csrf.get("token")
+    etag = headers.get("etag") or headers.get("ETag")
+    if not token or not etag:
+        return None
+    cancel_status, cancel_body, _ = _http(
+        _join(base_url, f"/api/v1/resource-requests/{request_id}/cancel"),
+        cookie,
+        origin=base_url,
+        method="POST",
+        body={"reason": RESOURCE_CANCEL_REASON},
+        token=token,
+        etag=etag,
     )
-    if code != 0 or not stdout.strip():
-        return []
-    # Every run is offered to every role: a run the first role cannot read would otherwise be
-    # recorded as `no-etag` and skipped for the role that owns it (the earlier order-dependent
-    # version did exactly that). Keep the best outcome seen per run.
-    results: dict[str, dict[str, str]] = {}
-    for role in ("student", "teacher"):
-        cookie = _auth_cookie(auth_dir / f"{role}.json")
-        if not cookie:
-            continue
-        _, csrf_body, _ = _http(f"{base_url}/api/v1/auth/csrf", cookie, origin=base_url)
-        try:
-            payload = json.loads(csrf_body)
-        except ValueError:
-            payload = {}
-        # The endpoint has used both spellings; accept either.
-        token = payload.get("token") or payload.get("csrfToken")
-        if not token:
-            continue
-        for line in stdout.strip().splitlines():
-            run_id, _, project_id = line.strip().partition("|")
-            if not run_id or not project_id:
-                continue
-            if keep_prefix and run_id.startswith(keep_prefix):
-                continue
-            if results.get(run_id, {}).get("outcome", "").startswith("http-2"):
-                continue
-            _, _, headers = _http(
-                f"{base_url}/api/v1/projects/{project_id}/agent-runs/{run_id}",
-                cookie,
-                origin=base_url,
-            )
-            etag = headers.get("etag") or headers.get("ETag")
-            if not etag:
-                results.setdefault(run_id, {"run_id": run_id, "outcome": "no-etag"})
-                continue
-            status, _, _ = _http(
-                f"{base_url}/api/v1/projects/{project_id}/agent-runs/{run_id}/cancel",
-                cookie,
-                origin=base_url,
-                method="POST",
-                body=dict(CANCEL_STALE_REASONS),
-                token=token,
-                etag=etag,
-            )
-            results[run_id] = {"run_id": run_id, "outcome": f"http-{status}"}
-    return list(results.values())
+    try:
+        result = json.loads(cancel_body)
+    except ValueError:
+        result = {"status": cancel_status}
+    return result if cancel_status in {200, 201, 202} else None
 
 
 def queued_dispatch_count(
@@ -775,7 +755,10 @@ def check_credentials(directory: Path) -> Check:
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
             problems.append(f"{name}: empty")
             continue
-        if metadata.st_mode & stat.S_IROTH:
+        # Windows does not expose POSIX read bits through ``stat``; the file
+        # is still private because it is created in the caller's private
+        # directory and is removed with the temporary run directory.
+        if hasattr(os, "getuid") and metadata.st_mode & stat.S_IROTH:
             problems.append(f"{name}: world-readable")
     ok = not problems
     detail = str(directory) if ok else "; ".join(problems)
@@ -784,14 +767,13 @@ def check_credentials(directory: Path) -> Check:
 
 def check_model(
     model: str,
-    run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
 ) -> Check:
     ok = bool(model.strip())
     return Check(
         "model",
         ok,
         None if ok else MODEL_MISSING,
-        model or f"{MODEL_ENV} unset and {NAMESPACE}/{MODEL_CONFIG_MAP} has no model",
+        model or f"{ANTHROPIC_MODEL_ENV} unset",
     )
 
 
@@ -817,17 +799,6 @@ def check_browser(
     return Check("browser", ok, None if ok else BROWSER_MISSING, "; ".join(problems) or str(browsers_path))
 
 
-def check_evidence_dir(directory: Path) -> Check:
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-        probe = directory / ".write-probe"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
-    except OSError as error:
-        return Check("evidence-dir", False, EVIDENCE_DIR_UNWRITABLE, f"{directory}: {error}")
-    return Check("evidence-dir", True, None, str(directory))
-
-
 def preflight_checks(
     args: argparse.Namespace,
     *,
@@ -848,9 +819,8 @@ def preflight_checks(
         check_portal_csrf(args.base_url, http),
         check_login_redirect(args.base_url, http),
         check_credentials(Path(args.credentials_dir)),
-        check_model(model, run_kubectl),
+        check_model(model),
         check_browser(repo_root, browsers_path, run_version),
-        check_evidence_dir(Path(args.evidence_dir)),
         check_authoring_queue(run_kubectl),
     ]
 
@@ -875,7 +845,7 @@ def run_preflight(
 ) -> PreflightResult:
     checks = preflight_checks(
         args,
-        environ=os.environ if environ is None else environ,
+        environ=load_acceptance_environment(environ),
         http=http_get if http is None else http,
         run_kubectl=kubectl if run_kubectl is None else run_kubectl,
         run_version=run_command if run_version is None else run_version,
@@ -895,15 +865,6 @@ def validate_run_id(run_id: str) -> str:
     return value
 
 
-def prepare_run_directory(run_dir: Path) -> None:
-    """Create the per-run evidence directory, failing with a stable code."""
-
-    try:
-        run_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise AcceptanceError(EVIDENCE_DIR_UNWRITABLE, f"{run_dir}: {error}") from error
-
-
 def materialise_credentials(source_dir: Path, target_dir: Path) -> None:
     """Copy the private credentials into ``target_dir`` with 0700/0600 modes."""
 
@@ -911,7 +872,7 @@ def materialise_credentials(source_dir: Path, target_dir: Path) -> None:
         target_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(target_dir, 0o700)
     except OSError as error:
-        raise AcceptanceError(EVIDENCE_DIR_UNWRITABLE, f"{target_dir}: {error}") from error
+        raise AcceptanceError(CREDENTIALS_MISSING, f"{target_dir}: {error}") from error
     for name in CREDENTIAL_FILES.values():
         source = source_dir / name
         try:
@@ -926,22 +887,8 @@ def materialise_credentials(source_dir: Path, target_dir: Path) -> None:
             os.chmod(destination, 0o600)
         except OSError as error:
             raise AcceptanceError(
-                EVIDENCE_DIR_UNWRITABLE, f"{destination}: {error}"
+                CREDENTIALS_MISSING, f"{destination}: {error}"
             ) from error
-
-
-def collect_artifacts(results_dir: Path, target_dir: Path) -> None:
-    """Copy the per-journey traces/screenshots next to the run's other evidence.
-
-    The Playwright HTML/JSON reports are written straight into the journey directory by
-    ``PLAYWRIGHT_HTML_REPORT``/``PLAYWRIGHT_JSON_OUTPUT_NAME`` rather than copied here:
-    the reporters resolve their configured relative paths against the working directory
-    the runner is started in, so copying ``web/playwright-report`` could pick up a report
-    left behind by an unrelated invocation.
-    """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    if results_dir.is_dir():
-        shutil.copytree(results_dir, target_dir / "test-results", dirs_exist_ok=True)
 
 
 def execute_journey(
@@ -974,144 +921,6 @@ def execute_journey(
     return completed.returncode
 
 
-def approve_pending_resource_requests(
-    base_url: str,
-    auth_state: Path,
-    provider_binding: str,
-) -> list[str]:
-    """Approve every platform task lease still waiting for an administrator.
-
-    The platform raises a ``reviewing`` resource request for each internal
-    authoring and evaluation task and waits for a human, so the acceptance performs
-    that approval the way an operator does in the admin console. Requests that target
-    an environment are left alone: the journeys approve those themselves through the
-    admin console, and approving them here would race that step and hide the form the
-    journey is about to fill in. Returns the ids it approved.
-    """
-
-    cookie = _auth_cookie(auth_state)
-    if not cookie:
-        return []
-    status, body, _ = _http(
-        _join(base_url, "/api/v1/resource-requests"), cookie, origin=base_url
-    )
-    if status != 200:
-        return []
-    try:
-        items = json.loads(body)
-    except ValueError:
-        return []
-    if not isinstance(items, list):
-        return []
-
-    approved: list[str] = []
-    for item in items:
-        if not isinstance(item, dict) or item.get("state") != "reviewing":
-            continue
-        request_id = item.get("id")
-        if not isinstance(request_id, str) or not request_id:
-            continue
-        detail_status, detail_body, detail_headers = _http(
-            _join(base_url, f"/api/v1/resource-requests/{request_id}"),
-            cookie,
-            origin=base_url,
-        )
-        etag = detail_headers.get("etag") or detail_headers.get("ETag")
-        if detail_status != 200 or not etag:
-            continue
-        try:
-            detail = json.loads(detail_body)
-        except ValueError:
-            continue
-        target = item.get("target")
-        if not isinstance(target, dict):
-            target = detail.get("target")
-        request_key = item.get("requestKey")
-        if not isinstance(request_key, str):
-            request_key = detail.get("requestKey")
-        if isinstance(request_key, str) and "evaluation-" in request_key:
-            # The evaluation-track task leases (the frozen-submission
-            # `evaluation-<taskRunId>` and the authoring run's own
-            # `authoring-<runId>-evaluation-<attempt>-<sandboxId>`) are the ones
-            # the lab journey approves itself through the admin console
-            # (approveEvaluationTaskResourceRequestByUi). Approving them here
-            # races that step: the UI's confirm dialog then short-circuits on a
-            # no-longer-reviewing latest request and never posts, failing the
-            # journey. Leave them to the journey exactly like the environment
-            # requests below.
-            continue
-        if not isinstance(target, dict) or target.get("kind") != "task":
-            # Only platform task leases are approved here; the journeys approve the
-            # environment requests themselves through the admin console.
-            continue
-        _, csrf_body, _ = _http(
-            _join(base_url, "/api/v1/auth/csrf"), cookie, origin=base_url
-        )
-        try:
-            csrf = json.loads(csrf_body)
-        except ValueError:
-            csrf = {}
-        token = csrf.get("csrfToken") or csrf.get("token")
-        if not token:
-            continue
-        approve_status, _, _ = _http(
-            _join(base_url, f"/api/v1/resource-requests/{request_id}/approve"),
-            cookie,
-            origin=base_url,
-            method="POST",
-            body={
-                "expectedRevision": detail.get("revision"),
-                "providerBinding": provider_binding,
-                "resources": detail.get("requestedResources") or {},
-                "durationSeconds": detail.get("requestedDurationSeconds"),
-                "reason": APPROVAL_REASON,
-            },
-            token=token,
-            etag=etag,
-        )
-        if approve_status in {200, 201, 202}:
-            approved.append(request_id)
-    return approved
-
-
-def start_resource_approval_watchdog(
-    base_url: str,
-    auth_state: Path,
-    provider_binding: str,
-) -> "threading.Event":
-    """Approve platform task leases in the background until the stop event is set."""
-
-    stop = threading.Event()
-
-    def loop() -> None:
-        while not stop.is_set():
-            for request_id in approve_pending_resource_requests(
-                base_url, auth_state, provider_binding
-            ):
-                print(f"approved resource request {request_id}")
-            stop.wait(APPROVAL_POLL_SECONDS)
-
-    threading.Thread(target=loop, daemon=True).start()
-    return stop
-
-
-
-def acquire_run_lock(evidence_root: Path):
-    """Take the evidence root's exclusive run lock, or return None when another run holds it."""
-
-    handle = (evidence_root / ".acceptance.lock").open("w", encoding="utf-8")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-    # The handle must outlive this call: closing it would release the lock.
-    _RUN_LOCK.append(handle)
-    return handle
-
-
-_RUN_LOCK: list = []
-
 def run_acceptance(
     args: argparse.Namespace,
     *,
@@ -1121,7 +930,7 @@ def run_acceptance(
     git_commit: str | None = None,
     deployment_identity: str | None = None,
 ) -> RunResult:
-    environment = dict(os.environ if environ is None else environ)
+    environment = load_acceptance_environment(environ)
     run_kubectl = kubectl if run_kubectl is None else run_kubectl
     execute = execute_journey if execute is None else execute
 
@@ -1137,113 +946,93 @@ def run_acceptance(
     if not model:
         return RunResult(exit_code=2, diagnostics=[MODEL_MISSING])
 
-    evidence_root = Path(args.evidence_dir).resolve()
-    try:
-        evidence_root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return RunResult(exit_code=2, diagnostics=[EVIDENCE_DIR_UNWRITABLE])
-    if acquire_run_lock(evidence_root) is None:
-        return RunResult(exit_code=2, diagnostics=[RUN_IN_PROGRESS])
-    run_dir = evidence_root / run_id
-    credentials_dir = run_dir / ".credentials"
-    try:
-        prepare_run_directory(run_dir)
-        materialise_credentials(Path(args.credentials_dir), credentials_dir)
-    except AcceptanceError as error:
-        return RunResult(exit_code=2, diagnostics=[error.code])
-
     provider_binding = resolve_provider_binding(
         getattr(args, "provider_binding", None), environment, run_kubectl
     )
-    environment = acceptance_environment(
-        base_url=args.base_url,
-        credentials_dir=credentials_dir,
-        model=model,
-        environ=environment,
-        provider_binding=provider_binding,
-    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="labweaver-acceptance-") as temporary_root:
+            run_dir = Path(temporary_root)
+            credentials_dir = run_dir / ".credentials"
+            auth_dir = run_dir / ".auth"
+            output_dir = run_dir / "playwright-output"
+            materialise_credentials(Path(args.credentials_dir), credentials_dir)
+            auth_dir.mkdir(mode=0o700)
+            output_dir.mkdir(mode=0o700)
 
-    if git_commit is None:
-        git_commit = probe_git_commit()
-    if deployment_identity is None:
-        deployment_identity = probe_deployment_identity(run_kubectl)
-    bundle_sha256 = args.bundle_sha256 or deployment_identity
+            journey_environment_base = acceptance_environment(
+                base_url=args.base_url,
+                credentials_dir=credentials_dir,
+                auth_dir=auth_dir,
+                output_dir=output_dir,
+                model=model,
+                environ=environment,
+                provider_binding=provider_binding,
+            )
 
-    results_dir = ROOT / "web" / "test-results"
+            if git_commit is None:
+                git_commit = probe_git_commit()
+            if deployment_identity is None:
+                deployment_identity = probe_deployment_identity(run_kubectl)
+            bundle_sha256 = args.bundle_sha256 or deployment_identity
 
-    if not getattr(args, "no_queue_wait", False):
-        pending = wait_for_authoring_queue(run_kubectl, QUEUE_WAIT_SECONDS)
-        if pending:
-            print(f"authoring queue still busy: {pending} dispatch(es) after waiting")
-    started_at = datetime.now(timezone.utc).isoformat()
-    print(f"provider_binding={provider_binding or '<unset>'} model={model}")
-    # The Playwright setups resolve `.auth` against the directory the runner is
-    # started in, which is the repository root, so that is where the browser
-    # sessions the approval watchdog signs in with live.
-    approval_stop = start_resource_approval_watchdog(
-        args.base_url,
-        Path(getattr(args, "auth_dir", None) or ROOT / ".auth") / "platform-admin.json",
-        provider_binding or "container-primary-v1",
-    )
-    results: list[dict[str, object]] = []
-    for journey in selected:
-        journey_env = dict(environment)
-        journey_env.update(journey_environment(journey, args.lab))
-        journey_dir = run_dir / journey.key
-        journey_dir.mkdir(parents=True, exist_ok=True)
-        # Absolute paths so each journey carries its own fresh report; the built-in
-        # reporters otherwise resolve their relative output paths against the CWD.
-        journey_env["PLAYWRIGHT_HTML_REPORT"] = str(journey_dir)
-        journey_env["PLAYWRIGHT_JSON_OUTPUT_NAME"] = str(journey_dir / "report.json")
-        stdout_path = run_dir / f"{journey.key}.stdout.log"
-        stderr_path = run_dir / f"{journey.key}.stderr.log"
-        returncode = execute(playwright_command(journey), journey_env, stdout_path, stderr_path)
-        passed = returncode == 0
-        results.append(
-            {
-                "key": journey.key,
-                "project": journey.project,
-                "spec": journey.spec,
-                "grep": journey.grep,
-                "status": "passed" if passed else "failed",
-                "diagnostic": (
-                    None
-                    if passed
-                    else JOURNEY_TIMEOUT
-                    if returncode == JOURNEY_TIMEOUT_EXIT_CODE
-                    else JOURNEY_FAILED
-                ),
-                "exit_code": returncode,
-            }
-        )
-        collect_artifacts(results_dir, journey_dir)
-        print(f"{'PASS' if passed else 'FAIL'} {journey.key} ({journey.project})")
-    approval_stop.set()
-    finished_at = datetime.now(timezone.utc).isoformat()
+            if not getattr(args, "no_queue_wait", False):
+                pending = wait_for_authoring_queue(run_kubectl, QUEUE_WAIT_SECONDS)
+                if pending:
+                    print(f"authoring queue still busy: {pending} dispatch(es) after waiting")
+            started_at = datetime.now(timezone.utc).isoformat()
+            print(f"provider_binding={provider_binding or '<unset>'} model={model}")
+            results: list[dict[str, object]] = []
+            for journey in selected:
+                journey_env = dict(journey_environment_base)
+                journey_env.update(journey_environment(journey, args.lab))
+                stdout_path = run_dir / f"{journey.key}.stdout.log"
+                stderr_path = run_dir / f"{journey.key}.stderr.log"
+                returncode = execute(
+                    playwright_command(journey), journey_env, stdout_path, stderr_path
+                )
+                passed = returncode == 0
+                results.append(
+                    {
+                        "key": journey.key,
+                        "project": journey.project,
+                        "spec": journey.spec,
+                        "grep": journey.grep,
+                        "status": "passed" if passed else "failed",
+                        "diagnostic": (
+                            None
+                            if passed
+                            else JOURNEY_TIMEOUT
+                            if returncode == JOURNEY_TIMEOUT_EXIT_CODE
+                            else JOURNEY_FAILED
+                        ),
+                        "exit_code": returncode,
+                    }
+                )
+                print(f"{'PASS' if passed else 'FAIL'} {journey.key} ({journey.project})")
+            finished_at = datetime.now(timezone.utc).isoformat()
 
-    summary = build_summary(
-        run_id=run_id,
-        base_url=args.base_url,
-        git_commit=git_commit,
-        package_manifest=args.package_manifest,
-        helm_revision=deployment_identity,
-        bundle_sha256=bundle_sha256,
-        provider_binding=provider_binding,
-        journeys=results,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
-    (run_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-    )
+            summary = build_summary(
+                run_id=run_id,
+                base_url=args.base_url,
+                git_commit=git_commit,
+                package_manifest=args.package_manifest,
+                helm_revision=deployment_identity,
+                bundle_sha256=bundle_sha256,
+                provider_binding=provider_binding,
+                journeys=results,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
 
-    exit_code = journey_exit_code(results)
-    diagnostics = [] if exit_code == 0 else [
-        f"{item['key']}:{item.get('diagnostic') or JOURNEY_FAILED}"
-        for item in results
-        if item["status"] != "passed"
-    ]
-    return RunResult(exit_code=exit_code, diagnostics=diagnostics, summary=summary)
+            exit_code = journey_exit_code(results)
+            diagnostics = [] if exit_code == 0 else [
+                f"{item['key']}:{item.get('diagnostic') or JOURNEY_FAILED}"
+                for item in results
+                if item["status"] != "passed"
+            ]
+            return RunResult(exit_code=exit_code, diagnostics=diagnostics, summary=summary)
+    except AcceptanceError as error:
+        return RunResult(exit_code=2, diagnostics=[error.code])
 
 
 # --- CLI ------------------------------------------------------------------
@@ -1261,22 +1050,22 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--base-url", required=True)
     preflight.add_argument("--credentials-dir", default=str(DEFAULT_CREDENTIALS_DIR))
     preflight.add_argument("--model", default=None)
-    preflight.add_argument("--evidence-dir", default=DEFAULT_EVIDENCE_DIR)
 
-    stale = subparsers.add_parser(
-        "cancel-stale",
-        help="cancel superseded agent runs that still occupy the authoring worker",
+    cancel = subparsers.add_parser(
+        "cancel-resource",
+        help="cancel one resource request identified by this run",
     )
-    stale.add_argument("--base-url", required=True)
-    stale.add_argument("--auth-dir", default=str(ROOT / ".auth"))
-    stale.add_argument("--keep", default="", help="run id prefix to leave untouched")
+    cancel.add_argument("--base-url", required=True)
+    cancel.add_argument("--auth-state", required=True)
+    cancel.add_argument("--project-id", required=True)
+    cancel.add_argument("--request-id", required=True)
+    cancel.add_argument("--request-key", required=True)
 
     run = subparsers.add_parser("run", help="run the selected browser journeys")
     run.add_argument("--base-url", required=True)
     run.add_argument("--run-id", required=True)
     run.add_argument("--journeys", default=DEFAULT_JOURNEYS)
     run.add_argument("--lab", default=DEFAULT_LAB)
-    run.add_argument("--evidence-dir", default=DEFAULT_EVIDENCE_DIR)
     run.add_argument("--model", default=None)
     run.add_argument(
         "--no-queue-wait",
@@ -1291,9 +1080,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--credentials-dir", default=str(DEFAULT_CREDENTIALS_DIR))
     run.add_argument("--package-manifest", default=None)
     run.add_argument("--bundle-sha256", default=None)
-    # Where the Playwright setups write their browser sessions; the approval
-    # watchdog signs in with the platform-admin one.
-    run.add_argument("--auth-dir", default=str(ROOT / ".auth"))
 
     return parser
 
@@ -1308,17 +1094,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(code, file=sys.stderr)
         return result.exit_code
 
-    if args.command == "cancel-stale":
-        results = cancel_superseded_runs(
+    if args.command == "cancel-resource":
+        result = cancel_resource_request(
             base_url=args.base_url,
-            auth_dir=Path(args.auth_dir),
-            run_kubectl=kubectl,
-            keep_prefix=args.keep,
+            auth_state=Path(args.auth_state),
+            project_id=args.project_id,
+            request_id=args.request_id,
+            request_key=args.request_key,
         )
-        if not results:
-            print("no superseded runs to cancel")
-        for item in results:
-            print(f"{item['run_id']} {item['outcome']}")
+        if result is None:
+            print("resource request was not cancelled", file=sys.stderr)
+            return 1
+        print(json.dumps(result, sort_keys=True))
         return 0
 
     result = run_acceptance(args)

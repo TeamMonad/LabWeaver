@@ -1038,7 +1038,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.mutation == MutationContract::IdempotentRevisioned {
             parameters.push(header_parameter("If-Match", true));
         }
-        if operation.operation_id == "createProjectLlmPolicy" {
+        if matches!(
+            operation.operation_id,
+            "createProjectLlmPolicy" | "createCourseLlmPolicy"
+        ) {
             parameters.push(header_parameter("If-Match", false));
         }
         // The BFF interceptor obtains and attaches these headers for browser
@@ -1476,7 +1479,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
-        "createProjectLlmPolicy" => "project-llm-egress-policy",
+        "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
         "createInternalAgentLlmReview" => "http/internal-agent-llm-review-request",
         "createProjectWorkConfigurationRun" => "http/create-work-configuration-run-request",
@@ -1559,6 +1562,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "createProjectLlmPolicy"
         | "getActiveProjectLlmPolicy"
+        | "createCourseLlmPolicy"
+        | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
         "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
         "createProjectAgentRun"

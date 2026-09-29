@@ -2248,6 +2248,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         Project
     ),
     op!(
+        Public,
+        Post,
+        "/api/v1/courses/{courseId}/llm-egress-policies",
+        "createCourseLlmPolicy",
+        "llm_policy:write",
+        Oidc,
+        IdempotentCreate,
+        201,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/courses/{courseId}/llm-egress-policies/active",
+        "getActiveCourseLlmPolicy",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Course
+    ),
+    op!(
         GatewayInternal,
         Get,
         "/internal/v1/projects/{projectId}/llm-egress-policy",

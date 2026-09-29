@@ -1,10 +1,12 @@
 import { randomBytes } from 'node:crypto'
+import path from 'node:path'
 import { expect } from '@playwright/test'
 
+const authDir = process.env.LABWEAVER_AUTH_DIR || '.auth'
 export const AUTH_STATE = Object.freeze({
-  teacher: '.auth/teacher.json',
-  student: '.auth/student.json',
-  admin: '.auth/platform-admin.json',
+  teacher: path.join(authDir, 'teacher.json'),
+  student: path.join(authDir, 'student.json'),
+  admin: path.join(authDir, 'platform-admin.json'),
 })
 
 export function uuidv7() {
@@ -83,13 +85,52 @@ export async function expectJson(response, label) {
   }
 }
 
-export async function createProjectPolicy(request, baseURL, projectId, budgetOverrides = {}) {
-  const body = policyFor(projectId, null, process.env.LABWEAVER_E2E_PROVIDER_MODEL, budgetOverrides)
-  const response = await request.post(`/api/v1/projects/${projectId}/llm-egress-policies`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-    data: body,
+function formatPolicyDecimal(value, scale) {
+  const integer = Number(value)
+  if (!Number.isSafeInteger(integer) || integer <= 0) throw new Error('POLICY_BUDGET_VALUE_INVALID')
+  const unit = 10 ** scale
+  const whole = Math.floor(integer / unit)
+  const fraction = integer % unit
+  if (fraction === 0) return String(whole)
+  return `${whole}.${String(fraction).padStart(scale, '0').replace(/0+$/, '')}`
+}
+
+export async function configureProjectPolicyByUi(page, projectId, budgetOverrides = {}) {
+  const model = process.env.LABWEAVER_E2E_PROVIDER_MODEL?.trim()
+  if (!model || /\s/.test(model)) throw new Error('LABWEAVER_E2E_PROVIDER_MODEL_REQUIRED')
+  const defaults = policyFor(projectId, null, model, budgetOverrides).budget
+  await page.goto(`/researcher/ai-policy?projectId=${encodeURIComponent(projectId)}`, {
+    waitUntil: 'domcontentloaded',
   })
-  return await expectJson(response, 'PROJECT_POLICY_CREATE_FAILED')
+  await expect(page.getByRole('heading', { name: '项目 AI 设置', exact: true })).toBeVisible()
+  const projectSelect = page.locator('select[data-testid="policy-project-select"]')
+  await expect(projectSelect).toBeVisible()
+  await projectSelect.selectOption(projectId)
+  await expect(page.locator('[data-testid="policy-options-state"]')).toBeVisible()
+  const modelSelect = page.locator('select[data-testid="policy-model-select"]')
+  await expect(modelSelect).toBeVisible({ timeout: 30_000 })
+  await modelSelect.selectOption(model)
+  const consent = page.locator('input[data-testid="policy-material-consent"]')
+  await consent.check()
+  const fields = {
+    maxInputTokens: defaults.maxInputTokens,
+    maxOutputTokens: defaults.maxOutputTokens,
+    maxRequests: defaults.maxRequests,
+    maxCostDollars: formatPolicyDecimal(defaults.maxCostMicrousd, 6),
+    timeoutSeconds: formatPolicyDecimal(defaults.timeoutMilliseconds, 3),
+    maxTransientRetries: defaults.maxTransientRetries,
+    maxSchemaRepairs: defaults.maxSchemaRepairs,
+  }
+  for (const [name, value] of Object.entries(fields)) {
+    await page.locator(`input[name="${name}"]`).fill(String(value))
+  }
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === `/api/v1/projects/${projectId}/llm-egress-policies`
+  })
+  await page.locator('[data-testid="policy-save-button"]').click()
+  return await expectJson(await responsePromise, 'PROJECT_POLICY_UI_SAVE_FAILED')
 }
 
 export async function createProjectByUi(page, name) {
