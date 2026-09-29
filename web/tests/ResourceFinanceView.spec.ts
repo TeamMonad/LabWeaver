@@ -1,6 +1,16 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
+import { createResourceRate, listResourceRates } from '@/generated/contracts'
+
+vi.mock('@/generated/contracts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/generated/contracts')>()
+  return {
+    ...actual,
+    createResourceRate: vi.fn(),
+    listResourceRates: vi.fn(),
+  }
+})
 
 const api = vi.hoisted(() => ({
   get: vi.fn(),
@@ -88,6 +98,9 @@ describe('ResourceFinanceView', () => {
 
   beforeEach(() => {
     api.get.mockReset()
+    vi.mocked(listResourceRates).mockReset()
+    vi.mocked(createResourceRate).mockReset()
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [] as never, error: undefined as never })
     routerMocks.replace.mockReset()
     routerMocks.replace.mockImplementation(({ query }: { query: Record<string, string | undefined> }) => {
       routerMocks.route.query = query
@@ -113,6 +126,97 @@ describe('ResourceFinanceView', () => {
     expect(wrapper.find('.budget-form').exists()).toBe(true)
     expect(wrapper.find('.budget-form button[type="submit"]').text()).toBe('创建预算')
     expect(wrapper.find('.budget-card .diagnostic-banner').exists()).toBe(false)
+  })
+
+  it('lets an administrator create a GPU rate version from the finance page', async () => {
+    const rate = {
+      id: 'rate-vgpu-1',
+      revision: 1,
+      unit: 'gpu_unit_second',
+      unitQuantity: 1,
+      gpuClass: 'nvidia-v100-2q',
+      gpuMode: 'vm_vgpu',
+      unitPrice: { currency: 'USD', amount: '0.250000' },
+      effectiveFrom: '2026-09-08T00:00:00.000Z',
+      effectiveUntil: null,
+    }
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [] as never, error: undefined as never })
+      .mockResolvedValue({ data: [rate] as never, error: undefined as never })
+    vi.mocked(createResourceRate).mockResolvedValue({ data: rate as never, error: undefined as never })
+    api.get.mockImplementation(({ url }: { url: string }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="resource-rate-form"]')
+    await form.findAll('select')[1].setValue('vm_vgpu')
+    await form.find('input').setValue('nvidia-v100-2q')
+    const inputs = form.findAll('input')
+    await inputs[1].setValue('1')
+    await inputs[2].setValue('0.250000')
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(createResourceRate).toHaveBeenCalledWith({
+      headers: { 'Idempotency-Key': expect.any(String) },
+      body: {
+        unit: 'gpu_unit_second',
+        unitQuantity: 1,
+        gpuClass: 'nvidia-v100-2q',
+        gpuMode: 'vm_vgpu',
+        unitPrice: { currency: 'USD', amount: '0.250000' },
+        effectiveFrom: expect.stringMatching(/Z$/),
+        effectiveUntil: null,
+      },
+    })
+    expect(wrapper.text()).toContain('GPU nvidia-v100-2q · VM vGPU')
+    expect(wrapper.text()).toContain('资源费率已创建。')
+  })
+
+  it('reuses the rate create intent key after a transport failure', async () => {
+    const rate = {
+      id: 'rate-vgpu-1',
+      revision: 1,
+      unit: 'gpu_unit_second',
+      unitQuantity: 1,
+      gpuClass: 'nvidia-v100-2q',
+      gpuMode: 'vm_vgpu',
+      unitPrice: { currency: 'USD', amount: '0.250000' },
+      effectiveFrom: '2026-09-08T00:00:00.000Z',
+      effectiveUntil: null,
+    }
+    vi.mocked(createResourceRate)
+      .mockRejectedValueOnce(new Error('request timed out'))
+      .mockResolvedValueOnce({ data: rate as never, error: undefined as never })
+    api.get.mockImplementation(({ url }: { url: string }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="resource-rate-form"]')
+    await form.findAll('select')[1].setValue('vm_vgpu')
+    await form.find('input').setValue('nvidia-v100-2q')
+    const inputs = form.findAll('input')
+    await inputs[1].setValue('1')
+    await inputs[2].setValue('0.250000')
+
+    await form.trigger('submit')
+    await flushPromises()
+    expect(wrapper.text()).toContain('RESOURCE_RATE_CREATE_FAILED')
+
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(createResourceRate).toHaveBeenCalledTimes(2)
+    expect(createResourceRate.mock.calls[0][0].headers?.['Idempotency-Key']).toBe(
+      createResourceRate.mock.calls[1][0].headers?.['Idempotency-Key'],
+    )
+    expect(wrapper.text()).toContain('资源费率已创建。')
   })
 
   it('keeps an unrelated 404 as a budget load error', async () => {
@@ -144,13 +248,13 @@ describe('ResourceFinanceView', () => {
     expect((projectSelect.element as HTMLSelectElement).value).toBe('project-other')
     expect(api.get).toHaveBeenCalledWith(expect.objectContaining({ url: '/api/v1/projects/project-other/resource-budget' }))
 
-    const limitInput = wrapper.get('input[inputmode="decimal"]')
+    const limitInput = wrapper.get('.budget-form input[inputmode="decimal"]')
     await limitInput.setValue('12.000000')
     await projectSelect.setValue('project-new')
     await flushPromises()
 
     expect(projectMocks.state!.selectedProjectId).toBe('project-new')
-    expect((wrapper.get('input[inputmode="decimal"]').element as HTMLInputElement).value).toBe('0.000000')
+    expect((wrapper.get('.budget-form input[inputmode="decimal"]').element as HTMLInputElement).value).toBe('0.000000')
     expect(routerMocks.replace).toHaveBeenCalledWith({ query: { projectId: 'project-new' } })
   })
 

@@ -94,12 +94,14 @@
           <div class="two-columns">
             <label>
               <span>GPU 目录项（可选）</span>
-              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="options.catalog.kind !== 'success'">
+              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="options.catalog.kind !== 'success' || !selectedRelease">
                 <option value="">不申请 GPU</option>
                 <option v-for="entry in gpuCatalogOptions" :key="entry.id" :value="entry.id">
                   {{ entry.class }} · {{ gpuModeLabel(entry.mode) }} · {{ entry.capacityUnits }} units
                 </option>
               </select>
+              <small v-if="!selectedRelease" class="field-note">先选择已发布版本，再显示与运行时兼容的 GPU 目录项。</small>
+              <small v-else-if="options.catalog.kind === 'success' && gpuCatalogOptions.length === 0" class="field-note">当前版本的运行时没有兼容的 GPU 目录项。</small>
             </label>
             <label>
               <span>GPU 数量</span>
@@ -236,8 +238,12 @@ type ResourceConfirmation =
 const resourceConfirmation = ref<ResourceConfirmation | null>(null)
 
 const releaseOptions = computed(() => options.releases.kind === 'success' ? options.releases.data : [])
-const gpuCatalogOptions = computed(() => options.catalog.kind === 'success' ? options.catalog.data : [])
 const selectedRelease = computed(() => releaseOptions.value.find((item) => releaseKey(item.id, item.version) === selectedReleaseKey.value) ?? null)
+const gpuCatalogOptions = computed(() => {
+  if (options.catalog.kind !== 'success' || !selectedRelease.value) return []
+  const runtimeMode = selectedRelease.value.runtimeKind === 'virtual_machine' ? 'vm_vgpu' : 'container'
+  return options.catalog.data.filter((entry) => runtimeMode === 'vm_vgpu' ? entry.mode === 'vm_vgpu' : entry.mode !== 'vm_vgpu')
+})
 const selectedGpu = computed(() => gpuCatalogOptions.value.find((item) => item.id === selectedGpuCatalogId.value) ?? null)
 const selectedGpuRateSelection = computed(() => selectedGpu.value
   ? options.gpuRateSelection(selectedGpu.value)
@@ -309,6 +315,15 @@ watch(
 )
 
 watch(
+  () => gpuCatalogOptions.value,
+  (items) => {
+    if (selectedGpuCatalogId.value && !items.some((item) => item.id === selectedGpuCatalogId.value)) {
+      selectedGpuCatalogId.value = ''
+    }
+  },
+)
+
+watch(
   () => selectedGpu.value,
   (entry) => {
     if (!entry) {
@@ -329,6 +344,8 @@ const canSubmit = computed(() => Boolean(
   Number.isInteger(storageGiB.value) && storageGiB.value > 0 &&
   Number.isInteger(durationHours.value) && durationHours.value > 0 &&
   (!selectedGpu.value || (
+    Boolean(selectedGpuRate.value) &&
+    !selectedGpuRateAmbiguous.value &&
     Number.isInteger(gpuCount.value) &&
     gpuCount.value > 0 &&
     gpuCount.value <= selectedGpu.value.capacityUnits

@@ -45,6 +45,85 @@
       @retry="finance.load"
     />
 
+    <DiagnosticBanner
+      v-if="rates.outcome"
+      :code="rates.outcome.diagnostic.code"
+      :message="rates.outcome.diagnostic.message"
+      :retryable="rates.outcome.diagnostic.retryable"
+      :severity="rates.outcome.kind === 'error' ? 'error' : 'info'"
+      @retry="rates.load"
+    />
+
+    <section class="rates-card md-card" aria-labelledby="rates-heading">
+      <div class="section-heading">
+        <div>
+          <h3 id="rates-heading">资源费率</h3>
+          <p>费率按资源类型和 GPU class 版本化保存。GPU 目录项只有匹配当前费率后才能申请。</p>
+        </div>
+        <button type="button" class="icon-button" aria-label="刷新资源费率" :disabled="rates.acting !== null" @click="rates.load">
+          <SvgIcon name="refresh" size="sm" aria-hidden="true" />
+        </button>
+      </div>
+      <AsyncStateView :state="rates.rates" empty-text="还没有资源费率。创建费率后，匹配的 GPU 目录项才能用于资源申请。" @retry="rates.load">
+        <template #success="{ data }">
+          <ul class="rate-list" aria-label="资源费率列表">
+            <li v-for="rate in data" :key="`${rate.id}-${rate.revision}`" class="rate-row">
+              <div class="rate-main">
+                <strong>{{ rateLabel(rate) }}</strong>
+                <small>{{ rate.unitQuantity }} 基础单位 · {{ rate.unitPrice.amount }} {{ rate.unitPrice.currency }} · {{ formatTimestamp(rate.effectiveFrom) }} 起</small>
+                <small v-if="rate.effectiveUntil">至 {{ formatTimestamp(rate.effectiveUntil) }}</small>
+              </div>
+              <span class="state-chip">版本 {{ rate.revision }}</span>
+            </li>
+          </ul>
+        </template>
+      </AsyncStateView>
+      <form class="rate-form" data-testid="resource-rate-form" @submit.prevent="submitRate">
+        <label>
+          <span>计费单位</span>
+          <select v-model="rateUnit" class="text-input">
+            <option value="gpu_unit_second">GPU 秒</option>
+            <option value="cpu_millicore_second">CPU millicore 秒</option>
+            <option value="memory_byte_second">内存字节 秒</option>
+            <option value="storage_byte_second">存储字节 秒</option>
+          </select>
+        </label>
+        <label v-if="rateUnit === 'gpu_unit_second'">
+          <span>GPU class</span>
+          <input v-model="rateGpuClass" class="text-input" maxlength="63" pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" required />
+        </label>
+        <label v-if="rateUnit === 'gpu_unit_second'">
+          <span>分配模式</span>
+          <select v-model="rateGpuMode" class="text-input">
+            <option value="exclusive">独占</option>
+            <option value="container_time_slice">容器时间片</option>
+            <option value="vm_vgpu">VM vGPU</option>
+          </select>
+        </label>
+        <label>
+          <span>每次计费基础单位数</span>
+          <input v-model.number="rateUnitQuantity" class="text-input" type="number" min="1" step="1" required />
+        </label>
+        <label>
+          <span>单价</span>
+          <input v-model="rateAmount" class="text-input" inputmode="decimal" pattern="(0|[1-9][0-9]*)\.[0-9]{6}" placeholder="0.000000" required />
+        </label>
+        <label>
+          <span>币种</span>
+          <input v-model="rateCurrency" class="text-input" maxlength="32" pattern="[A-Za-z0-9_-]{1,32}" required />
+        </label>
+        <label>
+          <span>生效时间</span>
+          <input v-model="rateEffectiveFrom" class="text-input" type="datetime-local" required />
+        </label>
+        <label>
+          <span>结束时间（可选）</span>
+          <input v-model="rateEffectiveUntil" class="text-input" type="datetime-local" />
+        </label>
+        <button type="submit" class="filled-button" :disabled="!canSubmitRate || rates.acting !== null">创建费率版本</button>
+      </form>
+    </section>
+
     <div class="finance-layout">
       <section class="budget-card md-card" aria-labelledby="budget-heading">
         <div class="section-heading">
@@ -147,14 +226,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResourceFinance, type ResourceCharge } from '@/composables/useProjectResourceFinance'
+import { useResourceRates } from '@/composables/useResourceRates'
 import { useProjects } from '@/composables/useProjects'
 import { formatTimestamp } from '@/utils/format'
+import type { GpuAllocationMode, ResourceBillingUnit, ResourceRateSchema } from '@/generated/contracts'
 
 const projects = useProjects()
 const route = useRoute()
@@ -190,6 +271,15 @@ const warningAmount = ref('0.000000')
 const selectedChargeId = ref('')
 const adjustmentAmount = ref('0.000000')
 const adjustmentReason = ref('')
+const rates = useResourceRates()
+const rateUnit = ref<ResourceBillingUnit>('gpu_unit_second')
+const rateGpuClass = ref('')
+const rateGpuMode = ref<GpuAllocationMode>('exclusive')
+const rateUnitQuantity = ref(1)
+const rateAmount = ref('0.000000')
+const rateCurrency = ref('USD')
+const rateEffectiveFrom = ref(localDateTimeValue())
+const rateEffectiveUntil = ref('')
 
 const selectedCharge = computed(() => finance.charges.kind === 'success'
   ? finance.charges.data.find((charge) => charge.id === selectedChargeId.value) ?? null
@@ -201,6 +291,17 @@ const canSaveBudget = computed(() => {
   return /^[A-Za-z0-9_-]{1,32}$/.test(budgetCurrency.value) && valid(limitAmount.value) && valid(warningAmount.value) && Number(warningAmount.value) <= Number(limitAmount.value)
 })
 const canSubmitAdjustment = computed(() => Boolean(selectedCharge.value && /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/.test(adjustmentAmount.value) && adjustmentReason.value.trim()))
+const canSubmitRate = computed(() => {
+  if (!Number.isSafeInteger(rateUnitQuantity.value) || rateUnitQuantity.value < 1) return false
+  if (!/^(0|[1-9][0-9]*)\.[0-9]{6}$/.test(rateAmount.value)) return false
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(rateCurrency.value)) return false
+  if (rateUnit.value === 'gpu_unit_second' && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(rateGpuClass.value.trim())) return false
+  const from = Date.parse(rateEffectiveFrom.value)
+  if (!Number.isFinite(from)) return false
+  if (!rateEffectiveUntil.value) return true
+  const until = Date.parse(rateEffectiveUntil.value)
+  return Number.isFinite(until) && until > from
+})
 
 watch(
   [() => projectOptions.value, routeProjectId],
@@ -285,6 +386,49 @@ function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
     gpu_unit_second: 'GPU',
   } as Record<ResourceCharge['lines'][number]['unit'], string>)[value] ?? value
 }
+
+function localDateTimeValue(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function toUtcTimestamp(value: string): string | null {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+}
+
+function rateLabel(rate: ResourceRateSchema) {
+  if (rate.unit === 'gpu_unit_second') return `GPU ${rate.gpuClass} · ${rateModeLabel(rate.gpuMode)}`
+  return billingUnitLabel(rate.unit)
+}
+
+function rateModeLabel(mode: GpuAllocationMode | null | undefined) {
+  return ({ exclusive: '独占', container_time_slice: '容器时间片', vm_vgpu: 'VM vGPU' } as Record<GpuAllocationMode, string>)[mode ?? 'exclusive']
+}
+
+async function submitRate() {
+  if (!canSubmitRate.value) return
+  const effectiveFrom = toUtcTimestamp(rateEffectiveFrom.value)
+  const effectiveUntil = rateEffectiveUntil.value ? toUtcTimestamp(rateEffectiveUntil.value) : null
+  if (!effectiveFrom || (rateEffectiveUntil.value && !effectiveUntil)) return
+  const created = await rates.create({
+    unit: rateUnit.value,
+    unitQuantity: rateUnitQuantity.value,
+    gpuClass: rateUnit.value === 'gpu_unit_second' ? rateGpuClass.value.trim() : null,
+    gpuMode: rateUnit.value === 'gpu_unit_second' ? rateGpuMode.value : null,
+    unitPrice: { currency: rateCurrency.value.trim(), amount: rateAmount.value },
+    effectiveFrom,
+    effectiveUntil,
+  })
+  if (!created) return
+  rateGpuClass.value = ''
+  rateUnitQuantity.value = 1
+  rateAmount.value = '0.000000'
+  rateEffectiveFrom.value = localDateTimeValue()
+  rateEffectiveUntil.value = ''
+}
+
+onMounted(() => { void rates.load() })
 </script>
 
 <style scoped>
@@ -300,6 +444,15 @@ function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
 .project-strip label { flex: 1; max-width: 560px; }
 .project-scope { padding-bottom: 10px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .project-context-action { justify-self: start; }
+.rates-card { display: grid; gap: 18px; padding: 20px; }
+.rate-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.rate-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.rate-main { display: grid; gap: 4px; min-width: 0; }
+.rate-main strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
+.rate-main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.rate-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); align-items: end; }
+.rate-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.rate-form button { justify-self: start; }
 .finance-layout { display: grid; grid-template-columns: minmax(300px, .75fr) minmax(0, 1.25fr); gap: 20px; align-items: start; }
 .budget-card, .charges-card { display: grid; gap: 18px; padding: 20px; }
 .budget-summary { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
@@ -335,5 +488,5 @@ textarea.text-input { resize: vertical; }
 .filled-button:disabled, .outlined-button:disabled, .text-button:disabled { opacity: .5; cursor: not-allowed; }
 .icon-button { display: inline-grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 50%; background: transparent; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
 @media (max-width: 850px) { .finance-layout { grid-template-columns: 1fr; } .project-strip { align-items: stretch; flex-direction: column; } .project-strip label { max-width: none; } .project-scope { padding-bottom: 0; } }
-@media (max-width: 620px) { .budget-summary, .two-columns { grid-template-columns: 1fr; } .charge-row { align-items: flex-start; flex-direction: column; } .charge-actions { justify-content: flex-start; } .charge-line { grid-template-columns: 1fr auto; } .charge-line > small { grid-column: 1 / -1; } }
+@media (max-width: 620px) { .budget-summary, .two-columns { grid-template-columns: 1fr; } .rate-row, .charge-row { align-items: flex-start; flex-direction: column; } .charge-actions { justify-content: flex-start; } .charge-line { grid-template-columns: 1fr auto; } .charge-line > small { grid-column: 1 / -1; } }
 </style>

@@ -156,8 +156,8 @@
                     <code v-if="attempt.diagnosticCode">{{ attempt.diagnosticCode }}</code>
                   </li>
                 </ul>
-                <button v-if="(data.state === 'failed' || data.state === 'partially_succeeded') && track.kind === 'work_configuration' && !data.plan" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('work_configuration')">重试 Work 配置</button>
-                <button v-if="(data.state === 'failed' || data.state === 'partially_succeeded') && track.kind === 'environment'" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment</button>
+                <button v-if="track.kind === 'work_configuration' && trackCanRetry(data, 'work_configuration') && !data.plan" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('work_configuration')">重试 Work 配置</button>
+                <button v-if="track.kind === 'environment' && trackCanRetry(data, 'environment')" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment</button>
               </article>
             </div>
             <section v-if="workConfigurationNeedsNewTask(data)" class="work-plan-retry-hint" aria-label="创建新的 Work 配置任务">
@@ -283,7 +283,18 @@ const approvalReason = ref('')
 const restartConfirmed = ref(false)
 const approvalExpiresAt = ref('')
 const approving = ref(false)
-const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success'))
+const existingRunForCurrentInputs = computed(() => {
+  if (agent.run.kind !== 'success' || policy.value.kind !== 'success' || !selectedEnvironment.value || !packageId.value.trim()) return false
+  const current = agent.run.data
+  return current.projectId === selectedProjectId.value
+    && current.packageId === packageId.value.trim()
+    && current.policyId === policy.value.data.id
+    && current.policyRevision === policy.value.data.revision
+    && current.purpose.kind === 'work_configuration'
+    && current.purpose.environmentId === selectedEnvironment.value.id
+    && current.purpose.environmentRevision === selectedEnvironment.value.revision
+})
+const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success' && agent.run.kind !== 'loading' && !existingRunForCurrentInputs.value))
 const canApprovePlan = computed(() => {
   if (plan.value.kind !== 'success' || agent.run.kind !== 'success' || agent.run.data.state !== 'awaiting_approval') return false
   if (!approvalReason.value.trim() || !approvalExpiresAt.value) return false
@@ -492,6 +503,13 @@ function workConfigurationNeedsNewTask(data: AgentRunSchema) {
     && data.plan !== null
     && data.plan !== undefined
     && (data.state === 'failed' || data.state === 'partially_succeeded' || data.state === 'cancelled')
+}
+
+function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][number]['kind']): boolean {
+  if (data.state !== 'failed' && data.state !== 'partially_succeeded' && data.state !== 'cancelled') return false
+  const track = data.tracks.find((item) => item.kind === kind)
+  const latestAttempt = track?.attempts[track.attempts.length - 1]
+  return latestAttempt?.state === 'failed' || latestAttempt?.state === 'cancelled'
 }
 
 function prepareNewTask() {

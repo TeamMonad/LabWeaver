@@ -152,6 +152,39 @@ describe('ResourceRequestView', () => {
     expect(wrapper.find('a[href^="/teacher/materials"]').exists()).toBe(false)
   })
 
+  it('only offers GPU modes supported by the selected release runtime', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [
+        { id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' },
+        { id: 'release-vm', version: 1, runtimeKind: 'virtual_machine', label: 'VM release', source: 'control' },
+      ],
+    }
+    mocks.catalog = {
+      kind: 'success',
+      data: [
+        { id: 'gpu-container', class: 'nvidia-cuda', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true },
+        { id: 'gpu-vm', class: 'nvidia-v100-2q', mode: 'vm_vgpu', capacityUnits: 16, revision: 1, active: true },
+      ],
+    }
+    const wrapper = await mountView()
+    const releaseSelect = wrapper.findAll('label').find((label) => label.text().includes('已发布版本'))?.get('select')
+    const gpuSelect = wrapper.findAll('label').find((label) => label.text().includes('GPU 目录项'))?.get('select')
+    expect(releaseSelect).toBeDefined()
+    expect(gpuSelect).toBeDefined()
+    expect(gpuSelect!.findAll('option').map((option) => option.element.value)).toEqual(['', 'gpu-container'])
+
+    await releaseSelect!.setValue('release-vm:1')
+    await flushPromises()
+    expect(gpuSelect!.findAll('option').map((option) => option.element.value)).toEqual(['', 'gpu-vm'])
+    await gpuSelect!.setValue('gpu-vm')
+    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+
+    await releaseSelect!.setValue('release-container:1')
+    await flushPromises()
+    expect((gpuSelect!.element as HTMLSelectElement).value).toBe('')
+  })
+
   it('requires confirmation for cancellation and reclaim, then clears a target on project switch', async () => {
     mocks.requests = { kind: 'success', data: [pendingRequest()] }
     mocks.leases = { kind: 'success', data: [activeLease()] }

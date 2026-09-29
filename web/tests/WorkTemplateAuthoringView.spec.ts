@@ -203,6 +203,32 @@ describe('WorkTemplateAuthoringView', () => {
     wrapper.unmount()
   })
 
+  it('prevents a second start for the same archived package', async () => {
+    const wrapper = await mountView()
+
+    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    expect((runButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(createProjectAgentRun).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('only exposes an Environment retry when that track has a failed attempt', async () => {
+    const partiallySucceededRun = {
+      ...run,
+      state: 'partially_succeeded',
+      tracks: [
+        { kind: 'environment', candidateId: 'candidate-1', attempts: [{ number: 1, state: 'succeeded' }] },
+        { kind: 'evaluation', candidateId: null, attempts: [{ number: 1, state: 'failed' }] },
+      ],
+    }
+    vi.mocked(createProjectAgentRun).mockResolvedValue({ data: partiallySucceededRun as never, error: undefined as never })
+
+    const wrapper = await mountView()
+
+    expect(wrapper.text()).not.toContain('重试 Environment 轨道')
+    wrapper.unmount()
+  })
+
   it('waits for the Environment candidate projection after a transient not-found response', async () => {
     vi.useFakeTimers()
     try {
