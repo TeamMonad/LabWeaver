@@ -30,6 +30,8 @@ DEFAULT_BUILDER_IMAGE = "labweaver/vgpu-guest-builder:ubuntu-24.04"
 CONTAINERDISK_PATH = "disk/disk.qcow2"
 CAPACITY_INFO_PATH = ".labweaver-vgpu-capacity.json"
 GUEST_PATCHER_PATH = "/usr/local/bin/gridd-unlock-patcher"
+GUEST_RESIZE_HEADROOM_BYTES = 4 * 1024 * 1024 * 1024
+MIN_GUEST_VIRTUAL_SIZE_BYTES = 16 * 1024 * 1024 * 1024
 
 
 class GuestImageError(Exception):
@@ -172,7 +174,10 @@ qemu-img check "$base"
 base_virtual_size=$(qemu-img info --output=json "$base" | python3 -c \\
     'import json, sys; print(json.load(sys.stdin)["virtual-size"])')
 test "$base_virtual_size" -gt 0
-target_virtual_size=$((base_virtual_size + 4 * 1024 * 1024 * 1024))
+target_virtual_size={MIN_GUEST_VIRTUAL_SIZE_BYTES}
+if (( base_virtual_size + {GUEST_RESIZE_HEADROOM_BYTES} > target_virtual_size )); then
+    target_virtual_size=$((base_virtual_size + {GUEST_RESIZE_HEADROOM_BYTES}))
+fi
 root_device=$(virt-inspector --no-applications --no-icon -a "$base" \\
     | virt-inspector --xpath 'string(//mountpoint[text()="/"]/@dev)')
 test -n "$root_device"
@@ -200,11 +205,12 @@ virt-customize --format=qcow2 --network -a "$stage/guest.qcow2" \\
     --copy-in "$stage/patcher:/var/tmp/labweaver-vgpu" \\
     --run-command 'DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update' \\
     --run-command 'DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends dkms build-essential linux-image-generic linux-headers-generic kmod' \\
+    --run-command 'DEBIAN_FRONTEND=noninteractive apt-get clean' \\
     --run-command 'cd /var/tmp/labweaver-vgpu && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ./driver.deb' \\
     --run-command "install -D -m 0755 $guest_patcher {GUEST_PATCHER_PATH}" \\
     --run-command "command -v nvidia-gridd >/dev/null" \\
     --run-command "printf '%s' $marker_b64 | base64 --decode > /etc/labweaver-vgpu-image.json" \\
-    --run-command 'rm -rf /var/tmp/labweaver-vgpu /var/lib/apt/lists/*'
+    --run-command 'DEBIAN_FRONTEND=noninteractive apt-get clean && rm -rf /var/tmp/labweaver-vgpu /var/lib/apt/lists/* /var/cache/apt/archives/*'
 
 virt-sysprep --format=qcow2 -a "$stage/guest.qcow2" \\
     --operations machine-id,net-hwaddr,ssh-hostkeys

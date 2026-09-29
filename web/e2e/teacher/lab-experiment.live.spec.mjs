@@ -20,7 +20,7 @@ import {
   waitForFrozenSubmission,
   waitForProjectEvaluationResultWithResourceApproval,
 } from '../support/real-experiment.mjs'
-import { cp, mkdtemp, rm } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,10 +32,11 @@ const LABS = Object.freeze({
   xv6: Object.freeze({
     root: join(LAB_ROOT, 'xv6-lab'),
     frozenPath: 'student/student.c',
-    // The starter user program already satisfies both xv6 cases; the terminal
-    // step proves interactive access without weakening the score.
-    fixCommands: [],
-    expectImprovement: false,
+    starterOutput: 'xv6-starter: fix me',
+    fixCommands: [
+      "sed -i 's/xv6-starter: fix me/xv6-student: hello/' student/student.c",
+    ],
+    expectImprovement: true,
   }),
   cuda: Object.freeze({
     root: join(LAB_ROOT, 'cuda-lab'),
@@ -365,6 +366,13 @@ test('student completes a published lab experiment through the browser terminal'
   let adminContext
   try {
     await cp(LAB.root, packageCopy, { recursive: true })
+    if (process.env.LABWEAVER_E2E_LAB === 'xv6') {
+      const sourcePath = join(packageCopy, LAB.frozenPath)
+      const source = await readFile(sourcePath, 'utf8')
+      const starterSource = source.replace('xv6-student: hello', LAB.starterOutput)
+      if (starterSource === source) throw new Error('LAB_EXPERIMENT_XV6_STARTER_OUTPUT_NOT_FOUND')
+      await writeFile(sourcePath, starterSource, 'utf8')
+    }
     const project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
     await configureProjectPolicyByUi(page, project.id)
