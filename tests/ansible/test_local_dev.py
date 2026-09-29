@@ -251,7 +251,7 @@ class LocalDevBundleTests(unittest.TestCase):
         )
         self.assertEqual(
             [observer["providerBinding"] for observer in rendered["gpuObservers"]],
-            ["gpu-primary-v1", "kubernetes-work-local-hostpath"],
+            ["container-primary-v1", "kubernetes-work-local-hostpath"],
         )
         for observer in rendered["gpuObservers"]:
             self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
