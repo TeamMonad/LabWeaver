@@ -1,4 +1,5 @@
 ---
+resource_application_run_id: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RUN_ID') }}"
 resource_application_package_manifest: "{{ lookup('ansible.builtin.env', 'LABWEAVER_PACKAGE_MANIFEST') }}"
 resource_application_configuration_bundle: "{{ lookup('ansible.builtin.env', 'LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE') }}"
 resource_application_access_seed_file: "{{ lookup('ansible.builtin.env', 'LABWEAVER_ACCESS_SEED_FILE') }}"
@@ -20,7 +21,7 @@ resource_application_namespace: labweaver-system
 resource_application_release_name: labweaver-resource
 resource_application_image_pull_secret_name: harbor-labweaver-system-pull
 resource_application_rollout_timeout: 10m
-resource_application_work_root: /var/lib/labweaver/resource-application-work
+resource_application_work_root: "/var/lib/labweaver/resource-application-work/{{ resource_application_run_id }}"
 resource_application_workloads:
   - control-service
   - access-service

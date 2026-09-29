@@ -1083,6 +1083,8 @@ fn ensure_offline_pkg_closure(
     entries: &[(&str, &str, &str)],
 ) -> Result<(), AppError> {
     let base = root.join(dir);
+    fs::create_dir_all(&base)
+        .map_err(|error| io_error("create offline package directory", error))?;
     for (file, expected_sha256, url) in entries {
         let path = base.join(file);
         let present = std::fs::read(&path)
@@ -1929,6 +1931,21 @@ mod tests {
             format!("harbor.lab.lan/labweaver-system/base-rust-builder@{expected}")
         );
         assert!(pinned_mirror("harbor.lab.lan", "RUST_BUILDER", "rust:latest").is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_package_closure_creates_a_clean_context_directory() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let package_dir = root.path().join("containers/alpine-3.21-pkgs");
+
+        ensure_offline_pkg_closure(root.path(), "containers/alpine-3.21-pkgs", &[])
+            .map_err(|error| error.to_string())?;
+
+        if !package_dir.is_dir() {
+            return Err("offline package context directory was not created".into());
+        }
         Ok(())
     }
 

@@ -49,6 +49,10 @@
       - platform_application_keycloak_ca_file | length > 0
       - platform_application_keycloak_hostname is match('^[a-z0-9][a-z0-9.-]+$')
       - platform_application_keycloak_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_model_service_port | int > 0
+      - platform_application_model_service_port | int < 65536
+      - platform_application_model_egress_fqdns is sequence
+      - platform_application_model_egress_fqdns is not string
       - (platform_application_lock.platform_vm_bases | length) >= 2
       - (platform_application_lock.platform_vm_bases | length) <= platform_application_vm_base_max_count
       - >-
@@ -130,6 +134,14 @@
       - platform_application_ssh_load_balancer_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
       - platform_application_ssh_shared_ip_key is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
     fail_msg: PLATFORM_APPLICATION_INPUT_INVALID
+
+- name: Validate exact external model egress hostnames
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$')
+    fail_msg: PLATFORM_APPLICATION_MODEL_EGRESS_FQDN_INVALID
+  loop: "{{ platform_application_model_egress_fqdns }}"
 
 - name: Validate retained baseline identity allowances
   ansible.builtin.assert:
@@ -2890,6 +2902,17 @@
         )
     fail_msg: PLATFORM_APPLICATION_PROBE_DEFAULT_DENY_INVALID
 
+- name: Validate the evaluation freeze worker registry pull configuration
+  ansible.builtin.assert:
+    that:
+      - platform_application_harbor_username | length > 0
+      - platform_application_harbor_password | length > 0
+      - >-
+        platform_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile ==
+        '/etc/labweaver/secrets/registry-pull-config.json'
+    fail_msg: PLATFORM_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID
+  no_log: true
+
 - name: Reconcile the evaluation freeze worker registry pull secret
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -2987,73 +3010,14 @@
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition:
-      apiVersion: cilium.io/v2
-      kind: CiliumNetworkPolicy
-      metadata:
-        name: authoring-platform-egress
-        namespace: "{{ platform_application_authoring_namespace }}"
-        labels:
-          app.kubernetes.io/part-of: labweaver
-          app.kubernetes.io/managed-by: ansible
-      spec:
-        endpointSelector: {}
-        egress:
-          - toEntities: [host, remote-node]
-            toPorts:
-              - ports:
-                  - port: "{{ platform_application_model_service_port | string }}"
-                    protocol: TCP
-          - toEndpoints:
-              - matchLabels:
-                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_model_namespace }}"
-            toPorts:
-              - ports:
-                  - port: "{{ platform_application_model_service_port | string }}"
-                    protocol: TCP
-          # A CIDR allowance never matches an in-cluster pod destination, so the
-          # object store is admitted as an endpoint of the data namespace.
-          - toEndpoints:
-              - matchLabels:
-                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_data_namespace }}"
-            toPorts:
-              - ports:
-                  - port: "{{ platform_application_object_store_service_port | string }}"
-                    protocol: TCP
+    definition: "{{ lookup('template', 'authoring-platform-egress.yml.j2') | from_yaml }}"
 
 - name: Reconcile the reviewed model egress for the platform services
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition:
-      apiVersion: cilium.io/v2
-      kind: CiliumNetworkPolicy
-      metadata:
-        name: platform-model-egress
-        namespace: "{{ platform_application_namespace }}"
-        labels:
-          app.kubernetes.io/part-of: labweaver
-          app.kubernetes.io/managed-by: ansible
-      spec:
-        endpointSelector:
-          matchExpressions:
-            - key: app.kubernetes.io/name
-              operator: In
-              values: [agent-service]
-        egress:
-          - toEntities: [host, remote-node]
-            toPorts:
-              - ports:
-                  - port: "{{ platform_application_model_service_port | string }}"
-                    protocol: TCP
-          - toEndpoints:
-              - matchLabels:
-                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_model_namespace }}"
-            toPorts:
-              - ports:
-                  - port: "{{ platform_application_model_service_port | string }}"
-                    protocol: TCP
+    definition: "{{ lookup('template', 'platform-model-egress.yml.j2') | from_yaml }}"
 
 - name: Reconcile the tokenless authoring runner service account
   kubernetes.core.k8s:
