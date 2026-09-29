@@ -9138,6 +9138,33 @@ export type ProjectLlmEgressPolicySchemaStudentContentMode = 'manifest_allowlist
 export type ProjectLlmEgressPolicySchemaUtcTimestamp = string;
 
 /**
+ * ProjectLlmPolicyOptions
+ *
+ * Non-secret deployment-owned defaults used to author a project LLM policy.
+ */
+export type ProjectLlmPolicyOptionsSchema = {
+    claudeCodeVersion: string;
+    defaultModel: string;
+    maxInFlightPerWorker: number;
+    models: Array<ProjectLlmPolicyModelOption>;
+    runtimeBinding: string;
+};
+
+/**
+ * One deployment-approved model that a project manager may select.
+ */
+export type ProjectLlmPolicyModelOption = {
+    /**
+     * User-facing name for the model. This must not contain credentials or runtime secrets.
+     */
+    label: string;
+    /**
+     * Stable model name accepted by the configured LLM runtime.
+     */
+    model: string;
+};
+
+/**
  * ProjectMembership
  *
  * Project-local scope. A project may optionally be associated with teaching.
@@ -14145,6 +14172,7 @@ export type CreateProjectLlmPolicyData = {
     body: ProjectLlmEgressPolicySchema;
     headers: {
         'Idempotency-Key': string;
+        'If-Match'?: string;
     };
     path: {
         projectId: string;
@@ -14277,6 +14305,73 @@ export type GetActiveProjectLlmPolicyResponses = {
 };
 
 export type GetActiveProjectLlmPolicyResponse = GetActiveProjectLlmPolicyResponses[keyof GetActiveProjectLlmPolicyResponses];
+
+export type GetProjectLlmPolicyOptionsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/llm-egress-policy-options';
+};
+
+export type GetProjectLlmPolicyOptionsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectLlmPolicyOptionsError = GetProjectLlmPolicyOptionsErrors[keyof GetProjectLlmPolicyOptionsErrors];
+
+export type GetProjectLlmPolicyOptionsResponses = {
+    /**
+     * Successful response
+     */
+    200: ProjectLlmPolicyOptionsSchema;
+};
+
+export type GetProjectLlmPolicyOptionsResponse = GetProjectLlmPolicyOptionsResponses[keyof GetProjectLlmPolicyOptionsResponses];
 
 export type ListOwnProjectEvaluationResultsData = {
     body?: never;

@@ -205,6 +205,39 @@ pub(crate) fn package(
     }
 }
 
+/// Prepare the files that image builds consume from the repository context.
+///
+/// The CI image matrix and the full package command share this entry point so
+/// a build cannot accidentally rely on a developer's ignored local files.
+pub(crate) fn prepare(root: &Path) -> Result<(), AppError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Err(AppError::UnsupportedPlatform {
+            command: "package-prepare",
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dirty = git_output(root, ["status", "--porcelain"])?;
+        if !dirty.is_empty() {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_INPUT_DIRTY",
+                detail: "package preparation requires a clean tracked and untracked source tree"
+                    .to_owned(),
+            });
+        }
+        let lock_bytes = fs::read(root.join("deploy/versions.lock.yml"))
+            .map_err(|error| io_error("read component lock", error))?;
+        let lock: VersionLock =
+            serde_yaml::from_slice(&lock_bytes).map_err(|error| AppError::Io {
+                role: "parse component lock",
+                detail: error.to_string(),
+            })?;
+        prepare_inputs(root, &lock.platform_images)
+    }
+}
+
 pub(crate) fn deploy(environment: &str, manifest_path: &Path, root: &Path) -> Result<(), AppError> {
     validate_environment(environment)?;
     let manifest = read_manifest(manifest_path)?;
@@ -438,13 +471,7 @@ fn package_linux(
     })?;
     verify_tools(&lock)?;
     verify_rust_toolchain(root, &lock.platform_images)?;
-    ensure_claude_code_package(root, &lock.platform_images)?;
-    ensure_offline_pkg_closure(root, "containers/alpine-3.21-pkgs", ALPINE_V3_21_PKGS)?;
-    ensure_offline_pkg_closure(
-        root,
-        "containers/debian-bookworm-pkgs",
-        DEBIAN_BOOKWORM_PKGS,
-    )?;
+    prepare_inputs(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
     ensure_web_dist(root)?;
     let run_id = format!("pkg-{environment}-{release}-{}", &source_commit[..12]);
@@ -491,6 +518,19 @@ fn package_linux(
     fs::write(&temporary, bytes)
         .map_err(|error| io_error("write temporary package manifest", error))?;
     fs::rename(temporary, destination).map_err(|error| io_error("publish package manifest", error))
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_inputs(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+    ensure_claude_code_package(root, lock)?;
+    ensure_offline_pkg_closure(root, "containers/alpine-3.21-pkgs", ALPINE_V3_21_PKGS)?;
+    ensure_offline_pkg_closure(
+        root,
+        "containers/debian-bookworm-pkgs",
+        DEBIAN_BOOKWORM_PKGS,
+    )?;
+    prepare_web_dist(root)?;
+    ensure_web_dist(root)
 }
 
 #[cfg(target_os = "linux")]
@@ -689,6 +729,7 @@ fn sha512_bytes(bytes: &[u8]) -> String {
 /// matches the reviewed sha512. The deployment proxy cannot reach the npm
 /// registry, so the packaging host downloads the tarball directly from npm
 /// once; every image build then verifies the same checksum offline.
+#[cfg(target_os = "linux")]
 const ALPINE_V3_21_PKGS: &[(&str, &str, &str)] = &[
     (
         "acl-2.3.2-r1.apk",
@@ -811,6 +852,7 @@ const ALPINE_V3_21_PKGS: &[(&str, &str, &str)] = &[
         "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/utmps-libs-0.1.2.3-r2.apk",
     ),
 ];
+#[cfg(target_os = "linux")]
 const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
     (
         "bash_5.2.15-2+b13_amd64.deb",
@@ -1088,19 +1130,7 @@ fn ensure_offline_pkg_closure(
 /// dist matches the current web/ source tree and lockfile before packaging.
 fn ensure_web_dist(root: &Path) -> Result<(), AppError> {
     let dist = root.join("containers/web-dist");
-    let tree = run_checked(
-        Command::new("git").args(["ls-tree", "-r", "HEAD", "web"]),
-        "resolve current web source tree",
-    )?;
-    let lock_bytes =
-        std::fs::read(root.join("web/pnpm-lock.yaml")).map_err(|_| AppError::PlatformImage {
-            code: "LW_PACKAGE_INPUT_MISSING",
-            detail: "web/pnpm-lock.yaml".to_owned(),
-        })?;
-    let mut hasher = Sha256::new();
-    hasher.update(tree.as_bytes());
-    hasher.update(&lock_bytes);
-    let observed = format!("{:x}", hasher.finalize());
+    let observed = web_tree_hash(root)?;
     let pinned = std::fs::read_to_string(dist.join(".web-tree-sha256")).map_err(|_| {
         AppError::PlatformImage {
             code: "LW_PACKAGE_INPUT_MISSING",
@@ -1114,6 +1144,101 @@ fn ensure_web_dist(root: &Path) -> Result<(), AppError> {
                 "web/ changed after the vendored dist build (expected {pinned}, observed {observed}); rebuild it against web/"
             ),
         });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_web_dist(root: &Path) -> Result<(), AppError> {
+    let dist = root.join("containers/web-dist");
+    let expected = web_tree_hash(root)?;
+    let marker = dist.join(".web-tree-sha256");
+    if fs::read_to_string(&marker)
+        .map(|value| value.trim() == expected)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    run_checked(
+        Command::new("pnpm").current_dir(root).args([
+            "--dir",
+            "web",
+            "install",
+            "--frozen-lockfile",
+        ]),
+        "install locked web dependencies",
+    )?;
+    run_checked(
+        Command::new("pnpm")
+            .current_dir(root)
+            .args(["--dir", "web", "build"]),
+        "build web frontend",
+    )?;
+
+    let source = root.join("web/dist");
+    if !source.is_dir() {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_MISSING",
+            detail: "web/dist".to_owned(),
+        });
+    }
+    if dist.exists() {
+        fs::remove_dir_all(&dist).map_err(|error| io_error("replace vendored web dist", error))?;
+    }
+    copy_directory(&source, &dist)?;
+    fs::write(&marker, format!("{expected}\n"))
+        .map_err(|error| io_error("write vendored web dist identity", error))
+}
+
+#[cfg(target_os = "linux")]
+fn web_tree_hash(root: &Path) -> Result<String, AppError> {
+    let tree = run_checked(
+        Command::new("git")
+            .current_dir(root)
+            .args(["ls-tree", "-r", "HEAD", "web"]),
+        "resolve current web source tree",
+    )?;
+    let lock_bytes =
+        fs::read(root.join("web/pnpm-lock.yaml")).map_err(|_| AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_MISSING",
+            detail: "web/pnpm-lock.yaml".to_owned(),
+        })?;
+    let mut hasher = Sha256::new();
+    hasher.update(tree.as_bytes());
+    hasher.update(&lock_bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(target_os = "linux")]
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(destination).map_err(|error| io_error("create vendored web dist", error))?;
+    for entry in fs::read_dir(source).map_err(|error| io_error("read web dist", error))? {
+        let entry = entry.map_err(|error| io_error("read web dist entry", error))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)
+            .map_err(|error| io_error("read web dist entry metadata", error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_INPUT_INVALID",
+                detail: format!("web dist contains a symlink: {}", source_path.display()),
+            });
+        }
+        if metadata.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            fs::copy(&source_path, &destination_path)
+                .map_err(|error| io_error("copy vendored web dist file", error))?;
+        } else {
+            return Err(AppError::PlatformImage {
+                code: "LW_PACKAGE_INPUT_INVALID",
+                detail: format!(
+                    "web dist contains an unsupported entry: {}",
+                    source_path.display()
+                ),
+            });
+        }
     }
     Ok(())
 }

@@ -76,13 +76,24 @@
         <h3 id="config-heading">生成 Work 配置</h3>
         <p class="section-note">材料包和策略均由服务端解析。这里提交的是引用和运行时选择，不接受浏览器直接注入镜像或平台权限。</p>
 
-        <AsyncStateView :state="policy" empty-text="当前项目没有已激活的 LLM 策略。请先由管理员配置。" @retry="reloadPolicy">
+        <AsyncStateView :state="policy" empty-text="当前项目没有已激活的项目 AI 设置。请先完成配置。" @retry="reloadPolicy">
           <template #success="{ data }">
             <div class="policy-summary">
               <div><span>模型</span><code>{{ data.binding.model }}</code></div>
               <div><span>Claude Code</span><code>{{ data.binding.claudeCodeVersion }}</code></div>
               <div><span>策略</span><code>rev-{{ data.revision }}</code></div>
               <div><span>预算</span><code>{{ data.budget.maxRequests }} requests / {{ data.budget.maxInputTokens }} input tokens</code></div>
+            </div>
+          </template>
+          <template #empty>
+            <div class="policy-missing" data-testid="software-policy-missing">
+              <p>当前项目没有已激活的项目 AI 设置。完成配置后才能生成 Work 配置。</p>
+              <RouterLink
+                class="outlined-button"
+                :to="{ path: '/researcher/ai-policy', query: { projectId: selectedProjectId } }"
+              >
+                打开项目 AI 设置
+              </RouterLink>
             </div>
           </template>
         </AsyncStateView>
@@ -516,6 +527,8 @@ function runStateLabel(state: string) {
 .project-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 9px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .config-layout { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(0, 1.3fr); gap: 20px; align-items: start; }
 .config-card, .run-card { padding: 20px; }
+.policy-missing { display: grid; justify-items: start; gap: 10px; margin: 18px 0; padding: 13px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); }
+.policy-missing p { margin: 0; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .policy-summary, .run-overview, .plan-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; margin: 18px 0; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); font: var(--md-sys-body-small); }
 .policy-summary span, .run-overview span, .plan-meta > div > span:first-child { color: var(--md-sys-color-on-surface-variant); }

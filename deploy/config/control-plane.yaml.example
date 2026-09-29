@@ -84,6 +84,14 @@ control:
   evaluationRuntime:
     providerBinding: "evaluation-kubernetes-primary-v1"
     runnerImage: "harbor.example.invalid/labweaver/evaluation-runner@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  llmPolicyOptions:
+    models:
+      - model: "configured-model"
+        label: "Configured model"
+    defaultModel: "configured-model"
+    runtimeBinding: "claude-code-production"
+    claudeCodeVersion: "2.1.215"
+    maxInFlightPerWorker: 1
 cleanup_interval_seconds: 30
 nats:
   server: "tls://nats.labweaver-data.svc:4222"

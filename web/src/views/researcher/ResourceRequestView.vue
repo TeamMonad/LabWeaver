@@ -109,6 +109,7 @@
           <div v-if="selectedGpu" class="gpu-detail" role="note">
             <strong>{{ selectedGpu.class }} · {{ gpuModeLabel(selectedGpu.mode) }}</strong>
             <span>目录容量：{{ selectedGpu.capacityUnits }} units · 单次申请上限：{{ selectedGpu.mode === 'container_time_slice' ? '1 个共享时间片' : `${selectedGpu.capacityUnits} 个单位` }}</span>
+            <span v-if="selectedGpu.mode === 'container_time_slice'" data-testid="gpu-sharing-limit">共享时间片不提供独占显存或固定比例算力，其他任务可能影响性能。</span>
             <span v-if="selectedGpuRate">费率：{{ selectedGpuRate.unitPrice.amount }} {{ selectedGpuRate.unitPrice.currency }} / {{ selectedGpuRate.unitQuantity }} GPU 秒</span>
             <span v-else-if="selectedGpuRateAmbiguous">费率：当前有效费率的同一版本存在冲突，无法提交</span>
             <span v-else>费用：尚未配置，当前不能提交这项 GPU 申请。</span>

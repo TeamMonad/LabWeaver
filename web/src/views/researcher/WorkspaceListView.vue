@@ -71,7 +71,10 @@
               <p class="eyebrow">Project 详情</p>
               <h3 id="project-detail-heading">{{ selectedProject.name }}</h3>
             </div>
-            <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+            <div class="project-detail-actions">
+              <RouterLink class="outlined-button small" :to="{ path: '/researcher/ai-policy', query: { projectId: selectedProject.id } }">项目 AI 设置</RouterLink>
+              <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+            </div>
           </div>
 
           <form class="project-form" @submit.prevent="saveProject">
@@ -393,6 +396,7 @@ async function confirmDestructiveAction() {
 .eyebrow { font: var(--md-sys-label-medium); text-transform: uppercase; letter-spacing: .05em; }
 .workspace-layout { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(0, 1.4fr); gap: 20px; align-items: start; }
 .project-list, .project-detail { padding: 20px; }
+.project-detail-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
 .project-items { display: grid; gap: 6px; margin-top: 18px; }
 .project-item { width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 14px; border: 1px solid transparent; border-radius: var(--md-sys-shape-medium); background: transparent; color: var(--md-sys-color-on-surface); text-align: left; cursor: pointer; }
 .project-item:hover { background: var(--md-sys-color-surface-container-high); }
@@ -416,6 +420,7 @@ textarea.text-input { resize: vertical; }
 .filled-button.small { min-height: 32px; padding: 0 12px; font: var(--md-sys-label-medium); }
 .filled-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--md-sys-color-primary); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); }
 .outlined-button { border: 1px solid var(--md-sys-color-outline); background: transparent; color: var(--md-sys-color-primary); }
+.outlined-button.small { min-height: 32px; padding: 0 11px; font: var(--md-sys-label-medium); }
 .text-button { min-height: 32px; border: 0; background: transparent; color: var(--md-sys-color-primary); }
 .danger-button { color: var(--md-sys-color-error); border-color: var(--md-sys-color-error); }
 .filled-button:disabled, .outlined-button:disabled, .text-button:disabled { opacity: .5; cursor: not-allowed; }

@@ -2234,6 +2234,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Project
     ),
     op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/llm-egress-policy-options",
+        "getProjectLlmPolicyOptions",
+        "llm_policy:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
         GatewayInternal,
         Get,
         "/internal/v1/projects/{projectId}/llm-egress-policy",

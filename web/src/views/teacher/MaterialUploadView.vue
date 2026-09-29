@@ -100,6 +100,17 @@
             </details>
           </div>
         </template>
+        <template #empty>
+          <div class="policy-missing" data-testid="material-policy-missing">
+            <p>当前项目没有已激活的项目 AI 设置。完成配置后才能上传材料并启动 AgentRun。</p>
+            <RouterLink
+              class="outlined-button"
+              :to="{ path: '/researcher/ai-policy', query: { projectId } }"
+            >
+              打开项目 AI 设置
+            </RouterLink>
+          </div>
+        </template>
       </AsyncStateView>
     </section>
 
@@ -820,6 +831,20 @@ onUnmounted(() => {
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
 }
+
+.policy-missing {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+}
+
+.policy-missing p { margin: 0; }
 
 .policy-primary,
 .run-header {

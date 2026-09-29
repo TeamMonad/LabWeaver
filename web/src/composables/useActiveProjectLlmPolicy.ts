@@ -20,6 +20,10 @@ export function useActiveProjectLlmPolicy(projectId: Ref<string | null>) {
     const result = await getActiveProjectLlmPolicy({ path: { projectId: id } })
     if (result.error) {
       const problem = extractProblemDetails(result.error)
+      if (problem?.status === 404 || problem?.diagnosticCode === 'LW_POLICY_NOT_FOUND') {
+        state.value = { kind: 'empty' }
+        return
+      }
       state.value = {
         kind: 'error',
         diagnostic: makeDiagnostic(

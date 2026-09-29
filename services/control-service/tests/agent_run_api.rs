@@ -385,6 +385,16 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             provider_binding: "evaluation-primary-v1".to_owned(),
             runner_image: format!("runner@sha256:{}", "a".repeat(64)),
         },
+        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                model: "fixture-provider-v1".to_owned(),
+                label: "Fixture model".to_owned(),
+            }],
+            default_model: "fixture-provider-v1".to_owned(),
+            runtime_binding: "claude-code-test".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
+        },
     })
 }
 

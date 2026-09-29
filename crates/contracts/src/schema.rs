@@ -30,6 +30,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmEgressPolicy
     );
     document!(
+        "schemas/contracts/v1/project-llm-policy-options.schema.json",
+        crate::authoring::ProjectLlmPolicyOptions
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
     );
@@ -1034,6 +1038,9 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.mutation == MutationContract::IdempotentRevisioned {
             parameters.push(header_parameter("If-Match", true));
         }
+        if operation.operation_id == "createProjectLlmPolicy" {
+            parameters.push(header_parameter("If-Match", false));
+        }
         // The BFF interceptor obtains and attaches these headers for browser
         // mutations. Read operations authenticate through the session cookie
         // but do not participate in the CSRF protocol, so keeping the headers
@@ -1553,6 +1560,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createProjectLlmPolicy"
         | "getActiveProjectLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
+        "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"

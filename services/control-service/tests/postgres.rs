@@ -272,6 +272,16 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         .connect(&url)
         .await?;
     apply_domain_migrations(&pool, Domain::Control).await?;
+    sqlx::query(
+        "DO $$ BEGIN
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'lw_control_runtime') THEN
+                 CREATE ROLE lw_control_runtime NOLOGIN;
+             END IF;
+         END $$",
+    )
+    .execute(&pool)
+    .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
     let config = control_config()?;
     let evaluation_schema = config.evaluation_schema_sha256;
     let environment_schema = config.environment_schema_sha256;
@@ -1116,6 +1126,7 @@ async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("authoring-approval-policy")?,
+            None,
         )
         .await?;
     let upload = service
@@ -1455,6 +1466,7 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("vm-base-policy")?,
+            None,
         )
         .await?;
     let upload = service
@@ -1667,6 +1679,7 @@ async fn container_experiment_runner_image_is_built_frozen_and_fails_closed()
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("runner-policy")?,
+            None,
         )
         .await?;
     let upload = service
@@ -2113,6 +2126,7 @@ async fn private_work_environment_approval_requires_project_owner()
             project_id,
             policy.clone(),
             &IdempotencyKey::parse("private-work-policy")?,
+            None,
         )
         .await?;
     let environment =
@@ -2345,6 +2359,16 @@ async fn project_release_reads_are_project_scoped_and_course_filtered()
         .connect(&url)
         .await?;
     apply_domain_migrations(&pool, Domain::Control).await?;
+    sqlx::query(
+        "DO $$ BEGIN
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'lw_control_runtime') THEN
+                 CREATE ROLE lw_control_runtime NOLOGIN;
+             END IF;
+         END $$",
+    )
+    .execute(&pool)
+    .await?;
+    apply_domain_migrations(&pool, Domain::Access).await?;
     let service = ControlService::new(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
@@ -2618,7 +2642,7 @@ fn authoring_policy(
         "revision": 1,
         "binding": {
             "runtimeBinding": "claude-code-test",
-            "model": "claude-sonnet-4-6-20260601",
+            "model": "fixture-provider-v1",
             "claudeCodeVersion": "2.1.207",
             "maxInFlightPerWorker": 2
         },
@@ -2918,6 +2942,16 @@ fn control_config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         evaluation_runtime: control_service::EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),
             runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+        },
+        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                model: "fixture-provider-v1".to_owned(),
+                label: "Fixture model".to_owned(),
+            }],
+            default_model: "fixture-provider-v1".to_owned(),
+            runtime_binding: "claude-code-test".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
         },
     })
 }

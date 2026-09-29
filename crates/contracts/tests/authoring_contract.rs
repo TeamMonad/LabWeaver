@@ -1,6 +1,9 @@
 //! Regression coverage for teacher authoring and Claude Code runtime bindings.
 
-use contracts::authoring::{AuthoringError, EnvironmentSpec, ProjectLlmEgressPolicy};
+use contracts::authoring::{
+    AuthoringError, ClaudeCodeBindingV1, EnvironmentSpec, ProjectLlmEgressPolicy,
+    ProjectLlmPolicyModelOption, ProjectLlmPolicyOptions,
+};
 use contracts::http::{HttpContractError, InternalImageArtifactResolution};
 use contracts::supply_chain::ImageArtifact;
 use contracts::{BuildRequestId, ImageArtifactId, PolicyId, ProjectId};
@@ -109,6 +112,53 @@ fn claude_code_binding_is_explicit_and_provider_opaque() -> Result<(), Box<dyn s
     assert_eq!(policy.binding.model, "claude-sonnet-4-6-20260601");
     assert_eq!(policy.binding.claude_code_version, "2.1.207");
     Ok(())
+}
+
+fn policy_options() -> ProjectLlmPolicyOptions {
+    ProjectLlmPolicyOptions {
+        models: vec![ProjectLlmPolicyModelOption {
+            model: "approved-model-v1".to_owned(),
+            label: "Approved model".to_owned(),
+        }],
+        default_model: "approved-model-v1".to_owned(),
+        runtime_binding: "claude-code-production".to_owned(),
+        claude_code_version: "2.1.207".to_owned(),
+        max_in_flight_per_worker: 2,
+    }
+}
+
+#[test]
+fn project_policy_options_allow_only_deployment_owned_binding_and_models() {
+    let options = policy_options();
+    assert!(options.validate().is_ok());
+    assert!(
+        options
+            .validate_policy_binding(&ClaudeCodeBindingV1 {
+                runtime_binding: "claude-code-production".to_owned(),
+                model: "approved-model-v1".to_owned(),
+                claude_code_version: "2.1.207".to_owned(),
+                max_in_flight_per_worker: 2,
+            })
+            .is_ok()
+    );
+    assert_eq!(
+        options.validate_policy_binding(&ClaudeCodeBindingV1 {
+            runtime_binding: "unreviewed-runtime".to_owned(),
+            model: "approved-model-v1".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
+        }),
+        Err(AuthoringError::RuntimeIdentityInvalid)
+    );
+    assert_eq!(
+        options.validate_policy_binding(&ClaudeCodeBindingV1 {
+            runtime_binding: "claude-code-production".to_owned(),
+            model: "unlisted-model".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
+        }),
+        Err(AuthoringError::ModelRequired)
+    );
 }
 
 #[test]

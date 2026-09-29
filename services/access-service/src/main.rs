@@ -362,6 +362,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             axum::routing::any(proxy::forward_control),
         )
         .route(
+            "/api/v1/projects/{project_id}/llm-egress-policy-options",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects/{project_id}/agent-runs",
             axum::routing::any(proxy::forward_control),
         )

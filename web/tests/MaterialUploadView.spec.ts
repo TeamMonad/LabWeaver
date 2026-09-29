@@ -112,4 +112,21 @@ describe('MaterialUploadView', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('无策略读取权限'))
     expect(wrapper.text()).toContain('LW_ACCESS_DENIED')
   })
+
+  it('links to project AI settings when the active policy is missing', async () => {
+    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({
+      data: undefined as never,
+      error: {
+        response: {
+          status: 404,
+          data: { diagnosticCode: 'LW_POLICY_NOT_FOUND', detail: 'no active policy' },
+        },
+      } as never,
+    })
+
+    const { wrapper } = await mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="material-policy-missing"]').exists()).toBe(true))
+    expect(wrapper.find('[data-testid="material-policy-missing"] a').attributes('href')).toBe('/researcher/ai-policy?projectId=project-1')
+  })
 })

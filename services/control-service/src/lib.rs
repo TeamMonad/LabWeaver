@@ -18,7 +18,7 @@ use contracts::authoring::{
     AgentRun, AgentRunPurpose, AgentRunState, AgentTrackKind, AuthoringApproval,
     AuthoringApprovalPublicationStatus, AuthoringPublicationState, CandidateApproval,
     CandidateDecision, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, PackageFile,
-    ProblemPackage, ProjectLlmEgressPolicy, RuntimeKind,
+    ProblemPackage, ProjectLlmEgressPolicy, ProjectLlmPolicyOptions, RuntimeKind,
 };
 use contracts::evaluation::{
     CollectorSpec, EvaluationExecutionBinding, EvaluationRuntimeIdentity, EvaluationSpec,
@@ -119,6 +119,8 @@ pub struct ControlConfig {
     pub virtual_machine_bases: VirtualMachineBaseCatalog,
     /// Single deployment-owned Evaluation runtime identity template.
     pub evaluation_runtime: EvaluationRuntimePolicy,
+    /// Non-secret deployment-owned defaults for project AI policy authoring.
+    pub llm_policy_options: ProjectLlmPolicyOptions,
 }
 
 /// Non-secret immutable Evaluation runtime fields; package identity is derived per candidate.
@@ -211,6 +213,7 @@ impl ControlConfig {
         let container_build_valid = self.container_build.validate();
         let virtual_machine_base_valid = self.virtual_machine_bases.validate();
         let evaluation_runtime_valid = self.evaluation_runtime.identity().is_ok();
+        let llm_policy_options_valid = self.llm_policy_options.validate().is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
             && completion_lease_valid
@@ -220,6 +223,7 @@ impl ControlConfig {
             && container_build_valid
             && virtual_machine_base_valid
             && evaluation_runtime_valid)
+            || !llm_policy_options_valid
         {
             tracing::error!(
                 event = "control.configuration_invalid",
@@ -232,6 +236,7 @@ impl ControlConfig {
                 container_build_valid,
                 virtual_machine_base_valid,
                 evaluation_runtime_valid,
+                llm_policy_options_valid,
                 "deployment-owned Control policy failed validation"
             );
             return Err(ControlError::ConfigurationInvalid);
@@ -435,6 +440,12 @@ impl ControlService {
             objects,
             config,
         })
+    }
+
+    /// Returns the non-secret deployment-owned project AI policy defaults.
+    #[must_use]
+    pub fn project_llm_policy_options(&self) -> ProjectLlmPolicyOptions {
+        self.config.llm_policy_options.clone()
     }
 
     /// Creates a project and its initial Access-owned owner membership in one
@@ -1815,30 +1826,50 @@ impl ControlService {
         Ok(references)
     }
 
-    /// Activates one append-only course policy under a course-scoped lock.
+    /// Activates one course policy under a course-scoped lock.
+    ///
+    /// A missing expected revision creates the first policy. Updating an active policy must
+    /// provide its current revision so concurrent edits fail closed.
     pub async fn activate_policy(
         &self,
         course_id: CourseId,
         policy: ProjectLlmEgressPolicy,
         idempotency_key: &IdempotencyKey,
+        expected_revision: Option<Revision>,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-        self.activate_policy_in_scope(policy.project_id, Some(course_id), policy, idempotency_key)
-            .await
+        self.activate_policy_in_scope(
+            policy.project_id,
+            Some(course_id),
+            policy,
+            idempotency_key,
+            expected_revision,
+        )
+        .await
     }
 
-    /// Activates one append-only project policy, including independent Work projects.
+    /// Activates one project policy, including independent Work projects.
+    ///
+    /// A missing expected revision creates the first policy. Updating an active policy must
+    /// provide its current revision so concurrent edits fail closed.
     pub async fn activate_project_policy(
         &self,
         project_id: ProjectId,
         policy: ProjectLlmEgressPolicy,
         idempotency_key: &IdempotencyKey,
+        expected_revision: Option<Revision>,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
         let project = self.project(project_id).await?;
         if project.state == ProjectState::Archived {
             return Err(ControlError::ProjectArchived);
         }
-        self.activate_policy_in_scope(project_id, project.course_id, policy, idempotency_key)
-            .await
+        self.activate_policy_in_scope(
+            project_id,
+            project.course_id,
+            policy,
+            idempotency_key,
+            expected_revision,
+        )
+        .await
     }
 
     async fn activate_policy_in_scope(
@@ -1847,11 +1878,16 @@ impl ControlService {
         course_id: Option<CourseId>,
         mut policy: ProjectLlmEgressPolicy,
         idempotency_key: &IdempotencyKey,
+        expected_revision: Option<Revision>,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
         if policy.project_id != project_id || policy.course_id != course_id {
             return Err(ControlError::ProjectMismatch);
         }
         policy.validate().map_err(|_| ControlError::PolicyInvalid)?;
+        self.config
+            .llm_policy_options
+            .validate_policy_binding(&policy.binding)
+            .map_err(|_| ControlError::PolicyInvalid)?;
         let request_hash = canonical_hash(&policy)?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         advisory_project_lock(&mut transaction, project_id).await?;
@@ -1873,6 +1909,19 @@ impl ControlService {
             IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
             IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
             IdempotencyDecision::Reserved => {}
+        }
+        let current = sqlx::query_scalar::<_, i64>(
+            "SELECT revision FROM control.project_llm_policies \
+             WHERE project_id=$1 AND superseded_at IS NULL",
+        )
+        .bind(project_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .map(revision_from_i64)
+        .transpose()?;
+        if current != expected_revision {
+            return Err(ControlError::RevisionConflict);
         }
         let next = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(revision),0)+1 FROM control.project_llm_policies WHERE project_id=$1",
@@ -2742,7 +2791,7 @@ impl ControlService {
         .await
         .map_err(db)?
         .ok_or(ControlError::NotFound)?;
-        project_release_view(&row, project_id, actor_id)
+        project_release_view(&row, project_id)
     }
 
     /// Lists immutable releases in one project with an optional course filter.
@@ -2808,7 +2857,7 @@ impl ControlService {
         .await
         .map_err(db)?;
         rows.into_iter()
-            .map(|row| project_release_view(&row, project_id, actor_id))
+            .map(|row| project_release_view(&row, project_id))
             .collect()
     }
 
@@ -7831,7 +7880,6 @@ fn release_view(
 fn project_release_view(
     row: &sqlx::postgres::PgRow,
     project_id: ProjectId,
-    actor_id: ActorId,
 ) -> Result<EnvironmentTemplateReleaseView, ControlError> {
     let view = release_view(row)?;
     let release = &view.release;
@@ -8273,6 +8321,16 @@ mod tests {
             evaluation_runtime: EvaluationRuntimePolicy {
                 provider_binding: "evaluation-primary-v1".to_owned(),
                 runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+            },
+            llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+                models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                    model: "fixture-provider-v1".to_owned(),
+                    label: "Fixture model".to_owned(),
+                }],
+                default_model: "fixture-provider-v1".to_owned(),
+                runtime_binding: "claude-code-test".to_owned(),
+                claude_code_version: "2.1.207".to_owned(),
+                max_in_flight_per_worker: 2,
             },
         })
     }

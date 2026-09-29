@@ -140,6 +140,84 @@ pub struct ProjectLlmEgressPolicy {
     pub activated_at: UtcTimestamp,
 }
 
+/// One deployment-approved model that a project manager may select.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectLlmPolicyModelOption {
+    /// Stable model name accepted by the configured LLM runtime.
+    pub model: String,
+    /// User-facing name for the model. This must not contain credentials or runtime secrets.
+    pub label: String,
+}
+
+/// Non-secret deployment-owned defaults used to author a project LLM policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectLlmPolicyOptions {
+    pub models: Vec<ProjectLlmPolicyModelOption>,
+    pub default_model: String,
+    pub runtime_binding: String,
+    pub claude_code_version: String,
+    pub max_in_flight_per_worker: u16,
+}
+
+impl ProjectLlmPolicyOptions {
+    /// Validates deployment-owned defaults before they can be exposed to callers.
+    pub fn validate(&self) -> Result<(), AuthoringError> {
+        if self.models.is_empty() {
+            return Err(AuthoringError::ModelRequired);
+        }
+        let mut seen = BTreeSet::new();
+        for option in &self.models {
+            let normalized_model = option.model.to_ascii_lowercase();
+            if !valid_runtime_identity(&option.model, 256)
+                || matches!(
+                    normalized_model.as_str(),
+                    "default" | "sonnet" | "opus" | "haiku" | "opusplan"
+                )
+                || option.label.trim().is_empty()
+                || option.label.len() > 256
+                || !seen.insert(option.model.clone())
+            {
+                return Err(AuthoringError::ModelRequired);
+            }
+        }
+        if !seen.contains(&self.default_model) {
+            return Err(AuthoringError::ModelRequired);
+        }
+        if !valid_runtime_identity(&self.runtime_binding, 256)
+            || self.runtime_binding.contains("://")
+            || !valid_claude_code_version(&self.claude_code_version)
+            || !(1..=64).contains(&self.max_in_flight_per_worker)
+        {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
+        }
+        Ok(())
+    }
+
+    /// Verifies that a submitted policy uses the deployment-owned runtime binding and model.
+    pub fn validate_policy_binding(
+        &self,
+        binding: &ClaudeCodeBindingV1,
+    ) -> Result<(), AuthoringError> {
+        self.validate()?;
+        if binding.runtime_binding != self.runtime_binding
+            || binding.claude_code_version != self.claude_code_version
+            || binding.max_in_flight_per_worker != self.max_in_flight_per_worker
+        {
+            return Err(AuthoringError::RuntimeIdentityInvalid);
+        }
+        if !self
+            .models
+            .iter()
+            .any(|option| option.model == binding.model)
+        {
+            return Err(AuthoringError::ModelRequired);
+        }
+        Ok(())
+    }
+}
+
 impl ProjectLlmEgressPolicy {
     /// Validates explicit Claude Code identity, budgets, and hard-deny classifications.
     pub fn validate(&self) -> Result<(), AuthoringError> {

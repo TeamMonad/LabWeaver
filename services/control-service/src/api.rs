@@ -122,6 +122,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(get_project_policy),
         )
         .route(
+            "/api/v1/projects/{project_id}/llm-egress-policy-options",
+            get(get_project_policy_options),
+        )
+        .route(
             "/api/v1/projects/{project_id}/agent-runs",
             post(create_project_agent_run),
         )
@@ -645,7 +649,12 @@ async fn create_project_policy(
     .await?;
     let policy = state
         .control
-        .activate_project_policy(project_id, policy, &idempotency(&headers)?)
+        .activate_project_policy(
+            project_id,
+            policy,
+            &idempotency(&headers)?,
+            optional_etag(&headers)?,
+        )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &policy, policy.revision))
 }
@@ -666,6 +675,23 @@ async fn get_project_policy(
     .await?;
     let policy = state.control.active_project_policy(project_id).await?;
     Ok(with_etag(StatusCode::OK, &policy, policy.revision))
+}
+
+async fn get_project_policy_options(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectLlmPolicyOptions",
+        project_id,
+    )
+    .await?;
+    Ok(Json(state.control.project_llm_policy_options()).into_response())
 }
 
 async fn create_project_agent_run(
@@ -1476,7 +1502,12 @@ async fn create_policy(
     .await?;
     let policy = state
         .control
-        .activate_policy(course_id, policy, &idempotency(&headers)?)
+        .activate_policy(
+            course_id,
+            policy,
+            &idempotency(&headers)?,
+            optional_etag(&headers)?,
+        )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &policy, policy.revision))
 }
@@ -2326,6 +2357,18 @@ fn etag(headers: &HeaderMap) -> Result<Revision, ApiError> {
         .ok_or_else(|| ApiError::precondition("LW_IF_MATCH_REQUIRED"))?;
     StrongEtag::parse(value)
         .map(|value| value.revision())
+        .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))
+}
+
+fn optional_etag(headers: &HeaderMap) -> Result<Option<Revision>, ApiError> {
+    let Some(value) = headers.get("If-Match") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?;
+    StrongEtag::parse(value)
+        .map(|etag| Some(etag.revision()))
         .map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))
 }
 

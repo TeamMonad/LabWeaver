@@ -69,7 +69,35 @@ jobs:
             exit 1
           fi
 
+  prepare-image-context:
+    name: prepare-image-context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Prepare reproducible image inputs
+        run: cargo xtask package-prepare
+      - name: Upload prepared image context
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-image-context
+          path: |
+            containers/web-dist
+            containers/claude-code-linux-x64-*.tgz
+            containers/alpine-3.21-pkgs
+            containers/debian-bookworm-pkgs
+          include-hidden-files: true
+          if-no-files-found: error
+
   build-images:
+    needs: prepare-image-context
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -88,6 +116,10 @@ jobs:
           - web
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-image-context
+          path: containers
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
         with:
           version: v0.35.0
@@ -125,6 +157,7 @@ jobs:
               --build-arg "SERVICE=$COMPONENT"
               --build-arg "CLAUDE_CODE_VERSION=$claude_code_version"
               --build-arg "CLAUDE_CODE_LINUX_X64_SHA512=$claude_code_sha512"
+              --build-arg "CLAUDE_CODE_PACKAGE_PATH=containers/claude-code-linux-x64-${claude_code_version}.tgz"
               --target agent-runtime
             )
           fi

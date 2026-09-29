@@ -1,0 +1,58 @@
+{
+  "$defs": {
+    "ProjectLlmPolicyModelOption": {
+      "additionalProperties": false,
+      "description": "One deployment-approved model that a project manager may select.",
+      "properties": {
+        "label": {
+          "description": "User-facing name for the model. This must not contain credentials or runtime secrets.",
+          "type": "string"
+        },
+        "model": {
+          "description": "Stable model name accepted by the configured LLM runtime.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Non-secret deployment-owned defaults used to author a project LLM policy.",
+  "properties": {
+    "claudeCodeVersion": {
+      "type": "string"
+    },
+    "defaultModel": {
+      "type": "string"
+    },
+    "maxInFlightPerWorker": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/$defs/ProjectLlmPolicyModelOption"
+      },
+      "type": "array"
+    },
+    "runtimeBinding": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "models",
+    "defaultModel",
+    "runtimeBinding",
+    "claudeCodeVersion",
+    "maxInFlightPerWorker"
+  ],
+  "title": "ProjectLlmPolicyOptions",
+  "type": "object"
+}

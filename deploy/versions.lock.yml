@@ -150,9 +150,9 @@ platform_container_images:
 platform_gpu_classes:
   - class: nvidia-cuda
     mode: exclusive
-    provider_binding: gpu-primary-v1
+    provider_binding: container-primary-v1
     capacity_units: 1
-    allocation_binding: nvidia-cuda-primary-v1
+    allocation_binding: nvidia.com/gpu
 platform_vm_bases:
   - binding: ubuntu-24.04-v1
     release: ubuntu-24.04

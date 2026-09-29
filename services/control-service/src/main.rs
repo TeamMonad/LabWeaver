@@ -446,6 +446,15 @@ mod deployment_contract_tests {
         assert!(deployment.nats.server.starts_with("tls://"));
         assert!(deployment.nats.build_consumer_name.ends_with("-v1"));
         assert!(deployment.nats.authoring_consumer_name.ends_with("-v1"));
+        assert!(!deployment.control.llm_policy_options.models.is_empty());
+        assert!(
+            deployment
+                .control
+                .llm_policy_options
+                .models
+                .iter()
+                .any(|option| option.model == deployment.control.llm_policy_options.default_model)
+        );
         assert!(
             deployment
                 .nats
