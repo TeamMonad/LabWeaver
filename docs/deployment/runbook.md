@@ -277,7 +277,7 @@ cargo xtask verify --env v1 --infra --yes
 
 ## 5. GPU 启用
 
-当前树**没有** GPU Ansible 角色或 playbook；设备插件与 KubeVirt mdev 由集群运维在仓外配置。Resource 侧只从 GPU 目录与只读容量观测解析，不接受调用者篡改模式。
+当前树通过 `80-install-addons.yml` 的 `gpu_device_plugin` 角色提供显式、默认关闭的设备插件配置，并通过 `70-install-kubevirt.yml --tags kubevirt-mdev` 提供只配置 CR 的 mediated-device patch。Resource 侧只从 GPU 目录与只读容量观测解析，不接受调用者篡改模式。完整变量和受控命令见 `docs/deployment/ansible.md`。
 
 ### 5.1 模式与资源名（互不混淆）
 

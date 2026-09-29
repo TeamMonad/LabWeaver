@@ -1,3 +1,53 @@
+- name: Validate explicit KubeVirt mediated-device resources
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.mdevNameSelector | default('') is string
+      - item.mdevNameSelector | default('') | length > 0
+      - item.resourceName | default('') is string
+      - item.resourceName | default('') | length > 0
+      - >-
+        item.externalResourceProvider is not defined or
+        item.externalResourceProvider is boolean
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_RESOURCE_INVALID
+  loop: "{{ kubevirt_permitted_mediated_devices }}"
+  loop_control:
+    label: "{{ item.mdevNameSelector | default('unnamed') }}"
+  tags: [kubevirt-mdev]
+
+- name: Require mediated-device resources and node configuration together
+  ansible.builtin.assert:
+    that:
+      - >-
+        (kubevirt_permitted_mediated_devices | length > 0) ==
+        (kubevirt_mediated_devices_configuration | length > 0)
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_CONFIGURATION_INCOMPLETE
+  tags: [kubevirt-mdev]
+
+- name: Validate explicit global KubeVirt mediated-device types
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item | length > 0
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_TYPE_INVALID
+  loop: "{{ kubevirt_mediated_device_types }}"
+  tags: [kubevirt-mdev]
+
+- name: Validate explicit KubeVirt mediated-device node configuration
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.mediatedDeviceTypes is sequence
+      - item.mediatedDeviceTypes is not string
+      - item.mediatedDeviceTypes | length > 0
+      - item.nodeSelector is mapping
+      - item.nodeSelector | length > 0
+    fail_msg: KUBEVIRT_MEDIATED_DEVICE_CONFIGURATION_INVALID
+  loop: "{{ kubevirt_mediated_devices_configuration }}"
+  loop_control:
+    label: "{{ item.nodeSelector | default({}) | to_json }}"
+  tags: [kubevirt-mdev]
+
 - name: Label selected KVM-capable workers for KubeVirt scheduling
   ansible.builtin.command: >-
     kubectl label node {{ item }} {{ kubevirt_node_label }}=true --overwrite
@@ -35,6 +85,28 @@
         configuration:
           developerConfiguration:
             useEmulation: false
+
+- name: Configure explicitly selected KubeVirt mediated devices
+  kubernetes.core.k8s:
+    state: present
+    # Keep this as a merge update for the two fields owned by this opt-in
+    # task. Server-side apply would record a partial KubeVirt document and
+    # could remove unrelated configuration on a later role run.
+    definition:
+      apiVersion: kubevirt.io/v1
+      kind: KubeVirt
+      metadata:
+        name: kubevirt
+        namespace: kubevirt
+      spec:
+        configuration:
+          permittedHostDevices:
+            mediatedDevices: "{{ kubevirt_permitted_mediated_devices }}"
+          mediatedDevicesConfiguration: >-
+            {{ {'mediatedDeviceTypes': kubevirt_mediated_device_types,
+                 'nodeMediatedDeviceTypes': kubevirt_mediated_devices_configuration} }}
+  when: kubevirt_permitted_mediated_devices | length > 0
+  tags: [kubevirt-mdev]
 
 - name: Install CDI operator and custom resource
   kubernetes.core.k8s:

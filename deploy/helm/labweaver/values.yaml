@@ -51,6 +51,13 @@ workloads:
     args: []
     configMap: control-service-config
     secret: control-service-secrets
+    # Platform image completion stages the uploaded archive here before it
+    # hands the immutable object to Agent. Keep this workload-specific budget
+    # separate from the small default used by ordinary API services.
+    tmpSizeLimit: 3Gi
+    resources:
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 1Gi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 3Gi}
     env:
       LABWEAVER_CONTROL_CONFIG_FILE: /etc/labweaver/config/config.yaml
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
@@ -108,6 +115,14 @@ workloads:
     secret: agent-service-secrets
     rbacProfile: authoring
     kubernetesApi: true
+    # One VM disk import can hold the staged archive, expanded disk, and
+    # containerdisk layer concurrently. The import gate permits one such
+    # operation per Agent process, so reserve a smaller normal request while
+    # allowing the bounded 18 GiB worst case plus headroom.
+    tmpSizeLimit: 20Gi
+    resources:
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 4Gi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 20Gi}
     env:
       LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
       # Acceptance-only VM candidate diagnostics. The directory is backed by

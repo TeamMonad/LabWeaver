@@ -1,0 +1,27 @@
+---
+# The role is opt-in because advertising an extended resource before the host
+# driver and CDI state are ready would make an otherwise healthy node lie about
+# its capacity.
+gpu_device_plugin_enabled: false
+gpu_device_plugin_kubeconfig: /etc/kubernetes/admin.conf
+gpu_device_plugin_namespace: kube-system
+gpu_device_plugin_image: nvcr.io/nvidia/k8s-device-plugin:v0.17.0@sha256:7089559ce6153018806857f5049085bae15b3bf6f1c8bd19d8b12f707d087dea
+gpu_device_plugin_node_label: labweaver.io/gpu-mode
+gpu_device_plugin_exclusive_nodes: []
+gpu_device_plugin_shared_nodes: []
+gpu_device_plugin_shared_replicas: 10
+gpu_device_plugin_exclusive_resource_name: nvidia.com/gpu
+gpu_device_plugin_shared_resource_name: nvidia.com/gpu.shared
+gpu_device_plugin_device_discovery_strategy: nvml
+gpu_device_plugin_device_list_strategy: cdi-annotations
+gpu_device_plugin_cdi_path: /var/run/cdi
+# NVIDIA's container-toolkit driver root on the selected nodes. The plugin
+# mounts this host directory read-only at /driver-root for CDI library
+# discovery. Use / for a host-installed driver tree and /run/nvidia/driver for
+# the standard driver-container layout.
+gpu_device_plugin_driver_root: /run/nvidia/driver
+# The termination path must be on a writable volume. The plugin still mounts
+# the host /dev read-only, so this does not broaden access to the host device
+# tree just to make container runtime diagnostics work.
+gpu_device_plugin_termination_message_path: /var/lib/nvidia-device-plugin/termination-log
+gpu_device_plugin_remove_legacy_daemonset: true

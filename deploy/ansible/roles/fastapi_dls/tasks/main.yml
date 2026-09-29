@@ -1,0 +1,684 @@
+---
+- name: Validate the FastAPI-DLS deployment inputs
+  ansible.builtin.assert:
+    that:
+      - fastapi_dls_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_service_port | int == 443
+      - fastapi_dls_url is match('^[a-z0-9][a-z0-9.-]+$')
+      - fastapi_dls_timezone | length > 0
+      - fastapi_dls_lease_expire_days | int > 0
+      - fastapi_dls_lease_expire_days | int <= 90
+      - fastapi_dls_token_expire_days | int > 0
+      - fastapi_dls_instance_ref is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - fastapi_dls_database_url is match('^sqlite:////app/database/.+$')
+      - fastapi_dls_storage_size is match('^[1-9][0-9]*Gi$')
+      - fastapi_dls_data_pvc_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_tls_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_client_config_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - >-
+        fastapi_dls_client_license_url | length == 0 or
+        fastapi_dls_client_license_url is match('^https://[^/]+(?::[0-9]+)?$')
+      - fastapi_dls_client_token_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_client_token_secret_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_client_token_secret_key is match('^[A-Za-z0-9._-]+$')
+      - fastapi_dls_signing_root_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_signing_root_secret_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - fastapi_dls_signing_root_secret_key is match('^[A-Za-z0-9._-]+$')
+      - fastapi_dls_allowed_client_namespace_selector is mapping
+      - fastapi_dls_allowed_client_namespace_selector | length > 0
+      - fastapi_dls_allowed_client_pod_selector is mapping
+      - fastapi_dls_allowed_client_pod_selector | length > 0
+  when: fastapi_dls_enabled | bool
+
+- name: Validate the FastAPI-DLS namespace and pod selectors
+  ansible.builtin.assert:
+    that:
+      - item.key is string
+      - item.value is string
+      - item.key | length > 0
+      - item.value | length > 0
+    fail_msg: FASTAPI_DLS_CLIENT_SELECTOR_INVALID
+  loop: >-
+    {{ (fastapi_dls_allowed_client_namespace_selector | dict2items)
+       + (fastapi_dls_allowed_client_pod_selector | dict2items) }}
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the FastAPI-DLS namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          app.kubernetes.io/managed-by: ansible
+  when: fastapi_dls_enabled | bool
+
+- name: Read the retained FastAPI-DLS TLS Secret
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ fastapi_dls_namespace }}"
+    name: "{{ fastapi_dls_tls_secret_name }}"
+  register: fastapi_dls_tls_secret
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Require complete retained FastAPI-DLS TLS material
+  ansible.builtin.assert:
+    that:
+      - fastapi_dls_tls_secret.resources | length == 1
+      - fastapi_dls_tls_secret.resources[0].data is defined
+      - fastapi_dls_tls_secret.resources[0].data['webserver.key'] is defined
+      - fastapi_dls_tls_secret.resources[0].data['webserver.crt'] is defined
+      - fastapi_dls_tls_secret.resources[0].data['ca.crt'] is defined
+    fail_msg: FASTAPI_DLS_TLS_SECRET_INVALID
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_tls_secret.resources | length > 0
+  no_log: true
+
+- name: Bootstrap FastAPI-DLS TLS material
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_tls_secret.resources | length == 0
+  block:
+    - name: Create a temporary directory for the initial FastAPI-DLS TLS pair
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: labweaver-fastapi-dls-
+      register: fastapi_dls_tls_temp
+
+    - name: Build the FastAPI-DLS TLS certificate SAN list
+      ansible.builtin.set_fact:
+        fastapi_dls_tls_san: >-
+          {{ [
+            'DNS:' ~ fastapi_dls_service_name,
+            'DNS:' ~ fastapi_dls_service_name ~ '.' ~ fastapi_dls_namespace,
+            'DNS:' ~ fastapi_dls_service_name ~ '.' ~ fastapi_dls_namespace ~ '.svc',
+            'DNS:' ~ fastapi_dls_url
+          ] | join(',') }}
+
+    - name: Generate the retained FastAPI-DLS web certificate and key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -nodes
+          - -newkey
+          - rsa:2048
+          - -keyout
+          - "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+          - -out
+          - "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
+          - -days
+          - "3650"
+          - -subj
+          - "/CN={{ fastapi_dls_service_name }}"
+          - -addext
+          - "subjectAltName={{ fastapi_dls_tls_san }}"
+      args:
+        creates: "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
+      no_log: true
+
+    - name: Read the generated FastAPI-DLS TLS pair
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ fastapi_dls_tls_temp.path }}/webserver.key"
+        - "{{ fastapi_dls_tls_temp.path }}/webserver.crt"
+      register: fastapi_dls_tls_material
+      no_log: true
+
+    - name: Reconcile the retained FastAPI-DLS TLS Secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+        state: present
+        apply: true
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ fastapi_dls_tls_secret_name }}"
+            namespace: "{{ fastapi_dls_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: labweaver-infrastructure
+              app.kubernetes.io/managed-by: ansible
+          type: Opaque
+          data:
+            webserver.key: "{{ fastapi_dls_tls_material.results[0].content }}"
+            webserver.crt: "{{ fastapi_dls_tls_material.results[1].content }}"
+            ca.crt: "{{ fastapi_dls_tls_material.results[1].content }}"
+      no_log: true
+  always:
+    - name: Remove the temporary FastAPI-DLS TLS material
+      ansible.builtin.file:
+        state: absent
+        path: "{{ fastapi_dls_tls_temp.path }}"
+      no_log: true
+      when: fastapi_dls_tls_temp is defined
+
+- name: Reconcile the FastAPI-DLS guest client configuration references
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ fastapi_dls_client_config_name }}"
+        namespace: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      data:
+        licenseUrl: >-
+          {{ fastapi_dls_client_license_url
+             if fastapi_dls_client_license_url | length > 0
+             else 'https://' ~ fastapi_dls_url ~ ':' ~ (fastapi_dls_service_port | string) }}
+        tokenSecretName: "{{ fastapi_dls_client_token_secret_name }}"
+        tokenSecretNamespace: "{{ fastapi_dls_client_token_secret_namespace }}"
+        tokenSecretKey: "{{ fastapi_dls_client_token_secret_key }}"
+        caSecretName: "{{ fastapi_dls_tls_secret_name }}"
+        caSecretNamespace: "{{ fastapi_dls_namespace }}"
+        caSecretKey: ca.crt
+        signingRootSecretName: "{{ fastapi_dls_signing_root_secret_name }}"
+        signingRootSecretNamespace: "{{ fastapi_dls_signing_root_secret_namespace }}"
+        signingRootSecretKey: "{{ fastapi_dls_signing_root_secret_key }}"
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the FastAPI-DLS data PVC
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{ fastapi_dls_data_pvc_name }}"
+        namespace: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: "{{ fastapi_dls_storage_class }}"
+        resources:
+          requests:
+            storage: "{{ fastapi_dls_storage_size }}"
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the cluster-internal FastAPI-DLS Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ fastapi_dls_service_name }}"
+        namespace: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      spec:
+        type: ClusterIP
+        selector:
+          app.kubernetes.io/name: fastapi-dls
+        ports:
+          - name: https
+            port: 443
+            targetPort: https-proxy
+            protocol: TCP
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the FastAPI-DLS TLS proxy configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ fastapi_dls_service_name }}-proxy"
+        namespace: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      data:
+        nginx.conf: "{{ lookup('template', 'nginx.conf.j2') }}"
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the FastAPI-DLS client NetworkPolicy
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ lookup('template', 'network-policy.yml.j2') | from_yaml }}"
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the FastAPI-DLS Deployment
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: "{{ fastapi_dls_service_name }}"
+        namespace: "{{ fastapi_dls_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+      spec:
+        replicas: 1
+        strategy:
+          type: Recreate
+          rollingUpdate: null
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: fastapi-dls
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/name: fastapi-dls
+              app.kubernetes.io/part-of: labweaver-infrastructure
+          spec:
+            automountServiceAccountToken: false
+            containers:
+              - name: fastapi-dls
+                image: "{{ fastapi_dls_image }}"
+                imagePullPolicy: IfNotPresent
+                command:
+                  - uvicorn
+                  - main:app
+                  - --host
+                  - 127.0.0.1
+                  - --port
+                  - "8080"
+                  - --app-dir
+                  - /app
+                  - --proxy-headers
+                env:
+                  - name: TZ
+                    value: "{{ fastapi_dls_timezone }}"
+                  - name: DLS_URL
+                    value: "{{ fastapi_dls_url }}"
+                  - name: DLS_PORT
+                    value: "{{ fastapi_dls_service_port | string }}"
+                  - name: LEASE_EXPIRE_DAYS
+                    value: "{{ fastapi_dls_lease_expire_days | string }}"
+                  - name: TOKEN_EXPIRE_DAYS
+                    value: "{{ fastapi_dls_token_expire_days | string }}"
+                  - name: INSTANCE_REF
+                    value: "{{ fastapi_dls_instance_ref }}"
+                  - name: DATABASE
+                    value: "{{ fastapi_dls_database_url }}"
+                  - name: DEBUG
+                    value: "{{ fastapi_dls_debug | bool | ternary('true', 'false') }}"
+                  - name: CERT_PATH
+                    value: /app/cert
+                ports:
+                  - name: backend
+                    containerPort: 8080
+                    protocol: TCP
+                readinessProbe:
+                  exec:
+                    command:
+                      - python
+                      - -c
+                      - >-
+                        import urllib.request;
+                        response = urllib.request.urlopen(
+                        'http://127.0.0.1:8080/-/health', timeout=2);
+                        assert response.status == 200
+                  initialDelaySeconds: 10
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                livenessProbe:
+                  exec:
+                    command:
+                      - python
+                      - -c
+                      - >-
+                        import urllib.request;
+                        response = urllib.request.urlopen(
+                        'http://127.0.0.1:8080/-/health', timeout=2);
+                        assert response.status == 200
+                  initialDelaySeconds: 30
+                  periodSeconds: 20
+                  timeoutSeconds: 5
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: [ALL]
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 128Mi
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+                volumeMounts:
+                  - name: data
+                    mountPath: /app/database
+                  - name: data
+                    mountPath: /app/cert
+              - name: tls-proxy
+                image: "{{ fastapi_dls_proxy_image }}"
+                imagePullPolicy: IfNotPresent
+                ports:
+                  - name: https-proxy
+                    containerPort: 8443
+                    protocol: TCP
+                readinessProbe:
+                  tcpSocket:
+                    port: https-proxy
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                livenessProbe:
+                  tcpSocket:
+                    port: https-proxy
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                  timeoutSeconds: 5
+                securityContext:
+                  runAsUser: 101
+                  runAsGroup: 101
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: [ALL]
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 16Mi
+                  limits:
+                    cpu: 100m
+                    memory: 64Mi
+                volumeMounts:
+                  - name: tls
+                    mountPath: /etc/nginx/tls
+                    readOnly: true
+                  - name: proxy-config
+                    mountPath: /etc/nginx/nginx.conf
+                    subPath: nginx.conf
+                    readOnly: true
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: "{{ fastapi_dls_data_pvc_name }}"
+              - name: tls
+                secret:
+                  secretName: "{{ fastapi_dls_tls_secret_name }}"
+              - name: proxy-config
+                configMap:
+                  name: "{{ fastapi_dls_service_name }}-proxy"
+  when: fastapi_dls_enabled | bool
+
+- name: Wait for the FastAPI-DLS backend to become ready
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ fastapi_dls_namespace }}"
+    name: "{{ fastapi_dls_service_name }}"
+  register: fastapi_dls_deployment_status
+  until:
+    - fastapi_dls_deployment_status.resources | length == 1
+    - >-
+      fastapi_dls_deployment_status.resources[0].status.observedGeneration | default(0) | int
+      >= fastapi_dls_deployment_status.resources[0].metadata.generation | int
+    - fastapi_dls_deployment_status.resources[0].status.updatedReplicas | default(0) | int == 1
+    - fastapi_dls_deployment_status.resources[0].status.availableReplicas | default(0) | int == 1
+    - fastapi_dls_deployment_status.resources[0].status.readyReplicas | default(0) | int == 1
+  retries: 30
+  delay: 5
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Find a ready FastAPI-DLS backend pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ fastapi_dls_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/name={{ fastapi_dls_service_name }}
+    field_selectors:
+      - status.phase=Running
+  register: fastapi_dls_backend_pods
+  until:
+    - fastapi_dls_backend_pods.resources | length > 0
+    - >-
+      fastapi_dls_backend_pods.resources[0].status.conditions
+      | selectattr('type', 'equalto', 'Ready')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+  retries: 12
+  delay: 5
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Read the retained FastAPI-DLS client token Secret
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ fastapi_dls_client_token_secret_namespace }}"
+    name: "{{ fastapi_dls_client_token_secret_name }}"
+  register: fastapi_dls_client_token_secret
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Determine whether a retained FastAPI-DLS client token is present
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_present: >-
+      {{ fastapi_dls_client_token_secret.resources | length == 1 and
+         fastapi_dls_client_token_secret.resources[0].data is defined and
+         fastapi_dls_client_token_secret_key in fastapi_dls_client_token_secret.resources[0].data }}
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Generate a candidate FastAPI-DLS client token
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    namespace: "{{ fastapi_dls_namespace }}"
+    pod: "{{ fastapi_dls_backend_pods.resources | map(attribute='metadata.name') | list | first }}"
+    container: fastapi-dls
+    command: >-
+      python -c "import base64,json,os,sys,urllib.request;token=urllib.request.urlopen(
+      'http://127.0.0.1:8080/-/client-token', timeout=5).read().decode('utf-8').strip();
+      parts=token.split('.');
+      assert len(parts)==3,'DLS client token is not a compact JWS';
+      payload=json.loads(base64.urlsafe_b64decode(parts[1]+'='*((4-len(parts[1])%4)%4)));
+      configuration=payload.get('service_instance_configuration',{});
+      assert configuration.get('nls_service_instance_ref')==os.environ['INSTANCE_REF'],'DLS client token identity mismatch';
+      assert configuration.get('node_url_list',[{}])[0].get('url')==os.environ['DLS_URL'],'DLS client token URL mismatch';
+      port=int(configuration.get('svc_port_set_list',[{}])[0].get('svc_port_map',[{}])[0].get('port',-1));
+      assert port==int(os.environ['DLS_PORT']),'DLS client token port mismatch';
+      assert 11*365*86400 <= int(payload['exp'])-int(payload['iat']) <= 13*365*86400,'DLS client token lifetime mismatch';
+      sys.stdout.write(token)"
+  register: fastapi_dls_client_token_candidate_exec
+  changed_when: false
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Validate the candidate FastAPI-DLS client token
+  ansible.builtin.assert:
+    that:
+      - fastapi_dls_client_token_candidate_exec.stdout | default('') | trim | length > 0
+    fail_msg: FASTAPI_DLS_CLIENT_TOKEN_EMPTY
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Decode the candidate FastAPI-DLS client token payload
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_candidate_payload_segment: >-
+      {{ (fastapi_dls_client_token_candidate_exec.stdout | trim).split('.')[1]
+         | replace('-', '+') | replace('_', '/') }}
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Parse the candidate FastAPI-DLS client token payload
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_candidate_payload: >-
+      {{ (fastapi_dls_client_token_candidate_payload_segment
+          ~ ('=' * ((4 - (fastapi_dls_client_token_candidate_payload_segment | length) % 4) % 4)))
+         | b64decode | from_json }}
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Decode the retained FastAPI-DLS client token
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_compact: >-
+      {{ fastapi_dls_client_token_secret.resources[0].data[fastapi_dls_client_token_secret_key]
+         | b64decode | trim }}
+  no_log: true
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_client_token_present | bool
+
+- name: Validate the retained FastAPI-DLS client token shape
+  ansible.builtin.assert:
+    that:
+      - fastapi_dls_client_token_compact.split('.') | length == 3
+    fail_msg: FASTAPI_DLS_RETAINED_CLIENT_TOKEN_INVALID
+  no_log: true
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_client_token_present | bool
+
+- name: Decode the retained FastAPI-DLS client token payload
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_payload_segment: >-
+      {{ fastapi_dls_client_token_compact.split('.')[1]
+         | replace('-', '+') | replace('_', '/') }}
+  no_log: true
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_client_token_present | bool
+
+- name: Parse the retained FastAPI-DLS client token payload
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_payload: >-
+      {{ (fastapi_dls_client_token_payload_segment
+          ~ ('=' * ((4 - (fastapi_dls_client_token_payload_segment | length) % 4) % 4)))
+         | b64decode | from_json }}
+  no_log: true
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_client_token_present | bool
+
+- name: Determine whether the retained FastAPI-DLS client token needs refresh
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_needs_refresh: true
+  when:
+    - fastapi_dls_enabled | bool
+    - not (fastapi_dls_client_token_present | bool)
+  no_log: true
+
+- name: Determine whether the retained FastAPI-DLS client token identity is current
+  ansible.builtin.set_fact:
+    fastapi_dls_client_token_needs_refresh: >-
+      {{ fastapi_dls_client_token_payload.get('service_instance_configuration', {})
+         != fastapi_dls_client_token_candidate_payload.get('service_instance_configuration', {}) or
+         fastapi_dls_client_token_payload.get('service_instance_public_key_configuration', {})
+         != fastapi_dls_client_token_candidate_payload.get('service_instance_public_key_configuration', {}) or
+         fastapi_dls_client_token_payload.get('scope_ref_list', [])
+         != fastapi_dls_client_token_candidate_payload.get('scope_ref_list', []) or
+         fastapi_dls_client_token_payload.get('fulfillment_class_ref_list', [])
+         != fastapi_dls_client_token_candidate_payload.get('fulfillment_class_ref_list', []) or
+         fastapi_dls_client_token_payload.get('iss')
+         != fastapi_dls_client_token_candidate_payload.get('iss') or
+         fastapi_dls_client_token_payload.get('aud')
+         != fastapi_dls_client_token_candidate_payload.get('aud') or
+         fastapi_dls_client_token_payload.get('protocol_version')
+         != fastapi_dls_client_token_candidate_payload.get('protocol_version') or
+         fastapi_dls_client_token_payload.get('update_mode')
+         != fastapi_dls_client_token_candidate_payload.get('update_mode') or
+         (fastapi_dls_client_token_payload.get('exp', 0) | int - fastapi_dls_client_token_payload.get('iat', 0) | int)
+         < 11 * 365 * 86400 or
+         (fastapi_dls_client_token_payload.get('exp', 0) | int - fastapi_dls_client_token_payload.get('iat', 0) | int)
+         > 13 * 365 * 86400 or
+         fastapi_dls_client_token_payload.get('exp', 0) | int <= (now(utc=true).timestamp() | int) }}
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_client_token_present | bool
+  no_log: true
+
+- name: Read the retained FastAPI-DLS signing root
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    namespace: "{{ fastapi_dls_namespace }}"
+    pod: "{{ fastapi_dls_backend_pods.resources | map(attribute='metadata.name') | list | first }}"
+    container: fastapi-dls
+    command: cat /app/cert/root_certificate.pem
+  register: fastapi_dls_signing_root_exec
+  changed_when: false
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Validate the retained FastAPI-DLS signing root
+  ansible.builtin.assert:
+    that:
+      - fastapi_dls_signing_root_exec.stdout | default('') is search('-----BEGIN CERTIFICATE-----')
+      - fastapi_dls_signing_root_exec.stdout | default('') is search('-----END CERTIFICATE-----')
+    fail_msg: FASTAPI_DLS_SIGNING_ROOT_INVALID
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
+- name: Reconcile the FastAPI-DLS client token Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ fastapi_dls_client_token_secret_name }}"
+        namespace: "{{ fastapi_dls_client_token_secret_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          app.kubernetes.io/managed-by: ansible
+      type: Opaque
+      data: "{{ {fastapi_dls_client_token_secret_key: (fastapi_dls_client_token_candidate_exec.stdout | trim | b64encode)} }}"
+  no_log: true
+  when:
+    - fastapi_dls_enabled | bool
+    - fastapi_dls_client_token_needs_refresh | bool
+
+- name: Reconcile the FastAPI-DLS signing root Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ fastapi_dls_signing_root_secret_name }}"
+        namespace: "{{ fastapi_dls_signing_root_secret_namespace }}"
+        labels:
+          app.kubernetes.io/name: fastapi-dls
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          app.kubernetes.io/managed-by: ansible
+      type: Opaque
+      data: "{{ {fastapi_dls_signing_root_secret_key: (fastapi_dls_signing_root_exec.stdout | trim | b64encode)} }}"
+  no_log: true
+  when: fastapi_dls_enabled | bool

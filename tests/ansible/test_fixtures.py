@@ -1620,6 +1620,8 @@ class AnsibleFixtureTests(unittest.TestCase):
             maxsplit=1,
         )[0]
         self.assertIn('"resourcequotas"', kubevirt_profile)
+        self.assertIn('apiGroups: ["cilium.io"]', kubevirt_profile)
+        self.assertIn('resources: ["ciliumnetworkpolicies"]', kubevirt_profile)
         self.assertIn('resources: ["datavolumes/source"]', service_account)
         self.assertIn("name: {{ $name }}-datasource", service_account)
         self.assertIn("kind: RoleBinding", service_account)

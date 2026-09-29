@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-gpu-device-plugin-{{ gpu_device_plugin_mode }}
+  namespace: {{ gpu_device_plugin_namespace }}
+  labels:
+    app.kubernetes.io/name: nvidia-gpu-device-plugin
+    labweaver.io/gpu-mode: {{ gpu_device_plugin_mode }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvidia-gpu-device-plugin
+      labweaver.io/gpu-mode: {{ gpu_device_plugin_mode }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvidia-gpu-device-plugin
+        labweaver.io/gpu-mode: {{ gpu_device_plugin_mode }}
+    spec:
+      priorityClassName: system-node-critical
+      runtimeClassName: nvidia
+      nodeSelector:
+        {{ gpu_device_plugin_node_label }}: {{ gpu_device_plugin_mode }}
+      containers:
+        - name: nvidia-device-plugin
+          image: {{ gpu_device_plugin_image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config-file=/etc/nvidia-device-plugin/config.yaml
+            - --device-discovery-strategy={{ gpu_device_plugin_device_discovery_strategy }}
+            - --device-list-strategy={{ gpu_device_plugin_device_list_strategy }}
+          env:
+            - name: NVIDIA_DRIVER_ROOT
+              value: "{{ gpu_device_plugin_driver_root }}"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          terminationMessagePath: {{ gpu_device_plugin_termination_message_path }}
+          terminationMessagePolicy: FallbackToLogsOnError
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: dev
+              mountPath: /dev
+              readOnly: true
+            - name: sys-pci-devices
+              mountPath: /sys/bus/pci/devices
+              readOnly: true
+            - name: termination-log
+              mountPath: /var/lib/nvidia-device-plugin
+            - name: config
+              mountPath: /etc/nvidia-device-plugin
+              readOnly: true
+            - name: cdi
+              mountPath: {{ gpu_device_plugin_cdi_path }}
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: DirectoryOrCreate
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: sys-pci-devices
+          hostPath:
+            path: /sys/bus/pci/devices
+            type: Directory
+        - name: termination-log
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ gpu_device_plugin_config_name }}
+        - name: cdi
+          hostPath:
+            path: {{ gpu_device_plugin_cdi_path }}
+            type: DirectoryOrCreate
+        - name: driver-root
+          hostPath:
+            path: {{ gpu_device_plugin_driver_root }}
+            type: Directory

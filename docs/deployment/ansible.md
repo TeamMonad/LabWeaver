@@ -16,6 +16,62 @@ Environment 管理环境 Namespace、Quota、PVC 和运行对象；Resource 管�
 
 GPU 需要已有设备插件或 KubeVirt mediated device 配置。目录声明的模式和实际资源名称必须匹配；容器时间片申请一个共享份额，不能视为整卡。VM vGPU 必须使用已配置规格。无匹配设备、容量信息过期或设备释放未确认时，不自动降级或归还可分配容量。
 
+## GPU 设备插件与 vGPU
+
+`80-install-addons.yml` 的 `gpu_device_plugin` 角色默认关闭，启用时必须显式给出互不重叠的节点集合。独占节点暴露 `nvidia.com/gpu`；共享节点使用 NVIDIA time-slicing，并在 `renameByDefault` 下暴露 `nvidia.com/gpu.shared`。角色使用 `runtimeClassName: nvidia`、只读 `/dev` 与 PCI sysfs，并把 termination log 写入 Pod 可写的 `emptyDir`，因此不会因 `/dev/termination-log` 的只读 hostPath 失败。CDI 模式同时把节点驱动根只读挂载到 `/driver-root`，并把 `/var/run/cdi` 作为可写 hostPath；宿主机直接安装驱动时设置 `gpu_device_plugin_driver_root=/`，driver-container 布局使用 `/run/nvidia/driver`。不要把同一节点放进两个集合。
+
+只对目标节点运行角色时使用现有 playbook 的 tag：
+
+```sh
+ansible-playbook -i deploy/ansible/inventories/v1/hosts.yml \
+  deploy/ansible/playbooks/80-install-addons.yml \
+  --tags gpu-device-plugin \
+  -e gpu_device_plugin_enabled=true \
+  -e 'gpu_device_plugin_exclusive_nodes=["<exclusive-node>"]' \
+  -e 'gpu_device_plugin_shared_nodes=["<shared-node>"]' \
+  -e gpu_device_plugin_shared_replicas=10
+```
+
+KubeVirt mediated device 只在主机实际创建对应 `mdev_supported_types` 后启用。`kubevirt-mdev` tag 只执行 CR 配置校验和 patch，不重装 KubeVirt；`kubevirt_mediated_devices_configuration` 的每项必须同时有 `nodeSelector` 和 `mediatedDeviceTypes`，并与全局 `kubevirt_mediated_device_types`、`permittedHostDevices.mediatedDevices` 成套配置。V100DX 配置示例使用 `nvidia-195` 至 `nvidia-199`，资源名分别为 `nvidia.com/grid-v100dx-2q` 至 `nvidia.com/grid-v100dx-32q`，节点选择器必须替换为实时节点标签：
+
+```sh
+ansible-playbook -i deploy/ansible/inventories/v1/hosts.yml \
+  deploy/ansible/playbooks/70-install-kubevirt.yml \
+  --tags kubevirt-mdev \
+  -e @deploy/ansible/inventories/v1/gpu-mdev-private.yml
+```
+
+已有集群的 GPU seed 如果仍使用旧的 `nvidia-cuda-primary-v1` allocation binding，应先在管理员 GPU 目录界面新增正确 `nvidia.com/gpu` revision，再同步部署输入；不要直接改数据库或清空 seed。新安装可直接使用当前锁定输入。
+
+## FastAPI-DLS（可选）
+
+FastAPI-DLS 角色默认关闭。启用时部署固定摘要的 2.x 镜像，后端只绑定 Pod loopback，TLS 由同 Pod 的非 root nginx sidecar 终止，Service 为 ClusterIP 的 443 端口；NetworkPolicy 只允许带有 `labweaver.io/managed=true`、`labweaver.io/environment=true`、`app.kubernetes.io/name=labweaver-vm-runtime` 的环境 Namespace 中、同时带有 `app=runtime` 与 `labweaver.io/gpu-mode=vm_vgpu` 的 VM Pod 访问 8443。没有公网 Ingress。DLS 的 SQLite 数据库与签名根证书持久化在同一 PVC 的 `/app/database` 和 `/app/cert`；`fastapi-dls-tls` Secret 的 `ca.crt` 是 nginx TLS 信任材料，不能当作 DLS 签名 root CA。
+
+使用私有变量启用角色。角色首次部署时在 backend loopback 生成 client token，写入
+`fastapi-dls-client-token` Secret 的 `client-token` 键，并把持久化的 DLS signing root
+写入 `fastapi-dls-signing-root` Secret 的 `ca.crt` 键。已有 Secret 会保留，token 内容不写入变量文件、镜像或日志：
+
+`fastapi_dls_token_expire_days` 控制短期认证会话 token；FastAPI-DLS 的 client `.tok`
+由服务端按其长期有效期生成，角色不会在每次重跑时轮换已有 Secret。
+
+```sh
+ansible-playbook -i deploy/ansible/inventories/v1/hosts.yml \
+  deploy/ansible/playbooks/80-install-addons.yml \
+  --tags fastapi-dls \
+  -e fastapi_dls_enabled=true
+```
+
+外部 NVIDIA license server 仍可用，把 `fastapi_dls_client_license_url` 设为审核过的 HTTPS 主机地址，并保持 FastAPI-DLS 角色关闭；外部模式下由管理员提供对应 token Secret 引用。DLS 内部地址由 `fastapi_dls_url` 和 `fastapi_dls_service_port` 生成，当前服务端口固定为 443。管理员可在 backend 容器 loopback 上读取 client token 或 DLS signing root；guest 的 `gridd-unlock-patcher` 使用 DLS signing root，不能使用 nginx TLS CA：
+
+```sh
+kubectl -n labweaver-gpu-license exec deploy/fastapi-dls -c fastapi-dls -- \
+  curl -fsS http://127.0.0.1:8080/-/config/root-certificate
+kubectl -n labweaver-gpu-license exec deploy/fastapi-dls -c fastapi-dls -- \
+  curl -fsS http://127.0.0.1:8080/-/client-token
+```
+
+上述管理端点只对管理员的 `kubectl exec` loopback 可见；guest 通过 TLS proxy 只能访问 `/auth/v1/` 和 `/leasing/v1/`。580.x guest 驱动还需要按 guest 镜像维护流程应用 `gridd-unlock-patcher`，host 驱动不在该角色范围内。
+
 ## 主机防火墙
 
 节点主机防火墙由 **Cilium Host Firewall** 承担，不再使用 firewalld。`cluster_network` 角色在 Cilium Helm values 中启用 `hostFirewall.enabled: true`，并应用 `CiliumClusterwideNetworkPolicy`（`host-firewall-policy.yml.j2`）作为节点防火墙策略：集群节点间与 health 流量整体放行，外部放行 SSH（22）、公网入口（80/443）、WireGuard 管理网（51820/udp）与 ICMP echo。策略在 Cilium 安装后立即应用，`hostFirewall` 启用但尚未有策略选中节点时保持默认放行，因此不会在应用策略前中断管理通道。

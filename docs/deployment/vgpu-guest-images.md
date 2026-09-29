@@ -50,12 +50,12 @@ publishing remains an explicit administrator operation after the local output
 is inspected.
 
 The command deliberately has no DLS token, TLS CA, or DLS signing root input.
-The VM bootstrap retrieves the client token from the Secret reference exposed
-by the `fastapi-dls-client` ConfigMap and retrieves the DLS signing root from
-the backend loopback endpoint before applying the patcher. The signing root
-used by `gridd-unlock-patcher` is different from the nginx TLS `ca.crt` in
-`fastapi-dls-tls`; never substitute the TLS CA. The token and certificate are
-runtime material and must not be copied into the guest image or repository.
+The VM bootstrap retrieves the client token and DLS signing root from the
+Secret references exposed by the `fastapi-dls-client` ConfigMap before applying
+the patcher. The signing root used by `gridd-unlock-patcher` is different from
+the nginx TLS `ca.crt` in `fastapi-dls-tls`; never substitute the TLS CA. The
+token and certificate are runtime material and must not be copied into the
+guest image or repository.
 
 The optional cluster-internal FastAPI-DLS role uses the stable references
 `fastapi-dls-client-token` (Secret key `client-token`),
