@@ -303,6 +303,8 @@ fn safe_log_field(name: &str) -> bool {
             | "course_id"
             | "project_id"
             | "run_id"
+            | "step_run_id"
+            | "task_run_id"
             | "environment_id"
             | "resource_id"
             | "build_request_id"
@@ -347,6 +349,13 @@ fn safe_log_field(name: &str) -> bool {
             | "status"
             | "kind"
             | "phase"
+            | "terminal_status"
+            | "awarded_points"
+            | "max_points"
+            | "compile_exit_code"
+            | "compile_signal"
+            | "compile_timed_out"
+            | "compile_output_exceeded"
             | "action"
             | "worker"
             | "executor"
@@ -806,6 +815,18 @@ mod tests {
                 finished_at = "2026-09-14T06:26:32Z",
                 max_delivery_attempt = 10_i64,
                 trace_id = "01900000000070008000000000000001",
+                run_id = "01900000000070008000000000000001",
+                step_run_id = "01900000000070008000000000000002",
+                task_run_id = "01900000000070008000000000000003",
+                phase = "Test",
+                terminal_status = "WrongAnswer",
+                diagnostic_code = "LW_OJ_WRONG_ANSWER",
+                awarded_points = 0_u32,
+                max_points = 100_u32,
+                compile_exit_code = ?Some(65_i32),
+                compile_signal = ?Option::<i32>::None,
+                compile_timed_out = false,
+                compile_output_exceeded = false,
                 s3_error_code = "NoSuchBucket",
                 s3_request_id =
                     "tx000000000000000000000-0000000000000000-0000000000000000-0000000000000000",
@@ -816,6 +837,9 @@ mod tests {
                 locator = "LOCATOR_SENTINEL",
                 payload = "PAYLOAD_SENTINEL",
                 command = "COMMAND_SENTINEL",
+                input = "OJ_INPUT_SENTINEL",
+                expected = "OJ_EXPECTED_SENTINEL",
+                stdout = "OJ_STDOUT_SENTINEL",
                 error = "ERROR_SENTINEL",
             );
             tracing::debug!(event = "telemetry.debug.must_not_appear");
@@ -829,6 +853,9 @@ mod tests {
             "LOCATOR_SENTINEL",
             "PAYLOAD_SENTINEL",
             "COMMAND_SENTINEL",
+            "OJ_INPUT_SENTINEL",
+            "OJ_EXPECTED_SENTINEL",
+            "OJ_STDOUT_SENTINEL",
             "ERROR_SENTINEL",
         ] {
             assert!(
@@ -851,12 +878,31 @@ mod tests {
         assert_eq!(event["finished_at"], "2026-09-14T06:26:32Z");
         assert_eq!(event["token"], "redacted_unclassified");
         assert_eq!(event["max_delivery_attempt"], 10);
+        assert_oj_receipt_fields(&event);
         assert_eq!(event["s3_error_code"], "NoSuchBucket");
         assert_eq!(
             event["s3_request_id"],
             "tx000000000000000000000-0000000000000000-0000000000000000-0000000000000000"
         );
         Ok(())
+    }
+
+    fn assert_oj_receipt_fields(event: &serde_json::Value) {
+        assert_eq!(event["run_id"], "01900000000070008000000000000001");
+        assert_eq!(event["step_run_id"], "01900000000070008000000000000002");
+        assert_eq!(event["task_run_id"], "01900000000070008000000000000003");
+        assert_eq!(event["phase"], "Test");
+        assert_eq!(event["terminal_status"], "WrongAnswer");
+        assert_eq!(event["diagnostic_code"], "LW_OJ_WRONG_ANSWER");
+        assert_eq!(event["awarded_points"], 0);
+        assert_eq!(event["max_points"], 100);
+        assert_eq!(event["compile_exit_code"], "Some(65)");
+        assert_eq!(event["compile_signal"], "None");
+        assert_eq!(event["compile_timed_out"].as_bool(), Some(false));
+        assert_eq!(event["compile_output_exceeded"].as_bool(), Some(false));
+        assert!(event.get("input").is_none());
+        assert!(event.get("expected").is_none());
+        assert!(event.get("stdout").is_none());
     }
 
     #[test]
