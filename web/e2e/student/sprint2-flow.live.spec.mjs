@@ -964,7 +964,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       if (release.runtimeKind !== requiredRuntimeKind) {
         throw new Error(`REAL_WORK_GPU_RUNTIME_MISMATCH:${REAL_WORK_GPU.mode}:${release.runtimeKind}`)
       }
-      const gpuSelect = page.getByLabel('GPU 目录项（可选）', { exact: true })
+      const gpuSelect = page.getByRole('combobox', { name: 'GPU 目录项（可选）', exact: true })
       await expect(gpuSelect).toBeEnabled({ timeout: 120_000 })
       const gpuValue = await gpuSelect.locator('option').evaluateAll((options, target) => {
         const expected = `${target.class} · ${target.modeLabel}`
