@@ -27,6 +27,8 @@ import {
   readResumablePublishedWork,
   waitForRealWorkCharges,
 } from '../support/real-work.mjs'
+import { readActorId } from '../support/real-experiment.mjs'
+import { approveResourceRequestByUi } from '../support/real-resource.mjs'
 import {
   createRealWorkSshIdentity,
   readRealWorkVmLicenseStatus,
@@ -55,6 +57,10 @@ const REAL_WORK_VM = realWorkVmConfig()
 const REAL_WORK_CONFIG = realWorkConfig({ virtualMachine: Boolean(REAL_WORK_VM) })
 const REAL_WORK_RESUME = realWorkResumeConfig()
 const REAL_WORK_GPU = realWorkGpuConfig()
+const AUTHORING_RESOURCE_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
+  || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
+  || 'container-primary-v1'
 const WORK_PROVIDER_BINDING = REAL_WORK_VM?.providerBinding
   ?? process.env.LABWEAVER_E2E_PROVIDER_BINDING
   ?? 'kubernetes-work-local-hostpath'
@@ -73,18 +79,111 @@ function terminalRunState(value) {
   return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value)
 }
 
-async function publishWorkTemplate(page, project, packageCopy = null) {
-  await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await selectProjectByUi(page, project.id)
-  await page.getByRole('button', { name: '生成 Work 模板', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '生成 Work 模板', exact: true })).toBeVisible()
+async function approvePendingAgentTaskResourceByUi(adminPage, {
+  projectId,
+  run,
+  runId,
+  packageId,
+  policyId,
+  policyRevision,
+  studentActorId,
+  trackKind,
+  purposeKind,
+  environmentClass = null,
+  environmentId = null,
+  environmentRevision = null,
+}) {
+  if (
+    run.id !== runId
+    || run.projectId !== projectId
+    || run.packageId !== packageId
+    || run.policyId !== policyId
+    || run.policyRevision !== policyRevision
+    || run.purpose?.kind !== purposeKind
+    || (purposeKind === 'authoring' && run.purpose.environmentClass !== environmentClass)
+    || (purposeKind === 'work_configuration'
+      && (run.purpose.environmentId !== environmentId
+        || run.purpose.environmentRevision !== environmentRevision
+        || run.purpose.actorId !== studentActorId))
+  ) {
+    throw new Error('WORK_TASK_RESOURCE_RUN_SCOPE_INVALID')
+  }
 
-  const fileInput = page.getByTestId('work-template-file-input')
+  const track = run.tracks?.find((item) => item.kind === trackKind)
+  if (!track) throw new Error('WORK_TASK_RESOURCE_TRACK_MISSING')
+  const activeAttempts = track.attempts?.filter((attempt) => (
+    ['pending', 'running', 'repairing', 'awaiting_approval'].includes(attempt.state)
+  )) ?? []
+  if (activeAttempts.length === 0) return
+  if (activeAttempts.length !== 1 || activeAttempts[0].number !== 1) {
+    throw new Error('WORK_TASK_RESOURCE_ATTEMPT_UNEXPECTED')
+  }
+  const activeAttempt = activeAttempts[0]
+
+  const requests = await expectJson(
+    await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
+    'WORK_TASK_RESOURCE_REQUESTS_READ_FAILED',
+  )
+  if (!Array.isArray(requests)) throw new Error('WORK_TASK_RESOURCE_REQUESTS_INVALID')
+
+  const compactRunId = runId.replaceAll('-', '').toLowerCase()
+  const requestPrefix = `authoring-${compactRunId}-`
+  const matchingRequests = requests.filter((request) => (
+    typeof request.requestKey === 'string' && request.requestKey.startsWith(requestPrefix)
+  ))
+  if (matchingRequests.length > 1) throw new Error('WORK_TASK_RESOURCE_REQUEST_DUPLICATE')
+  for (const request of matchingRequests) {
+    const identity = request.requestKey.match(
+      /^authoring-([0-9a-f]{32})-(environment|evaluation|work_configuration)-([1-9][0-9]*)-([0-9a-f]{32})$/i,
+    )
+    const taskRunId = request.target?.taskRunId
+    if (
+      request.projectId !== projectId
+      || identity?.[1]?.toLowerCase() !== compactRunId
+      || identity?.[2] !== trackKind
+      || Number(identity?.[3]) !== activeAttempt.number
+      || request.requesterId !== studentActorId
+      || request.target?.kind !== 'task'
+      || typeof taskRunId !== 'string'
+      || taskRunId.replaceAll('-', '').toLowerCase() !== identity?.[4]?.toLowerCase()
+      || typeof request.id !== 'string'
+      || !Number.isSafeInteger(request.requestedResources?.cpuMillicores)
+      || request.requestedResources.cpuMillicores <= 0
+      || !Number.isSafeInteger(request.requestedResources?.memoryBytes)
+      || request.requestedResources.memoryBytes <= 0
+      || !Number.isSafeInteger(request.requestedResources?.storageBytes)
+      || request.requestedResources.storageBytes <= 0
+      || request.requestedResources.gpu != null
+    ) {
+      throw new Error(`WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
+    }
+    if (request.state !== 'reviewing') continue
+    if (!Number.isInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
+      throw new Error(`WORK_TASK_RESOURCE_DURATION_INVALID:${request.id}`)
+    }
+    await approveResourceRequestByUi(adminPage, {
+      requestKey: request.requestKey,
+      projectId,
+      requestId: request.id,
+      requesterId: studentActorId,
+      durationSeconds: request.requestedDurationSeconds,
+      providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
+    })
+  }
+}
+
+async function publishWorkTemplate(page, project, packageCopy = null, { adminPage, studentActorId }) {
   const packageDirectory = packageCopy?.directory ?? await mkdtemp(join(tmpdir(), 'labweaver-work-package-'))
   const ownsPackageDirectory = !packageCopy
   try {
+    await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, {
+      waitUntil: 'domcontentloaded',
+    })
+    await selectProjectByUi(page, project.id)
+    await page.getByRole('button', { name: '生成 Work 模板', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '生成 Work 模板', exact: true })).toBeVisible()
+
+    const fileInput = page.getByTestId('work-template-file-input')
     if (ownsPackageDirectory) await writeFile(join(packageDirectory, 'README.md'), PACKAGE_CONTENT, 'utf8')
     await fileInput.setInputFiles(packageDirectory)
     await expect(page.getByRole('list', { name: '待上传材料文件', exact: true })).toContainText('README.md')
@@ -108,13 +207,35 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
     await page.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
     const runResponse = await runResponsePromise
     const acceptedRun = await expectJson(runResponse, 'WORK_TEMPLATE_RUN_CREATE_FAILED')
-    expect(acceptedRun).toMatchObject({ id: expect.any(String), projectId: project.id })
+    expect(acceptedRun).toMatchObject({
+      id: expect.any(String),
+      projectId: project.id,
+      packageId: packageData.id,
+      policyId: expect.any(String),
+      policyRevision: expect.any(Number),
+    })
     expect(acceptedRun.purpose?.environmentClass ?? acceptedRun.environmentClass).toBe('work')
 
     const run = await pollJson(
       page.request,
       `/api/v1/projects/${project.id}/agent-runs/${acceptedRun.id}`,
-      (value) => terminalRunState(value.state),
+      async (value) => {
+        if (!terminalRunState(value.state)) {
+          await approvePendingAgentTaskResourceByUi(adminPage, {
+            projectId: project.id,
+            run: value,
+            runId: acceptedRun.id,
+            packageId: packageData.id,
+            policyId: acceptedRun.policyId,
+            policyRevision: acceptedRun.policyRevision,
+            studentActorId,
+            trackKind: 'environment',
+            purposeKind: 'authoring',
+            environmentClass: 'work',
+          })
+        }
+        return terminalRunState(value.state)
+      },
       'WORK_TEMPLATE_RUN_STATUS_FAILED',
       // A real authoring run drives the sandbox CLI against the deployment's
       // model, so it can take as long as the harness LLM timeout allows.
@@ -812,12 +933,18 @@ test('student provisions a Work environment, configures it, and releases its cap
   let trackedRequestId = null
   let vmSshIdentity = null
   let vmSshKey = null
+  let adminContext = null
+  let adminPage = null
+  let studentActorId = null
   let primaryFailure = null
   const cleanupFailures = []
   try {
+    adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+    adminPage = await adminContext.newPage()
+    studentActorId = await readActorId(page.request)
     const { packageData, release } = resumed
       ? { packageData: resumed.packageData, release: resumed.release }
-      : await publishWorkTemplate(page, project, packageCopy)
+      : await publishWorkTemplate(page, project, packageCopy, { adminPage, studentActorId })
     const expectedSeedMarker = packageCopy?.seedMarker ?? resumed?.seedMarker
     const expectedPersistenceMarker = packageCopy?.persistenceMarker ?? resumed?.persistenceMarker
 
@@ -1049,6 +1176,49 @@ test('student provisions a Work environment, configures it, and releases its cap
     const configurationResponse = await configurationResponsePromise
     const configurationRun = await expectJson(configurationResponse, 'WORK_CONFIGURATION_RUN_CREATE_FAILED')
     expect(configurationRun).toMatchObject({ id: expect.any(String), projectId: project.id })
+    const configurationRequestBody = configurationResponse.request().postDataJSON()
+    expect(configurationRequestBody).toMatchObject({
+      projectId: project.id,
+      packageId: packageData.id,
+      packageRevision: packageData.revision,
+      environmentId,
+      environmentRevision: expect.any(Number),
+      policyId: expect.any(String),
+      policyRevision: expect.any(Number),
+    })
+    if (
+      !Number.isInteger(configurationRequestBody.environmentRevision)
+      || configurationRequestBody.environmentRevision < 1
+      || !Number.isInteger(configurationRequestBody.policyRevision)
+      || configurationRequestBody.policyRevision < 1
+    ) {
+      throw new Error('WORK_CONFIGURATION_REQUEST_SCOPE_INVALID')
+    }
+    const configurationRunStatus = await pollJson(
+      page.request,
+      `/api/v1/projects/${project.id}/agent-runs/${configurationRun.id}`,
+      async (value) => {
+        await approvePendingAgentTaskResourceByUi(adminPage, {
+          projectId: project.id,
+          run: value,
+          runId: configurationRun.id,
+          packageId: packageData.id,
+          policyId: configurationRequestBody.policyId,
+          policyRevision: configurationRequestBody.policyRevision,
+          studentActorId,
+          trackKind: 'work_configuration',
+          purposeKind: 'work_configuration',
+          environmentId: configurationRequestBody.environmentId,
+          environmentRevision: configurationRequestBody.environmentRevision,
+        })
+        return value.state === 'awaiting_approval' || terminalRunState(value.state)
+      },
+      'WORK_CONFIGURATION_RUN_STATUS_FAILED',
+      300_000,
+    )
+    if (configurationRunStatus.state !== 'awaiting_approval') {
+      throw new Error(`WORK_CONFIGURATION_RUN_FAILED_BEFORE_PLAN:${configurationRunStatus.state}`)
+    }
     const configurationPlan = await expectJson(await planResponsePromise, 'WORK_CONFIGURATION_PLAN_LOAD_FAILED')
     expect(configurationPlan).toMatchObject({
       plan: {
@@ -1364,6 +1534,11 @@ test('student provisions a Work environment, configures it, and releases its cap
     }
     try {
       await vmSshIdentity?.cleanup()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    try {
+      await adminContext?.close()
     } catch (error) {
       cleanupFailures.push(error)
     }

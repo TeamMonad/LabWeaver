@@ -561,7 +561,7 @@ export async function readResumablePublishedWork(request, resume, { gpu = null, 
 
 function currentRateDimension(rate, target, now = Date.now()) {
   const effectiveFrom = Date.parse(rate?.effectiveFrom)
-  const effectiveUntil = rate?.effectiveUntil == null ? Number.POSITIVE_INFINITY : Date.parse(rate.effectiveUntil)
+  const effectiveUntil = rate?.effectiveUntil == null ? null : Date.parse(rate.effectiveUntil)
   if (
     !rate
     || rate.unit !== target.unit
@@ -569,8 +569,7 @@ function currentRateDimension(rate, target, now = Date.now()) {
     || rate.unitQuantity < 1
     || !Number.isFinite(effectiveFrom)
     || effectiveFrom > now
-    || !Number.isFinite(effectiveUntil)
-    || effectiveUntil <= now
+    || (effectiveUntil !== null && (!Number.isFinite(effectiveUntil) || effectiveUntil <= now))
   ) return false
   if (target.unit === 'gpu_unit_second') {
     return rate.gpuClass === target.gpuClass && rate.gpuMode === target.gpuMode
