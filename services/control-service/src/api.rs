@@ -18,7 +18,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use contracts::authoring::{AgentRun, AgentRunPurpose, AgentTrackKind, ProjectLlmEgressPolicy};
+use contracts::authoring::{
+    AgentRun, AgentRunPurpose, AgentTrackKind, CandidateDecision, EnvironmentCandidate,
+    ProjectLlmEgressPolicy, RuntimeKind,
+};
 use contracts::http::{
     AddProjectMembershipRequest, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
     AuthoringPublicationAdmissionQuery, CancelPlatformImageUploadRequest, CandidateDecisionRequest,
@@ -1133,6 +1136,19 @@ async fn retry_project_agent_run(
     Ok(accepted(&run))
 }
 
+/// Called only after user authorization and before opening a mutation transaction.
+/// Container candidates retain their existing build authority and do not need the VM catalog.
+async fn candidate_platform_images(
+    state: &ApiState,
+    headers: &HeaderMap,
+    candidate: &EnvironmentCandidate,
+) -> Result<Vec<PlatformImageEntry>, ApiError> {
+    if candidate.spec.runtime.kind() != RuntimeKind::VirtualMachine {
+        return Ok(Vec::new());
+    }
+    Ok(state.agent.list_platform_images(headers).await?.entries)
+}
+
 async fn get_project_environment_candidate(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -1147,9 +1163,14 @@ async fn get_project_environment_candidate(
         project_id,
     )
     .await?;
+    let candidate = state
+        .control
+        .project_environment_candidate(project_id, candidate_id)
+        .await?;
+    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
     let value = state
         .control
-        .project_environment_candidate_view(project_id, candidate_id)
+        .project_environment_candidate_view(project_id, candidate_id, &catalog)
         .await?;
     Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
 }
@@ -1190,6 +1211,15 @@ async fn decide_project_environment_candidate(
         project_id,
     )
     .await?;
+    let catalog = if request.decision == CandidateDecision::Approved {
+        let candidate = state
+            .control
+            .project_environment_candidate(project_id, candidate_id)
+            .await?;
+        candidate_platform_images(&state, &headers, &candidate).await?
+    } else {
+        Vec::new()
+    };
     let approval = state
         .control
         .decide_project_candidate(
@@ -1201,6 +1231,7 @@ async fn decide_project_environment_candidate(
             etag(&headers)?,
             &idempotency(&headers)?,
             now()?,
+            &catalog,
         )
         .await?;
     Ok(with_etag(
@@ -1236,6 +1267,7 @@ async fn decide_project_evaluation_candidate(
             etag(&headers)?,
             &idempotency(&headers)?,
             now()?,
+            &[],
         )
         .await?;
     Ok(with_etag(
@@ -1260,7 +1292,11 @@ async fn complete_project_authoring_approval(
         project_id,
     )
     .await?;
-    let catalog = state.agent.list_platform_images(&headers).await?;
+    let candidate = state
+        .control
+        .project_environment_candidate(project_id, request.environment_candidate_id)
+        .await?;
+    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
     let approval = state
         .control
         .complete_authoring_approval(
@@ -1270,7 +1306,7 @@ async fn complete_project_authoring_approval(
             &idempotency(&headers)?,
             now()?,
             &trace_id(&headers),
-            &catalog.entries,
+            &catalog,
         )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &approval, approval.revision))
@@ -1846,6 +1882,11 @@ async fn create_project_work_release(
         project_id,
     )
     .await?;
+    let candidate = state
+        .control
+        .project_environment_candidate(project_id, request.candidate_id)
+        .await?;
+    let catalog = candidate_platform_images(&state, &headers, &candidate).await?;
     let key = idempotency(&headers)?;
     let published_at = now()?;
     let trace_id = trace_id(&headers);
@@ -1859,6 +1900,7 @@ async fn create_project_work_release(
             &key,
             published_at,
             &trace_id,
+            &catalog,
         )
         .await?;
     Ok(Json(OperationAccepted {

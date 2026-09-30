@@ -15,6 +15,7 @@ import {
 } from '../support/live.mjs'
 import {
   assertRealWorkCharges,
+  assertRealWorkVmCandidate,
   configureRealWorkBudgetByUi,
   createRealWorkPackage,
   ensureRealWorkRates,
@@ -41,6 +42,7 @@ const GPU_MODE_LABELS = Object.freeze({
   vm_vgpu: 'VM vGPU',
 })
 const GIB = 1024 ** 3
+const VM_PERSISTENCE_MARKER_PATH = 'workspace/persistence-marker.txt'
 
 // The agent worker runs one reserved dispatch at a time, so a journey can sit
 // behind earlier runs before its own authoring starts. These ceilings cover a
@@ -49,16 +51,15 @@ const GIB = 1024 ** 3
 const FULL_CHAIN_TIMEOUT_MS = 14_400_000
 const AUTHORING_RUN_TIMEOUT_MS = 9_000_000
 const CANDIDATE_BUILD_TIMEOUT_MS = 3_600_000
-const REAL_WORK_CONFIG = realWorkConfig()
+const REAL_WORK_VM = realWorkVmConfig()
+const REAL_WORK_CONFIG = realWorkConfig({ virtualMachine: Boolean(REAL_WORK_VM) })
 const REAL_WORK_RESUME = realWorkResumeConfig()
 const REAL_WORK_GPU = realWorkGpuConfig()
-const REAL_WORK_VM = realWorkVmConfig()
 const WORK_PROVIDER_BINDING = REAL_WORK_VM?.providerBinding
   ?? process.env.LABWEAVER_E2E_PROVIDER_BINDING
   ?? 'kubernetes-work-local-hostpath'
-const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME)
+const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME || REAL_WORK_VM)
 if (REAL_WORK_GPU && !REAL_WORK_MODE) throw new Error('LABWEAVER_E2E_WORK_GPU_REQUIRES_REAL_PROVIDER')
-if (REAL_WORK_VM && !REAL_WORK_RESUME) throw new Error('LABWEAVER_E2E_VM_REQUIRES_APPROVED_RESUME')
 if (REAL_WORK_VM && REAL_WORK_GPU?.mode !== 'vm_vgpu') throw new Error('LABWEAVER_E2E_VM_REQUIRES_VM_VGPU')
 if (REAL_WORK_GPU?.mode === 'vm_vgpu' && !REAL_WORK_VM) throw new Error('LABWEAVER_E2E_VM_VGPU_REQUIRES_VM_CONFIGURATION')
 
@@ -129,40 +130,58 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
       page.request,
       project.id,
       environmentTrack.candidateId,
-      (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
-      'WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
+      (value) => {
+        if (REAL_WORK_VM) return Boolean(value.candidate)
+        return ['succeeded', 'failed', 'cancelled'].includes(value.build?.state)
+      },
+      REAL_WORK_VM ? 'WORK_TEMPLATE_VM_CANDIDATE_READ_FAILED' : 'WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
       CANDIDATE_BUILD_TIMEOUT_MS,
     )
     if (candidate.candidate?.spec?.class !== 'work') throw new Error('WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
-    if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
-      throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
+    if (!candidate.imageArtifact) {
+      throw new Error(`WORK_TEMPLATE_CANDIDATE_ARTIFACT_NOT_READY:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
     }
     if (REAL_WORK_MODE) {
       const runtime = candidate.candidate?.spec?.runtime
-      expect(runtime).toMatchObject({
-        kind: 'container',
-        provider_binding: WORK_PROVIDER_BINDING,
-        service_port: 8080,
-        build_context: {
-          artifactId: expect.any(String),
-          objectVersion: expect.any(String),
-        },
-      })
+      if (REAL_WORK_VM) {
+        assertRealWorkVmCandidate(candidate, REAL_WORK_VM, REAL_WORK_GPU)
+      } else {
+        expect(runtime).toMatchObject({
+          kind: 'container',
+          provider_binding: WORK_PROVIDER_BINDING,
+          service_port: 8080,
+          build_context: {
+            artifactId: expect.any(String),
+            objectVersion: expect.any(String),
+          },
+        })
+        if (candidate.build?.state !== 'succeeded') {
+          throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'build not succeeded'}`)
+        }
+        realContainerArtifact(candidate)
+      }
       if (REAL_WORK_GPU) {
         expect(candidate.candidate?.spec?.resources?.gpu).toEqual({
           class: REAL_WORK_GPU.class,
           count: REAL_WORK_GPU.count,
         })
       }
-      realContainerArtifact(candidate)
+    } else if (candidate.build?.state !== 'succeeded') {
+      throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'build not succeeded'}`)
     }
 
     const candidateCard = page.getByTestId('work-template-candidate')
     await expect(candidateCard).toBeVisible({ timeout: 120_000 })
-    await expect(candidateCard).toContainText('构建完成', { timeout: 120_000 })
+    if (REAL_WORK_VM) {
+      await expect(candidateCard).toContainText(REAL_WORK_VM.baseDisk.binding, { timeout: 120_000 })
+    } else {
+      await expect(candidateCard).toContainText('构建完成', { timeout: 120_000 })
+    }
     await candidateCard.getByTestId('work-template-candidate-confirmation').check()
     await candidateCard.getByPlaceholder('说明为什么批准这个 Work Environment 候选').fill(
-      '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。',
+      REAL_WORK_VM
+        ? '已核对 Work EnvironmentSpec、虚拟机基础镜像和项目安全约束。'
+        : '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。',
     )
     const approveButton = candidateCard.getByRole('button', { name: '批准 Environment 候选', exact: true })
     await expect(approveButton).toBeEnabled()
@@ -192,7 +211,12 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
       'WORK_TEMPLATE_RELEASE_STATUS_FAILED',
       120_000,
     )
-    expect(release).toMatchObject({ projectId: project.id, runtimeKind: 'container', version: expect.any(Number) })
+    expect(release).toMatchObject({
+      projectId: project.id,
+      runtimeKind: REAL_WORK_VM ? 'virtual_machine' : 'container',
+      version: expect.any(Number),
+    })
+    if (REAL_WORK_VM) expect(release.artifact).toEqual(candidate.imageArtifact)
     await expect(page.getByTestId('work-template-resource-link')).toBeVisible()
     return { packageData, run, candidate, release }
   } finally {
@@ -752,9 +776,6 @@ async function cleanupWorkResources(request, baseURL, projectId, environmentId, 
 test('student provisions a Work environment, configures it, and releases its capacity', async ({ page, browser, baseURL }) => {
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
   if (REAL_WORK_RESUME && REAL_WORK_CONFIG) throw new Error('REAL_WORK_RESUME_AND_FULL_PROVIDER_CONFIG_CONFLICT')
-  if (REAL_WORK_GPU?.mode === 'vm_vgpu' && !REAL_WORK_RESUME) {
-    throw new Error('REAL_WORK_VM_VGPU_REQUIRES_APPROVED_VM_RELEASE_AND_COMPUTE_CHECK')
-  }
   const guards = installUsabilityGuards(page)
 
   await expectProblem(
@@ -779,10 +800,11 @@ test('student provisions a Work environment, configures it, and releases its cap
   }
   await selectProjectByUi(page, project.id)
   if (!resumed) await configureProjectPolicyByUi(page, project.id)
-  const packageCopy = REAL_WORK_CONFIG
-    ? await createRealWorkPackage(REAL_WORK_CONFIG.goldenBaseImage, {
+  const packageCopy = !resumed && (REAL_WORK_VM || REAL_WORK_CONFIG)
+    ? await createRealWorkPackage(REAL_WORK_VM ? null : REAL_WORK_CONFIG.goldenBaseImage, {
       gpu: REAL_WORK_GPU,
       providerBinding: WORK_PROVIDER_BINDING,
+      vm: REAL_WORK_VM,
     })
     : null
   let trackedEnvironmentId = null
@@ -1078,7 +1100,7 @@ test('student provisions a Work environment, configures it, and releases its cap
         const configuredPersistenceBody = await readRealWorkVmWorkspaceFile(
           configuredConnection.endpointGrant,
           vmSshIdentity,
-          '/workspace/persistence-marker.txt',
+          VM_PERSISTENCE_MARKER_PATH,
         )
         expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
       } else {
@@ -1150,7 +1172,7 @@ test('student provisions a Work environment, configures it, and releases its cap
         const restartedPersistenceBody = await readRealWorkVmWorkspaceFile(
           restartedConnection.endpointGrant,
           vmSshIdentity,
-          '/workspace/persistence-marker.txt',
+          VM_PERSISTENCE_MARKER_PATH,
         )
         expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
         const restartedVmLicense = await readRealWorkVmLicenseStatus(restartedConnection.endpointGrant, vmSshIdentity)

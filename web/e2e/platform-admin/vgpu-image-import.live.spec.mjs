@@ -164,7 +164,7 @@ test('platform administrator imports one requested vGPU guest image through the 
     const url = new URL(response.url())
     return response.request().method() === 'POST'
       && /^\/api\/v1\/admin\/images\/uploads\/[^/]+\/complete$/.test(url.pathname)
-  })
+  }, { timeout: 1_200_000 })
   await importButton.click()
   const completionResponse = await completionResponsePromise
   const completionBody = await completionResponse.json().catch(() => null)

@@ -7,7 +7,7 @@
 
 use contracts::http::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
 use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk, VirtualMachineDiskFormat};
-use contracts::{ImageArtifactId, PlatformImageId, UtcTimestamp};
+use contracts::{ImageArtifactId, PlatformImageId, Revision, UtcTimestamp};
 use control_service::{VirtualMachineBaseCatalog, VirtualMachineBasePolicy};
 
 const PROVIDER: &str = "kubevirt-primary-v1";
@@ -31,7 +31,9 @@ fn timestamp() -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
 fn base_disk(binding: &str, digest: &str, capacity_bytes: u64) -> VirtualMachineBaseDisk {
     VirtualMachineBaseDisk {
         binding: binding.to_owned(),
-        source_registry_digest: format!("docker://quay.io/containerdisks/{binding}@{digest}"),
+        source_registry_digest: format!(
+            "docker://harbor.example.invalid/labweaver-system/{binding}@{digest}"
+        ),
         capacity_bytes,
     }
 }
@@ -102,7 +104,13 @@ fn resolved_artifact(
     images: &[PlatformImageEntry],
 ) -> Option<ImageArtifact> {
     catalog
-        .resolve_with_catalog(provider_binding, storage_class_binding, declared, images)
+        .resolve_with_catalog(
+            provider_binding,
+            storage_class_binding,
+            declared,
+            images,
+            Revision::new(1).ok()?,
+        )
         .map(|(id, format)| ImageArtifact::VirtualMachine {
             id,
             base_disk: declared.clone(),
@@ -137,6 +145,43 @@ fn active_catalog_entry_resolves_with_its_catalog_identity() -> TestResult {
         Some(catalog.bases[0].artifact_id),
         "a catalog entry must never inherit the static artifact identity"
     );
+    Ok(())
+}
+
+#[test]
+fn catalog_identity_requires_current_trust_and_the_exact_repository() -> TestResult {
+    let catalog = static_catalog();
+    let mut entry = cataloged_vm_entry(PlatformImageStatus::Active, timestamp()?);
+    let declared = base_disk(CATALOG_BINDING, CATALOG_DIGEST, CATALOG_CAPACITY_BYTES);
+    entry.trust_revision = 2;
+    assert!(resolved_artifact(&catalog, PROVIDER, STORAGE, &declared, &[entry.clone()]).is_none());
+    entry.trust_revision = 1;
+    entry.source_reference = "harbor.example.invalid/other-project/rocky-9-v1:1".to_owned();
+    assert!(resolved_artifact(&catalog, PROVIDER, STORAGE, &declared, &[entry.clone()]).is_none());
+    entry.source_reference = "harbor.example.invalid:5443/labweaver-system/rocky-9-v1:1".to_owned();
+    let mut port_scoped = declared;
+    port_scoped.source_registry_digest = format!(
+        "docker://harbor.example.invalid:5443/labweaver-system/rocky-9-v1@{CATALOG_DIGEST}"
+    );
+    assert!(resolved_artifact(&catalog, PROVIDER, STORAGE, &port_scoped, &[entry]).is_some());
+    Ok(())
+}
+
+#[test]
+fn catalog_cannot_replace_a_static_binding_with_a_different_disk() -> TestResult {
+    let catalog = static_catalog();
+    let declared = base_disk(STATIC_BINDING, CATALOG_DIGEST, CATALOG_CAPACITY_BYTES);
+    let entry = image_entry(
+        STATIC_BINDING,
+        CATALOG_DIGEST,
+        Some(CATALOG_CAPACITY_BYTES),
+        Some(VirtualMachineDiskFormat::Qcow2),
+        Some(DISK_SHA256),
+        PlatformImageKind::VirtualMachine,
+        PlatformImageStatus::Active,
+        timestamp()?,
+    );
+    assert!(resolved_artifact(&catalog, PROVIDER, STORAGE, &declared, &[entry]).is_none());
     Ok(())
 }
 

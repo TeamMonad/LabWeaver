@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks'
 const HOST_KEY_FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/
 const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SSH_HOSTNAME = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/
-const WORKSPACE_FILE = /^\/workspace\/[A-Za-z0-9._/-]+$/
+const VM_WORKSPACE_FILE = /^workspace(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
 export const VM_CUDA_PROBE_PTX_TARGET = 'sm_60'
 
@@ -387,14 +387,16 @@ export async function readRealWorkVmLicenseStatus(endpointGrant, identity) {
   return parseRealWorkVmLicenseStatus(output)
 }
 
-/** Read one fixed workspace marker through the current SSH access grant. */
+/** Read a workspace file relative to the authorized SSH account's home. */
 export async function readRealWorkVmWorkspaceFile(endpointGrant, identity, filePath) {
-  if (
-    typeof filePath !== 'string'
-    || !WORKSPACE_FILE.test(filePath)
-    || filePath.split('/').includes('..')
-  ) {
+  const relativePath = realWorkVmWorkspaceRelativePath(filePath)
+  return await runPinnedSsh(endpointGrant, identity, `cat -- "$HOME/${relativePath}"`)
+}
+
+/** Keep VM reads relative to the authorized SSH account's configured home. */
+export function realWorkVmWorkspaceRelativePath(filePath) {
+  if (typeof filePath !== 'string' || !VM_WORKSPACE_FILE.test(filePath)) {
     throw new Error('WORK_VM_WORKSPACE_PATH_INVALID')
   }
-  return await runPinnedSsh(endpointGrant, identity, `cat -- ${filePath}`)
+  return filePath
 }

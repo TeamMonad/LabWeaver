@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
+  realWorkVmWorkspaceRelativePath,
   runProcess,
   VM_CUDA_PROBE_PTX_TARGET,
 } from '../e2e/support/real-work-ssh.mjs'
@@ -63,6 +64,17 @@ GPU 00000000:01:00.0
         License Status : Unlicensed
 `
     expect(() => parseRealWorkVmLicenseStatus(output)).toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
+  })
+
+  it('resolves VM workspace files beneath the authorized SSH account home', () => {
+    expect(realWorkVmWorkspaceRelativePath('workspace/persistence-marker.txt'))
+      .toBe('workspace/persistence-marker.txt')
+    expect(() => realWorkVmWorkspaceRelativePath('/workspace/persistence-marker.txt'))
+      .toThrow('WORK_VM_WORKSPACE_PATH_INVALID')
+    expect(() => realWorkVmWorkspaceRelativePath('workspace/../etc/passwd'))
+      .toThrow('WORK_VM_WORKSPACE_PATH_INVALID')
+    expect(() => realWorkVmWorkspaceRelativePath('workspace//persistence-marker.txt'))
+      .toThrow('WORK_VM_WORKSPACE_PATH_INVALID')
   })
 
   it('terminates a process at its configured deadline', async () => {

@@ -81,7 +81,7 @@
       <form class="admin-form" @submit.prevent="submitRegister">
         <label>
           <span>类型</span>
-          <select v-model="registerForm.kind" class="text-input">
+          <select v-model="registerForm.kind" class="text-input" aria-label="类型">
             <option value="container">container</option>
             <option value="virtual_machine">virtual_machine</option>
           </select>
@@ -116,7 +116,7 @@
       <form class="admin-form" @submit.prevent="submitUpload">
         <label>
           <span>类型</span>
-          <select v-model="uploadForm.kind" class="text-input">
+          <select v-model="uploadForm.kind" class="text-input" aria-label="类型">
             <option value="container">container</option>
             <option value="virtual_machine">virtual_machine</option>
           </select>
@@ -136,7 +136,7 @@
         <template v-if="uploadForm.kind === 'virtual_machine'">
           <label>
             <span>磁盘格式</span>
-            <select v-model="uploadForm.diskFormat" class="text-input">
+            <select v-model="uploadForm.diskFormat" class="text-input" aria-label="磁盘格式">
               <option value="qcow2">qcow2</option>
               <option value="raw">raw</option>
             </select>

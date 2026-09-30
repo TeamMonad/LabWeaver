@@ -26,6 +26,7 @@ const CURRENCY = /^[A-Za-z0-9_-]{1,32}$/
 const VM_BINDING = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/
 const VM_SOURCE_REGISTRY_DIGEST = /^docker:\/\/[^\s@]+@sha256:[0-9a-f]{64}$/i
 const VM_DISK_FORMATS = Object.freeze(['qcow2', 'raw'])
+const GIB = 1024 ** 3
 
 function requireDigestPinnedImage(value) {
   const image = typeof value === 'string' ? value.trim() : ''
@@ -38,7 +39,7 @@ function requireDigestPinnedImage(value) {
  * Resolve the explicit opt-in settings for the real Work provider path.
  * Ordinary Playwright runs continue to use the existing fixture package.
  */
-export function realWorkConfig() {
+export function realWorkConfig({ virtualMachine = false } = {}) {
   // An explicit resume continues from immutable IDs supplied by the caller.
   // It must not require another provider/base-image configuration because it
   // deliberately skips the already-paid authoring path.
@@ -47,7 +48,7 @@ export function realWorkConfig() {
     process.env.LABWEAVER_E2E_RESUME_RUN_ID,
     process.env.LABWEAVER_E2E_RESUME_RELEASE_ID,
   ].some((value) => typeof value === 'string' && value.trim() !== '')
-  if (resumeConfigured) return null
+  if (resumeConfigured || virtualMachine) return null
   if (process.env.LABWEAVER_E2E_REAL_PROVIDER !== '1') return null
   const model = process.env.LABWEAVER_E2E_PROVIDER_MODEL?.trim() ?? ''
   if (!model || /\s/.test(model)) throw new Error('LABWEAVER_E2E_PROVIDER_MODEL_REQUIRED')
@@ -120,10 +121,9 @@ export function realWorkGpuConfig() {
 }
 
 /**
- * Resolve the explicit, deployment-reviewed VM release identity used by the
- * resume path. VM Work authoring is intentionally not inferred from a
- * container image setting: the caller must provide every base-disk and
- * provider binding that the already-approved release is expected to carry.
+ * Resolve exact VM bindings from the deployment-reviewed imported-base
+ * catalog. The same values seed fresh Work authoring and validate a resume;
+ * they are never inferred from a container image setting.
  */
 export function realWorkVmConfig() {
   const providerBinding = process.env.LABWEAVER_E2E_VM_PROVIDER_BINDING?.trim() ?? ''
@@ -140,6 +140,8 @@ export function realWorkVmConfig() {
   if (!VM_BINDING.test(baseDiskBinding)) throw new Error('LABWEAVER_E2E_VM_BASE_DISK_BINDING_INVALID')
   if (!VM_SOURCE_REGISTRY_DIGEST.test(sourceRegistryDigest)) throw new Error('LABWEAVER_E2E_VM_BASE_DISK_DIGEST_INVALID')
   if (!/^[1-9][0-9]{8,15}$/.test(capacityBytes)) throw new Error('LABWEAVER_E2E_VM_BASE_DISK_CAPACITY_INVALID')
+  const parsedCapacityBytes = Number(capacityBytes)
+  if (!Number.isSafeInteger(parsedCapacityBytes)) throw new Error('LABWEAVER_E2E_VM_BASE_DISK_CAPACITY_INVALID')
   if (sshPort !== '22') throw new Error('LABWEAVER_E2E_VM_SSH_PORT_INVALID')
   return Object.freeze({
     providerBinding,
@@ -147,27 +149,41 @@ export function realWorkVmConfig() {
     baseDisk: Object.freeze({
       binding: baseDiskBinding,
       sourceRegistryDigest,
-      capacityBytes: Number(capacityBytes),
+      capacityBytes: parsedCapacityBytes,
     }),
     sshPort: Number(sshPort),
   })
 }
 
 /**
- * Build a transient Work package with an explicit generated container recipe.
- * The package is intentionally separate from the checked-in experiment fixture:
- * the real provider path needs a Work class, a writable seeded workspace, and a
- * stable marker that can be read again after a Work restart.
+ * Build transient material for the normal Work authoring path. Container Work
+ * carries an explicit generated recipe; VM Work carries the exact reviewed
+ * imported-base bindings and is resolved by Control without a build request.
  */
 export async function createRealWorkPackage(
   goldenBaseImage,
-  { gpu = null, providerBinding = 'kubernetes-work-local-hostpath' } = {},
+  { gpu = null, providerBinding = 'kubernetes-work-local-hostpath', vm = null } = {},
 ) {
-  const base = requireDigestPinnedImage(goldenBaseImage)
+  const base = vm ? null : requireDigestPinnedImage(goldenBaseImage)
+  if (vm && (
+    !VM_BINDING.test(vm.providerBinding ?? '')
+    || !VM_BINDING.test(vm.storageClassBinding ?? '')
+    || !VM_BINDING.test(vm.baseDisk?.binding ?? '')
+    || !VM_SOURCE_REGISTRY_DIGEST.test(vm.baseDisk?.sourceRegistryDigest ?? '')
+    || !Number.isSafeInteger(vm.baseDisk?.capacityBytes)
+    || vm.baseDisk.capacityBytes <= 0
+    || vm.sshPort !== 22
+  )) {
+    throw new Error('REAL_WORK_VM_CONFIGURATION_INVALID')
+  }
+  const vmStorageBytes = vm
+    ? Math.max(16 * GIB, Math.ceil(vm.baseDisk.capacityBytes / GIB) * GIB)
+    : null
+  if (vm && !Number.isSafeInteger(vmStorageBytes)) throw new Error('REAL_WORK_VM_STORAGE_CAPACITY_INVALID')
   const directory = await mkdtemp(join(tmpdir(), 'labweaver-real-work-'))
-  const seedMarker = `labweaver-real-work-seed-${uuidv7()}`
+  const seedMarker = vm ? null : `labweaver-real-work-seed-${uuidv7()}`
   const persistenceMarker = `labweaver-real-work-persistence-${uuidv7()}`
-  const dockerfile = [
+  const dockerfile = vm ? null : [
     `FROM ${base.image}`,
     'COPY seed.txt /opt/labweaver/workspace-seed/seed.txt',
     'USER 0',
@@ -185,30 +201,40 @@ export async function createRealWorkPackage(
     resources: {
       cpuMillicores: 1000,
       memoryBytes: 2 * 1024 * 1024 * 1024,
-      storageBytes: 10 * 1024 * 1024 * 1024,
+      storageBytes: vm ? vmStorageBytes : 10 * GIB,
       ...(gpu ? { gpu: { class: gpu.class, count: gpu.count } } : {}),
     },
     network: { mode: 'deny_all' },
-    entries: [{ name: 'workspace-files', protocol: 'http', servicePort: 8080 }],
+    entries: vm
+      ? [{ name: 'ssh', protocol: 'ssh', servicePort: vm.sshPort }]
+      : [{ name: 'workspace-files', protocol: 'http', servicePort: 8080 }],
     security: {
       userPolicy: 'non_root_required',
-      rootFilesystemPolicy: 'read_only_required',
+      rootFilesystemPolicy: vm ? 'mutable_required' : 'read_only_required',
       privilegeEscalationPolicy: 'deny',
       publicExposurePolicy: 'deny',
       securityProfileBinding: 'restricted-v1',
     },
-    runtime: {
-      kind: 'container',
-      provider_binding: providerBinding,
-      build_recipe: {
-        mode: 'generated',
-        files: [
-          { path: 'Dockerfile', content: dockerfile },
-          { path: 'seed.txt', content: `${seedMarker}\n` },
-        ],
+    runtime: vm
+      ? {
+        kind: 'virtual_machine',
+        provider_binding: vm.providerBinding,
+        base_disk: { ...vm.baseDisk },
+        storage_class_binding: vm.storageClassBinding,
+        ssh_port: vm.sshPort,
+      }
+      : {
+        kind: 'container',
+        provider_binding: providerBinding,
+        build_recipe: {
+          mode: 'generated',
+          files: [
+            { path: 'Dockerfile', content: dockerfile },
+            { path: 'seed.txt', content: `${seedMarker}\n` },
+          ],
+        },
+        service_port: 8080,
       },
-      service_port: 8080,
-    },
     retention: {
       policyId: uuidv7(),
       policyRevision: 1,
@@ -217,24 +243,39 @@ export async function createRealWorkPackage(
       disposition: 'delete',
     },
   }
-  const readme = [
-    '# Real Work provider package',
-    '',
-    'This package is used only by the explicitly opted-in real provider E2E path.',
-    'Return the nested environmentSpec exactly, adapting only the generated container build recipe.',
-    `The Work must remain class=work and use the ${providerBinding} provider binding.`,
-    `The generated Dockerfile must start FROM ${base.image}, copy seed.txt into /opt/labweaver/workspace-seed/seed.txt, and run the Python HTTP service on port 8080 as UID/GID 65534.`,
-    `The initial workspace must expose the exact seed marker ${seedMarker} through the HTTP endpoint.`,
-    ...(gpu ? [`The Work resource request must include GPU class ${gpu.class} with count ${gpu.count}.`] : []),
-    '',
-  ].join('\n')
+  const readme = vm
+    ? [
+      '# Real VM Work package',
+      '',
+      'Return the nested environmentSpec as a Work environment and preserve its reviewed VM runtime bindings exactly.',
+      `Use provider binding ${vm.providerBinding}, storage class binding ${vm.storageClassBinding}, base disk binding ${vm.baseDisk.binding}, source registry digest ${vm.baseDisk.sourceRegistryDigest}, capacity ${vm.baseDisk.capacityBytes} bytes, and SSH port ${vm.sshPort}.`,
+      'Keep the SSH entry on port 22, deny-all networking, non-root SSH access, and a mutable guest root filesystem. Do not replace the VM with a container or add a container build recipe.',
+      'The guest workspace is writable through its normal authorized SSH access. Do not add SSH keys, passwords, certificates, or other credentials to this package.',
+      ...(gpu ? [`The Work resource request must include GPU class ${gpu.class} with count ${gpu.count}.`] : []),
+      '',
+    ].join('\n')
+    : [
+      '# Real Work provider package',
+      '',
+      'This package is used only by the explicitly opted-in real provider E2E path.',
+      'Return the nested environmentSpec exactly, adapting only the generated container build recipe.',
+      `The Work must remain class=work and use the ${providerBinding} provider binding.`,
+      `The generated Dockerfile must start FROM ${base.image}, copy seed.txt into /opt/labweaver/workspace-seed/seed.txt, and run the Python HTTP service on port 8080 as UID/GID 65534.`,
+      `The initial workspace must expose the exact seed marker ${seedMarker} through the HTTP endpoint.`,
+      ...(gpu ? [`The Work resource request must include GPU class ${gpu.class} with count ${gpu.count}.`] : []),
+      '',
+    ].join('\n')
   const configurationInstructions = [
     '# Work configuration instructions',
     '',
-    'For the WorkConfiguration request, write the exact persistence marker below to /workspace/persistence-marker.txt.',
+    vm
+      ? 'The approved VM Work configuration runs from the guest workspace. As the authorized non-root guest user, write the exact persistence marker below to persistence-marker.txt in the current directory.'
+      : 'For the WorkConfiguration request, write the exact persistence marker below to /workspace/persistence-marker.txt.',
     `Persistence marker: ${persistenceMarker}`,
     'Use a complete executable POSIX shell script and a separate verification script.',
-    'The verification script must fail if /workspace/persistence-marker.txt is missing or has another value.',
+    vm
+      ? 'The verification script must fail if persistence-marker.txt in the current guest workspace is missing or has another value. Do not use sudo or alter the SSH access policy.'
+      : 'The verification script must fail if /workspace/persistence-marker.txt is missing or has another value.',
     'This file-only change does not require a Work restart.',
     '',
   ].join('\n')
@@ -284,6 +325,71 @@ function sameVirtualMachineArtifact(actual, expected, code) {
     throw new Error(code)
   }
   return actual
+}
+
+/** Validate the Control-projected artifact for a fresh VM Work candidate. */
+export function assertRealWorkVmCandidate(candidate, vm, gpu = null) {
+  if (
+    !VM_BINDING.test(vm?.providerBinding ?? '')
+    || !VM_BINDING.test(vm?.storageClassBinding ?? '')
+    || !VM_BINDING.test(vm?.baseDisk?.binding ?? '')
+    || !VM_SOURCE_REGISTRY_DIGEST.test(vm?.baseDisk?.sourceRegistryDigest ?? '')
+    || !Number.isSafeInteger(vm?.baseDisk?.capacityBytes)
+    || vm.baseDisk.capacityBytes <= 0
+  ) {
+    throw new Error('REAL_WORK_VM_CONFIGURATION_INVALID')
+  }
+  const spec = candidate?.candidate?.spec
+  const runtime = spec?.runtime
+  const resources = spec?.resources
+  const expectedStorageBytes = Math.max(
+    16 * GIB,
+    Math.ceil(vm.baseDisk.capacityBytes / GIB) * GIB,
+  )
+  if (!Number.isSafeInteger(expectedStorageBytes)) throw new Error('REAL_WORK_VM_CONFIGURATION_INVALID')
+  if (
+    spec?.class !== 'work'
+    || runtime?.kind !== 'virtual_machine'
+    || runtime.provider_binding !== vm.providerBinding
+    || runtime.storage_class_binding !== vm.storageClassBinding
+    || runtime.ssh_port !== 22
+    || runtime.base_disk?.binding !== vm.baseDisk.binding
+    || runtime.base_disk?.capacityBytes !== vm.baseDisk.capacityBytes
+    || runtime.base_disk?.sourceRegistryDigest?.toLowerCase() !== vm.baseDisk.sourceRegistryDigest.toLowerCase()
+    || Object.hasOwn(runtime, 'build_recipe')
+    || candidate.build != null
+    || !Array.isArray(spec.entries)
+    || spec.entries.length !== 1
+    || spec.entries[0].name !== 'ssh'
+    || spec.entries[0].protocol !== 'ssh'
+    || spec.entries[0].servicePort !== 22
+    || spec.security?.userPolicy !== 'non_root_required'
+    || spec.security?.rootFilesystemPolicy !== 'mutable_required'
+    || spec.security?.privilegeEscalationPolicy !== 'deny'
+    || spec.security?.publicExposurePolicy !== 'deny'
+    || spec.network?.mode !== 'deny_all'
+    || resources?.cpuMillicores !== 1000
+    || resources?.memoryBytes !== 2 * GIB
+    || resources?.storageBytes !== expectedStorageBytes
+    || (gpu && (resources?.gpu?.class !== gpu.class || resources?.gpu?.count !== gpu.count))
+  ) {
+    throw new Error('REAL_WORK_VM_CANDIDATE_SPEC_INVALID')
+  }
+
+  const artifact = candidate.imageArtifact
+  if (
+    !artifact
+    || artifact.kind !== 'virtual_machine'
+    || typeof artifact.id !== 'string'
+    || artifact.id.trim() === ''
+    || !VM_DISK_FORMATS.includes(artifact.format)
+    || artifact.base_disk?.binding !== vm.baseDisk.binding
+    || artifact.base_disk?.capacityBytes !== vm.baseDisk.capacityBytes
+    || artifact.base_disk?.sourceRegistryDigest?.toLowerCase() !== vm.baseDisk.sourceRegistryDigest.toLowerCase()
+  ) {
+    throw new Error('REAL_WORK_VM_CANDIDATE_ARTIFACT_INVALID')
+  }
+  return artifact
 }
 
 function resumableContainerArtifact(candidate) {

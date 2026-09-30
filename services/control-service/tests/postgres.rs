@@ -426,6 +426,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             Revision::new(1)?,
             &IdempotencyKey::parse("candidate-kind-mismatch")?,
             "2026-07-16T08:00:00.000Z".parse()?,
+            &[],
         )
         .await;
     assert!(matches!(result, Err(ControlError::CandidateKindMismatch)));
@@ -619,6 +620,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             Revision::new(1)?,
             &IdempotencyKey::parse("approve-container-candidate")?,
             "2026-07-16T08:00:00.000Z".parse()?,
+            &[],
         )
         .await;
     let approval = approval_result?;
@@ -635,7 +637,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         1
     );
     let requested_view = service
-        .project_environment_candidate_view(project_id, environment_candidate.id)
+        .project_environment_candidate_view(project_id, environment_candidate.id, &[])
         .await?;
     assert_eq!(requested_view.candidate, environment_candidate);
     assert_eq!(requested_view.approvals, vec![approval.clone()]);
@@ -713,7 +715,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
         )
         .await?;
     let succeeded_view = service
-        .environment_candidate_view(course_id, environment_candidate.id)
+        .environment_candidate_view(course_id, environment_candidate.id, &[])
         .await?;
     let succeeded_build = succeeded_view.build.ok_or("missing succeeded build view")?;
     assert_eq!(
@@ -740,6 +742,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             &IdempotencyKey::parse("publish-container-release")?,
             "2026-07-16T08:30:00.000Z".parse()?,
             "trace-publish-container-release",
+            &[],
         )
         .await?;
     let work_admission = service
@@ -850,7 +853,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     .execute(&pool)
     .await?;
     let current_view = service
-        .project_environment_candidate_view(project_id, current_candidate.id)
+        .project_environment_candidate_view(project_id, current_candidate.id, &[])
         .await?;
     assert_eq!(current_view.candidate, current_candidate);
     assert!(current_view.build.is_none());
@@ -1577,7 +1580,9 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
     let catalog_digest = format!("sha256:{}", Sha256Digest::of_bytes(b"catalog-vm-base"));
     let catalog_base = VirtualMachineBaseDisk {
         binding: "rocky-9-v1".to_owned(),
-        source_registry_digest: format!("docker://quay.io/containerdisks/rocky-9@{catalog_digest}"),
+        source_registry_digest: format!(
+            "docker://harbor.internal/labweaver-system/rocky-9@{catalog_digest}"
+        ),
         capacity_bytes: 21_474_836_480,
     };
     // The candidate declares the catalog base; the deployment policy only owns unrelated statics.
@@ -1675,6 +1680,10 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
     disabled.status = PlatformImageStatus::Disabled;
     let mut inventory_only = entry.clone();
     inventory_only.disk_sha256 = None;
+    let mut stale_trust = entry.clone();
+    stale_trust.trust_revision += 1;
+    let mut repository_drift = entry.clone();
+    repository_drift.source_reference = "harbor.internal/other-project/rocky-9:1".to_owned();
 
     for (index, drifted) in [
         digest_drift,
@@ -1682,6 +1691,8 @@ async fn vm_base_approval_accepts_admin_catalog_identity_and_rejects_descriptor_
         format_drift,
         disabled,
         inventory_only,
+        stale_trust,
+        repository_drift,
     ]
     .into_iter()
     .enumerate()
@@ -2257,6 +2268,7 @@ async fn private_work_environment_approval_requires_project_owner()
                 Revision::new(1)?,
                 &IdempotencyKey::parse("private-work-outsider")?,
                 now,
+                &[],
             )
             .await,
         Err(ControlError::ProjectGovernanceDenied)
@@ -2271,6 +2283,7 @@ async fn private_work_environment_approval_requires_project_owner()
             Revision::new(1)?,
             &IdempotencyKey::parse("private-work-owner")?,
             now,
+            &[],
         )
         .await?;
     assert_eq!(approval.actor_id, owner);

@@ -312,23 +312,6 @@ impl VirtualMachineBaseCatalog {
             })
     }
 
-    /// Resolves the exact reviewed entry named by the candidate bindings.
-    fn resolve(
-        &self,
-        provider_binding: &str,
-        storage_class_binding: &str,
-        base_disk: &VirtualMachineBaseDisk,
-    ) -> Option<&VirtualMachineBasePolicy> {
-        if provider_binding != self.provider_binding
-            || storage_class_binding != self.storage_class_binding
-        {
-            return None;
-        }
-        self.bases
-            .iter()
-            .find(|entry| &entry.base_disk == base_disk)
-    }
-
     /// Resolves one reviewed base disk from the static policy or the Agent image catalog.
     ///
     /// The deployment bindings are checked first, then the deployment bounds are enforced across
@@ -336,7 +319,8 @@ impl VirtualMachineBaseCatalog {
     /// static `bases` length must fit `max_bases`, and no accepted catalog capacity may exceed
     /// `max_capacity_bytes`. A catalog that violates a bound is rejected here instead of being
     /// silently truncated. A static `bases` entry always wins and is returned exactly as before;
-    /// otherwise an active virtual-machine catalog entry is accepted only when the declared
+    /// otherwise an active virtual-machine catalog entry at the current trust revision is accepted
+    /// only when the declared
     /// `docker://<repository>@<digest>` identity names that entry (same binding, repository digest,
     /// reviewed capacity, declared format, and unpacked disk sha256), so a registry-reference
     /// inventory entry can never be published.
@@ -347,6 +331,7 @@ impl VirtualMachineBaseCatalog {
         storage_class_binding: &str,
         base_disk: &VirtualMachineBaseDisk,
         catalog: &[PlatformImageEntry],
+        trust_revision: Revision,
     ) -> Option<(ImageArtifactId, VirtualMachineDiskFormat)> {
         if provider_binding != self.provider_binding
             || storage_class_binding != self.storage_class_binding
@@ -374,16 +359,23 @@ impl VirtualMachineBaseCatalog {
         if let Some(policy) = self
             .bases
             .iter()
-            .find(|entry| &entry.base_disk == base_disk)
+            .find(|entry| entry.base_disk.binding == base_disk.binding)
         {
-            return Some((policy.artifact_id, policy.format));
+            return (&policy.base_disk == base_disk).then_some((policy.artifact_id, policy.format));
         }
         let declared_source = base_disk.source_registry_digest.strip_prefix("docker://")?;
-        let declared_digest = declared_source.rsplit_once('@')?.1;
+        let (declared_repository, declared_digest) = declared_source.rsplit_once('@')?;
         let entry = catalog.iter().find(|entry| {
+            let reference = entry.source_reference.split('@').next().unwrap_or_default();
+            let repository = reference
+                .rsplit_once(':')
+                .filter(|(_, tag)| !tag.contains('/'))
+                .map_or(reference, |(repository, _)| repository);
             entry.kind == PlatformImageKind::VirtualMachine
                 && entry.status == PlatformImageStatus::Active
+                && entry.trust_revision == trust_revision.get()
                 && entry.binding == base_disk.binding
+                && repository == declared_repository
                 && entry.resolved_digest == declared_digest
                 && entry.capacity_bytes == Some(base_disk.capacity_bytes)
                 && entry.format.is_some()
@@ -2524,15 +2516,13 @@ impl ControlService {
         &self,
         course_id: CourseId,
         candidate_id: CandidateId,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentCandidateView, ControlError> {
         let candidate = self.environment_candidate(course_id, candidate_id).await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
         let build = load_candidate_build(&self.pool, course_id, &candidate).await?;
-        let image_artifact = resolve_candidate_image_artifact(
-            &candidate,
-            build.as_ref(),
-            &self.config.virtual_machine_bases,
-        );
+        let image_artifact =
+            resolve_candidate_image_artifact(&candidate, build.as_ref(), &self.config, catalog);
         Ok(EnvironmentCandidateView {
             candidate,
             approvals,
@@ -2547,17 +2537,15 @@ impl ControlService {
         &self,
         project_id: ProjectId,
         candidate_id: CandidateId,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentCandidateView, ControlError> {
         let candidate = self
             .project_environment_candidate(project_id, candidate_id)
             .await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
         let build = load_candidate_build_project(&self.pool, project_id, &candidate).await?;
-        let image_artifact = resolve_candidate_image_artifact(
-            &candidate,
-            build.as_ref(),
-            &self.config.virtual_machine_bases,
-        );
+        let image_artifact =
+            resolve_candidate_image_artifact(&candidate, build.as_ref(), &self.config, catalog);
         Ok(EnvironmentCandidateView {
             candidate,
             approvals,
@@ -3340,6 +3328,7 @@ impl ControlService {
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
+        catalog: &[PlatformImageEntry],
     ) -> Result<CandidateApproval, ControlError> {
         let project = self.project(project_id).await?;
         if project.state == ProjectState::Archived {
@@ -3355,6 +3344,7 @@ impl ControlService {
             expected_revision,
             idempotency_key,
             now,
+            catalog,
         )
         .await
     }
@@ -3371,6 +3361,7 @@ impl ControlService {
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
+        catalog: &[PlatformImageEntry],
     ) -> Result<CandidateApproval, ControlError> {
         if request.reason.trim().is_empty() || request.candidate_revision != expected_revision {
             return Err(ControlError::RevisionConflict);
@@ -3476,6 +3467,9 @@ impl ControlService {
             .ok_or(ControlError::ProjectNotFound)?;
             if owner != actor_id.as_uuid() {
                 return Err(ControlError::ProjectGovernanceDenied);
+            }
+            if candidate.spec.runtime.kind() == RuntimeKind::VirtualMachine {
+                resolve_candidate_image_artifact(&candidate, None, &self.config, catalog)?;
             }
         }
         let expected_schema = match kind.as_str() {
@@ -5028,6 +5022,7 @@ impl ControlService {
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
         if request.project_id != project_id {
             return Err(ControlError::ProjectMismatch);
@@ -5178,15 +5173,21 @@ impl ControlService {
                 storage_class_binding,
                 ..
             } => {
-                let policy = self
+                let (artifact_id, format) = self
                     .config
                     .virtual_machine_bases
-                    .resolve(provider_binding, storage_class_binding, base_disk)
+                    .resolve_with_catalog(
+                        provider_binding,
+                        storage_class_binding,
+                        base_disk,
+                        catalog,
+                        self.config.trust_revision,
+                    )
                     .ok_or(ControlError::ArtifactMismatch)?;
                 ImageArtifact::VirtualMachine {
-                    id: policy.artifact_id,
-                    base_disk: policy.base_disk.clone(),
-                    format: policy.format,
+                    id: artifact_id,
+                    base_disk: base_disk.clone(),
+                    format,
                 }
             }
         };
@@ -7138,7 +7139,13 @@ async fn validate_authoring_artifact(
         ) => {
             let (artifact_id, format) = config
                 .virtual_machine_bases
-                .resolve_with_catalog(provider_binding, storage_class_binding, base_disk, catalog)
+                .resolve_with_catalog(
+                    provider_binding,
+                    storage_class_binding,
+                    base_disk,
+                    catalog,
+                    config.trust_revision,
+                )
                 .ok_or(ControlError::ArtifactMismatch)?;
             let expected = ImageArtifact::VirtualMachine {
                 id: artifact_id,
@@ -7561,12 +7568,13 @@ async fn load_candidate_approvals(
 /// Resolve the artifact that is safe to present as the approval input.
 ///
 /// Container candidates require a succeeded, Control-projected build. VM
-/// candidates have no build projection; their artifact is the deployment-owned
-/// base only when every reviewed binding still matches the active policy.
+/// candidates have no build projection; their artifact must resolve through the
+/// current reviewed static policy or trusted Agent catalog.
 fn resolve_candidate_image_artifact(
     candidate: &EnvironmentCandidate,
     build: Option<&CandidateBuildView>,
-    virtual_machine_bases: &VirtualMachineBaseCatalog,
+    config: &ControlConfig,
+    catalog: &[PlatformImageEntry],
 ) -> Result<Option<ImageArtifact>, ControlError> {
     let artifact = match &candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => build
@@ -7577,13 +7585,23 @@ fn resolve_candidate_image_artifact(
             base_disk,
             storage_class_binding,
             ..
-        } => virtual_machine_bases
-            .resolve(provider_binding, storage_class_binding, base_disk)
-            .map(|policy| ImageArtifact::VirtualMachine {
-                id: policy.artifact_id,
-                base_disk: policy.base_disk.clone(),
-                format: policy.format,
-            }),
+        } => {
+            let (id, format) = config
+                .virtual_machine_bases
+                .resolve_with_catalog(
+                    provider_binding,
+                    storage_class_binding,
+                    base_disk,
+                    catalog,
+                    config.trust_revision,
+                )
+                .ok_or(ControlError::ArtifactMismatch)?;
+            Some(ImageArtifact::VirtualMachine {
+                id,
+                base_disk: base_disk.clone(),
+                format,
+            })
+        }
     };
 
     if let Some(artifact) = &artifact
@@ -8364,7 +8382,7 @@ mod tests {
             format: config.virtual_machine_bases.bases[0].format,
         };
         assert_eq!(
-            resolve_candidate_image_artifact(&candidate, None, &config.virtual_machine_bases,)?,
+            resolve_candidate_image_artifact(&candidate, None, &config, &[])?,
             Some(expected.clone())
         );
 
@@ -8375,14 +8393,10 @@ mod tests {
         {
             *provider_binding = "other-provider".to_owned();
         }
-        assert_eq!(
-            resolve_candidate_image_artifact(
-                &provider_mismatch,
-                None,
-                &config.virtual_machine_bases,
-            )?,
-            None
-        );
+        assert!(matches!(
+            resolve_candidate_image_artifact(&provider_mismatch, None, &config, &[],),
+            Err(ControlError::ArtifactMismatch)
+        ));
 
         let mut storage_mismatch = candidate.clone();
         if let EnvironmentRuntimeSpec::VirtualMachine {
@@ -8392,14 +8406,10 @@ mod tests {
         {
             *storage_class_binding = "other-storage".to_owned();
         }
-        assert_eq!(
-            resolve_candidate_image_artifact(
-                &storage_mismatch,
-                None,
-                &config.virtual_machine_bases,
-            )?,
-            None
-        );
+        assert!(matches!(
+            resolve_candidate_image_artifact(&storage_mismatch, None, &config, &[],),
+            Err(ControlError::ArtifactMismatch)
+        ));
 
         let mut disk_mismatch = candidate;
         if let EnvironmentRuntimeSpec::VirtualMachine { base_disk, .. } =
@@ -8410,38 +8420,43 @@ mod tests {
                 "a".repeat(64)
             );
         }
-        assert_eq!(
-            resolve_candidate_image_artifact(&disk_mismatch, None, &config.virtual_machine_bases)?,
-            None
-        );
+        assert!(matches!(
+            resolve_candidate_image_artifact(&disk_mismatch, None, &config, &[]),
+            Err(ControlError::ArtifactMismatch)
+        ));
         Ok(())
     }
 
     #[test]
-    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only() {
+    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only()
+    -> Result<(), Box<dyn std::error::Error>> {
         let catalog = multi_base_catalog();
         assert!(catalog.validate());
         let ubuntu = &catalog.bases[0].base_disk;
         let cirros = &catalog.bases[1].base_disk;
         assert_eq!(
             catalog
-                .resolve(
+                .resolve_with_catalog(
                     &catalog.provider_binding,
                     &catalog.storage_class_binding,
                     cirros,
+                    &[],
+                    Revision::new(1)?,
                 )
-                .map(|entry| entry.base_disk.binding.as_str()),
-            Some("cirros-0.6-v1")
+                .map(|(id, _)| id),
+            Some(catalog.bases[1].artifact_id)
         );
 
         let mut unknown = cirros.clone();
         unknown.binding = "alpine-3.22-v1".to_owned();
         assert!(
             catalog
-                .resolve(
+                .resolve_with_catalog(
                     &catalog.provider_binding,
                     &catalog.storage_class_binding,
                     &unknown,
+                    &[],
+                    Revision::new(1)?,
                 )
                 .is_none()
         );
@@ -8453,10 +8468,12 @@ mod tests {
         );
         assert!(
             catalog
-                .resolve(
+                .resolve_with_catalog(
                     &catalog.provider_binding,
                     &catalog.storage_class_binding,
                     &drift,
+                    &[],
+                    Revision::new(1)?,
                 )
                 .is_none()
         );
@@ -8479,6 +8496,7 @@ mod tests {
             },
         ];
         assert!(!duplicate.validate());
+        Ok(())
     }
 
     fn multi_base_catalog() -> VirtualMachineBaseCatalog {

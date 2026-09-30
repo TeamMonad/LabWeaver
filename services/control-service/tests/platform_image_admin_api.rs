@@ -31,25 +31,31 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use contracts::authoring::{CandidateApproval, CandidateDecision, RuntimeKind};
+use contracts::authoring::{
+    CandidateApproval, CandidateDecision, EnvironmentCandidate, ProjectLlmEgressPolicy, RuntimeKind,
+};
 use contracts::http::{
-    CancelPlatformImageUploadRequest, CreatePlatformImageUploadRequest,
-    DisablePlatformImageRequest, IdempotencyKey, InternalPlatformImageDisableRequest,
-    InternalPlatformImageImportEnqueueRequest, InternalPlatformImageImportJobStatus,
-    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
-    PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE, PlatformImageCatalog, PlatformImageCatalogView,
-    PlatformImageEntry, PlatformImageEntryView, PlatformImageImportJobState, PlatformImageKind,
-    PlatformImageStatus, PlatformImageUploadSession, PlatformImageUploadState,
-    PlatformImageUploadStatus, RegisterPlatformImageRequest, RepinPlatformImageRequest,
+    CancelPlatformImageUploadRequest, CandidateDecisionRequest,
+    CreateEnvironmentTemplateReleaseRequest, CreatePlatformImageUploadRequest,
+    DisablePlatformImageRequest, EnvironmentCandidateView, IdempotencyKey,
+    InternalPlatformImageDisableRequest, InternalPlatformImageImportEnqueueRequest,
+    InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, OperationAccepted, PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE,
+    PlatformImageCatalog, PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
+    PlatformImageImportJobState, PlatformImageKind, PlatformImageStatus,
+    PlatformImageUploadSession, PlatformImageUploadState, PlatformImageUploadStatus,
+    RegisterPlatformImageRequest, RepinPlatformImageRequest, StrongEtag,
 };
 use contracts::supply_chain::{
-    EnvironmentTemplateRelease, ImageArtifact, VirtualMachineDiskFormat,
+    EnvironmentTemplateRelease, EnvironmentTemplateReleaseView, ImageArtifact,
+    VirtualMachineDiskFormat,
 };
 use contracts::{
-    ActorId, ApprovalId, ArtifactId, ArtifactRef, AuthenticatedActor, AuthorizationDecision,
-    AuthorizationDecisionRequest, BffSessionId, BuildRequestId, CandidateId, CourseId,
-    DiagnosticCode, ImageArtifactId, PlatformImageId, PlatformRole, PolicyId, ProblemDetails,
-    ProjectId, ReleaseId, Revision, UploadSessionId, UtcTimestamp,
+    ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, AuthenticatedActor,
+    AuthorizationDecision, AuthorizationDecisionRequest, BffSessionId, BuildRequestId, CandidateId,
+    CourseId, DiagnosticCode, ImageArtifactId, PlatformImageId, PlatformRole, PolicyId,
+    ProblemDetails, Project, ProjectId, ProjectState, ReleaseId, Revision, UploadSessionId,
+    UtcTimestamp,
 };
 use control_service::api::{ApiState, GatewayPrincipal, router};
 use control_service::clients::ServiceHttpClientConfig;
@@ -1521,6 +1527,581 @@ async fn import_database()
         .await?;
     support::apply_domain_migrations(&pool, Domain::Control).await?;
     Ok((pool, postgres))
+}
+
+#[derive(Clone)]
+struct VmCatalogState {
+    pool: PgPool,
+    entry: Arc<Mutex<PlatformImageEntry>>,
+    unavailable: Arc<AtomicBool>,
+    requests: Arc<AtomicUsize>,
+    candidate_update: Arc<Mutex<Option<EnvironmentCandidate>>>,
+}
+
+async fn vm_catalog_response(
+    State(state): State<VmCatalogState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    state.requests.fetch_add(1, Ordering::SeqCst);
+    if headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        != Some(format!("Bearer {SERVICE_TOKEN}").as_str())
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if state.unavailable.load(Ordering::SeqCst) {
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LW_SERVICE_UNAVAILABLE",
+            true,
+        );
+    }
+    let updated = match state.candidate_update.lock() {
+        Ok(mut update) => update.take(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    // Updating the same row inside the external HTTP call also checks that Control has not
+    // locked it before asking the Agent for a catalog snapshot.
+    if let Some(candidate) = updated {
+        let Ok(revision) = i64::try_from(candidate.revision.get()) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let Ok(contract) = serde_json::to_value(&candidate) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        if sqlx::query(
+            "UPDATE control.candidates SET revision=$2,contract=$3 WHERE candidate_id=$1",
+        )
+        .bind(candidate.id.as_uuid())
+        .bind(revision)
+        .bind(contract)
+        .execute(&state.pool)
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    let entry = match state.entry.lock() {
+        Ok(entry) => entry.clone(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    Json(PlatformImageCatalog {
+        entries: vec![entry],
+    })
+    .into_response()
+}
+
+async fn vm_work_access_decision(
+    State(owner): State<ActorId>,
+    Json(request): Json<AuthorizationDecisionRequest>,
+) -> Result<Json<AuthorizationDecision>, StatusCode> {
+    if request.actor_id != owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut decision = access_decision(
+        State(AccessState {
+            admin: Arc::new(AtomicBool::new(false)),
+        }),
+        Json(request),
+    )
+    .await?;
+    decision.0.actor.roles = vec![PlatformRole::Student];
+    Ok(decision)
+}
+
+fn fresh_vm_work_candidate(
+    project: &Project,
+    entry: &PlatformImageEntry,
+) -> Result<EnvironmentCandidate, Box<dyn std::error::Error>> {
+    let capacity = entry.capacity_bytes.ok_or("missing reviewed VM capacity")?;
+    let candidate = EnvironmentCandidate {
+        id: CandidateId::new(),
+        run_id: AgentRunId::new(),
+        project_id: project.id,
+        course_id: project.course_id,
+        revision: Revision::new(1)?,
+        spec: serde_json::from_value(json!({
+            "apiVersion":"environment.labweaver.io/v1", "kind":"EnvironmentSpec",
+            "name":"fresh-vm-work", "class":"work",
+            "resources":{"cpuMillicores":1000,"memoryBytes":2_147_483_648_u64,"storageBytes":capacity},
+            "network":{"mode":"deny_all"},
+            "entries":[{"name":"ssh","protocol":"ssh","servicePort":22}],
+            "security":{
+                "userPolicy":"non_root_required", "rootFilesystemPolicy":"mutable_required",
+                "privilegeEscalationPolicy":"deny", "publicExposurePolicy":"deny",
+                "securityProfileBinding":"restricted-v1"
+            },
+            "runtime":{
+                "kind":"virtual_machine", "provider_binding":"kubevirt-primary-v1",
+                "storage_class_binding":"vm-rwo-primary-v1", "ssh_port":22,
+                "base_disk":{
+                    "binding":entry.binding,
+                    "sourceRegistryDigest":format!("docker://harbor.lab.lan/labweaver-system/{}@{}",entry.binding,entry.resolved_digest),
+                    "capacityBytes":capacity
+                }
+            },
+            "retention":{
+                "policyId":PolicyId::new(), "policyRevision":1, "class":"run_evidence",
+                "retainUntil":"2099-01-01T00:00:00.000Z", "disposition":"delete"
+            }
+        }))?,
+        policy_revision: Revision::new(1)?,
+        model: "fixture-provider-v1".to_owned(),
+        created_at: project.created_at,
+    };
+    candidate.validate()?;
+    Ok(candidate)
+}
+
+async fn insert_vm_work_candidate(
+    pool: &PgPool,
+    candidate: &EnvironmentCandidate,
+    schema: Sha256Digest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO control.candidates
+         (candidate_id,candidate_kind,project_id,course_id,run_id,revision,state,content_sha256,
+          contract,policy_revision,schema_sha256,projected_event_id)
+         VALUES($1,'environment',$2,$3,$4,1,'validated',$5,$6,1,$7,$8)",
+    )
+    .bind(candidate.id.as_uuid())
+    .bind(candidate.project_id.as_uuid())
+    .bind(candidate.course_id.map(CourseId::as_uuid))
+    .bind(candidate.run_id.as_uuid())
+    .bind(Sha256Digest::of_canonical(&candidate.spec)?.to_string())
+    .bind(serde_json::to_value(candidate)?)
+    .bind(schema.to_string())
+    .bind(contracts::EventId::new().as_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn vm_work_approval_request(
+    candidate: &EnvironmentCandidate,
+    actor: ActorId,
+    session: BffSessionId,
+    key: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    let mut request = admin_request(
+        format!(
+            "/api/v1/projects/{}/environment-candidates/{}/decisions",
+            candidate.project_id, candidate.id
+        ),
+        "POST",
+        actor,
+        session,
+        Some(key),
+        Some(serde_json::to_vec(&CandidateDecisionRequest {
+            candidate_revision: candidate.revision,
+            policy_revision: candidate.policy_revision,
+            trust_revision: Revision::new(1)?,
+            decision: CandidateDecision::Approved,
+            reason: "reviewed the imported VM base".to_owned(),
+        })?),
+    )?;
+    request.headers_mut().insert(
+        "If-Match",
+        HeaderValue::from_str(&StrongEtag::from_revision(candidate.revision).header_value())?,
+    );
+    Ok(request)
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one Work journey exercises the PG approval fences and live HTTPS catalog authority"
+)]
+async fn fresh_vm_catalog_base_is_visible_approved_and_published_through_normal_work_routes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    sqlx::query(
+        "DO $$ BEGIN
+             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='lw_control_runtime') THEN
+                 CREATE ROLE lw_control_runtime NOLOGIN;
+             END IF;
+         END $$",
+    )
+    .execute(&pool)
+    .await?;
+    support::apply_domain_migrations(&pool, Domain::Access).await?;
+    let now = import_now()?;
+    let actor = ActorId::new();
+    let session = BffSessionId::new();
+    let project = Project {
+        id: ProjectId::new(),
+        owner_actor_id: actor,
+        name: "fresh VM Work".to_owned(),
+        description: None,
+        course_id: Some(CourseId::new()),
+        state: ProjectState::Active,
+        revision: Revision::new(1)?,
+        created_at: now,
+        updated_at: now,
+    };
+    sqlx::query(
+        "INSERT INTO control.projects
+         (project_id,owner_actor_id,name,course_id,state,revision,created_at,updated_at,contract)
+         VALUES($1,$2,$3,$4,'active',1,$5,$5,$6)",
+    )
+    .bind(project.id.as_uuid())
+    .bind(actor.as_uuid())
+    .bind(&project.name)
+    .bind(project.course_id.map(CourseId::as_uuid))
+    .bind(now.get())
+    .bind(serde_json::to_value(&project)?)
+    .execute(&pool)
+    .await?;
+    let control_config = config()?;
+    let service = ControlService::new(
+        pool.clone(),
+        Arc::new(PlatformImageObjects::new(Vec::new())),
+        control_config.clone(),
+    )?;
+    let policy: ProjectLlmEgressPolicy = serde_json::from_value(json!({
+        "id":PolicyId::new(), "projectId":project.id, "courseId":project.course_id, "revision":1,
+        "binding":{"runtimeBinding":"claude-code-test","model":"fixture-provider-v1","claudeCodeVersion":"2.1.207","maxInFlightPerWorker":2},
+        "budget":{"maxInputTokens":100_000,"maxOutputTokens":16_000,"maxRequests":8,"maxCostMicrousd":2_000_000,"timeoutMilliseconds":120_000,"maxTransientRetries":2,"maxSchemaRepairs":2},
+        "deniedDataClasses":["secret","token","private_key","personally_identifiable_information","unallowlisted_student_submission"],
+        "studentContentMode":"manifest_allowlist_only", "activatedAt":now
+    }))?;
+    service
+        .activate_project_policy(
+            project.id,
+            policy,
+            &IdempotencyKey::parse("fresh-vm-policy")?,
+            None,
+        )
+        .await?;
+    let mut entry = platform_image_entry(
+        "fresh-import-vm",
+        PlatformImageKind::VirtualMachine,
+        &format!("sha256:{}", Sha256Digest::of_bytes(b"fresh VM disk")),
+        now,
+    );
+    entry.capacity_bytes = Some(21_474_836_480);
+    entry.disk_sha256 = Some(Sha256Digest::of_bytes(b"qcow bytes").to_string());
+    entry.format = Some(VirtualMachineDiskFormat::Qcow2);
+    let mut candidate = fresh_vm_work_candidate(&project, &entry)?;
+    insert_vm_work_candidate(&pool, &candidate, control_config.environment_schema_sha256).await?;
+    let state = VmCatalogState {
+        pool: pool.clone(),
+        entry: Arc::new(Mutex::new(entry.clone())),
+        unavailable: Arc::new(AtomicBool::new(false)),
+        requests: Arc::new(AtomicUsize::new(0)),
+        candidate_update: Arc::new(Mutex::new(None)),
+    };
+    let (ca, leaf, private_key, jwk) = tls_material()?;
+    let temp = tempfile::tempdir()?;
+    let ca_path = temp.path().join("vm-catalog-ca.pem");
+    std::fs::write(&ca_path, ca)?;
+    let authority = spawn_authority(jwk).await?;
+    let access_server = spawn_tls_service(
+        Router::new()
+            .route("/internal/v1/auth/decision", post(vm_work_access_decision))
+            .with_state(actor),
+        &leaf,
+        &private_key,
+    )
+    .await?;
+    let agent_server = spawn_tls_service(
+        Router::new()
+            .route("/internal/v1/platform-images", get(vm_catalog_response))
+            .with_state(state.clone()),
+        &leaf,
+        &private_key,
+    )
+    .await?;
+    let tokens = Arc::new(service_token_client(&authority.issuer).await?);
+    let verifier = ServiceTokenVerifier::discover(
+        ServiceAuthConfig::new(
+            &authority.issuer,
+            "labweaver-agent".to_owned(),
+            BTreeSet::from(["control-service".to_owned()]),
+            BTreeSet::new(),
+            BTreeSet::from(["ES256".to_owned()]),
+            3_600,
+            1,
+            TransportSecurityMode::InsecureTestOnly,
+        )?,
+        no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?,
+    )
+    .await?;
+    let app = router(Arc::new(ApiState {
+        control: service.clone(),
+        access: control_service::clients::AccessClient::new_authenticated(
+            service_config(&access_server.base_url, &ca_path),
+            Arc::clone(&tokens),
+        )?,
+        agent: control_service::clients::AgentClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            Arc::clone(&tokens),
+        )?,
+        environment: control_service::clients::EnvironmentClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            Arc::clone(&tokens),
+        )?,
+        evaluation: control_service::clients::EvaluationClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            tokens,
+        )?,
+        service_token_verifier: Arc::new(verifier),
+    }))
+    .layer(axum::Extension(GatewayPrincipal {
+        client_id: "access-gateway".to_owned(),
+    }));
+    let candidate_uri = format!(
+        "/api/v1/projects/{}/environment-candidates/{}",
+        project.id, candidate.id
+    );
+
+    let denied = app
+        .clone()
+        .oneshot(admin_request(
+            candidate_uri.clone(),
+            "GET",
+            ActorId::new(),
+            session,
+            None,
+            None,
+        )?)
+        .await?;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        state.requests.load(Ordering::SeqCst),
+        0,
+        "unauthorized reads must not request the Agent catalog"
+    );
+    let response = app
+        .clone()
+        .oneshot(admin_request(
+            candidate_uri.clone(),
+            "GET",
+            actor,
+            session,
+            None,
+            None,
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let view: EnvironmentCandidateView =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+    let contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { base_disk, .. } =
+        &candidate.spec.runtime
+    else {
+        return Err("fixture must be a VM".into());
+    };
+    let expected_artifact = ImageArtifact::VirtualMachine {
+        id: entry.catalog_id.to_string().parse()?,
+        base_disk: base_disk.clone(),
+        format: VirtualMachineDiskFormat::Qcow2,
+    };
+    assert_eq!(view.image_artifact, Some(expected_artifact.clone()));
+    assert!(view.build.is_none(), "VM approval needs no container build");
+    assert_eq!(
+        service
+            .environment_candidate_view(
+                project.course_id.ok_or("missing course")?,
+                candidate.id,
+                std::slice::from_ref(&entry)
+            )
+            .await?
+            .image_artifact,
+        Some(expected_artifact.clone())
+    );
+
+    let mut disabled = entry.clone();
+    disabled.status = PlatformImageStatus::Disabled;
+    let mut stale_trust = entry.clone();
+    stale_trust.trust_revision += 1;
+    let mut repository_drift = entry.clone();
+    repository_drift.source_reference =
+        "harbor.lab.lan/other-project/fresh-import-vm:v1".to_owned();
+    let mut digest_drift = entry.clone();
+    digest_drift.resolved_digest =
+        format!("sha256:{}", Sha256Digest::of_bytes(b"different manifest"));
+    let mut capacity_drift = entry.clone();
+    capacity_drift.capacity_bytes = Some(21_474_836_481);
+    let mut format_missing = entry.clone();
+    format_missing.format = None;
+    let mut inventory_only = entry.clone();
+    inventory_only.disk_sha256 = None;
+    for (index, drifted) in [
+        disabled,
+        stale_trust,
+        repository_drift,
+        digest_drift,
+        capacity_drift,
+        format_missing,
+        inventory_only,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        *state.entry.lock().map_err(|_| "catalog lock poisoned")? = drifted;
+        let response = app
+            .clone()
+            .oneshot(admin_request(
+                candidate_uri.clone(),
+                "GET",
+                actor,
+                session,
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "invalid catalog descriptor {index}"
+        );
+        assert_eq!(
+            problem_body(response).await?.diagnostic_code.as_str(),
+            "LW_RELEASE_ARTIFACT_MISMATCH"
+        );
+        let response = app
+            .clone()
+            .oneshot(vm_work_approval_request(
+                &candidate,
+                actor,
+                session,
+                &format!("reject-vm-{index}"),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            problem_body(response).await?.diagnostic_code.as_str(),
+            "LW_RELEASE_ARTIFACT_MISMATCH"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.candidate_approvals")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    *state.entry.lock().map_err(|_| "catalog lock poisoned")? = entry.clone();
+    state.unavailable.store(true, Ordering::SeqCst);
+    let response = app
+        .clone()
+        .oneshot(admin_request(
+            candidate_uri.clone(),
+            "GET",
+            actor,
+            session,
+            None,
+            None,
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(problem_body(response).await?.retryable);
+    state.unavailable.store(false, Ordering::SeqCst);
+
+    let stale_request = vm_work_approval_request(&candidate, actor, session, "vm-revision-race")?;
+    candidate.revision = Revision::new(2)?;
+    *state
+        .candidate_update
+        .lock()
+        .map_err(|_| "candidate update lock poisoned")? = Some(candidate.clone());
+    let response = app.clone().oneshot(stale_request).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        problem_body(response).await?.diagnostic_code.as_str(),
+        "LW_REVISION_CONFLICT"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.candidate_approvals")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    let response = app
+        .clone()
+        .oneshot(vm_work_approval_request(
+            &candidate,
+            actor,
+            session,
+            "approve-fresh-vm",
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let approval: CandidateApproval =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+    assert_eq!(approval.candidate_revision, candidate.revision);
+    let publish = CreateEnvironmentTemplateReleaseRequest {
+        project_id: project.id,
+        course_id: project.course_id,
+        candidate_id: candidate.id,
+        candidate_revision: candidate.revision,
+        runtime_kind: RuntimeKind::VirtualMachine,
+        approval_id: approval.id,
+    };
+    let publish_uri = format!(
+        "/api/v1/projects/{}/environment-template-releases",
+        project.id
+    );
+    state
+        .entry
+        .lock()
+        .map_err(|_| "catalog lock poisoned")?
+        .status = PlatformImageStatus::Disabled;
+    let response = app
+        .clone()
+        .oneshot(admin_request(
+            publish_uri.clone(),
+            "POST",
+            actor,
+            session,
+            Some("publish-disabled-vm"),
+            Some(serde_json::to_vec(&publish)?),
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        problem_body(response).await?.diagnostic_code.as_str(),
+        "LW_RELEASE_ARTIFACT_MISMATCH"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.environment_template_releases")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    *state.entry.lock().map_err(|_| "catalog lock poisoned")? = entry;
+    let response = app
+        .clone()
+        .oneshot(admin_request(
+            publish_uri,
+            "POST",
+            actor,
+            session,
+            Some("publish-fresh-vm"),
+            Some(serde_json::to_vec(&publish)?),
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: OperationAccepted =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+    let response = app
+        .oneshot(admin_request(
+            accepted.status_url,
+            "GET",
+            actor,
+            session,
+            None,
+            None,
+        )?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let release_view: EnvironmentTemplateReleaseView =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+    let release = release_view.release;
+    assert_eq!(release.artifact, expected_artifact);
+    assert_eq!(release.candidate_revision, candidate.revision);
+    release.validate()?;
+    Ok(())
 }
 
 fn upload_request(binding: &str) -> CreatePlatformImageUploadRequest {
