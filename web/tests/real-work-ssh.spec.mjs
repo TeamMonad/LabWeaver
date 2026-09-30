@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
+  runProcess,
   VM_CUDA_PROBE_PTX_TARGET,
 } from '../e2e/support/real-work-ssh.mjs'
 
@@ -62,5 +63,44 @@ GPU 00000000:01:00.0
         License Status : Unlicensed
 `
     expect(() => parseRealWorkVmLicenseStatus(output)).toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
+  })
+
+  it('terminates a process at its configured deadline', async () => {
+    const result = await runProcess(
+      process.execPath,
+      ['-e', "require('node:net').createServer().listen(0)"],
+      { timeoutMs: 100, outputCode: 'PROCESS_TEST', outputLimitBytes: 1024 },
+    )
+
+    expect(result).toMatchObject({ code: null, timedOut: true, outputExceeded: false })
+  })
+
+  it('does not report an early child SIGKILL as a timeout', async () => {
+    const result = await runProcess(
+      process.execPath,
+      ['-e', "process.kill(process.pid, 'SIGKILL')"],
+      { timeoutMs: 5000, outputCode: 'PROCESS_TEST', outputLimitBytes: 1024 },
+    )
+
+    expect(result).toMatchObject({ code: null, timedOut: false, outputExceeded: false })
+  })
+
+  it('terminates a process and reports output beyond the configured cap', async () => {
+    const result = await runProcess(
+      process.execPath,
+      ['-e', "process.stdout.write('too-much-output')"],
+      { timeoutMs: 5000, outputCode: 'PROCESS_TEST', outputLimitBytes: 4 },
+    )
+
+    expect(result).toMatchObject({ timedOut: false, outputExceeded: true })
+    expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(4)
+  })
+
+  it('keeps process start failures on their established diagnostic path', async () => {
+    await expect(runProcess(
+      'labweaver-program-that-does-not-exist',
+      [],
+      { timeoutMs: 1000, outputCode: 'PROCESS_TEST', outputLimitBytes: 4 },
+    )).rejects.toThrow('PROCESS_TEST_START_FAILED')
   })
 })

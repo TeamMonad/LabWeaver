@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { performance } from 'node:perf_hooks'
 
 const HOST_KEY_FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/
 const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -146,15 +147,22 @@ export function openSshPublicKeyFingerprint(publicKeyOpenssh) {
   return opensshFingerprint(keyType, encodedKey)
 }
 
-async function runProcess(program, args, {
+export async function runProcess(program, args, {
   input,
   timeoutMs,
   outputCode,
+  outputLimitBytes = MAX_PROCESS_OUTPUT_BYTES,
 }) {
   return await new Promise((resolve, reject) => {
+    const startedAt = performance.now()
     let child
     try {
-      child = spawn(program, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      child = spawn(program, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+      })
     } catch {
       reject(new Error(`${outputCode}_START_FAILED`))
       return
@@ -163,26 +171,14 @@ async function runProcess(program, args, {
     const stderr = []
     let outputBytes = 0
     let outputExceeded = false
-    let timedOut = false
-    let killTimer
-    const stopChild = () => {
-      child.kill('SIGTERM')
-      if (!killTimer) {
-        killTimer = setTimeout(() => child.kill('SIGKILL'), 1000)
-        killTimer.unref?.()
-      }
-    }
-    const timeout = setTimeout(() => {
-      timedOut = true
-      stopChild()
-    }, timeoutMs)
-    timeout.unref?.()
+    let exitedAt = null
 
     const collect = (chunks) => (chunk) => {
+      if (outputExceeded) return
       outputBytes += chunk.length
-      if (outputBytes > MAX_PROCESS_OUTPUT_BYTES) {
+      if (outputBytes > outputLimitBytes) {
         outputExceeded = true
-        stopChild()
+        child.kill('SIGKILL')
         return
       }
       chunks.push(chunk)
@@ -190,18 +186,17 @@ async function runProcess(program, args, {
     child.stdout.on('data', collect(stdout))
     child.stderr.on('data', collect(stderr))
     child.once('error', () => {
-      clearTimeout(timeout)
-      clearTimeout(killTimer)
       reject(new Error(`${outputCode}_START_FAILED`))
     })
-    child.once('close', (code) => {
-      clearTimeout(timeout)
-      clearTimeout(killTimer)
+    child.once('exit', () => {
+      exitedAt = performance.now()
+    })
+    child.once('close', (code, signal) => {
       resolve({
         code,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
-        timedOut,
+        timedOut: signal === 'SIGKILL' && !outputExceeded && exitedAt !== null && exitedAt - startedAt >= timeoutMs,
         outputExceeded,
       })
     })
