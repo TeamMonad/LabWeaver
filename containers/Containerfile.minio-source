@@ -18,7 +18,7 @@ RUN apk add --no-cache ca-certificates git
 WORKDIR /src
 RUN git init . \
     && git remote add origin https://github.com/minio/minio.git \
-    && git fetch --depth=1 origin "${MINIO_SOURCE_COMMIT}" \
+    && git -c http.version=HTTP/1.1 fetch --depth=1 origin "${MINIO_SOURCE_COMMIT}" \
     && git checkout --detach "${MINIO_SOURCE_COMMIT}" \
     && test "$(git rev-parse HEAD)" = "${MINIO_SOURCE_COMMIT}"
 

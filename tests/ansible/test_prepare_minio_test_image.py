@@ -37,7 +37,18 @@ class PrepareMinioTestImageTests(unittest.TestCase):
         )
 
         self.assertIn("github.com/minio/minio.git", containerfile)
-        self.assertIn('git fetch --depth=1 origin "${MINIO_SOURCE_COMMIT}"', containerfile)
+        fetch_lines = [
+            line.strip()
+            for line in containerfile.splitlines()
+            if "fetch --depth=1 origin" in line
+        ]
+        self.assertEqual(len(fetch_lines), 1)
+        self.assertIn("-c http.version=HTTP/1.1", fetch_lines[0])
+        self.assertIn('"${MINIO_SOURCE_COMMIT}"', fetch_lines[0])
+        self.assertIn(
+            'test "$(git rev-parse HEAD)" = "${MINIO_SOURCE_COMMIT}"',
+            containerfile,
+        )
         self.assertIn("go build -tags kqueue -trimpath", containerfile)
         self.assertIn('ENTRYPOINT ["/usr/bin/minio"]', containerfile)
 
