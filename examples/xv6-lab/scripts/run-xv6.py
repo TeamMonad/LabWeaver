@@ -126,6 +126,8 @@ def run(arguments: list[str]) -> int:
 
     command = [
         "/usr/bin/qemu-system-riscv64",
+        "-accel",
+        "tcg,tb-size=32",
         "-machine",
         "virt",
         "-bios",

@@ -56,7 +56,7 @@
       {
         "path": "scripts/run-xv6.py",
         "role": "public",
-        "sha256": "9e9f2aec106072bc18a91c03defb29c3e5b4e8a403e2f812caba6d573562476c"
+        "sha256": "ae4ca6038133281f5e03cb0af9379514444154ba25b330cd515aab5561fa7cda"
       },
       {
         "path": "scripts/run-xv6.sh",
