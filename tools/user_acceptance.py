@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import ssl
 import subprocess
@@ -33,7 +34,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,9 @@ BROWSER_MISSING = "LW_ACCEPTANCE_BROWSER_MISSING"
 JOURNEY_UNKNOWN = "LW_ACCEPTANCE_JOURNEY_UNKNOWN"
 JOURNEY_FAILED = "LW_ACCEPTANCE_JOURNEY_FAILED"
 RUN_ID_INVALID = "LW_ACCEPTANCE_RUN_ID_INVALID"
+RESUME_TARGET_INVALID = "LW_ACCEPTANCE_RESUME_TARGET_INVALID"
+JOURNEY_OUTPUT_LIMIT = 4000
+JOURNEY_OUTPUT_TRUNCATION_MARKER = "\n[... output truncated; showing beginning and end ...]\n"
 
 # role -> private credential file name inside the credentials directory.
 CREDENTIAL_FILES: Mapping[str, str] = {
@@ -299,6 +303,95 @@ def journey_exit_code(journeys: Sequence[Mapping[str, object]]) -> int:
     if not journeys:
         return 1
     return 0 if all(item.get("status") == "passed" for item in journeys) else 1
+
+
+def _bounded_journey_output(value: str, limit: int = JOURNEY_OUTPUT_LIMIT) -> str:
+    """Keep failed browser diagnostics useful without retaining a log artifact."""
+
+    text = value.strip()
+    text = re.sub(
+        r"(?i)([\"']?(?:password|secret|token|authorization|private[_-]?key)[\"']?\s*[:=]\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
+        r"\1<redacted>",
+        text,
+    )
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    if limit <= len(JOURNEY_OUTPUT_TRUNCATION_MARKER):
+        return JOURNEY_OUTPUT_TRUNCATION_MARKER[:limit]
+    available = limit - len(JOURNEY_OUTPUT_TRUNCATION_MARKER)
+    head_limit = (available + 1) // 2
+    tail_limit = available - head_limit
+    return (
+        text[:head_limit]
+        + JOURNEY_OUTPUT_TRUNCATION_MARKER
+        + (text[-tail_limit:] if tail_limit else "")
+    )
+
+
+def _redact_journey_output(
+    value: str,
+    secret_values: Iterable[str],
+    temporary_root: Path,
+) -> str:
+    """Redact credentials and host paths before failed output reaches the console."""
+
+    text = value
+    for secret in secret_values:
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    for path in (ROOT, temporary_root):
+        text = text.replace(str(path), "<local-path>")
+        text = text.replace(str(path).replace("\\", "/"), "<local-path>")
+    text = re.sub(
+        r"(?i)([\"']?authorization[\"']?\s*[:=]\s*)(?:bearer\s+)?[^\s,;}]+",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(r"(?i)(?:[A-Za-z]:[\\/]|/tmp/|/var/tmp/)[^\s:'\"]+", "<local-path>", text)
+    return _bounded_journey_output(text)
+
+
+def _read_journey_secret_values(
+    credentials_dir: Path,
+    environment: Mapping[str, str],
+) -> list[str]:
+    values: list[str] = []
+    for name in CREDENTIAL_FILES.values():
+        try:
+            value = (credentials_dir / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            values.append(value)
+    for name, value in environment.items():
+        if re.search(r"(?i)(?:password|secret|token|authorization|private[_-]?key)", name) and value:
+            values.append(value)
+    return values
+
+
+def _print_failed_journey_output(
+    journey: Journey,
+    stdout_path: Path,
+    stderr_path: Path,
+    secret_values: Iterable[str],
+    temporary_root: Path,
+) -> None:
+    """Print bounded failure output while the temporary run directory still exists."""
+
+    for label, path, stream in (
+        ("stdout", stdout_path, sys.stdout),
+        ("stderr", stderr_path, sys.stderr),
+    ):
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        detail = _redact_journey_output(content, secret_values, temporary_root)
+        if detail:
+            print(f"{journey.key} {label}:\n{detail}", file=stream)
 
 
 # --- probes ---------------------------------------------------------------
@@ -939,8 +1032,19 @@ def run_acceptance(
         keys = [item.strip() for item in args.journeys.split(",") if item.strip()]
         selected = select_journeys(keys)
         run_id = validate_run_id(args.run_id)
+        resume_project_id = getattr(args, "resume_project_id", None)
+        resume_run_id = getattr(args, "resume_run_id", None)
+        if bool(resume_project_id) != bool(resume_run_id):
+            raise AcceptanceError(RESUME_TARGET_INVALID)
+        if resume_project_id:
+            uuid.UUID(resume_project_id)
+            uuid.UUID(resume_run_id)
+            if not any(journey.key == "lab" for journey in selected):
+                raise AcceptanceError(RESUME_TARGET_INVALID)
     except AcceptanceError as error:
         return RunResult(exit_code=2, diagnostics=[error.code])
+    except (ValueError, TypeError, AttributeError):
+        return RunResult(exit_code=2, diagnostics=[RESUME_TARGET_INVALID])
 
     model = resolve_model(args.model, environment, run_kubectl)
     if not model:
@@ -982,15 +1086,29 @@ def run_acceptance(
             started_at = datetime.now(timezone.utc).isoformat()
             print(f"provider_binding={provider_binding or '<unset>'} model={model}")
             results: list[dict[str, object]] = []
+            journey_secret_values: list[str] | None = None
             for journey in selected:
                 journey_env = dict(journey_environment_base)
                 journey_env.update(journey_environment(journey, args.lab))
+                if journey.key == "lab" and resume_project_id and resume_run_id:
+                    journey_env["LABWEAVER_E2E_LAB_RESUME_PROJECT_ID"] = resume_project_id
+                    journey_env["LABWEAVER_E2E_LAB_RESUME_RUN_ID"] = resume_run_id
                 stdout_path = run_dir / f"{journey.key}.stdout.log"
                 stderr_path = run_dir / f"{journey.key}.stderr.log"
                 returncode = execute(
                     playwright_command(journey), journey_env, stdout_path, stderr_path
                 )
                 passed = returncode == 0
+                if not passed:
+                    if journey_secret_values is None:
+                        journey_secret_values = _read_journey_secret_values(credentials_dir, environment)
+                    _print_failed_journey_output(
+                        journey,
+                        stdout_path,
+                        stderr_path,
+                        journey_secret_values,
+                        run_dir,
+                    )
                 results.append(
                     {
                         "key": journey.key,
@@ -1080,6 +1198,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--credentials-dir", default=str(DEFAULT_CREDENTIALS_DIR))
     run.add_argument("--package-manifest", default=None)
     run.add_argument("--bundle-sha256", default=None)
+    run.add_argument(
+        "--resume-project-id",
+        default=None,
+        help="continue the lab journey from one existing project/run instead of creating a new run",
+    )
+    run.add_argument(
+        "--resume-run-id",
+        default=None,
+        help="AgentRun to inspect and, when eligible, retry once through the lab page",
+    )
 
     return parser
 

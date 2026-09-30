@@ -440,6 +440,7 @@
                 v-if="data.state === 'running' || data.state === 'requested'"
                 type="button"
                 class="text-button"
+                :disabled="agent.acting !== null"
                 @click="agent.cancel"
               >
                 取消
@@ -448,6 +449,7 @@
                 <button
                   type="button"
                   class="text-button"
+                  :disabled="agent.acting !== null"
                   @click="agent.retryTrack('environment')"
                 >
                   重试环境轨道
@@ -455,6 +457,7 @@
                 <button
                   type="button"
                   class="text-button"
+                  :disabled="agent.acting !== null"
                   @click="agent.retryTrack('evaluation')"
                 >
                   重试评测轨道

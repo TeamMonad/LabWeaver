@@ -16,19 +16,18 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, OnceLock};
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
-use contracts::UtcTimestamp;
-use contracts::http::{InternalPlatformImageImportRequest, PlatformImageEntry};
+use contracts::http::InternalPlatformImageImportRequest;
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, TempPath};
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::containerdisk::wrap_containerdisk_file;
 use crate::oci_import::{OciImportError, OciLimits, parse_oci_layout_file};
 use crate::platform_images::{
-    PgPlatformImageCatalog, PlatformImageRegistry, PlatformImageRegistryError,
-    PlatformImageStoreError, RegisterPlatformImage,
+    PlatformImageRegistry, PlatformImageRegistryError, PlatformImageStoreError,
 };
 
 const MAX_TAR_EXTENSION_BYTES: u64 = 64 * 1024;
@@ -52,6 +51,9 @@ fn vm_import_gate() -> Arc<Semaphore> {
 /// Administrator archive import failure.
 #[derive(Debug, Error)]
 pub enum PlatformImageImportError {
+    /// The durable import was cancelled before catalog publication.
+    #[error("LW_PLATFORM_IMAGE_IMPORT_CANCELLED")]
+    Cancelled,
     /// The staged archive could not be read back from the immutable object store.
     #[error("LW_AGENT_PERSISTENCE_FAILED")]
     ObjectStore(#[from] ObjectStoreError),
@@ -72,11 +74,25 @@ pub enum PlatformImageImportError {
     Catalog(#[from] PlatformImageStoreError),
 }
 
+/// Registry identity produced after the archive has been verified and published. Catalog
+/// publication is intentionally separate so the durable import job can fence it with its own
+/// lease and cancellation row in one database transaction.
+#[derive(Clone, Debug)]
+pub struct PublishedPlatformImage {
+    pub resolved_digest: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub capacity_bytes: Option<u64>,
+    pub disk_sha256: Option<String>,
+    pub format: Option<contracts::supply_chain::VirtualMachineDiskFormat>,
+}
+
 impl PlatformImageImportError {
     /// Stable diagnostic code for API error mapping.
     #[must_use]
     pub fn diagnostic_code(&self) -> &'static str {
         match self {
+            Self::Cancelled => "LW_PLATFORM_IMAGE_IMPORT_CANCELLED",
             Self::ObjectStore(_) => "LW_AGENT_PERSISTENCE_FAILED",
             Self::Layout(error) => error.diagnostic_code(),
             Self::Disk => "LW_PLATFORM_IMAGE_DISK_INVALID",
@@ -87,51 +103,51 @@ impl PlatformImageImportError {
     }
 }
 
-/// Imports one staged archive into the configured registry and catalog.
+/// Verifies and publishes one staged archive while observing a durable cancellation request.
 ///
-/// The push happens before the catalog write, so a registry failure never leaves a pinned
-/// digest that the registry cannot resolve, and the catalog write is the only step that makes
-/// the binding visible to authoring. Every verification runs before the push, so a rejected
-/// upload leaves both the registry and the catalog untouched.
-///
-/// # Errors
-///
-/// Fails closed on an unreadable or mismatched archive object, a malformed OCI layout, a disk
-/// archive that is not the declared disk, a capacity violation, a registry rejection, or a
-/// conflicting catalog binding.
-pub async fn import_platform_image(
+/// Blocking verification keeps its temporary-file guards until the worker has joined it. Network
+/// publication is cancellable so an administrator request stops a large upload promptly; the
+/// caller still waits for any in-flight blocking verification before releasing its admission
+/// permit.
+pub async fn publish_platform_image_with_cancellation(
     registry: &PlatformImageRegistry,
-    catalog: &PgPlatformImageCatalog,
     objects: &dyn ImmutableObjectStore,
     request: &InternalPlatformImageImportRequest,
-    now: UtcTimestamp,
-) -> Result<PlatformImageEntry, PlatformImageImportError> {
-    let permit = vm_import_gate()
-        .acquire_owned()
-        .await
-        .map_err(|_| PlatformImageImportError::ObjectStore(ObjectStoreError::ObjectUnavailable))?;
-    let object = objects
-        .read_verified_file(&request.archive_object_key, &request.archive)
-        .await?;
+    cancellation: &CancellationToken,
+) -> Result<PublishedPlatformImage, PlatformImageImportError> {
+    if cancellation.is_cancelled() {
+        return Err(PlatformImageImportError::Cancelled);
+    }
+    let permit = tokio::select! {
+        result = vm_import_gate().acquire_owned() => result
+            .map_err(|_| PlatformImageImportError::ObjectStore(ObjectStoreError::ObjectUnavailable))?,
+        () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
+    };
+    let object = tokio::select! {
+        result = objects.read_verified_file(&request.archive_object_key, &request.archive) => result?,
+        () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
+    };
+    if cancellation.is_cancelled() {
+        return Err(PlatformImageImportError::Cancelled);
+    }
     if request.disk_format.is_none()
         && request.disk_path.is_none()
         && request.capacity_bytes.is_none()
     {
-        import_oci_layout_file(registry, catalog, object, request, now, permit).await
+        publish_oci_layout_file(registry, object, request, permit, cancellation).await
     } else {
-        import_vm_disk_file(registry, catalog, object, request, now, permit).await
+        publish_vm_disk_file(registry, object, request, permit, cancellation).await
     }
 }
 
 /// Publishes one verified OCI layout archive and pins its manifest identity.
-async fn import_oci_layout_file(
+async fn publish_oci_layout_file(
     registry: &PlatformImageRegistry,
-    catalog: &PgPlatformImageCatalog,
     archive: artifact_store::VerifiedObjectFile,
     request: &InternalPlatformImageImportRequest,
-    now: UtcTimestamp,
     permit: OwnedSemaphorePermit,
-) -> Result<PlatformImageEntry, PlatformImageImportError> {
+    cancellation: &CancellationToken,
+) -> Result<PublishedPlatformImage, PlatformImageImportError> {
     let archive_path = archive.path().to_owned();
     let (image, _permit) = tokio::task::spawn_blocking(move || {
         let result = parse_oci_layout_file(&archive_path, OciLimits::default());
@@ -140,44 +156,37 @@ async fn import_oci_layout_file(
     })
     .await
     .map_err(|_| PlatformImageImportError::Layout(OciImportError::Invalid))??;
-    let digest = registry
-        .publish_file(&request.target_reference, &image)
-        .await?;
+    if cancellation.is_cancelled() {
+        return Err(PlatformImageImportError::Cancelled);
+    }
+    let digest = tokio::select! {
+        result = registry.publish_file(&request.target_reference, &image) => result?,
+        () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
+    };
     let size_bytes = image
         .blobs
         .iter()
         .map(|blob| blob.size_bytes)
         .try_fold(0_u64, u64::checked_add)
         .ok_or(PlatformImageImportError::Capacity)?;
-    let entry = catalog
-        .register(&RegisterPlatformImage {
-            kind: request.kind,
-            binding: request.binding.clone(),
-            source_reference: request.target_reference.clone(),
-            resolved_digest: digest,
-            media_type: image.manifest_media_type.clone(),
-            size_bytes,
-            capacity_bytes: None,
-            disk_sha256: None,
-            format: None,
-            trust_revision: request.trust_revision,
-            actor_id: request.actor_id,
-            reason: request.reason.clone(),
-            now,
-        })
-        .await?;
-    Ok(entry)
+    Ok(PublishedPlatformImage {
+        resolved_digest: digest,
+        media_type: image.manifest_media_type,
+        size_bytes,
+        capacity_bytes: None,
+        disk_sha256: None,
+        format: None,
+    })
 }
 
 /// Imports one large VM-disk archive from a temporary object-store file.
-async fn import_vm_disk_file(
+async fn publish_vm_disk_file(
     registry: &PlatformImageRegistry,
-    catalog: &PgPlatformImageCatalog,
     archive: artifact_store::VerifiedObjectFile,
     request: &InternalPlatformImageImportRequest,
-    now: UtcTimestamp,
     permit: OwnedSemaphorePermit,
-) -> Result<PlatformImageEntry, PlatformImageImportError> {
+    cancellation: &CancellationToken,
+) -> Result<PublishedPlatformImage, PlatformImageImportError> {
     let disk_path = request.disk_path.as_deref().unwrap_or_default();
     if !contracts::http::valid_vm_disk_upload(
         request.kind,
@@ -199,6 +208,9 @@ async fn import_vm_disk_file(
     })
     .await
     .map_err(|_| PlatformImageImportError::Disk)??;
+    if cancellation.is_cancelled() {
+        return Err(PlatformImageImportError::Cancelled);
+    }
     let DiskFile {
         path: disk_path_file,
         sha256: disk_sha256,
@@ -210,33 +222,27 @@ async fn import_vm_disk_file(
     })
     .await
     .map_err(|_| PlatformImageImportError::Disk)??;
-    let digest = registry
-        .publish_file(&request.target_reference, &image)
-        .await?;
+    if cancellation.is_cancelled() {
+        return Err(PlatformImageImportError::Cancelled);
+    }
+    let digest = tokio::select! {
+        result = registry.publish_file(&request.target_reference, &image) => result?,
+        () = cancellation.cancelled() => return Err(PlatformImageImportError::Cancelled),
+    };
     let size_bytes = image
         .blobs
         .iter()
         .map(|blob| blob.size_bytes)
         .try_fold(0_u64, u64::checked_add)
         .ok_or(PlatformImageImportError::Capacity)?;
-    let entry = catalog
-        .register(&RegisterPlatformImage {
-            kind: request.kind,
-            binding: request.binding.clone(),
-            source_reference: request.target_reference.clone(),
-            resolved_digest: digest,
-            media_type: image.manifest_media_type.clone(),
-            size_bytes,
-            capacity_bytes: Some(capacity_bytes),
-            disk_sha256: Some(disk_sha256),
-            format: request.disk_format,
-            trust_revision: request.trust_revision,
-            actor_id: request.actor_id,
-            reason: request.reason.clone(),
-            now,
-        })
-        .await?;
-    Ok(entry)
+    Ok(PublishedPlatformImage {
+        resolved_digest: digest,
+        media_type: image.manifest_media_type,
+        size_bytes,
+        capacity_bytes: Some(capacity_bytes),
+        disk_sha256: Some(disk_sha256),
+        format: request.disk_format,
+    })
 }
 
 struct DiskFile {

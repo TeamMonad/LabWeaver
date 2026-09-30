@@ -263,6 +263,14 @@ pub struct CompleteProblemPackageUploadRequest {}
 /// Reviewed archive media type accepted for an administrator OCI layout upload.
 pub const PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE: &str = "application/vnd.oci.image.layout.v1+tar";
 
+/// Maximum compressed archive object accepted for a single-request platform image import.
+///
+/// The expanded OCI/disk validation budget is enforced by Agent separately; this bound is the
+/// object-store and browser upload budget and is deliberately independent of virtual disk capacity.
+/// It stays below the common S3 single-request limit; larger images require a future multipart
+/// upload contract.
+pub const PLATFORM_IMAGE_ARCHIVE_MAX_BYTES: u64 = 5_000_000_000;
+
 /// Returns whether a catalog binding uses the reviewed lowercase locator charset.
 #[must_use]
 pub fn valid_platform_image_binding(value: &str) -> bool {
@@ -484,10 +492,44 @@ pub struct PlatformImageUploadSession {
     pub revision: Revision,
 }
 
+/// Control-owned lifecycle state for a platform image upload.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformImageUploadState {
+    Pending,
+    Queued,
+    Freezing,
+    Importing,
+    Cancelling,
+    Imported,
+    Failed,
+    Cancelled,
+}
+
+/// Public status of a platform image upload and its asynchronous import.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageUploadStatus {
+    pub upload_id: UploadSessionId,
+    pub state: PlatformImageUploadState,
+    pub revision: Revision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<PlatformImageId>,
+}
+
 /// Completion request for one staged OCI archive upload.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompletePlatformImageUploadRequest {}
+
+/// Revision-fenced cancellation of a platform image upload.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelPlatformImageUploadRequest {
+    pub expected_revision: Revision,
+}
 
 /// Internal registration request; the actor is the verified Control caller's decision actor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -544,6 +586,46 @@ pub struct InternalPlatformImageImportRequest {
     pub trust_revision: u64,
     pub actor_id: ActorId,
     pub reason: String,
+}
+
+/// Durable Agent import job submission. The upload id is the stable idempotency identity across
+/// Control retries and Agent restarts; the embedded request is immutable after acceptance.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportEnqueueRequest {
+    pub upload_id: UploadSessionId,
+    pub request: InternalPlatformImageImportRequest,
+}
+
+/// Agent-owned lifecycle state for one durable platform image import job.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformImageImportJobState {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// Short Agent response used by Control while polling a durable import job.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportJobStatus {
+    pub upload_id: UploadSessionId,
+    pub state: PlatformImageImportJobState,
+    pub revision: Revision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<PlatformImageId>,
+}
+
+/// Internal cancellation request for the Agent-owned import job.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalPlatformImageImportCancelRequest {
+    pub upload_id: UploadSessionId,
 }
 
 /// One teacher command for approving an immutable Environment/Evaluation authoring package.
@@ -3739,8 +3821,36 @@ pub const OPERATIONS: &[OperationContract] = &[
         "platform_image:write",
         BffSession,
         IdempotentRevisioned,
-        201,
+        202,
+        true,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/admin/images/uploads/{uploadId}",
+        "getPlatformImageUpload",
+        "platform_image:read",
+        BffSession,
+        None,
+        200,
         false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/admin/images/uploads/{uploadId}/cancel",
+        "cancelPlatformImageUpload",
+        "platform_image:write",
+        BffSession,
+        IdempotentRevisioned,
+        202,
+        true,
         true,
         PLATFORM_ADMIN,
         Global
@@ -3748,14 +3858,42 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         GatewayInternal,
         Post,
-        "/internal/v1/platform-images/imports",
-        "importPlatformImage",
+        "/internal/v1/platform-images/import-jobs",
+        "enqueuePlatformImageImport",
         "agent.control.invoke",
         ServiceJwt,
         IdempotentCreate,
-        201,
+        202,
         false,
         true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Get,
+        "/internal/v1/platform-images/import-jobs/{uploadId}",
+        "getPlatformImageImportJob",
+        "agent.control.invoke",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/platform-images/import-jobs/{uploadId}/cancel",
+        "cancelPlatformImageImportJob",
+        "agent.control.invoke",
+        ServiceJwt,
+        IdempotentCreate,
+        202,
+        true,
+        false,
         PLATFORM_ADMIN,
         Service
     ),

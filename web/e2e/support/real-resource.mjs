@@ -188,6 +188,10 @@ export async function requestProjectResourceByUi(page, {
   durationHours = 1,
   gpuMode = null,
   gpuClass = null,
+  gpuCount = 1,
+  releaseId = null,
+  releaseVersion = null,
+  onAccepted = null,
 } = {}) {
   if (!['cpu', 'gpu'].includes(kind)) throw new Error(`LW_ACCEPTANCE_RESOURCE_KIND_UNSUPPORTED:${kind}`)
   if (gpuMode !== null && !Object.hasOwn(GPU_MODE_LABELS, gpuMode)) {
@@ -195,6 +199,16 @@ export async function requestProjectResourceByUi(page, {
   }
   if (kind === 'gpu' && gpuMode === null) {
     throw new Error('LW_ACCEPTANCE_GPU_MODE_REQUIRED')
+  }
+  if (!Number.isInteger(gpuCount) || gpuCount < 1) {
+    throw new Error('LW_ACCEPTANCE_GPU_COUNT_INVALID')
+  }
+  if (gpuMode === 'container_time_slice' && gpuCount !== 1) {
+    throw new Error('LW_ACCEPTANCE_GPU_TIME_SLICE_COUNT_INVALID')
+  }
+  if ((releaseId === null) !== (releaseVersion === null)
+    || (releaseId !== null && (typeof releaseId !== 'string' || releaseId === '' || !Number.isInteger(releaseVersion) || releaseVersion < 1))) {
+    throw new Error('LW_ACCEPTANCE_RESOURCE_RELEASE_IDENTITY_INVALID')
   }
   const selectedProjectId = await openResourcePage(page, { projectName, projectId })
   await waitForResourceLists(page)
@@ -216,10 +230,19 @@ export async function requestProjectResourceByUi(page, {
     await expect(page.getByText('当前项目没有可用的已发布版本。')).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
     throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_MISSING:${scope}`)
   }
-  const release = releases[0]
+  if ((releaseId === null) !== (releaseVersion === null)) {
+    throw new Error('LW_ACCEPTANCE_RESOURCE_RELEASE_IDENTITY_INCOMPLETE')
+  }
+  const release = releaseId === null
+    ? releases[0]
+    : releases.find((option) => {
+      const match = option.value.match(REQUEST_KEY_OPTION)
+      return match?.[1] === releaseId && Number(match[2]) === releaseVersion
+    })
+  if (!release) throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_NOT_VISIBLE:${releaseId}:${releaseVersion}`)
   const releaseMatch = release.value.match(REQUEST_KEY_OPTION)
   if (!releaseMatch) throw new Error(`LW_ACCEPTANCE_RESOURCE_RELEASE_OPTION_INVALID:${release.value}`)
-  const [, releaseId, releaseVersion] = releaseMatch
+  const [, selectedReleaseId, selectedReleaseVersion] = releaseMatch
   await releaseSelect.selectOption(release.value)
 
   await page.getByLabel('CPU（m）').fill(String(cpuMillicores))
@@ -243,6 +266,9 @@ export async function requestProjectResourceByUi(page, {
       throw new Error(`LW_ACCEPTANCE_GPU_CATALOG_MODE_MISSING:${gpuMode}:${gpuClass ?? 'any'}`)
     }
     await gpuSelect.selectOption(gpuCatalogEntry.value)
+    const gpuCountField = page.getByLabel('GPU 数量', { exact: true })
+    if (await gpuCountField.isEditable()) await gpuCountField.fill(String(gpuCount))
+    else if (gpuCount !== 1) throw new Error('LW_ACCEPTANCE_GPU_COUNT_NOT_EDITABLE')
     const detail = page.locator('.gpu-detail')
     await expect(detail).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
     const detailText = (await detail.textContent()) ?? ''
@@ -272,11 +298,35 @@ export async function requestProjectResourceByUi(page, {
   if (typeof environmentId !== 'string' || environmentId === '') {
     throw new Error(`LW_ACCEPTANCE_RESOURCE_ENVIRONMENT_ID_MISSING:${accepted.requestId}`)
   }
+  onAccepted?.({
+    projectId: selectedProjectId,
+    requestId: accepted.requestId,
+    requestKey,
+    environmentId,
+    releaseId: selectedReleaseId,
+    releaseVersion: Number(selectedReleaseVersion),
+    durationSeconds: requestBody.durationSeconds,
+    gpuCatalogEntry: gpuCatalogEntry?.label ?? null,
+    gpuMode: gpuMode ?? null,
+    gpuClass: gpuClass ?? null,
+    gpuCount: kind === 'gpu' ? gpuCount : null,
+    state: 'accepted',
+  })
   if (
-    requestBody?.target?.releaseId !== releaseId
-    || String(requestBody?.target?.releaseVersion) !== releaseVersion
+    requestBody?.target?.releaseId !== selectedReleaseId
+    || String(requestBody?.target?.releaseVersion) !== selectedReleaseVersion
   ) {
     throw new Error(`LW_ACCEPTANCE_RESOURCE_REQUEST_RELEASE_MISMATCH:${requestBody?.target?.releaseId ?? 'missing'}`)
+  }
+  if (
+    requestBody?.resources?.cpuMillicores !== cpuMillicores
+    || requestBody?.resources?.memoryBytes !== memoryGiB * 1024 ** 3
+    || requestBody?.resources?.storageBytes !== storageGiB * 1024 ** 3
+  ) {
+    throw new Error(`LW_ACCEPTANCE_RESOURCE_REQUEST_WORKLOAD_MISMATCH:${accepted.requestId}`)
+  }
+  if (kind === 'gpu' && (requestBody?.resources?.gpu?.class !== gpuClass || requestBody?.resources?.gpu?.count !== gpuCount)) {
+    throw new Error(`LW_ACCEPTANCE_GPU_REQUEST_MISMATCH:${requestBody?.resources?.gpu?.class ?? 'missing'}:${requestBody?.resources?.gpu?.count ?? 'missing'}`)
   }
   if (!Number.isInteger(requestBody?.durationSeconds) || requestBody.durationSeconds <= 0) {
     throw new Error(`LW_ACCEPTANCE_RESOURCE_REQUEST_DURATION_INVALID:${requestKey}`)
@@ -296,12 +346,13 @@ export async function requestProjectResourceByUi(page, {
     requestId: accepted.requestId,
     requestKey,
     environmentId,
-    releaseId,
-    releaseVersion: Number(releaseVersion),
+    releaseId: selectedReleaseId,
+    releaseVersion: Number(selectedReleaseVersion),
     durationSeconds: requestBody.durationSeconds,
     gpuCatalogEntry: gpuCatalogEntry?.label ?? null,
     gpuMode: gpuMode ?? null,
     gpuClass: gpuClass ?? null,
+    gpuCount: kind === 'gpu' ? gpuCount : null,
     state: rendered.state,
   }
 }
@@ -359,6 +410,8 @@ export async function approveResourceRequestByUi(page, {
   requesterId = null,
   durationSeconds = null,
   providerBinding = WORK_PROVIDER_BINDING,
+  expectedFailureCode = null,
+  onAccepted = null,
 } = {}) {
   if (typeof requestKey !== 'string' || requestKey === '') {
     throw new Error('LW_ACCEPTANCE_RESOURCE_REQUEST_KEY_REQUIRED')
@@ -405,7 +458,26 @@ export async function approveResourceRequestByUi(page, {
   await expect(dialog).toBeVisible()
   await dialog.locator('.filled-button').click()
 
-  const approval = await expectJson(await responsePromise, 'LW_ACCEPTANCE_RESOURCE_REQUEST_APPROVAL_FAILED')
+  const approvalResponse = await responsePromise
+  if (expectedFailureCode) {
+    const responseText = await approvalResponse.text()
+    let problem = null
+    try {
+      problem = JSON.parse(responseText)
+    } catch {
+      // An expected capacity rejection must be a structured API diagnostic.
+    }
+    const actualCode = problem?.diagnosticCode ?? problem?.diagnostic_code ?? null
+    if (approvalResponse.ok() || actualCode !== expectedFailureCode) {
+      throw new Error(`LW_ACCEPTANCE_RESOURCE_APPROVAL_EXPECTED_FAILURE_MISMATCH:${expectedFailureCode}:${approvalResponse.status()}:${actualCode ?? 'diagnostic-missing'}`)
+    }
+    return {
+      requestId: requestId ?? null,
+      blocked: true,
+      diagnosticCode: actualCode,
+    }
+  }
+  const approval = await expectJson(approvalResponse, 'LW_ACCEPTANCE_RESOURCE_REQUEST_APPROVAL_FAILED')
   if (typeof approval?.requestId !== 'string' || approval.requestId === '') {
     throw new Error(`LW_ACCEPTANCE_RESOURCE_REQUEST_APPROVAL_ID_MISSING:${scope}`)
   }
@@ -415,6 +487,7 @@ export async function approveResourceRequestByUi(page, {
   if (requestId && approval.requestId !== requestId) {
     throw new Error(`LW_ACCEPTANCE_RESOURCE_REQUEST_APPROVAL_MISMATCH:${approval.requestId}`)
   }
+  onAccepted?.({ requestId: approval.requestId, leaseId: approval.leaseId })
 
   const settledRequestState = await waitForRenderedState(page, {
     label: `LW_ACCEPTANCE_ADMIN_REQUEST_STATE:${scope}`,

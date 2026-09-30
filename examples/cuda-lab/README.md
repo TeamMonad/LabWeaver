@@ -6,16 +6,14 @@ allocation path. The starter `student/gpu_stats.cu` reduces the integers
 `0..N-1` with `atomicAdd` and `atomicMax` but launches too few threads, so the
 student must correct the coverage before submitting the program's statistics.
 
-## GPU class placeholder
+## GPU class selection
 
-`environment.yaml` requests one GPU of class `v100-exclusive`. This class is a
-placeholder for the deployed Resource GPU catalog entry. The operator must
-either register the exclusive Tesla V100 worker under the catalog class
-`v100-exclusive`, or change the `gpu.class` value in `environment.yaml` to the
-catalog class that is actually active. The class is a policy identity; the
-catalog entry, not the package, owns the mapping to the runtime device
-(`nvidia.com/gpu` for the exclusive V100 worker). The worker-158 P40 vGPU
-capacity is a different catalog class and must not be selected by this package.
+`environment.yaml` requests one GPU by catalog class. The class is a policy
+identity; the active Resource catalog entry owns its provider binding, mode,
+and runtime device mapping. Choose the class for the target environment when
+publishing the package, and keep the requested class aligned with the catalog
+entry and the environment mode. The package does not assume a particular GPU
+model or worker.
 
 The GPU resource field is additive to the existing CPU, memory, and storage
 requirements. The student environment also declares an interactive terminal and

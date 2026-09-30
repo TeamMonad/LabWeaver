@@ -20,15 +20,27 @@ import {
   ensureRealWorkRates,
   inspectRealWorkFinanceByUi,
   realWorkConfig,
+  realWorkGpuConfig,
   realWorkResumeConfig,
+  realWorkVmConfig,
   readResumablePublishedWork,
   waitForRealWorkCharges,
 } from '../support/real-work.mjs'
+import {
+  createRealWorkSshIdentity,
+  readRealWorkVmLicenseStatus,
+  readRealWorkVmWorkspaceFile,
+  runRealWorkVmCudaProbe,
+} from '../support/real-work-ssh.mjs'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 
-const WORK_PROVIDER_BINDING =
-  process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
+const GPU_MODE_LABELS = Object.freeze({
+  exclusive: '独占',
+  container_time_slice: '容器时间片',
+  vm_vgpu: 'VM vGPU',
+})
+const GIB = 1024 ** 3
 
 // The agent worker runs one reserved dispatch at a time, so a journey can sit
 // behind earlier runs before its own authoring starts. These ceilings cover a
@@ -39,7 +51,16 @@ const AUTHORING_RUN_TIMEOUT_MS = 9_000_000
 const CANDIDATE_BUILD_TIMEOUT_MS = 3_600_000
 const REAL_WORK_CONFIG = realWorkConfig()
 const REAL_WORK_RESUME = realWorkResumeConfig()
+const REAL_WORK_GPU = realWorkGpuConfig()
+const REAL_WORK_VM = realWorkVmConfig()
+const WORK_PROVIDER_BINDING = REAL_WORK_VM?.providerBinding
+  ?? process.env.LABWEAVER_E2E_PROVIDER_BINDING
+  ?? 'kubernetes-work-local-hostpath'
 const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME)
+if (REAL_WORK_GPU && !REAL_WORK_MODE) throw new Error('LABWEAVER_E2E_WORK_GPU_REQUIRES_REAL_PROVIDER')
+if (REAL_WORK_VM && !REAL_WORK_RESUME) throw new Error('LABWEAVER_E2E_VM_REQUIRES_APPROVED_RESUME')
+if (REAL_WORK_VM && REAL_WORK_GPU?.mode !== 'vm_vgpu') throw new Error('LABWEAVER_E2E_VM_REQUIRES_VM_VGPU')
+if (REAL_WORK_GPU?.mode === 'vm_vgpu' && !REAL_WORK_VM) throw new Error('LABWEAVER_E2E_VM_VGPU_REQUIRES_VM_CONFIGURATION')
 
 test.describe.configure({ timeout: FULL_CHAIN_TIMEOUT_MS })
 
@@ -127,6 +148,12 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
           objectVersion: expect.any(String),
         },
       })
+      if (REAL_WORK_GPU) {
+        expect(candidate.candidate?.spec?.resources?.gpu).toEqual({
+          class: REAL_WORK_GPU.class,
+          count: REAL_WORK_GPU.count,
+        })
+      }
       realContainerArtifact(candidate)
     }
 
@@ -292,6 +319,106 @@ async function waitForActiveAccessGrant(request, grantId) {
     throw new Error(`WORK_ACCESS_GRANT_NOT_ACTIVE:${grant.state}:${grant.reasonCode ?? 'reason missing'}`)
   }
   return grant
+}
+
+async function addStudentSshKeyByUi(page, identity, onAccepted = () => {}) {
+  await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('heading', { name: 'SSH 公钥', exact: true })).toBeVisible()
+  await page.getByLabel('OpenSSH 公钥', { exact: true }).fill(identity.publicKeyOpenssh)
+  const createResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST' && url.pathname === '/api/v1/me/ssh-public-keys'
+  })
+  await page.getByRole('button', { name: '添加', exact: true }).click()
+  const created = await expectJson(await createResponsePromise, 'WORK_SSH_KEY_CREATE_FAILED')
+  if (typeof created?.id !== 'string' || created.id === '') {
+    throw new Error('WORK_SSH_KEY_CREATE_ID_MISSING')
+  }
+  onAccepted(created)
+  expect(created).toMatchObject({
+    id: expect.any(String),
+    algorithm: 'ed25519',
+    fingerprintSha256: identity.fingerprintSha256,
+  })
+  const fingerprintRow = page.locator('code[title]').filter({ hasText: identity.fingerprintSha256.slice(0, 16) })
+  await expect(fingerprintRow).toHaveAttribute('title', identity.fingerprintSha256, { timeout: 30_000 })
+  return created
+}
+
+async function deleteStudentSshKeyByUi(page, key) {
+  await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
+  const fingerprintCell = page.locator('code[title]').filter({ hasText: key.fingerprintSha256.slice(0, 16) })
+  await expect(fingerprintCell).toHaveAttribute('title', key.fingerprintSha256, { timeout: 30_000 })
+  const row = fingerprintCell.locator('xpath=ancestor::tr[1]')
+  await row.getByRole('button', { name: '删除', exact: true }).click()
+  const dialog = page.getByRole('alertdialog', { name: '删除 SSH 公钥', exact: true })
+  await expect(dialog).toBeVisible()
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'DELETE'
+      && url.pathname === `/api/v1/me/ssh-public-keys/${encodeURIComponent(key.id)}`
+  })
+  await dialog.getByRole('button', { name: '删除', exact: true }).click()
+  const response = await responsePromise
+  if (!response.ok()) throw new Error(`WORK_SSH_KEY_DELETE_FAILED:${response.status()}`)
+  await expect(fingerprintCell).toHaveCount(0, { timeout: 30_000 })
+}
+
+async function issueWorkAccessGrantByUi(page, projectId, environment) {
+  await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environment.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  await expect(
+    page.locator('.resource-title-row').getByRole('heading', { name: environment.id }),
+  ).toBeVisible({ timeout: 120_000 })
+
+  const activePage = await expectJson(
+    await page.request.get(`/api/v1/environments/${environment.id}/access-grants?state=active&includeTerminal=false&limit=2`),
+    'WORK_SSH_ACTIVE_GRANTS_READ_FAILED',
+  )
+  if (!Array.isArray(activePage.items) || activePage.items.length > 1) {
+    throw new Error('WORK_SSH_ACTIVE_GRANTS_AMBIGUOUS')
+  }
+  let grant
+  if (activePage.items.length === 1) {
+    grant = await expectJson(
+      await page.request.get(`/api/v1/access-grants/${encodeURIComponent(activePage.items[0].id)}`),
+      'WORK_SSH_ACCESS_GRANT_READ_FAILED',
+    )
+    if (grant.environmentRevision !== environment.revision) {
+      throw new Error('WORK_SSH_ACTIVE_GRANT_REVISION_STALE')
+    }
+  } else {
+    const createButton = page.getByRole('button', { name: '签发访问授权', exact: true })
+    await expect(createButton).toBeEnabled({ timeout: 120_000 })
+    const createResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'POST'
+        && url.pathname === `/api/v1/environments/${environment.id}/access-grants`
+    })
+    await createButton.click()
+    const accepted = await expectJson(await createResponsePromise, 'WORK_SSH_ACCESS_GRANT_CREATE_FAILED')
+    expect(accepted).toMatchObject({
+      id: expect.any(String),
+      projectId,
+      environmentId: environment.id,
+      environmentRevision: environment.revision,
+      state: 'requested',
+    })
+    grant = await waitForActiveAccessGrant(page.request, accepted.id)
+  }
+  expect(grant).toMatchObject({
+    projectId,
+    environmentId: environment.id,
+    environmentRevision: environment.revision,
+    state: 'active',
+    endpointGrants: expect.any(Array),
+  })
+  const sshGrants = grant.endpointGrants.filter((item) => item.protocol === 'ssh' && item.health === 'healthy')
+  if (sshGrants.length !== 1) throw new Error('WORK_SSH_ACCESS_GRANT_ENDPOINT_INVALID')
+  await expect(page.locator('.ssh-command__text')).toContainText(sshGrants[0].alias, { timeout: 30_000 })
+  await expect(page.locator('.ssh-meta')).toContainText(sshGrants[0].sshGatewayHostKeyFingerprint)
+  return { grant, endpointGrant: sshGrants[0] }
 }
 
 async function requestNewConnectionAfterLeaseRevoke(request, baseURL, projectId, environment, endpointIds) {
@@ -625,6 +752,9 @@ async function cleanupWorkResources(request, baseURL, projectId, environmentId, 
 test('student provisions a Work environment, configures it, and releases its capacity', async ({ page, browser, baseURL }) => {
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
   if (REAL_WORK_RESUME && REAL_WORK_CONFIG) throw new Error('REAL_WORK_RESUME_AND_FULL_PROVIDER_CONFIG_CONFLICT')
+  if (REAL_WORK_GPU?.mode === 'vm_vgpu' && !REAL_WORK_RESUME) {
+    throw new Error('REAL_WORK_VM_VGPU_REQUIRES_APPROVED_VM_RELEASE_AND_COMPUTE_CHECK')
+  }
   const guards = installUsabilityGuards(page)
 
   await expectProblem(
@@ -641,7 +771,7 @@ test('student provisions a Work environment, configures it, and releases its cap
   )
 
   const resumed = REAL_WORK_RESUME
-    ? await readResumablePublishedWork(page.request, REAL_WORK_RESUME)
+    ? await readResumablePublishedWork(page.request, REAL_WORK_RESUME, { gpu: REAL_WORK_GPU, vm: REAL_WORK_VM })
     : null
   const project = resumed?.project ?? await createProjectByUi(page, `live-work-${Date.now()}-${uuidv7().slice(0, 8)}`)
   if (resumed) {
@@ -649,10 +779,19 @@ test('student provisions a Work environment, configures it, and releases its cap
   }
   await selectProjectByUi(page, project.id)
   if (!resumed) await configureProjectPolicyByUi(page, project.id)
-  const packageCopy = REAL_WORK_CONFIG ? await createRealWorkPackage(REAL_WORK_CONFIG.goldenBaseImage) : null
+  const packageCopy = REAL_WORK_CONFIG
+    ? await createRealWorkPackage(REAL_WORK_CONFIG.goldenBaseImage, {
+      gpu: REAL_WORK_GPU,
+      providerBinding: WORK_PROVIDER_BINDING,
+    })
+    : null
   let trackedEnvironmentId = null
   let trackedLeaseId = null
   let trackedRequestId = null
+  let vmSshIdentity = null
+  let vmSshKey = null
+  let primaryFailure = null
+  const cleanupFailures = []
   try {
     const { packageData, release } = resumed
       ? { packageData: resumed.packageData, release: resumed.release }
@@ -661,7 +800,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     const expectedPersistenceMarker = packageCopy?.persistenceMarker ?? resumed?.persistenceMarker
 
     if (REAL_WORK_MODE) {
-      await ensureRealWorkRates(browser, baseURL)
+      await ensureRealWorkRates(browser, baseURL, { gpu: REAL_WORK_GPU })
       await configureRealWorkBudgetByUi(browser, baseURL, project.id)
     }
 
@@ -671,10 +810,33 @@ test('student provisions a Work environment, configures it, and releases its cap
     const releaseSelect = page.getByLabel('已发布版本')
     await expect(releaseSelect.locator(`option[value="${release.id}:${release.version}"]`)).toHaveCount(1, { timeout: 120_000 })
     await releaseSelect.selectOption(`${release.id}:${release.version}`)
+    if (REAL_WORK_GPU) {
+      const requiredRuntimeKind = REAL_WORK_VM ? 'virtual_machine' : 'container'
+      if (release.runtimeKind !== requiredRuntimeKind) {
+        throw new Error(`REAL_WORK_GPU_RUNTIME_MISMATCH:${REAL_WORK_GPU.mode}:${release.runtimeKind}`)
+      }
+      const gpuSelect = page.getByLabel('GPU 目录项（可选）', { exact: true })
+      await expect(gpuSelect).toBeEnabled({ timeout: 120_000 })
+      const gpuValue = await gpuSelect.locator('option').evaluateAll((options, target) => {
+        const expected = `${target.class} · ${target.modeLabel}`
+        return options.find((option) => (option.textContent ?? '').trim().startsWith(expected))?.value ?? null
+      }, { class: REAL_WORK_GPU.class, modeLabel: GPU_MODE_LABELS[REAL_WORK_GPU.mode] })
+      if (!gpuValue) throw new Error(`REAL_WORK_GPU_CATALOG_OPTION_MISSING:${REAL_WORK_GPU.class}:${REAL_WORK_GPU.mode}`)
+      await gpuSelect.selectOption(gpuValue)
+      await expect(page.locator('.gpu-detail')).toContainText(`${REAL_WORK_GPU.class} · ${GPU_MODE_LABELS[REAL_WORK_GPU.mode]}`)
+      const gpuCount = page.getByLabel('GPU 数量', { exact: true })
+      if (await gpuCount.isEditable()) await gpuCount.fill(String(REAL_WORK_GPU.count))
+      else await expect(gpuCount).toHaveValue(String(REAL_WORK_GPU.count))
+    }
     await page.getByLabel('CPU（m）').fill('1000')
     await page.getByLabel('时长（小时）').fill('1')
     await page.getByLabel('内存（GiB）').fill('2')
-    await page.getByLabel('存储（GiB）').fill('10')
+    const vmBaseDiskCapacityBytes = REAL_WORK_VM ? release.artifact?.base_disk?.capacityBytes : null
+    if (REAL_WORK_VM && (!Number.isSafeInteger(vmBaseDiskCapacityBytes) || vmBaseDiskCapacityBytes < 1)) {
+      throw new Error('REAL_WORK_VM_RELEASE_BASE_DISK_CAPACITY_INVALID')
+    }
+    const storageGiB = REAL_WORK_VM ? Math.max(16, Math.ceil(vmBaseDiskCapacityBytes / GIB)) : 10
+    await page.getByLabel('存储（GiB）').fill(String(storageGiB))
     const resourceResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === '/api/v1/resource-requests'
@@ -682,11 +844,23 @@ test('student provisions a Work environment, configures it, and releases its cap
     await page.getByRole('button', { name: '提交资源申请', exact: true }).click()
     const resourceResponse = await resourceResponsePromise
     const accepted = await expectJson(resourceResponse, 'RESOURCE_REQUEST_CREATE_FAILED')
+    const onAcceptedResourceRequest = (acceptedRequest, response) => {
+      if (typeof acceptedRequest?.requestId !== 'string' || acceptedRequest.requestId === '') {
+        throw new Error('RESOURCE_REQUEST_CREATE_ID_MISSING')
+      }
+      trackedRequestId = acceptedRequest.requestId
+      const body = response.request().postDataJSON()
+      const environmentId = body?.target?.environmentId ?? acceptedRequest.environmentId
+      if (typeof environmentId === 'string' && environmentId !== '') trackedEnvironmentId = environmentId
+      return body
+    }
+    const requestBody = onAcceptedResourceRequest(accepted, resourceResponse)
+    requestBody.requestId = accepted.requestId
     expect(accepted).toMatchObject({ requestId: expect.any(String) })
-    const requestBody = resourceResponse.request().postDataJSON()
     expect(requestBody).toMatchObject({ projectId: project.id, target: { kind: 'environment', releaseId: release.id, releaseVersion: release.version } })
-  requestBody.requestId = accepted.requestId
-  trackedRequestId = accepted.requestId
+    if (REAL_WORK_GPU) {
+      expect(requestBody.resources?.gpu).toEqual({ class: REAL_WORK_GPU.class, count: REAL_WORK_GPU.count })
+    }
     const environmentId = requestBody.target.environmentId
     trackedEnvironmentId = environmentId
 
@@ -714,7 +888,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     await expect(
       page.locator('.resource-title-row').getByRole('heading', { name: environmentId }),
     ).toBeVisible({ timeout: 120_000 })
-    await expect(page.locator('.env-meta-grid')).toContainText('容器')
+    await expect(page.locator('.env-meta-grid')).toContainText(REAL_WORK_VM ? '虚拟机' : '容器')
     const environment = await waitForEnvironment(page.request, environmentId, 'ready')
     expect(environment.class).toBe('work')
     expect(environment.projectId).toBe(project.id)
@@ -728,26 +902,41 @@ test('student provisions a Work environment, configures it, and releases its cap
     expect(new Set(endpointIds).size).toBe(endpointIds.length)
     await verifyCrossProjectEnvironmentDenied(browser, baseURL, project.id, environmentId)
 
-    await expect(page.getByRole('button', { name: '签发访问授权', exact: true })).toBeVisible({ timeout: 120_000 })
-    const accessGrantResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/environments/${environmentId}/access-grants`
-    })
-    await page.getByRole('button', { name: '签发访问授权', exact: true }).click()
-    const accessGrantResponse = await accessGrantResponsePromise
-    const requestedAccessGrant = await expectJson(accessGrantResponse, 'WORK_ACCESS_GRANT_CREATE_FAILED')
-    expect(requestedAccessGrant).toMatchObject({
-      id: expect.any(String),
-      projectId: project.id,
-      environmentId,
-      environmentRevision: environment.revision,
-      state: 'requested',
-    })
-    const accessGrant = await waitForActiveAccessGrant(page.request, requestedAccessGrant.id)
+    let accessGrant
+    let expectedAccessGrantId
+    let sshEndpointGrant = null
+    if (REAL_WORK_VM) {
+      vmSshIdentity = await createRealWorkSshIdentity()
+      await addStudentSshKeyByUi(page, vmSshIdentity, (acceptedKey) => {
+        vmSshKey = acceptedKey
+      })
+      const issued = await issueWorkAccessGrantByUi(page, project.id, environment)
+      accessGrant = issued.grant
+      expectedAccessGrantId = accessGrant.id
+      sshEndpointGrant = issued.endpointGrant
+    } else {
+      await expect(page.getByRole('button', { name: '签发访问授权', exact: true })).toBeVisible({ timeout: 120_000 })
+      const accessGrantResponsePromise = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'POST'
+          && url.pathname === `/api/v1/environments/${environmentId}/access-grants`
+      })
+      await page.getByRole('button', { name: '签发访问授权', exact: true }).click()
+      const accessGrantResponse = await accessGrantResponsePromise
+      const requestedAccessGrant = await expectJson(accessGrantResponse, 'WORK_ACCESS_GRANT_CREATE_FAILED')
+      expect(requestedAccessGrant).toMatchObject({
+        id: expect.any(String),
+        projectId: project.id,
+        environmentId,
+        environmentRevision: environment.revision,
+        state: 'requested',
+      })
+      expectedAccessGrantId = requestedAccessGrant.id
+      accessGrant = await waitForActiveAccessGrant(page.request, requestedAccessGrant.id)
+    }
     let revocationTargetGrant = accessGrant
     expect(accessGrant).toMatchObject({
-      id: requestedAccessGrant.id,
+      id: expectedAccessGrantId,
       projectId: project.id,
       environmentId,
       environmentRevision: environment.revision,
@@ -772,27 +961,37 @@ test('student provisions a Work environment, configures it, and releases its cap
         expect(endpointGrant.connectUrl).toBe(`/connect/${endpointGrant.id}/`)
       }
     }
-    const httpGrant = accessGrant.endpointGrants.find(
-      (endpointGrant) => (endpointGrant.protocol === 'http' || endpointGrant.protocol === 'https')
-        && typeof endpointGrant.connectUrl === 'string',
-    )
-    if (!httpGrant?.connectUrl) throw new Error('WORK_ACCESS_GRANT_HTTP_CONNECTION_MISSING')
-    const runtimeResponse = await page.request.get(httpGrant.connectUrl)
-    const runtimeBody = await runtimeResponse.text()
-    if (!runtimeResponse.ok()) {
-      throw new Error(`WORK_ACCESS_GRANT_RUNTIME_GET_FAILED:${runtimeResponse.status()}:${runtimeBody.slice(0, 2000)}`)
-    }
-    expect(runtimeResponse.status()).toBe(200)
-    if (REAL_WORK_MODE) {
-      const seedBody = await readWorkFile(
-        page.request,
-        httpGrant.connectUrl,
-        'seed.txt',
-        'REAL_WORK_SEED_FILE_READ_FAILED',
-      )
-      expect(seedBody.trim()).toBe(expectedSeedMarker)
+    if (REAL_WORK_VM) {
+      const vmLicense = await readRealWorkVmLicenseStatus(sshEndpointGrant, vmSshIdentity)
+      expect(vmLicense).toMatchObject({
+        driverVersion: expect.any(String),
+        licenseStatus: 'Licensed',
+      })
+      const vmResult = await runRealWorkVmCudaProbe(sshEndpointGrant, vmSshIdentity)
+      expect(vmResult).toEqual({ count: 256, sum: 32640, max: 255 })
     } else {
+      const httpGrant = accessGrant.endpointGrants.find(
+        (endpointGrant) => (endpointGrant.protocol === 'http' || endpointGrant.protocol === 'https')
+          && typeof endpointGrant.connectUrl === 'string',
+      )
+      if (!httpGrant?.connectUrl) throw new Error('WORK_ACCESS_GRANT_HTTP_CONNECTION_MISSING')
+      const runtimeResponse = await page.request.get(httpGrant.connectUrl)
+      const runtimeBody = await runtimeResponse.text()
+      if (!runtimeResponse.ok()) {
+        throw new Error(`WORK_ACCESS_GRANT_RUNTIME_GET_FAILED:${runtimeResponse.status()}:${runtimeBody.slice(0, 2000)}`)
+      }
+      expect(runtimeResponse.status()).toBe(200)
+      if (REAL_WORK_MODE) {
+        const seedBody = await readWorkFile(
+          page.request,
+          httpGrant.connectUrl,
+          'seed.txt',
+          'REAL_WORK_SEED_FILE_READ_FAILED',
+        )
+        expect(seedBody.trim()).toBe(expectedSeedMarker)
+      } else {
       expect(runtimeBody).toContain('Welcome to nginx')
+      }
     }
     await assertNoStuckProgress(page, 'student-work-environment')
     await auditAccessibility(page, 'student-work-environment')
@@ -873,37 +1072,48 @@ test('student provisions a Work environment, configures it, and releases its cap
 
     if (REAL_WORK_MODE) {
       const configuredEnvironment = await waitForEnvironment(page.request, environmentId, 'ready')
-      const existingGrant = await expectJson(
-        await page.request.get(`/api/v1/access-grants/${accessGrant.id}`),
-        'REAL_WORK_ACCESS_GRANT_READ_AFTER_CONFIGURATION_FAILED',
-      )
-      let configuredConnection
-      if (existingGrant.state === 'active' && existingGrant.environmentRevision === configuredEnvironment.revision) {
-        configuredConnection = { grant: existingGrant, httpGrant: httpEndpointGrant(existingGrant) }
-      } else {
-        configuredConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, configuredEnvironment)
+      if (REAL_WORK_VM) {
+        const configuredConnection = await issueWorkAccessGrantByUi(page, project.id, configuredEnvironment)
         revocationTargetGrant = configuredConnection.grant
+        const configuredPersistenceBody = await readRealWorkVmWorkspaceFile(
+          configuredConnection.endpointGrant,
+          vmSshIdentity,
+          '/workspace/persistence-marker.txt',
+        )
+        expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+      } else {
+        const existingGrant = await expectJson(
+          await page.request.get(`/api/v1/access-grants/${accessGrant.id}`),
+          'REAL_WORK_ACCESS_GRANT_READ_AFTER_CONFIGURATION_FAILED',
+        )
+        let configuredConnection
+        if (existingGrant.state === 'active' && existingGrant.environmentRevision === configuredEnvironment.revision) {
+          configuredConnection = { grant: existingGrant, httpGrant: httpEndpointGrant(existingGrant) }
+        } else {
+          configuredConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, configuredEnvironment)
+          revocationTargetGrant = configuredConnection.grant
+        }
+        const configuredBody = await readWorkEndpoint(
+          page.request,
+          configuredConnection.httpGrant.connectUrl,
+          'REAL_WORK_CONFIGURED_ENDPOINT_READ_FAILED',
+        )
+        expect(configuredBody).toContain('seed.txt')
+        const configuredSeedBody = await readWorkFile(
+          page.request,
+          configuredConnection.httpGrant.connectUrl,
+          'seed.txt',
+          'REAL_WORK_CONFIGURED_SEED_FILE_READ_FAILED',
+        )
+        const configuredPersistenceBody = await readWorkFile(
+          page.request,
+          configuredConnection.httpGrant.connectUrl,
+          'persistence-marker.txt',
+          'REAL_WORK_CONFIGURED_PERSISTENCE_FILE_READ_FAILED',
+        )
+        expect(configuredSeedBody.trim()).toBe(expectedSeedMarker)
+        expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
       }
-      const configuredBody = await readWorkEndpoint(
-        page.request,
-        configuredConnection.httpGrant.connectUrl,
-        'REAL_WORK_CONFIGURED_ENDPOINT_READ_FAILED',
-      )
-      expect(configuredBody).toContain('seed.txt')
-      const configuredSeedBody = await readWorkFile(
-        page.request,
-        configuredConnection.httpGrant.connectUrl,
-        'seed.txt',
-        'REAL_WORK_CONFIGURED_SEED_FILE_READ_FAILED',
-      )
-      const configuredPersistenceBody = await readWorkFile(
-        page.request,
-        configuredConnection.httpGrant.connectUrl,
-        'persistence-marker.txt',
-        'REAL_WORK_CONFIGURED_PERSISTENCE_FILE_READ_FAILED',
-      )
-      expect(configuredSeedBody.trim()).toBe(expectedSeedMarker)
-      expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
 
       await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}&environmentId=${encodeURIComponent(environmentId)}`, { waitUntil: 'domcontentloaded' })
       const restartButton = page.getByRole('button', { name: '重启', exact: true })
@@ -934,22 +1144,40 @@ test('student provisions a Work environment, configures it, and releases its cap
         state: 'succeeded',
       })
       const restartedEnvironment = await waitForEnvironment(page.request, environmentId, 'ready')
-      const restartedConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, restartedEnvironment)
-      revocationTargetGrant = restartedConnection.grant
-      const restartedSeedBody = await readWorkFile(
-        page.request,
-        restartedConnection.httpGrant.connectUrl,
-        'seed.txt',
-        'REAL_WORK_RESTARTED_SEED_FILE_READ_FAILED',
-      )
-      const restartedPersistenceBody = await readWorkFile(
-        page.request,
-        restartedConnection.httpGrant.connectUrl,
-        'persistence-marker.txt',
-        'REAL_WORK_RESTARTED_PERSISTENCE_FILE_READ_FAILED',
-      )
-      expect(restartedSeedBody.trim()).toBe(expectedSeedMarker)
-      expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+      if (REAL_WORK_VM) {
+        const restartedConnection = await issueWorkAccessGrantByUi(page, project.id, restartedEnvironment)
+        revocationTargetGrant = restartedConnection.grant
+        const restartedPersistenceBody = await readRealWorkVmWorkspaceFile(
+          restartedConnection.endpointGrant,
+          vmSshIdentity,
+          '/workspace/persistence-marker.txt',
+        )
+        expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+        const restartedVmLicense = await readRealWorkVmLicenseStatus(restartedConnection.endpointGrant, vmSshIdentity)
+        expect(restartedVmLicense).toMatchObject({
+          driverVersion: expect.any(String),
+          licenseStatus: 'Licensed',
+        })
+        const restartedCudaResult = await runRealWorkVmCudaProbe(restartedConnection.endpointGrant, vmSshIdentity)
+        expect(restartedCudaResult).toEqual({ count: 256, sum: 32640, max: 255 })
+      } else {
+        const restartedConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, restartedEnvironment)
+        revocationTargetGrant = restartedConnection.grant
+        const restartedSeedBody = await readWorkFile(
+          page.request,
+          restartedConnection.httpGrant.connectUrl,
+          'seed.txt',
+          'REAL_WORK_RESTARTED_SEED_FILE_READ_FAILED',
+        )
+        const restartedPersistenceBody = await readWorkFile(
+          page.request,
+          restartedConnection.httpGrant.connectUrl,
+          'persistence-marker.txt',
+          'REAL_WORK_RESTARTED_PERSISTENCE_FILE_READ_FAILED',
+        )
+        expect(restartedSeedBody.trim()).toBe(expectedSeedMarker)
+        expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+      }
     }
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
@@ -1067,13 +1295,17 @@ test('student provisions a Work environment, configures it, and releases its cap
     )
     if (finalLease.state !== 'revoked') throw new Error(`RESOURCE_LEASE_NOT_REVOKED:${finalLease.state}`)
     await waitForDeletedEnvironment(page.request, environmentId)
+    if (vmSshKey) {
+      await deleteStudentSshKeyByUi(page, vmSshKey)
+      vmSshKey = null
+    }
     await assertNoStuckProgress(page, 'researcher-resource-released')
     await auditAccessibility(page, 'researcher-resource-released')
     guards.assertCleanConsole('researcher-resource-released')
     if (REAL_WORK_MODE) {
-      const finance = await waitForRealWorkCharges(browser, baseURL, project.id)
-      assertRealWorkCharges(finance.charges)
-      await inspectRealWorkFinanceByUi(browser, baseURL, project.id)
+      const finance = await waitForRealWorkCharges(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
+      assertRealWorkCharges(finance.charges, REAL_WORK_GPU)
+      await inspectRealWorkFinanceByUi(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
     }
     const deniedConnection = await requestNewConnectionAfterLeaseRevoke(
       page.request,
@@ -1087,16 +1319,41 @@ test('student provisions a Work environment, configures it, and releases its cap
       reasonCode: 'LW_ACCESS_ENDPOINT_ELIGIBILITY_DENIED',
     })
   } catch (error) {
-    if (!REAL_WORK_MODE) throw error
-    try {
-      await cleanupWorkResources(page.request, baseURL, project.id, trackedEnvironmentId, trackedLeaseId, trackedRequestId)
-    } catch (cleanupError) {
-      const primaryMessage = error instanceof Error ? error.message : String(error)
-      const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-      throw new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_CLEANUP_FAILED:${cleanupMessage}`, { cause: error })
+    primaryFailure = error
+    if (REAL_WORK_MODE) {
+      try {
+        await cleanupWorkResources(page.request, baseURL, project.id, trackedEnvironmentId, trackedLeaseId, trackedRequestId)
+      } catch (cleanupError) {
+        const primaryMessage = error instanceof Error ? error.message : String(error)
+        const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        primaryFailure = new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_CLEANUP_FAILED:${cleanupMessage}`, { cause: error })
+      }
     }
-    throw error
   } finally {
-    await packageCopy?.cleanup()
+    try {
+      if (vmSshKey) await deleteStudentSshKeyByUi(page, vmSshKey)
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    try {
+      await packageCopy?.cleanup()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    try {
+      await vmSshIdentity?.cleanup()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+  }
+  if (primaryFailure && cleanupFailures.length > 0) {
+    const primaryMessage = primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
+    const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
+    throw new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: primaryFailure })
+  }
+  if (primaryFailure) throw primaryFailure
+  if (cleanupFailures.length > 0) {
+    const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
+    throw new Error(`REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: cleanupFailures[0] })
   }
 })

@@ -21,20 +21,20 @@ use axum::{Extension, Json, Router};
 use contracts::authoring::{AgentRun, AgentRunPurpose, AgentTrackKind, ProjectLlmEgressPolicy};
 use contracts::http::{
     AddProjectMembershipRequest, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
-    AuthoringPublicationAdmissionQuery, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
-    CompletePlatformImageUploadRequest, CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
+    AuthoringPublicationAdmissionQuery, CancelPlatformImageUploadRequest, CandidateDecisionRequest,
+    CompleteAuthoringApprovalRequest, CompletePlatformImageUploadRequest,
+    CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest,
     CreateWorkConfigurationRunRequest, CursorPage, DisablePlatformImageRequest,
     EnvironmentPublicationAdmissionQuery, EvaluationReleaseListQuery, GeneratedArtifactKind,
     GeneratedArtifactQuery, IdempotencyKey, InternalAgentRunMutationRequest,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
-    InternalPlatformImageDisableRequest, InternalPlatformImageImportRequest,
-    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
-    InternalWithdrawEvaluationReleaseRequest, OperationAccepted, PlatformImageCatalogView,
-    PlatformImageEntry, PlatformImageEntryView, RegisterPlatformImageRequest,
-    RemoveProjectMembershipRequest, RepinPlatformImageRequest, StrongEtag,
-    WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
+    InternalPlatformImageDisableRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageRepinRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
+    PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
+    RegisterPlatformImageRequest, RemoveProjectMembershipRequest, RepinPlatformImageRequest,
+    StrongEtag, WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
     WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
 };
 use contracts::{
@@ -250,6 +250,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/admin/images/uploads/{upload_id}/complete",
             post(complete_admin_image_upload),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}",
+            get(get_admin_image_upload),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}/cancel",
+            post(cancel_admin_image_upload),
         )
         .route(
             "/api/v1/admin/images/{catalog_id}/repin",
@@ -2559,46 +2567,49 @@ async fn complete_admin_image_upload(
         authorize_global(&state, &principal, &headers, "completePlatformImageUpload").await?;
     require_platform_admin(&decision)?;
     let key = idempotency(&headers)?;
-    let staging = state
+    let status = state
         .control
-        .begin_platform_image_completion(decision.actor.actor_id, upload_id, &key, now()?)
+        .queue_platform_image_completion(decision.actor.actor_id, upload_id, &key, now()?)
         .await?;
-    let import = InternalPlatformImageImportRequest {
-        kind: staging.kind,
-        binding: staging.binding,
-        target_reference: staging.target_reference,
-        archive: staging.archive,
-        archive_object_key: staging.archive_object_key,
-        disk_format: staging.disk_format,
-        disk_path: staging.disk_path,
-        capacity_bytes: staging.capacity_bytes,
-        trust_revision: staging.trust_revision,
-        actor_id: staging.actor_id,
-        reason: staging.reason,
-    };
-    let entry = match state
-        .agent
-        .import_platform_image(&import, &key, &headers)
-        .await
-    {
-        Ok(entry) => entry,
-        Err(error) => {
-            // The upstream diagnostic and status must survive to the browser, so the staging
-            // session is closed as failed before the original failure is propagated.
-            let api_error = ApiError::from(error);
-            state
-                .control
-                .fail_platform_image_import(upload_id, &api_error.diagnostic, now()?)
-                .await?;
-            return Err(api_error);
-        }
-    };
-    state
+    Ok(with_etag(StatusCode::ACCEPTED, &status, status.revision))
+}
+
+async fn get_admin_image_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(upload_id): Path<UploadSessionId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_global(&state, &principal, &headers, "getPlatformImageUpload").await?;
+    require_platform_admin(&decision)?;
+    let status = state
         .control
-        .finish_platform_image_import(upload_id, entry.catalog_id, now()?)
+        .platform_image_upload_status(upload_id)
         .await?;
-    let references = state.control.platform_image_release_references().await?;
-    Ok((StatusCode::CREATED, Json(entry_view(entry, &references))).into_response())
+    Ok(with_etag(StatusCode::OK, &status, status.revision))
+}
+
+async fn cancel_admin_image_upload(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(upload_id): Path<UploadSessionId>,
+    headers: HeaderMap,
+    Json(request): Json<CancelPlatformImageUploadRequest>,
+) -> Result<Response, ApiError> {
+    let decision =
+        authorize_global(&state, &principal, &headers, "cancelPlatformImageUpload").await?;
+    require_platform_admin(&decision)?;
+    let status = state
+        .control
+        .cancel_platform_image_upload(
+            decision.actor.actor_id,
+            upload_id,
+            &request,
+            &idempotency(&headers)?,
+            now()?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::ACCEPTED, &status, status.revision))
 }
 
 fn accepted(run: &AgentRun) -> Response {
@@ -2666,7 +2677,9 @@ impl From<ControlError> for ApiError {
             | ControlError::ProjectionConflict
             | ControlError::ReleaseCandidateMismatch
             | ControlError::ArtifactMismatch => StatusCode::CONFLICT,
-            ControlError::SseCursorExpired => StatusCode::GONE,
+            ControlError::SseCursorExpired | ControlError::PlatformImageUploadExpired => {
+                StatusCode::GONE
+            }
             ControlError::CourseMismatch | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
             ControlError::ConfigurationInvalid
             | ControlError::PersistenceFailed

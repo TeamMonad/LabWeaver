@@ -2,7 +2,7 @@
 //! release impact hint, the staging session and the completion fence.
 //!
 //! Every upstream failure is expected to survive to the browser with the Agent's own diagnostic
-//! and status, and every staged archive is expected to leave exactly one cleanup ledger row.
+//! and status, and every staged archive version is registered for exact cleanup.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -10,7 +10,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -33,12 +33,14 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use contracts::authoring::{CandidateApproval, CandidateDecision, RuntimeKind};
 use contracts::http::{
-    CreatePlatformImageUploadRequest, DisablePlatformImageRequest,
-    InternalPlatformImageDisableRequest, InternalPlatformImageImportRequest,
+    CancelPlatformImageUploadRequest, CreatePlatformImageUploadRequest,
+    DisablePlatformImageRequest, IdempotencyKey, InternalPlatformImageDisableRequest,
+    InternalPlatformImageImportEnqueueRequest, InternalPlatformImageImportJobStatus,
     InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
     PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE, PlatformImageCatalog, PlatformImageCatalogView,
-    PlatformImageEntry, PlatformImageEntryView, PlatformImageKind, PlatformImageStatus,
-    PlatformImageUploadSession, RegisterPlatformImageRequest, RepinPlatformImageRequest,
+    PlatformImageEntry, PlatformImageEntryView, PlatformImageImportJobState, PlatformImageKind,
+    PlatformImageStatus, PlatformImageUploadSession, PlatformImageUploadState,
+    PlatformImageUploadStatus, RegisterPlatformImageRequest, RepinPlatformImageRequest,
 };
 use contracts::supply_chain::{
     EnvironmentTemplateRelease, ImageArtifact, VirtualMachineDiskFormat,
@@ -99,7 +101,7 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
         .await?;
     support::apply_domain_migrations(&pool, Domain::Control).await?;
 
-    let now = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
+    let now = import_now()?;
     let actor_id = ActorId::new();
     let session_id = BffSessionId::new();
     let project_id = ProjectId::new();
@@ -243,7 +245,7 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
     .await?;
     let service = ControlService::new(pool.clone(), objects, config()?)?;
     let app = router(Arc::new(ApiState {
-        control: service,
+        control: service.clone(),
         access,
         agent,
         evaluation,
@@ -471,8 +473,8 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
         ("pending".to_owned(), None, None)
     );
 
-    // Completion freezes the exact staged version, imports it through the Agent, and records the
-    // staging archive for bounded cleanup.
+    // Completion only queues durable work. The HTTP operation remains fast and the browser reads
+    // the resulting state through the status route while Control and Agent workers run.
     let complete_response = app
         .clone()
         .oneshot(admin_request(
@@ -491,53 +493,106 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
     let complete_bytes = to_bytes(complete_response.into_body(), usize::MAX).await?;
     assert_eq!(
         complete_status,
-        StatusCode::CREATED,
+        StatusCode::ACCEPTED,
         "{}",
         String::from_utf8_lossy(&complete_bytes)
     );
-    let imported: PlatformImageEntryView = serde_json::from_slice(&complete_bytes)?;
-    assert_eq!(imported.entry.catalog_id, imported_entry.catalog_id);
-    assert_eq!(imported.release_reference_count, 1);
-
-    let import_body = received_body(&received, "import")?;
-    let (frozen_artifact_id, frozen_object_version) = frozen_archive(&pool, session.upload_id)
-        .await?
-        .ok_or("the staged archive must be frozen before the Agent import")?;
-    assert_eq!(frozen_object_version, FROZEN_OBJECT_VERSION);
-    assert_eq!(
-        import_body
-            .get("archive")
-            .and_then(|archive| archive.get("objectVersion"))
-            .and_then(Value::as_str),
-        Some(frozen_object_version.as_str())
-    );
-    assert_eq!(
-        import_body
-            .get("archive")
-            .and_then(|archive| archive.get("artifactId"))
-            .and_then(Value::as_str),
-        Some(frozen_artifact_id.to_string().as_str())
-    );
-    assert_eq!(
-        import_body.get("archiveObjectKey").and_then(Value::as_str),
-        Some(
-            format!(
-                "problem-packages/platform-image-uploads/{}",
-                session.upload_id
-            )
-            .as_str()
-        )
-    );
+    let queued: PlatformImageUploadStatus = serde_json::from_slice(&complete_bytes)?;
+    assert_eq!(queued.upload_id, session.upload_id);
+    assert_eq!(queued.state, PlatformImageUploadState::Queued);
+    assert_eq!(queued.revision, Revision::new(2)?);
     assert_eq!(
         upload_state(&pool, session.upload_id).await?,
-        ("imported".to_owned(), Some(imported_entry.catalog_id), None)
+        ("queued".to_owned(), None, None)
     );
+
+    let status_response = app
+        .clone()
+        .oneshot(admin_request(
+            format!("/api/v1/admin/images/uploads/{}", session.upload_id),
+            "GET",
+            actor_id,
+            session_id,
+            None,
+            None,
+        )?)
+        .await?;
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let current: PlatformImageUploadStatus =
+        serde_json::from_slice(&to_bytes(status_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(current, queued);
+
+    let cancel_response = app
+        .clone()
+        .oneshot(admin_request(
+            format!("/api/v1/admin/images/uploads/{}/cancel", session.upload_id),
+            "POST",
+            actor_id,
+            session_id,
+            Some("cancel-key"),
+            Some(serde_json::to_vec(&CancelPlatformImageUploadRequest {
+                expected_revision: queued.revision,
+            })?),
+        )?)
+        .await?;
+    assert_eq!(cancel_response.status(), StatusCode::ACCEPTED);
+    let cancelled: PlatformImageUploadStatus =
+        serde_json::from_slice(&to_bytes(cancel_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(cancelled.state, PlatformImageUploadState::Cancelling);
+    assert_eq!(cancelled.revision, Revision::new(3)?);
     assert_eq!(
-        cleanup_ledger_key(&pool, session.upload_id).await?,
-        Some(format!(
-            "problem-packages/platform-image-uploads/{}",
-            session.upload_id
-        ))
+        upload_state(&pool, session.upload_id).await?,
+        ("queued".to_owned(), None, None)
+    );
+
+    let cancel_readback = app
+        .clone()
+        .oneshot(admin_request(
+            format!("/api/v1/admin/images/uploads/{}", session.upload_id),
+            "GET",
+            actor_id,
+            session_id,
+            None,
+            None,
+        )?)
+        .await?;
+    assert_eq!(cancel_readback.status(), StatusCode::OK);
+    let cancel_readback: PlatformImageUploadStatus =
+        serde_json::from_slice(&to_bytes(cancel_readback.into_body(), usize::MAX).await?)?;
+    assert_eq!(cancel_readback.state, PlatformImageUploadState::Cancelling);
+    assert_eq!(cancel_readback.revision, Revision::new(3)?);
+
+    let expired_session = service
+        .create_platform_image_upload(
+            actor_id,
+            &upload_request("expired-http"),
+            &IdempotencyKey::parse("create-expired-http")?,
+            import_now()?,
+        )
+        .await?;
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
+        .bind(expired_session.upload_id.as_uuid()).execute(&pool).await?;
+    let expired_response = app
+        .clone()
+        .oneshot(admin_request(
+            format!(
+                "/api/v1/admin/images/uploads/{}/complete",
+                expired_session.upload_id
+            ),
+            "POST",
+            actor_id,
+            session_id,
+            Some("complete-expired-http"),
+            Some(b"{}".to_vec()),
+        )?)
+        .await?;
+    assert_eq!(expired_response.status(), StatusCode::GONE);
+    assert_eq!(
+        problem_body(expired_response)
+            .await?
+            .diagnostic_code
+            .as_str(),
+        "LW_PLATFORM_IMAGE_UPLOAD_EXPIRED"
     );
 
     // A virtual-machine upload carries the reviewed disk descriptor through the staging fence and
@@ -592,23 +647,12 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
     let vm_complete_bytes = to_bytes(vm_complete.into_body(), usize::MAX).await?;
     assert_eq!(
         vm_complete_status,
-        StatusCode::CREATED,
+        StatusCode::ACCEPTED,
         "{}",
         String::from_utf8_lossy(&vm_complete_bytes)
     );
-    let vm_import_body = received_body(&received, "import_vm")?;
-    assert_eq!(
-        vm_import_body.get("diskFormat").and_then(Value::as_str),
-        Some("qcow2")
-    );
-    assert_eq!(
-        vm_import_body.get("diskPath").and_then(Value::as_str),
-        Some("disk/disk.qcow2")
-    );
-    assert_eq!(
-        vm_import_body.get("capacityBytes").and_then(Value::as_u64),
-        Some(10_737_418_240)
-    );
+    let vm_queued: PlatformImageUploadStatus = serde_json::from_slice(&vm_complete_bytes)?;
+    assert_eq!(vm_queued.state, PlatformImageUploadState::Queued);
 
     // A partially declared VM descriptor fails closed at staging before any row is written.
     let partial_vm = app
@@ -639,8 +683,8 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
         "LW_PLATFORM_IMAGE_UPLOAD_INVALID"
     );
 
-    // An Agent rejection closes the staging session as failed, keeps the upstream diagnostic and
-    // still schedules the frozen archive for deletion.
+    // A downstream rejection is resolved by the durable Agent and Control workers after this
+    // request. The gateway only acknowledges the queued operation here.
     let rejected_response = app
         .clone()
         .oneshot(admin_request(
@@ -684,29 +728,15 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
     let rejected_bytes = to_bytes(rejected_complete.into_body(), usize::MAX).await?;
     assert_eq!(
         rejected_status,
-        StatusCode::CONFLICT,
+        StatusCode::ACCEPTED,
         "{}",
         String::from_utf8_lossy(&rejected_bytes)
     );
-    let rejected_problem: ProblemDetails = serde_json::from_slice(&rejected_bytes)?;
-    assert_eq!(
-        rejected_problem.diagnostic_code.as_str(),
-        "LW_PLATFORM_IMAGE_STATE_CONFLICT"
-    );
+    let rejected_queued: PlatformImageUploadStatus = serde_json::from_slice(&rejected_bytes)?;
+    assert_eq!(rejected_queued.state, PlatformImageUploadState::Queued);
     assert_eq!(
         upload_state(&pool, rejected_session.upload_id).await?,
-        (
-            "failed".to_owned(),
-            None,
-            Some("LW_PLATFORM_IMAGE_STATE_CONFLICT".to_owned())
-        )
-    );
-    assert_eq!(
-        cleanup_ledger_key(&pool, rejected_session.upload_id).await?,
-        Some(format!(
-            "problem-packages/platform-image-uploads/{}",
-            rejected_session.upload_id
-        ))
+        ("queued".to_owned(), None, None)
     );
     Ok(())
 }
@@ -757,6 +787,9 @@ impl Drop for TlsServiceHandle {
 struct PlatformImageObjects {
     bytes: Vec<u8>,
     frozen: Mutex<BTreeMap<String, ArtifactRef>>,
+    available: AtomicBool,
+    read_failure: AtomicBool,
+    versions: Mutex<Vec<String>>,
 }
 
 impl PlatformImageObjects {
@@ -764,6 +797,9 @@ impl PlatformImageObjects {
         Self {
             bytes,
             frozen: Mutex::new(BTreeMap::new()),
+            available: AtomicBool::new(true),
+            read_failure: AtomicBool::new(false),
+            versions: Mutex::new(vec![FROZEN_OBJECT_VERSION.to_owned()]),
         }
     }
 }
@@ -856,6 +892,34 @@ impl ImmutableObjectStore for PlatformImageObjects {
     ) -> Result<VerifiedObjectFile, ObjectStoreError> {
         let verified = self.freeze_current(key, expected_size, media_type).await?;
         VerifiedObjectFile::from_bytes(verified.reference, &verified.bytes)
+    }
+
+    async fn freeze_current_reference(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<ArtifactRef, ObjectStoreError> {
+        if self.read_failure.load(Ordering::SeqCst) {
+            return Err(ObjectStoreError::ObjectUnavailable);
+        }
+        if !self.available.load(Ordering::SeqCst) {
+            return Err(ObjectStoreError::ObjectNotFound);
+        }
+        Ok(self
+            .freeze_current(key, expected_size, media_type)
+            .await?
+            .reference)
+    }
+
+    async fn list_key_versions(&self, _: &str) -> Result<Vec<String>, ObjectStoreError> {
+        if self.read_failure.load(Ordering::SeqCst) {
+            return Err(ObjectStoreError::ObjectUnavailable);
+        }
+        self.versions
+            .lock()
+            .map(|versions| versions.clone())
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)
     }
 
     async fn delete_orphan(&self, _key: &str, _version: &str) -> Result<(), ObjectStoreError> {
@@ -1012,34 +1076,6 @@ async fn upload_state(
             .map_err(|error| std::io::Error::other(error.to_string()))?,
         sqlx::Row::try_get(&row, "terminal_diagnostic")?,
     ))
-}
-
-async fn cleanup_ledger_key(
-    pool: &PgPool,
-    upload_id: UploadSessionId,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    Ok(sqlx::query_scalar(
-        "SELECT object_key FROM control.object_cleanup_ledger WHERE upload_id=$1",
-    )
-    .bind(upload_id.as_uuid())
-    .fetch_optional(pool)
-    .await?)
-}
-
-async fn frozen_archive(
-    pool: &PgPool,
-    upload_id: UploadSessionId,
-) -> Result<Option<(uuid::Uuid, String)>, Box<dyn std::error::Error>> {
-    let row = sqlx::query(
-        "SELECT artifact_id,object_version FROM control.platform_image_upload_sessions \
-         WHERE upload_id=$1",
-    )
-    .bind(upload_id.as_uuid())
-    .fetch_one(pool)
-    .await?;
-    let artifact_id: Option<uuid::Uuid> = sqlx::Row::try_get(&row, "artifact_id")?;
-    let object_version: Option<String> = sqlx::Row::try_get(&row, "object_version")?;
-    Ok(artifact_id.zip(object_version))
 }
 
 fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -1307,10 +1343,6 @@ async fn spawn_agent_server(
                 "/internal/v1/platform-images/{catalog_id}/disable",
                 post(agent_disable_image),
             )
-            .route(
-                "/internal/v1/platform-images/imports",
-                post(agent_import_image),
-            )
             .with_state(state),
         certificate_pem,
         private_key_pem,
@@ -1384,27 +1416,6 @@ async fn agent_disable_image(
     entry.catalog_id = catalog_id;
     entry.status = PlatformImageStatus::Disabled;
     (StatusCode::OK, Json(entry)).into_response()
-}
-
-async fn agent_import_image(
-    State(state): State<AgentState>,
-    Json(request): Json<InternalPlatformImageImportRequest>,
-) -> Response {
-    let route = match request.kind {
-        PlatformImageKind::VirtualMachine => "import_vm",
-        PlatformImageKind::Container => "import",
-    };
-    if record_request(&state, route, json!(request)).is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    if request.binding == CONFLICT_BINDING {
-        return problem(
-            StatusCode::CONFLICT,
-            "LW_PLATFORM_IMAGE_STATE_CONFLICT",
-            false,
-        );
-    }
-    (StatusCode::CREATED, Json(state.imported.clone())).into_response()
 }
 
 async fn spawn_tls_service(
@@ -1489,4 +1500,815 @@ fn tls_material() -> Result<(String, String, String, Value), Box<dyn std::error:
         "kid": "test"
     });
     Ok((ca.pem(), leaf.pem(), leaf_key.serialize_pem(), jwk))
+}
+
+fn import_now() -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
+    let value = time::OffsetDateTime::now_utc();
+    Ok(UtcTimestamp::from_utc(value.replace_nanosecond(
+        value.nanosecond() / 1_000_000 * 1_000_000,
+    )?)?)
+}
+
+async fn import_database()
+-> Result<(PgPool, testcontainers::ContainerAsync<Postgres>), Box<dyn std::error::Error>> {
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_domain_migrations(&pool, Domain::Control).await?;
+    Ok((pool, postgres))
+}
+
+fn upload_request(binding: &str) -> CreatePlatformImageUploadRequest {
+    CreatePlatformImageUploadRequest {
+        kind: PlatformImageKind::Container,
+        binding: binding.to_owned(),
+        target_reference: format!("harbor.lab.lan/labweaver-system/{binding}:v1"),
+        archive_bytes: 5_000_000_000,
+        archive_media_type: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE.to_owned(),
+        disk_format: None,
+        disk_path: None,
+        capacity_bytes: None,
+        trust_revision: 1,
+        reason: "reviewed large archive".to_owned(),
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one persisted upload exercises stale-owner fencing, restart and late cancellation in order"
+)]
+async fn control_import_restart_fences_old_workers_and_freezes_a_cancelled_late_upload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let actor = ActorId::new();
+    let request = upload_request("late-upload");
+    let session = control
+        .create_platform_image_upload(
+            actor,
+            &request,
+            &IdempotencyKey::parse("create-late")?,
+            import_now()?,
+        )
+        .await?;
+    assert_eq!(session.archive_bytes, 5_000_000_000);
+    let queued = control
+        .queue_platform_image_completion(
+            actor,
+            session.upload_id,
+            &IdempotencyKey::parse("complete-late")?,
+            import_now()?,
+        )
+        .await?;
+    assert_eq!(
+        control
+            .queue_platform_image_completion(
+                actor,
+                session.upload_id,
+                &IdempotencyKey::parse("complete-late")?,
+                import_now()?
+            )
+            .await?,
+        queued
+    );
+    let cancel = control
+        .cancel_platform_image_upload(
+            actor,
+            session.upload_id,
+            &CancelPlatformImageUploadRequest {
+                expected_revision: queued.revision,
+            },
+            &IdempotencyKey::parse("cancel-late")?,
+            import_now()?,
+        )
+        .await?;
+    assert_eq!(cancel.state, PlatformImageUploadState::Cancelling);
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Cancelling
+    );
+    let first = control
+        .claim_platform_image_import(import_now()?)
+        .await?
+        .ok_or("cancelled upload not claimed")?;
+    assert!(first.archive.is_none());
+    assert!(first.cancel_requested);
+    let reference = objects
+        .freeze_current_reference(
+            &first.archive_object_key,
+            first.archive_size,
+            &first.archive_media_type,
+        )
+        .await?;
+    control
+        .record_platform_image_import_reference(&first, &reference, import_now()?)
+        .await?;
+    control
+        .renew_platform_image_import(&first, import_now()?)
+        .await?;
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET completion_lease_expires_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1").bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    assert!(matches!(
+        control
+            .cancel_platform_image_import_fenced(&first, import_now()?)
+            .await,
+        Err(control_service::ControlError::OperationLeaseLost)
+    ));
+    assert!(matches!(
+        control
+            .renew_platform_image_import(&first, import_now()?)
+            .await,
+        Err(control_service::ControlError::OperationLeaseLost)
+    ));
+    let restarted = ControlService::new(pool.clone(), objects, config()?)?;
+    let current = restarted
+        .claim_platform_image_import(import_now()?)
+        .await?
+        .ok_or("expired lease not recovered")?;
+    assert_ne!(first.lease_token, current.lease_token);
+    assert_eq!(current.archive, Some(reference.clone()));
+    assert!(matches!(
+        control
+            .finish_platform_image_import_fenced(&first, PlatformImageId::new(), import_now()?)
+            .await,
+        Err(control_service::ControlError::OperationLeaseLost)
+    ));
+    restarted
+        .cancel_platform_image_import_fenced(&current, import_now()?)
+        .await?;
+    let terminal = restarted
+        .platform_image_upload_status(session.upload_id)
+        .await?;
+    assert_eq!(terminal.state, PlatformImageUploadState::Cancelled);
+    let cleanup = sqlx::query("SELECT object_key,object_version,next_attempt_at FROM control.object_cleanup_ledger WHERE upload_id=$1").bind(session.upload_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        sqlx::Row::try_get::<String, _>(&cleanup, "object_key")?,
+        current.archive_object_key
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<String, _>(&cleanup, "object_version")?,
+        reference.object_version
+    );
+    assert!(
+        sqlx::Row::try_get::<time::OffsetDateTime, _>(&cleanup, "next_attempt_at")?
+            >= session.expires_at.get()
+    );
+    assert!(matches!(
+        restarted.cleanup_one_object(import_now()?).await?,
+        control_service::CleanupOutcome::Idle
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn import_migration_preserves_pending_running_and_terminal_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    sqlx::query("CREATE SCHEMA control").execute(&pool).await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET search_path=control,pg_catalog")
+        .execute(&mut *connection)
+        .await?;
+    let migration_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let catalog = persistence_sqlx::MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
+    let migrations = &catalog
+        .domains
+        .iter()
+        .find(|domain| domain.name == Domain::Control)
+        .ok_or("control migrations absent")?
+        .migrations;
+    for migration in migrations.iter().filter(|migration| migration.id < 11) {
+        sqlx::raw_sql(&persistence_sqlx::MigrationCatalog::read_verified_sql(
+            &migration_root,
+            migration,
+        )?)
+        .execute(&mut *connection)
+        .await?;
+    }
+    for state in ["pending", "importing", "imported", "failed"] {
+        let upload_id = UploadSessionId::new();
+        let lease = (state == "importing").then(uuid::Uuid::now_v7);
+        sqlx::query("INSERT INTO control.platform_image_upload_sessions (upload_id,created_by,kind,binding,target_reference,trust_revision,reason,archive_bytes,archive_media_type,object_key,state,expires_at,completion_lease_token,completion_lease_expires_at,imported_catalog_id) VALUES ($1,$2,'container',$3,'registry.test/platform/base:v1',1,'reviewed',10,'application/vnd.oci.image.layout.v1.tar',$4,$5,now()+interval '15 minutes',$6,CASE WHEN $6::uuid IS NOT NULL THEN now()-interval '1 second' END,$7)")
+            .bind(upload_id.as_uuid()).bind(ActorId::new().as_uuid()).bind(format!("migration-{state}")).bind(format!("archive/{upload_id}")).bind(state).bind(lease).bind((state == "imported").then(|| PlatformImageId::new().as_uuid()))
+            .execute(&mut *connection).await?;
+    }
+    let migration = migrations
+        .iter()
+        .find(|migration| migration.id == 11)
+        .ok_or("new import migration absent")?;
+    sqlx::raw_sql(&persistence_sqlx::MigrationCatalog::read_verified_sql(
+        &migration_root,
+        migration,
+    )?)
+    .execute(&mut *connection)
+    .await?;
+    let states = sqlx::query_as::<_, (String, i64, bool)>("SELECT state,revision,cancel_requested FROM control.platform_image_upload_sessions ORDER BY state").fetch_all(&mut *connection).await?;
+    assert_eq!(
+        states,
+        vec![
+            ("failed".to_owned(), 1, false),
+            ("imported".to_owned(), 1, false),
+            ("importing".to_owned(), 1, false),
+            ("pending".to_owned(), 1, false)
+        ]
+    );
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ImportTransportState {
+    accepted: Arc<Mutex<Option<InternalPlatformImageImportEnqueueRequest>>>,
+    failures: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
+}
+
+async fn transport_enqueue(
+    State(state): State<ImportTransportState>,
+    Json(request): Json<InternalPlatformImageImportEnqueueRequest>,
+) -> Result<Response, StatusCode> {
+    {
+        let mut accepted = state
+            .accepted
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if accepted
+            .as_ref()
+            .is_some_and(|previous| previous != &request)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        *accepted = Some(request.clone());
+    }
+    if state
+        .failures
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(InternalPlatformImageImportJobStatus {
+            upload_id: request.upload_id,
+            state: PlatformImageImportJobState::Running,
+            revision: Revision::new(2).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            diagnostic: None,
+            catalog_id: None,
+        }),
+    )
+        .into_response())
+}
+
+async fn transport_cancel(
+    State(state): State<ImportTransportState>,
+    Path(upload_id): Path<UploadSessionId>,
+) -> Result<Response, StatusCode> {
+    let accepted = state
+        .accepted
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if accepted
+        .as_ref()
+        .is_none_or(|request| request.upload_id != upload_id)
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    state.cancelled.store(true, Ordering::SeqCst);
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(InternalPlatformImageImportJobStatus {
+            upload_id,
+            state: PlatformImageImportJobState::Cancelled,
+            revision: Revision::new(3).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            diagnostic: Some("LW_PLATFORM_IMAGE_IMPORT_CANCELLED".to_owned()),
+            catalog_id: None,
+        }),
+    )
+        .into_response())
+}
+
+async fn worker_transport(
+    state: ImportTransportState,
+) -> Result<
+    (
+        control_service::clients::AgentClient,
+        TlsServiceHandle,
+        AuthorityHandle,
+        tempfile::TempDir,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (ca, certificate, key, jwk) = tls_material()?;
+    let temp = tempfile::tempdir()?;
+    let ca_path = temp.path().join("agent-ca.pem");
+    std::fs::write(&ca_path, ca)?;
+    let authority = spawn_authority(jwk).await?;
+    let server = spawn_tls_service(
+        Router::new()
+            .route(
+                "/internal/v1/platform-images/import-jobs",
+                post(transport_enqueue),
+            )
+            .route(
+                "/internal/v1/platform-images/import-jobs/{upload_id}/cancel",
+                post(transport_cancel),
+            )
+            .with_state(state),
+        &certificate,
+        &key,
+    )
+    .await?;
+    let token = Arc::new(service_token_client(&authority.issuer).await?);
+    let client = control_service::clients::AgentClient::new_authenticated(
+        service_config(&server.base_url, &ca_path),
+        token,
+    )?;
+    Ok((client, server, authority, temp))
+}
+
+#[tokio::test]
+async fn unknown_agent_enqueue_response_recovers_the_same_job_before_cancelling_and_cleaning()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let transport = ImportTransportState {
+        accepted: Arc::new(Mutex::new(None)),
+        failures: Arc::new(AtomicUsize::new(3)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let (agent, _server, _authority, _temp) = worker_transport(transport.clone()).await?;
+    let worker = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control: control.clone(),
+        agent: agent.clone(),
+        poll_interval: std::time::Duration::from_millis(10),
+    };
+    let actor = ActorId::new();
+    let session = control
+        .create_platform_image_upload(
+            actor,
+            &upload_request("lost-response"),
+            &IdempotencyKey::parse("create-lost")?,
+            import_now()?,
+        )
+        .await?;
+    control
+        .queue_platform_image_completion(
+            actor,
+            session.upload_id,
+            &IdempotencyKey::parse("complete-lost")?,
+            import_now()?,
+        )
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), worker.tick()).await??;
+    let uncertain = control
+        .platform_image_upload_status(session.upload_id)
+        .await?;
+    assert_eq!(uncertain.state, PlatformImageUploadState::Importing);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.object_cleanup_ledger WHERE upload_id=$1"
+        )
+        .bind(session.upload_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    let original = transport
+        .accepted
+        .lock()
+        .map_err(|_| "fixture lock poisoned")?
+        .clone()
+        .ok_or("Agent did not receive the job")?;
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET completion_lease_expires_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1").bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    control
+        .cancel_platform_image_upload(
+            actor,
+            session.upload_id,
+            &CancelPlatformImageUploadRequest {
+                expected_revision: uncertain.revision,
+            },
+            &IdempotencyKey::parse("cancel-lost")?,
+            import_now()?,
+        )
+        .await?;
+    let recovered = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control: ControlService::new(pool.clone(), objects, config()?)?,
+        agent,
+        poll_interval: std::time::Duration::from_millis(10),
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), recovered.tick()).await??;
+    assert_eq!(
+        *transport
+            .accepted
+            .lock()
+            .map_err(|_| "fixture lock poisoned")?,
+        Some(original)
+    );
+    assert!(transport.cancelled.load(Ordering::SeqCst));
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Cancelled
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.object_cleanup_ledger WHERE upload_id=$1"
+        )
+        .bind(session.upload_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_cancel_waits_for_a_late_put_without_creating_an_agent_job()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    objects.available.store(false, Ordering::SeqCst);
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let transport = ImportTransportState {
+        accepted: Arc::new(Mutex::new(None)),
+        failures: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let (agent, _server, _authority, _temp) = worker_transport(transport.clone()).await?;
+    let worker = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control: control.clone(),
+        agent,
+        poll_interval: std::time::Duration::from_millis(10),
+    };
+    let actor = ActorId::new();
+    let session = control
+        .create_platform_image_upload(
+            actor,
+            &upload_request("pending-cancel"),
+            &IdempotencyKey::parse("create-pending")?,
+            import_now()?,
+        )
+        .await?;
+    control
+        .cancel_platform_image_upload(
+            actor,
+            session.upload_id,
+            &CancelPlatformImageUploadRequest {
+                expected_revision: session.revision,
+            },
+            &IdempotencyKey::parse("cancel-pending")?,
+            import_now()?,
+        )
+        .await?;
+    worker.tick().await?;
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Cancelling
+    );
+    assert!(
+        transport
+            .accepted
+            .lock()
+            .map_err(|_| "fixture lock poisoned")?
+            .is_none()
+    );
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET completion_lease_expires_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1").bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    objects.available.store(true, Ordering::SeqCst);
+    worker.tick().await?;
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Cancelled
+    );
+    assert!(
+        transport
+            .accepted
+            .lock()
+            .map_err(|_| "fixture lock poisoned")?
+            .is_none()
+    );
+    let versions: Vec<String> = sqlx::query_scalar(
+        "SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1",
+    )
+    .bind(session.upload_id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(versions, vec![FROZEN_OBJECT_VERSION.to_owned()]);
+    *objects
+        .versions
+        .lock()
+        .map_err(|_| "fixture lock poisoned")? = vec![
+        FROZEN_OBJECT_VERSION.to_owned(),
+        "overwritten-between-ticks".to_owned(),
+        "latest-late-put".to_owned(),
+    ];
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    let restarted = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control,
+        agent: worker.agent.clone(),
+        poll_interval: worker.poll_interval,
+    };
+    restarted.tick().await?;
+    let versions: Vec<String> = sqlx::query_scalar("SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1 ORDER BY object_version").bind(session.upload_id.as_uuid()).fetch_all(&pool).await?;
+    assert_eq!(versions.len(), 3);
+    assert!(versions.contains(&"overwritten-between-ticks".to_owned()));
+    assert!(versions.contains(&"latest-late-put".to_owned()));
+    assert!(sqlx::query_scalar::<_, bool>("SELECT cleanup_versions_next_attempt_at>clock_timestamp() FROM control.platform_image_upload_sessions WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).fetch_one(&pool).await?);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one upload keeps temporary failure, confirmed absence and later committed PUT recovery together"
+)]
+async fn expired_upload_does_not_turn_a_temporary_object_store_failure_into_terminal_absence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    objects.read_failure.store(true, Ordering::SeqCst);
+    objects
+        .versions
+        .lock()
+        .map_err(|_| "fixture lock poisoned")?
+        .clear();
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let transport = ImportTransportState {
+        accepted: Arc::new(Mutex::new(None)),
+        failures: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let (agent, _server, _authority, _temp) = worker_transport(transport.clone()).await?;
+    let worker = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control: control.clone(),
+        agent,
+        poll_interval: std::time::Duration::from_millis(10),
+    };
+    let actor = ActorId::new();
+    let session = control
+        .create_platform_image_upload(
+            actor,
+            &upload_request("expired-pending-cancel"),
+            &IdempotencyKey::parse("create-expired-pending")?,
+            import_now()?,
+        )
+        .await?;
+    control
+        .cancel_platform_image_upload(
+            actor,
+            session.upload_id,
+            &CancelPlatformImageUploadRequest {
+                expected_revision: session.revision,
+            },
+            &IdempotencyKey::parse("cancel-expired-pending")?,
+            import_now()?,
+        )
+        .await?;
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    assert!(worker.tick().await.is_err());
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Cancelling
+    );
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET completion_lease_expires_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    objects.read_failure.store(false, Ordering::SeqCst);
+    objects.available.store(false, Ordering::SeqCst);
+    worker.tick().await?;
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Cancelled
+    );
+    objects.read_failure.store(true, Ordering::SeqCst);
+    assert!(worker.tick().await.is_err());
+    assert!(sqlx::query_scalar::<_, bool>("SELECT cleanup_versions_next_attempt_at>clock_timestamp() FROM control.platform_image_upload_sessions WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).fetch_one(&pool).await?);
+    objects.read_failure.store(false, Ordering::SeqCst);
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET cleanup_versions_next_attempt_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    worker.tick().await?;
+    assert!(sqlx::query_scalar::<_, bool>("SELECT cleanup_versions_next_attempt_at>clock_timestamp() FROM control.platform_image_upload_sessions WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).fetch_one(&pool).await?);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.object_cleanup_ledger WHERE upload_id=$1"
+        )
+        .bind(session.upload_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    *objects
+        .versions
+        .lock()
+        .map_err(|_| "fixture lock poisoned")? = vec!["put-committed-after-empty-scan".to_owned()];
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET cleanup_versions_next_attempt_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    worker.tick().await?;
+    let versions: Vec<String> = sqlx::query_scalar(
+        "SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1",
+    )
+    .bind(session.upload_id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(versions, vec!["put-committed-after-empty-scan".to_owned()]);
+    assert!(
+        transport
+            .accepted
+            .lock()
+            .map_err(|_| "fixture lock poisoned")?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one worker exercises orphaned uploads with and without a committed PUT, then a delayed PUT and an accepted import"
+)]
+async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let transport = ImportTransportState {
+        accepted: Arc::new(Mutex::new(None)),
+        failures: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let (agent, _server, _authority, _temp) = worker_transport(transport.clone()).await?;
+    let worker = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control: control.clone(),
+        agent,
+        poll_interval: std::time::Duration::from_millis(10),
+    };
+    let actor = ActorId::new();
+    for (binding, uploaded) in [("orphan-put", true), ("orphan-empty", false)] {
+        *objects
+            .versions
+            .lock()
+            .map_err(|_| "fixture lock poisoned")? = if uploaded {
+            vec![FROZEN_OBJECT_VERSION.to_owned()]
+        } else {
+            Vec::new()
+        };
+        objects.available.store(uploaded, Ordering::SeqCst);
+        let session = control
+            .create_platform_image_upload(
+                actor,
+                &upload_request(binding),
+                &IdempotencyKey::parse(&format!("create-{binding}"))?,
+                import_now()?,
+            )
+            .await?;
+        sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
+            .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+        assert!(matches!(
+            control
+                .queue_platform_image_completion(
+                    actor,
+                    session.upload_id,
+                    &IdempotencyKey::parse(&format!("expired-{binding}"))?,
+                    import_now()?,
+                )
+                .await,
+            Err(control_service::ControlError::PlatformImageUploadExpired)
+        ));
+        worker.tick().await?;
+        let status = control
+            .platform_image_upload_status(session.upload_id)
+            .await?;
+        assert_eq!(status.state, PlatformImageUploadState::Failed);
+        assert_eq!(status.revision.get(), session.revision.get() + 1);
+        assert_eq!(
+            status.diagnostic.as_deref(),
+            Some("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")
+        );
+        let versions: Vec<String> = sqlx::query_scalar(
+            "SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1",
+        )
+        .bind(session.upload_id.as_uuid())
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            versions,
+            if uploaded {
+                vec![FROZEN_OBJECT_VERSION.to_owned()]
+            } else {
+                Vec::new()
+            }
+        );
+        assert!(
+            transport
+                .accepted
+                .lock()
+                .map_err(|_| "fixture lock poisoned")?
+                .is_none()
+        );
+        worker.tick().await?;
+        assert_eq!(
+            control
+                .platform_image_upload_status(session.upload_id)
+                .await?,
+            status
+        );
+        if !uploaded {
+            *objects
+                .versions
+                .lock()
+                .map_err(|_| "fixture lock poisoned")? = vec!["late-orphan-put".to_owned()];
+            sqlx::query("UPDATE control.platform_image_upload_sessions SET cleanup_versions_next_attempt_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1")
+                .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+            worker.tick().await?;
+            assert_eq!(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1",
+                )
+                .bind(session.upload_id.as_uuid())
+                .fetch_one(&pool)
+                .await?,
+                "late-orphan-put"
+            );
+            assert_eq!(
+                control
+                    .platform_image_upload_status(session.upload_id)
+                    .await?,
+                status
+            );
+        }
+    }
+    // Accepted completion owns the job independently of the PUT deadline.
+    let session = control
+        .create_platform_image_upload(
+            actor,
+            &upload_request("accepted-before-expiry"),
+            &IdempotencyKey::parse("create-accepted-expiry")?,
+            import_now()?,
+        )
+        .await?;
+    let key = IdempotencyKey::parse("complete-accepted-expiry")?;
+    let queued = control
+        .queue_platform_image_completion(actor, session.upload_id, &key, import_now()?)
+        .await?;
+    sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
+        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
+    assert_eq!(
+        control
+            .queue_platform_image_completion(actor, session.upload_id, &key, import_now()?)
+            .await?,
+        queued
+    );
+    objects.available.store(true, Ordering::SeqCst);
+    worker.tick().await?;
+    assert_eq!(
+        control
+            .platform_image_upload_status(session.upload_id)
+            .await?
+            .state,
+        PlatformImageUploadState::Importing
+    );
+    assert_eq!(
+        transport
+            .accepted
+            .lock()
+            .map_err(|_| "fixture lock poisoned")?
+            .as_ref()
+            .map(|request| request.upload_id),
+        Some(session.upload_id)
+    );
+    Ok(())
 }

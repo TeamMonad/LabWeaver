@@ -167,6 +167,20 @@ pub trait ImmutableObjectStore: Send + Sync {
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError>;
 
+    /// Resolves and verifies the current object version without downloading its body.
+    ///
+    /// This is used by durable import workers that persist the immutable reference before doing
+    /// the long-running Agent-side download. Implementations must verify size and media type from
+    /// the versioned metadata before returning the reference.
+    async fn freeze_current_reference(
+        &self,
+        _key: &str,
+        _expected_size: u64,
+        _media_type: &str,
+    ) -> Result<ArtifactRef, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
     /// Resolves and streams one current version into a temporary file.
     async fn freeze_current_file(
         &self,
@@ -174,6 +188,12 @@ pub trait ImmutableObjectStore: Send + Sync {
         _expected_size: u64,
         _media_type: &str,
     ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Lists immutable versions and delete markers for one validated, exact object key.
+    /// Implementations must filter returned keys for equality and follow all version pages.
+    async fn list_key_versions(&self, _key: &str) -> Result<Vec<String>, ObjectStoreError> {
         Err(ObjectStoreError::StreamingUnsupported)
     }
 
@@ -686,6 +706,115 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         self.read_verified(key, &expected).await
     }
 
+    async fn freeze_current_reference(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<ArtifactRef, ObjectStoreError> {
+        self.validate_key(key)?;
+        if expected_size == 0
+            || expected_size > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                if error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 404)
+                {
+                    ObjectStoreError::ObjectNotFound
+                } else {
+                    ObjectStoreError::ObjectUnavailable
+                }
+            })?;
+        let version = head
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        let observed_size = head
+            .content_length()
+            .and_then(|observed| u64::try_from(observed).ok());
+        if head.version_id().is_none_or(|observed| observed != version)
+            || observed_size != Some(expected_size)
+            || head
+                .content_type()
+                .is_none_or(|observed| observed != media_type)
+        {
+            return Err(ObjectStoreError::ObjectIdentityMismatch);
+        }
+        Ok(ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes: expected_size,
+            media_type: media_type.to_owned(),
+        })
+    }
+
+    async fn list_key_versions(&self, key: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.validate_key(key)?;
+        let mut key_marker = None;
+        let mut version_marker = None;
+        let mut versions = std::collections::BTreeSet::new();
+        loop {
+            let page = self
+                .client
+                .list_object_versions()
+                .bucket(&self.config.bucket)
+                .prefix(key)
+                .max_keys(1000)
+                .set_key_marker(key_marker.clone())
+                .set_version_id_marker(version_marker.clone())
+                .send()
+                .await
+                .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+            for version in page.versions() {
+                if version.key() == Some(key) {
+                    let id = version
+                        .version_id()
+                        .filter(|id| !id.is_empty() && *id != "null")
+                        .ok_or(ObjectStoreError::VersioningRequired)?;
+                    versions.insert(id.to_owned());
+                }
+            }
+            for marker in page.delete_markers() {
+                if marker.key() == Some(key) {
+                    let id = marker
+                        .version_id()
+                        .filter(|id| !id.is_empty() && *id != "null")
+                        .ok_or(ObjectStoreError::VersioningRequired)?;
+                    versions.insert(id.to_owned());
+                }
+            }
+            if page.is_truncated() != Some(true) {
+                break;
+            }
+            let next_key = page
+                .next_key_marker()
+                .ok_or(ObjectStoreError::ObjectUnavailable)?;
+            let next_version = page.next_version_id_marker().map(str::to_owned);
+            if !next_key.starts_with(key)
+                || (key_marker.as_deref() == Some(next_key) && version_marker == next_version)
+            {
+                return Err(ObjectStoreError::ObjectUnavailable);
+            }
+            key_marker = Some(next_key.to_owned());
+            version_marker = next_version;
+        }
+        Ok(versions.into_iter().collect())
+    }
+
     async fn freeze_current_file(
         &self,
         key: &str,
@@ -868,6 +997,9 @@ pub enum ObjectStoreError {
     /// Object could not be read.
     #[error("LW_OBJECT_UNAVAILABLE")]
     ObjectUnavailable,
+    /// A metadata lookup confirmed that the exact key does not exist.
+    #[error("LW_OBJECT_NOT_FOUND")]
+    ObjectNotFound,
     /// Stored bytes or metadata differ from the immutable manifest.
     #[error("LW_OBJECT_IDENTITY_MISMATCH")]
     ObjectIdentityMismatch,
@@ -899,6 +1031,7 @@ impl ObjectStoreError {
             Self::SigningFailed => "LW_OBJECT_UPLOAD_SIGNING_FAILED",
             Self::UploadFailed => "LW_OBJECT_UPLOAD_FAILED",
             Self::ObjectUnavailable => "LW_OBJECT_UNAVAILABLE",
+            Self::ObjectNotFound => "LW_OBJECT_NOT_FOUND",
             Self::ObjectIdentityMismatch => "LW_OBJECT_IDENTITY_MISMATCH",
             Self::DeleteFailed => "LW_OBJECT_CLEANUP_FAILED",
             Self::VersioningRequired => "LW_OBJECT_VERSIONING_REQUIRED",
@@ -1042,6 +1175,7 @@ mod tests {
             config,
             client: client.clone(),
         };
+        verify_exact_key_version_cleanup(&store).await?;
         let package_config = S3StoreConfig {
             binding: "minio-package-e2-v1".to_owned(),
             endpoint: endpoint.parse()?,
@@ -1266,6 +1400,89 @@ mod tests {
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    async fn verify_exact_key_version_cleanup(
+        store: &S3ImmutableObjectStore,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let key = "problem-packages/platform-image-uploads/paged-versions.tar";
+        let neighbor = format!("{key}.another-upload");
+        let unrelated = "problem-packages/another-upload/archive.tar";
+        for other_key in [&neighbor, unrelated] {
+            store
+                .client
+                .put_object()
+                .bucket(&store.config.bucket)
+                .key(other_key)
+                .content_type("application/x-tar")
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+                .send()
+                .await?;
+        }
+        let mut expected = std::collections::BTreeSet::new();
+        for _ in 0..1001 {
+            let response = store
+                .client
+                .put_object()
+                .bucket(&store.config.bucket)
+                .key(key)
+                .content_type("application/x-tar")
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+                .send()
+                .await?;
+            expected.insert(response.version_id().ok_or("version missing")?.to_owned());
+        }
+        let reference = store
+            .freeze_current_reference(key, 1, "application/x-tar")
+            .await?;
+        assert!(expected.contains(&reference.object_version));
+        assert_eq!(
+            store
+                .freeze_current_reference(key, 2, "application/x-tar")
+                .await,
+            Err(super::ObjectStoreError::ObjectIdentityMismatch)
+        );
+        let marker = store
+            .client
+            .delete_object()
+            .bucket(&store.config.bucket)
+            .key(key)
+            .send()
+            .await?;
+        expected.insert(
+            marker
+                .version_id()
+                .ok_or("delete marker missing")?
+                .to_owned(),
+        );
+        assert_eq!(
+            store
+                .freeze_current_reference(key, 1, "application/x-tar")
+                .await,
+            Err(super::ObjectStoreError::ObjectNotFound)
+        );
+        let versions = store.list_key_versions(key).await?;
+        let observed = versions
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(observed.len(), expected.len(), "version count differs");
+        assert!(
+            expected.difference(&observed).next().is_none(),
+            "reviewed version missing from enumeration"
+        );
+        assert_eq!(
+            store.list_key_versions("unowned-key").await,
+            Err(super::ObjectStoreError::ObjectIdentityInvalid)
+        );
+        for version in versions {
+            store.delete_orphan(key, &version).await?;
+        }
+        assert!(store.list_key_versions(key).await?.is_empty());
+        for other_key in [&neighbor, unrelated] {
+            assert_eq!(store.list_key_versions(other_key).await?.len(), 1);
+        }
         Ok(())
     }
 }

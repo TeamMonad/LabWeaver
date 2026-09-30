@@ -2153,6 +2153,7 @@ impl PostgresAgentRunStore {
             || existing.execution_generation != intent.execution_generation
             || existing.namespace != intent.namespace
             || existing.workload_name != intent.workload_name
+            || existing.binding != intent.binding
         {
             return Err(AgentRunStoreError::IdentityMismatch);
         }
@@ -2260,6 +2261,21 @@ impl PostgresAgentRunStore {
         &self,
         intent: &SandboxAttemptIntent,
     ) -> Result<(), AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        let state: String = row
+            .try_get("state")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if matches!(state.as_str(), "cleanup_confirmed" | "released") {
+            return transaction
+                .commit()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed);
+        }
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET state='cleanup_confirmed', updated_at=now() \
@@ -2269,14 +2285,17 @@ impl PostgresAgentRunStore {
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .rows_affected();
         if affected != 1 {
             return Err(AgentRunStoreError::StateConflict);
         }
-        Ok(())
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
     }
 
     /// Marks the Resource reservation released after confirmed cleanup.
@@ -2288,6 +2307,21 @@ impl PostgresAgentRunStore {
         &self,
         intent: &SandboxAttemptIntent,
     ) -> Result<(), AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        let state: String = row
+            .try_get("state")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if state == "released" {
+            return transaction
+                .commit()
+                .await
+                .map_err(|_| AgentRunStoreError::PersistenceFailed);
+        }
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET state='released', updated_at=now() \
@@ -2296,14 +2330,300 @@ impl PostgresAgentRunStore {
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .rows_affected();
         if affected != 1 {
             return Err(AgentRunStoreError::StateConflict);
         }
-        Ok(())
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
+    }
+
+    /// Freezes one metering payload before deleting the attempt's workload. A retry must reuse
+    /// the exact payload, including event ids and measurement boundaries.
+    pub async fn checkpoint_sandbox_usage(
+        &self,
+        intent: &SandboxAttemptIntent,
+        payload: &serde_json::Value,
+    ) -> Result<(), AgentRunStoreError> {
+        let deliveries: Vec<contracts::http::RecordResourceUsageRequest> =
+            serde_json::from_value(payload.clone())
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let binding: contracts::execution::TaskExecutionBinding =
+            serde_json::from_value(intent.binding.clone())
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if deliveries.is_empty()
+            || deliveries.len() > 2
+            || deliveries.iter().any(|delivery| {
+                delivery.project_id != binding.project_id
+                    || delivery.request_id != binding.resource_request_id
+                    || delivery.lease_id != Some(binding.lease_id)
+                    || delivery.measured_until <= delivery.measured_from
+                    || delivery.measurement.validate().is_err()
+            })
+            || (deliveries.len() == 2
+                && deliveries[0].source_event_id == deliveries[1].source_event_id)
+        {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        let state: String = row
+            .try_get("state")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if !matches!(
+            state.as_str(),
+            "submitted" | "terminal" | "failed" | "cleanup_confirmed" | "released"
+        ) {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let existing: Option<serde_json::Value> = row
+            .try_get("usage_payload")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if let Some(existing) = existing {
+            if existing != *payload {
+                return Err(AgentRunStoreError::StateConflict);
+            }
+        } else {
+            sqlx::query(
+                "UPDATE agent.authoring_sandbox_attempts \
+                 SET usage_payload=$4,usage_checkpointed_at=now(),usage_diagnostic_code=NULL,updated_at=now() \
+                 WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+            )
+            .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt)).bind(payload)
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
+    }
+
+    /// Loads the immutable delivery intent with its acknowledgement, fenced to the complete
+    /// attempt identity rather than only the parent run and track.
+    pub async fn load_sandbox_usage(
+        &self,
+        intent: &SandboxAttemptIntent,
+    ) -> Result<Option<(serde_json::Value, bool)>, AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        let payload: Option<serde_json::Value> = row
+            .try_get("usage_payload")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let delivered: bool = row
+            .try_get("usage_delivered")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(payload.map(|payload| (payload, delivered)))
+    }
+
+    /// Saves a known terminal observation before cleanup when Resource is unavailable. The
+    /// returned observation and fallback measurement boundary always come from the first commit.
+    pub async fn checkpoint_sandbox_usage_observation(
+        &self,
+        intent: &SandboxAttemptIntent,
+        observation: &contracts::execution::ExecutionObservation,
+        measured_until: UtcTimestamp,
+    ) -> Result<(contracts::execution::ExecutionObservation, UtcTimestamp), AgentRunStoreError>
+    {
+        observation
+            .validate()
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if !observation.state.is_terminal()
+            || observation
+                .started_at
+                .zip(observation.terminated_at)
+                .is_none()
+            || observation
+                .terminated_at
+                .is_some_and(|terminated| measured_until < terminated)
+        {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let value =
+            serde_json::to_value(observation).map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        let state: String = row
+            .try_get("state")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if !matches!(
+            state.as_str(),
+            "submitted" | "terminal" | "failed" | "cleanup_confirmed" | "released"
+        ) {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let existing: Option<serde_json::Value> = row
+            .try_get("usage_observation")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let fixed_until = if let Some(existing) = existing {
+            if existing != value {
+                return Err(AgentRunStoreError::StateConflict);
+            }
+            UtcTimestamp::from_utc(
+                row.try_get("usage_observed_at")
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            )
+            .map_err(|_| AgentRunStoreError::InvalidContract)?
+        } else {
+            sqlx::query(
+                "UPDATE agent.authoring_sandbox_attempts \
+                 SET usage_observation=$4,usage_observed_at=$5,usage_diagnostic_code=NULL,updated_at=now() \
+                 WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+            )
+            .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt)).bind(value).bind(measured_until.get())
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            measured_until
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok((observation.clone(), fixed_until))
+    }
+
+    /// Loads the saved observation and its fixed fallback boundary after objects have gone.
+    pub async fn load_sandbox_usage_observation(
+        &self,
+        intent: &SandboxAttemptIntent,
+    ) -> Result<
+        Option<(contracts::execution::ExecutionObservation, UtcTimestamp)>,
+        AgentRunStoreError,
+    > {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        let existing: Option<serde_json::Value> = row
+            .try_get("usage_observation")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let result = existing
+            .map(|value| {
+                let observation = serde_json::from_value(value)
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let until = UtcTimestamp::from_utc(
+                    row.try_get("usage_observed_at")
+                        .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                )
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                Ok::<_, AgentRunStoreError>((observation, until))
+            })
+            .transpose()?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(result)
+    }
+
+    /// Acknowledges all fixed usage deliveries. Resource release is tracked independently.
+    pub async fn mark_sandbox_usage_delivered(
+        &self,
+        intent: &SandboxAttemptIntent,
+    ) -> Result<(), AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        if row
+            .try_get::<Option<serde_json::Value>, _>("usage_payload")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            .is_none()
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        sqlx::query(
+            "UPDATE agent.authoring_sandbox_attempts \
+             SET usage_delivered=true,usage_diagnostic_code=NULL,updated_at=now() \
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+        )
+        .bind(intent.run_id.as_uuid())
+        .bind(track_name(intent.track))
+        .bind(i64::from(intent.attempt))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
+    }
+
+    /// Keeps an explicit review diagnostic when a historical attempt has no recoverable timing.
+    /// This never replaces an already fixed delivery with a weaker measurement.
+    pub async fn mark_sandbox_usage_unavailable(
+        &self,
+        intent: &SandboxAttemptIntent,
+        diagnostic: &str,
+    ) -> Result<(), AgentRunStoreError> {
+        if diagnostic.is_empty() || diagnostic.len() > 128 {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let row = load_sandbox_usage_row(&mut transaction, intent).await?;
+        if row
+            .try_get::<Option<serde_json::Value>, _>("usage_payload")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            .is_some()
+            || row
+                .try_get::<Option<serde_json::Value>, _>("usage_observation")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+                .is_some()
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let existing: Option<String> = row
+            .try_get("usage_diagnostic_code")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        if existing
+            .as_deref()
+            .is_some_and(|existing| existing != diagnostic)
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        sqlx::query(
+            "UPDATE agent.authoring_sandbox_attempts \
+             SET usage_diagnostic_code=$4,updated_at=now() \
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+        )
+        .bind(intent.run_id.as_uuid())
+        .bind(track_name(intent.track))
+        .bind(i64::from(intent.attempt))
+        .bind(diagnostic)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
     }
 
     /// Loads one durable attempt checkpoint for recovery.
@@ -2373,6 +2693,46 @@ impl PostgresAgentRunStore {
                 .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
         }))
     }
+}
+
+async fn load_sandbox_usage_row(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    intent: &SandboxAttemptIntent,
+) -> Result<sqlx::postgres::PgRow, AgentRunStoreError> {
+    let row = sqlx::query(
+        "SELECT task_run_id,execution_generation,namespace,workload_name,binding,state,usage_payload,usage_delivered,usage_diagnostic_code,usage_observation,usage_observed_at \
+         FROM agent.authoring_sandbox_attempts \
+         WHERE run_id=$1 AND track=$2 AND attempt_number=$3 FOR UPDATE",
+    )
+    .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt))
+    .fetch_optional(&mut **transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?
+    .ok_or(AgentRunStoreError::StateConflict)?;
+    let generation = i64::try_from(intent.execution_generation)
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    if row
+        .try_get::<uuid::Uuid, _>("task_run_id")
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+        != intent.task_run_id
+        || row
+            .try_get::<i64, _>("execution_generation")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            != generation
+        || row
+            .try_get::<String, _>("namespace")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            != intent.namespace
+        || row
+            .try_get::<String, _>("workload_name")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            != intent.workload_name
+        || row
+            .try_get::<serde_json::Value, _>("binding")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            != intent.binding
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    Ok(row)
 }
 
 /// Coordinates reservation, exactly-one execution ownership and terminal persistence.

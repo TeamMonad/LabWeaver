@@ -55,7 +55,7 @@ pub struct OciLimits {
 impl Default for OciLimits {
     fn default() -> Self {
         Self {
-            max_archive_bytes: 2 * 1024 * 1024 * 1024,
+            max_archive_bytes: 5_000_000_000,
             max_total_bytes: 8 * 1024 * 1024 * 1024,
             max_blobs: 512,
         }

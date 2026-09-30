@@ -744,12 +744,32 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::PlatformImageUploadSession
     );
     document!(
+        "schemas/contracts/v1/http/platform-image-upload-status.schema.json",
+        crate::http::PlatformImageUploadStatus
+    );
+    document!(
         "schemas/contracts/v1/http/complete-platform-image-upload-request.schema.json",
         crate::http::CompletePlatformImageUploadRequest
     );
     document!(
+        "schemas/contracts/v1/http/cancel-platform-image-upload-request.schema.json",
+        crate::http::CancelPlatformImageUploadRequest
+    );
+    document!(
         "schemas/contracts/v1/http/internal-platform-image-import-request.schema.json",
         crate::http::InternalPlatformImageImportRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-enqueue-request.schema.json",
+        crate::http::InternalPlatformImageImportEnqueueRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-job-status.schema.json",
+        crate::http::InternalPlatformImageImportJobStatus
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-cancel-request.schema.json",
+        crate::http::InternalPlatformImageImportCancelRequest
     );
 
     document!(
@@ -1204,6 +1224,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"PlatformImageCatalog": contract_ref("http/platform-image-catalog")
                 ,"PlatformImageCatalogView": contract_ref("http/platform-image-catalog-view")
                 ,"PlatformImageUploadSession": contract_ref("http/platform-image-upload-session")
+                ,"PlatformImageUploadStatus": contract_ref("http/platform-image-upload-status")
+                ,"InternalPlatformImageImportJobStatus": contract_ref("http/internal-platform-image-import-job-status")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -1536,7 +1558,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "disablePlatformImage" => "http/disable-platform-image-request",
         "createPlatformImageUpload" => "http/create-platform-image-upload-request",
         "completePlatformImageUpload" => "http/complete-platform-image-upload-request",
-        "importPlatformImage" => "http/internal-platform-image-import-request",
+        "cancelPlatformImageUpload" => "http/cancel-platform-image-upload-request",
+        "enqueuePlatformImageImport" => "http/internal-platform-image-import-enqueue-request",
+        "cancelPlatformImageImportJob" => "http/internal-platform-image-import-cancel-request",
         _ => return None,
     };
     Some(contract_ref(name))
@@ -1671,12 +1695,19 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("gateway-session")
         }
         "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
-        "registerPlatformImage"
-        | "repinPlatformImage"
-        | "disablePlatformImage"
-        | "completePlatformImageUpload" => contract_ref("http/platform-image-entry-view"),
+        "getPlatformImageUpload" => contract_ref("http/platform-image-upload-status"),
+        "registerPlatformImage" | "repinPlatformImage" | "disablePlatformImage" => {
+            contract_ref("http/platform-image-entry-view")
+        }
+        "completePlatformImageUpload" | "cancelPlatformImageUpload" => {
+            contract_ref("http/platform-image-upload-status")
+        }
         "createPlatformImageUpload" => contract_ref("http/platform-image-upload-session"),
-        "importPlatformImage" => contract_ref("http/platform-image-entry"),
+        "enqueuePlatformImageImport"
+        | "getPlatformImageImportJob"
+        | "cancelPlatformImageImportJob" => {
+            contract_ref("http/internal-platform-image-import-job-status")
+        }
         id if [
             "createEnvironmentTemplateRelease",
             "createEnvironment",

@@ -8,10 +8,11 @@
 pub mod api;
 pub mod clients;
 pub mod messaging;
+pub mod platform_image_jobs;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use artifact_store::{ImmutableObjectStore, ObjectStoreError};
 use contracts::authoring::{
@@ -29,15 +30,17 @@ use contracts::events::{
 };
 use contracts::http::{
     AddProjectMembershipRequest, AgentWorkExecutionIntentMetadata, ApproveWorkConfigurationRequest,
-    AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery, CandidateBuildState,
-    CandidateBuildView, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
+    AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery,
+    CancelPlatformImageUploadRequest, CandidateBuildState, CandidateBuildView,
+    CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest, EnvironmentCandidateView,
     EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactKind,
     GeneratedArtifactRecord, IdempotencyKey, InternalPublishEvaluationReleaseRequest,
     PlatformImageEntry, PlatformImageKind, PlatformImageStatus, PlatformImageUploadSession,
-    PlatformImageUploadTarget, ProblemPackageUploadFile, ProblemPackageUploadSession,
-    ProblemPackageUploadTarget, RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
+    PlatformImageUploadState, PlatformImageUploadStatus, PlatformImageUploadTarget,
+    ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
+    RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
     WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
 };
 use contracts::supply_chain::{
@@ -60,13 +63,13 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 use time::Duration;
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 const CREATE_UPLOAD: &str = "control_create_problem_package_upload_v1";
 const COMPLETE_UPLOAD: &str = "control_complete_problem_package_upload_v1";
 const CREATE_PLATFORM_IMAGE_UPLOAD: &str = "control_create_platform_image_upload_v1";
 const COMPLETE_PLATFORM_IMAGE_UPLOAD: &str = "control_complete_platform_image_upload_v1";
+const CANCEL_PLATFORM_IMAGE_UPLOAD: &str = "control_cancel_platform_image_upload_v1";
 const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_WORK_RELEASE: &str = "control_create_work_environment_template_release_v1";
@@ -83,17 +86,6 @@ const BUILD_REQUEST_SUBJECT: &str = subjects::AGENT_BUILD_REQUESTED;
 const RELEASE_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED;
 const WITHDRAWAL_SUBJECT: &str = subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN;
 const AUTHORING_APPROVAL_SUBJECT: &str = subjects::AUTHORING_APPROVAL_COMPLETED;
-
-// Completing an image stages an archive on ephemeral storage while its immutable identity is
-// verified. Serialize this bounded heavy path per Control process before it claims a database
-// lease, so waiting requests do not hold a transaction or consume an expiring completion lease.
-static PLATFORM_IMAGE_COMPLETION_GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-fn platform_image_completion_gate() -> Arc<Semaphore> {
-    PLATFORM_IMAGE_COMPLETION_GATE
-        .get_or_init(|| Arc::new(Semaphore::new(1)))
-        .clone()
-}
 
 /// Non-secret Control behavior configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1519,7 +1511,10 @@ impl ControlService {
         )
         .bind(&request.archive_media_type)
         .bind(&key)
-        .bind(request.disk_format.map(disk_format_str))
+        .bind(request.disk_format.map(|format| match format {
+            VirtualMachineDiskFormat::Raw => "raw",
+            VirtualMachineDiskFormat::Qcow2 => "qcow2",
+        }))
         .bind(request.disk_path.as_deref())
         .bind(
             request
@@ -1545,24 +1540,21 @@ impl ControlService {
         Ok(session)
     }
 
-    /// Claims one completion lease and freezes the uploaded archive at one exact object version.
+    /// Queues one platform image import without performing object-store or downstream I/O.
     ///
-    /// A retry that reclaims an expired lease with the same idempotency key re-reads the version
-    /// recorded by the first attempt. A completed import is never replayed: the Agent catalog is
-    /// the only authority for the resulting entry and the administrator re-reads the listing.
-    pub async fn begin_platform_image_completion(
+    /// The completion idempotency record stores the same public status returned to the caller, so
+    /// a retry after the HTTP request completed cannot allocate a second worker or operation.
+    pub async fn queue_platform_image_completion(
         &self,
         actor_id: ActorId,
         upload_id: UploadSessionId,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
-    ) -> Result<PlatformImageImportStaging, ControlError> {
-        let gate = platform_image_completion_gate();
-        let _permit = gate
-            .acquire()
-            .await
-            .map_err(|_| ControlError::PersistenceFailed)?;
-        let request_hash = canonical_hash(&json!({"actorId": actor_id, "uploadId": upload_id}))?;
+    ) -> Result<PlatformImageUploadStatus, ControlError> {
+        let request_hash = canonical_hash(&json!({
+            "actorId": actor_id,
+            "uploadId": upload_id,
+        }))?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         match IdempotencyStore::reserve(
             &mut transaction,
@@ -1574,17 +1566,19 @@ impl ControlService {
         .await
         .map_err(|_| ControlError::PersistenceFailed)?
         {
-            IdempotencyDecision::Replay(_) => {
-                return Err(ControlError::PlatformImageUploadStateConflict);
+            IdempotencyDecision::Replay(value) => {
+                transaction.rollback().await.map_err(db)?;
+                return serde_json::from_value(value)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch);
             }
             IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
-            IdempotencyDecision::InProgress | IdempotencyDecision::Reserved => {}
+            IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
+            IdempotencyDecision::Reserved => {}
         }
         let row = sqlx::query(
-            "SELECT kind,binding,target_reference,trust_revision,reason,archive_bytes, \
-                    archive_media_type,object_key,object_version,artifact_id,state, \
-                    disk_format,disk_path,capacity_bytes, \
-                    completion_idempotency_key,completion_request_sha256,completion_lease_expires_at \
+            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id, \
+                    completion_idempotency_key,completion_request_sha256, \
+                    expires_at<=clock_timestamp() AS expired \
              FROM control.platform_image_upload_sessions WHERE upload_id=$1 FOR UPDATE",
         )
         .bind(upload_id.as_uuid())
@@ -1593,215 +1587,149 @@ impl ControlService {
         .map_err(db)?
         .ok_or(ControlError::PlatformImageUploadNotFound)?;
         let state: String = row.try_get("state").map_err(db)?;
-        let stored_key: Option<String> = row.try_get("completion_idempotency_key").map_err(db)?;
-        let stored_hash: Option<String> = row.try_get("completion_request_sha256").map_err(db)?;
-        let lease_expires_at: Option<time::OffsetDateTime> =
-            row.try_get("completion_lease_expires_at").map_err(db)?;
-        let resuming = stored_key.as_deref() == Some(idempotency_key.as_str())
-            && stored_hash.as_deref() == Some(request_hash.to_string().as_str());
-        match state.as_str() {
-            "pending" => {}
-            "importing"
-                if resuming && lease_expires_at.is_some_and(|expires| expires <= now.get()) => {}
-            "importing" => return Err(ControlError::OperationInProgress),
-            _ => return Err(ControlError::PlatformImageUploadStateConflict),
+        if (state == "pending" && row.try_get::<bool, _>("expired").map_err(db)?)
+            || row
+                .try_get::<Option<String>, _>("terminal_diagnostic")
+                .map_err(db)?
+                .as_deref()
+                == Some("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")
+        {
+            return Err(ControlError::PlatformImageUploadExpired);
         }
-        let lease_token = Uuid::now_v7();
-        let lease_seconds = i64::try_from(self.config.completion_lease_seconds)
-            .map_err(|_| ControlError::ConfigurationInvalid)?;
-        sqlx::query(
+        if state != "pending" {
+            return Err(ControlError::PlatformImageUploadStateConflict);
+        }
+        let updated = sqlx::query(
             "UPDATE control.platform_image_upload_sessions \
-             SET state='importing',completion_idempotency_key=$2, \
-                 completion_request_sha256=$3,completion_lease_token=$4, \
-                 completion_lease_expires_at=date_trunc('milliseconds',clock_timestamp())+($5*interval '1 second'), \
-                 updated_at=$6 \
-             WHERE upload_id=$1 AND state IN ('pending','importing')",
+             SET state='queued',completion_idempotency_key=$2, \
+                 completion_request_sha256=$3,revision=revision+1, \
+                 cancel_requested=false,updated_at=$4 \
+             WHERE upload_id=$1 AND state='pending' AND expires_at>clock_timestamp() \
+             RETURNING upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id",
         )
         .bind(upload_id.as_uuid())
         .bind(idempotency_key.as_str())
         .bind(request_hash.to_string())
-        .bind(lease_token)
-        .bind(lease_seconds)
         .bind(now.get())
-        .execute(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(db)?;
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadExpired)?;
+        let status = platform_image_upload_status_from_row(&updated)?;
+        let value = serde_json::to_value(&status).map_err(|_| ControlError::ContractInvalid)?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Control,
+            COMPLETE_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            &value,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?;
         transaction.commit().await.map_err(db)?;
+        Ok(status)
+    }
 
-        let object_key: String = row.try_get("object_key").map_err(db)?;
-        let archive_bytes = u64::try_from(row.try_get::<i64, _>("archive_bytes").map_err(db)?)
-            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        let archive_media_type: String = row.try_get("archive_media_type").map_err(db)?;
-        let stored_version: Option<String> = row.try_get("object_version").map_err(db)?;
-        let stored_artifact: Option<Uuid> = row.try_get("artifact_id").map_err(db)?;
-        let verified_reference = match (stored_version, stored_artifact) {
-            (Some(version), Some(artifact_id)) => {
-                let expected = contracts::ArtifactRef {
-                    artifact_id: artifact_id_from_uuid(artifact_id)?,
-                    store_binding: self.objects.binding().to_owned(),
-                    object_version: version,
-                    size_bytes: archive_bytes,
-                    media_type: archive_media_type,
-                };
-                self.objects
-                    .read_verified_file(&object_key, &expected)
-                    .await
-                    .map(|file| file.reference().clone())
-                    .map_err(ControlError::from)
+    /// Reads the current public status of one platform image upload.
+    pub async fn platform_image_upload_status(
+        &self,
+        upload_id: UploadSessionId,
+    ) -> Result<PlatformImageUploadStatus, ControlError> {
+        let row = sqlx::query(
+            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id \
+             FROM control.platform_image_upload_sessions WHERE upload_id=$1",
+        )
+        .bind(upload_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadNotFound)?;
+        platform_image_upload_status_from_row(&row)
+    }
+
+    /// Requests cancellation of one queued or running import using the public revision fence.
+    pub async fn cancel_platform_image_upload(
+        &self,
+        actor_id: ActorId,
+        upload_id: UploadSessionId,
+        request: &CancelPlatformImageUploadRequest,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+    ) -> Result<PlatformImageUploadStatus, ControlError> {
+        let request_hash = canonical_hash(&json!({
+            "actorId": actor_id,
+            "uploadId": upload_id,
+            "request": request,
+        }))?;
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Control,
+            CANCEL_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                transaction.rollback().await.map_err(db)?;
+                return serde_json::from_value(value)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch);
             }
-            (None, None) => self
-                .objects
-                .freeze_current_file(&object_key, archive_bytes, &archive_media_type)
-                .await
-                .map(|file| file.reference().clone())
-                .map_err(ControlError::from),
-            _ => Err(ControlError::PersistenceIdentityMismatch),
-        }?;
+            IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        let row = sqlx::query(
+            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id \
+             FROM control.platform_image_upload_sessions WHERE upload_id=$1 FOR UPDATE",
+        )
+        .bind(upload_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadNotFound)?;
+        let revision = Revision::new(
+            u64::try_from(row.try_get::<i64, _>("revision").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+        )
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if revision != request.expected_revision {
+            return Err(ControlError::RevisionConflict);
+        }
+        let state: String = row.try_get("state").map_err(db)?;
+        let next_state = match state.as_str() {
+            "pending" | "queued" => "queued",
+            "freezing" | "importing" | "cancelling" => "cancelling",
+            _ => return Err(ControlError::PlatformImageUploadStateConflict),
+        };
         let updated = sqlx::query(
             "UPDATE control.platform_image_upload_sessions \
-             SET artifact_id=$3,object_version=$4,updated_at=$5 \
-             WHERE upload_id=$1 AND state='importing' AND completion_lease_token=$2 \
-               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
-               AND (artifact_id IS NULL OR (artifact_id=$3 AND object_version=$4))",
+             SET state=$2,cancel_requested=true,revision=revision+1,updated_at=$3 \
+             WHERE upload_id=$1 AND revision=$4 \
+             RETURNING upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id",
         )
         .bind(upload_id.as_uuid())
-        .bind(lease_token)
-        .bind(verified_reference.artifact_id.as_uuid())
-        .bind(&verified_reference.object_version)
+        .bind(next_state)
         .bind(now.get())
-        .execute(&self.pool)
+        .bind(i64::try_from(revision.get()).map_err(|_| ControlError::ContractInvalid)?)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(db)?;
-        if updated.rows_affected() != 1 {
-            return Err(ControlError::OperationLeaseLost);
-        }
-        Ok(PlatformImageImportStaging {
-            kind: platform_image_kind_from_str(&row.try_get::<String, _>("kind").map_err(db)?)?,
-            binding: row.try_get("binding").map_err(db)?,
-            target_reference: row.try_get("target_reference").map_err(db)?,
-            trust_revision: u64::try_from(row.try_get::<i64, _>("trust_revision").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-            reason: row.try_get("reason").map_err(db)?,
-            disk_format: row
-                .try_get::<Option<String>, _>("disk_format")
-                .map_err(db)?
-                .map(|format| parse_disk_format(&format))
-                .transpose()?,
-            disk_path: row.try_get("disk_path").map_err(db)?,
-            capacity_bytes: row
-                .try_get::<Option<i64>, _>("capacity_bytes")
-                .map_err(db)?
-                .map(|capacity| {
-                    u64::try_from(capacity).map_err(|_| ControlError::PersistenceIdentityMismatch)
-                })
-                .transpose()?,
-            archive: verified_reference,
-            archive_object_key: object_key,
-            actor_id,
-        })
-    }
-
-    /// Marks one staging session imported and schedules the staged archive for deletion.
-    pub async fn finish_platform_image_import(
-        &self,
-        upload_id: UploadSessionId,
-        catalog_id: PlatformImageId,
-        now: UtcTimestamp,
-    ) -> Result<(), ControlError> {
-        let mut transaction = self.pool.begin().await.map_err(db)?;
-        let row = sqlx::query(
-            "UPDATE control.platform_image_upload_sessions \
-             SET state='imported',imported_catalog_id=$2,completion_lease_token=NULL, \
-                 completion_lease_expires_at=NULL,updated_at=$3 \
-             WHERE upload_id=$1 AND state='importing' \
-               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
-             RETURNING object_key,object_version,completion_idempotency_key",
-        )
-        .bind(upload_id.as_uuid())
-        .bind(catalog_id.as_uuid())
-        .bind(now.get())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::OperationLeaseLost)?;
-        let object_key: String = row.try_get("object_key").map_err(db)?;
-        let object_version: Option<String> = row.try_get("object_version").map_err(db)?;
-        schedule_staged_archive_cleanup(
+        let status = platform_image_upload_status_from_row(&updated)?;
+        let value = serde_json::to_value(&status).map_err(|_| ControlError::ContractInvalid)?;
+        IdempotencyStore::complete(
             &mut transaction,
-            upload_id,
-            &object_key,
-            object_version.as_deref(),
+            Domain::Control,
+            CANCEL_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            &value,
         )
-        .await?;
-        if let Some(completion_key) = row
-            .try_get::<Option<String>, _>("completion_idempotency_key")
-            .map_err(db)?
-        {
-            IdempotencyStore::complete(
-                &mut transaction,
-                Domain::Control,
-                COMPLETE_PLATFORM_IMAGE_UPLOAD,
-                &completion_key,
-                &json!({"uploadId": upload_id, "catalogId": catalog_id}),
-            )
-            .await
-            .map_err(|_| ControlError::PersistenceFailed)?;
-        }
-        transaction.commit().await.map_err(db)?;
-        Ok(())
-    }
-
-    /// Records one terminal import failure and schedules any frozen version for deletion.
-    ///
-    /// The upstream diagnostic from the Agent authority is stored verbatim so an administrator
-    /// can distinguish a registry rejection from a conflicting catalog binding.
-    pub async fn fail_platform_image_import(
-        &self,
-        upload_id: UploadSessionId,
-        diagnostic: &str,
-        now: UtcTimestamp,
-    ) -> Result<(), ControlError> {
-        let mut transaction = self.pool.begin().await.map_err(db)?;
-        let row = sqlx::query(
-            "UPDATE control.platform_image_upload_sessions \
-             SET state='failed',terminal_diagnostic=$2,completion_lease_token=NULL, \
-                 completion_lease_expires_at=NULL,updated_at=$3 \
-             WHERE upload_id=$1 AND state='importing' \
-               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
-             RETURNING object_key,object_version,completion_idempotency_key",
-        )
-        .bind(upload_id.as_uuid())
-        .bind(diagnostic)
-        .bind(now.get())
-        .fetch_optional(&mut *transaction)
         .await
-        .map_err(db)?
-        .ok_or(ControlError::OperationLeaseLost)?;
-        let object_key: String = row.try_get("object_key").map_err(db)?;
-        let object_version: Option<String> = row.try_get("object_version").map_err(db)?;
-        schedule_staged_archive_cleanup(
-            &mut transaction,
-            upload_id,
-            &object_key,
-            object_version.as_deref(),
-        )
-        .await?;
-        if let Some(completion_key) = row
-            .try_get::<Option<String>, _>("completion_idempotency_key")
-            .map_err(db)?
-        {
-            sqlx::query(
-                "DELETE FROM control.idempotency_ledger \
-                 WHERE operation=$1 AND idempotency_key=$2 AND state='in_progress'",
-            )
-            .bind(COMPLETE_PLATFORM_IMAGE_UPLOAD)
-            .bind(completion_key)
-            .execute(&mut *transaction)
-            .await
-            .map_err(db)?;
-        }
+        .map_err(|_| ControlError::PersistenceFailed)?;
         transaction.commit().await.map_err(db)?;
-        Ok(())
+        Ok(status)
     }
 
     /// Counts non-withdrawn Environment template releases per pinned image digest.
@@ -6186,31 +6114,49 @@ fn validate_upload_request(
     Ok(())
 }
 
-/// Verified platform image archive staged by Control for the Agent import.
-#[derive(Clone, Debug)]
-pub struct PlatformImageImportStaging {
-    /// Reviewed platform image kind.
-    pub kind: PlatformImageKind,
-    /// Catalog binding the imported image is registered under.
-    pub binding: String,
-    /// Reviewed `<registry-host>/<repository>:<tag>` the archive is tagged as.
-    pub target_reference: String,
-    /// Exact frozen object identity of the uploaded archive.
-    pub archive: contracts::ArtifactRef,
-    /// Object-store key of the frozen archive.
-    pub archive_object_key: String,
-    /// Reviewed supply-chain trust revision.
-    pub trust_revision: u64,
-    /// Administrator requesting the import.
-    pub actor_id: ActorId,
-    /// Administrator reason recorded with the catalog entry.
-    pub reason: String,
-    /// Declared virtual-machine disk encoding; absent for a container or registry-reference upload.
-    pub disk_format: Option<VirtualMachineDiskFormat>,
-    /// Relative path of the disk inside the frozen archive, when one was declared.
-    pub disk_path: Option<String>,
-    /// Declared virtual-machine disk capacity in bytes, when one was declared.
-    pub capacity_bytes: Option<u64>,
+fn platform_image_upload_status_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<PlatformImageUploadStatus, ControlError> {
+    let upload_id =
+        UploadSessionId::from_str(&row.try_get::<Uuid, _>("upload_id").map_err(db)?.to_string())
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
+        "pending" => PlatformImageUploadState::Pending,
+        "queued" if row.try_get::<bool, _>("cancel_requested").map_err(db)? => {
+            PlatformImageUploadState::Cancelling
+        }
+        "queued" => PlatformImageUploadState::Queued,
+        "freezing" => PlatformImageUploadState::Freezing,
+        "importing" => PlatformImageUploadState::Importing,
+        "cancelling" => PlatformImageUploadState::Cancelling,
+        "imported" => PlatformImageUploadState::Imported,
+        "failed" => PlatformImageUploadState::Failed,
+        "cancelled" => PlatformImageUploadState::Cancelled,
+        _ => return Err(ControlError::PersistenceIdentityMismatch),
+    };
+    let revision = Revision::new(
+        u64::try_from(row.try_get::<i64, _>("revision").map_err(db)?)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+    )
+    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let catalog_id = row
+        .try_get::<Option<Uuid>, _>("imported_catalog_id")
+        .map(|value| {
+            value
+                .map(|id| {
+                    PlatformImageId::from_str(&id.to_string())
+                        .map_err(|_| ControlError::PersistenceIdentityMismatch)
+                })
+                .transpose()
+        })
+        .map_err(db)??;
+    Ok(PlatformImageUploadStatus {
+        upload_id,
+        state,
+        revision,
+        diagnostic: row.try_get("terminal_diagnostic").map_err(db)?,
+        catalog_id,
+    })
 }
 
 fn platform_image_upload_key(prefix: &str, upload_id: UploadSessionId) -> String {
@@ -6220,7 +6166,7 @@ fn platform_image_upload_key(prefix: &str, upload_id: UploadSessionId) -> String
     )
 }
 
-fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, ControlError> {
+pub(crate) fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, ControlError> {
     match value {
         "container" => Ok(PlatformImageKind::Container),
         "virtual_machine" => Ok(PlatformImageKind::VirtualMachine),
@@ -6228,14 +6174,7 @@ fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, Contro
     }
 }
 
-const fn disk_format_str(format: VirtualMachineDiskFormat) -> &'static str {
-    match format {
-        VirtualMachineDiskFormat::Qcow2 => "qcow2",
-        VirtualMachineDiskFormat::Raw => "raw",
-    }
-}
-
-fn parse_disk_format(value: &str) -> Result<VirtualMachineDiskFormat, ControlError> {
+pub(crate) fn parse_disk_format(value: &str) -> Result<VirtualMachineDiskFormat, ControlError> {
     match value {
         "qcow2" => Ok(VirtualMachineDiskFormat::Qcow2),
         "raw" => Ok(VirtualMachineDiskFormat::Raw),
@@ -6249,6 +6188,7 @@ fn validate_platform_image_upload(
     if !contracts::http::valid_platform_image_binding(&request.binding)
         || request.archive_media_type != contracts::http::PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE
         || request.archive_bytes == 0
+        || request.archive_bytes > contracts::http::PLATFORM_IMAGE_ARCHIVE_MAX_BYTES
         || request.trust_revision == 0
         || request.reason.trim().is_empty()
         || request.reason.chars().count() > 512
@@ -6293,8 +6233,9 @@ async fn schedule_staged_archive_cleanup(
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO control.object_cleanup_ledger (object_key,object_version,upload_id) \
-         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+        "INSERT INTO control.object_cleanup_ledger (object_key,object_version,upload_id,next_attempt_at) \
+         SELECT $1,$2,$3,GREATEST(now(),expires_at) FROM control.platform_image_upload_sessions \
+         WHERE upload_id=$3 ON CONFLICT DO NOTHING",
     )
     .bind(object_key)
     .bind(object_version)
@@ -8201,6 +8142,8 @@ pub enum ControlError {
     PlatformImageUploadNotFound,
     #[error("LW_PLATFORM_IMAGE_UPLOAD_STATE_CONFLICT")]
     PlatformImageUploadStateConflict,
+    #[error("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")]
+    PlatformImageUploadExpired,
     #[error("{0}")]
     PackageVerificationFailed(String),
     #[error("LW_PACKAGE_OBJECT_VERIFICATION_FAILED: {0}")]

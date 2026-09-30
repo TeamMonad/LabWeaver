@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
 import { stat } from 'node:fs/promises'
+import { expectJson, pollJson } from '../support/live.mjs'
+import {
+  assertAcceptedVgpuImageCompletion,
+  matchesVgpuImageCatalogRow,
+  validateVgpuImageImport,
+} from '../support/vgpu-image-import.mjs'
 
 const INPUT_ENV = Object.freeze({
   archivePath: 'LABWEAVER_E2E_VGPU_IMAGE_ARCHIVE',
@@ -12,8 +18,6 @@ const INPUT_ENV = Object.freeze({
 const REQUIRED_INPUT_FIELDS = Object.keys(INPUT_ENV)
 const TRUST_REVISION = 1
 const DISK_FORMAT = 'qcow2'
-const VM_KIND_LABEL = '虚拟机'
-const ACTIVE_STATUS_LABEL = '可用'
 
 function inputError(detail) {
   throw new Error(`LW_VGPU_IMAGE_INPUT_INVALID:${detail}`)
@@ -43,14 +47,6 @@ function configuredInput() {
 }
 
 const INPUT = configuredInput()
-
-function formatBytes(bytes) {
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-  if (bytes === 0) return '0 B'
-  const exponent = Math.min(Math.floor(Math.log2(bytes) / 10), units.length - 1)
-  const value = bytes / 2 ** (exponent * 10)
-  return `${value.toFixed(exponent === 0 ? 0 : 2)} ${units[exponent]}`
-}
 
 function readDiagnosticCode(alert) {
   return alert.locator('.diagnostic-code').textContent().then((value) => value?.trim() || 'diagnostic-missing')
@@ -85,19 +81,6 @@ async function readRowsForBinding(page, binding) {
     })), binding)
 }
 
-function rowMatches(row, input) {
-  return Boolean(
-    row
-      && row.kindLabel === VM_KIND_LABEL
-      && row.binding === input.binding
-      && row.sourceReference === input.targetReference
-      && row.capacityLabel === formatBytes(input.capacityBytes)
-      && row.format === DISK_FORMAT
-      && row.statusLabel === ACTIVE_STATUS_LABEL
-      && row.trustRevision === TRUST_REVISION,
-  )
-}
-
 async function waitForImportReadback(page, input) {
   await expect.poll(async () => {
     const alert = page.locator('[role="alert"]')
@@ -106,14 +89,36 @@ async function waitForImportReadback(page, input) {
     }
     const rows = await readRowsForBinding(page, input.binding)
     if (rows.length > 1) throw new Error('LW_VGPU_IMAGE_READBACK_DUPLICATE_BINDING')
-    return rows.length === 1 && rowMatches(rows[0], input)
-  }, { timeout: 300_000, intervals: [500, 1000, 2000] }).toBe(true)
+    return rows.length === 1 && matchesVgpuImageCatalogRow(rows[0], input)
+  }, { timeout: 900_000, intervals: [1000, 2000, 3000] }).toBe(true)
+}
+
+async function readCatalogEntries(page) {
+  const catalog = await expectJson(
+    await page.request.get('/api/v1/admin/images'),
+    'LW_VGPU_IMAGE_CATALOG_API_READ_FAILED',
+  )
+  if (!Array.isArray(catalog?.entries)) throw new Error('LW_VGPU_IMAGE_CATALOG_API_INVALID')
+  return catalog.entries
+}
+
+async function assertImportedUpload(page, input, completion) {
+  const accepted = assertAcceptedVgpuImageCompletion(completion)
+  const status = await pollJson(
+    page.request,
+    `/api/v1/admin/images/uploads/${accepted.uploadId}`,
+    (value) => ['imported', 'failed', 'cancelled'].includes(value.state),
+    'LW_VGPU_IMAGE_UPLOAD_STATUS_READ_FAILED',
+    900_000,
+  )
+  const entries = await readCatalogEntries(page)
+  return validateVgpuImageImport({ completion, status, entries, input })
 }
 
 test.skip(INPUT === null, 'set the five LABWEAVER_E2E_VGPU_IMAGE_* variables to run this scenario')
 
 test('platform administrator imports one requested vGPU guest image through the UI', async ({ page }) => {
-  test.setTimeout(360_000)
+  test.setTimeout(1_200_000)
   if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
 
   let archiveMetadata
@@ -134,7 +139,11 @@ test('platform administrator imports one requested vGPU guest image through the 
   const existingRows = await readRowsForBinding(page, INPUT.binding)
   if (existingRows.length > 1) throw new Error('LW_VGPU_IMAGE_READBACK_DUPLICATE_BINDING')
   if (existingRows.length === 1) {
-    if (!rowMatches(existingRows[0], INPUT)) throw new Error('LW_VGPU_IMAGE_BINDING_CONFLICT')
+    if (!matchesVgpuImageCatalogRow(existingRows[0], INPUT)) throw new Error('LW_VGPU_IMAGE_BINDING_CONFLICT')
+    test.info().annotations.push({
+      type: 'image-import-path',
+      description: JSON.stringify({ result: 'reused-existing', binding: INPUT.binding }),
+    })
     return
   }
 
@@ -151,6 +160,24 @@ test('platform administrator imports one requested vGPU guest image through the 
 
   const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
   await expect(importButton).toBeEnabled()
+  const completionResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && /^\/api\/v1\/admin\/images\/uploads\/[^/]+\/complete$/.test(url.pathname)
+  })
   await importButton.click()
+  const completionResponse = await completionResponsePromise
+  const completionBody = await completionResponse.json().catch(() => null)
+  const completion = { status: completionResponse.status(), body: completionBody }
+  const imported = await assertImportedUpload(page, INPUT, completion)
   await waitForImportReadback(page, INPUT)
+  await expect(page.locator('.upload-status')).toContainText('镜像导入：已导入', { timeout: 60_000 })
+  const uiRows = await readRowsForBinding(page, INPUT.binding)
+  if (uiRows.length !== 1 || !matchesVgpuImageCatalogRow(uiRows[0], INPUT)) {
+    throw new Error(`LW_VGPU_IMAGE_UI_CATALOG_IDENTITY_MISMATCH:${imported.catalogId}`)
+  }
+  test.info().annotations.push({
+    type: 'image-import-path',
+    description: JSON.stringify({ result: 'fresh-upload', uploadId: imported.uploadId, catalogId: imported.catalogId }),
+  })
 })

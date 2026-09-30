@@ -26,7 +26,8 @@ use contracts::http::{
     InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
-    InternalPlatformImageImportRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
+    InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalPublishEvaluationReleaseRequest,
     InternalWithdrawEvaluationReleaseRequest, PlatformImageCatalog, PlatformImageEntry,
 };
@@ -148,7 +149,7 @@ impl AccessClient {
             correlate(
                 self.client
                     .post(self.config.endpoint("internal/v1/auth/decision")?)
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -192,7 +193,7 @@ impl AgentClient {
                 self.client
                     .post(self.config.endpoint("internal/v1/agent-runs")?)
                     .header("Idempotency-Key", key.as_str())
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -228,7 +229,7 @@ impl AgentClient {
                             .endpoint(&format!("internal/v1/agent-runs/{run_id}/cancel"))?,
                     )
                     .header("Idempotency-Key", key.as_str())
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -257,7 +258,7 @@ impl AgentClient {
                         "internal/v1/agent-runs/{run_id}/tracks/{track}/retry"
                     ))?)
                     .header("Idempotency-Key", key.as_str())
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -524,22 +525,65 @@ impl AgentClient {
         .await
     }
 
-    /// Imports one Control-frozen OCI layout archive into the platform registry and catalog.
-    pub async fn import_platform_image(
+    /// Enqueues one Control-frozen OCI layout archive for the durable Agent import worker.
+    pub async fn enqueue_platform_image_import(
         &self,
-        request: &InternalPlatformImageImportRequest,
+        request: &InternalPlatformImageImportEnqueueRequest,
         key: &IdempotencyKey,
         headers: &reqwest::header::HeaderMap,
-    ) -> Result<PlatformImageEntry, AdminDownstreamError> {
+    ) -> Result<InternalPlatformImageImportJobStatus, AdminDownstreamError> {
         send_json_admin(
             correlate(
                 self.client
                     .post(
                         self.config
-                            .endpoint("internal/v1/platform-images/imports")?,
+                            .endpoint("internal/v1/platform-images/import-jobs")?,
                     )
                     .header("Idempotency-Key", key.as_str())
                     .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Reads one Agent-owned durable import job without holding a Control database transaction.
+    pub async fn get_platform_image_import(
+        &self,
+        upload_id: contracts::UploadSessionId,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<InternalPlatformImageImportJobStatus, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client.get(self.config.endpoint(&format!(
+                    "internal/v1/platform-images/import-jobs/{upload_id}"
+                ))?),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Requests cancellation of one Agent-owned import job by its stable upload identity.
+    pub async fn cancel_platform_image_import(
+        &self,
+        upload_id: contracts::UploadSessionId,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<InternalPlatformImageImportJobStatus, AdminDownstreamError> {
+        let request = InternalPlatformImageImportCancelRequest { upload_id };
+        send_json_admin(
+            correlate(
+                self.client
+                    .post(self.config.endpoint(&format!(
+                        "internal/v1/platform-images/import-jobs/{upload_id}/cancel"
+                    ))?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -758,7 +802,7 @@ impl EvaluationClient {
                         contracts::http::StrongEtag::from_revision(request.expected_revision)
                             .header_value(),
                     )
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,

@@ -37,6 +37,9 @@ domains:
       - id: 10
         file: control/0010_vm_template_upload.sql
         sha256: 0ed57897893d1103364564a99176c923cd6a4e93e583dd1e60565f3ffda87874
+      - id: 11
+        file: control/0011_platform_image_import_jobs.sql
+        sha256: 1bc13e48040c3f42941729e8b604a6e3dfaa27b93a09f5b79a8514235db1d778
   - name: access
     migrations:
       - id: 1
@@ -109,6 +112,12 @@ domains:
       - id: 15
         file: agent/0015_platform_image_vm_fields.sql
         sha256: 5fbf7d72693ca4cb97f913fc990d475df53942250af9ff9f0f1534a8a4698801
+      - id: 16
+        file: agent/0016_platform_image_import_jobs.sql
+        sha256: 393106c844c01466eb8e8b6b49fc123e152c071b5be32f7ac6276233bdafe837
+      - id: 17
+        file: agent/0017_authoring_sandbox_usage.sql
+        sha256: 98534d05b0c42d5b60438bb52b80eca566ffccdcb5bb97dbbaf91067e4ec46b9
   - name: evaluation
     migrations:
       - id: 1

@@ -68,6 +68,8 @@ export type InternalEvaluationRunMutationRequest = InternalEvaluationRunMutation
 
 export type InternalImageArtifactResolution = InternalImageArtifactResolutionSchema;
 
+export type InternalPlatformImageImportJobStatus = InternalPlatformImageImportJobStatusSchema;
+
 export type InternalPublishEvaluationReleaseRequest = InternalPublishEvaluationReleaseRequestSchema;
 
 export type InternalWithdrawEvaluationReleaseRequest = InternalWithdrawEvaluationReleaseRequestSchema;
@@ -87,6 +89,8 @@ export type PlatformImageEntry = PlatformImageEntrySchema;
 export type PlatformImageEntryView = PlatformImageEntryViewSchema;
 
 export type PlatformImageUploadSession = PlatformImageUploadSessionSchema;
+
+export type PlatformImageUploadStatus = PlatformImageUploadStatusSchema;
 
 export type ProblemDetails = {
     detail: string;
@@ -2828,6 +2832,20 @@ export type AuthoringPublicationAdmissionQuerySchemaProjectId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type AuthoringPublicationAdmissionQuerySchemaRevision = number;
+
+/**
+ * CancelPlatformImageUploadRequest
+ *
+ * Revision-fenced cancellation of a platform image upload.
+ */
+export type CancelPlatformImageUploadRequestSchema = {
+    expectedRevision: CancelPlatformImageUploadRequestSchemaRevision;
+};
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CancelPlatformImageUploadRequestSchemaRevision = number;
 
 /**
  * CandidateDecisionRequest
@@ -7169,6 +7187,39 @@ export type InternalImageArtifactResolutionSchemaVirtualMachineBaseDisk = {
 export type InternalImageArtifactResolutionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
+ * InternalPlatformImageImportJobStatus
+ *
+ * Short Agent response used by Control while polling a durable import job.
+ */
+export type InternalPlatformImageImportJobStatusSchema = {
+    catalogId?: PlatformImageId | null;
+    diagnostic?: string | null;
+    revision: InternalPlatformImageImportJobStatusSchemaRevision;
+    state: PlatformImageImportJobState;
+    uploadId: UploadSessionId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageId = string;
+
+/**
+ * Agent-owned lifecycle state for one durable platform image import job.
+ */
+export type PlatformImageImportJobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type InternalPlatformImageImportJobStatusSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UploadSessionId`.
+ */
+export type UploadSessionId = string;
+
+/**
  * InternalPublishEvaluationReleaseRequest
  *
  * Control-to-Evaluation command that publishes one approved immutable `EvaluationSpec`.
@@ -7754,7 +7805,7 @@ export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
      * Declared virtual-machine base-disk capacity in bytes; absent for container entries.
      */
     capacityBytes?: number | null;
-    catalogId: PlatformImageId;
+    catalogId: PlatformImageCatalogViewSchemaPlatformImageId;
     /**
      * Lowercase hex SHA-256 of the unpacked virtual-machine disk; absent for container entries.
      */
@@ -7782,7 +7833,7 @@ export type PlatformImageCatalogViewSchemaPlatformImageEntryView = {
 /**
  * Strongly typed UUIDv7 identifier for `PlatformImageId`.
  */
-export type PlatformImageId = string;
+export type PlatformImageCatalogViewSchemaPlatformImageId = string;
 
 /**
  * Reviewed platform image kinds.
@@ -8002,7 +8053,7 @@ export type PlatformImageUploadSessionSchema = {
     kind: PlatformImageUploadSessionSchemaPlatformImageKind;
     revision: PlatformImageUploadSessionSchemaRevision;
     targetReference: string;
-    uploadId: UploadSessionId;
+    uploadId: PlatformImageUploadSessionSchemaUploadSessionId;
     uploadTarget: PlatformImageUploadTarget;
 };
 
@@ -8030,7 +8081,7 @@ export type PlatformImageUploadSessionSchemaRevision = number;
 /**
  * Strongly typed UUIDv7 identifier for `UploadSessionId`.
  */
-export type UploadSessionId = string;
+export type PlatformImageUploadSessionSchemaUploadSessionId = string;
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
@@ -8041,6 +8092,39 @@ export type PlatformImageUploadSessionSchemaUtcTimestamp = string;
  * Supported VM base-disk encodings.
  */
 export type PlatformImageUploadSessionSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
+
+/**
+ * PlatformImageUploadStatus
+ *
+ * Public status of a platform image upload and its asynchronous import.
+ */
+export type PlatformImageUploadStatusSchema = {
+    catalogId?: PlatformImageUploadStatusSchemaPlatformImageId | null;
+    diagnostic?: string | null;
+    revision: PlatformImageUploadStatusSchemaRevision;
+    state: PlatformImageUploadState;
+    uploadId: PlatformImageUploadStatusSchemaUploadSessionId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PlatformImageId`.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageId = string;
+
+/**
+ * Control-owned lifecycle state for a platform image upload.
+ */
+export type PlatformImageUploadState = 'pending' | 'queued' | 'freezing' | 'importing' | 'cancelling' | 'imported' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type PlatformImageUploadStatusSchemaRevision = number;
+
+/**
+ * Strongly typed UUIDv7 identifier for `UploadSessionId`.
+ */
+export type PlatformImageUploadStatusSchemaUploadSessionId = string;
 
 /**
  * ProblemPackageUploadSession
@@ -10492,6 +10576,146 @@ export type CreatePlatformImageUploadResponses = {
 
 export type CreatePlatformImageUploadResponse = CreatePlatformImageUploadResponses[keyof CreatePlatformImageUploadResponses];
 
+export type GetPlatformImageUploadData = {
+    body?: never;
+    path: {
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/uploads/{uploadId}';
+};
+
+export type GetPlatformImageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetPlatformImageUploadError = GetPlatformImageUploadErrors[keyof GetPlatformImageUploadErrors];
+
+export type GetPlatformImageUploadResponses = {
+    /**
+     * Successful response
+     */
+    200: PlatformImageUploadStatusSchema;
+};
+
+export type GetPlatformImageUploadResponse = GetPlatformImageUploadResponses[keyof GetPlatformImageUploadResponses];
+
+export type CancelPlatformImageUploadData = {
+    body: CancelPlatformImageUploadRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        uploadId: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/images/uploads/{uploadId}/cancel';
+};
+
+export type CancelPlatformImageUploadErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelPlatformImageUploadError = CancelPlatformImageUploadErrors[keyof CancelPlatformImageUploadErrors];
+
+export type CancelPlatformImageUploadResponses = {
+    /**
+     * Successful response
+     */
+    202: PlatformImageUploadStatusSchema;
+};
+
+export type CancelPlatformImageUploadResponse = CancelPlatformImageUploadResponses[keyof CancelPlatformImageUploadResponses];
+
 export type CompletePlatformImageUploadData = {
     body: CompletePlatformImageUploadRequestSchema;
     headers: {
@@ -10560,7 +10784,7 @@ export type CompletePlatformImageUploadResponses = {
     /**
      * Successful response
      */
-    201: PlatformImageEntryViewSchema;
+    202: PlatformImageUploadStatusSchema;
 };
 
 export type CompletePlatformImageUploadResponse = CompletePlatformImageUploadResponses[keyof CompletePlatformImageUploadResponses];

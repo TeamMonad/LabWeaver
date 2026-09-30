@@ -26,6 +26,7 @@ use agent_service::messaging::{
     AgentBuildCommandConsumer, AgentOutboxDispatcher, connect_nats_mtls,
 };
 use agent_service::oci_registry::RegistryCredentials;
+use agent_service::platform_image_jobs::{PlatformImageImportJobStore, PlatformImageImportWorker};
 use agent_service::platform_images::{
     PgPlatformImageCatalog, PlatformImageRegistry, PlatformImageSeed, PlatformImageSeedOutcome,
 };
@@ -404,7 +405,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         Arc::clone(&service_token_client),
         required_set("LABWEAVER_SERVICE_SCOPES")?,
     )?;
-    let process: Arc<dyn ClaudeCodeProcess> = Arc::new(SandboxAuthoringProcess::new(
+    let sandbox_process = Arc::new(SandboxAuthoringProcess::new(
         SandboxProcessConfiguration {
             sandbox: sandbox.to_configuration(
                 &object_store_prefix,
@@ -425,6 +426,12 @@ async fn run_agent_service() -> Result<(), StartupError> {
         store.clone(),
         Arc::clone(&objects),
     )?);
+    let mut sandbox_cleanup_worker = tokio_util::task::AbortOnDropHandle::new(
+        sandbox_process
+            .spawn_cleanup_worker()
+            .ok_or(StartupError::Configuration)?,
+    );
+    let process: Arc<dyn ClaudeCodeProcess> = sandbox_process;
     let platform_registry = load_platform_registry(deployment.platform_registry.as_ref())?;
     let seed_images = if let Some(config) = deployment.platform_registry.as_ref() {
         config.seed_images.clone()
@@ -433,6 +440,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
     };
     let api_objects: Arc<dyn ImmutableObjectStore> = objects.clone();
     let platform_images = PgPlatformImageCatalog::new(store.pool().clone());
+    let platform_image_import_jobs = PlatformImageImportJobStore::new(store.pool().clone());
     let state = Arc::new(AgentApiState {
         store: store.clone(),
         build_store: build_store.clone(),
@@ -441,6 +449,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         platform_images: platform_images.clone(),
         platform_registry,
         objects: api_objects,
+        platform_image_import_jobs: platform_image_import_jobs.clone(),
     });
     spawn_platform_image_seeds(
         &platform_images,
@@ -483,6 +492,15 @@ async fn run_agent_service() -> Result<(), StartupError> {
         &work_execution_configuration,
     )
     .map_err(StartupError::WorkExecution)?;
+    let platform_image_import_worker = PlatformImageImportWorker {
+        jobs: platform_image_import_jobs,
+        catalog: platform_images,
+        registry: state.platform_registry.clone(),
+        objects: Arc::clone(&state.objects),
+        worker_id: format!("{}:platform-image-import", deployment.worker_id),
+        lease_duration: Duration::from_secs(deployment.track_lease_seconds),
+        poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
+    };
     tokio::select! {
         result = http_transport::serve_tls(
             listener,
@@ -492,6 +510,11 @@ async fn run_agent_service() -> Result<(), StartupError> {
         result = worker.run() => result?,
         result = review_worker.run() => result?,
         result = work_execution_worker.run() => result?,
+        result = platform_image_import_worker.run() => result.map_err(StartupError::PlatformImageImport)?,
+        result = &mut sandbox_cleanup_worker => {
+            result.map_err(|_| StartupError::SandboxCleanupWorker)?;
+            return Err(StartupError::SandboxCleanupWorker);
+        },
         result = build_command_loop(build_consumer, build_store) => result?,
         result = build_worker_loop(
             build_worker,
@@ -1102,7 +1125,10 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
           AND to_regclass('agent.build_commands') IS NOT NULL \
           AND to_regclass('agent.generated_artifacts') IS NOT NULL \
           AND to_regclass('agent.llm_review_runs') IS NOT NULL \
-          AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL",
+          AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL \
+          AND to_regclass('agent.platform_image_import_jobs') IS NOT NULL \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' \
+                      AND table_name='authoring_sandbox_attempts' AND column_name='usage_payload')",
     )
     .fetch_one(pool)
     .await?;
@@ -1126,6 +1152,8 @@ enum StartupError {
     Configuration,
     #[error("LW_AGENT_SCHEMA_UNAVAILABLE")]
     SchemaUnavailable,
+    #[error("LW_AGENT_SANDBOX_CLEANUP_WORKER_STOPPED")]
+    SandboxCleanupWorker,
     #[error("LW_AGENT_CLOCK_INVALID")]
     Clock,
     #[error(transparent)]
@@ -1162,6 +1190,8 @@ enum StartupError {
     Messaging(#[from] agent_service::messaging::AgentMessagingError),
     #[error(transparent)]
     BuildExecutor(#[from] agent_service::build_provider::BuildExecutorFenceError),
+    #[error(transparent)]
+    PlatformImageImport(#[from] agent_service::platform_image_jobs::PlatformImageImportJobError),
     #[error(transparent)]
     Service(#[from] service_runtime::StartupError),
 }

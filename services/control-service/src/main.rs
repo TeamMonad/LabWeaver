@@ -19,6 +19,9 @@ use control_service::messaging::{
     AgentBuildConsumer, AgentRunConsumer, AuthoringPublicationConsumer, ControlOutboxDispatcher,
     connect_nats_mtls,
 };
+use control_service::platform_image_jobs::{
+    PlatformImageImportWorker, PlatformImageImportWorkerError,
+};
 use control_service::{ControlConfig, ControlService};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -107,6 +110,11 @@ async fn main() -> Result<(), StartupError> {
         deployment.agent_service,
         Arc::clone(&service_token_client),
     )?;
+    let platform_image_import_worker = PlatformImageImportWorker {
+        control: service.clone(),
+        agent: agent.clone(),
+        poll_interval: Duration::from_millis(deployment.nats.outbox_poll_milliseconds),
+    };
     let environment = EnvironmentClient::new_authenticated(
         deployment.environment_service,
         Arc::clone(&service_token_client),
@@ -175,6 +183,7 @@ async fn main() -> Result<(), StartupError> {
             tls,
         ) => result?,
         result = cleanup_loop(service, interval) => result?,
+        result = platform_image_import_worker.run() => result.map_err(StartupError::PlatformImageImport)?,
         result = consumer_loop(consumer, consumer_control, agent) => result?,
         result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
         result = authoring_consumer_loop(authoring_consumer, authoring_consumer_control, authoring_consumer_evaluation, authoring_consumer_agent) => result?,
@@ -427,6 +436,8 @@ enum StartupError {
     Control(#[from] control_service::ControlError),
     #[error(transparent)]
     Downstream(#[from] control_service::clients::DownstreamError),
+    #[error(transparent)]
+    PlatformImageImport(#[from] PlatformImageImportWorkerError),
     #[error(transparent)]
     Messaging(#[from] control_service::messaging::MessagingError),
 }
