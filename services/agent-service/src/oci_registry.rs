@@ -5,10 +5,14 @@
 //! exact blobs and manifest by their content digests and reads the manifest back from the registry
 //! so a tag or a mutable reference can never become the runtime identity.
 
+use std::{sync::Arc, time::Instant};
+
+use http_auth::parser::ChallengeParser;
 use reqwest::{
     Body, Client, Method, StatusCode, Url,
-    header::{ACCEPT, CONTENT_TYPE, HeaderValue, LOCATION},
+    header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue, LOCATION, WWW_AUTHENTICATE},
 };
+use serde::Deserialize;
 use sha2::Digest;
 use tempfile::TempPath;
 use thiserror::Error;
@@ -66,6 +70,10 @@ impl std::fmt::Debug for OciFileImage {
 }
 
 const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
+// A file upload can span several GiB. Metadata retains the client's short timeout;
+// this one streaming request has a bounded budget and remains cancellable by future drop.
+const FILE_BLOB_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(15);
+const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const ACCEPTED_MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
 
 /// Multi-platform indexes the registry may return for a tag.
@@ -129,6 +137,30 @@ pub struct OciRegistryPublisher {
     repository: String,
     client: Client,
     credentials: RegistryCredentials,
+    bearer: Arc<tokio::sync::Mutex<Option<BearerAuthorization>>>,
+}
+
+#[derive(Clone)]
+struct BearerChallenge {
+    realm: Url,
+    service: Option<String>,
+}
+
+// Authorization material stays within this repository's publisher and is never Debug/logged.
+#[derive(Clone)]
+struct BearerAuthorization {
+    challenge: BearerChallenge,
+    token: String,
+    expires_at: Instant,
+    push: bool,
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    token: Option<String>,
+    access_token: Option<String>,
+    expires_in: Option<u64>,
+    issued_at: Option<String>,
 }
 
 impl std::fmt::Debug for OciRegistryPublisher {
@@ -159,6 +191,7 @@ impl OciRegistryPublisher {
             repository: repository.into(),
             client,
             credentials,
+            bearer: Arc::new(tokio::sync::Mutex::new(None)),
         };
         publisher.validate()?;
         Ok(publisher)
@@ -178,6 +211,7 @@ impl OciRegistryPublisher {
             repository: repository.into(),
             client,
             credentials,
+            bearer: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -265,11 +299,7 @@ impl OciRegistryPublisher {
 
     async fn ensure_blob(&self, blob: &OciBlob) -> Result<(), OciRegistryError> {
         let path = format!("v2/{}/blobs/{}", self.repository, blob.digest);
-        let response = self
-            .request(Method::HEAD, &path)
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
+        let response = self.send(Method::HEAD, &path, &[], None, true).await?;
         match response.status() {
             StatusCode::OK => Ok(()),
             StatusCode::NOT_FOUND => self.upload_blob(blob).await,
@@ -281,10 +311,8 @@ impl OciRegistryPublisher {
     async fn upload_blob(&self, blob: &OciBlob) -> Result<(), OciRegistryError> {
         let start_path = format!("v2/{}/blobs/uploads/", self.repository);
         let response = self
-            .request(Method::POST, &start_path)
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
+            .send(Method::POST, &start_path, &[], None, true)
+            .await?;
         let status = response.status();
         if denied(status) {
             return Err(OciRegistryError::Denied);
@@ -301,13 +329,14 @@ impl OciRegistryPublisher {
             .base
             .join(location)
             .map_err(|_| OciRegistryError::Rejected)?;
-        if location.scheme() != self.base.scheme() || location.host_str() != self.base.host_str() {
+        if !self.same_origin(&location) {
             return Err(OciRegistryError::Rejected);
         }
         let separator = if location.query().is_some() { '&' } else { '?' };
         let upload = format!("{location}{separator}digest={}", blob.digest);
         let response = self
-            .request(Method::PUT, upload.as_str())
+            .request(Method::PUT, upload.as_str(), true)
+            .await?
             .header(CONTENT_TYPE, HeaderValue::from_static(BLOB_MEDIA_TYPE))
             .body(blob.bytes.clone())
             .send()
@@ -326,11 +355,7 @@ impl OciRegistryPublisher {
     async fn ensure_file_blob(&self, blob: &OciFileBlob) -> Result<(), OciRegistryError> {
         verify_file_blob(blob).await?;
         let path = format!("v2/{}/blobs/{}", self.repository, blob.digest);
-        let response = self
-            .request(Method::HEAD, &path)
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
+        let response = self.send(Method::HEAD, &path, &[], None, true).await?;
         match response.status() {
             StatusCode::OK => Ok(()),
             StatusCode::NOT_FOUND => self.upload_file_blob(blob).await,
@@ -342,10 +367,8 @@ impl OciRegistryPublisher {
     async fn upload_file_blob(&self, blob: &OciFileBlob) -> Result<(), OciRegistryError> {
         let start_path = format!("v2/{}/blobs/uploads/", self.repository);
         let response = self
-            .request(Method::POST, &start_path)
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
+            .send(Method::POST, &start_path, &[], None, true)
+            .await?;
         let status = response.status();
         if denied(status) {
             return Err(OciRegistryError::Denied);
@@ -362,18 +385,21 @@ impl OciRegistryPublisher {
             .base
             .join(location)
             .map_err(|_| OciRegistryError::Rejected)?;
-        if location.scheme() != self.base.scheme() || location.host_str() != self.base.host_str() {
+        if !self.same_origin(&location) {
             return Err(OciRegistryError::Rejected);
         }
         let separator = if location.query().is_some() { '&' } else { '?' };
         let upload = format!("{location}{separator}digest={}", blob.digest);
+        // Authenticate before opening the stream. A rejected PUT is terminal: a consumed
+        // multi-gigabyte request body is never cloned, buffered or transparently replayed.
+        let request = self.request(Method::PUT, upload.as_str(), true).await?;
         let file = tokio::fs::File::open(blob.path())
             .await
             .map_err(|_| OciRegistryError::Unavailable)?;
         let content_length = HeaderValue::from_str(&blob.size_bytes.to_string())
             .map_err(|_| OciRegistryError::Configuration)?;
-        let response = self
-            .request(Method::PUT, upload.as_str())
+        let response = request
+            .timeout(FILE_BLOB_UPLOAD_TIMEOUT)
             .header(CONTENT_TYPE, HeaderValue::from_static(BLOB_MEDIA_TYPE))
             .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(Body::wrap_stream(ReaderStream::new(file)))
@@ -381,6 +407,7 @@ impl OciRegistryPublisher {
             .await
             .map_err(|_| OciRegistryError::Unavailable)?;
         let status = response.status();
+        trace_registry_response("blob_upload_commit", status);
         if denied(status) {
             return Err(OciRegistryError::Denied);
         }
@@ -400,12 +427,14 @@ impl OciRegistryPublisher {
         let content_type =
             HeaderValue::from_str(media_type).map_err(|_| OciRegistryError::Configuration)?;
         let response = self
-            .request(Method::PUT, &path)
-            .header(CONTENT_TYPE, content_type)
-            .body(bytes.to_vec())
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
+            .send(
+                Method::PUT,
+                &path,
+                &[(CONTENT_TYPE, content_type)],
+                Some(bytes),
+                true,
+            )
+            .await?;
         let status = response.status();
         if denied(status) {
             return Err(OciRegistryError::Denied);
@@ -444,11 +473,14 @@ impl OciRegistryPublisher {
         for _ in 0..2 {
             let path = format!("v2/{}/manifests/{target}", self.repository);
             let response = self
-                .request(Method::GET, &path)
-                .header(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))
-                .send()
-                .await
-                .map_err(|_| OciRegistryError::Unavailable)?;
+                .send(
+                    Method::GET,
+                    &path,
+                    &[(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))],
+                    None,
+                    false,
+                )
+                .await?;
             let status = response.status();
             if denied(status) {
                 return Err(OciRegistryError::Denied);
@@ -504,11 +536,14 @@ impl OciRegistryPublisher {
     ) -> Result<String, OciRegistryError> {
         let path = format!("v2/{}/manifests/{reference}", self.repository);
         let response = self
-            .request(Method::GET, &path)
-            .header(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))
-            .send()
-            .await
-            .map_err(|_| OciRegistryError::Unavailable)?;
+            .send(
+                Method::GET,
+                &path,
+                &[(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFEST_TYPES))],
+                None,
+                true,
+            )
+            .await?;
         let status = response.status();
         if denied(status) {
             return Err(OciRegistryError::Denied);
@@ -527,17 +562,243 @@ impl OciRegistryPublisher {
         Ok(observed.to_owned())
     }
 
-    fn request(&self, method: Method, target: &str) -> reqwest::RequestBuilder {
-        let url = if target.starts_with("http") {
-            target.to_owned()
+    async fn request(
+        &self,
+        method: Method,
+        target: &str,
+        push: bool,
+    ) -> Result<reqwest::RequestBuilder, OciRegistryError> {
+        let url = self
+            .base
+            .join(target)
+            .map_err(|_| OciRegistryError::Configuration)?;
+        if !self.same_origin(&url) {
+            return Err(OciRegistryError::Rejected);
+        }
+        let request = self.client.request(method, url);
+        let cached = self.bearer.lock().await.clone();
+        if let Some(auth) = cached {
+            let token = if auth.expires_at > Instant::now() && (!push || auth.push) {
+                auth.token
+            } else {
+                self.fetch_bearer(&auth.challenge, push).await?
+            };
+            Ok(request.bearer_auth(token))
         } else {
-            self.base
-                .join(target)
-                .map_or_else(|_| target.to_owned(), |url| url.to_string())
-        };
-        self.client
-            .request(method, url)
+            Ok(request.basic_auth(&self.credentials.username, Some(&self.credentials.password)))
+        }
+    }
+
+    /// Only replayable metadata requests participate in a single challenge retry.
+    async fn send(
+        &self,
+        method: Method,
+        target: &str,
+        headers: &[(HeaderName, HeaderValue)],
+        body: Option<&[u8]>,
+        push: bool,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        for attempt in 0..2 {
+            let mut request = self.request(method.clone(), target, push).await?;
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            if let Some(body) = body {
+                request = request.body(body.to_vec());
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|_| OciRegistryError::Unavailable)?;
+            if response.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                let Some(challenge) = self.bearer_challenge(response.headers())? else {
+                    trace_registry_response(registry_stage(&method, target), response.status());
+                    return Ok(response);
+                };
+                self.fetch_bearer(&challenge, push).await?;
+                continue;
+            }
+            trace_registry_response(registry_stage(&method, target), response.status());
+            return Ok(response);
+        }
+        Err(OciRegistryError::Denied)
+    }
+
+    fn same_origin(&self, url: &Url) -> bool {
+        url.origin() == self.base.origin()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+    }
+
+    fn bearer_challenge(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<Option<BearerChallenge>, OciRegistryError> {
+        let mut selected = None;
+        for header in headers.get_all(WWW_AUTHENTICATE) {
+            let value = header.to_str().map_err(|_| OciRegistryError::Rejected)?;
+            for challenge in ChallengeParser::new(value) {
+                let challenge = challenge.map_err(|_| OciRegistryError::Rejected)?;
+                if !challenge.scheme.eq_ignore_ascii_case("bearer") {
+                    continue;
+                }
+                if selected.is_some() {
+                    return Err(OciRegistryError::Rejected);
+                }
+                let mut params = std::collections::BTreeMap::new();
+                for (key, value) in challenge.params {
+                    if params
+                        .insert(key.to_ascii_lowercase(), value.to_unescaped())
+                        .is_some()
+                    {
+                        return Err(OciRegistryError::Rejected);
+                    }
+                }
+                let realm = Url::parse(params.get("realm").ok_or(OciRegistryError::Rejected)?)
+                    .map_err(|_| OciRegistryError::Rejected)?;
+                if realm.scheme() != "https" || !self.same_origin(&realm) || realm.query().is_some()
+                {
+                    return Err(OciRegistryError::Rejected);
+                }
+                if let Some(scope) = params.get("scope") {
+                    for scope in scope.split_whitespace() {
+                        let mut parts = scope.splitn(3, ':');
+                        if parts.next() != Some("repository")
+                            || parts.next() != Some(self.repository.as_str())
+                            || parts.next().is_none_or(|actions| {
+                                actions.is_empty()
+                                    || actions
+                                        .split(',')
+                                        .any(|action| !matches!(action, "pull" | "push"))
+                            })
+                        {
+                            return Err(OciRegistryError::Rejected);
+                        }
+                    }
+                }
+                let service = params.remove("service");
+                if service.as_ref().is_some_and(|value| {
+                    value.is_empty() || value.len() > 256 || value.chars().any(char::is_whitespace)
+                }) {
+                    return Err(OciRegistryError::Rejected);
+                }
+                selected = Some(BearerChallenge { realm, service });
+            }
+        }
+        Ok(selected)
+    }
+
+    async fn fetch_bearer(
+        &self,
+        challenge: &BearerChallenge,
+        push: bool,
+    ) -> Result<String, OciRegistryError> {
+        let mut realm = challenge.realm.clone();
+        let actions = if push { "pull,push" } else { "pull" };
+        {
+            let mut query = realm.query_pairs_mut();
+            if let Some(service) = &challenge.service {
+                query.append_pair("service", service);
+            }
+            query.append_pair(
+                "scope",
+                &format!("repository:{}:{actions}", self.repository),
+            );
+        }
+        let mut response = self
+            .client
+            .get(realm.clone())
             .basic_auth(&self.credentials.username, Some(&self.credentials.password))
+            .send()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?;
+        trace_registry_response("token_exchange", response.status());
+        if denied(response.status()) {
+            return Err(OciRegistryError::Denied);
+        }
+        if response.status() != StatusCode::OK || response.url() != &realm {
+            return Err(OciRegistryError::Rejected);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_TOKEN_BYTES as u64)
+        {
+            return Err(OciRegistryError::Rejected);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| OciRegistryError::Unavailable)?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_TOKEN_BYTES {
+                return Err(OciRegistryError::Rejected);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let response: TokenResponse =
+            serde_json::from_slice(&bytes).map_err(|_| OciRegistryError::Rejected)?;
+        if let (Some(token), Some(access_token)) = (&response.token, &response.access_token)
+            && token != access_token
+        {
+            return Err(OciRegistryError::Rejected);
+        }
+        let token = response
+            .token
+            .filter(|value| !value.is_empty())
+            .or(response.access_token.filter(|value| !value.is_empty()))
+            .ok_or(OciRegistryError::Denied)?;
+        let now = time::OffsetDateTime::now_utc();
+        let issued = response.issued_at.map_or(Ok(now), |value| {
+            time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| OciRegistryError::Rejected)
+        })?;
+        if issued > now + time::Duration::seconds(30) {
+            return Err(OciRegistryError::Rejected);
+        }
+        let lifetime = i64::try_from(response.expires_in.unwrap_or(60))
+            .map_err(|_| OciRegistryError::Rejected)?;
+        let expiry = issued
+            .checked_add(time::Duration::seconds(lifetime))
+            .ok_or(OciRegistryError::Rejected)?;
+        if expiry <= now {
+            return Err(OciRegistryError::Denied);
+        }
+        let remaining =
+            std::time::Duration::try_from(expiry - now).map_err(|_| OciRegistryError::Rejected)?;
+        let expires_at = Instant::now()
+            .checked_add(remaining)
+            .ok_or(OciRegistryError::Rejected)?;
+        *self.bearer.lock().await = Some(BearerAuthorization {
+            challenge: challenge.clone(),
+            token: token.clone(),
+            expires_at,
+            push,
+        });
+        Ok(token)
+    }
+}
+
+fn registry_stage(method: &Method, target: &str) -> &'static str {
+    if target.contains("/blobs/uploads/") {
+        "blob_upload_start"
+    } else if method == Method::HEAD {
+        "blob_exists"
+    } else if method == Method::PUT {
+        "manifest_put"
+    } else {
+        "manifest_get"
+    }
+}
+
+fn trace_registry_response(stage: &'static str, status: StatusCode) {
+    if !status.is_success() && status != StatusCode::NOT_FOUND {
+        tracing::warn!(
+            event = "agent.oci_registry.request_rejected",
+            failure_stage = stage,
+            http_status = status.as_u16()
+        );
     }
 }
 
@@ -679,6 +940,14 @@ fn valid_repository(value: &str) -> bool {
                 && !segment.ends_with(['.', '-', '_'])
         })
 }
+
+#[cfg(test)]
+#[path = "oci_registry_auth_tests.rs"]
+#[allow(
+    clippy::expect_used,
+    reason = "fixture-only URLs and immutable protocol values are validated at construction"
+)]
+mod auth_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -845,7 +1114,7 @@ mod tests {
 
     struct UrlString(String);
 
-    fn image() -> OciImage {
+    pub(super) fn image() -> OciImage {
         let config = br#"{"architecture":"amd64"}"#.to_vec();
         let layer = b"layer".to_vec();
         let config_digest = format!(

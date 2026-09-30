@@ -1,5 +1,7 @@
 //! Access Service browser BFF entry points.
 
+#[cfg(test)]
+mod browser_proxy_tests;
 mod console;
 mod grants;
 #[path = "../../http_transport.rs"]
@@ -300,6 +302,14 @@ fn admin_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/admin/images/uploads",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}",
+            get(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/admin/images/uploads/{upload_id}/cancel",
+            post(proxy::forward_control),
         )
         .route(
             "/api/v1/admin/images/uploads/{upload_id}/complete",

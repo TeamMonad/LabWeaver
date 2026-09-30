@@ -140,6 +140,7 @@ impl ProductionBuildExecutor {
         let harbor_ca = Certificate::from_pem(&harbor_ca).map_err(|_| rejected())?;
         let client = Client::builder()
             .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .add_root_certificate(harbor_ca)
             .build()

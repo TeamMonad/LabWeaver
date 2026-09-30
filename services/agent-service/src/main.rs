@@ -971,6 +971,7 @@ fn load_platform_registry(
     let ca = reqwest::Certificate::from_pem(&ca).map_err(|_| StartupError::Configuration)?;
     let client = reqwest::Client::builder()
         .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .add_root_certificate(ca)
         .build()

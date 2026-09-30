@@ -338,6 +338,76 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   return { approval, publication }
 }
 
+async function readExistingPublishedApproval(
+  page,
+  projectId,
+  targetRunId,
+  run,
+  packageData,
+  environmentCandidateId,
+  evaluationCandidateId,
+  artifact,
+  approvalId,
+) {
+  const request = page.context().request
+  const publication = await expectJson(
+    await request.get(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/authoring-approvals/${encodeURIComponent(approvalId)}`,
+    ),
+    'LAB_EXPERIMENT_RESUME_APPROVAL_READ_FAILED',
+  )
+  if (publication === null || typeof publication !== 'object') {
+    throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_RESPONSE_INVALID')
+  }
+  const approval = publication.approval
+  const runEnvironmentCandidateId = run.tracks.find((track) => track.kind === 'environment')?.candidateId
+  const runEvaluationCandidateId = run.tracks.find((track) => track.kind === 'evaluation')?.candidateId
+  if (publication.status !== 'ready') {
+    throw new Error(`LAB_EXPERIMENT_RESUME_APPROVAL_NOT_READY:${publication.status ?? 'missing'}`)
+  }
+  if (typeof publication.environmentReleaseId !== 'string' || !publication.environmentReleaseId) {
+    throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_ENVIRONMENT_RELEASE_MISSING')
+  }
+  if (
+    run.id !== targetRunId
+    || run.projectId !== projectId
+    || run.packageId !== packageData.id
+    || runEnvironmentCandidateId !== environmentCandidateId
+    || runEvaluationCandidateId !== evaluationCandidateId
+    || approval?.id !== approvalId
+    || approval.projectId !== projectId
+    || approval.packageId !== packageData.id
+    || approval.environmentCandidateId !== environmentCandidateId
+    || approval.evaluationCandidateId !== evaluationCandidateId
+  ) {
+    throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_SCOPE_OR_PUBLICATION_INVALID')
+  }
+  // AuthoringApproval has no runId field; the exact candidate pair binds it to this AgentRun.
+  expect(approval.imageArtifact).toEqual(artifact)
+
+  const query = new URLSearchParams({ projectId, runId: targetRunId, approvalId })
+  await page.goto(`/teacher/approvals?${query.toString()}`, { waitUntil: 'domcontentloaded' })
+  await selectProjectByUi(page, projectId)
+  await expect(page.getByRole('heading', { name: '实验包批准', exact: true })).toBeVisible()
+  await expect(page.locator('input[aria-label="AgentRun ID"]')).toHaveValue(targetRunId)
+
+  const approvalSuccess = page.locator('.approval-success')
+  await expect(approvalSuccess).toBeVisible({ timeout: 120_000 })
+  const approvalDetails = approvalSuccess.locator('details')
+  await approvalDetails.locator('summary').click()
+  await expect(approvalDetails.getByText(approvalId, { exact: true })).toBeVisible()
+
+  const publicationCard = page.locator('.publication-status')
+  await expect(publicationCard).toBeVisible({ timeout: 120_000 })
+  await expect(publicationCard).toHaveAttribute('data-status', 'ready')
+  await expect(publicationCard).toContainText('Environment 与 Evaluation 已发布，可以继续配置学生实验。')
+  const publicationDetails = publicationCard.locator('details')
+  await publicationDetails.locator('summary').click()
+  await expect(publicationDetails.getByText(publication.environmentReleaseId, { exact: true })).toBeVisible()
+
+  return { approval, publication }
+}
+
 async function createEnvironmentByStudentUi(page, projectId, releaseId) {
   await page.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, projectId)
@@ -563,6 +633,10 @@ test('student completes a published lab experiment through the browser terminal'
     throw new Error('LAB_EXPERIMENT_RESUME_TARGET_INCOMPLETE')
   }
   const resumeExistingRun = Boolean(resumeProjectId && resumeRunId)
+  const resumeApprovalId = process.env.LABWEAVER_E2E_LAB_RESUME_APPROVAL_ID?.trim() ?? ''
+  if (resumeApprovalId && !resumeExistingRun) {
+    throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_REQUIRES_TARGET')
+  }
   const packageCopy = resumeExistingRun ? null : await mkdtemp(join(tmpdir(), 'labweaver-lab-'))
   let environmentId
   let studentContext
@@ -592,31 +666,38 @@ test('student completes a published lab experiment through the browser terminal'
       }
       run = existing
       packageData = { id: existing.packageId }
-      if (!runIsFullyTerminal(run)) {
-        run = await waitForTerminalExperimentRun(
+      if (resumeApprovalId) {
+        if (!runIsFullyTerminal(run) || run.state !== 'succeeded') {
+          throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_REQUIRES_SUCCESSFUL_RUN')
+        }
+        completed = await waitForExperimentRun(request, project.id, run.id)
+      } else {
+        if (!runIsFullyTerminal(run)) {
+          run = await waitForTerminalExperimentRun(
+            request,
+            project.id,
+            run.id,
+            () => approveAuthoringResourceRequestsByUi(adminPage, project.id, run.id, teacherActorId),
+          )
+        }
+        let retryWaitOptions = {}
+        if (isFirstFailedEnvironmentAttempt(run)) {
+          const acceptedRetry = await retryFailedEnvironmentTrackByUi(page, project.id, run)
+          retryWaitOptions = {
+            minimumRevision: acceptedRetry.revision,
+            requiredEnvironmentAttemptNumber: 2,
+          }
+        } else if (environmentRetryAlreadyUsed(run)) {
+          throw new Error('LAB_EXPERIMENT_RESUME_ENVIRONMENT_RETRY_ALREADY_USED')
+        }
+        completed = await waitForExperimentRun(
           request,
           project.id,
           run.id,
           () => approveAuthoringResourceRequestsByUi(adminPage, project.id, run.id, teacherActorId),
+          retryWaitOptions,
         )
       }
-      let retryWaitOptions = {}
-      if (isFirstFailedEnvironmentAttempt(run)) {
-        const acceptedRetry = await retryFailedEnvironmentTrackByUi(page, project.id, run)
-        retryWaitOptions = {
-          minimumRevision: acceptedRetry.revision,
-          requiredEnvironmentAttemptNumber: 2,
-        }
-      } else if (environmentRetryAlreadyUsed(run)) {
-        throw new Error('LAB_EXPERIMENT_RESUME_ENVIRONMENT_RETRY_ALREADY_USED')
-      }
-      completed = await waitForExperimentRun(
-        request,
-        project.id,
-        run.id,
-        () => approveAuthoringResourceRequestsByUi(adminPage, project.id, run.id, teacherActorId),
-        retryWaitOptions,
-      )
     } else {
       await cp(LAB.root, packageCopy, { recursive: true })
       await configureLabPackageCopy(packageCopy)
@@ -645,17 +726,31 @@ test('student completes a published lab experiment through the browser terminal'
       request,
       project.id,
       completed.environmentCandidateId,
-      () => approveAuthoringResourceRequestsByUi(adminPage, project.id, completed.run.id, teacherActorId),
+      resumeApprovalId
+        ? null
+        : () => approveAuthoringResourceRequestsByUi(adminPage, project.id, completed.run.id, teacherActorId),
     )
-    const published = await approveAndPublish(
-      page,
-      project.id,
-      completed.run.id,
-      packageData,
-      completed.environmentCandidateId,
-      completed.evaluationCandidateId,
-      built.artifact,
-    )
+    const published = resumeApprovalId
+      ? await readExistingPublishedApproval(
+        page,
+        project.id,
+        resumeRunId,
+        completed.run,
+        packageData,
+        completed.environmentCandidateId,
+        completed.evaluationCandidateId,
+        built.artifact,
+        resumeApprovalId,
+      )
+      : await approveAndPublish(
+        page,
+        project.id,
+        completed.run.id,
+        packageData,
+        completed.environmentCandidateId,
+        completed.evaluationCandidateId,
+        built.artifact,
+      )
     await assertNoStuckProgress(page, 'teacher-approval')
     await auditAccessibility(page, 'teacher-approval', testInfo)
     teacherGuards.assertCleanConsole('teacher-approval')

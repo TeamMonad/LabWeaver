@@ -22,6 +22,7 @@ flate2 = "=1.1.9"
 futures = "0.3.31"
 persistence-sqlx = { path = "../../crates/persistence-sqlx" }
 hyper-util.workspace = true
+http-auth = { version = "0.1.10", default-features = false }
 regex = "1.12.2"
 reqwest.workspace = true
 rand.workspace = true

@@ -62,8 +62,8 @@ use crate::materializer::{
     MaterializeCommand, MaterializeContent, MaterializeDestination,
 };
 use crate::oj::{
-    OjCaseBinding, OjCheckerKind, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,
-    OjFileBinding, OjTerminalStatus,
+    OjCaseBinding, OjCheckerKind, OjEvidenceReceipt, OjExecutionLimits, OjExecutionPhase,
+    OjExecutionRequest, OjFileBinding, OjTerminalStatus,
 };
 use crate::oj_executor::OjJobObservation;
 use crate::oj_executor::{OjExecutorConfiguration, OjExecutorError, OjKubernetesExecutor};
@@ -1813,11 +1813,12 @@ impl KubernetesEvaluationRunner {
                     observation,
                 } => {
                     return Ok((
-                        oj_receipt_result(
+                        oj_receipt_terminal_result(
+                            context.lease.run_id.as_uuid(),
+                            context.lease.step_run_id.as_uuid(),
+                            context.lease.task_run_id.as_uuid(),
                             request.phase,
-                            receipt.terminal_status,
-                            receipt.awarded_points,
-                            receipt.diagnostic_code,
+                            &receipt,
                         ),
                         crate::execution_backend::observation_timing(&observation),
                     ));
@@ -2284,6 +2285,44 @@ fn oj_receipt_result(
         (_, OjTerminalStatus::Cancelled) => TerminalResult::Cancelled,
         _ => TerminalResult::Failed(diagnostic_code),
     }
+}
+
+fn oj_receipt_terminal_result(
+    run_id: Uuid,
+    step_run_id: Uuid,
+    task_run_id: Uuid,
+    phase: OjExecutionPhase,
+    receipt: &OjEvidenceReceipt,
+) -> TerminalResult {
+    let result = oj_receipt_result(
+        phase,
+        receipt.terminal_status,
+        receipt.awarded_points,
+        receipt.diagnostic_code.clone(),
+    );
+    let outcome = match &result {
+        TerminalResult::Succeeded { .. } => "succeeded",
+        TerminalResult::Failed(_) => "failed",
+        TerminalResult::Cancelled => "cancelled",
+    };
+    tracing::info!(
+        event = "evaluation.oj.terminal_receipt",
+        run_id = %run_id,
+        step_run_id = %step_run_id,
+        task_run_id = %task_run_id,
+        phase = ?phase,
+        terminal_status = ?receipt.terminal_status,
+        diagnostic_code = %receipt.diagnostic_code,
+        awarded_points = receipt.awarded_points,
+        max_points = receipt.max_points,
+        compile_exit_code = ?receipt.compile_exit_code,
+        compile_signal = ?receipt.compile_signal,
+        compile_timed_out = receipt.compile_timed_out,
+        compile_output_exceeded = receipt.compile_output_exceeded,
+        outcome,
+        "verified OJ receipt produced a terminal evaluation result",
+    );
+    result
 }
 
 fn advisory_completion(

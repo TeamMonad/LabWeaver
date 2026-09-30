@@ -38,15 +38,19 @@ const WORK_TEMPLATE_PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the 
 const WORK_TEMPLATE_APPROVAL_REASON = '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。'
 const GPU_MODE = process.env.LABWEAVER_E2E_GPU_MODE?.trim() || null
 const GPU_CLASS = process.env.LABWEAVER_E2E_GPU_CLASS?.trim() || null
+const AUTHORING_RESOURCE_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
+  || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
+  || 'container-primary-v1'
 // The agent worker runs one reserved dispatch at a time, so the Work template
 // authoring this journey drives can sit behind earlier runs; these ceilings cover
 // a queued authoring run plus the deployment's own fifteen minute per-candidate
 // LLM bound and the image build that follows it.
 const JOURNEY_TIMEOUT_MS = 7_200_000
 const SETTLE_TIMEOUT_MS = 1_800_000
-const WORK_TEMPLATE_RUN_ATTEMPTS = 2
 const AUTHORING_RUN_TIMEOUT_MS = 2_700_000
 const CANDIDATE_BUILD_TIMEOUT_MS = 1_800_000
+const ACTIVE_ATTEMPT_STATES = new Set(['pending', 'running', 'repairing', 'awaiting_approval'])
 
 function diagnosticCode(value) {
   return value?.diagnosticCode ?? value?.diagnostic_code ?? 'diagnostic missing'
@@ -54,6 +58,11 @@ function diagnosticCode(value) {
 
 function terminalRunState(value) {
   return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value)
+}
+
+function runIsFullyTerminal(run) {
+  return terminalRunState(run.state)
+    && !run.tracks.some((track) => track.attempts.some((attempt) => ACTIVE_ATTEMPT_STATES.has(attempt.state)))
 }
 
 function describeError(error) {
@@ -64,91 +73,194 @@ function describeError(error) {
  * Publish a Work environment template for the project through the authoring
  * page, its AgentRun, the candidate approval, and the release operation.
  */
-async function publishWorkTemplateByUi(page, projectId) {
+async function publishWorkTemplateByUi(teacherPage, adminPage, projectId, teacherActorId) {
   const packageDirectory = await mkdtemp(join(tmpdir(), 'labweaver-admin-work-'))
   try {
     await writeFile(join(packageDirectory, 'README.md'), WORK_TEMPLATE_PACKAGE_CONTENT, 'utf8')
-    await page.goto(`/researcher/software?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
-    await selectProjectByUi(page, projectId)
-    await page.getByRole('button', { name: '生成 Work 模板', exact: true }).click()
-    await expect(page.getByRole('heading', { name: '生成 Work 模板', exact: true })).toBeVisible()
+    await teacherPage.goto(`/researcher/software?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
+    await selectProjectByUi(teacherPage, projectId)
+    await teacherPage.getByRole('button', { name: '生成 Work 模板', exact: true }).click()
+    await expect(teacherPage.getByRole('heading', { name: '生成 Work 模板', exact: true })).toBeVisible()
 
-    await page.getByTestId('work-template-file-input').setInputFiles(packageDirectory)
-    await expect(page.getByRole('list', { name: '待上传材料文件', exact: true })).toContainText('README.md')
-    const packageResponsePromise = page.waitForResponse((response) => {
+    await teacherPage.getByTestId('work-template-file-input').setInputFiles(packageDirectory)
+    await expect(teacherPage.getByRole('list', { name: '待上传材料文件', exact: true })).toContainText('README.md')
+    const packageResponsePromise = teacherPage.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && /\/api\/v1\/projects\/[^/]+\/problem-package-uploads\/[^/]+\/complete$/.test(url.pathname)
     })
-    await page.getByRole('button', { name: '上传材料包', exact: true }).click()
+    await teacherPage.getByRole('button', { name: '上传材料包', exact: true }).click()
     const packageData = await expectJson(await packageResponsePromise, 'LW_ACCEPTANCE_WORK_PACKAGE_UPLOAD_FAILED')
     expect(packageData).toMatchObject({ projectId, revision: expect.any(Number) })
-    await expect(page.locator('.package-summary').getByText(/材料包已归档：/)).toBeVisible({ timeout: SETTLE_TIMEOUT_MS })
+    await expect(teacherPage.locator('.package-summary').getByText(/材料包已归档：/)).toBeVisible({ timeout: SETTLE_TIMEOUT_MS })
 
-    // The local model service answers `LW_PROVIDER_UNAVAILABLE` in a small share of authoring
-    // runs; a real user would simply start the run again, so the journey does the same. Any other
-    // failure is reported as-is and never retried.
-    let run = null
-    let candidate = null
-    let environmentTrack = null
-    let runDiagnostics = 'no tracks'
-    for (let attempt = 1; attempt <= WORK_TEMPLATE_RUN_ATTEMPTS; attempt += 1) {
-      const runResponsePromise = page.waitForResponse((response) => {
-        const url = new URL(response.url())
-        return response.request().method() === 'POST'
-          && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
-      })
-      await page.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
-      const acceptedRun = await expectJson(await runResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
-      expect(acceptedRun).toMatchObject({ id: expect.any(String), projectId })
-      run = await pollJson(
-        page.request,
-        `/api/v1/projects/${projectId}/agent-runs/${acceptedRun.id}`,
-        (value) => terminalRunState(value.state),
-        'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_STATUS_FAILED',
-        AUTHORING_RUN_TIMEOUT_MS,
+    const runResponsePromise = teacherPage.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'POST'
+        && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
+    })
+    await teacherPage.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
+    const acceptedRun = await expectJson(await runResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
+    expect(acceptedRun).toMatchObject({
+      id: expect.any(String),
+      projectId,
+      packageId: packageData.id,
+      purpose: { kind: 'authoring', environmentClass: 'work' },
+    })
+
+    const compactRunId = acceptedRun.id.replaceAll('-', '').toLowerCase()
+    const approvePendingAuthoringResources = async () => {
+      const requests = await expectJson(
+        await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
+        'LW_ACCEPTANCE_WORK_TEMPLATE_RESOURCE_REQUESTS_READ_FAILED',
       )
-      // A transient model outage is worth another run; every other outcome is reported as-is.
-      if (run.state !== 'succeeded') {
-        runDiagnostics = run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'
-        const transient = runDiagnostics.includes('LW_PROVIDER_UNAVAILABLE')
-        if (!transient || attempt === WORK_TEMPLATE_RUN_ATTEMPTS) {
-          throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:${run.state}:${runDiagnostics}`)
+      if (!Array.isArray(requests)) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_RESOURCE_REQUESTS_INVALID')
+      const runPrefix = `authoring-${compactRunId}-`
+      for (const resourceRequest of requests.filter((item) => (
+        item?.projectId === projectId
+        && typeof item.requestKey === 'string'
+        && item.requestKey.startsWith(runPrefix)
+      ))) {
+        const requestIdentity = resourceRequest.requestKey.match(
+          /^authoring-([0-9a-f]{32})-(environment|evaluation|work_configuration)-([1-9][0-9]*)-([0-9a-f]{32})$/i,
+        )
+        const taskRunId = resourceRequest.target?.taskRunId
+        if (
+          requestIdentity?.[1] !== compactRunId
+          || resourceRequest.requesterId !== teacherActorId
+          || resourceRequest.target?.kind !== 'task'
+          || typeof taskRunId !== 'string'
+          || taskRunId.replaceAll('-', '').toLowerCase() !== requestIdentity?.[4]?.toLowerCase()
+        ) {
+          throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RESOURCE_REQUEST_SCOPE_INVALID:${resourceRequest.id ?? 'missing'}`)
         }
-        // The start button is the real precondition for another run: it stays disabled while the
-        // previous run is still attached to the form.
-        await expect(page.getByRole('button', { name: '启动 Work AgentRun', exact: true })).toBeEnabled({ timeout: SETTLE_TIMEOUT_MS })
-        continue
+        if (resourceRequest.state !== 'reviewing') continue
+        if (!Number.isInteger(resourceRequest.requestedDurationSeconds) || resourceRequest.requestedDurationSeconds <= 0) {
+          throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RESOURCE_DURATION_INVALID:${resourceRequest.id ?? 'missing'}`)
+        }
+        await approveResourceRequestByUi(adminPage, {
+          requestKey: resourceRequest.requestKey,
+          projectId,
+          requestId: resourceRequest.id,
+          requesterId: teacherActorId,
+          durationSeconds: resourceRequest.requestedDurationSeconds,
+          providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
+        })
       }
-      environmentTrack = run.tracks.find((track) => track.kind === 'environment')
-      if (!environmentTrack?.candidateId) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_MISSING')
-      candidate = await pollEnvironmentCandidate(
-        page.request,
-        projectId,
-        environmentTrack.candidateId,
-        (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
-        'LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
-        CANDIDATE_BUILD_TIMEOUT_MS,
-      )
-      if (candidate.candidate?.spec?.class !== 'work') throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
-      if (candidate.build?.state === 'succeeded' && candidate.imageArtifact) break
-      // The same outage can hit the build provider the platform uses right after the run, so a
-      // build that failed for that reason is retried exactly like the run itself.
-      const buildDiagnostic = candidate.build?.diagnosticCode ?? 'artifact missing'
-      if (!buildDiagnostic.includes('LW_PROVIDER_UNAVAILABLE') || attempt === WORK_TEMPLATE_RUN_ATTEMPTS) {
-        throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${buildDiagnostic}`)
-      }
-      await expect(page.getByRole('button', { name: '启动 Work AgentRun', exact: true })).toBeEnabled({ timeout: SETTLE_TIMEOUT_MS })
     }
 
-    const candidateCard = page.getByTestId('work-template-candidate')
+    const waitForRun = async (minimumRevision = 0, requiredEnvironmentAttemptNumber = null) => await pollJson(
+      teacherPage.request,
+      `/api/v1/projects/${projectId}/agent-runs/${acceptedRun.id}`,
+      async (value) => {
+        if (
+          value.id !== acceptedRun.id
+          || value.projectId !== projectId
+          || value.packageId !== packageData.id
+          || value.purpose?.kind !== 'authoring'
+          || value.purpose.environmentClass !== 'work'
+        ) {
+          throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_RUN_SCOPE_INVALID')
+        }
+        const revisionIsFresh = Number.isInteger(value.revision) && value.revision >= minimumRevision
+        const requiredAttempt = requiredEnvironmentAttemptNumber === null
+          ? null
+          : value.tracks.find((track) => track.kind === 'environment')?.attempts
+            .find((attempt) => attempt.number === requiredEnvironmentAttemptNumber)
+        const requiredAttemptIsTerminal = requiredEnvironmentAttemptNumber === null
+          || ['succeeded', 'failed', 'cancelled'].includes(requiredAttempt?.state)
+        const complete = runIsFullyTerminal(value) && revisionIsFresh && requiredAttemptIsTerminal
+        if (!complete) await approvePendingAuthoringResources()
+        return complete
+      },
+      'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_STATUS_FAILED',
+      AUTHORING_RUN_TIMEOUT_MS,
+    )
+
+    let run = await waitForRun()
+    if (run.state !== 'succeeded') {
+      const environmentTrack = run.tracks.find((track) => track.kind === 'environment')
+      const attempts = environmentTrack?.attempts ?? []
+      const firstAttempt = attempts[0]
+      const retryableFailure = run.state !== 'cancelled'
+        && attempts.length === 1
+        && firstAttempt.number === 1
+        && ['failed', 'cancelled'].includes(firstAttempt.state)
+        && firstAttempt.diagnosticCode?.includes('LW_PROVIDER_UNAVAILABLE')
+      if (!retryableFailure) {
+        const runDiagnostics = run.tracks.map((track) => track.attempts.map(diagnosticCode).join(',')).join(';') || 'no tracks'
+        throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:${run.state}:${runDiagnostics}`)
+      }
+
+      const retryPage = await teacherPage.context().newPage()
+      let acceptedRetry
+      try {
+        await retryPage.goto(
+          `/teacher/materials?projectId=${encodeURIComponent(projectId)}&packageId=${encodeURIComponent(run.packageId)}&runId=${encodeURIComponent(run.id)}`,
+          { waitUntil: 'domcontentloaded' },
+        )
+        await selectProjectByUi(retryPage, projectId)
+        const retry = retryPage.getByRole('button', { name: '重试环境轨道', exact: true })
+        await expect(retry).toBeVisible({ timeout: SETTLE_TIMEOUT_MS })
+        await expect(retry).toBeEnabled()
+        const retryResponsePromise = retryPage.waitForResponse((response) => {
+          const url = new URL(response.url())
+          return response.request().method() === 'POST'
+            && url.pathname === `/api/v1/projects/${projectId}/agent-runs/${run.id}/tracks/environment/retry`
+        })
+        await retry.click()
+        const retryResponse = await retryResponsePromise
+        const retryHeaders = retryResponse.request().headers()
+        expect(retryHeaders['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i)
+        expect(retryHeaders['if-match']).toBe(`"rev-${run.revision}"`)
+        acceptedRetry = await expectJson(retryResponse, 'LW_ACCEPTANCE_WORK_TEMPLATE_TRACK_RETRY_FAILED')
+      } finally {
+        await retryPage.close()
+      }
+      expect(acceptedRetry).toMatchObject({ id: run.id, projectId })
+      expect(acceptedRetry.revision).toBeGreaterThan(run.revision)
+      run = await waitForRun(acceptedRetry.revision, 2)
+      if (run.state !== 'succeeded') {
+        const runDiagnostics = run.tracks.map((track) => track.attempts.map(diagnosticCode).join(',')).join(';') || 'no tracks'
+        throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED_AFTER_TRACK_RETRY:${run.state}:${runDiagnostics}`)
+      }
+    }
+
+    const environmentTrack = run.tracks.find((track) => track.kind === 'environment')
+    if (!environmentTrack?.candidateId) throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_MISSING')
+    const candidate = await pollEnvironmentCandidate(
+      teacherPage.request,
+      projectId,
+      environmentTrack.candidateId,
+      async (value) => {
+        if (
+          value.candidate?.id !== environmentTrack.candidateId
+          || value.candidate.projectId !== projectId
+          || value.candidate.runId !== run.id
+        ) {
+          throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_SCOPE_INVALID')
+        }
+        if (!['succeeded', 'failed', 'cancelled'].includes(value.build?.state)) {
+          await approvePendingAuthoringResources()
+        }
+        return ['succeeded', 'failed', 'cancelled'].includes(value.build?.state)
+      },
+      'LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
+      CANDIDATE_BUILD_TIMEOUT_MS,
+    )
+    if (candidate.candidate?.spec?.class !== 'work') throw new Error('LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
+    if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
+      throw new Error(`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
+    }
+
+    const candidateCard = teacherPage.getByTestId('work-template-candidate')
     await expect(candidateCard).toBeVisible({ timeout: SETTLE_TIMEOUT_MS })
     await expect(candidateCard).toContainText('构建完成', { timeout: SETTLE_TIMEOUT_MS })
     await candidateCard.getByTestId('work-template-candidate-confirmation').check()
     await candidateCard.getByPlaceholder('说明为什么批准这个 Work Environment 候选').fill(WORK_TEMPLATE_APPROVAL_REASON)
     const approveCandidateButton = candidateCard.getByRole('button', { name: '批准 Environment 候选', exact: true })
     await expect(approveCandidateButton).toBeEnabled()
-    const approvalResponsePromise = page.waitForResponse((response) => {
+    const approvalResponsePromise = teacherPage.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/projects/${projectId}/environment-candidates/${environmentTrack.candidateId}/decisions`
@@ -158,23 +270,23 @@ async function publishWorkTemplateByUi(page, projectId) {
     expect(approval).toMatchObject({ candidateId: environmentTrack.candidateId, decision: 'approved' })
     await expect(candidateCard).toContainText(`候选已批准：${approval.id}`)
 
-    const releaseResponsePromise = page.waitForResponse((response) => {
+    const releaseResponsePromise = teacherPage.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/projects/${projectId}/environment-template-releases`
     })
-    await page.getByTestId('work-template-release-button').click()
+    await teacherPage.getByTestId('work-template-release-button').click()
     const releaseAccepted = await expectJson(await releaseResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RELEASE_CREATE_FAILED')
     expect(releaseAccepted).toMatchObject({ operationId: expect.any(String), statusUrl: expect.any(String) })
     const release = await pollJson(
-      page.request,
+      teacherPage.request,
       releaseAccepted.statusUrl,
       (value) => Boolean(value.id) && value.projectId === projectId && value.candidateId === environmentTrack.candidateId,
       'LW_ACCEPTANCE_WORK_TEMPLATE_RELEASE_STATUS_FAILED',
       SETTLE_TIMEOUT_MS,
     )
     expect(release).toMatchObject({ projectId, runtimeKind: 'container', version: expect.any(Number) })
-    await expect(page.getByTestId('work-template-resource-link')).toBeVisible()
+    await expect(teacherPage.getByTestId('work-template-resource-link')).toBeVisible()
     return { packageData, run, release }
   } finally {
     await rm(packageDirectory, { recursive: true, force: true })
@@ -204,9 +316,10 @@ test('platform administrator approves a real resource request and reads back its
     project = await createProjectByUi(teacherPage, `live-admin-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(teacherPage, project.id)
     await configureProjectPolicyByUi(teacherPage, project.id)
+    const teacherActorId = await readActorId(teacherPage.request)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(teacherPage, project.id, studentActorId)
-    await publishWorkTemplateByUi(teacherPage, project.id)
+    await publishWorkTemplateByUi(teacherPage, page, project.id, teacherActorId)
 
     resourceRequest = await requestProjectResourceByUi(studentPage, {
       projectName: project.name,

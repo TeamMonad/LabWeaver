@@ -81,7 +81,11 @@
       <form class="rate-form" data-testid="resource-rate-form" @submit.prevent="submitRate">
         <label>
           <span>计费单位</span>
-          <select v-model="rateUnit" class="text-input">
+          <select
+            v-model="rateUnit"
+            class="text-input"
+            aria-label="计费单位"
+          >
             <option value="gpu_unit_second">GPU 秒</option>
             <option value="cpu_millicore_second">CPU millicore 秒</option>
             <option value="memory_byte_second">内存字节 秒</option>
@@ -94,7 +98,11 @@
         </label>
         <label v-if="rateUnit === 'gpu_unit_second'">
           <span>分配模式</span>
-          <select v-model="rateGpuMode" class="text-input">
+          <select
+            v-model="rateGpuMode"
+            class="text-input"
+            aria-label="分配模式"
+          >
             <option value="exclusive">独占</option>
             <option value="container_time_slice">容器时间片</option>
             <option value="vm_vgpu">VM vGPU</option>
