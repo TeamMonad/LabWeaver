@@ -209,7 +209,7 @@ describe('real Work cleanup through public owner APIs', () => {
   const deleted = { ...failed, revision: 6, generation: 3, observedState: 'deleted', operation: { id: 'delete', kind: 'delete', state: 'succeeded', acceptedRevision: 5 } }
   const expiring = { id: 'lease', requestId: 'request', claimId: 'claim', revision: 3, state: 'expiring' }
   const revoked = { ...expiring, state: 'revoked' }
-  const expiredRequest = { requestId: 'request', projectId: 'project', state: 'expired' }
+  const expiredRequest = { id: 'request', projectId: 'project', state: 'expired' }
   const accepted = { environmentId: 'environment', operationId: 'delete', statusUrl: `${environmentPath}/operations/delete` }
 
   function response(body, status = 200) {
@@ -278,6 +278,16 @@ describe('real Work cleanup through public owner APIs', () => {
 
   it('requires the Resource request to settle even after deleted and revoked readbacks', async () => {
     const request = http({ finalRequest: { ...expiredRequest, state: 'expiring' } })
+    await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toBeInstanceOf(AggregateError)
+    expect(request.get).toHaveBeenCalledWith(requestPath)
+  })
+
+  it.each([
+    { id: 'another-request', projectId: 'project', state: 'expired' },
+    { id: 'request', projectId: 'another-project', state: 'expired' },
+    { requestId: 'request', projectId: 'project', state: 'expired' },
+  ])('rejects terminal Resource readback with a different public identity: %j', async (finalRequest) => {
+    const request = http({ finalRequest })
     await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toBeInstanceOf(AggregateError)
     expect(request.get).toHaveBeenCalledWith(requestPath)
   })

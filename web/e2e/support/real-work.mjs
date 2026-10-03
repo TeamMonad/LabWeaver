@@ -1105,7 +1105,7 @@ export async function cleanupWorkResources(request, baseURL, projectId, environm
         'REAL_WORK_CLEANUP_RESOURCE_REQUEST_FINAL_STATUS_FAILED',
         240_000,
       )
-      expect(finalRequest).toMatchObject({ requestId, projectId })
+      expect(finalRequest).toMatchObject({ id: requestId, projectId })
     }
   } catch (error) {
     failures.push(error)
