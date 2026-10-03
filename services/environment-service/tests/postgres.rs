@@ -1308,6 +1308,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
     let environment_id = EnvironmentId::new();
     let plan = ContainerResourcePlan {
         environment_id,
+        project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{environment_id}"),
         image: format!("harbor.internal/course/image@sha256:{}", "a".repeat(64)),
         resources: Vec::new(),
@@ -1415,6 +1416,7 @@ async fn container_executor_persists_generation_and_permanent_delete_tombstone()
     let expired_environment_id = EnvironmentId::new();
     let expired_plan = ContainerResourcePlan {
         environment_id: expired_environment_id,
+        project_id: contracts::ProjectId::new(),
         namespace: format!("lw-env-{expired_environment_id}"),
         image: String::new(),
         resources: Vec::new(),
@@ -1526,6 +1528,16 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
     ) -> KubeVirtExecutorResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match request {
+            KubeVirtExecutorRequest::Stop { plan } => KubeVirtExecutorResponse::Stopped {
+                plan_sha256: plan.plan_sha256,
+                observation: KubeVirtStoppedObservation {
+                    observed_environment_generation: fence.environment_generation,
+                    vm_uid: uuid::Uuid::new_v4(),
+                    root_disk_uid: uuid::Uuid::new_v4(),
+                    vmi_absent: true,
+                    observed_at: self.observed_at,
+                },
+            },
             KubeVirtExecutorRequest::DeleteNamespace { plan } => {
                 KubeVirtExecutorResponse::Deleted {
                     plan_sha256: plan.plan_sha256,
@@ -1541,7 +1553,6 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
             KubeVirtExecutorRequest::Apply { plan }
             | KubeVirtExecutorRequest::Observe { plan }
             | KubeVirtExecutorRequest::Start { plan }
-            | KubeVirtExecutorRequest::Stop { plan }
             | KubeVirtExecutorRequest::Restart { plan } => KubeVirtExecutorResponse::Running {
                 plan_sha256: plan.plan_sha256,
                 observation: KubeVirtRunningObservation {
@@ -1684,6 +1695,7 @@ fn kubevirt_executor_envelope(
         ReconcileAction::Cleanup => KubeVirtExecutorRequest::DeleteNamespace {
             plan: KubeVirtCleanupPlan {
                 environment_id: plan.environment_id,
+                project_id: contracts::ProjectId::new(),
                 namespace: plan.namespace,
                 virtual_machine_name: plan.virtual_machine_name,
                 plan_sha256: plan.plan_sha256,
@@ -1724,9 +1736,9 @@ const fn environment_id_for_kubevirt_request(request: &KubeVirtExecutorRequest) 
         KubeVirtExecutorRequest::Apply { plan }
         | KubeVirtExecutorRequest::Observe { plan }
         | KubeVirtExecutorRequest::Start { plan }
-        | KubeVirtExecutorRequest::Stop { plan }
         | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
-        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
     }
 }
 
@@ -1811,7 +1823,14 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
         vmi_absent: true,
         observed_at: timestamp("2026-07-16T08:05:00.000Z"),
     };
-    store.record_stopped(&stop, &plan, &stopped).await?;
+    let stop_plan = KubeVirtCleanupPlan {
+        environment_id,
+        project_id: contracts::ProjectId::new(),
+        namespace: plan.namespace.clone(),
+        virtual_machine_name: plan.virtual_machine_name.clone(),
+        plan_sha256: Sha256Digest::of_bytes(b"stop-plan"),
+    };
+    store.record_stopped(&stop, &stop_plan, &stopped).await?;
     let persisted_host_key: String = sqlx::query_scalar(
         "SELECT ssh_host_key_sha256 FROM environment.kubevirt_runtime_observations \
          WHERE environment_id=$1",
@@ -1842,6 +1861,7 @@ async fn kubevirt_observation_identity_is_durable_fenced_and_tombstoned()
     let cleanup = kubevirt_fence(environment_id, 4, ReconcileAction::Cleanup);
     let cleanup_plan = KubeVirtCleanupPlan {
         environment_id,
+        project_id: contracts::ProjectId::new(),
         namespace: plan.namespace.clone(),
         virtual_machine_name: plan.virtual_machine_name.clone(),
         plan_sha256: Sha256Digest::of_bytes(b"cleanup-plan"),

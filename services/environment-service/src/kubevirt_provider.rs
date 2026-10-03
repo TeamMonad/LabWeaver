@@ -26,6 +26,7 @@ use sqlx::{PgPool, Row};
 use url::Url;
 use uuid::Uuid;
 
+use crate::container_provider::valid_extended_resource_name;
 use crate::{
     ContainerReleaseResolver, EnvironmentProvider, ProviderFailure, ProviderFailureCode,
     ProviderObservation, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
@@ -389,6 +390,7 @@ fn declared_manifest_digest(source_registry_digest: &str) -> Option<&str> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtCleanupPlan {
     pub environment_id: EnvironmentId,
+    pub project_id: contracts::ProjectId,
     pub namespace: String,
     pub virtual_machine_name: String,
     pub plan_sha256: Sha256Digest,
@@ -447,7 +449,7 @@ pub trait KubeVirtProviderBackend: Send + Sync {
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
+        plan: &KubeVirtCleanupPlan,
     ) -> Result<KubeVirtStoppedObservation, ProviderFailure>;
 
     async fn restart(
@@ -596,7 +598,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
+        plan: &KubeVirtCleanupPlan,
     ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
         match self
             .request(fence, KubeVirtExecutorRequest::Stop { plan: plan.clone() })
@@ -687,7 +689,7 @@ pub enum KubeVirtExecutorRequest {
     Apply { plan: KubeVirtResourcePlan },
     Observe { plan: KubeVirtResourcePlan },
     Start { plan: KubeVirtResourcePlan },
-    Stop { plan: KubeVirtResourcePlan },
+    Stop { plan: KubeVirtCleanupPlan },
     Restart { plan: KubeVirtResourcePlan },
     DeleteNamespace { plan: KubeVirtCleanupPlan },
 }
@@ -739,9 +741,9 @@ const fn kubevirt_executor_environment_id(request: &KubeVirtExecutorRequest) -> 
         KubeVirtExecutorRequest::Apply { plan }
         | KubeVirtExecutorRequest::Observe { plan }
         | KubeVirtExecutorRequest::Start { plan }
-        | KubeVirtExecutorRequest::Stop { plan }
         | KubeVirtExecutorRequest::Restart { plan } => plan.environment_id,
-        KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
+        KubeVirtExecutorRequest::Stop { plan }
+        | KubeVirtExecutorRequest::DeleteNamespace { plan } => plan.environment_id,
     }
 }
 
@@ -1415,7 +1417,7 @@ pub trait KubeVirtObservationStore: Send + Sync {
     async fn record_stopped(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
+        plan: &KubeVirtCleanupPlan,
         observation: &KubeVirtStoppedObservation,
     ) -> Result<(), KubeVirtObservationStoreError>;
 
@@ -1592,7 +1594,7 @@ impl KubeVirtObservationStore for PgKubeVirtObservationStore {
     async fn record_stopped(
         &self,
         fence: &KubeVirtBackendFence,
-        plan: &KubeVirtResourcePlan,
+        plan: &KubeVirtCleanupPlan,
         observation: &KubeVirtStoppedObservation,
     ) -> Result<(), KubeVirtObservationStoreError> {
         if plan.environment_id != fence.environment_id
@@ -2347,12 +2349,14 @@ where
         let virtual_machine_name = "runtime".to_owned();
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
+            "projectId": instance.project_id,
             "namespace": namespace,
             "virtualMachineName": virtual_machine_name,
             "action": "cleanup",
         }))?;
         Ok(KubeVirtCleanupPlan {
             environment_id: instance.id,
+            project_id: instance.project_id,
             namespace,
             virtual_machine_name,
             plan_sha256,
@@ -2413,6 +2417,18 @@ where
         {
             return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
         }
+        if action == ReconcileAction::Stop
+            && matches!(
+                instance.observed_state,
+                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring
+            )
+        {
+            if instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted {
+                return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+            }
+            self.stop_runtime(&fence, instance).await?;
+            return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
+        }
         let resolved = self
             .releases
             .resolve(instance.release_id, instance.release_version)
@@ -2454,22 +2470,6 @@ where
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
             }
-            (
-                ReconcileAction::Stop,
-                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring,
-            ) => {
-                let observed = self.backend.stop(&fence, &plan).await?;
-                validate_stopped_observation(instance, observed)?;
-                self.observations
-                    .record_stopped(&fence, &plan, &observed)
-                    .await
-                    .map_err(|error| observation_store_failure(&error))?;
-                Ok(no_endpoints(
-                    ObservedEnvironmentState::Stopped,
-                    instance.desired_state
-                        == contracts::environment::DesiredEnvironmentState::Stopped,
-                ))
-            }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::Rejected,
                 retryable: false,
@@ -2484,6 +2484,23 @@ where
     R: ContainerReleaseResolver,
     S: KubeVirtObservationStore,
 {
+    async fn stop_runtime(
+        &self,
+        fence: &KubeVirtBackendFence,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), ProviderFailure> {
+        let plan = self
+            .cleanup_plan(instance)
+            .map_err(|error| projection_failure(&error))?;
+        let observed = self.backend.stop(fence, &plan).await?;
+        validate_stopped_observation(instance, observed)?;
+        self.observations
+            .record_stopped(fence, &plan, &observed)
+            .await
+            .map_err(|error| observation_store_failure(&error))?;
+        Ok(())
+    }
+
     async fn accept_running_observation(
         &self,
         fence: &KubeVirtBackendFence,
@@ -2775,16 +2792,6 @@ fn valid_dns_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-fn valid_extended_resource_name(value: &str) -> bool {
-    let Some((prefix, name)) = value.rsplit_once('/') else {
-        return valid_dns_label(value);
-    };
-    !prefix.is_empty()
-        && prefix.len() <= 253
-        && prefix.split('.').all(valid_dns_label)
-        && valid_dns_label(name)
 }
 
 fn valid_guest_user(value: &str) -> bool {

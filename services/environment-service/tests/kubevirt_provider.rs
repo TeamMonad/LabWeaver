@@ -109,7 +109,7 @@ impl KubeVirtObservationStore for FixtureObservationStore {
     async fn record_stopped(
         &self,
         _fence: &KubeVirtBackendFence,
-        _plan: &KubeVirtResourcePlan,
+        _plan: &KubeVirtCleanupPlan,
         _observation: &KubeVirtStoppedObservation,
     ) -> Result<(), KubeVirtObservationStoreError> {
         self.states
@@ -222,7 +222,7 @@ impl KubeVirtProviderBackend for FixtureBackend {
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
-        _plan: &KubeVirtResourcePlan,
+        _plan: &KubeVirtCleanupPlan,
     ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
         self.record("stop", fence);
         Ok(KubeVirtStoppedObservation {
@@ -575,7 +575,7 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
     let lease_id = LeaseId::new();
     let capacity_binding = "vm-vgpu-capacity-1".to_owned();
     let gpu_class = "nvidia-vgpu".to_owned();
-    let allocation_binding = "nvidia.com/grid-t4-4c".to_owned();
+    let allocation_binding = "nvidia.com/GRID_V100DX-2Q".to_owned();
     let gpu_allocation = GpuAllocation {
         entry_id: GpuCatalogEntryId::new(),
         class: gpu_class.clone(),
@@ -629,20 +629,20 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
         );
         assert_eq!(
             gpu.pointer("/deviceName"),
-            Some(&json!("nvidia.com/grid-t4-4c"))
+            Some(&json!("nvidia.com/GRID_V100DX-2Q"))
         );
     }
     assert_eq!(
         virtual_machine
             .document
-            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1grid-t4-4c"),
+            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1GRID_V100DX-2Q"),
         Some(&json!("2"))
     );
     let quota = resource(&plan, "ResourceQuota");
     assert_eq!(
         quota
             .document
-            .pointer("/spec/hard/limits.nvidia.com~1grid-t4-4c"),
+            .pointer("/spec/hard/limits.nvidia.com~1GRID_V100DX-2Q"),
         Some(&json!("2"))
     );
     assert_vgpu_license_projection(&plan);
@@ -879,6 +879,7 @@ async fn start_stop_start_preserves_vm_disk_host_key_and_endpoint_identity() {
     let mut stop = provision.clone();
     stop.observed_state = ObservedEnvironmentState::Stopping;
     stop.desired_state = DesiredEnvironmentState::Stopped;
+    stop.release_id = ReleaseId::new(); // The release no longer resolves; Stop uses runtime identity.
     stop.generation = 2;
     stop.operation.id = contracts::OperationId::new();
     let stopped = provider
@@ -975,6 +976,8 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
     instance.observed_state = ObservedEnvironmentState::Expiring;
     instance.desired_state = DesiredEnvironmentState::Deleted;
     instance.operation.kind = EnvironmentOperationKind::Expire;
+    instance.operation.access_revocation_revision = Some(instance.revision);
+    instance.release_id = ReleaseId::new();
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider(projection, backend.clone());
 
@@ -983,7 +986,14 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
         .await
         .expect("expire stop succeeds");
 
-    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Deleting);
+    let deleting = environment_service::apply_provider_observation(
+        &instance,
+        instance.operation.id,
+        observation.clone(),
+    )
+    .expect("expire advances through the real deletion state");
+    assert_eq!(deleting.observed_state, ObservedEnvironmentState::Deleting);
     assert!(!observation.operation_complete);
     assert!(observation.endpoints.is_empty());
     assert_eq!(
@@ -992,7 +1002,7 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
             .lock()
             .expect("operations lock")
             .as_slice(),
-        ["stop"]
+        [] as [&str; 0]
     );
 }
 

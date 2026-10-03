@@ -608,6 +608,7 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
         projection.release.approval.trust_revision,
     );
 
+    instance.release_id = ReleaseId::new(); // Cleanup must not need a resolvable release.
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
@@ -630,6 +631,8 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
     instance.observed_state = ObservedEnvironmentState::Expiring;
     instance.desired_state = DesiredEnvironmentState::Deleted;
     instance.operation.kind = EnvironmentOperationKind::Expire;
+    instance.operation.access_revocation_revision = Some(instance.revision);
+    instance.release_id = ReleaseId::new();
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider(projection, backend.clone());
 
@@ -638,7 +641,14 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
         .await
         .expect("expire stop succeeds");
 
-    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Deleting);
+    let deleting = environment_service::apply_provider_observation(
+        &instance,
+        instance.operation.id,
+        observation.clone(),
+    )
+    .expect("expire advances through the real deletion state");
+    assert_eq!(deleting.observed_state, ObservedEnvironmentState::Deleting);
     assert!(!observation.operation_complete);
     assert!(observation.endpoints.is_empty());
     assert_eq!(
@@ -647,7 +657,7 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
             .lock()
             .expect("operations lock")
             .as_slice(),
-        ["scale:0"]
+        [] as [&str; 0]
     );
 }
 
@@ -780,6 +790,11 @@ fn experiment_gpu_allocation_renders_the_extended_resource_on_the_pod() {
     let projection = gpu_projection();
     let mut instance = instance_for(&projection);
     instance.gpu_allocation = Some(gpu_allocation("a100-exclusive", 1));
+    instance
+        .gpu_allocation
+        .as_mut()
+        .expect("GPU allocation")
+        .allocation_binding = "nvidia.com/gpu.shared".to_owned();
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
 
     let plan = provider
@@ -789,18 +804,20 @@ fn experiment_gpu_allocation_renders_the_extended_resource_on_the_pod() {
     assert_eq!(
         deployment
             .document
-            .pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu"),
+            .pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu.shared"),
         Some(&json!("1"))
     );
     assert_eq!(
         deployment
             .document
-            .pointer("/spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu"),
+            .pointer("/spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu.shared"),
         Some(&json!("1"))
     );
     let quota = resource(&plan, "ResourceQuota");
     assert_eq!(
-        quota.document.pointer("/spec/hard/limits.nvidia.com~1gpu"),
+        quota
+            .document
+            .pointer("/spec/hard/limits.nvidia.com~1gpu.shared"),
         Some(&json!("1"))
     );
 }

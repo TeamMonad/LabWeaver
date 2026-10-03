@@ -65,6 +65,7 @@ pub struct ContainerResource {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerResourcePlan {
     pub environment_id: contracts::EnvironmentId,
+    pub project_id: contracts::ProjectId,
     pub namespace: String,
     pub image: String,
     pub resources: Vec<ContainerResource>,
@@ -1627,6 +1628,7 @@ where
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
+            project_id: instance.project_id,
             namespace,
             image,
             resources: documents,
@@ -1664,11 +1666,13 @@ where
         let namespace = format!("lw-env-{}", instance.id);
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
+            "projectId": instance.project_id,
             "namespace": namespace,
             "action": "cleanup",
         }))?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
+            project_id: instance.project_id,
             namespace,
             image: String::new(),
             resources: Vec::new(),
@@ -1725,6 +1729,21 @@ where
         {
             return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
         }
+        if action == ReconcileAction::Stop
+            && matches!(
+                instance.observed_state,
+                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring
+            )
+        {
+            if instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted {
+                return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+            }
+            let plan = self
+                .cleanup_plan(instance)
+                .map_err(|error| projection_failure(&error))?;
+            self.backend.scale(&fence, &plan, 0).await?;
+            return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
+        }
         let resolved = self
             .releases
             .resolve(instance.release_id, instance.release_version)
@@ -1772,17 +1791,6 @@ where
                     .restart(&fence, &plan, instance.operation.accepted_revision)
                     .await?;
                 ready_observation(instance, observed)
-            }
-            (
-                ReconcileAction::Stop,
-                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring,
-            ) => {
-                self.backend.scale(&fence, &plan, 0).await?;
-                Ok(no_endpoints(
-                    ObservedEnvironmentState::Stopped,
-                    instance.desired_state
-                        == contracts::environment::DesiredEnvironmentState::Stopped,
-                ))
             }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::Rejected,
@@ -2104,14 +2112,35 @@ fn valid_dns_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn valid_extended_resource_name(value: &str) -> bool {
-    let Some((prefix, name)) = value.rsplit_once('/') else {
-        return valid_dns_label(value);
+/// Kubernetes extended resources must also be valid after adding the quota prefix.
+pub(crate) fn valid_extended_resource_name(value: &str) -> bool {
+    let Some((prefix, name)) = value.split_once('/') else {
+        return false;
     };
-    !prefix.is_empty()
-        && prefix.len() <= 253
-        && prefix.split('.').all(valid_dns_label)
-        && valid_dns_label(name)
+    if value.contains("kubernetes.io/") || value.starts_with("requests.") {
+        return false;
+    }
+    let valid_prefix = |prefix: &str| {
+        !prefix.is_empty()
+            && prefix.len() <= 253
+            && prefix.split('.').all(|label| {
+                !label.is_empty()
+                    && label.as_bytes()[0].is_ascii_alphanumeric()
+                    && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                    && label.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+    };
+    valid_prefix(prefix)
+        && valid_prefix(&format!("requests.{prefix}"))
+        && !name.is_empty()
+        && name.len() <= 63
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name.as_bytes()[name.len() - 1].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -2165,7 +2194,9 @@ pub enum ReleaseProjectionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{release_provider_binding, valid_image_repository_prefix};
+    use super::{
+        release_provider_binding, valid_extended_resource_name, valid_image_repository_prefix,
+    };
     use contracts::authoring::EnvironmentRuntimeSpec;
     use serde_json::json;
 
@@ -2204,6 +2235,44 @@ mod tests {
             _ => unreachable!("test runtime kind"),
         };
         serde_json::from_value(runtime).expect("valid runtime")
+    }
+
+    #[test]
+    fn extended_resources_follow_qualified_name_and_quota_constraints() {
+        for name in [
+            "nvidia.com/GRID_V100DX-2Q",
+            "nvidia.com/gpu.shared",
+            "example.org/A_b.c-9",
+        ] {
+            assert!(valid_extended_resource_name(name), "{name}");
+        }
+        for name in [
+            "gpu",
+            "kubernetes.io/gpu",
+            "vendor.kubernetes.io/gpu",
+            "requests.vendor/gpu",
+            "Vendor.io/gpu",
+            "vendor..io/gpu",
+            "vendor.io/-gpu",
+            "vendor.io/gpu_",
+            "vendor.io/gpu/other",
+            "vendor.io/gpü",
+        ] {
+            assert!(!valid_extended_resource_name(name), "{name}");
+        }
+        assert!(valid_extended_resource_name(&format!(
+            "{}/{}",
+            "a".repeat(244),
+            "A".repeat(63)
+        )));
+        assert!(!valid_extended_resource_name(&format!(
+            "{}/gpu",
+            "a".repeat(245)
+        )));
+        assert!(!valid_extended_resource_name(&format!(
+            "vendor.io/{}",
+            "A".repeat(64)
+        )));
     }
 
     #[test]
