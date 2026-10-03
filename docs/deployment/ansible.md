@@ -94,6 +94,8 @@ Cloudflare API Token 只从 root-only locator（`/var/lib/labweaver/.private/tls
 
 配置 Probe 的执行镜像使用独立 Python venv、`ansible-core` 与 `ansible.posix.json` 全量 JSON callback；两者版本以 `deploy/versions.lock.yml` 的 `ansible_probe` 为准。构建 `Containerfile.ansible-probe` 的 `runtime` 和 `evaluation-runtime` target 都必须传入 `ANSIBLE_CORE_VERSION`、`ANSIBLE_POSIX_VERSION`，CI 从同一版本锁读取，缺少参数时构建失败。仅安装 `ansible-core` 不包含这个 callback。
 
+platform profile 的服务二进制镜像与评测工具链镜像分别构建。操作员须从同一份已批准源码构建 `evaluation-runtime` target，并通过权威配置 bundle 将不可变镜像摘要写入 Control 的 `control.evaluationRuntime.runnerImage`。`93-platform-application.yml` 保留并校验该引用；Evaluation freeze coordinator 与 build executor 仍使用应用包中的 `evaluation-service` 二进制镜像。
+
 Evaluation worker 在连接 guest 前校验已批准的不可变 playbook：单个 play 必须使用 `hosts: probe`、`gather_facts: false`，只接受当前请求允许的 `package_facts`、`service_facts`、`stat` 完整模块名及只读字面参数。`stat` 可以使用字面绝对路径，或 `{{ item }}` 配合字面路径列表；启用 checksum 时必须指定 SHA-256。额外 action、变量、lookup、delegate、become、include 和 handler 均拒绝。事实从真实模块结果生成，缺失观察不会补成成功；不接受 playbook 输出预制事实或成绩。
 
 worker 使用固定 image venv/config/collection 路径及可写 controller 临时目录，清空继承环境。SSH 使用短期证书与已核对的 guest host key，`ssh_common_args` 显式指定证书和独立 known-hosts 文件；开启 pipelining，文件传输使用 `ssh` 管道，不依赖镜像中未安装的 SFTP/SCP。guest 需要 Ansible 支持的 Python，APT package facts 还需要 `python3-apt`。VM base、guest 用户、workspace、SSH CA 和网络绑定须与 Environment 配置一致。
