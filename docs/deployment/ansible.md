@@ -14,6 +14,10 @@ Inventory 声明目标集群、命名空间、存储类、镜像引用和依赖�
 
 Environment 管理环境 Namespace、Quota、PVC 和运行对象；Resource 管理分配审批、租约、GPU 容量和费用。Evaluation 在明确授权的范围执行评测 Job，不接管用户环境的生命周期。应用部署所用身份与这些运行时身份分开配置。
 
+`93-platform-application.yml` 的 platform profile 唯一管理共享的 Keycloak internal identity proxy。`94-resource-application.yml` 的 resource profile 只管理 Resource 自身应用对象及 Kubernetes API egress 策略，显式关闭 `internalIdentityProxy.enabled`，覆盖私有 values 中的旧启用值。Resource 升级不使用 `--take-ownership`。升级前核对对象实际归属，存在其他 profile 归属冲突时停止，不强制接管平台共享对象。
+
+已有 release 曾声明其他 profile 的共享对象时，操作员必须先核对实际归属并安全解除旧声明，再执行该 profile 的升级。可依据 [Helm 的资源保留说明](https://helm.sh/docs/v3/howto/charts_tips_and_tricks/#tell-helm-not-to-uninstall-a-resource) 安排保护与解除步骤：`helm.sh/resource-policy: keep` 能保护升级时将被移除的对象，但会使它脱离原 release 的管理，后续归属与清理必须明确处理。不要直接编辑 Helm release Secret，也不要删除共享对象来绕过冲突。
+
 OJ 程序评测使用默认 OCI 运行时、Landlock ABI 3 和 `hostUsers: false`。容器内 UID 保持 65532，每个 Pod 映射到独立的宿主机 UID，使 `RLIMIT_NPROC=64` 只计算该 Pod 的线程。评测节点必须启用 Kubernetes `UserNamespacesSupport`，运行时及承载 Pod 卷的文件系统须支持用户命名空间和 idmap mount；containerd 部署需要 Linux 6.3 及以上、containerd 2.0 及以上、runc 1.2 及以上，不能使用 NFS 承载这些卷。参见 [Kubernetes 用户命名空间要求](https://v1-35.docs.kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)。
 
 GPU 需要已有设备插件或 KubeVirt mediated device 配置。目录声明的模式和实际资源名称必须匹配；容器时间片申请一个共享份额，不能视为整卡。VM vGPU 必须使用已配置规格。无匹配设备、容量信息过期或设备释放未确认时，不自动降级或归还可分配容量。

@@ -163,6 +163,8 @@
       - "--set"
       - "workloads.resource-service.enabled=true"
       - "--set"
+      - "internalIdentityProxy.enabled=false"
+      - "--set"
       - "network.defaultDenyEnabled=false"
       - "--set"
       - "network.cdiCloneSourcePolicyEnabled=false"
@@ -181,7 +183,7 @@
     argv: >-
       {{ [resource_application_helm, '--kubeconfig', resource_application_kubeconfig,
           'upgrade', '--install', resource_application_release_name, resource_application_chart_source,
-          '--namespace', resource_application_namespace, '--take-ownership', '--atomic', '--wait',
+          '--namespace', resource_application_namespace, '--atomic', '--wait',
           '--timeout', resource_application_rollout_timeout] + resource_application_helm_args }}
   changed_when: true
 
