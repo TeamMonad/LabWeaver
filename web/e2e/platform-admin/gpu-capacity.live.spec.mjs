@@ -18,7 +18,7 @@ const GPU_MODES = Object.freeze(['exclusive', 'container_time_slice', 'vm_vgpu']
 const ACTIVE_REQUEST_STATES = new Set(['allocating', 'active', 'expiring'])
 const ACTIVE_LEASE_STATES = new Set(['allocating', 'active', 'expiring'])
 const EXPECTED_CAPACITY_FAILURE = 'LW_RESOURCE_GPU_CAPACITY_EXHAUSTED'
-const MAX_APPROVED_REQUESTS = 10
+const MAX_APPROVED_REQUESTS = 16
 const GIB = 1024 ** 3
 
 if (PROVIDED_INPUTS !== 0 && PROVIDED_INPUTS !== Object.keys(INPUT).length) {
@@ -200,6 +200,56 @@ async function waitForEnvironmentCreated(request, environmentId, runtimeKind) {
   return environment
 }
 
+async function waitForEnvironmentsReady(request, ownedRequests, runtimeKind) {
+  const expected = ownedRequests.map(() => ({ state: 'ready', runtimeKind }))
+  await expect.poll(async () => {
+    const environments = await Promise.all(ownedRequests.map((owned) => (
+      tryReadEnvironment(request, owned.environmentId)
+    )))
+    return environments.map((environment) => ({
+      state: environment?.observedState ?? 'missing',
+      runtimeKind: environment?.runtimeKind ?? 'missing',
+    }))
+  }, { timeout: 240_000, intervals: [1000, 2000, 5000] }).toEqual(expected)
+}
+
+async function assertHeldCapacity(request, ownedRequests, ownedLeases, runtimeKind, expectedCount) {
+  expect(ownedRequests).toHaveLength(expectedCount)
+  expect(new Set(ownedRequests.map((owned) => owned.environmentId)).size).toBe(expectedCount)
+  const [resources, environments] = await Promise.all([
+    readProjectResources(request, INPUT.projectId),
+    Promise.all(ownedRequests.map((owned) => readEnvironment(request, owned.environmentId))),
+  ])
+  for (const [index, owned] of ownedRequests.entries()) {
+    const currentRequest = resources.requests.find((item) => item.id === owned.requestId)
+    const ownedLease = ownedLeases.find((item) => item.requestId === owned.requestId)
+    const currentLease = resources.leases.find((item) => item.id === ownedLease?.leaseId)
+    expect(currentRequest, `LW_GPU_CAPACITY_REQUEST_NOT_ACTIVE:${owned.requestId}`).toMatchObject({
+      state: 'active',
+      requestedResources: { gpu: { count: 1 } },
+    })
+    expect(currentLease, `LW_GPU_CAPACITY_LEASE_NOT_ACTIVE:${owned.requestId}`).toMatchObject({
+      requestId: owned.requestId,
+      state: 'active',
+    })
+    expect(environments[index], `LW_GPU_CAPACITY_ENVIRONMENT_NOT_READY:${owned.environmentId}`).toMatchObject({
+      observedState: 'ready',
+      runtimeKind,
+    })
+  }
+}
+
+async function waitForReleasedResource(request, ownedRequest, ownedLease) {
+  await expect.poll(async () => {
+    const resources = await readProjectResources(request, INPUT.projectId)
+    const currentRequest = resources.requests.find((item) => item.id === ownedRequest.requestId)
+    const currentLease = resources.leases.find((item) => item.id === ownedLease.leaseId)
+    return currentRequest?.state === 'expired'
+      && currentLease?.requestId === ownedRequest.requestId
+      && ['revoked', 'expired'].includes(currentLease?.state)
+  }, { timeout: 240_000, intervals: [1000, 2000, 5000] }).toBe(true)
+}
+
 async function waitForEnvironmentDeleted(request, environmentId) {
   let latestState = 'unread'
   try {
@@ -298,7 +348,7 @@ async function cleanupOwnedResources(studentPage, projectId, requests, knownLeas
     }
   }
   if (failures.length) {
-    throw new Error(`LW_GPU_CAPACITY_CLEANUP_FAILED:${failures.length}`)
+    throw new AggregateError(failures, `LW_GPU_CAPACITY_CLEANUP_FAILED:${failures.length}`)
   }
 }
 
@@ -318,12 +368,10 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     const globalState = await readGlobalResourceState(page.request)
     assertAllocationBindingIdle(globalState, entries, entry)
 
-    const baselineAllocations = entry.mode === 'container_time_slice'
-      ? Array.from({ length: entry.capacityUnits }, () => 1)
-      : [entry.capacityUnits]
-    if (baselineAllocations.length > MAX_APPROVED_REQUESTS) {
-      throw new Error(`LW_GPU_CAPACITY_SCENARIO_REQUEST_LIMIT_EXCEEDED:${entry.class}:${baselineAllocations.length}:${MAX_APPROVED_REQUESTS}`)
+    if (entry.capacityUnits > MAX_APPROVED_REQUESTS) {
+      throw new Error(`LW_GPU_CAPACITY_SCENARIO_REQUEST_LIMIT_EXCEEDED:${entry.class}:${entry.capacityUnits}:${MAX_APPROVED_REQUESTS}`)
     }
+    const baselineAllocations = Array.from({ length: entry.capacityUnits }, () => 1)
     for (const count of baselineAllocations) {
       const request = await requestGpu(studentPage, entry, count, release, (accepted) => ownedRequests.push(accepted))
       const lease = await approveGpuRequest(page, request, entry, null, (accepted) => {
@@ -335,13 +383,9 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
       await waitForEnvironmentCreated(studentPage.request, request.environmentId, release.runtimeKind)
     }
 
-    const held = await readProjectResources(studentPage.request, INPUT.projectId)
-    const heldRequests = ownedRequests.map((owned) => held.requests.find((item) => item.id === owned.requestId))
-    const heldLeases = ownedRequests.map((owned) => held.leases.find((item) => item.requestId === owned.requestId))
-    if (heldRequests.some((request) => request?.state !== 'active')
-      || heldLeases.some((lease) => lease?.state !== 'active')) {
-      throw new Error(`LW_GPU_CAPACITY_HOLD_READBACK_FAILED:${entry.class}:${entry.capacityUnits}`)
-    }
+    const baselineRequests = [...ownedRequests]
+    await waitForEnvironmentsReady(studentPage.request, baselineRequests, release.runtimeKind)
+    await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
 
     const contender = await requestGpu(studentPage, entry, 1, release, (accepted) => ownedRequests.push(accepted))
     const blocked = await approveGpuRequest(page, contender, entry, EXPECTED_CAPACITY_FAILURE)
@@ -351,13 +395,18 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     expect(blockedRequest?.state).toBe('reviewing')
     expect(blockedState.leases.some((lease) => lease.requestId === contender.requestId)).toBe(false)
 
-    for (const lease of ownedLeases) {
-      await releaseProjectLeaseByUi(studentPage, { projectId: INPUT.projectId, leaseId: lease.leaseId })
-      const request = ownedRequests.find((item) => item.requestId === lease.requestId)
-      if (!request) throw new Error(`LW_GPU_CAPACITY_RELEASE_REQUEST_MISSING:${lease.requestId}`)
-      await waitForEnvironmentDeleted(studentPage.request, request.environmentId)
-    }
-    ownedLeases.length = 0
+    await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
+    const releasedRequest = baselineRequests[0]
+    const releasedLease = ownedLeases.find((lease) => lease.requestId === releasedRequest.requestId)
+    if (!releasedLease) throw new Error(`LW_GPU_CAPACITY_RELEASE_LEASE_MISSING:${releasedRequest.requestId}`)
+    await releaseProjectLeaseByUi(studentPage, { projectId: INPUT.projectId, leaseId: releasedLease.leaseId })
+    await Promise.all([
+      waitForEnvironmentDeleted(studentPage.request, releasedRequest.environmentId),
+      waitForReleasedResource(studentPage.request, releasedRequest, releasedLease),
+    ])
+    ownedLeases.splice(ownedLeases.indexOf(releasedLease), 1)
+    const remainingRequests = baselineRequests.slice(1)
+    await assertHeldCapacity(studentPage.request, remainingRequests, ownedLeases, release.runtimeKind, entry.capacityUnits - 1)
 
     const acquired = await approveGpuRequest(page, contender, entry, null, (accepted) => {
       ownedLeases.push({ requestId: accepted.requestId, leaseId: accepted.leaseId })
@@ -366,9 +415,9 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
       throw new Error(`LW_GPU_CAPACITY_RELEASE_DID_NOT_ADMIT:${contender.requestId}:${acquired.diagnosticCode ?? acquired.leaseState}`)
     }
     await waitForEnvironmentCreated(studentPage.request, contender.environmentId, release.runtimeKind)
-    const acquiredState = await readProjectResources(studentPage.request, INPUT.projectId)
-    expect(acquiredState.requests.find((item) => item.id === contender.requestId)?.state).toBe('active')
-    expect(acquiredState.leases.find((lease) => lease.requestId === contender.requestId)?.state).toBe('active')
+    const fullCapacityRequests = [...remainingRequests, contender]
+    await waitForEnvironmentsReady(studentPage.request, fullCapacityRequests, release.runtimeKind)
+    await assertHeldCapacity(studentPage.request, fullCapacityRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
   } catch (error) {
     primaryError = error
   }
@@ -377,9 +426,15 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
   } catch (error) {
     cleanupError = error
   }
-  await studentContext.close()
+  try {
+    await studentContext.close()
+  } catch (error) {
+    cleanupError = cleanupError
+      ? new AggregateError([cleanupError, error], 'LW_GPU_CAPACITY_CONTEXT_CLEANUP_FAILED')
+      : error
+  }
   if (primaryError && cleanupError) {
-    throw new Error(`${primaryError instanceof Error ? primaryError.message : String(primaryError)}; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`, { cause: primaryError })
+    throw new AggregateError([primaryError, cleanupError], `${primaryError instanceof Error ? primaryError.message : String(primaryError)}; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`, { cause: primaryError })
   }
   if (primaryError) throw primaryError
   if (cleanupError) throw cleanupError
