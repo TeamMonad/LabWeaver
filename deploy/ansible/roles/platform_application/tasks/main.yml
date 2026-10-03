@@ -617,6 +617,15 @@
           | first).data['config.yaml'] | from_yaml }}
   no_log: true
 
+- name: Require the reviewed immutable Evaluation runner before applying configuration
+  ansible.builtin.assert:
+    that:
+      - platform_application_control_configuration.control.evaluationRuntime is mapping
+      - platform_application_control_configuration.control.evaluationRuntime.runnerImage is string
+      - platform_application_control_configuration.control.evaluationRuntime.runnerImage is match('^[^@\\s]+@sha256:[0-9a-f]{64}$')
+    fail_msg: PLATFORM_APPLICATION_EVALUATION_RUNNER_IMAGE_INVALID
+  no_log: true
+
 - name: Require Control quarantine subjects to belong to the retained Agent stream
   ansible.builtin.assert:
     that:
@@ -2552,63 +2561,6 @@
             platform_application_evaluation_configuration_object.data['worker.yaml']
           }}
   no_log: true
-
-- name: Bind the control evaluation runner to the immutable package image
-  ansible.builtin.set_fact:
-    platform_application_control_configuration_object: >-
-      {{
-        platform_application_configuration_objects
-        | selectattr('kind', 'equalto', 'ConfigMap')
-        | selectattr('metadata.name', 'equalto', 'control-service-config')
-        | first
-      }}
-  no_log: true
-
-- name: Apply the package-bound control evaluation configuration
-  kubernetes.core.k8s:
-    kubeconfig: "{{ platform_application_kubeconfig }}"
-    state: present
-    apply: true
-    definition:
-      apiVersion: v1
-      kind: ConfigMap
-      metadata: >-
-        {{ platform_application_control_configuration_object.metadata }}
-      data:
-        config.yaml: >-
-          {{
-            (
-              platform_application_control_configuration_object.data['config.yaml']
-              | from_yaml
-              | combine(
-                  {
-                    'control': (
-                      (
-                        platform_application_control_configuration_object.data['config.yaml']
-                        | from_yaml
-                      ).control
-                      | combine(
-                          {
-                            'evaluationRuntime': (
-                              (
-                                platform_application_control_configuration_object.data['config.yaml']
-                                | from_yaml
-                              ).control.evaluationRuntime
-                              | combine(
-                                  {
-                                    'runnerImage':
-                                      platform_application_evaluation_worker_image
-                                  }
-                                )
-                            )
-                          }
-                        )
-                    )
-                  }
-                )
-              | to_nice_yaml(indent=2, sort_keys=false)
-            )
-          }}
 
 - name: Bind the build executor service to the immutable package image
   ansible.builtin.set_fact:

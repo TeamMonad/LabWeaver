@@ -468,6 +468,65 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks,
         )
 
+    def test_platform_application_requires_and_preserves_reviewed_evaluation_runner(self) -> None:
+        tasks = yaml.safe_load(
+            (ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        validation = next(
+            task["ansible.builtin.assert"]
+            for task in tasks
+            if task.get("ansible.builtin.assert", {}).get("fail_msg")
+            == "PLATFORM_APPLICATION_EVALUATION_RUNNER_IMAGE_INVALID"
+        )
+        application = next(
+            task["kubernetes.core.k8s"]
+            for task in tasks
+            if task.get("loop") == "{{ platform_application_configuration_objects }}"
+            and "kubernetes.core.k8s" in task
+        )
+        environment = Environment(undefined=StrictUndefined)
+        environment.tests["match"] = lambda value, pattern: (
+            isinstance(value, str) and re.match(pattern, value) is not None
+        )
+        predicates = [environment.compile_expression(value) for value in validation["that"]]
+        runner = "harbor.test/labweaver/evaluation-runtime@sha256:" + "a" * 64
+        configuration = {"control": {"evaluationRuntime": {"runnerImage": runner}}}
+        context = {"platform_application_control_configuration": configuration}
+        self.assertTrue(all(predicate(**context) for predicate in predicates))
+        control = {
+            "kind": "ConfigMap",
+            "metadata": {"name": "control-service-config"},
+            "data": {"config.yaml": yaml.safe_dump(configuration)},
+        }
+        applied = environment.compile_expression(application["definition"][2:-2].strip())(
+            item=control,
+            platform_application_evaluation_worker_image=(
+                "harbor.test/labweaver/evaluation-service@sha256:" + "b" * 64
+            ),
+        )
+        self.assertEqual(
+            yaml.safe_load(applied["data"]["config.yaml"])["control"]["evaluationRuntime"][
+                "runnerImage"
+            ],
+            runner,
+        )
+        for rejected in (
+            "harbor.test/labweaver/evaluation-runtime:latest",
+            "harbor.test/labweaver/evaluation-runtime@sha256:" + "a" * 63,
+            "harbor.test/labweaver/evaluation-runtime@sha256:" + "A" * 64,
+            "harbor.test/invalid runner@sha256:" + "a" * 64,
+            None,
+        ):
+            with self.subTest(runner=rejected):
+                configuration["control"]["evaluationRuntime"]["runnerImage"] = rejected
+                self.assertFalse(all(predicate(**context) for predicate in predicates))
+        configuration["control"]["evaluationRuntime"] = {}
+        self.assertFalse(all(predicate(**context) for predicate in predicates))
+        configuration["control"] = {}
+        self.assertFalse(all(predicate(**context) for predicate in predicates))
+
     def test_platform_application_requires_canonical_oidc_platform_admin_mapping(self) -> None:
         tasks = (
             ROOT / "deploy/ansible/roles/platform_application/tasks/main.yml"
