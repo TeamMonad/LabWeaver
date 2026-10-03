@@ -1318,6 +1318,7 @@ pub struct ClaudeCodeExecution {
 pub struct ClaudeCodeFailure {
     error: ClaudeCodeRuntimeError,
     audit: Box<ClaudeCodeAudit>,
+    repair_detail: Option<String>,
 }
 
 impl ClaudeCodeFailure {
@@ -1835,6 +1836,7 @@ impl ClaudeCodeRuntime {
             match parsed {
                 Ok(execution) => return Ok(execution),
                 Err(failure) if failure.is_schema_invalid() && repairs < max_repairs => {
+                    let repair_detail = failure.repair_detail.as_deref().unwrap_or("").to_owned();
                     if remaining_time().is_zero() && matches!(scope, ExecutionScope::Advisory) {
                         let mut expired = self.failure(
                             track,
@@ -1863,7 +1865,7 @@ impl ClaudeCodeRuntime {
                         retryable = true,
                     );
                     current_prompt = format!(
-                        "{current_prompt}\n\nThe previous response was rejected \
+                        "{current_prompt}\n\n{repair_detail}\nThe previous response was rejected \
                          (LLM_SCHEMA_INVALID). It must be exactly one syntactically valid JSON \
                          object: every {{, [, ] and }} must be balanced and correctly nested, \
                          every string must be quoted with JSON escapes, and there must be no \
@@ -2230,15 +2232,9 @@ impl ClaudeCodeRuntime {
                 );
                 failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
             })?;
-            if materializer
+            materializer
                 .validate_recipe_plan(&plan, "Dockerfile")
-                .is_err()
-            {
-                return Err(failure_with_audit(
-                    ClaudeCodeRuntimeError::SchemaInvalid,
-                    audit.clone(),
-                ));
-            }
+                .map_err(|error| recipe_failure(error, audit.clone()))?;
             let artifact = materializer
                 .materialize(
                     input.project_id(),
@@ -2312,12 +2308,11 @@ impl ClaudeCodeRuntime {
                 );
                 failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
             })?;
-            if !generated_build_recipe_is_complete(&plan, "evaluation/Dockerfile") {
-                return Err(failure_with_audit(
-                    ClaudeCodeRuntimeError::SchemaInvalid,
-                    audit.clone(),
-                ));
-            }
+            crate::candidate_materializer::validate_generated_recipe(
+                &plan,
+                "evaluation/Dockerfile",
+            )
+            .map_err(|error| recipe_failure(error, audit.clone()))?;
             let materializer = self.materializer.as_ref().ok_or_else(|| {
                 tracing::error!(
                     event = "agent.candidate_materialization.failed",
@@ -2332,15 +2327,9 @@ impl ClaudeCodeRuntime {
                 );
                 failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
             })?;
-            if materializer
+            materializer
                 .validate_recipe_plan(&plan, "evaluation/Dockerfile")
-                .is_err()
-            {
-                return Err(failure_with_audit(
-                    ClaudeCodeRuntimeError::SchemaInvalid,
-                    audit.clone(),
-                ));
-            }
+                .map_err(|error| recipe_failure(error, audit.clone()))?;
             let artifact = materializer
                 .materialize_runner(
                     input.project_id(),
@@ -3077,7 +3066,28 @@ fn failure_with_audit(
     ClaudeCodeFailure {
         error,
         audit: Box::new(audit),
+        repair_detail: None,
     }
+}
+
+fn recipe_failure(
+    error: crate::candidate_materializer::CandidateMaterializationError,
+    audit: ClaudeCodeAudit,
+) -> ClaudeCodeFailure {
+    let mut failure = failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit);
+    if let crate::candidate_materializer::CandidateMaterializationError::MissingCopySource(source) =
+        error
+    {
+        // Source has already passed the package-relative path validator. Quote and bound
+        // only this path; no provider text is retained or written to diagnostic logs.
+        let source: String = source.chars().take(256).collect();
+        if let Ok(quoted) = serde_json::to_string(&source) {
+            failure.repair_detail = Some(format!(
+                "Missing local COPY/ADD source {quoted}. Include that source in the generated files array or choose the complete verified package context."
+            ));
+        }
+    }
+    failure
 }
 
 fn zero_usage() -> LlmUsage {
@@ -3266,10 +3276,6 @@ fn preserve_declared_environment_surfaces(
         restored.push("entries");
     }
     restored
-}
-
-fn generated_build_recipe_is_complete(plan: &Value, dockerfile_path: &str) -> bool {
-    crate::candidate_materializer::generated_recipe_is_valid(plan, dockerfile_path)
 }
 
 const TOOL_POLICY_CANONICAL_JSON: &[u8] = br#"{"bare":true,"builtinTools":[],"maxTurnsPerCandidate":1,"mcpServers":[],"outputProtocol":"stream_json_single_candidate_with_non_authoritative_system_and_synthetic_user_telemetry","permissionMode":"dontAsk","sessionPersistence":false}"#;
@@ -3475,8 +3481,8 @@ mod tests {
     use super::{
         CLAUDE_RUNTIME_PATH, ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
         ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError, RunCancellation, TokioClaudeCodeProcess,
-        decimal_to_microusd, execute_process, generated_build_recipe_is_complete, microusd_to_usd,
-        platform_image_prompt, read_stream_until_result, usd_number_to_microusd,
+        decimal_to_microusd, execute_process, microusd_to_usd, platform_image_prompt,
+        read_stream_until_result, usd_number_to_microusd,
     };
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
 
@@ -3519,7 +3525,10 @@ mod tests {
                 {"path": "seed", "content": "seed\n"}
             ]
         });
-        assert!(generated_build_recipe_is_complete(&complete, "Dockerfile"));
+        assert!(
+            crate::candidate_materializer::validate_generated_recipe(&complete, "Dockerfile")
+                .is_ok()
+        );
 
         let missing = json!({
             "mode": "generated",
@@ -3527,7 +3536,10 @@ mod tests {
                 {"path": "Dockerfile", "content": "FROM scratch\nCOPY seed /opt/seed\n"}
             ]
         });
-        assert!(!generated_build_recipe_is_complete(&missing, "Dockerfile"));
+        assert!(
+            crate::candidate_materializer::validate_generated_recipe(&missing, "Dockerfile")
+                .is_err()
+        );
 
         let broken = json!({
             "mode": "generated",
@@ -3535,7 +3547,10 @@ mod tests {
                 {"path": "Dockerfile", "content": "FROM scratch\nRUN true\n    && echo ok\n"}
             ]
         });
-        assert!(!generated_build_recipe_is_complete(&broken, "Dockerfile"));
+        assert!(
+            crate::candidate_materializer::validate_generated_recipe(&broken, "Dockerfile")
+                .is_err()
+        );
 
         let continued = json!({
             "mode": "generated",
@@ -3543,13 +3558,22 @@ mod tests {
                 {"path": "Dockerfile", "content": "FROM scratch\nRUN true \\\n    && echo ok\n"}
             ]
         });
-        assert!(generated_build_recipe_is_complete(&continued, "Dockerfile"));
+        assert!(
+            crate::candidate_materializer::validate_generated_recipe(&continued, "Dockerfile")
+                .is_ok()
+        );
 
         let submitted = json!({"mode": "submitted", "source_path": "context.tar.gz"});
-        assert!(generated_build_recipe_is_complete(&submitted, "Dockerfile"));
+        assert!(
+            crate::candidate_materializer::validate_generated_recipe(&submitted, "Dockerfile")
+                .is_ok()
+        );
 
         let package = json!({"mode": "package"});
-        assert!(generated_build_recipe_is_complete(&package, "Dockerfile"));
+        assert!(
+            crate::candidate_materializer::validate_generated_recipe(&package, "Dockerfile")
+                .is_ok()
+        );
     }
 
     #[test]

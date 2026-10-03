@@ -598,7 +598,7 @@ impl SandboxAuthoringProcess {
                         attempt_timing(&observation),
                     )
                     .await;
-                    return Err(ClaudeCodeProcessError::Io);
+                    return Err(sandbox_failure(&diagnostic_code));
                 }
                 KubernetesJobObservation::Missing | KubernetesJobObservation::Running => {}
             }
@@ -632,8 +632,8 @@ impl SandboxAuthoringProcess {
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
         let task_run_id = TaskRunId::from_str(&checkpoint.task_run_id.to_string())
             .map_err(|_| ClaudeCodeProcessError::Io)?;
-        if checkpoint.diagnostic_code.is_some() {
-            return Err(ClaudeCodeProcessError::Io);
+        if let Some(diagnostic) = &checkpoint.diagnostic_code {
+            return Err(sandbox_failure(diagnostic));
         }
         let binding: TaskExecutionBinding = serde_json::from_value(
             checkpoint
@@ -826,8 +826,8 @@ impl SandboxAuthoringProcess {
                 .await
                 .map_err(|_| ClaudeCodeProcessError::Io)?
                 .ok_or(ClaudeCodeProcessError::Io)?;
-            if checkpoint.diagnostic_code.is_some() {
-                return Err(ClaudeCodeProcessError::Io);
+            if let Some(diagnostic) = &checkpoint.diagnostic_code {
+                return Err(sandbox_failure(diagnostic));
             }
             if let Some(value) = &checkpoint.terminal_receipt {
                 let frozen: FrozenSandboxReceipt = serde_json::from_value(value.clone())
@@ -939,6 +939,11 @@ impl SandboxAuthoringProcess {
                     )
                     .await;
                 }
+                KubernetesJobObservation::Failed {
+                    diagnostic_code, ..
+                } => {
+                    return Err(sandbox_failure(&diagnostic_code));
+                }
                 KubernetesJobObservation::Running if cancellation.is_cancelled() => {
                     return Err(ClaudeCodeProcessError::Cancelled);
                 }
@@ -957,12 +962,15 @@ impl SandboxAuthoringProcess {
                         .await
                         .map_err(|_| ClaudeCodeProcessError::Io)?
                         .ok_or(ClaudeCodeProcessError::Io)?;
+                    if let Some(diagnostic) = &latest.diagnostic_code {
+                        return Err(sandbox_failure(diagnostic));
+                    }
                     if latest.terminal_receipt.is_some() {
                         continue;
                     }
                     return Err(ClaudeCodeProcessError::Io);
                 }
-                _ => return Err(ClaudeCodeProcessError::Io),
+                KubernetesJobObservation::Running => return Err(ClaudeCodeProcessError::Io),
             }
         }
     }
@@ -1816,6 +1824,14 @@ fn attempt_ownership_from_parts(
     }
 }
 
+fn sandbox_failure(diagnostic: &str) -> ClaudeCodeProcessError {
+    if diagnostic == "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED" {
+        ClaudeCodeProcessError::TimedOut
+    } else {
+        ClaudeCodeProcessError::Io
+    }
+}
+
 fn valid_receipt_sha(size: u64, value: &str) -> bool {
     valid_sha256(value) && (size > 0 || value == Sha256Digest::of_bytes(&[]).to_string())
 }
@@ -1924,7 +1940,10 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
             return Err(ClaudeCodeProcessError::TimedOut);
         }
         if checkpoint.state == "failed" {
-            return Err(ClaudeCodeProcessError::Io);
+            return Err(checkpoint
+                .diagnostic_code
+                .as_deref()
+                .map_or(ClaudeCodeProcessError::Io, sandbox_failure));
         }
         Box::pin(self.finish_recovered_attempt(
             scope,

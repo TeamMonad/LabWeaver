@@ -65,11 +65,14 @@ pub struct RecipeFile {
 }
 
 /// Object-store and plan validation failure during candidate materialization.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Clone, Eq, Error, PartialEq)]
 pub enum CandidateMaterializationError {
     /// The plan is malformed or outside the package/project scope.
     #[error("candidate build recipe is invalid")]
     InvalidPlan,
+    /// A local COPY or ADD source is absent from the generated build context.
+    #[error("candidate build recipe has a missing COPY source")]
+    MissingCopySource(String),
     /// The configured object store could not persist or verify the generated context.
     #[error("candidate build context could not be persisted")]
     Storage,
@@ -78,12 +81,25 @@ pub enum CandidateMaterializationError {
     ScopeUnavailable,
 }
 
+impl std::fmt::Debug for CandidateMaterializationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidPlan => "InvalidPlan",
+            Self::MissingCopySource(_) => "MissingCopySource",
+            Self::Storage => "Storage",
+            Self::ScopeUnavailable => "ScopeUnavailable",
+        })
+    }
+}
+
 impl CandidateMaterializationError {
     /// Returns a stable diagnostic for the materialization boundary.
     #[must_use]
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
-            Self::InvalidPlan => "LW_AGENT_CANDIDATE_MATERIALIZATION_INVALID_PLAN",
+            Self::InvalidPlan | Self::MissingCopySource(_) => {
+                "LW_AGENT_CANDIDATE_MATERIALIZATION_INVALID_PLAN"
+            }
             Self::Storage => "LW_AGENT_CANDIDATE_MATERIALIZATION_STORAGE_FAILED",
             Self::ScopeUnavailable => "LW_AGENT_CANDIDATE_MATERIALIZATION_SCOPE_UNAVAILABLE",
         }
@@ -463,9 +479,7 @@ impl EnvironmentCandidateMaterializer for S3EnvironmentCandidateMaterializer {
         plan: &Value,
         dockerfile_path: &str,
     ) -> Result<(), CandidateMaterializationError> {
-        if !generated_recipe_is_valid(plan, dockerfile_path) {
-            return Err(CandidateMaterializationError::InvalidPlan);
-        }
+        validate_generated_recipe(plan, dockerfile_path)?;
         let recipe: ContainerBuildRecipe = serde_json::from_value(plan.clone())
             .map_err(|_| CandidateMaterializationError::InvalidPlan)?;
         match recipe {
@@ -750,19 +764,19 @@ fn pack_recipe(
 /// failing later at materialization time. Submitted recipes are accepted only
 /// when their relative source path is well formed; the materializer still
 /// verifies that the named package file exists with a build-context media type.
-pub(crate) fn generated_recipe_is_valid(plan: &serde_json::Value, dockerfile_path: &str) -> bool {
-    let Ok(recipe) = serde_json::from_value::<ContainerBuildRecipe>(plan.clone()) else {
-        return false;
-    };
+pub(crate) fn validate_generated_recipe(
+    plan: &serde_json::Value,
+    dockerfile_path: &str,
+) -> Result<(), CandidateMaterializationError> {
+    let recipe = serde_json::from_value::<ContainerBuildRecipe>(plan.clone())
+        .map_err(|_| CandidateMaterializationError::InvalidPlan)?;
     match recipe {
         ContainerBuildRecipe::Generated { files } => {
-            let Some(dockerfile) = files
+            let dockerfile = files
                 .iter()
                 .find(|file| file.path == dockerfile_path)
                 .map(|file| file.content.as_str())
-            else {
-                return false;
-            };
+                .ok_or(CandidateMaterializationError::InvalidPlan)?;
             let mut previous_continued = false;
             for line in dockerfile.lines() {
                 let trimmed = line.trim_start();
@@ -771,20 +785,21 @@ pub(crate) fn generated_recipe_is_valid(plan: &serde_json::Value, dockerfile_pat
                         || trimmed.starts_with("||")
                         || trimmed.starts_with(';'))
                 {
-                    return false;
+                    return Err(CandidateMaterializationError::InvalidPlan);
                 }
                 previous_continued = line.trim_end().ends_with('\\');
             }
             if dockerfile_has_self_referential_stage_copy(dockerfile) {
-                return false;
+                return Err(CandidateMaterializationError::InvalidPlan);
             }
-            pack_recipe(&files, dockerfile_path).is_ok()
+            pack_recipe(&files, dockerfile_path).map(|_| ())
         }
         ContainerBuildRecipe::Submitted { source_path } => {
-            contracts::validate_relative_path(&source_path).is_ok()
+            contracts::validate_relative_path(&source_path)
+                .map_err(|_| CandidateMaterializationError::InvalidPlan)
         }
         ContainerBuildRecipe::Package { context_path } => {
-            package_context_prefix(context_path.as_deref()).is_ok()
+            package_context_prefix(context_path.as_deref()).map(|_| ())
         }
     }
 }
@@ -894,12 +909,18 @@ pub(crate) fn validate_dockerfile_copy_sources(
             continue;
         }
         for source in &operands[..operands.len() - 1] {
-            let normalized = source.trim_start_matches("./");
-            if normalized.is_empty()
-                || normalized == "."
-                || source.starts_with("http://")
+            if source.starts_with("http://")
                 || source.starts_with("https://")
                 || source.starts_with("git@")
+            {
+                continue;
+            }
+            if source.split('/').any(|component| component == "..") {
+                return Err(CandidateMaterializationError::InvalidPlan);
+            }
+            let normalized = source.trim_start_matches("./").trim_end_matches('/');
+            if normalized.is_empty()
+                || normalized == "."
                 || normalized.contains('*')
                 || normalized.contains('?')
                 || normalized.contains('[')
@@ -911,7 +932,11 @@ pub(crate) fn validate_dockerfile_copy_sources(
                     .iter()
                     .any(|path| path.starts_with(&format!("{normalized}/")));
             if !present {
-                return Err(CandidateMaterializationError::InvalidPlan);
+                contracts::validate_relative_path(normalized)
+                    .map_err(|_| CandidateMaterializationError::InvalidPlan)?;
+                return Err(CandidateMaterializationError::MissingCopySource(
+                    normalized.to_owned(),
+                ));
             }
         }
     }
@@ -945,8 +970,8 @@ fn current_timestamp() -> Result<UtcTimestamp, ()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateMaterializationError, ContainerBuildRecipe, RecipeFile, generated_recipe_is_valid,
-        pack_recipe,
+        CandidateMaterializationError, ContainerBuildRecipe, RecipeFile, pack_recipe,
+        validate_generated_recipe,
     };
     use serde_json::json;
 
@@ -1037,7 +1062,9 @@ mod tests {
         ];
         assert_eq!(
             pack_recipe(&unresolved, "Dockerfile"),
-            Err(CandidateMaterializationError::InvalidPlan)
+            Err(CandidateMaterializationError::MissingCopySource(
+                "workspace-seed/marker.txt".to_owned()
+            ))
         );
 
         let resolved = vec![
@@ -1060,6 +1087,32 @@ mod tests {
     }
 
     #[test]
+    fn local_copy_directory_accepts_children_and_rejects_missing_or_traversal() {
+        let paths = std::collections::BTreeSet::from(["profiles/probe/playbook.yml".to_owned()]);
+        for source in ["profiles", "profiles/", "./profiles/"] {
+            assert!(
+                super::validate_dockerfile_copy_sources(
+                    &format!("COPY {source} /app/profiles/"),
+                    &paths
+                )
+                .is_ok()
+            );
+        }
+        assert_eq!(
+            super::validate_dockerfile_copy_sources("COPY missing/ /app/", &paths),
+            Err(CandidateMaterializationError::MissingCopySource(
+                "missing".to_owned()
+            ))
+        );
+        for source in ["../file", "./../file", "../*.txt", "profiles/../*.txt"] {
+            assert_eq!(
+                super::validate_dockerfile_copy_sources(&format!("ADD {source} /app/"), &paths),
+                Err(CandidateMaterializationError::InvalidPlan)
+            );
+        }
+    }
+
+    #[test]
     fn generated_recipe_rejects_self_referential_stage_copy() {
         let plan = serde_json::json!({
             "mode": "generated",
@@ -1072,31 +1125,43 @@ mod tests {
                 )
             }]
         });
-        assert!(!generated_recipe_is_valid(&plan, "evaluation/Dockerfile"));
+        assert!(validate_generated_recipe(&plan, "evaluation/Dockerfile").is_err());
     }
 
     #[test]
     fn package_recipe_selects_verified_package_files() {
-        assert!(generated_recipe_is_valid(
-            &serde_json::json!({"mode": "package"}),
-            "Dockerfile"
-        ));
-        assert!(generated_recipe_is_valid(
-            &serde_json::json!({"mode": "package", "context_path": "lab"}),
-            "Dockerfile"
-        ));
-        assert!(generated_recipe_is_valid(
-            &serde_json::json!({"mode": "package", "context_path": "lab/"}),
-            "evaluation/Dockerfile"
-        ));
-        assert!(!generated_recipe_is_valid(
-            &serde_json::json!({"mode": "package", "context_path": "../lab"}),
-            "Dockerfile"
-        ));
-        assert!(!generated_recipe_is_valid(
-            &serde_json::json!({"mode": "package", "extra": true}),
-            "Dockerfile"
-        ));
+        assert!(
+            validate_generated_recipe(&serde_json::json!({"mode": "package"}), "Dockerfile")
+                .is_ok()
+        );
+        assert!(
+            validate_generated_recipe(
+                &serde_json::json!({"mode": "package", "context_path": "lab"}),
+                "Dockerfile"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_generated_recipe(
+                &serde_json::json!({"mode": "package", "context_path": "lab/"}),
+                "evaluation/Dockerfile"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_generated_recipe(
+                &serde_json::json!({"mode": "package", "context_path": "../lab"}),
+                "Dockerfile"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_generated_recipe(
+                &serde_json::json!({"mode": "package", "extra": true}),
+                "Dockerfile"
+            )
+            .is_err()
+        );
     }
 
     #[test]

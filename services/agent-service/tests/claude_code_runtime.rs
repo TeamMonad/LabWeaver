@@ -3866,6 +3866,13 @@ async fn authoring_repair_missing_copy_source_advances_scope_and_accumulates_usa
             .expect("repair prompt missing")
             .contains("COPY or ADD")
     );
+    assert!(
+        commands[1]
+            .args()
+            .last()
+            .expect("repair prompt missing")
+            .contains("Missing local COPY/ADD source \"requirements.txt\"")
+    );
     assert_eq!(commands[0].stdin_sha256(), commands[1].stdin_sha256());
     Ok(())
 }
@@ -3972,6 +3979,9 @@ async fn authoring_repair_process_failure_preserves_known_usage_and_error_class(
             "second generation process failed",
         )?;
         assert_eq!(failure.diagnostic_code(), expected.diagnostic_code());
+        if expected == ClaudeCodeRuntimeError::TimedOut {
+            assert_eq!(failure.diagnostic_code(), "LW_PROVIDER_TIMEOUT");
+        }
         assert_eq!(failure.audit().outcome, outcome);
         assert_repair_usage(failure.audit(), 1, false);
         assert_repair_scopes(&process, &scope, &[1, 2]);
