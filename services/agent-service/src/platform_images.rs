@@ -310,6 +310,10 @@ impl PgPlatformImageCatalog {
             || cancellation_requested
             || lease_valid != Some(true)
         {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
             return Err(PlatformImageStoreError::Conflict);
         }
         let catalog_id = Uuid::now_v7();
@@ -351,6 +355,10 @@ impl PgPlatformImageCatalog {
         .await
         .map_err(|_| PlatformImageStoreError::Persistence)?;
         if inserted.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
             return Err(PlatformImageStoreError::Conflict);
         }
         insert_audit(
@@ -382,6 +390,10 @@ impl PgPlatformImageCatalog {
         .await
         .map_err(|_| PlatformImageStoreError::Persistence)?;
         if updated.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
             return Err(PlatformImageStoreError::Conflict);
         }
         transaction
