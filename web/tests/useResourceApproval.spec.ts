@@ -2,7 +2,7 @@ import { defineComponent, h } from 'vue'
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { requestFingerprint, useResourceApproval } from '@/composables/useResourceApproval'
-import type { ResourceRequestSchema } from '@/generated/contracts'
+import type { GpuCatalogEntrySchema, ResourceRequestSchema } from '@/generated/contracts'
 
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
@@ -70,6 +70,79 @@ afterEach(() => {
 })
 
 describe('useResourceApproval', () => {
+  const exclusiveEntry: GpuCatalogEntrySchema = {
+    id: '0197f0e0-0000-7000-8000-0000000000a1',
+    class: 'nvidia-cuda',
+    mode: 'exclusive',
+    providerBinding: 'container-primary-v1',
+    allocationBinding: 'nvidia.com/gpu',
+    capacityUnits: 1,
+    revision: 2,
+    active: true,
+  }
+
+  it('offers only active GPU providers when the catalog retains inactive revisions', async () => {
+    mocks.listResourceRequests.mockResolvedValue(success([]))
+    mocks.listResourceLeases.mockResolvedValue(success([]))
+    mocks.apiGet.mockResolvedValue(success([
+      exclusiveEntry,
+      { ...exclusiveEntry, id: '0197f0e0-0000-7000-8000-0000000000a2', providerBinding: 'retired-gpu-provider', revision: 1, active: false },
+      {
+        ...exclusiveEntry,
+        id: '0197f0e0-0000-7000-8000-0000000000a3',
+        class: 'nvidia-v100-2q',
+        mode: 'vm_vgpu',
+        providerBinding: 'kubevirt-primary-v1',
+        allocationBinding: 'nvidia.com/GRID_V100DX-2Q',
+        capacityUnits: 16,
+        revision: 1,
+      },
+    ]))
+
+    const { state, wrapper } = mountApproval()
+    await vi.waitFor(() => expect(state.providerOptions).toEqual({
+      kind: 'success',
+      data: [
+        { providerBinding: 'container-primary-v1', catalogEntryCount: 1, gpuClasses: ['nvidia-cuda'] },
+        { providerBinding: 'kubevirt-primary-v1', catalogEntryCount: 1, gpuClasses: ['nvidia-v100-2q'] },
+      ],
+    }))
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['non-boolean active flag', { active: 'true' }],
+    ['unknown allocation mode', { mode: 'unknown' }],
+    ['missing entry identity', { id: undefined }],
+    ['empty allocation binding', { allocationBinding: '' }],
+    ['empty GPU class', { class: '' }],
+    ['invalid capacity', { capacityUnits: 0 }],
+    ['invalid revision', { revision: 0 }],
+    ['malformed active provider', { providerBinding: '' }],
+    ['malformed inactive provider', { active: false, providerBinding: '' }],
+    ['malformed inactive capacity', { active: false, capacityUnits: 0 }],
+  ])('rejects a catalog with %s', async (_label, fields) => {
+    mocks.listResourceRequests.mockResolvedValue(success([]))
+    mocks.listResourceLeases.mockResolvedValue(success([]))
+    mocks.apiGet.mockResolvedValue(success([exclusiveEntry, { ...exclusiveEntry, ...fields }]))
+
+    const { state, wrapper } = mountApproval()
+    await vi.waitFor(() => expect(state.providerOptions.kind).toBe('error'))
+    expect(state.providerOptions).toMatchObject({ kind: 'error', diagnostic: { code: 'GPU_CATALOG_INVALID' } })
+    expect(mocks.approveResourceRequest).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps GPU approval unavailable when every valid catalog revision is inactive', async () => {
+    mocks.listResourceRequests.mockResolvedValue(success([]))
+    mocks.listResourceLeases.mockResolvedValue(success([]))
+    mocks.apiGet.mockResolvedValue(success([{ ...exclusiveEntry, active: false }]))
+
+    const { state, wrapper } = mountApproval()
+    await vi.waitFor(() => expect(state.providerOptions).toEqual({ kind: 'empty' }))
+    wrapper.unmount()
+  })
+
   it('checks every selected task request against its latest content and revision before approval', async () => {
     const first = taskRequest('one')
     const second = taskRequest('two')

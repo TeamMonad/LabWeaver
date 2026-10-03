@@ -79,12 +79,20 @@ function parseProviderOptions(value: unknown): ResourceProviderOption[] {
       typeof entry.class !== 'string' ||
       !entry.class.trim() ||
       typeof entry.active !== 'boolean' ||
-      entry.active !== true ||
+      typeof entry.id !== 'string' ||
+      !entry.id.trim() ||
+      typeof entry.allocationBinding !== 'string' ||
+      !entry.allocationBinding.trim() ||
+      typeof entry.mode !== 'string' ||
+      !['exclusive', 'container_time_slice', 'vm_vgpu'].includes(entry.mode) ||
+      !Number.isSafeInteger(entry.revision) ||
+      Number(entry.revision) <= 0 ||
       !Number.isSafeInteger(entry.capacityUnits) ||
       Number(entry.capacityUnits) <= 0
     ) {
       throw new Error('GPU catalog entry is invalid')
     }
+    if (!entry.active) continue
     const current = providers.get(entry.providerBinding) ?? { count: 0, classes: new Set<string>() }
     current.count += 1
     current.classes.add(entry.class)
