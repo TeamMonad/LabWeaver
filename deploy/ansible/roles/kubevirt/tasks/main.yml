@@ -135,15 +135,15 @@
 - name: Validate explicit CDI node-pull references
   ansible.builtin.assert:
     that:
-      - cdi_image_pull_secrets is sequence
-      - cdi_image_pull_secrets is not string
-      - cdi_image_pull_secrets is not mapping
+      - kubevirt_cdi_image_pull_secrets is sequence
+      - kubevirt_cdi_image_pull_secrets is not string
+      - kubevirt_cdi_image_pull_secrets is not mapping
       - platform_application_namespace is defined
       - platform_application_namespace is string
       - platform_application_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - platform_application_namespace | length <= 63
     fail_msg: CDI_NODE_PULL_CONFIGURATION_INVALID
-  when: cdi_image_pull_secrets | length > 0
+  when: kubevirt_cdi_image_pull_secrets | length > 0
   tags: [kubevirt-cdi-pull]
 
 - name: Validate each CDI node-pull reference
@@ -155,7 +155,7 @@
       - item.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - item.name | length <= 63
     fail_msg: CDI_NODE_PULL_REFERENCE_INVALID
-  loop: "{{ cdi_image_pull_secrets }}"
+  loop: "{{ kubevirt_cdi_image_pull_secrets }}"
   tags: [kubevirt-cdi-pull]
 
 - name: Read existing platform-owned CDI node-pull credentials
@@ -164,8 +164,8 @@
     kind: Secret
     namespace: "{{ platform_application_namespace }}"
     name: "{{ item.name }}"
-  loop: "{{ cdi_image_pull_secrets }}"
-  register: cdi_node_pull_credentials
+  loop: "{{ kubevirt_cdi_image_pull_secrets }}"
+  register: kubevirt_cdi_node_pull_credentials
   no_log: true
   tags: [kubevirt-cdi-pull]
 
@@ -176,7 +176,7 @@
       - item.resources[0].type == 'kubernetes.io/dockerconfigjson'
       - item.resources[0].data['.dockerconfigjson'] is defined
     fail_msg: CDI_NODE_PULL_SECRET_INVALID
-  loop: "{{ cdi_node_pull_credentials.results }}"
+  loop: "{{ kubevirt_cdi_node_pull_credentials.results }}"
   no_log: true
   tags: [kubevirt-cdi-pull]
 
@@ -190,8 +190,8 @@
         name: cdi
       spec:
         config:
-          imagePullSecrets: "{{ cdi_image_pull_secrets }}"
-  when: cdi_image_pull_secrets | length > 0
+          imagePullSecrets: "{{ kubevirt_cdi_image_pull_secrets }}"
+  when: kubevirt_cdi_image_pull_secrets | length > 0
   tags: [kubevirt-cdi-pull]
 
 - name: Allow KubeVirt control-plane access to the adopted API endpoint
