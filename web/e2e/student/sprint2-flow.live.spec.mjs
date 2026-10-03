@@ -35,6 +35,12 @@ import {
   readRealWorkVmWorkspaceFile,
   runRealWorkVmCudaProbe,
 } from '../support/real-work-ssh.mjs'
+import {
+  addSshPublicKeyByUi as addStudentSshKeyByUi,
+  deleteSshPublicKeyByUi as deleteStudentSshKeyByUi,
+  issueEnvironmentSshAccessGrantByUi as issueWorkAccessGrantByUi,
+  waitForActiveAccessGrant,
+} from '../support/ssh-access.mjs'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
@@ -450,120 +456,6 @@ async function verifyCrossProjectEnvironmentDenied(browser, baseURL, projectId, 
   } finally {
     await context.close()
   }
-}
-
-async function waitForActiveAccessGrant(request, grantId) {
-  const grant = await pollJson(
-    request,
-    `/api/v1/access-grants/${grantId}`,
-    (value) => ['active', 'denied', 'expired', 'revoked'].includes(value.state),
-    'WORK_ACCESS_GRANT_STATUS_FAILED',
-    120_000,
-  )
-  if (grant.state !== 'active') {
-    throw new Error(`WORK_ACCESS_GRANT_NOT_ACTIVE:${grant.state}:${grant.reasonCode ?? 'reason missing'}`)
-  }
-  return grant
-}
-
-async function addStudentSshKeyByUi(page, identity, onAccepted = () => {}) {
-  await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'SSH 公钥', exact: true })).toBeVisible()
-  await page.getByLabel('OpenSSH 公钥', { exact: true }).fill(identity.publicKeyOpenssh)
-  const createResponsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST' && url.pathname === '/api/v1/me/ssh-public-keys'
-  })
-  await page.getByRole('button', { name: '添加', exact: true }).click()
-  const created = await expectJson(await createResponsePromise, 'WORK_SSH_KEY_CREATE_FAILED')
-  if (typeof created?.id !== 'string' || created.id === '') {
-    throw new Error('WORK_SSH_KEY_CREATE_ID_MISSING')
-  }
-  onAccepted(created)
-  expect(created).toMatchObject({
-    id: expect.any(String),
-    algorithm: 'ed25519',
-    fingerprintSha256: identity.fingerprintSha256,
-  })
-  const fingerprintRow = page.locator('code[title]').filter({ hasText: identity.fingerprintSha256.slice(0, 16) })
-  await expect(fingerprintRow).toHaveAttribute('title', identity.fingerprintSha256, { timeout: 30_000 })
-  return created
-}
-
-async function deleteStudentSshKeyByUi(page, key) {
-  await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
-  const fingerprintCell = page.locator('code[title]').filter({ hasText: key.fingerprintSha256.slice(0, 16) })
-  await expect(fingerprintCell).toHaveAttribute('title', key.fingerprintSha256, { timeout: 30_000 })
-  const row = fingerprintCell.locator('xpath=ancestor::tr[1]')
-  await row.getByRole('button', { name: '删除', exact: true }).click()
-  const dialog = page.getByRole('alertdialog', { name: '删除 SSH 公钥', exact: true })
-  await expect(dialog).toBeVisible()
-  const responsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'DELETE'
-      && url.pathname === `/api/v1/me/ssh-public-keys/${encodeURIComponent(key.id)}`
-  })
-  await dialog.getByRole('button', { name: '删除', exact: true }).click()
-  const response = await responsePromise
-  if (!response.ok()) throw new Error(`WORK_SSH_KEY_DELETE_FAILED:${response.status()}`)
-  await expect(fingerprintCell).toHaveCount(0, { timeout: 30_000 })
-}
-
-async function issueWorkAccessGrantByUi(page, projectId, environment) {
-  await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environment.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await expect(
-    page.locator('.resource-title-row').getByRole('heading', { name: environment.id }),
-  ).toBeVisible({ timeout: 120_000 })
-
-  const activePage = await expectJson(
-    await page.request.get(`/api/v1/environments/${environment.id}/access-grants?state=active&includeTerminal=false&limit=2`),
-    'WORK_SSH_ACTIVE_GRANTS_READ_FAILED',
-  )
-  if (!Array.isArray(activePage.items) || activePage.items.length > 1) {
-    throw new Error('WORK_SSH_ACTIVE_GRANTS_AMBIGUOUS')
-  }
-  let grant
-  if (activePage.items.length === 1) {
-    grant = await expectJson(
-      await page.request.get(`/api/v1/access-grants/${encodeURIComponent(activePage.items[0].id)}`),
-      'WORK_SSH_ACCESS_GRANT_READ_FAILED',
-    )
-    if (grant.environmentRevision !== environment.revision) {
-      throw new Error('WORK_SSH_ACTIVE_GRANT_REVISION_STALE')
-    }
-  } else {
-    const createButton = page.getByRole('button', { name: '签发访问授权', exact: true })
-    await expect(createButton).toBeEnabled({ timeout: 120_000 })
-    const createResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/environments/${environment.id}/access-grants`
-    })
-    await createButton.click()
-    const accepted = await expectJson(await createResponsePromise, 'WORK_SSH_ACCESS_GRANT_CREATE_FAILED')
-    expect(accepted).toMatchObject({
-      id: expect.any(String),
-      projectId,
-      environmentId: environment.id,
-      environmentRevision: environment.revision,
-      state: 'requested',
-    })
-    grant = await waitForActiveAccessGrant(page.request, accepted.id)
-  }
-  expect(grant).toMatchObject({
-    projectId,
-    environmentId: environment.id,
-    environmentRevision: environment.revision,
-    state: 'active',
-    endpointGrants: expect.any(Array),
-  })
-  const sshGrants = grant.endpointGrants.filter((item) => item.protocol === 'ssh' && item.health === 'healthy')
-  if (sshGrants.length !== 1) throw new Error('WORK_SSH_ACCESS_GRANT_ENDPOINT_INVALID')
-  await expect(page.locator('.ssh-command__text')).toContainText(sshGrants[0].alias, { timeout: 30_000 })
-  await expect(page.locator('.ssh-meta')).toContainText(sshGrants[0].sshGatewayHostKeyFingerprint)
-  return { grant, endpointGrant: sshGrants[0] }
 }
 
 async function requestNewConnectionAfterLeaseRevoke(request, baseURL, projectId, environment, endpointIds) {

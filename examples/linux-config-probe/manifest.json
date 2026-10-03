@@ -1,0 +1,47 @@
+{
+  "apiVersion": "labweaver.io/problem-package/v1",
+  "kind": "ProblemPackage",
+  "metadata": {
+    "name": "linux-config-probe",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "virtual_machine",
+      "providerBinding": "kubevirt-primary-v1"
+    },
+    "security": {
+      "runAsNonRoot": true,
+      "readOnlyRootFilesystem": false,
+      "allowPrivilegeEscalation": false,
+      "networkPolicyBinding": "deny-all-v1"
+    },
+    "files": [
+      {
+        "path": "README.md",
+        "role": "public",
+        "sha256": "d9347356dd446551985cfe999a7a2f62b30f62e249465d0b41150983c091c5f4"
+      },
+      {
+        "path": "environment.yaml",
+        "role": "public",
+        "sha256": "dff92e86073ef5dacc1ae97922b3e0a6903062bd1dca6d8b38340283571ab0fe"
+      },
+      {
+        "path": "evaluation.yaml",
+        "role": "public",
+        "sha256": "b60cbc9d5f24f2cb9e2721f345f6a5d90781e95eea544b54b629dde6bf30539f"
+      },
+      {
+        "path": "materials/application.conf",
+        "role": "public",
+        "sha256": "61c08a6acdad445d33fbf0c40e8d63440f9f1544232404645bebba8e61d7ea6c"
+      },
+      {
+        "path": "profiles/linux-config-probe-v1/playbook.yml",
+        "role": "controlled",
+        "sha256": "e41fe6ad9a131f26a93bccee32b93bfa24a488b11b0b4ddc88f2f48fbbed3f05"
+      }
+    ]
+  }
+}

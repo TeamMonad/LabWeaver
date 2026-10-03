@@ -265,7 +265,7 @@ async function preparePinnedSsh(endpointGrant, identity) {
   return { ...endpoint, knownHostsPath, sshConfigPath }
 }
 
-async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
+export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
   const endpoint = await preparePinnedSsh(endpointGrant, identity)
   const result = await runProcess('ssh', [
     '-F', endpoint.sshConfigPath,
