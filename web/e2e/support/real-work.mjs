@@ -536,6 +536,17 @@ export async function readResumablePublishedWork(request, resume, { gpu = null, 
   if (vm) sameVirtualMachineArtifact(release.artifact, runtimeArtifact, 'REAL_WORK_RESUME_RELEASE_ARTIFACT_INVALID')
   else sameContainerArtifact(release.artifact, runtimeArtifact, 'REAL_WORK_RESUME_RELEASE_ARTIFACT_INVALID')
 
+  // The release binds this exact candidate revision; retention lives on its spec.
+  const retainUntil = candidate.spec.retention?.retainUntil
+  const retentionDeadline = typeof retainUntil === 'string' ? Date.parse(retainUntil) : NaN
+  const retentionRecovery = 'Generate, review, and publish a new Work template through the normal UI before retrying.'
+  if (!Number.isFinite(retentionDeadline)) {
+    throw new Error(`REAL_WORK_RESUME_RETENTION_INVALID: ${retentionRecovery}`)
+  }
+  if (retentionDeadline <= Date.now()) {
+    throw new Error(`REAL_WORK_RESUME_RETENTION_EXPIRED: ${retentionRecovery}`)
+  }
+
   const packageData = await expectJson(
     await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/problem-packages/${encodeURIComponent(run.packageId)}`),
     'REAL_WORK_RESUME_PACKAGE_READ_FAILED',
