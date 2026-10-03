@@ -143,6 +143,12 @@
               <ul class="resource-list">
                 <li v-for="request in data" :key="request.id" class="resource-row">
                   <div class="resource-row__main"><strong>资源申请</strong><small>{{ request.requestKey }} · {{ resourceTargetLabel(request) }} · {{ resourceSummary(request.requestedResources) }}</small><small>更新于 {{ formatTimestamp(request.updatedAt) }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>申请 ID：{{ request.id }}</small></details></div>
+                  <p
+                    v-if="resourceAllocationFailureMessage(request.diagnosticCode)"
+                    role="alert"
+                  >
+                    {{ resourceAllocationFailureMessage(request.diagnosticCode) }}
+                  </p>
                   <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${request.state}`">{{ requestStateLabel(request.state) }}</span><button v-if="request.state === 'reviewing' || request.state === 'allocating'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="openCancelConfirmation(request)">取消</button></div>
                 </li>
               </ul>
@@ -192,6 +198,7 @@ import { useAuth } from '@/composables/useAuth'
 import type { ResourceLeaseSchema, ResourceRequestSchema } from '@/generated/contracts'
 import { formatTimestamp, idempotencyKey, newUuidV7 } from '@/utils/format'
 import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
+import { resourceAllocationFailureMessage } from '@/utils/stateLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -414,6 +421,7 @@ async function reclaimLease(lease: ResourceLeaseSchema) { await resources.reclai
 function requestEnvironmentId(requestId: string) {
   if (resources.requests.kind !== 'success') return null
   const request = resources.requests.data.find((item) => item.id === requestId)
+  if (resourceAllocationFailureMessage(request?.diagnosticCode)) return null
   return request?.target.kind === 'environment' ? request.target.environmentId : null
 }
 function releaseKey(id: string, version: number) { return id && version > 0 ? `${id}:${version}` : '' }

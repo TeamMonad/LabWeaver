@@ -129,6 +129,25 @@ describe('ResourceApprovalView provider binding rules', () => {
     mocks.useResourceApproval.mockReset()
   })
 
+  it('explains a blocked active allocation without offering a misleading retry', () => {
+    const { wrapper } = mountView({ ...cpuRequest, state: 'active', diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }, { kind: 'empty' })
+    expect(wrapper.get('[role="alert"]').text()).toContain('分配失败，请回收后重新申请。')
+    expect(wrapper.text()).toContain('撤销这次授权')
+    expect(wrapper.findAll('button').some((button) => button.text() === '重新送审')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('offers rejected requests a confirmed resubmission instead of allocation retry', async () => {
+    const rejected = { ...cpuRequest, state: 'rejected' as const }
+    const { approval, wrapper } = mountView(rejected, { kind: 'empty' })
+    await wrapper.get('textarea[aria-label="资源申请操作理由"]').setValue('已核对资源与执行后端配置。')
+    await wrapper.findAll('button').find((button) => button.text() === '重新送审')!.trigger('click')
+    expect(approval.runRequestAction).not.toHaveBeenCalled()
+    await wrapper.get('[role="alertdialog"] button').trigger('click')
+    expect(approval.runRequestAction).toHaveBeenCalledWith('retry', rejected.id, expect.objectContaining({ reason: '已核对资源与执行后端配置。' }), expect.objectContaining({ expectedRevision: rejected.revision }))
+    wrapper.unmount()
+  })
+
   it('allows a CPU-only approval with an empty GPU catalog after entering a binding', async () => {
     const { approval, wrapper } = mountView(cpuRequest, { kind: 'empty' })
 

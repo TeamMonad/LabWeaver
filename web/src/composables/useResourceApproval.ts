@@ -246,7 +246,7 @@ export function useResourceApproval() {
         approve: ['reviewing'],
         resize: ['reviewing'],
         reject: ['reviewing'],
-        retry: ['allocating'],
+        retry: ['rejected'],
       }
       if (!allowedStates[kind].includes(latest.state)) {
         return {

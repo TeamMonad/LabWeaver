@@ -133,6 +133,30 @@ describe('ResourceRequestView', () => {
     projectsState.selectedProject = projectOne
   })
 
+  it('explains a blocked allocation, hides its invalid connection and retains confirmed reclaim', async () => {
+    mocks.requests = { kind: 'success', data: [{ ...pendingRequest(), state: 'active', diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }] }
+    mocks.leases = { kind: 'success', data: [activeLease()] }
+    const wrapper = await mountView()
+    expect(wrapper.text()).toContain('分配失败，请回收后重新申请。')
+    expect(wrapper.find('a[href^="/researcher/environments"]').exists()).toBe(false)
+    const reclaim = wrapper.findAll('button').find((button) => button.text() === '回收')!
+    await reclaim.trigger('click')
+    await flushPromises()
+    expect(mocks.reclaim).not.toHaveBeenCalled()
+    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    await flushPromises()
+    expect(mocks.reclaim).toHaveBeenCalledWith(expect.objectContaining({ id: 'lease-1' }), 'researcher requested Work resource reclaim')
+    wrapper.unmount()
+  })
+
+  it('retains the normal connection for an active allocation without a failure diagnostic', async () => {
+    mocks.requests = { kind: 'success', data: [{ ...pendingRequest(), state: 'active' }] }
+    mocks.leases = { kind: 'success', data: [activeLease()] }
+    const wrapper = await mountView()
+    expect(wrapper.get('a[href^="/researcher/environments"]').attributes('href')).toContain('projectId=project-1')
+    wrapper.unmount()
+  })
+
   it('explains user units and gives an honest empty-release next step', async () => {
     mocks.releases = { kind: 'empty' }
     const wrapper = await mountView()

@@ -1067,6 +1067,8 @@ impl CapacityReconcileWorker {
                     item.claim.id,
                     item.claim.revision,
                     error.diagnostic(),
+                    self.environment_handoff.system_actor_id,
+                    &format!("resource-handoff-failed-{}", item.claim.id),
                 )
                 .await?;
         } else {
@@ -1108,6 +1110,8 @@ impl CapacityReconcileWorker {
                         item.claim.id,
                         item.claim.revision,
                         error.diagnostic(),
+                        self.environment_handoff.system_actor_id,
+                        &format!("resource-handoff-failed-{}", item.claim.id),
                     )
                     .await?;
             }

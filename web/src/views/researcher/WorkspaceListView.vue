@@ -157,7 +157,13 @@
                 <p>查看这个项目中的工作环境，或为项目申请新的 Work 资源。</p>
               </div>
               <div class="section-actions">
-                <button type="button" class="icon-button" aria-label="刷新 Work 环境" :disabled="workEnvironments.environments.kind === 'loading'" @click="workEnvironments.load">
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="刷新 Work 环境"
+                  :disabled="workEnvironments.environments.kind === 'loading'"
+                  @click="refreshWork"
+                >
                   <SvgIcon name="refresh" size="sm" aria-hidden="true" />
                 </button>
                 <RouterLink
@@ -170,6 +176,28 @@
                 </RouterLink>
               </div>
             </div>
+            <AsyncStateView
+              :state="workResources.requests"
+              loading-text="加载项目环境资源申请…"
+              @retry="workResources.load"
+            >
+              <template #empty />
+              <template #success>
+                <p
+                  v-for="request in failedEnvironmentResourceRequests"
+                  :key="request.id"
+                  role="alert"
+                >
+                  环境资源申请失败。{{ resourceAllocationFailureMessage(request.diagnosticCode) }}
+                  <RouterLink
+                    class="text-button"
+                    :to="{ path: '/researcher/resources', query: { projectId: selectedProjectId } }"
+                  >
+                    处理资源申请
+                  </RouterLink>
+                </p>
+              </template>
+            </AsyncStateView>
             <AsyncStateView :state="workEnvironments.environments" empty-text="这个项目还没有 Work 环境。" @retry="workEnvironments.load">
               <template #success="{ data }">
                 <ul class="work-list">
@@ -252,10 +280,11 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
+import { useProjectResources } from '@/composables/useProjectResources'
 import { useProjectMemberships, useProjects } from '@/composables/useProjects'
 import type { ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
-import { environmentStateLabel } from '@/utils/stateLabels'
+import { environmentStateLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -278,6 +307,18 @@ const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : 
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
 const members = useProjectMemberships(selectedProjectId)
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
+const workResources = useProjectResources(selectedProjectId)
+const failedEnvironmentResourceRequests = computed(() => workResources.requests.kind === 'success'
+  ? workResources.requests.data.filter((request) => request.projectId === selectedProjectId.value
+    && request.target.kind === 'environment'
+    && request.state === 'active'
+    && resourceAllocationFailureMessage(request.diagnosticCode))
+  : [])
+
+function refreshWork() {
+  void workEnvironments.load()
+  void workResources.load()
+}
 
 const createOpen = ref(false)
 const newName = ref('')

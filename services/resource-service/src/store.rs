@@ -2900,8 +2900,8 @@ impl PgResourceStore {
         lease_revision: contracts::Revision,
     ) -> Result<CapacityClaim, ResourceStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_revision
             || !matches!(
                 claim.state,
@@ -3110,9 +3110,9 @@ impl PgResourceStore {
     ) -> Result<ResourceLease, ResourceStoreError> {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_claim_revision
             || claim.state != CapacityClaimState::Releasing
             || lease.revision != expected_lease_revision
@@ -3186,9 +3186,9 @@ impl PgResourceStore {
     ) -> Result<ResourceLease, ResourceStoreError> {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_claim_revision
             || claim.state != CapacityClaimState::Releasing
             || lease.revision != expected_lease_revision
@@ -3305,19 +3305,39 @@ impl PgResourceStore {
     }
 
     /// Bounds transient handoff failures. After three attempts the claim is retained as
-    /// `blocked` for an explicit administrator recovery instead of retrying indefinitely.
+    /// `blocked` for lease reclaim and a new request instead of retrying indefinitely.
     pub async fn retry_or_block_capacity_handoff(
         &self,
         claim_id: contracts::CapacityClaimId,
         expected_revision: contracts::Revision,
         diagnostic_code: &str,
+        actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<CapacityClaim, ResourceStoreError> {
+        validate_trace(trace_id)?;
         if !valid_diagnostic(diagnostic_code) {
             return Err(ResourceStoreError::DiagnosticInvalid);
         }
         let mut transaction = self.pool.begin().await?;
+        // Locate immutable identities without taking the claim lock. Lease mutations lock
+        // Lease -> Request; handoff and its cleanup must follow that order before Claim.
+        let lease_id: uuid::Uuid =
+            sqlx::query_scalar("SELECT lease_id FROM resource.resource_leases WHERE claim_id=$1")
+                .bind(claim_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ResourceStoreError::LeaseNotFound)?;
+        let lease = load_locked_lease(
+            &mut transaction,
+            LeaseId::from_str(&lease_id.to_string()).map_err(|_| ResourceStoreError::Wire)?,
+        )
+        .await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
         let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_revision
+            || lease.claim_id != claim.id
+            || claim.request_id != request.id
+            || !matches!(request.target, ResourceTarget::Environment { .. })
             || !matches!(
                 claim.state,
                 CapacityClaimState::Provisioning | CapacityClaimState::Ready
@@ -3340,6 +3360,37 @@ impl PgResourceStore {
             .bind(diagnostic_code)
             .execute(&mut *transaction)
             .await?;
+            if request.state == ResourceRequestState::Active
+                && lease.state == ResourceLeaseState::Active
+            {
+                let mut failed_request = request.clone();
+                failed_request.diagnostic_code = Some("LW_RESOURCE_WORK_ALLOCATION_BLOCKED".into());
+                failed_request.revision = Revision::new(
+                    request
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                failed_request.updated_at = database_now(&mut transaction).await?;
+                update_request(&mut transaction, &request, &failed_request).await?;
+                insert_transition(
+                    &mut transaction,
+                    &failed_request,
+                    failed_request.revision.get(),
+                    Some(request.state),
+                    Some(actor),
+                    trace_id,
+                )
+                .await?;
+                enqueue_request_event(
+                    &mut transaction,
+                    &failed_request,
+                    REQUEST_STATE_CHANGED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
+            }
             transaction.commit().await?;
             return Ok(next);
         }

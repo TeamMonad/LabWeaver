@@ -81,6 +81,32 @@ describe('useResourceApproval', () => {
     active: true,
   }
 
+  it.each(['rejected', 'allocating', 'active'] as const)('only resubmits a rejected request, checking current %s state', async (requestState) => {
+    const request = { ...taskRequest('resubmit'), state: requestState }
+    mocks.listResourceRequests.mockResolvedValue(success([request]))
+    mocks.listResourceLeases.mockResolvedValue(success([]))
+    mocks.apiGet.mockResolvedValue(success([]))
+    mocks.getResourceRequest.mockResolvedValue(success(request))
+    mocks.retryResourceRequest.mockResolvedValue(success({ requestId: request.id, revision: 4, statusUrl: '/resource/resubmit' }))
+    const { state, wrapper } = mountApproval()
+    await vi.waitFor(() => expect(state.requests.kind).toBe('success'))
+    const result = await state.runRequestActions('retry', [{
+      requestId: request.id,
+      expectedRevision: request.revision,
+      expectedFingerprint: requestFingerprint(request),
+      payload: { providerBinding: 'kubernetes-standard', resources: request.requestedResources, durationSeconds: request.requestedDurationSeconds, reason: '重新提交审批。' },
+    }])
+    expect(mocks.getResourceRequest).toHaveBeenCalledTimes(1)
+    if (requestState === 'rejected') {
+      expect(result.kind).toBe('success')
+      expect(mocks.retryResourceRequest).toHaveBeenCalledWith(expect.objectContaining({ headers: { 'If-Match': '"rev-3"', 'Idempotency-Key': expect.any(String) }, body: expect.objectContaining({ expectedRevision: 3 }) }))
+    } else {
+      expect(result.kind).toBe('error')
+      expect(mocks.retryResourceRequest).not.toHaveBeenCalled()
+    }
+    wrapper.unmount()
+  })
+
   it('offers only active GPU providers when the catalog retains inactive revisions', async () => {
     mocks.listResourceRequests.mockResolvedValue(success([]))
     mocks.listResourceLeases.mockResolvedValue(success([]))

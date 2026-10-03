@@ -84,6 +84,12 @@ export function resourceRequestStateLabel(value: string | null | undefined): str
   return labelOf(RESOURCE_REQUEST_STATE, value)
 }
 
+export function resourceAllocationFailureMessage(diagnosticCode: string | null | undefined): string | null {
+  return diagnosticCode === 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED'
+    ? '分配失败，请回收后重新申请。'
+    : null
+}
+
 const RESOURCE_LEASE_STATE: Record<string, string> = {
   active: '使用中',
   expiring: '即将到期',
