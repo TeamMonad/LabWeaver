@@ -509,7 +509,13 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
     await expect(targetEnvironmentValue).toHaveCount(1)
     await expect(targetEnvironmentValue).toHaveText(requestBody.target.environmentId)
     await page.getByLabel('资源申请操作理由', { exact: true }).fill('已确认项目 Work 发布版本与 CPU 容量申请。')
-    await page.getByRole('textbox', { name: '执行后端绑定', exact: true }).fill(WORK_PROVIDER_BINDING)
+    if (requestBody.resources?.gpu) {
+      const provider = page.getByRole('combobox', { name: 'GPU Provider Binding', exact: true })
+      await expect(provider).toBeEnabled()
+      await provider.selectOption(WORK_PROVIDER_BINDING)
+    } else {
+      await page.getByRole('textbox', { name: '执行后端绑定', exact: true }).fill(WORK_PROVIDER_BINDING)
+    }
     await page.getByLabel('批准时长（秒）', { exact: true }).fill(String(requestBody.durationSeconds))
     const approveButton = page.getByRole('button', { name: '批准', exact: true })
     await expect(approveButton).toBeEnabled()
@@ -521,6 +527,11 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
     await approveButton.click()
     await page.getByRole('alertdialog').getByRole('button', { name: '确认', exact: true }).click()
     const response = await responsePromise
+    expect(response.request().postDataJSON()).toMatchObject({
+      providerBinding: WORK_PROVIDER_BINDING,
+      durationSeconds: requestBody.durationSeconds,
+      resources: requestBody.resources,
+    })
     const approval = await expectJson(response, 'RESOURCE_REQUEST_APPROVAL_FAILED')
     expect(approval).toMatchObject({ requestId: requestBody.requestId, leaseId: expect.any(String) })
     return approval
