@@ -101,6 +101,60 @@ pub struct KubernetesContainerExecutor {
 }
 
 impl KubernetesContainerExecutor {
+    /// Resolves the current process incarnation from Kubernetes, not from an RPC caller.
+    pub async fn kubevirt_execution_instance(
+        &self,
+        namespace: &str,
+        pod_name: &str,
+        pod_uid: uuid::Uuid,
+        container_name: &str,
+        boot_token: uuid::Uuid,
+    ) -> Result<crate::KubeVirtExecutionInstance, ProviderFailure> {
+        let pod = self
+            .executor_pod(namespace, pod_name)
+            .await?
+            .ok_or_else(rejected)?;
+        if pointer_uuid(&pod, "/metadata/uid")? != pod_uid {
+            return Err(rejected());
+        }
+        validate_executor_startup(
+            &pod,
+            namespace,
+            pod_name,
+            pod_uid,
+            container_name,
+            std::process::id(),
+            boot_token,
+        )
+    }
+
+    async fn executor_pod(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<Value>, ProviderFailure> {
+        if !valid_dns_label(namespace) || !valid_dns_label(name) {
+            return Err(rejected());
+        }
+        let url = self.namespaced_url(&format!("/api/v1/namespaces/{namespace}/pods/{name}"))?;
+        let response = self
+            .authorized(self.client.get(url))
+            .send()
+            .await
+            .map_err(|_| unavailable())?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(status_failure(response.status()));
+        }
+        response
+            .json()
+            .await
+            .map(Some)
+            .map_err(|_| invalid_observation())
+    }
+
     pub fn new(
         configuration: RuntimeExecutorConfiguration,
         objects: Arc<S3ImmutableObjectStore>,
@@ -534,6 +588,7 @@ impl KubernetesContainerExecutor {
             plan.project_id,
             &plan.namespace,
             fence.deadline_at,
+            None,
         )
         .await?;
         self.write_cleanup_evidence(fence, plan).await
@@ -545,6 +600,7 @@ impl KubernetesContainerExecutor {
         project_id: contracts::ProjectId,
         namespace: &str,
         deadline_at: UtcTimestamp,
+        kubevirt_permit: Option<&crate::KubeVirtExecutionPermit>,
     ) -> Result<(), ProviderFailure> {
         let url = self.namespaced_url(&format!("/api/v1/namespaces/{namespace}"))?;
         loop {
@@ -564,6 +620,9 @@ impl KubernetesContainerExecutor {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(invalid_observation)?;
+            if let Some(permit) = kubevirt_permit {
+                check_kubevirt_permit(permit).await?;
+            }
             let response = self
                 .authorized(self.client.delete(url.clone()).json(&json!({
                     "apiVersion":"v1", "kind":"DeleteOptions",
@@ -599,6 +658,9 @@ impl KubernetesContainerExecutor {
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                     .ok_or_else(invalid_observation)?;
+                if let Some(permit) = kubevirt_permit {
+                    check_kubevirt_permit(permit).await?;
+                }
                 let response = self.authorized(self.client.patch(url.clone()).header("content-type", "application/merge-patch+json").json(&json!({
                     "metadata":{"uid":uid, "resourceVersion":resource_version, "finalizers":[]}
                 }))).send().await.map_err(|_| unavailable())?;
@@ -640,6 +702,7 @@ impl KubernetesContainerExecutor {
     async fn apply_kubevirt_plan(
         &self,
         plan: &KubeVirtResourcePlan,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_plan(plan)?;
         let vm_vgpu_licensing = vm_vgpu_licensing_configuration(plan)?;
@@ -649,11 +712,12 @@ impl KubernetesContainerExecutor {
             .find(|resource| resource.kind == "Namespace")
             .ok_or_else(rejected)?;
         validate_kubevirt_resource(plan, namespace_resource)?;
-        self.apply_kubevirt_resource(plan, namespace_resource)
+        self.apply_kubevirt_resource(plan, namespace_resource, permit)
             .await?;
         self.ensure_base_disk(plan).await?;
         if let Some(licensing) = vm_vgpu_licensing.as_ref() {
-            self.apply_vgpu_private_cloud_init(plan, licensing).await?;
+            self.apply_vgpu_private_cloud_init(plan, licensing, permit)
+                .await?;
         }
         for resource in &plan.resources {
             if resource.kind == "Namespace" {
@@ -664,7 +728,8 @@ impl KubernetesContainerExecutor {
             if vm_vgpu_licensing.is_some() && resource.kind == "VirtualMachine" {
                 point_vm_to_private_cloud_init(&mut resource)?;
             }
-            self.apply_kubevirt_resource(plan, &resource).await?;
+            self.apply_kubevirt_resource(plan, &resource, permit)
+                .await?;
         }
         Ok(())
     }
@@ -673,9 +738,11 @@ impl KubernetesContainerExecutor {
         &self,
         plan: &KubeVirtResourcePlan,
         resource: &KubeVirtResource,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_resource(plan, resource)?;
         let url = self.kubevirt_resource_url(resource)?;
+        check_kubevirt_permit(permit).await?;
         let response = self
             .authorized(
                 self.client
@@ -722,6 +789,7 @@ impl KubernetesContainerExecutor {
         &self,
         plan: &KubeVirtResourcePlan,
         licensing: &KubeVirtVmVgpuLicensingConfiguration,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         let base_secret = plan
             .resources
@@ -762,7 +830,8 @@ impl KubernetesContainerExecutor {
             name: VM_VGPU_PRIVATE_CLOUD_INIT_SECRET.to_owned(),
             document,
         };
-        self.apply_kubevirt_resource(plan, &private_secret).await
+        self.apply_kubevirt_resource(plan, &private_secret, permit)
+            .await
     }
 
     async fn read_secret_data(
@@ -1001,6 +1070,7 @@ impl KubernetesContainerExecutor {
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
         action: &str,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         if !matches!(action, "start" | "stop" | "restart") {
             return Err(rejected());
@@ -1011,6 +1081,7 @@ impl KubernetesContainerExecutor {
             &plan.namespace,
             &plan.virtual_machine_name,
             action,
+            permit,
         )
         .await
     }
@@ -1021,6 +1092,7 @@ impl KubernetesContainerExecutor {
         namespace: &str,
         virtual_machine_name: &str,
         action: &str,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         if timestamp()?.get() >= fence.deadline_at.get() {
             return Err(unavailable());
@@ -1033,6 +1105,7 @@ impl KubernetesContainerExecutor {
         } else {
             json!({"gracePeriod":30})
         };
+        check_kubevirt_permit(permit).await?;
         let response = self
             .authorized(
                 self.client
@@ -1057,6 +1130,7 @@ impl KubernetesContainerExecutor {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<ArtifactRef, ProviderFailure> {
         let expected_namespace = format!("lw-env-{}", plan.environment_id);
         if plan.namespace != expected_namespace || plan.virtual_machine_name != "runtime" {
@@ -1067,6 +1141,7 @@ impl KubernetesContainerExecutor {
             plan.project_id,
             &plan.namespace,
             fence.deadline_at,
+            Some(permit),
         )
         .await?;
         let now = timestamp()?;
@@ -1442,10 +1517,11 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
         &self,
         fence: &KubeVirtBackendFence,
         request: &KubeVirtExecutorRequest,
+        permit: &crate::KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse {
         let result = match request {
             KubeVirtExecutorRequest::Apply { plan } => async {
-                self.apply_kubevirt_plan(plan).await?;
+                self.apply_kubevirt_plan(plan, permit).await?;
                 self.wait_kubevirt_running(fence, plan).await
             }
             .await
@@ -1461,7 +1537,8 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
                     observation,
                 }),
             KubeVirtExecutorRequest::Start { plan } => async {
-                self.kubevirt_subresource(fence, plan, "start").await?;
+                self.kubevirt_subresource(fence, plan, "start", permit)
+                    .await?;
                 self.wait_kubevirt_running(fence, plan).await
             }
             .await
@@ -1476,6 +1553,7 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
                     &plan.namespace,
                     &plan.virtual_machine_name,
                     "stop",
+                    permit,
                 )
                 .await?;
                 loop {
@@ -1499,7 +1577,8 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
                 observation,
             }),
             KubeVirtExecutorRequest::Restart { plan } => async {
-                self.kubevirt_subresource(fence, plan, "restart").await?;
+                self.kubevirt_subresource(fence, plan, "restart", permit)
+                    .await?;
                 self.wait_kubevirt_running(fence, plan).await
             }
             .await
@@ -1508,7 +1587,7 @@ impl KubeVirtExecutorBackend for KubernetesContainerExecutor {
                 observation,
             }),
             KubeVirtExecutorRequest::DeleteNamespace { plan } => self
-                .delete_kubevirt_namespace(fence, plan)
+                .delete_kubevirt_namespace(fence, plan, permit)
                 .await
                 .map(|cleanup_evidence| KubeVirtExecutorResponse::Deleted {
                     plan_sha256: plan.plan_sha256,
@@ -1628,6 +1707,76 @@ fn validate_resource(
         return Err(rejected());
     }
     resource_path(&resource.kind).map(|_| ())
+}
+
+async fn check_kubevirt_permit(
+    permit: &crate::KubeVirtExecutionPermit,
+) -> Result<(), ProviderFailure> {
+    permit
+        .check()
+        .await
+        .map(|_| ())
+        .map_err(|error| match error {
+            crate::KubeVirtExecutorFenceError::DeadlineExceeded => ProviderFailure {
+                code: ProviderFailureCode::Timeout,
+                retryable: false,
+            },
+            crate::KubeVirtExecutorFenceError::Cancelled => ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                retryable: false,
+            },
+            _ => unavailable(),
+        })
+}
+
+fn validate_executor_startup(
+    pod: &Value,
+    namespace: &str,
+    pod_name: &str,
+    pod_uid: uuid::Uuid,
+    container_name: &str,
+    process_id: u32,
+    boot_token: uuid::Uuid,
+) -> Result<crate::KubeVirtExecutionInstance, ProviderFailure> {
+    if process_id != 1
+        || boot_token.is_nil()
+        || !matches!(
+            pod.pointer("/spec/hostPID"),
+            None | Some(Value::Bool(false))
+        )
+        || !matches!(
+            pod.pointer("/spec/shareProcessNamespace"),
+            None | Some(Value::Bool(false))
+        )
+        || pointer_uuid(pod, "/metadata/uid")? != pod_uid
+        || pod.pointer("/metadata/name").and_then(Value::as_str) != Some(pod_name)
+        || pod.pointer("/metadata/namespace").and_then(Value::as_str) != Some(namespace)
+    {
+        return Err(rejected());
+    }
+    let containers = pod
+        .pointer("/spec/containers")
+        .and_then(Value::as_array)
+        .ok_or_else(rejected)?;
+    let container = containers
+        .iter()
+        .find(|container| container.get("name").and_then(Value::as_str) == Some(container_name))
+        .ok_or_else(rejected)?;
+    if container.get("args") != Some(&json!(["--mode", "kubevirt-executor"])) {
+        return Err(rejected());
+    }
+    if container.get("command").is_some_and(|command| {
+        command != &json!([]) && command != &json!(["/usr/local/bin/labweaver-service"])
+    }) {
+        return Err(rejected());
+    }
+    Ok(crate::KubeVirtExecutionInstance {
+        namespace: namespace.to_owned(),
+        pod_name: pod_name.to_owned(),
+        pod_uid,
+        container_name: container_name.to_owned(),
+        boot_token,
+    })
 }
 
 fn resource_path(kind: &str) -> Result<(&'static str, &'static str, bool), ProviderFailure> {
@@ -2229,6 +2378,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_kubevirt_permit_rejects_tenant_apply_before_any_http_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let environment_id = contracts::EnvironmentId::new();
+        let plan = vm_vgpu_plan_for_test(
+            environment_id,
+            &format!("lw-env-{environment_id}"),
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        let mut fence = stop_fence(environment_id);
+        let (_database, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+        sqlx::query("UPDATE environment.environment_instances SET contract=jsonb_set(contract,'{operation}','null'::jsonb) WHERE environment_id=$1").bind(environment_id.as_uuid()).execute(&permit.pool).await?;
+        assert!(matches!(
+            executor.apply_kubevirt_plan(&plan, &permit).await,
+            Err(ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            })
+        ));
+        assert!(mock.events.lock().await.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn executor_startup_requires_actual_pid1_and_isolated_matching_pod() {
+        let uid = uuid::Uuid::new_v4();
+        let token = uuid::Uuid::new_v4();
+        let base = json!({"metadata":{"namespace":"system","name":"executor","uid":uid},"spec":{"containers":[{"name":"kubevirt-executor","args":["--mode","kubevirt-executor"],"command":["/usr/local/bin/labweaver-service"]}]}});
+        for command in [None, Some(json!([]))] {
+            let mut pod = base.clone();
+            if let Some(command) = command {
+                pod["spec"]["containers"][0]["command"] = command;
+            } else {
+                pod["spec"]["containers"][0]
+                    .as_object_mut()
+                    .expect("container fixture")
+                    .remove("command");
+            }
+            assert!(
+                validate_executor_startup(
+                    &pod,
+                    "system",
+                    "executor",
+                    uid,
+                    "kubevirt-executor",
+                    1,
+                    token
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_executor_startup(
+                &base,
+                "system",
+                "executor",
+                uid,
+                "kubevirt-executor",
+                1,
+                token
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_executor_startup(
+                &base,
+                "system",
+                "executor",
+                uid,
+                "kubevirt-executor",
+                2,
+                token
+            )
+            .is_err()
+        );
+        for field in ["hostPID", "shareProcessNamespace"] {
+            let mut pod = base.clone();
+            pod["spec"][field] = json!(true);
+            assert!(
+                validate_executor_startup(
+                    &pod,
+                    "system",
+                    "executor",
+                    uid,
+                    "kubevirt-executor",
+                    1,
+                    token
+                )
+                .is_err()
+            );
+        }
+        let mut wrong = base.clone();
+        wrong["spec"]["containers"][0]["args"] = json!(["--mode", "container-executor"]);
+        assert!(
+            validate_executor_startup(
+                &wrong,
+                "system",
+                "executor",
+                uid,
+                "kubevirt-executor",
+                1,
+                token
+            )
+            .is_err()
+        );
+        assert!(
+            validate_executor_startup(
+                &base,
+                "system",
+                "executor",
+                uuid::Uuid::new_v4(),
+                "kubevirt-executor",
+                1,
+                token
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn vm_vgpu_apply_reads_named_secrets_and_only_applies_private_bootstrap()
     -> Result<(), Box<dyn std::error::Error>> {
         let mock = spawn_mock_kubernetes().await?;
@@ -2238,8 +2508,10 @@ mod tests {
         let licensing = vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls);
         let plan = vm_vgpu_plan_for_test(environment_id, &namespace, licensing);
 
+        let mut fence = stop_fence(environment_id);
+        let (_database, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
         executor
-            .apply_kubevirt_plan(&plan)
+            .apply_kubevirt_plan(&plan, &permit)
             .await
             .map_err(|error| format!("vGPU plan apply rejected: {error:?}"))?;
         let private_secret = mock
@@ -2756,7 +3028,8 @@ mod tests {
         )))
         .await?;
         let (_files, executor) = test_kubevirt_executor(&mock).await?;
-        let fence = stop_fence(environment_id);
+        let mut fence = stop_fence(environment_id);
+        let (_database, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
         let plan = KubeVirtCleanupPlan {
             environment_id,
             project_id,
@@ -2768,6 +3041,7 @@ mod tests {
             &executor,
             &fence,
             &KubeVirtExecutorRequest::Stop { plan },
+            &permit,
         )
         .await;
         let KubeVirtExecutorResponse::Stopped { observation, .. } = response else {
@@ -2873,6 +3147,9 @@ mod tests {
                         .is_err()
                 );
             } else {
+                let mut fence = fence;
+                let (_database, permit) =
+                    crate::kubevirt_execution::test_permit(&mut fence).await?;
                 let plan = KubeVirtCleanupPlan {
                     environment_id,
                     project_id,
@@ -2884,7 +3161,8 @@ mod tests {
                     KubeVirtExecutorBackend::execute(
                         &executor,
                         &fence,
-                        &KubeVirtExecutorRequest::Stop { plan }
+                        &KubeVirtExecutorRequest::Stop { plan },
+                        &permit,
                     )
                     .await,
                     KubeVirtExecutorResponse::Failed { .. }
@@ -2912,7 +3190,8 @@ mod tests {
         fixture.replace_disk_after_stop = true;
         let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
         let (_files, executor) = test_kubevirt_executor(&mock).await?;
-        let fence = stop_fence(environment_id);
+        let mut fence = stop_fence(environment_id);
+        let (_database, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
         let plan = KubeVirtCleanupPlan {
             environment_id,
             project_id,
@@ -2924,7 +3203,8 @@ mod tests {
             KubeVirtExecutorBackend::execute(
                 &executor,
                 &fence,
-                &KubeVirtExecutorRequest::Stop { plan }
+                &KubeVirtExecutorRequest::Stop { plan },
+                &permit,
             )
             .await,
             KubeVirtExecutorResponse::Failed { .. }
@@ -2989,7 +3269,8 @@ mod tests {
                     environment_id,
                     project_id,
                     &namespace,
-                    stop_fence(environment_id).deadline_at
+                    stop_fence(environment_id).deadline_at,
+                    None,
                 )
                 .await
                 .is_err()
@@ -3009,7 +3290,8 @@ mod tests {
                     environment_id,
                     project_id,
                     &namespace,
-                    stop_fence(environment_id).deadline_at
+                    stop_fence(environment_id).deadline_at,
+                    None,
                 )
                 .await
                 .is_err()
@@ -3047,6 +3329,7 @@ mod tests {
                     project_id,
                     &namespace,
                     stop_fence(environment_id).deadline_at,
+                    None,
                 )
                 .await;
             let events = mock.events.lock().await;

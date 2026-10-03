@@ -439,11 +439,15 @@ async fn provision_returns_one_stable_healthy_endpoint() {
     let first = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("provision succeeds");
+        .expect("provision succeeds")
+        .completed()
+        .expect("provider completed");
     let second = provider
         .execute(ReconcileAction::Observe, &instance)
         .await
-        .expect("observe succeeds");
+        .expect("observe succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(first.next_state, ObservedEnvironmentState::Ready);
     assert!(first.operation_complete);
@@ -487,13 +491,17 @@ async fn restart_reuses_operation_acceptance_revision_across_observations() {
     provider
         .execute(ReconcileAction::Restart, &instance)
         .await
-        .expect("first restart reconciliation succeeds");
+        .expect("first restart reconciliation succeeds")
+        .completed()
+        .expect("provider completed");
 
     instance.revision = revision(13);
     provider
         .execute(ReconcileAction::Restart, &instance)
         .await
-        .expect("retrying the same restart succeeds");
+        .expect("retrying the same restart succeeds")
+        .completed()
+        .expect("provider completed");
 
     instance.operation.id = OperationId::new();
     instance.operation.accepted_revision = revision(8);
@@ -501,7 +509,9 @@ async fn restart_reuses_operation_acceptance_revision_across_observations() {
     provider
         .execute(ReconcileAction::Restart, &instance)
         .await
-        .expect("a distinct restart succeeds");
+        .expect("a distinct restart succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(
         backend
@@ -526,7 +536,9 @@ async fn cleanup_deletes_the_namespace_and_requires_evidence() {
     let checkpoint = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup enters deleting state");
+        .expect("cleanup enters deleting state")
+        .completed()
+        .expect("provider completed");
     assert_eq!(checkpoint.next_state, ObservedEnvironmentState::Deleting);
     assert!(!checkpoint.operation_complete);
     assert!(checkpoint.cleanup_evidence.is_none());
@@ -535,7 +547,9 @@ async fn cleanup_deletes_the_namespace_and_requires_evidence() {
     let observation = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup succeeds");
+        .expect("cleanup succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(observation.next_state, ObservedEnvironmentState::Deleted);
     assert!(observation.operation_complete);
@@ -612,7 +626,9 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
-        .expect("withdrawal must not prevent fail-closed stop");
+        .expect("withdrawal must not prevent fail-closed stop")
+        .completed()
+        .expect("provider completed");
     assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
     assert_eq!(
         backend
@@ -639,7 +655,9 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
-        .expect("expire stop succeeds");
+        .expect("expire stop succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(observation.next_state, ObservedEnvironmentState::Deleting);
     let deleting = environment_service::apply_provider_observation(

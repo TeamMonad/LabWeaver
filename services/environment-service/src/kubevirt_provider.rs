@@ -28,8 +28,9 @@ use uuid::Uuid;
 
 use crate::container_provider::valid_extended_resource_name;
 use crate::{
-    ContainerReleaseResolver, EnvironmentProvider, ProviderFailure, ProviderFailureCode,
-    ProviderObservation, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
+    ContainerReleaseResolver, EnvironmentProvider, KubeVirtExecutionInstance,
+    KubeVirtExecutionPermit, ProviderFailure, ProviderFailureCode, ProviderObservation,
+    ProviderOutcome, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
 };
 
 pub const KUBEVIRT_BACKEND_PROTOCOL_VERSION: u8 = 1;
@@ -432,37 +433,37 @@ pub trait KubeVirtProviderBackend: Send + Sync {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn observe(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn start(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<KubeVirtStoppedObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure>;
 
     async fn restart(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>;
 
     async fn delete_namespace(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<ArtifactRef, ProviderFailure>;
+    ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure>;
 }
 
 /// NATS adapter for the deployment-owned `KubeVirt` executor.
@@ -508,16 +509,19 @@ impl NatsKubeVirtProviderBackend {
         let request = async_nats::Request::new()
             .timeout(Some(self.request_timeout))
             .payload(payload.into());
-        let message = self
+        let message = match self
             .client
             .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
+                if error.kind() == async_nats::client::RequestErrorKind::TimedOut {
+                    return None;
+                }
                 tracing::warn!(
                     event = "environment.kubevirt_provider.executor_request_failed",
                     component = "kubevirt-provider",
                     operation = "kubevirt.executor.request",
-                    outcome = "deferred",
+                    outcome = "failed",
                     duration_ms = 0_u64,
                     trace_id = fence.trace_id,
                     diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
@@ -529,8 +533,12 @@ impl NatsKubeVirtProviderBackend {
                     operation_id = %fence.operation_id,
                     attempt = fence.attempt,
                 );
-                unavailable()
-            })?;
+                Some(unavailable())
+            }) {
+            Ok(message) => message,
+            Err(None) => return Ok(KubeVirtExecutorResponse::Pending),
+            Err(Some(failure)) => return Err(failure),
+        };
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(invalid_observation());
         }
@@ -557,7 +565,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(fence, KubeVirtExecutorRequest::Apply { plan: plan.clone() })
@@ -570,7 +578,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(
@@ -586,7 +594,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(fence, KubeVirtExecutorRequest::Start { plan: plan.clone() })
@@ -599,7 +607,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure> {
         match self
             .request(fence, KubeVirtExecutorRequest::Stop { plan: plan.clone() })
             .await?
@@ -607,7 +615,8 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
             KubeVirtExecutorResponse::Stopped {
                 plan_sha256,
                 observation,
-            } if plan_sha256 == plan.plan_sha256 => Ok(observation),
+            } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(observation)),
+            KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
             KubeVirtExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(invalid_observation()),
         }
@@ -617,7 +626,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+    ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
             &self
                 .request(
@@ -633,7 +642,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
+    ) -> Result<ProviderOutcome<ArtifactRef>, ProviderFailure> {
         match self
             .request(
                 fence,
@@ -645,8 +654,9 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
                 plan_sha256,
                 cleanup_evidence,
             } if plan_sha256 == plan.plan_sha256 && valid_artifact_ref(&cleanup_evidence) => {
-                Ok(cleanup_evidence)
+                Ok(ProviderOutcome::Completed(cleanup_evidence))
             }
+            KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
             KubeVirtExecutorResponse::Failed { failure } => Err(failure),
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::CleanupFailed,
@@ -659,12 +669,13 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
 fn running_response(
     response: &KubeVirtExecutorResponse,
     plan: &KubeVirtResourcePlan,
-) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
     match response {
         KubeVirtExecutorResponse::Running {
             plan_sha256,
             observation,
-        } if *plan_sha256 == plan.plan_sha256 => Ok(*observation),
+        } if *plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(*observation)),
+        KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
         KubeVirtExecutorResponse::Failed { failure } => Err(*failure),
         _ => Err(invalid_observation()),
     }
@@ -769,6 +780,7 @@ pub struct KubeVirtExecutorResponseEnvelope {
     deny_unknown_fields
 )]
 pub enum KubeVirtExecutorResponse {
+    Pending,
     Running {
         plan_sha256: Sha256Digest,
         observation: KubeVirtRunningObservation,
@@ -793,6 +805,7 @@ pub trait KubeVirtExecutorBackend: Send + Sync {
         &self,
         fence: &KubeVirtBackendFence,
         request: &KubeVirtExecutorRequest,
+        permit: &KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse;
 }
 
@@ -802,7 +815,111 @@ pub struct PgKubeVirtExecutorFenceStore {
     pool: PgPool,
 }
 
+#[derive(Clone)]
+struct UnfinishedKubeVirtExecution {
+    instance: KubeVirtExecutionInstance,
+    request_id: String,
+    generation: i64,
+    operation_id: Uuid,
+    provider_step: i32,
+    attempt: i32,
+    deadline_at: time::OffsetDateTime,
+}
+
 impl PgKubeVirtExecutorFenceStore {
+    async fn recover_previous_boot(
+        &self,
+        instance: &KubeVirtExecutionInstance,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
+        let rows=sqlx::query("SELECT environment_id,execution_owner,last_request_id,highest_generation,operation_id,provider_step,attempt,deadline_at FROM environment.kubevirt_executor_fences WHERE last_response IS NULL AND execution_owner->>'podUid'=$1 AND execution_owner->>'containerName'=$2")
+            .bind(instance.pod_uid.to_string()).bind(&instance.container_name).fetch_all(&self.pool).await?;
+        for row in rows {
+            let owner: KubeVirtExecutionInstance =
+                serde_json::from_value(row.try_get("execution_owner")?)
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            if owner.namespace != instance.namespace
+                || owner.pod_name != instance.pod_name
+                || owner.boot_token == instance.boot_token
+            {
+                return Err(KubeVirtExecutorFenceError::IdentityMismatch);
+            }
+            let previous = UnfinishedKubeVirtExecution {
+                instance: owner,
+                request_id: row.try_get("last_request_id")?,
+                generation: row.try_get("highest_generation")?,
+                operation_id: row.try_get("operation_id")?,
+                provider_step: row.try_get("provider_step")?,
+                attempt: row.try_get("attempt")?,
+                deadline_at: row.try_get("deadline_at")?,
+            };
+            let environment_id =
+                EnvironmentId::from_str(&row.try_get::<Uuid, _>("environment_id")?.to_string())
+                    .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            self.retire_previous_boot(environment_id, &previous).await?;
+        }
+        Ok(())
+    }
+
+    /// Only the new verified PID1 may retire an earlier boot in the same isolated Pod container.
+    async fn retire_previous_boot(
+        &self,
+        environment_id: EnvironmentId,
+        previous: &UnfinishedKubeVirtExecution,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
+        let now: time::OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&self.pool)
+            .await?;
+        let code = if now >= previous.deadline_at {
+            ProviderFailureCode::Timeout
+        } else {
+            ProviderFailureCode::Cancelled
+        };
+        let response = KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code,
+                retryable: false,
+            },
+        };
+        let affected = sqlx::query(
+            "UPDATE environment.kubevirt_executor_fences SET last_response=$8, \
+             updated_at=clock_timestamp() WHERE environment_id=$1 AND highest_generation=$2 \
+             AND operation_id=$3 AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 \
+             AND execution_owner=$7 AND last_response IS NULL",
+        )
+        .bind(environment_id.as_uuid())
+        .bind(previous.generation)
+        .bind(previous.operation_id)
+        .bind(previous.provider_step)
+        .bind(previous.attempt)
+        .bind(&previous.request_id)
+        .bind(
+            serde_json::to_value(&previous.instance)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+        )
+        .bind(
+            serde_json::to_value(response)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(KubeVirtExecutorFenceError::StaleGeneration);
+        }
+        Ok(())
+    }
+
+    fn permit(
+        &self,
+        fence: KubeVirtBackendFence,
+        instance: KubeVirtExecutionInstance,
+    ) -> KubeVirtExecutionPermit {
+        KubeVirtExecutionPermit {
+            pool: self.pool.clone(),
+            fence,
+            instance,
+        }
+    }
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -815,19 +932,12 @@ impl PgKubeVirtExecutorFenceStore {
     async fn admit(
         &self,
         envelope: &KubeVirtExecutorRequestEnvelope,
+        instance: &KubeVirtExecutionInstance,
     ) -> Result<KubeVirtExecutorAdmission, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(envelope)?;
         let fence = &envelope.fence;
         let mut transaction = self.pool.begin().await?;
-        let authority_now: time::OffsetDateTime =
-            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
-                .fetch_one(&mut *transaction)
-                .await?;
-        if authority_now >= fence.deadline_at.get() {
-            return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
-        }
-        let remaining = std::time::Duration::try_from(fence.deadline_at.get() - authority_now)
-            .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
+        lock_execution_environment(&mut transaction, fence.environment_id).await?;
         let current = sqlx::query(
             "SELECT highest_generation,operation_id,provider_step,attempt,tombstoned, \
                     last_request_id,last_response,deadline_at \
@@ -836,6 +946,10 @@ impl PgKubeVirtExecutorFenceStore {
         .bind(fence.environment_id.as_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
+        let authority_now: time::OffsetDateTime =
+            sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+                .fetch_one(&mut *transaction)
+                .await?;
         if let Some(row) = current {
             let highest_generation = u64::try_from(row.try_get::<i64, _>("highest_generation")?)
                 .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
@@ -849,7 +963,7 @@ impl PgKubeVirtExecutorFenceStore {
             let tombstoned: bool = row.try_get("tombstoned")?;
             let last_request_id: String = row.try_get("last_request_id")?;
             let last_response = row.try_get::<Option<Value>, _>("last_response")?;
-            let previous_deadline: time::OffsetDateTime = row.try_get("deadline_at")?;
+
             if last_request_id == fence.request_id.to_string() {
                 if let Some(value) = last_response {
                     transaction.rollback().await?;
@@ -857,7 +971,10 @@ impl PgKubeVirtExecutorFenceStore {
                 }
                 return Err(KubeVirtExecutorFenceError::InProgress);
             }
-            if last_response.is_none() && authority_now < previous_deadline {
+            if authority_now >= fence.deadline_at.get() {
+                return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
+            }
+            if last_response.is_none() {
                 return Err(KubeVirtExecutorFenceError::InProgress);
             }
             let cleanup_succeeded = last_response
@@ -891,7 +1008,7 @@ impl PgKubeVirtExecutorFenceStore {
             sqlx::query(
                 "UPDATE environment.kubevirt_executor_fences SET highest_generation=$2, \
                  operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
-                 last_request_id=$8,last_response=NULL,deadline_at=$9,updated_at=clock_timestamp() \
+                 last_request_id=$8,last_response=NULL,deadline_at=$9,execution_owner=$10,updated_at=clock_timestamp() \
                  WHERE environment_id=$1",
             )
             .bind(fence.environment_id.as_uuid())
@@ -912,13 +1029,17 @@ impl PgKubeVirtExecutorFenceStore {
             .bind(kubevirt_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
+            .bind(serde_json::to_value(instance).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
             .execute(&mut *transaction)
             .await?;
         } else {
-            sqlx::query(
+            if authority_now >= fence.deadline_at.get() {
+                return Err(KubeVirtExecutorFenceError::DeadlineExceeded);
+            }
+            let admitted = sqlx::query(
                 "INSERT INTO environment.kubevirt_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
-                  last_action,last_request_id,deadline_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                  last_action,last_request_id,deadline_at,execution_owner) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (environment_id) DO NOTHING",
             )
             .bind(fence.environment_id.as_uuid())
             .bind(
@@ -938,25 +1059,32 @@ impl PgKubeVirtExecutorFenceStore {
             .bind(kubevirt_action_name(fence.action))
             .bind(fence.request_id.to_string())
             .bind(fence.deadline_at.get())
+            .bind(serde_json::to_value(instance).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
             .execute(&mut *transaction)
             .await?;
+            if admitted.rows_affected() != 1 {
+                return Err(KubeVirtExecutorFenceError::InProgress);
+            }
         }
         transaction.commit().await?;
-        Ok(KubeVirtExecutorAdmission::Execute(remaining))
+        Ok(KubeVirtExecutorAdmission::Execute)
     }
 
     async fn complete(
         &self,
         fence: KubeVirtBackendFence,
         response: &KubeVirtExecutorResponse,
+        instance: &KubeVirtExecutionInstance,
     ) -> Result<(), KubeVirtExecutorFenceError> {
         let value = serde_json::to_value(response)
             .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_execution_environment(&mut transaction, fence.environment_id).await?;
         let updated = sqlx::query(
             "UPDATE environment.kubevirt_executor_fences SET last_response=$7, \
                  tombstoned=CASE WHEN $8 THEN TRUE ELSE tombstoned END,updated_at=clock_timestamp() \
              WHERE environment_id=$1 AND highest_generation=$2 AND operation_id=$3 \
-               AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND last_response IS NULL",
+               AND provider_step=$4 AND attempt=$5 AND last_request_id=$6 AND execution_owner=$9 AND (last_response IS NULL OR last_response=$7)",
         )
         .bind(fence.environment_id.as_uuid())
         .bind(i64::try_from(fence.environment_generation).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
@@ -966,67 +1094,341 @@ impl PgKubeVirtExecutorFenceStore {
         .bind(fence.request_id.to_string())
         .bind(value)
         .bind(matches!(response, KubeVirtExecutorResponse::Deleted { .. }))
-        .execute(&self.pool)
+        .bind(serde_json::to_value(instance).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
+        .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(KubeVirtExecutorFenceError::StaleGeneration);
         }
+        transaction.commit().await?;
         Ok(())
     }
 }
 
+/// A DB-only barrier settles any earlier admission commit before a no-row completion decision.
+async fn lock_execution_environment(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    environment_id: EnvironmentId,
+) -> Result<(), KubeVirtExecutorFenceError> {
+    sqlx::query("SELECT environment_id FROM environment.environment_instances WHERE environment_id=$1 FOR UPDATE")
+        .bind(environment_id.as_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(KubeVirtExecutorFenceError::Cancelled)?;
+    Ok(())
+}
+
 enum KubeVirtExecutorAdmission {
-    Execute(std::time::Duration),
+    Execute,
     Replay(Value),
 }
 
-/// Deadline-bounded executor with replay and stale-generation rejection.
+/// Each process remembers its actual in-flight execution until its terminal response is durable.
+#[derive(Clone)]
+struct ActiveKubeVirtExecution {
+    fence: KubeVirtBackendFence,
+    terminal: Option<KubeVirtExecutorResponse>,
+}
+
+/// Kubernetes-incarnation-fenced executor. No database lock spans backend I/O.
 pub struct FencedKubeVirtExecutor<B> {
     store: PgKubeVirtExecutorFenceStore,
     backend: B,
+    instance: KubeVirtExecutionInstance,
+    active: Mutex<std::collections::BTreeMap<Uuid, ActiveKubeVirtExecution>>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
     #[must_use]
-    pub const fn new(store: PgKubeVirtExecutorFenceStore, backend: B) -> Self {
-        Self { store, backend }
+    pub fn new(
+        store: PgKubeVirtExecutorFenceStore,
+        backend: B,
+        instance: KubeVirtExecutionInstance,
+    ) -> Self {
+        Self {
+            store,
+            backend,
+            instance,
+            active: Mutex::new(std::collections::BTreeMap::new()),
+            shutdown: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    /// Called once before listening, after the production PID1/PodSpec startup check.
+    pub async fn prepare_startup(&self) -> Result<(), KubeVirtExecutorFenceError> {
+        self.store.recover_previous_boot(&self.instance).await
+    }
+
+    fn cancel_active(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    async fn finish_terminals(&self) -> Result<(), KubeVirtExecutorFenceError> {
+        let records = self
+            .active
+            .lock()
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in records {
+            let terminal = record
+                .terminal
+                .ok_or(KubeVirtExecutorFenceError::InProgress)?;
+            self.store
+                .complete(record.fence.clone(), &terminal, &self.instance)
+                .await?;
+            self.forget(&record.fence)?;
+        }
+        Ok(())
     }
 
     pub async fn execute(
         &self,
         envelope: KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponseEnvelope, KubeVirtExecutorFenceError> {
-        let response = match self.store.admit(&envelope).await? {
-            KubeVirtExecutorAdmission::Execute(remaining) => {
-                let response = tokio::time::timeout(
-                    remaining,
-                    self.backend.execute(&envelope.fence, &envelope.request),
-                )
-                .await
-                .map_err(|_| KubeVirtExecutorFenceError::DeadlineExceeded)?;
-                self.store
-                    .complete(envelope.fence.clone(), &response)
-                    .await?;
-                response
+        validate_kubevirt_executor_request(&envelope)?;
+        if *self.shutdown.borrow() {
+            return Err(KubeVirtExecutorFenceError::Cancelled);
+        }
+        let fence = &envelope.fence;
+        let previous = {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            if let Some(previous) = active.get(&fence.environment_id.as_uuid()) {
+                Some(previous.clone())
+            } else {
+                active.insert(
+                    fence.environment_id.as_uuid(),
+                    ActiveKubeVirtExecution {
+                        fence: fence.clone(),
+                        terminal: None,
+                    },
+                );
+                None
             }
-            KubeVirtExecutorAdmission::Replay(value) => serde_json::from_value(value)
-                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?,
         };
-        Ok(KubeVirtExecutorResponseEnvelope {
-            protocol_version: envelope.fence.protocol_version,
-            environment_id: envelope.fence.environment_id,
-            operation_id: envelope.fence.operation_id,
-            provider_step: envelope.fence.provider_step,
-            environment_generation: envelope.fence.environment_generation,
-            attempt: envelope.fence.attempt,
-            action: envelope.fence.action,
-            request_id: envelope.fence.request_id,
-            response,
-        })
+        if let Some(previous) = previous {
+            if let Some(terminal) = previous.terminal {
+                match self
+                    .store
+                    .complete(previous.fence.clone(), &terminal, &self.instance)
+                    .await
+                {
+                    Ok(()) => {
+                        self.forget(&previous.fence)?;
+                        if previous.fence.request_id == fence.request_id {
+                            return Ok(kubevirt_response_envelope(fence, terminal));
+                        }
+                    }
+                    Err(KubeVirtExecutorFenceError::StaleGeneration) => {
+                        self.forget(&previous.fence)?;
+                    }
+                    Err(_) => {}
+                }
+            }
+            return Ok(kubevirt_response_envelope(
+                fence,
+                KubeVirtExecutorResponse::Pending,
+            ));
+        }
+        let result = self.execute_reserved(&envelope).await;
+        // A terminal whose persistence failed stays in memory; polling retries only completion.
+        if self
+            .active
+            .lock()
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?
+            .get(&fence.environment_id.as_uuid())
+            .is_none_or(|record| record.terminal.is_none())
+        {
+            self.forget(fence)?;
+        }
+        result.map(|response| kubevirt_response_envelope(fence, response))
+    }
+
+    async fn execute_reserved(
+        &self,
+        envelope: &KubeVirtExecutorRequestEnvelope,
+    ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
+        match self.store.admit(envelope, &self.instance).await {
+            Ok(KubeVirtExecutorAdmission::Replay(value)) => serde_json::from_value(value)
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch),
+            Err(KubeVirtExecutorFenceError::InProgress) => Ok(KubeVirtExecutorResponse::Pending),
+            Err(error @ KubeVirtExecutorFenceError::Database(_)) => {
+                self.finish_unstarted_admission(&envelope.fence, error)
+                    .await
+            }
+            Err(error) => Err(error),
+            Ok(KubeVirtExecutorAdmission::Execute) => {
+                let permit = self
+                    .store
+                    .permit(envelope.fence.clone(), self.instance.clone());
+                let response = self.run_to_terminal(envelope, &permit).await;
+                {
+                    let mut active = self
+                        .active
+                        .lock()
+                        .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+                    let record = active
+                        .get_mut(&envelope.fence.environment_id.as_uuid())
+                        .ok_or(KubeVirtExecutorFenceError::IdentityMismatch)?;
+                    record.terminal = Some(response.clone());
+                }
+                if self
+                    .store
+                    .complete(envelope.fence.clone(), &response, &self.instance)
+                    .await
+                    .is_err()
+                {
+                    return Ok(KubeVirtExecutorResponse::Pending);
+                }
+                self.forget(&envelope.fence)?;
+                Ok(response)
+            }
+        }
+    }
+
+    async fn finish_unstarted_admission(
+        &self,
+        fence: &KubeVirtBackendFence,
+        original_error: KubeVirtExecutorFenceError,
+    ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
+        // No backend was invoked. A committed admission can be finished without repeating effects.
+        let response = KubeVirtExecutorResponse::Failed {
+            failure: unavailable(),
+        };
+        {
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+            let record = active
+                .get_mut(&fence.environment_id.as_uuid())
+                .ok_or(KubeVirtExecutorFenceError::IdentityMismatch)?;
+            record.terminal = Some(response.clone());
+        }
+        match self
+            .store
+            .complete(fence.clone(), &response, &self.instance)
+            .await
+        {
+            Ok(()) => {
+                self.forget(fence)?;
+                Ok(response)
+            }
+            Err(
+                KubeVirtExecutorFenceError::StaleGeneration | KubeVirtExecutorFenceError::Cancelled,
+            ) => {
+                // complete's Environment barrier proves the earlier DB transaction has settled.
+                self.forget(fence)?;
+                Err(original_error)
+            }
+            Err(_) => Ok(KubeVirtExecutorResponse::Pending),
+        }
+    }
+
+    async fn run_to_terminal(
+        &self,
+        envelope: &KubeVirtExecutorRequestEnvelope,
+        permit: &KubeVirtExecutionPermit,
+    ) -> KubeVirtExecutorResponse {
+        let mut shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled);
+        }
+        let remaining = match permit.check().await {
+            Ok(remaining) => remaining,
+            Err(error) => return execution_terminal_failure(&error),
+        };
+        // Leaving this block drops the actual backend future before completion is persisted.
+        let response = {
+            let work = self
+                .backend
+                .execute(&envelope.fence, &envelope.request, permit);
+            tokio::pin!(work);
+            let watch_authority = async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if let Err(error) = permit.check().await {
+                        return error;
+                    }
+                }
+            };
+            tokio::select! {
+                response = &mut work => response,
+                _ = shutdown.changed() => execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled),
+                error = watch_authority => execution_terminal_failure(&error),
+                () = tokio::time::sleep(remaining) => execution_terminal_failure(&KubeVirtExecutorFenceError::DeadlineExceeded),
+            }
+        };
+        // The backend only completes when its work is terminal. Pending is a transport reply,
+        // never a durable result or permission to repeat a possibly accepted write.
+        if matches!(response, KubeVirtExecutorResponse::Pending) {
+            return KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::ObservationInvalid,
+                    retryable: false,
+                },
+            };
+        }
+        if !matches!(response, KubeVirtExecutorResponse::Failed { .. })
+            && let Err(error) = permit.check().await
+        {
+            return execution_terminal_failure(&error);
+        }
+        response
+    }
+
+    fn forget(&self, fence: &KubeVirtBackendFence) -> Result<(), KubeVirtExecutorFenceError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?;
+        if active
+            .get(&fence.environment_id.as_uuid())
+            .is_some_and(|record| record.fence.request_id == fence.request_id)
+        {
+            active.remove(&fence.environment_id.as_uuid());
+        }
+        Ok(())
     }
 }
 
-/// Typed NATS request/reply server for the `KubeVirt` executor subject.
+fn execution_terminal_failure(error: &KubeVirtExecutorFenceError) -> KubeVirtExecutorResponse {
+    let failure = match error {
+        KubeVirtExecutorFenceError::DeadlineExceeded => ProviderFailure {
+            code: ProviderFailureCode::Timeout,
+            retryable: false,
+        },
+        KubeVirtExecutorFenceError::Cancelled => ProviderFailure {
+            code: ProviderFailureCode::Cancelled,
+            retryable: false,
+        },
+        _ => kubevirt_executor_failure(error),
+    };
+    KubeVirtExecutorResponse::Failed { failure }
+}
+
+fn kubevirt_response_envelope(
+    fence: &KubeVirtBackendFence,
+    response: KubeVirtExecutorResponse,
+) -> KubeVirtExecutorResponseEnvelope {
+    KubeVirtExecutorResponseEnvelope {
+        protocol_version: fence.protocol_version,
+        environment_id: fence.environment_id,
+        operation_id: fence.operation_id,
+        provider_step: fence.provider_step,
+        environment_generation: fence.environment_generation,
+        attempt: fence.attempt,
+        action: fence.action,
+        request_id: fence.request_id,
+        response,
+    }
+}
+
 pub struct NatsKubeVirtExecutorServer<B> {
     client: async_nats::Client,
     subject: String,
@@ -1049,71 +1451,71 @@ impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
         })
     }
 
-    pub async fn serve(self) -> Result<(), KubeVirtExecutorFenceError> {
+    pub async fn serve(
+        self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), KubeVirtExecutorFenceError> {
         let mut subscriber = self
             .client
             .subscribe(self.subject)
             .await
             .map_err(|_| KubeVirtExecutorFenceError::Transport)?;
-        while let Some(message) = subscriber.next().await {
-            let Some(reply) = message.reply.clone() else {
-                tracing::warn!(
-                    event = "environment.kubevirt_executor.request_rejected",
-                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_REPLY_REQUIRED"
-                );
-                continue;
-            };
-            if message.payload.len() > MAX_RESPONSE_BYTES {
-                tracing::warn!(
-                    event = "environment.kubevirt_executor.request_rejected",
-                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_PAYLOAD_TOO_LARGE"
-                );
-                continue;
+        let mut tasks = tokio::task::JoinSet::new();
+        let result = loop {
+            if *shutdown.borrow() {
+                break Ok(());
             }
-            let Ok(envelope) =
-                serde_json::from_slice::<KubeVirtExecutorRequestEnvelope>(&message.payload)
-            else {
-                tracing::warn!(
-                    event = "environment.kubevirt_executor.request_rejected",
-                    diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CONTRACT_INVALID"
-                );
-                continue;
-            };
-            let client = self.client.clone();
-            let executor = Arc::clone(&self.executor);
-            tokio::spawn(async move {
-                let fence = envelope.fence.clone();
-                let response = executor.execute(envelope).await.unwrap_or_else(|error| {
-                    KubeVirtExecutorResponseEnvelope {
-                        protocol_version: fence.protocol_version,
-                        environment_id: fence.environment_id,
-                        operation_id: fence.operation_id,
-                        provider_step: fence.provider_step,
-                        environment_generation: fence.environment_generation,
-                        attempt: fence.attempt,
-                        action: fence.action,
-                        request_id: fence.request_id,
-                        response: KubeVirtExecutorResponse::Failed {
-                            failure: kubevirt_executor_failure(&error),
-                        },
-                    }
-                });
-                let Ok(payload) = serde_json::to_vec(&response) else {
-                    tracing::error!(
-                        event = "environment.kubevirt_executor.response_failed",
-                        diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_RESPONSE_INVALID"
-                    );
-                    return;
-                };
-                if client.publish(reply, payload.into()).await.is_err() {
-                    tracing::warn!(
-                        event = "environment.kubevirt_executor.response_failed",
-                        diagnostic = "LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TRANSPORT_FAILED"
-                    );
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break Ok(()),
+                result = tasks.join_next(), if !tasks.is_empty() => {
+                    if result.is_some_and(|result|result.is_err()) {break Err(KubeVirtExecutorFenceError::Transport);}
                 }
-            });
+                message = subscriber.next() => {
+                    let Some(message)=message else {break Err(KubeVirtExecutorFenceError::Transport);};
+                    let Some(reply)=message.reply else {
+                        tracing::warn!(event="environment.kubevirt_executor.request_rejected",reason="replyRequired");
+                        continue;
+                    };
+                    if message.payload.len()>MAX_RESPONSE_BYTES {
+                        tracing::warn!(event="environment.kubevirt_executor.request_rejected",reason="payloadTooLarge");
+                        continue;
+                    }
+                    let Ok(envelope)=serde_json::from_slice::<KubeVirtExecutorRequestEnvelope>(&message.payload) else {
+                        tracing::warn!(event="environment.kubevirt_executor.request_rejected",reason="contractInvalid");
+                        continue;
+                    };
+                    let client=self.client.clone();let executor=Arc::clone(&self.executor);
+                    tasks.spawn(async move {
+                        let fence=envelope.fence.clone();
+                        let response=executor.execute(envelope).await.unwrap_or_else(|error|kubevirt_response_envelope(&fence,KubeVirtExecutorResponse::Failed {failure:kubevirt_executor_failure(&error)}));
+                        let Ok(payload)=serde_json::to_vec(&response) else {return;};
+                        if client.publish(reply,payload.into()).await.is_err() {
+                            tracing::warn!(event="environment.kubevirt_executor.response_failed",diagnostic="LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TRANSPORT_FAILED");
+                        }
+                    });
+                }
+            }
+        };
+        // Dropping the subscription rejects new work; accepted tasks still retain their exact owner.
+        drop(subscriber);
+        self.executor.cancel_active();
+        let mut task_failed = false;
+        while let Some(task) = tasks.join_next().await {
+            task_failed |= task.is_err();
         }
-        Err(KubeVirtExecutorFenceError::Transport)
+        let completion = self.executor.finish_terminals().await;
+        if completion.is_err() {
+            tracing::error!(
+                event = "environment.kubevirt_executor.drain_failed",
+                diagnostic = "LW_ENVIRONMENT_KUBEVIRT_TERMINAL_PERSIST_FAILED"
+            );
+        }
+        result?;
+        if task_failed {
+            return Err(KubeVirtExecutorFenceError::Transport);
+        }
+        completion
     }
 }
 
@@ -1139,6 +1541,14 @@ const fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> Provid
         KubeVirtExecutorFenceError::InProgress
         | KubeVirtExecutorFenceError::Database(_)
         | KubeVirtExecutorFenceError::Transport => unavailable(),
+        KubeVirtExecutorFenceError::DeadlineExceeded => ProviderFailure {
+            code: ProviderFailureCode::Timeout,
+            retryable: false,
+        },
+        KubeVirtExecutorFenceError::Cancelled => ProviderFailure {
+            code: ProviderFailureCode::Cancelled,
+            retryable: false,
+        },
         _ => configuration_invalid(),
     }
 }
@@ -1166,6 +1576,8 @@ pub enum KubeVirtExecutorFenceError {
     IdentityMismatch,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_DEADLINE_EXCEEDED")]
     DeadlineExceeded,
+    #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_CANCELLED")]
+    Cancelled,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_STALE_GENERATION")]
     StaleGeneration,
     #[error("LW_ENVIRONMENT_KUBEVIRT_EXECUTOR_TOMBSTONED")]
@@ -2375,17 +2787,23 @@ where
         &self.binding
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one concrete provider action dispatch keeps pending distinct from completed observations"
+    )]
     async fn execute(
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
+    ) -> Result<crate::ProviderOutcome<ProviderObservation>, ProviderFailure> {
         let fence = KubeVirtBackendFence::for_action(instance, action)?;
-        let no_endpoints = |next_state, operation_complete| ProviderObservation {
-            next_state,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete,
+        let no_endpoints = |next_state, operation_complete| {
+            ProviderOutcome::Completed(ProviderObservation {
+                next_state,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete,
+            })
         };
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Deleting
@@ -2393,7 +2811,11 @@ where
             let plan = self
                 .cleanup_plan(instance)
                 .map_err(|error| projection_failure(&error))?;
-            let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
+            let ProviderOutcome::Completed(cleanup_evidence) =
+                self.backend.delete_namespace(&fence, &plan).await?
+            else {
+                return Ok(ProviderOutcome::Pending);
+            };
             if !valid_artifact_ref(&cleanup_evidence) {
                 return Err(ProviderFailure {
                     code: ProviderFailureCode::CleanupFailed,
@@ -2404,12 +2826,12 @@ where
                 .record_deleted(&fence, &plan, &cleanup_evidence)
                 .await
                 .map_err(|error| observation_store_failure(&error))?;
-            return Ok(ProviderObservation {
+            return Ok(ProviderOutcome::Completed(ProviderObservation {
                 next_state: ObservedEnvironmentState::Deleted,
                 endpoints: Vec::new(),
                 cleanup_evidence: Some(cleanup_evidence),
                 operation_complete: true,
-            });
+            }));
         }
         if action == ReconcileAction::Cleanup
             && instance.observed_state == ObservedEnvironmentState::Stopped
@@ -2426,7 +2848,12 @@ where
             if instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted {
                 return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
             }
-            self.stop_runtime(&fence, instance).await?;
+            if matches!(
+                self.stop_runtime(&fence, instance).await?,
+                ProviderOutcome::Pending
+            ) {
+                return Ok(ProviderOutcome::Pending);
+            }
             return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
         }
         let resolved = self
@@ -2451,24 +2878,44 @@ where
                 ReconcileAction::Provision | ReconcileAction::Reset,
                 ObservedEnvironmentState::Provisioning,
             ) => {
-                let observed = self.backend.apply(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.apply(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             (ReconcileAction::Observe, _) => {
-                let observed = self.backend.observe(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.observe(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
-                let observed = self.backend.start(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.start(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
-                let observed = self.backend.restart(&fence, &plan).await?;
+                let ProviderOutcome::Completed(observed) =
+                    self.backend.restart(&fence, &plan).await?
+                else {
+                    return Ok(ProviderOutcome::Pending);
+                };
                 self.accept_running_observation(&fence, &plan, instance, observed)
                     .await
+                    .map(ProviderOutcome::Completed)
             }
             _ => Err(ProviderFailure {
                 code: ProviderFailureCode::Rejected,
@@ -2488,17 +2935,19 @@ where
         &self,
         fence: &KubeVirtBackendFence,
         instance: &EnvironmentInstance,
-    ) -> Result<(), ProviderFailure> {
+    ) -> Result<ProviderOutcome<()>, ProviderFailure> {
         let plan = self
             .cleanup_plan(instance)
             .map_err(|error| projection_failure(&error))?;
-        let observed = self.backend.stop(fence, &plan).await?;
+        let ProviderOutcome::Completed(observed) = self.backend.stop(fence, &plan).await? else {
+            return Ok(ProviderOutcome::Pending);
+        };
         validate_stopped_observation(instance, observed)?;
         self.observations
             .record_stopped(fence, &plan, &observed)
             .await
             .map_err(|error| observation_store_failure(&error))?;
-        Ok(())
+        Ok(ProviderOutcome::Completed(()))
     }
 
     async fn accept_running_observation(
@@ -2784,7 +3233,7 @@ fn valid_subject(value: &str) -> bool {
     valid_binding(value) && !value.contains('*') && !value.contains('>')
 }
 
-fn valid_dns_label(value: &str) -> bool {
+pub(crate) fn valid_dns_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
         && !value.starts_with('-')
@@ -2837,6 +3286,220 @@ const fn configuration_invalid() -> ProviderFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnstartedBackend(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl KubeVirtExecutorBackend for UnstartedBackend {
+        async fn execute(
+            &self,
+            _fence: &KubeVirtBackendFence,
+            _request: &KubeVirtExecutorRequest,
+            _permit: &KubeVirtExecutionPermit,
+        ) -> KubeVirtExecutorResponse {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            KubeVirtExecutorResponse::Failed {
+                failure: configuration_invalid(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real database race controls the admission commit barrier and subsequent absent-row completion"
+    )]
+    async fn unstarted_completion_waits_for_admission_commit_before_deciding_absence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let authority = crate::test_support::requested_instance();
+        let mut fence = KubeVirtBackendFence::for_action(&authority, ReconcileAction::Provision)
+            .map_err(|error| format!("{error:?}"))?;
+        let (_container, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+        let pool = permit.pool.clone();
+        sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid())
+            .execute(&pool)
+            .await?;
+        let executor = Arc::new(FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(pool.clone()),
+            UnstartedBackend(std::sync::atomic::AtomicUsize::new(0)),
+            permit.instance.clone(),
+        ));
+        executor
+            .active
+            .lock()
+            .map_err(|_| "active fixture lock")?
+            .insert(
+                fence.environment_id.as_uuid(),
+                ActiveKubeVirtExecution {
+                    fence: fence.clone(),
+                    terminal: None,
+                },
+            );
+        let mut admission = pool.begin().await?;
+        lock_execution_environment(&mut admission, fence.environment_id).await?;
+        sqlx::query("INSERT INTO environment.kubevirt_executor_fences (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned,last_action,last_request_id,deadline_at,execution_owner) VALUES ($1,$2,$3,$4,$5,FALSE,'provision',$6,$7,$8)")
+            .bind(fence.environment_id.as_uuid()).bind(i64::try_from(fence.environment_generation)?)
+            .bind(fence.operation_id.as_uuid()).bind(i32::try_from(fence.provider_step)?).bind(i32::try_from(fence.attempt)?)
+            .bind(fence.request_id.to_string()).bind(fence.deadline_at.get()).bind(serde_json::to_value(&permit.instance)?)
+            .execute(&mut *admission).await?;
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        let executing = Arc::clone(&executor);
+        let task_fence = fence.clone();
+        let mut completion = tokio::spawn(async move {
+            let _ = started.send(());
+            executing
+                .finish_unstarted_admission(
+                    &task_fence,
+                    KubeVirtExecutorFenceError::Database(sqlx::Error::Protocol(
+                        "admission acknowledgement lost".to_owned(),
+                    )),
+                )
+                .await
+        });
+        receiver.await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut completion)
+                .await
+                .is_err()
+        );
+        admission.commit().await?;
+        assert!(matches!(
+            completion.await??,
+            KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    ..
+                }
+            }
+        ));
+        let terminal: Value = sqlx::query_scalar("SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid()).fetch_one(&pool).await?;
+        assert_eq!(terminal["status"], "failed");
+        assert_eq!(
+            executor.backend.0.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(
+            executor
+                .active
+                .lock()
+                .map_err(|_| "active fixture lock")?
+                .is_empty()
+        );
+        sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid())
+            .execute(&pool)
+            .await?;
+        executor
+            .active
+            .lock()
+            .map_err(|_| "active fixture lock")?
+            .insert(
+                fence.environment_id.as_uuid(),
+                ActiveKubeVirtExecution {
+                    fence: fence.clone(),
+                    terminal: None,
+                },
+            );
+        assert!(matches!(
+            executor
+                .finish_unstarted_admission(
+                    &fence,
+                    KubeVirtExecutorFenceError::Database(sqlx::Error::Protocol(
+                        "admission rolled back".to_owned()
+                    ))
+                )
+                .await,
+            Err(KubeVirtExecutorFenceError::Database(_))
+        ));
+        assert!(
+            executor
+                .active
+                .lock()
+                .map_err(|_| "active fixture lock")?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nats_timeout_is_pending_but_no_responders_is_real_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers::{
+            GenericImage,
+            core::{IntoContainerPort, WaitFor},
+            runners::AsyncRunner,
+        };
+        let nats = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .start()
+            .await?;
+        let client = async_nats::connect(format!(
+            "nats://127.0.0.1:{}",
+            nats.get_host_port_ipv4(4222).await?
+        ))
+        .await?;
+        let mut subscriber = client.subscribe("fixture.kubevirt.accepted").await?;
+        client.flush().await?;
+        let instance = crate::test_support::requested_instance();
+        let fence = KubeVirtBackendFence {
+            protocol_version: KUBEVIRT_BACKEND_PROTOCOL_VERSION,
+            environment_id: instance.id,
+            operation_id: instance.operation.id,
+            provider_step: 1,
+            environment_generation: 1,
+            attempt: 1,
+            action: ReconcileAction::Cleanup,
+            request_id: Sha256Digest::of_bytes(b"bound-in-request"),
+            trace_id: "transport-fixture".to_owned(),
+            deadline_at: instance.operation.deadline_at,
+        };
+        let request = KubeVirtExecutorRequest::DeleteNamespace {
+            plan: KubeVirtCleanupPlan {
+                environment_id: instance.id,
+                project_id: instance.project_id,
+                namespace: format!("lw-env-{}", instance.id),
+                virtual_machine_name: "runtime".to_owned(),
+                plan_sha256: Sha256Digest::of_bytes(b"cleanup"),
+            },
+        };
+        let backend = NatsKubeVirtProviderBackend::new(
+            client.clone(),
+            "fixture.kubevirt.accepted".to_owned(),
+            Duration::from_millis(30),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        assert!(matches!(
+            backend
+                .request(&fence, request.clone())
+                .await
+                .map_err(|error| format!("{error:?}"))?,
+            KubeVirtExecutorResponse::Pending
+        ));
+        let accepted = tokio::time::timeout(Duration::from_secs(1), subscriber.next())
+            .await?
+            .ok_or("request not accepted")?;
+        let accepted: KubeVirtExecutorRequestEnvelope = serde_json::from_slice(&accepted.payload)?;
+        assert_eq!(accepted.fence.operation_id, fence.operation_id);
+        assert_eq!(accepted.fence.attempt, 1);
+        assert_eq!(accepted.fence.deadline_at, fence.deadline_at);
+        let no_responder = NatsKubeVirtProviderBackend::new(
+            client,
+            "fixture.kubevirt.no_responder".to_owned(),
+            Duration::from_millis(30),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        assert!(matches!(
+            no_responder.request(&fence, request).await,
+            Err(ProviderFailure {
+                code: ProviderFailureCode::Unavailable,
+                retryable: true
+            })
+        ));
+        Ok(())
+    }
 
     #[test]
     fn external_nvidia_dls_egress_uses_exact_fqdn_and_port() -> Result<(), ReleaseProjectionError> {

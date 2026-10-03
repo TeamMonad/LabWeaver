@@ -1691,112 +1691,123 @@ where
         &self.binding
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one concrete provider action dispatch keeps observation completion consistent"
+    )]
     async fn execute(
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        let fence = ContainerBackendFence::for_action(instance, action)?;
-        let no_endpoints = |next_state, operation_complete| ProviderObservation {
-            next_state,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete,
-        };
-        if action == ReconcileAction::Cleanup
-            && instance.observed_state == ObservedEnvironmentState::Deleting
-        {
-            let plan = self
-                .cleanup_plan(instance)
-                .map_err(|error| projection_failure(&error))?;
-            let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
-            if !valid_artifact_ref(&cleanup_evidence) {
-                return Err(ProviderFailure {
-                    code: ProviderFailureCode::CleanupFailed,
-                    retryable: true,
+    ) -> Result<crate::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            let fence = ContainerBackendFence::for_action(instance, action)?;
+            let no_endpoints = |next_state, operation_complete| ProviderObservation {
+                next_state,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete,
+            };
+            if action == ReconcileAction::Cleanup
+                && instance.observed_state == ObservedEnvironmentState::Deleting
+            {
+                let plan = self
+                    .cleanup_plan(instance)
+                    .map_err(|error| projection_failure(&error))?;
+                let cleanup_evidence = self.backend.delete_namespace(&fence, &plan).await?;
+                if !valid_artifact_ref(&cleanup_evidence) {
+                    return Err(ProviderFailure {
+                        code: ProviderFailureCode::CleanupFailed,
+                        retryable: true,
+                    });
+                }
+                return Ok(ProviderObservation {
+                    next_state: ObservedEnvironmentState::Deleted,
+                    endpoints: Vec::new(),
+                    cleanup_evidence: Some(cleanup_evidence),
+                    operation_complete: true,
                 });
             }
-            return Ok(ProviderObservation {
-                next_state: ObservedEnvironmentState::Deleted,
-                endpoints: Vec::new(),
-                cleanup_evidence: Some(cleanup_evidence),
-                operation_complete: true,
-            });
-        }
-        if action == ReconcileAction::Cleanup
-            && instance.observed_state == ObservedEnvironmentState::Stopped
-            && instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted
-        {
-            return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
-        }
-        if action == ReconcileAction::Stop
-            && matches!(
-                instance.observed_state,
-                ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring
-            )
-        {
-            if instance.desired_state == contracts::environment::DesiredEnvironmentState::Deleted {
+            if action == ReconcileAction::Cleanup
+                && instance.observed_state == ObservedEnvironmentState::Stopped
+                && instance.desired_state
+                    == contracts::environment::DesiredEnvironmentState::Deleted
+            {
                 return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
             }
-            let plan = self
-                .cleanup_plan(instance)
-                .map_err(|error| projection_failure(&error))?;
-            self.backend.scale(&fence, &plan, 0).await?;
-            return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
-        }
-        let resolved = self
-            .releases
-            .resolve(instance.release_id, instance.release_version)
-            .await
-            .map_err(|error| {
-                log_projection_failure(&error, instance, action, "resolve");
+            if action == ReconcileAction::Stop
+                && matches!(
+                    instance.observed_state,
+                    ObservedEnvironmentState::Stopping | ObservedEnvironmentState::Expiring
+                )
+            {
+                if instance.desired_state
+                    == contracts::environment::DesiredEnvironmentState::Deleted
+                {
+                    return Ok(no_endpoints(ObservedEnvironmentState::Deleting, false));
+                }
+                let plan = self
+                    .cleanup_plan(instance)
+                    .map_err(|error| projection_failure(&error))?;
+                self.backend.scale(&fence, &plan, 0).await?;
+                return Ok(no_endpoints(ObservedEnvironmentState::Stopped, true));
+            }
+            let resolved = self
+                .releases
+                .resolve(instance.release_id, instance.release_version)
+                .await
+                .map_err(|error| {
+                    log_projection_failure(&error, instance, action, "resolve");
+                    projection_failure(&error)
+                })?;
+            let plan = self.plan(instance, &resolved, action).map_err(|error| {
+                log_projection_failure(&error, instance, action, "plan");
                 projection_failure(&error)
             })?;
-        let plan = self.plan(instance, &resolved, action).map_err(|error| {
-            log_projection_failure(&error, instance, action, "plan");
-            projection_failure(&error)
-        })?;
-        match (action, instance.observed_state) {
-            (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
-                Ok(no_endpoints(ObservedEnvironmentState::Validating, false))
+            match (action, instance.observed_state) {
+                (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
+                    Ok(no_endpoints(ObservedEnvironmentState::Validating, false))
+                }
+                (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
+                    Ok(no_endpoints(ObservedEnvironmentState::Building, false))
+                }
+                (ReconcileAction::Build, ObservedEnvironmentState::Building) => {
+                    Ok(no_endpoints(ObservedEnvironmentState::Provisioning, false))
+                }
+                (
+                    ReconcileAction::Provision | ReconcileAction::Reset,
+                    ObservedEnvironmentState::Provisioning,
+                ) => {
+                    let observed = self.backend.apply(&fence, &plan).await?;
+                    ready_observation(instance, observed)
+                }
+                (ReconcileAction::Observe, _) => {
+                    let observed = self.backend.observe(&fence, &plan).await?;
+                    ready_observation(instance, observed)
+                }
+                (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
+                    let observed = self.backend.scale(&fence, &plan, 1).await?;
+                    ready_observation(instance, observed)
+                }
+                (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
+                    let observed = self
+                        .backend
+                        // The aggregate revision changes after every observation and
+                        // retry. The accepted operation revision is immutable for
+                        // one user restart, so it is the only stable template
+                        // identity that makes repeated reconciliation idempotent.
+                        .restart(&fence, &plan, instance.operation.accepted_revision)
+                        .await?;
+                    ready_observation(instance, observed)
+                }
+                _ => Err(ProviderFailure {
+                    code: ProviderFailureCode::Rejected,
+                    retryable: false,
+                }),
             }
-            (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
-                Ok(no_endpoints(ObservedEnvironmentState::Building, false))
-            }
-            (ReconcileAction::Build, ObservedEnvironmentState::Building) => {
-                Ok(no_endpoints(ObservedEnvironmentState::Provisioning, false))
-            }
-            (
-                ReconcileAction::Provision | ReconcileAction::Reset,
-                ObservedEnvironmentState::Provisioning,
-            ) => {
-                let observed = self.backend.apply(&fence, &plan).await?;
-                ready_observation(instance, observed)
-            }
-            (ReconcileAction::Observe, _) => {
-                let observed = self.backend.observe(&fence, &plan).await?;
-                ready_observation(instance, observed)
-            }
-            (ReconcileAction::Start, ObservedEnvironmentState::Stopped) => {
-                let observed = self.backend.scale(&fence, &plan, 1).await?;
-                ready_observation(instance, observed)
-            }
-            (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
-                let observed = self
-                    .backend
-                    // The aggregate revision changes after every observation and
-                    // retry. The accepted operation revision is immutable for
-                    // one user restart, so it is the only stable template
-                    // identity that makes repeated reconciliation idempotent.
-                    .restart(&fence, &plan, instance.operation.accepted_revision)
-                    .await?;
-                ready_observation(instance, observed)
-            }
-            _ => Err(ProviderFailure {
-                code: ProviderFailureCode::Rejected,
-                retryable: false,
-            }),
         }
+        .await
+        .map(crate::ProviderOutcome::Completed)
     }
 }
 

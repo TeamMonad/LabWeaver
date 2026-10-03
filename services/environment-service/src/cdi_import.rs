@@ -298,6 +298,189 @@ impl KubernetesCdiImportClient {
             .map_err(|_| CdiImportError::ImportFailed)
     }
 
+    async fn list_json(&self, path: &str) -> Result<Vec<Value>, CdiImportError> {
+        self.get_json(path)
+            .await?
+            .and_then(|value| value.get("items").and_then(Value::as_array).cloned())
+            .ok_or(CdiImportError::ImportFailed)
+    }
+
+    /// The existing base importer owns retry; CDI remains the only Pod/spec creator.
+    async fn reset_stale_importer(
+        &self,
+        import: &KubeVirtBaseDiskImport,
+        dv: &Value,
+    ) -> Result<(), CdiImportError> {
+        verify_import_data_volume(import, dv)?;
+        if data_volume_succeeded(dv) {
+            return Ok(());
+        }
+        if dv.pointer("/status/phase").and_then(Value::as_str) == Some("Failed") {
+            return Err(CdiImportError::ImportFailed);
+        }
+        if dv.pointer("/status/phase").and_then(Value::as_str) != Some("ImportScheduled") {
+            return Ok(());
+        }
+        let namespace = &import.data_source_namespace;
+        let name = import.data_volume_name();
+        if !crate::kubevirt_provider::valid_dns_label(namespace)
+            || !crate::kubevirt_provider::valid_dns_label(&name)
+        {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+        let Some(pvc) = self
+            .get_json(&format!(
+                "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}"
+            ))
+            .await?
+        else {
+            return Ok(());
+        };
+        if required_meta(&pvc, "namespace")? != namespace || required_meta(&pvc, "name")? != name {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+        let dv_uid = required_meta(dv, "uid")?;
+        verify_controller(&pvc, "DataVolume", &name, dv_uid)?;
+        if pvc.pointer("/status/phase").and_then(Value::as_str) != Some("Bound") {
+            return Ok(());
+        }
+        let capacity = pvc
+            .pointer("/spec/resources/requests/storage")
+            .and_then(Value::as_str)
+            .ok_or(CdiImportError::IdentityMismatch)?;
+        if !storage_matches(capacity, import.capacity_bytes)
+            || !pvc
+                .pointer("/status/capacity/storage")
+                .and_then(Value::as_str)
+                .is_some_and(|capacity| storage_matches(capacity, import.capacity_bytes))
+        {
+            return Err(CdiImportError::CapacityExceeded);
+        }
+        let pods = self
+            .list_json(&format!("/api/v1/namespaces/{namespace}/pods"))
+            .await?;
+        let consumers = pods
+            .iter()
+            .filter(|pod| pod_uses_pvc(pod, &name))
+            .collect::<Vec<_>>();
+        if consumers.len() != 1 {
+            return Ok(());
+        }
+        let pod = consumers[0];
+        if required_meta(pod, "namespace")? != namespace {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+        verify_controller(
+            pod,
+            "PersistentVolumeClaim",
+            &name,
+            required_meta(&pvc, "uid")?,
+        )?;
+        if pod
+            .pointer("/metadata/deletionTimestamp")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Ok(());
+        }
+        if !noauth_image_pull_failure(pod) {
+            return Ok(());
+        }
+        let config = self
+            .get_json(&format!("{CDI_PREFIX}/cdiconfigs/config"))
+            .await?
+            .ok_or(CdiImportError::ImportFailed)?;
+        let refs = pull_secret_names(config.pointer("/status/imagePullSecrets"))?;
+        if refs.is_empty() || refs == pull_secret_names(pod.pointer("/spec/imagePullSecrets"))? {
+            return Ok(());
+        }
+        self.verify_import_pull_secrets(namespace, &refs).await?;
+        self.verify_unconsumed_base(import, &name).await?;
+        let pod_name = required_meta(pod, "name")?;
+        if !crate::kubevirt_provider::valid_dns_label(pod_name) {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+        let response = self.authorized(self.client.delete(self.url(&format!("/api/v1/namespaces/{namespace}/pods/{pod_name}"))?))
+            .json(&json!({"apiVersion":"v1","kind":"DeleteOptions","preconditions":{
+                "uid":required_meta(pod,"uid")?,"resourceVersion":required_meta(pod,"resourceVersion")?
+            }})).send().await.map_err(|_| CdiImportError::ImportFailed)?;
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(CdiImportError::ImportFailed)
+        }
+    }
+
+    async fn verify_import_pull_secrets(
+        &self,
+        namespace: &str,
+        refs: &[String],
+    ) -> Result<(), CdiImportError> {
+        for secret_name in refs {
+            if !crate::kubevirt_provider::valid_dns_label(secret_name) {
+                return Err(CdiImportError::IdentityMismatch);
+            }
+            let secret = self
+                .get_json(&format!(
+                    "/api/v1/namespaces/{namespace}/secrets/{secret_name}"
+                ))
+                .await?
+                .ok_or(CdiImportError::ImportFailed)?;
+            if required_meta(&secret, "namespace")? != namespace
+                || required_meta(&secret, "name")? != secret_name
+            {
+                return Err(CdiImportError::IdentityMismatch);
+            }
+            if secret.get("type").and_then(Value::as_str) != Some("kubernetes.io/dockerconfigjson")
+                || secret
+                    .pointer("/metadata/labels/app.kubernetes.io~1part-of")
+                    .and_then(Value::as_str)
+                    != Some("labweaver")
+            {
+                return Err(CdiImportError::IdentityMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    async fn verify_unconsumed_base(
+        &self,
+        import: &KubeVirtBaseDiskImport,
+        name: &str,
+    ) -> Result<(), CdiImportError> {
+        let namespace = &import.data_source_namespace;
+        // Any published base or clone/VM consumer makes a shared importer reset unsafe.
+        let sources = self.list_json(&format!("{CDI_PREFIX}/datasources")).await?;
+        if sources.iter().any(|source| {
+            references_base_pvc(source, "/spec/source/pvc", namespace, name)
+                || references_base_pvc(source, "/status/source/pvc", namespace, name)
+        }) {
+            return Err(CdiImportError::ImportFailed);
+        }
+        let volumes = self.list_json(&format!("{CDI_PREFIX}/datavolumes")).await?;
+        if volumes.iter().any(|volume| {
+            references_base_pvc(volume, "/spec/source/pvc", namespace, name)
+                || references_base_source(volume, namespace, &import.data_source_name)
+        }) {
+            return Err(CdiImportError::ImportFailed);
+        }
+        for kind in ["virtualmachines", "virtualmachineinstances"] {
+            let machines = self
+                .list_json(&format!(
+                    "/apis/kubevirt.io/v1/namespaces/{namespace}/{kind}"
+                ))
+                .await?;
+            if machines.iter().any(|vm| {
+                pod_uses_pvc(vm, name)
+                    || vm
+                        .pointer("/spec/template")
+                        .is_some_and(|template| pod_uses_pvc(template, name))
+            }) {
+                return Err(CdiImportError::ImportFailed);
+            }
+        }
+        Ok(())
+    }
+
     async fn apply_json(&self, path: &str, document: &Value) -> Result<Value, CdiImportError> {
         let response = self
             .authorized(
@@ -362,10 +545,17 @@ impl CdiImportClient for KubernetesCdiImportClient {
                     .await?
             }
         };
+        verify_import_data_volume(import, &observed)?;
+        let admitted_uid = data_volume_uid(&observed)?;
+        self.reset_stale_importer(import, &observed).await?;
         let deadline = tokio::time::Instant::now() + self.import_timeout;
         loop {
+            verify_import_data_volume(import, &observed)?;
+            if data_volume_uid(&observed)? != admitted_uid {
+                return Err(CdiImportError::IdentityMismatch);
+            }
             if data_volume_succeeded(&observed) {
-                return data_volume_uid(&observed);
+                return Ok(admitted_uid);
             }
             if tokio::time::Instant::now() >= deadline {
                 // Leave the DataVolume in place: the retry reuses it instead of importing twice.
@@ -405,4 +595,465 @@ fn data_volume_uid(document: &Value) -> Result<String, CdiImportError> {
         .filter(|uid| !uid.is_empty())
         .map(str::to_owned)
         .ok_or(CdiImportError::ImportFailed)
+}
+
+fn required_meta<'a>(value: &'a Value, key: &str) -> Result<&'a str, CdiImportError> {
+    value
+        .get("metadata")
+        .and_then(|metadata| metadata.get(key))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(CdiImportError::IdentityMismatch)
+}
+fn verify_controller(
+    value: &Value,
+    kind: &str,
+    name: &str,
+    uid: &str,
+) -> Result<(), CdiImportError> {
+    let owners = value
+        .pointer("/metadata/ownerReferences")
+        .and_then(Value::as_array)
+        .ok_or(CdiImportError::IdentityMismatch)?;
+    if owners
+        .iter()
+        .filter(|owner| owner.get("controller").and_then(Value::as_bool) == Some(true))
+        .count()
+        != 1
+        || !owners.iter().any(|owner| {
+            owner.get("controller").and_then(Value::as_bool) == Some(true)
+                && owner.get("kind").and_then(Value::as_str) == Some(kind)
+                && owner.get("name").and_then(Value::as_str) == Some(name)
+                && owner.get("uid").and_then(Value::as_str) == Some(uid)
+        })
+    {
+        return Err(CdiImportError::IdentityMismatch);
+    }
+    Ok(())
+}
+fn storage_matches(value: &str, bytes: u64) -> bool {
+    value == bytes.to_string()
+        || [
+            ("Ki", 1_u64 << 10),
+            ("Mi", 1_u64 << 20),
+            ("Gi", 1_u64 << 30),
+            ("Ti", 1_u64 << 40),
+        ]
+        .iter()
+        .any(|(suffix, unit)| {
+            bytes.is_multiple_of(*unit) && value == format!("{}{suffix}", bytes / unit)
+        })
+}
+fn verify_import_data_volume(
+    import: &KubeVirtBaseDiskImport,
+    dv: &Value,
+) -> Result<(), CdiImportError> {
+    if required_meta(dv, "name")? != import.data_volume_name()
+        || required_meta(dv, "namespace")? != import.data_source_namespace
+        || dv
+            .pointer("/metadata/labels/labweaver.io~1managed")
+            .and_then(Value::as_str)
+            != Some("true")
+        || dv
+            .pointer("/spec/source/registry/url")
+            .and_then(Value::as_str)
+            != Some(import.source_registry_digest.as_str())
+        || dv
+            .pointer("/spec/storage/storageClassName")
+            .and_then(Value::as_str)
+            != Some(import.storage_class_name.as_str())
+        || dv
+            .pointer("/status/claimName")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name != import.data_volume_name())
+        || dv
+            .pointer("/spec/source/registry/pullMethod")
+            .and_then(Value::as_str)
+            != Some("node")
+    {
+        return Err(CdiImportError::IdentityMismatch);
+    }
+    let annotations = dv
+        .pointer("/metadata/annotations")
+        .and_then(Value::as_object)
+        .ok_or(CdiImportError::IdentityMismatch)?;
+    for (key, value) in identity_annotations(import) {
+        if annotations.get(&key) != Some(&value) {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+    }
+    let capacity = dv
+        .pointer("/spec/storage/resources/requests/storage")
+        .and_then(Value::as_str)
+        .ok_or(CdiImportError::IdentityMismatch)?;
+    if !storage_matches(capacity, import.capacity_bytes) {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    required_meta(dv, "uid")?;
+    Ok(())
+}
+fn pod_uses_pvc(pod: &Value, name: &str) -> bool {
+    pod.pointer("/spec/volumes")
+        .and_then(Value::as_array)
+        .is_some_and(|volumes| {
+            volumes.iter().any(|volume| {
+                volume
+                    .pointer("/persistentVolumeClaim/claimName")
+                    .and_then(Value::as_str)
+                    == Some(name)
+                    || volume.pointer("/dataVolume/name").and_then(Value::as_str) == Some(name)
+            })
+        })
+}
+fn pull_secret_names(value: Option<&Value>) -> Result<Vec<String>, CdiImportError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let mut names = value
+        .as_array()
+        .ok_or(CdiImportError::IdentityMismatch)?
+        .iter()
+        .map(|reference| {
+            reference
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .ok_or(CdiImportError::IdentityMismatch)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+fn noauth_image_pull_failure(pod: &Value) -> bool {
+    pod.pointer("/status/containerStatuses")
+        .and_then(Value::as_array)
+        .is_some_and(|statuses| {
+            statuses.iter().any(|status| {
+                status.get("name").and_then(Value::as_str) == Some("server")
+                    && status
+                        .pointer("/state/waiting/reason")
+                        .and_then(Value::as_str)
+                        == Some("ImagePullBackOff")
+                    && status
+                        .pointer("/state/waiting/message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("no basic auth credentials"))
+            })
+        })
+}
+
+fn references_base_pvc(value: &Value, path: &str, namespace: &str, name: &str) -> bool {
+    let Some(source) = value.pointer(path) else {
+        return false;
+    };
+    source.get("name").and_then(Value::as_str) == Some(name)
+        && source
+            .get("namespace")
+            .and_then(Value::as_str)
+            .is_none_or(|source_namespace| {
+                source_namespace.is_empty() || source_namespace == namespace
+            })
+}
+fn references_base_source(value: &Value, namespace: &str, name: &str) -> bool {
+    let Some(source) = value.pointer("/spec/sourceRef") else {
+        return false;
+    };
+    let source_namespace = source
+        .get("namespace")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/metadata/namespace").and_then(Value::as_str));
+    source.get("kind").and_then(Value::as_str) == Some("DataSource")
+        && source.get("name").and_then(Value::as_str) == Some(name)
+        && source_namespace.is_none_or(|source_namespace| source_namespace == namespace)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "external API fixtures require their seeded documents"
+)]
+mod tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        extract::State,
+        http::Request,
+        response::{IntoResponse, Response},
+    };
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    struct MockCdi {
+        documents: Arc<Mutex<BTreeMap<String, Value>>>,
+        deletes: Arc<Mutex<Vec<Value>>>,
+        task: tokio::task::JoinHandle<()>,
+        client: KubernetesCdiImportClient,
+    }
+    impl Drop for MockCdi {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+    type MockState = (Arc<Mutex<BTreeMap<String, Value>>>, Arc<Mutex<Vec<Value>>>);
+    async fn handle(
+        State((documents, deletes)): State<MockState>,
+        request: Request<Body>,
+    ) -> Response {
+        let path = request.uri().path().to_owned();
+        let method = request.method().clone();
+        if method == Method::GET {
+            let mut documents = documents.lock().await;
+            let value = documents.get(&path).cloned();
+            if let Some(current) = documents.get_mut(&path)
+                && current.get("replaceAfterRead").and_then(Value::as_bool) == Some(true)
+            {
+                current["metadata"]["uid"] = json!("replacement-dv");
+                current["status"]["phase"] = json!("Succeeded");
+                current["replaceAfterRead"] = json!(false);
+            }
+            return match value {
+                Some(value) => axum::Json(value).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            };
+        }
+        if method == Method::DELETE && path == "/api/v1/namespaces/labweaver-system/pods/importer" {
+            let Ok(bytes) = to_bytes(request.into_body(), 65536).await else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            if value["preconditions"]["uid"] != "pod-uid"
+                || value["preconditions"]["resourceVersion"] != "10"
+            {
+                return StatusCode::CONFLICT.into_response();
+            }
+            deletes.lock().await.push(value);
+            let mut documents = documents.lock().await;
+            let pod = &mut documents
+                .get_mut("/api/v1/namespaces/labweaver-system/pods")
+                .expect("pod list")["items"][0];
+            pod["metadata"]["uid"] = json!("new-pod-uid");
+            pod["metadata"]["resourceVersion"] = json!("11");
+            pod["spec"]["imagePullSecrets"] = json!([{"name":"harbor-pull"}]);
+            return StatusCode::ACCEPTED.into_response();
+        }
+        StatusCode::FORBIDDEN.into_response()
+    }
+    fn import() -> KubeVirtBaseDiskImport {
+        KubeVirtBaseDiskImport {
+        data_source_namespace:"labweaver-system".to_owned(),data_source_name:"base".to_owned(),
+        source_registry_digest:"docker://registry.invalid/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        disk_sha256:String::new(),identity:KubeVirtBaseDiskIdentity::RuntimeRegistryDigest,storage_class_name:"local-path".to_owned(),capacity_bytes:16_u64<<30,
+    }
+    }
+    async fn fixture() -> Result<(MockCdi, Value), Box<dyn std::error::Error>> {
+        let mut dv = data_volume_document(&import());
+        dv["metadata"]["uid"] = json!("dv-uid");
+        dv["status"]["phase"] = json!("ImportScheduled");
+        let pvc = json!({"metadata":{"name":"base-seed","namespace":"labweaver-system","uid":"pvc-uid","ownerReferences":[{"kind":"DataVolume","name":"base-seed","uid":"dv-uid","controller":true}]},"status":{"phase":"Bound","capacity":{"storage":"16Gi"}},"spec":{"resources":{"requests":{"storage":"16Gi"}}}});
+        let pod = json!({"metadata":{"name":"importer","namespace":"labweaver-system","uid":"pod-uid","resourceVersion":"10","ownerReferences":[{"kind":"PersistentVolumeClaim","name":"base-seed","uid":"pvc-uid","controller":true}]},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"base-seed"}}]},"status":{"containerStatuses":[{"name":"server","state":{"waiting":{"reason":"ImagePullBackOff","message":"no basic auth credentials"}}}]}});
+        let documents = Arc::new(Mutex::new(BTreeMap::from([
+            (
+                "/api/v1/namespaces/labweaver-system/persistentvolumeclaims/base-seed".to_owned(),
+                pvc,
+            ),
+            (
+                "/api/v1/namespaces/labweaver-system/pods".to_owned(),
+                json!({"items":[pod]}),
+            ),
+            (
+                format!("{CDI_PREFIX}/cdiconfigs/config"),
+                json!({"status":{"imagePullSecrets":[{"name":"harbor-pull"}]}}),
+            ),
+            (
+                "/api/v1/namespaces/labweaver-system/secrets/harbor-pull".to_owned(),
+                json!({"type":"kubernetes.io/dockerconfigjson","metadata":{"name":"harbor-pull","namespace":"labweaver-system","labels":{"app.kubernetes.io/part-of":"labweaver"}}}),
+            ),
+            (format!("{CDI_PREFIX}/datasources"), json!({"items":[]})),
+            (format!("{CDI_PREFIX}/datavolumes"), json!({"items":[]})),
+            (
+                "/apis/kubevirt.io/v1/namespaces/labweaver-system/virtualmachines".to_owned(),
+                json!({"items":[]}),
+            ),
+            (
+                "/apis/kubevirt.io/v1/namespaces/labweaver-system/virtualmachineinstances"
+                    .to_owned(),
+                json!({"items":[]}),
+            ),
+        ])));
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let router = Router::new()
+            .fallback(handle)
+            .with_state((Arc::clone(&documents), Arc::clone(&deletes)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let client = KubernetesCdiImportClient::new(
+            Client::new(),
+            url,
+            "fixture-token".to_owned(),
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+        );
+        Ok((
+            MockCdi {
+                documents,
+                deletes,
+                task,
+                client,
+            },
+            dv,
+        ))
+    }
+    #[tokio::test]
+    async fn stale_noauth_importer_is_reset_once_with_uid_and_revision_preserving_pvc()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (fixture, dv) = fixture().await?;
+        let pvc=fixture.documents.lock().await["/api/v1/namespaces/labweaver-system/persistentvolumeclaims/base-seed"].clone();
+        fixture.client.reset_stale_importer(&import(), &dv).await?;
+        fixture.client.reset_stale_importer(&import(), &dv).await?;
+        let deletes = fixture.deletes.lock().await;
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(
+            deletes[0]["preconditions"],
+            json!({"uid":"pod-uid","resourceVersion":"10"})
+        );
+        assert_eq!(
+            fixture.documents.lock().await["/api/v1/namespaces/labweaver-system/persistentvolumeclaims/base-seed"],
+            pvc
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn import_poll_rejects_same_name_replacement_even_when_new_dv_is_ready()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (fixture, mut dv) = fixture().await?;
+        dv["replaceAfterRead"] = json!(true);
+        {
+            let mut documents = fixture.documents.lock().await;
+            documents.insert(
+                format!("{CDI_PREFIX}/namespaces/labweaver-system/datavolumes/base-seed"),
+                dv,
+            );
+            documents
+                .get_mut("/api/v1/namespaces/labweaver-system/pods")
+                .expect("pods")["items"][0]["status"]["containerStatuses"] = json!([]);
+        }
+        assert!(matches!(
+            fixture.client.import_base_data_volume(&import()).await,
+            Err(CdiImportError::IdentityMismatch)
+        ));
+        assert!(fixture.deletes.lock().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn importer_retry_rejects_drift_consumers_and_does_not_reset_ready_or_current_refs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for scenario in [
+            "ready",
+            "fatal",
+            "unknown-phase",
+            "other-container",
+            "wrong-uid",
+            "wrong-scope",
+            "consumer",
+            "clone-default-namespace",
+            "published",
+            "config-empty",
+            "current-refs",
+            "healthy",
+            "wrong-secret",
+            "wrong-digest",
+            "wrong-capacity",
+        ] {
+            let (fixture, mut dv) = fixture().await?;
+            {
+                let mut docs = fixture.documents.lock().await;
+                match scenario {
+                    "ready" => dv["status"]["phase"] = json!("Succeeded"),
+                    "fatal" => dv["status"]["phase"] = json!("Failed"),
+                    "unknown-phase" => dv["status"]["phase"] = json!("UnknownNewPhase"),
+                    "other-container" => {
+                        docs.get_mut("/api/v1/namespaces/labweaver-system/pods")
+                            .expect("pods")["items"][0]["status"]["containerStatuses"][0]["name"] =
+                            json!("other");
+                    }
+                    "wrong-uid" => {
+                        docs.get_mut("/api/v1/namespaces/labweaver-system/pods")
+                            .expect("pods")["items"][0]["metadata"]["ownerReferences"][0]["uid"] =
+                            json!("other-pvc");
+                    }
+                    "wrong-scope" => {
+                        docs.get_mut("/api/v1/namespaces/labweaver-system/pods")
+                            .expect("pods")["items"][0]["metadata"]["namespace"] = json!("other");
+                    }
+                    "consumer" => {
+                        docs.get_mut(
+                            "/apis/kubevirt.io/v1/namespaces/labweaver-system/virtualmachines",
+                        )
+                        .expect("VMs")["items"] = json!([{"spec":{"template":{"spec":{"volumes":[{"dataVolume":{"name":"base-seed"}}]}}}}]);
+                    }
+                    "clone-default-namespace" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/datavolumes"))
+                            .expect("DVs")["items"] = json!([{"metadata":{"namespace":"labweaver-system"},"spec":{"sourceRef":{"kind":"DataSource","name":"base"}}}]);
+                    }
+                    "published" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/datasources"))
+                            .expect("DSs")["items"] = json!([{"spec":{"source":{"pvc":{"name":"base-seed","namespace":"labweaver-system"}}}}]);
+                    }
+                    "config-empty" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/cdiconfigs/config"))
+                            .expect("config")["status"]["imagePullSecrets"] = json!([]);
+                    }
+                    "current-refs" => {
+                        docs.get_mut("/api/v1/namespaces/labweaver-system/pods")
+                            .expect("pods")["items"][0]["spec"]["imagePullSecrets"] =
+                            json!([{"name":"harbor-pull"}]);
+                    }
+                    "healthy" => {
+                        docs.get_mut("/api/v1/namespaces/labweaver-system/pods")
+                            .expect("pods")["items"][0]["status"]["containerStatuses"] = json!([]);
+                    }
+                    "wrong-secret" => {
+                        docs.get_mut("/api/v1/namespaces/labweaver-system/secrets/harbor-pull")
+                            .expect("secret")["type"] = json!("Opaque");
+                    }
+                    "wrong-digest" => {
+                        dv["spec"]["source"]["registry"]["url"] = json!("docker://other");
+                    }
+                    "wrong-capacity" => {
+                        dv["spec"]["storage"]["resources"]["requests"]["storage"] = json!("32Gi");
+                    }
+                    _ => return Err("unknown retry scenario".into()),
+                }
+            }
+            let result = fixture.client.reset_stale_importer(&import(), &dv).await;
+            if [
+                "ready",
+                "config-empty",
+                "current-refs",
+                "healthy",
+                "unknown-phase",
+                "other-container",
+            ]
+            .contains(&scenario)
+            {
+                assert!(result.is_ok(), "{scenario}: {result:?}");
+            } else {
+                assert!(result.is_err(), "{scenario} unexpectedly accepted");
+            }
+            assert!(
+                fixture.deletes.lock().await.is_empty(),
+                "{scenario} deleted shared importer"
+            );
+        }
+        Ok(())
+    }
 }

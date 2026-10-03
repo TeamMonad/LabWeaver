@@ -409,7 +409,9 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     )
     .await
     .map_err(|_| "provider RPC timed out")?
-    .map_err(|_| "provider RPC failed")?;
+    .map_err(|_| "provider RPC failed")?
+    .completed()
+    .ok_or("provider unexpectedly pending")?;
     assert_eq!(
         observation.next_state,
         contracts::environment::ObservedEnvironmentState::Validating

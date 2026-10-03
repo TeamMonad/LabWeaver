@@ -194,75 +194,105 @@ impl KubeVirtProviderBackend for FixtureBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("apply", fence);
-        self.apply_objects(plan);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("apply", fence);
+            self.apply_objects(plan);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn observe(
         &self,
         fence: &KubeVirtBackendFence,
         _plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("observe", fence);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("observe", fence);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn start(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("start", fence);
-        self.apply_objects(plan);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("start", fence);
+            self.apply_objects(plan);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
         _plan: &KubeVirtCleanupPlan,
-    ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
-        self.record("stop", fence);
-        Ok(KubeVirtStoppedObservation {
-            observed_environment_generation: fence.environment_generation,
-            vm_uid: VM_UID,
-            root_disk_uid: ROOT_DISK_UID,
-            vmi_absent: true,
-            observed_at: timestamp("2026-07-16T08:02:00.000Z"),
-        })
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure>
+    {
+        async {
+            self.record("stop", fence);
+            Ok(KubeVirtStoppedObservation {
+                observed_environment_generation: fence.environment_generation,
+                vm_uid: VM_UID,
+                root_disk_uid: ROOT_DISK_UID,
+                vmi_absent: true,
+                observed_at: timestamp("2026-07-16T08:02:00.000Z"),
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn restart(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("restart", fence);
-        self.apply_objects(plan);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("restart", fence);
+            self.apply_objects(plan);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn delete_namespace(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
-        self.record("delete", fence);
-        self.objects
-            .lock()
-            .expect("objects lock")
-            .retain(|(kind, namespace, name)| {
-                namespace != &plan.namespace && !(kind == "Namespace" && name == &plan.namespace)
-            });
-        Ok(ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "environment-cleanup-evidence-v1".to_owned(),
-            object_version: plan.plan_sha256.to_string(),
-            size_bytes: 1,
-            media_type: "application/json".to_owned(),
-        })
+    ) -> Result<environment_service::ProviderOutcome<ArtifactRef>, ProviderFailure> {
+        async {
+            self.record("delete", fence);
+            self.objects
+                .lock()
+                .expect("objects lock")
+                .retain(|(kind, namespace, name)| {
+                    namespace != &plan.namespace
+                        && !(kind == "Namespace" && name == &plan.namespace)
+                });
+            Ok(ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                object_version: plan.plan_sha256.to_string(),
+                size_bytes: 1,
+                media_type: "application/json".to_owned(),
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -780,7 +810,9 @@ async fn readiness_requires_vm_ssh_and_current_generation() {
     let observation = incomplete_provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("incomplete readiness is retryable progress");
+        .expect("incomplete readiness is retryable progress")
+        .completed()
+        .expect("provider completed");
     assert_eq!(
         observation.next_state,
         ObservedEnvironmentState::Provisioning
@@ -796,7 +828,9 @@ async fn readiness_requires_vm_ssh_and_current_generation() {
     let observation = public_route_provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("public addresses remain incomplete readiness");
+        .expect("public addresses remain incomplete readiness")
+        .completed()
+        .expect("provider completed");
     assert_eq!(
         observation.next_state,
         ObservedEnvironmentState::Provisioning
@@ -818,7 +852,9 @@ async fn readiness_accepts_ssh_proof_without_guest_agent() {
     let observation = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("SSH readiness is authoritative without a guest agent");
+        .expect("SSH readiness is authoritative without a guest agent")
+        .completed()
+        .expect("provider completed");
     assert_eq!(observation.next_state, ObservedEnvironmentState::Ready);
     assert!(observation.operation_complete);
     assert_eq!(observation.endpoints.len(), 1);
@@ -835,11 +871,15 @@ async fn duplicate_reconcile_is_idempotent_and_fenced() {
     let first = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("provision succeeds");
+        .expect("provision succeeds")
+        .completed()
+        .expect("provider completed");
     let replay = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("same reconcile is idempotent");
+        .expect("same reconcile is idempotent")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(first.endpoints, replay.endpoints);
     assert_eq!(first.endpoints.len(), 1);
@@ -874,7 +914,9 @@ async fn start_stop_start_preserves_vm_disk_host_key_and_endpoint_identity() {
     let first = provider
         .execute(ReconcileAction::Provision, &provision)
         .await
-        .expect("initial provision");
+        .expect("initial provision")
+        .completed()
+        .expect("provider completed");
 
     let mut stop = provision.clone();
     stop.observed_state = ObservedEnvironmentState::Stopping;
@@ -885,7 +927,9 @@ async fn start_stop_start_preserves_vm_disk_host_key_and_endpoint_identity() {
     let stopped = provider
         .execute(ReconcileAction::Stop, &stop)
         .await
-        .expect("stop preserves disk");
+        .expect("stop preserves disk")
+        .completed()
+        .expect("provider completed");
     assert_eq!(stopped.next_state, ObservedEnvironmentState::Stopped);
     assert!(stopped.endpoints.is_empty());
 
@@ -896,7 +940,9 @@ async fn start_stop_start_preserves_vm_disk_host_key_and_endpoint_identity() {
     let second = provider
         .execute(ReconcileAction::Start, &start)
         .await
-        .expect("start reuses VM disk");
+        .expect("start reuses VM disk")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(second.next_state, ObservedEnvironmentState::Ready);
     assert_eq!(first.endpoints[0].id, second.endpoints[0].id);
@@ -929,7 +975,9 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     provider
         .execute(ReconcileAction::Provision, &provision)
         .await
-        .expect("fixture materializes owned resources");
+        .expect("fixture materializes owned resources")
+        .completed()
+        .expect("provider completed");
     assert_eq!(backend.count_kind("VirtualMachine"), 1);
     assert_eq!(backend.count_kind("DataVolume"), 1);
 
@@ -943,7 +991,9 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     let checkpoint = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup enters deleting state");
+        .expect("cleanup enters deleting state")
+        .completed()
+        .expect("provider completed");
     assert_eq!(checkpoint.next_state, ObservedEnvironmentState::Deleting);
     assert!(!checkpoint.operation_complete);
     assert!(checkpoint.cleanup_evidence.is_none());
@@ -953,7 +1003,9 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     let observation = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup succeeds");
+        .expect("cleanup succeeds")
+        .completed()
+        .expect("provider completed");
     assert_eq!(observation.next_state, ObservedEnvironmentState::Deleted);
     assert!(observation.operation_complete);
     assert!(observation.endpoints.is_empty());
@@ -984,7 +1036,9 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
-        .expect("expire stop succeeds");
+        .expect("expire stop succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(observation.next_state, ObservedEnvironmentState::Deleting);
     let deleting = environment_service::apply_provider_observation(

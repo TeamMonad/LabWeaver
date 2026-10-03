@@ -65,6 +65,9 @@ domains:
       - id: 4
         file: environment/0004_work_configuration_executions.sql
         sha256: f8c505c96770023c8eb7430fde523d8498b32207e29022151f7fecefb610c3ab
+      - id: 5
+        file: environment/0005_kubevirt_execution_owner.sql
+        sha256: acebef74ad5ec342abbc1eff5d1eb915de78f666b54c28c35fda512cdc1f5a1f
   - name: agent
     migrations:
       - id: 1

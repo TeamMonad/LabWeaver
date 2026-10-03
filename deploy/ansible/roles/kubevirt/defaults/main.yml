@@ -17,3 +17,6 @@ kubevirt_permitted_mediated_devices: []
 # node list opts this role into the configured mdev scope.
 kubevirt_mediated_device_types: []
 kubevirt_mediated_devices_configuration: []
+# Node-pull importer references. Credentials remain owned by the platform role.
+# When non-empty, platform_application_namespace must be supplied by that owner.
+cdi_image_pull_secrets: []

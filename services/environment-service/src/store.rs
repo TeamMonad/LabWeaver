@@ -696,6 +696,14 @@ impl PgEnvironmentStore {
         {
             return Err(EnvironmentStoreError::LeaseLost);
         }
+        let deferred = updated.revision == stored.revision;
+        if deferred {
+            let mut scheduled = stored.clone();
+            scheduled.operation.next_attempt_at = updated.operation.next_attempt_at;
+            if &scheduled != updated {
+                return Err(EnvironmentStoreError::RevisionConflict);
+            }
+        }
         update_instance(&mut transaction, &stored, updated).await?;
         let terminal = matches!(
             updated.operation.state,
@@ -729,6 +737,10 @@ impl PgEnvironmentStore {
         .await?;
         if result.rows_affected() != 1 {
             return Err(EnvironmentStoreError::LeaseLost);
+        }
+        if deferred {
+            transaction.commit().await?;
+            return Ok(());
         }
         let occurred_at = database_now(&mut transaction).await?;
         crate::metering::record_transition(&mut transaction, &stored, updated, occurred_at).await?;

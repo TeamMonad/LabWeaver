@@ -34,11 +34,12 @@ use environment_service::{
     EnvironmentEventPublisher, EnvironmentInventoryFilter, EnvironmentProvider,
     EnvironmentStoreError, FencedContainerExecutor, FencedKubeVirtExecutor, InboundCommandDecision,
     InboundLifecycleCommand, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
-    KubeVirtBaseDiskIdentity, KubeVirtCleanupPlan, KubeVirtExecutorBackend,
-    KubeVirtExecutorFenceError, KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope,
-    KubeVirtExecutorResponse, KubeVirtObservationStore, KubeVirtObservationStoreError,
-    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand,
-    LifecycleError, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+    KubeVirtBaseDiskIdentity, KubeVirtCleanupPlan, KubeVirtExecutionInstance,
+    KubeVirtExecutionPermit, KubeVirtExecutorBackend, KubeVirtExecutorFenceError,
+    KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse,
+    KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtResourcePlan,
+    KubeVirtRunningObservation, KubeVirtStoppedObservation, LifecycleCommand, LifecycleError,
+    NatsKubeVirtExecutorServer, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     PgContainerExecutorFenceStore, PgEnvironmentStore, PgKubeVirtExecutorFenceStore,
     PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderFailure, ProviderFailureCode,
     ProviderObservation, ProviderRegistry, PublishFailure, ReconcileAction, ReconcileWorker,
@@ -1525,6 +1526,7 @@ impl KubeVirtExecutorBackend for CountingKubeVirtExecutor {
         &self,
         fence: &KubeVirtBackendFence,
         request: &KubeVirtExecutorRequest,
+        _: &KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match request {
@@ -1586,14 +1588,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         .max_connections(3)
         .connect(&url)
         .await?;
-    sqlx::raw_sql(&format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
-        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
-    ))
-    .execute(&pool)
-    .await?;
+    support::apply_environment_migrations(&pool).await?;
     let observed_at = container_database_now(&pool).await?;
     let deadline = container_add_time(observed_at, time::Duration::minutes(1))?;
     let environment_id = EnvironmentId::new();
@@ -1608,6 +1603,17 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
         ReconcileAction::Provision,
         deadline,
     )?;
+    let mut authority = requested_instance();
+    authority.id = environment_id;
+    authority.operation.id = operation_id;
+    authority.operation.accepted_at = observed_at;
+    authority.operation.next_attempt_at = observed_at;
+    authority.operation.deadline_at = deadline;
+    authority.eligibility_expires_at = deadline;
+    PgEnvironmentStore::new(pool.clone())
+        .create("kubevirt-replay-authority", &authority)
+        .await?;
+    let instance = executor_instance();
     for _ in 0..2 {
         FencedKubeVirtExecutor::new(
             PgKubeVirtExecutorFenceStore::new(pool.clone()),
@@ -1615,6 +1621,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
                 calls: Arc::clone(&calls),
                 observed_at,
             },
+            instance.clone(),
         )
         .execute(first.clone())
         .await?;
@@ -1626,6 +1633,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
             calls: Arc::clone(&calls),
             observed_at,
         },
+        instance,
     );
     executor
         .execute(kubevirt_executor_envelope(
@@ -1652,6 +1660,16 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     Ok(())
+}
+
+fn executor_instance() -> KubeVirtExecutionInstance {
+    KubeVirtExecutionInstance {
+        namespace: "labweaver-system".to_owned(),
+        pod_name: "executor-fixture".to_owned(),
+        pod_uid: uuid::Uuid::new_v4(),
+        container_name: "kubevirt-executor".to_owned(),
+        boot_token: uuid::Uuid::new_v4(),
+    }
 }
 
 fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan {
@@ -2005,15 +2023,19 @@ impl EnvironmentProvider for BlockingProvider {
         &self,
         _action: ReconcileAction,
         _instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        self.entered.notify_one();
-        self.release.notified().await;
-        Ok(ProviderObservation {
-            next_state: ObservedEnvironmentState::Validating,
-            endpoints: Vec::new(),
-            cleanup_evidence: None,
-            operation_complete: false,
-        })
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(ProviderObservation {
+                next_state: ObservedEnvironmentState::Validating,
+                endpoints: Vec::new(),
+                cleanup_evidence: None,
+                operation_complete: false,
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -2038,7 +2060,7 @@ impl EnvironmentProvider for IdempotentCrashProvider {
         &self,
         action: ReconcileAction,
         instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self
             .completed
@@ -2069,71 +2091,81 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
         &self,
         action: ReconcileAction,
         instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        let next_revision = support::revision(instance.revision.get() + 1);
-        let observation = match (action, instance.observed_state) {
-            (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
-                ProviderObservation {
-                    next_state: ObservedEnvironmentState::Validating,
-                    endpoints: Vec::new(),
-                    cleanup_evidence: None,
-                    operation_complete: false,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            let next_revision = support::revision(instance.revision.get() + 1);
+            let observation = match (action, instance.observed_state) {
+                (ReconcileAction::Validate, ObservedEnvironmentState::Requested) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Validating,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: false,
+                    }
                 }
-            }
-            (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
-                ProviderObservation {
-                    next_state: ObservedEnvironmentState::Building,
-                    endpoints: Vec::new(),
-                    cleanup_evidence: None,
-                    operation_complete: false,
+                (ReconcileAction::Validate, ObservedEnvironmentState::Validating) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Building,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: false,
+                    }
                 }
-            }
-            (ReconcileAction::Build, ObservedEnvironmentState::Building) => ProviderObservation {
-                next_state: ObservedEnvironmentState::Provisioning,
-                endpoints: Vec::new(),
-                cleanup_evidence: None,
-                operation_complete: false,
-            },
-            (ReconcileAction::Provision, ObservedEnvironmentState::Provisioning) => {
-                ProviderObservation {
-                    next_state: ObservedEnvironmentState::Ready,
-                    endpoints: vec![EnvironmentEndpoint {
-                        id: EndpointId::new(),
-                        protocol: EndpointProtocol::Https,
-                        revision: next_revision,
-                        health: EndpointHealth::Healthy,
-                        observed_at: timestamp("2026-07-14T00:01:00.000Z"),
-                    }],
-                    cleanup_evidence: None,
-                    operation_complete: true,
+                (ReconcileAction::Build, ObservedEnvironmentState::Building) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Provisioning,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: false,
+                    }
                 }
-            }
-            (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => ProviderObservation {
-                next_state: ObservedEnvironmentState::Stopped,
-                endpoints: Vec::new(),
-                cleanup_evidence: None,
-                operation_complete: true,
-            },
-            (ReconcileAction::Cleanup, ObservedEnvironmentState::Deleting) => ProviderObservation {
-                next_state: ObservedEnvironmentState::Deleted,
-                endpoints: Vec::new(),
-                cleanup_evidence: Some(ArtifactRef {
-                    artifact_id: ArtifactId::new(),
-                    store_binding: "environment-cleanup-evidence-v1".to_owned(),
-                    object_version: instance.operation.id.to_string(),
-                    size_bytes: 1,
-                    media_type: "application/json".to_owned(),
-                }),
-                operation_complete: true,
-            },
-            _ => {
-                return Err(ProviderFailure {
-                    code: ProviderFailureCode::Rejected,
-                    retryable: false,
-                });
-            }
-        };
-        Ok(observation)
+                (ReconcileAction::Provision, ObservedEnvironmentState::Provisioning) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Ready,
+                        endpoints: vec![EnvironmentEndpoint {
+                            id: EndpointId::new(),
+                            protocol: EndpointProtocol::Https,
+                            revision: next_revision,
+                            health: EndpointHealth::Healthy,
+                            observed_at: timestamp("2026-07-14T00:01:00.000Z"),
+                        }],
+                        cleanup_evidence: None,
+                        operation_complete: true,
+                    }
+                }
+                (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Stopped,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: true,
+                    }
+                }
+                (ReconcileAction::Cleanup, ObservedEnvironmentState::Deleting) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Deleted,
+                        endpoints: Vec::new(),
+                        cleanup_evidence: Some(ArtifactRef {
+                            artifact_id: ArtifactId::new(),
+                            store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                            object_version: instance.operation.id.to_string(),
+                            size_bytes: 1,
+                            media_type: "application/json".to_owned(),
+                        }),
+                        operation_complete: true,
+                    }
+                }
+                _ => {
+                    return Err(ProviderFailure {
+                        code: ProviderFailureCode::Rejected,
+                        retryable: false,
+                    });
+                }
+            };
+            Ok(observation)
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -2147,16 +2179,565 @@ impl EnvironmentProvider for CleanupFailureProvider {
         &self,
         action: ReconcileAction,
         _instance: &contracts::environment::EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        if action != ReconcileAction::Cleanup {
-            return Err(ProviderFailure {
-                code: ProviderFailureCode::Rejected,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            if action != ReconcileAction::Cleanup {
+                return Err(ProviderFailure {
+                    code: ProviderFailureCode::Rejected,
+                    retryable: false,
+                });
+            }
+            Err(ProviderFailure {
+                code: ProviderFailureCode::CleanupFailed,
                 retryable: false,
-            });
+            })
         }
-        Err(ProviderFailure {
-            code: ProviderFailureCode::CleanupFailed,
-            retryable: false,
-        })
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
+}
+
+struct BlockingKubeVirtExecutor {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+    observed_at: UtcTimestamp,
+}
+struct ExecutionDrop(Arc<AtomicBool>);
+impl Drop for ExecutionDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl KubeVirtExecutorBackend for BlockingKubeVirtExecutor {
+    async fn execute(
+        &self,
+        fence: &KubeVirtBackendFence,
+        request: &KubeVirtExecutorRequest,
+        permit: &KubeVirtExecutionPermit,
+    ) -> KubeVirtExecutorResponse {
+        if matches!(request, KubeVirtExecutorRequest::Apply { .. }) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let _drop = ExecutionDrop(Arc::clone(&self.dropped));
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+        CountingKubeVirtExecutor {
+            calls: Arc::clone(&self.calls),
+            observed_at: self.observed_at,
+        }
+        .execute(fence, request, permit)
+        .await
+    }
+}
+
+#[tokio::test]
+async fn kubevirt_pending_cancellation_and_timeout_preserve_exact_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut authority = requested_instance();
+    authority.operation.accepted_at = now;
+    authority.operation.next_attempt_at = now;
+    authority.operation.deadline_at = container_add_time(now, time::Duration::seconds(5))?;
+    authority.eligibility_expires_at = container_add_time(now, time::Duration::minutes(2))?;
+    store.create("pending-authority", &authority).await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let instance = executor_instance();
+    let executor = Arc::new(FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        BlockingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+            observed_at: now,
+        },
+        instance.clone(),
+    ));
+    let plan = kubevirt_executor_plan(authority.id);
+    let first = kubevirt_executor_envelope(
+        plan.clone(),
+        authority.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        authority.operation.deadline_at,
+    )?;
+    let task = {
+        let executor = Arc::clone(&executor);
+        let first = first.clone();
+        tokio::spawn(async move { executor.execute(first).await })
+    };
+    entered.notified().await;
+    assert!(matches!(
+        executor.execute(first.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let unchanged = store.load(authority.id).await?;
+    assert_eq!(unchanged, authority);
+    let accepted_at = store.current_time().await?;
+    let accepted = store
+        .accept_command(
+            "pending-delete",
+            &LifecycleCommand {
+                environment_id: authority.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: authority.revision,
+                actor_id: authority.owner_id,
+                trace_id: "pending-delete".to_owned(),
+                accepted_at,
+                deadline_at: container_add_time(accepted_at, time::Duration::seconds(5))?,
+                access_revocation_revision: Some(revision(2)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let current = store.load(authority.id).await?;
+    assert_eq!(current.operation.id, accepted.operation_id);
+    let cleanup = kubevirt_executor_envelope(
+        plan,
+        accepted.operation_id,
+        current.generation,
+        1,
+        ReconcileAction::Cleanup,
+        current.operation.deadline_at,
+    )?;
+    assert!(matches!(
+        executor.execute(cleanup.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    let response = tokio::time::timeout(Duration::from_secs(2), task).await???;
+    assert!(matches!(
+        response.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            }
+        }
+    ));
+    assert!(dropped.load(Ordering::SeqCst));
+    let old_terminal: serde_json::Value = sqlx::query_scalar(
+        "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1",
+    )
+    .bind(authority.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(old_terminal["failure"]["code"], "cancelled");
+    assert!(matches!(
+        executor.execute(cleanup).await?.response,
+        KubeVirtExecutorResponse::Deleted { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let mut timed = requested_instance();
+    let now = store.current_time().await?;
+    timed.operation.accepted_at = now;
+    timed.operation.next_attempt_at = now;
+    timed.operation.deadline_at = container_add_time(now, time::Duration::milliseconds(350))?;
+    timed.eligibility_expires_at = container_add_time(now, time::Duration::minutes(1))?;
+    store.create("timeout-authority", &timed).await?;
+    dropped.store(false, Ordering::SeqCst);
+    let timeout_request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(timed.id),
+        timed.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        timed.operation.deadline_at,
+    )?;
+    let terminal = executor.execute(timeout_request.clone()).await?;
+    assert!(matches!(
+        terminal.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Timeout,
+                ..
+            }
+        }
+    ));
+    assert!(dropped.load(Ordering::SeqCst));
+    let count = calls.load(Ordering::SeqCst);
+    assert_eq!(
+        serde_json::to_value(executor.execute(timeout_request).await?.response)?,
+        serde_json::to_value(terminal.response)?
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    Ok(())
+}
+
+struct PendingProvider;
+#[async_trait]
+impl EnvironmentProvider for PendingProvider {
+    fn binding(&self) -> &'static str {
+        "container-primary-v1"
+    }
+    async fn execute(
+        &self,
+        _: ReconcileAction,
+        _: &contracts::environment::EnvironmentInstance,
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        Ok(environment_service::ProviderOutcome::Pending)
+    }
+}
+#[tokio::test]
+async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut instance = requested_instance();
+    instance.operation.accepted_at = now;
+    instance.operation.next_attempt_at = now;
+    instance.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
+    instance.eligibility_expires_at = instance.operation.deadline_at;
+    store.create("pending-reconcile", &instance).await?;
+    let before_events: i64 = sqlx::query_scalar("SELECT count(*) FROM environment.outbox_events")
+        .fetch_one(&pool)
+        .await?;
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(PendingProvider))?;
+    let worker = ReconcileWorker::new(
+        store.clone(),
+        Reconciler::new(registry, Duration::from_secs(1))?,
+        Duration::from_secs(2),
+        Duration::from_millis(10),
+    )?;
+    for _ in 0..2 {
+        assert_eq!(
+            worker
+                .run_once("pending-worker", store.current_time().await?)
+                .await?,
+            ReconcileWorkerOutcome::Pending
+        );
+        let current = store.load(instance.id).await?;
+        let mut expected = instance.clone();
+        expected.operation.next_attempt_at = current.operation.next_attempt_at;
+        assert_eq!(current, expected);
+        assert!(current.operation.next_attempt_at <= instance.operation.deadline_at);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environment.outbox_events")
+            .fetch_one(&pool)
+            .await?,
+        before_events
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM environment.resource_meter_deliveries")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn kubevirt_incarnation_recovery_and_terminal_commit_retry_do_not_repeat_effects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut authority = requested_instance();
+    authority.operation.accepted_at = now;
+    authority.operation.next_attempt_at = now;
+    authority.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
+    authority.eligibility_expires_at = authority.operation.deadline_at;
+    store.create("incarnation-recovery", &authority).await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let instance = executor_instance();
+    let backend = || BlockingKubeVirtExecutor {
+        calls: Arc::clone(&calls),
+        entered: Arc::clone(&entered),
+        dropped: Arc::clone(&dropped),
+        observed_at: now,
+    };
+    let original = Arc::new(FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        backend(),
+        instance.clone(),
+    ));
+    let request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(authority.id),
+        authority.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        authority.operation.deadline_at,
+    )?;
+    let task = {
+        let original = Arc::clone(&original);
+        let request = request.clone();
+        tokio::spawn(async move { original.execute(request).await })
+    };
+    entered.notified().await;
+    task.abort();
+    let _ = task.await;
+    assert!(dropped.load(Ordering::SeqCst));
+    drop(original);
+    // A different Pod, even when the old Pod is no longer observable, cannot prove termination.
+    let mut foreign = instance.clone();
+    foreign.pod_uid = uuid::Uuid::new_v4();
+    foreign.boot_token = uuid::Uuid::new_v4();
+    let foreign = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        backend(),
+        foreign,
+    );
+    foreign.prepare_startup().await?;
+    assert!(matches!(
+        foreign.execute(request.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1"
+        )
+        .bind(authority.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        None
+    );
+    // This fixture models the next isolated PID1 boot of that same container, not Pod disappearance.
+    let mut replacement = instance.clone();
+    replacement.boot_token = uuid::Uuid::new_v4();
+    let replacement = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        backend(),
+        replacement,
+    );
+    replacement.prepare_startup().await?;
+    assert!(matches!(
+        replacement.execute(request).await?.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            }
+        }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut second = requested_instance();
+    second.operation.accepted_at = now;
+    second.operation.next_attempt_at = now;
+    second.operation.deadline_at = authority.operation.deadline_at;
+    second.eligibility_expires_at = authority.operation.deadline_at;
+    store.create("terminal-commit-retry", &second).await?;
+    let executor = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        CountingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            observed_at: now,
+        },
+        instance,
+    );
+    sqlx::raw_sql("CREATE FUNCTION environment.reject_terminal_once() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'terminal persistence unavailable'; END $$; CREATE TRIGGER reject_terminal BEFORE UPDATE ON environment.kubevirt_executor_fences FOR EACH ROW WHEN (NEW.last_response IS NOT NULL) EXECUTE FUNCTION environment.reject_terminal_once();").execute(&pool).await?;
+    let request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(second.id),
+        second.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        second.operation.deadline_at,
+    )?;
+    assert!(matches!(
+        executor.execute(request.clone()).await?.response,
+        KubeVirtExecutorResponse::Pending
+    ));
+    let count = calls.load(Ordering::SeqCst);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1"
+        )
+        .bind(second.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        None
+    );
+    sqlx::query("DROP TRIGGER reject_terminal ON environment.kubevirt_executor_fences")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        executor.execute(request.clone()).await?.response,
+        KubeVirtExecutorResponse::Running { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    // Admission deadline is re-read after the database row lock, never before it.
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT environment_id FROM environment.kubevirt_executor_fences WHERE environment_id=$1 FOR UPDATE").bind(second.id.as_uuid()).fetch_one(&mut *transaction).await?;
+    let deadline = container_add_time(
+        store.current_time().await?,
+        time::Duration::milliseconds(100),
+    )?;
+    let next = kubevirt_executor_envelope(
+        kubevirt_executor_plan(second.id),
+        second.operation.id,
+        1,
+        2,
+        ReconcileAction::Provision,
+        deadline,
+    )?;
+    let executor = Arc::new(executor);
+    let task = {
+        let executor = Arc::clone(&executor);
+        tokio::spawn(async move { executor.execute(next).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    transaction.commit().await?;
+    assert!(matches!(
+        task.await?,
+        Err(KubeVirtExecutorFenceError::DeadlineExceeded)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    Ok(())
+}
+
+#[tokio::test]
+async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit()
+-> Result<(), Box<dyn std::error::Error>> {
+    use testcontainers::{
+        GenericImage,
+        core::{IntoContainerPort, WaitFor},
+    };
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let store = PgEnvironmentStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut authority = requested_instance();
+    authority.operation.accepted_at = now;
+    authority.operation.next_attempt_at = now;
+    authority.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
+    authority.eligibility_expires_at = authority.operation.deadline_at;
+    store.create("graceful-drain", &authority).await?;
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        BlockingKubeVirtExecutor {
+            calls: Arc::clone(&calls),
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+            observed_at: now,
+        },
+        executor_instance(),
+    );
+    executor.prepare_startup().await?;
+    let nats = GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(4222.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let server = NatsKubeVirtExecutorServer::new(
+        client.clone(),
+        "fixture.kubevirt.drain".to_owned(),
+        executor,
+    )?;
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move { server.serve(receiver).await });
+    // Subscription readiness is observed through NATS, not an arbitrary sleep.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let response = client
+                .send_request(
+                    "fixture.kubevirt.drain",
+                    async_nats::Request::new()
+                        .timeout(Some(Duration::from_millis(50)))
+                        .payload(b"invalid-contract".to_vec().into()),
+                )
+                .await;
+            if !response.is_err_and(|error| {
+                error.kind() == async_nats::client::RequestErrorKind::NoResponders
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let request = kubevirt_executor_envelope(
+        kubevirt_executor_plan(authority.id),
+        authority.operation.id,
+        1,
+        1,
+        ReconcileAction::Provision,
+        authority.operation.deadline_at,
+    )?;
+    let payload = serde_json::to_vec(&request)?;
+    let request_task = tokio::spawn(async move {
+        client
+            .request("fixture.kubevirt.drain", payload.into())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    shutdown.send_replace(true);
+    let response = request_task.await??;
+    let response: environment_service::KubeVirtExecutorResponseEnvelope =
+        serde_json::from_slice(&response.payload)?;
+    assert!(matches!(
+        response.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Cancelled,
+                ..
+            }
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), task).await???;
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let terminal: serde_json::Value = sqlx::query_scalar(
+        "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1",
+    )
+    .bind(authority.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal["failure"]["code"], "cancelled");
+    Ok(())
 }

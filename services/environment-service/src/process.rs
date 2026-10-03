@@ -522,6 +522,7 @@ async fn reconcile_loop(
                     release_deleted_gpu_environments(&store, client).await?;
                 }
                 match outcome {
+                    crate::reconciler::ReconcileWorkerOutcome::Pending => { tracing::debug!(event = "environment.reconcile.pending", outcome = "pending"); }
                     crate::reconciler::ReconcileWorkerOutcome::Idle => { tracing::debug!(event = "environment.reconcile.idle", outcome = "idle"); }
                     crate::reconciler::ReconcileWorkerOutcome::LeaseLost => { tracing::warn!(event = "environment.reconcile.lease_lost", outcome = "ownership_lost", failure_stage = "reconcile", error_kind = "concurrency", retryable = false); }
                     crate::reconciler::ReconcileWorkerOutcome::Advanced { terminal, .. } => { tracing::info!(event = "environment.reconcile.advanced", outcome = if terminal { "terminal" } else { "advanced" }); }

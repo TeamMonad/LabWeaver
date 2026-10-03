@@ -78,11 +78,13 @@ pub use outbox::{
     EnvironmentEventPublisher, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     PublishFailure,
 };
+mod kubevirt_execution;
+pub use kubevirt_execution::{KubeVirtExecutionInstance, KubeVirtExecutionPermit};
 pub use process::{EnvironmentProcessRuntime, EnvironmentProcessRuntimeError};
 pub use reconciler::{
     EnvironmentProvider, ProviderFailure, ProviderFailureCode, ProviderObservation,
-    ProviderRegistry, ReconcileAction, ReconcileError, ReconcileWorker, ReconcileWorkerError,
-    ReconcileWorkerOutcome, Reconciler, next_action,
+    ProviderOutcome, ProviderRegistry, ReconcileAction, ReconcileError, ReconcileWorker,
+    ReconcileWorkerError, ReconcileWorkerOutcome, Reconciler, next_action,
 };
 pub use resolver::{
     OwnerResolver, OwnerResolverError, authorize_endpoint_eligibility, authorize_owner_resolution,
@@ -107,3 +109,7 @@ pub use work_execution::{
     ContainerWorkExecutionBackend, ContainerWorkExecutionService, ContainerWorkExecutionTarget,
     KubernetesWorkExecutionBackend, WorkExecutionError, WorkExecutionOutcome,
 };
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;

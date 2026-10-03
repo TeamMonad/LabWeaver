@@ -132,6 +132,68 @@
         config:
           scratchSpaceStorageClass: "{{ storageclass_local_path }}"
 
+- name: Validate explicit CDI node-pull references
+  ansible.builtin.assert:
+    that:
+      - cdi_image_pull_secrets is sequence
+      - cdi_image_pull_secrets is not string
+      - cdi_image_pull_secrets is not mapping
+      - platform_application_namespace is defined
+      - platform_application_namespace is string
+      - platform_application_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_namespace | length <= 63
+    fail_msg: CDI_NODE_PULL_CONFIGURATION_INVALID
+  when: cdi_image_pull_secrets | length > 0
+  tags: [kubevirt-cdi-pull]
+
+- name: Validate each CDI node-pull reference
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | list == ['name']
+      - item.name is string
+      - item.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - item.name | length <= 63
+    fail_msg: CDI_NODE_PULL_REFERENCE_INVALID
+  loop: "{{ cdi_image_pull_secrets }}"
+  tags: [kubevirt-cdi-pull]
+
+- name: Read existing platform-owned CDI node-pull credentials
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ platform_application_namespace }}"
+    name: "{{ item.name }}"
+  loop: "{{ cdi_image_pull_secrets }}"
+  register: cdi_node_pull_credentials
+  no_log: true
+  tags: [kubevirt-cdi-pull]
+
+- name: Require existing Docker registry credentials in the runtime base namespace
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - item.resources[0].type == 'kubernetes.io/dockerconfigjson'
+      - item.resources[0].data['.dockerconfigjson'] is defined
+    fail_msg: CDI_NODE_PULL_SECRET_INVALID
+  loop: "{{ cdi_node_pull_credentials.results }}"
+  no_log: true
+  tags: [kubevirt-cdi-pull]
+
+- name: Configure CDI node-pull references through the CDI owner
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cdi.kubevirt.io/v1beta1
+      kind: CDI
+      metadata:
+        name: cdi
+      spec:
+        config:
+          imagePullSecrets: "{{ cdi_image_pull_secrets }}"
+  when: cdi_image_pull_secrets | length > 0
+  tags: [kubevirt-cdi-pull]
+
 - name: Allow KubeVirt control-plane access to the adopted API endpoint
   kubernetes.core.k8s:
     state: present
