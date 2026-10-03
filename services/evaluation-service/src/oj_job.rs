@@ -217,6 +217,9 @@ impl OjJobResources {
                     "metadata":{"labels":labels,"annotations":annotations},
                     "spec":{
                         "restartPolicy":"Never",
+                        // RLIMIT_NPROC counts threads by real UID, so each attempt needs
+                        // its own host UID mapping rather than sharing it with other pods.
+                        "hostUsers":false,
                         // No sandbox RuntimeClass here on purpose: the OJ worker restricts itself with
                         // a Landlock ruleset ("CompatLevel::HardRequirement", "FullyEnforced"), and the
                         // shared gVisor class does not implement the Landlock syscalls at all
