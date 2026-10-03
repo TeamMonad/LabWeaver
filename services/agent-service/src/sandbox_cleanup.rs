@@ -5,7 +5,9 @@
 //! retries independently after the owned objects are confirmed absent and the reservation is
 //! released.
 
+use artifact_store::S3ImmutableObjectStore;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use contracts::authoring::AgentTrackKind;
@@ -32,6 +34,8 @@ pub(super) fn spawn(
     api: KubernetesApiClient,
     resources: ResourceClient,
     store: PostgresAgentRunStore,
+    objects: Arc<S3ImmutableObjectStore>,
+    configuration: super::SandboxProcessConfiguration,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let handle = tokio::runtime::Handle::try_current().ok()?;
     Some(handle.spawn(async move {
@@ -39,6 +43,8 @@ pub(super) fn spawn(
             api,
             resources,
             store,
+            objects,
+            configuration,
         }
         .run()
         .await;
@@ -49,6 +55,8 @@ struct Worker {
     api: KubernetesApiClient,
     resources: ResourceClient,
     store: PostgresAgentRunStore,
+    objects: Arc<S3ImmutableObjectStore>,
+    configuration: super::SandboxProcessConfiguration,
 }
 
 #[derive(Debug)]
@@ -60,14 +68,16 @@ struct PendingAttempt {
     execution_generation: u64,
     namespace: String,
     workload_name: String,
-    binding: Value,
+    binding: Option<Value>,
     objects: Value,
     state: String,
+    request_payload: Option<Value>,
+    keys: [Option<String>; 3],
 }
 
 impl PendingAttempt {
-    fn intent(&self) -> SandboxAttemptIntent {
-        SandboxAttemptIntent {
+    fn intent(&self) -> Result<SandboxAttemptIntent, crate::run_store::AgentRunStoreError> {
+        Ok(SandboxAttemptIntent {
             run_id: self.run_id,
             track: self.track,
             attempt: self.attempt,
@@ -75,8 +85,11 @@ impl PendingAttempt {
             execution_generation: self.execution_generation,
             namespace: self.namespace.clone(),
             workload_name: self.workload_name.clone(),
-            binding: self.binding.clone(),
-        }
+            binding: self
+                .binding
+                .clone()
+                .ok_or(crate::run_store::AgentRunStoreError::InvalidContract)?,
+        })
     }
 
     fn from_row(row: &PgRow) -> Result<Self, crate::run_store::AgentRunStoreError> {
@@ -123,6 +136,17 @@ impl PendingAttempt {
             state: row
                 .try_get("state")
                 .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?,
+            request_payload: row
+                .try_get("request_payload")
+                .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?,
+            keys: [
+                row.try_get("result_object_key")
+                    .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?,
+                row.try_get("stderr_object_key")
+                    .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?,
+                row.try_get("export_object_key")
+                    .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?,
+            ],
         })
     }
 }
@@ -185,12 +209,14 @@ impl Worker {
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts
              SET updated_at=now()
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4 AND task_run_id=$5
                AND state IN ('submitted','terminal','failed','cleanup_confirmed','released')",
         )
         .bind(pending.run_id.as_uuid())
         .bind(track_name(pending.track))
         .bind(i64::from(pending.attempt))
+        .bind(i64::try_from(pending.execution_generation).map_err(|_|crate::run_store::AgentRunStoreError::InvalidContract)?)
+        .bind(pending.task_run_id)
         .execute(self.store.pool())
         .await
         .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?
@@ -207,9 +233,18 @@ impl Worker {
     ) -> Result<bool, crate::run_store::AgentRunStoreError> {
         let task_run_id = TaskRunId::from_str(&pending.task_run_id.to_string())
             .map_err(|_| crate::run_store::AgentRunStoreError::InvalidContract)?;
-        let binding: TaskExecutionBinding = serde_json::from_value(pending.binding.clone())
-            .map_err(|_| crate::run_store::AgentRunStoreError::InvalidContract)?;
+        if pending.binding.is_none() {
+            return self.reconcile_creating(pending, task_run_id).await;
+        }
+        let binding: TaskExecutionBinding = serde_json::from_value(
+            pending
+                .binding
+                .clone()
+                .ok_or(crate::run_store::AgentRunStoreError::InvalidContract)?,
+        )
+        .map_err(|_| crate::run_store::AgentRunStoreError::InvalidContract)?;
         if binding.task_run_id != task_run_id
+            || binding.execution_generation != pending.execution_generation
             || binding.namespace != pending.namespace
             || binding.workload_name != pending.workload_name
             || binding.validate().is_err()
@@ -222,7 +257,7 @@ impl Worker {
             );
             return Ok(false);
         }
-        let intent = pending.intent();
+        let intent = pending.intent()?;
         let persisted_usage = load_usage_checkpoint(&self.store, &intent).await?;
         let persisted_observation = self.store.load_sandbox_usage_observation(&intent).await?;
         if pending.state == "released" {
@@ -244,6 +279,186 @@ impl Worker {
             persisted_observation,
         )
         .await
+    }
+
+    async fn capture_receipt(
+        &self,
+        pending: &PendingAttempt,
+        intent: &SandboxAttemptIntent,
+        message: &str,
+    ) -> Result<(), super::TerminalReceiptError> {
+        use super::TerminalReceiptError::{Invalid, Unavailable};
+        let saved = self
+            .store
+            .load_sandbox_attempt(
+                pending.run_id,
+                pending.track,
+                pending.attempt,
+                pending.execution_generation,
+            )
+            .await
+            .map_err(|_| Unavailable)?
+            .ok_or(Invalid)?;
+        if saved.state == "failed" || saved.diagnostic_code.is_some() {
+            return Ok(());
+        }
+        let keys = [
+            pending.keys[0].as_deref().ok_or(Invalid)?,
+            pending.keys[1].as_deref().ok_or(Invalid)?,
+            pending.keys[2].as_deref().ok_or(Invalid)?,
+        ];
+        let version = self
+            .store
+            .sandbox_claude_version(pending.run_id)
+            .await
+            .map_err(|error| match error {
+                crate::run_store::AgentRunStoreError::InvalidContract => Invalid,
+                _ => Unavailable,
+            })?;
+        if let Some(value) = saved.terminal_receipt {
+            let frozen: super::FrozenSandboxReceipt =
+                serde_json::from_value(value).map_err(|_| Invalid)?;
+            frozen
+                .receipt
+                .validate_version(
+                    &version,
+                    self.configuration.result_max_bytes,
+                    self.configuration.stderr_max_bytes,
+                    self.configuration.sandbox.workspace_bytes,
+                )
+                .map_err(|_| Invalid)?;
+            if !frozen.matches_identity(pending.task_run_id, keys)
+                || !frozen.valid_metadata(self.objects.binding())
+            {
+                return Err(Invalid);
+            }
+            frozen.assemble(self.objects.as_ref(), true).await?;
+            return Ok(());
+        }
+        let receipt = super::parse_receipt(message).map_err(|_| Invalid)?;
+        receipt
+            .validate_version(
+                &version,
+                self.configuration.result_max_bytes,
+                self.configuration.stderr_max_bytes,
+                self.configuration.sandbox.workspace_bytes,
+            )
+            .map_err(|_| Invalid)?;
+        for (key, name) in keys.iter().zip(["result.json", "stderr.log", "export.tar"]) {
+            if *key
+                != super::object_key(
+                    &self.configuration.object_prefix,
+                    TaskRunId::from_str(&pending.task_run_id.to_string()).map_err(|_| Invalid)?,
+                    name,
+                )
+            {
+                return Err(Invalid);
+            }
+        }
+        let frozen = super::freeze_terminal_receipt(
+            self.objects.as_ref(),
+            pending.task_run_id,
+            &receipt,
+            keys,
+        )
+        .await?;
+        self.store
+            .checkpoint_sandbox_receipt(
+                intent,
+                self.objects.binding(),
+                &serde_json::to_value(frozen).map_err(|_| Invalid)?,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::run_store::AgentRunStoreError::InvalidContract
+                | crate::run_store::AgentRunStoreError::IdentityMismatch => Invalid,
+                _ => Unavailable,
+            })?;
+        self.store
+            .complete_sandbox_attempt(
+                intent,
+                Some((keys[0], &receipt.result_sha256, receipt.result_size_bytes)),
+                receipt.exit_code,
+                None,
+            )
+            .await
+            .map_err(|_| Unavailable)
+    }
+
+    async fn reconcile_creating(
+        &self,
+        pending: &PendingAttempt,
+        task: TaskRunId,
+    ) -> Result<bool, crate::run_store::AgentRunStoreError> {
+        if pending.state != "creating" {
+            return Err(crate::run_store::AgentRunStoreError::InvalidContract);
+        }
+        let request: super::SandboxResourceRequest = serde_json::from_value(
+            pending
+                .request_payload
+                .clone()
+                .ok_or(crate::run_store::AgentRunStoreError::InvalidContract)?,
+        )
+        .map_err(|_| crate::run_store::AgentRunStoreError::InvalidContract)?;
+        let lifecycle = request
+            .lifecycle(&self.resources, task)
+            .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
+        // Settle the same immutable POST, including ambiguous accepted requests, then cancel it.
+        lifecycle
+            .create()
+            .await
+            .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
+        let identity = SandboxAuthoringProcess::attempt_identity(
+            &pending.namespace,
+            &pending.workload_name,
+            super::attempt_ownership_from_parts(pending.run_id.as_uuid(), task, &request.trace_id),
+            &request.trace_id,
+        );
+        let cleanup = self
+            .api
+            .cleanup_intent(
+                &identity,
+                &crate::sandbox::sandbox_cleanup_targets(&pending.namespace, task.as_uuid()),
+            )
+            .await
+            .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
+        if cleanup != ExecutionCleanupStatus::Confirmed {
+            return Ok(false);
+        }
+        lifecycle
+            .cancel("authoring generation recovered before submission")
+            .await
+            .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
+        let request = self
+            .resources
+            .get_task_resource_request(task)
+            .await
+            .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
+        match request.state {
+            contracts::resource::ResourceRequestState::Expired
+            | contracts::resource::ResourceRequestState::Cancelled
+            | contracts::resource::ResourceRequestState::Rejected => {}
+            _ => {
+                let status = self
+                    .resources
+                    .get_task_resource(task)
+                    .await
+                    .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?;
+                if !status.cleanup_confirmed {
+                    return Ok(false);
+                }
+            }
+        }
+        self.store
+            .release_creating_sandbox(
+                pending.run_id,
+                pending.track,
+                pending.attempt,
+                pending.task_run_id,
+                pending.execution_generation,
+            )
+            .await?;
+        Ok(true)
     }
 
     async fn reconcile_released_attempt(
@@ -302,20 +517,55 @@ impl Worker {
         );
         let objects: Vec<ExecutionObjectRef> = serde_json::from_value(pending.objects.clone())
             .map_err(|_| crate::run_store::AgentRunStoreError::InvalidContract)?;
-        if objects.is_empty() {
-            tracing::error!(
-                event = "agent.authoring.sandbox.cleanup_recovery_rejected",
-                failure_stage = "checkpoint.objects",
-                task_run_id = %task_run_id.as_uuid(),
-                "durable sandbox checkpoint has no owned Kubernetes references to verify",
-            );
-            return Ok(false);
-        }
-        let observed = match self.api.observe(&identity, None).await {
-            Ok(
-                KubernetesJobObservation::Completed { observation, .. }
-                | KubernetesJobObservation::Failed { observation, .. },
-            ) => Some(observation),
+        let observed = match self
+            .api
+            .observe(&identity, super::job_uid(&objects).as_deref())
+            .await
+        {
+            Ok(KubernetesJobObservation::Completed {
+                message,
+                observation,
+            }) => {
+                let captured = self.capture_receipt(pending, &intent, &message).await;
+                match captured {
+                    Ok(()) => {}
+                    Err(super::TerminalReceiptError::Unavailable) => return Ok(false),
+                    Err(super::TerminalReceiptError::Invalid) => {
+                        match self
+                            .store
+                            .complete_sandbox_attempt(
+                                &intent,
+                                None,
+                                1,
+                                Some("LW_AGENT_SANDBOX_RECEIPT_INVALID"),
+                            )
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(crate::run_store::AgentRunStoreError::StateConflict) => {
+                                let saved = self
+                                    .store
+                                    .load_sandbox_attempt(
+                                        pending.run_id,
+                                        pending.track,
+                                        pending.attempt,
+                                        pending.execution_generation,
+                                    )
+                                    .await?
+                                    .ok_or(crate::run_store::AgentRunStoreError::StateConflict)?;
+                                if saved.diagnostic_code.is_none() {
+                                    return Err(
+                                        crate::run_store::AgentRunStoreError::StateConflict,
+                                    );
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                Some(observation)
+            }
+            Ok(KubernetesJobObservation::Failed { observation, .. }) => Some(observation),
             Ok(KubernetesJobObservation::Missing) => None,
             Ok(KubernetesJobObservation::Running) => {
                 tracing::warn!(
@@ -360,7 +610,20 @@ impl Worker {
             }
             None => mark_usage_unavailable(&self.store, &intent, USAGE_TIMING_UNAVAILABLE).await?,
         };
-        let cleanup = cleanup_recovery_with_poll(&self.api, &identity, &objects).await;
+        let cleanup = if objects.is_empty() {
+            self.api
+                .cleanup_intent(
+                    &identity,
+                    &crate::sandbox::sandbox_cleanup_targets(
+                        &pending.namespace,
+                        task_run_id.as_uuid(),
+                    ),
+                )
+                .await
+                .map_err(|_| crate::run_store::AgentRunStoreError::StateConflict)?
+        } else {
+            cleanup_recovery_with_poll(&self.api, &identity, &objects).await
+        };
         if cleanup != ExecutionCleanupStatus::Confirmed {
             return Ok(false);
         }
@@ -414,15 +677,15 @@ async fn select_pending_batch(
 ) -> Result<Vec<PendingAttempt>, crate::run_store::AgentRunStoreError> {
     let rows = sqlx::query(
         "SELECT run_id,track,attempt_number,task_run_id,execution_generation,
-                    namespace,workload_name,binding,objects,state
+                    namespace,workload_name,binding,objects,state,request_payload,result_object_key,stderr_object_key,export_object_key
              FROM agent.authoring_sandbox_attempts
              WHERE updated_at <= now() - interval '3 seconds'
-               AND ((state IN ('submitted','terminal','failed','cleanup_confirmed'))
+               AND ((state IN ('creating','submitted','terminal','failed','cleanup_confirmed'))
                     OR (state='released' AND usage_payload IS NOT NULL
                         AND NOT usage_delivered)
                     OR (state='released' AND usage_observation IS NOT NULL
                         AND usage_payload IS NULL))
-               AND (state <> 'submitted' OR NOT EXISTS (
+               AND (state NOT IN ('creating','submitted') OR NOT EXISTS (
                     SELECT 1 FROM agent.agent_track_work_items work
                     WHERE work.run_id=agent.authoring_sandbox_attempts.run_id
                       AND work.track=agent.authoring_sandbox_attempts.track
@@ -430,7 +693,7 @@ async fn select_pending_batch(
                       AND work.state='running'
                       AND work.lease_expires_at > clock_timestamp()
                ))
-             ORDER BY updated_at,run_id,track,attempt_number
+             ORDER BY updated_at,run_id,track,attempt_number,execution_generation
              LIMIT 32",
     )
     .fetch_all(pool)
@@ -441,6 +704,8 @@ async fn select_pending_batch(
         let run_id = row.try_get::<uuid::Uuid, _>("run_id");
         let track = row.try_get::<String, _>("track");
         let attempt = row.try_get::<i64, _>("attempt_number");
+        let generation = row.try_get::<i64, _>("execution_generation");
+        let task = row.try_get::<uuid::Uuid, _>("task_run_id");
         match PendingAttempt::from_row(&row) {
             Ok(attempt) => attempts.push(attempt),
             Err(error) => {
@@ -449,14 +714,16 @@ async fn select_pending_batch(
                     error_kind = ?error,
                     "authoring cleanup recovery row is invalid and will be deferred",
                 );
-                if let (Ok(run_id), Ok(track), Ok(attempt)) = (run_id, track, attempt) {
+                if let (Ok(run_id), Ok(track), Ok(attempt), Ok(generation), Ok(task)) =
+                    (run_id, track, attempt, generation, task)
+                {
                     let deferred = sqlx::query(
                         "UPDATE agent.authoring_sandbox_attempts SET updated_at=now()
-                             WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+                             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4 AND task_run_id=$5",
                     )
                     .bind(run_id)
                     .bind(track)
-                    .bind(attempt)
+                    .bind(attempt).bind(generation).bind(task)
                     .execute(pool)
                     .await
                     .map_err(|_| crate::run_store::AgentRunStoreError::PersistenceFailed)?
@@ -557,6 +824,56 @@ mod tests {
         sandbox::{SANDBOX_EVENT_SCOPE, SANDBOX_MAIN_CONTAINER, SANDBOX_MANAGED_BY},
         sandbox_process::{SandboxAuthoringProcess, attempt_ownership_from_parts},
     };
+
+    async fn test_objects() -> Result<Arc<artifact_store::S3ImmutableObjectStore>, Box<dyn Error>> {
+        Ok(Arc::new(
+            artifact_store::S3ImmutableObjectStore::new(
+                artifact_store::S3StoreConfig {
+                    binding: "test-objects".to_owned(),
+                    endpoint: "https://objects.invalid".parse()?,
+                    bucket: "test".to_owned(),
+                    region: "test".to_owned(),
+                    object_prefix: "authoring".to_owned(),
+                    upload_ttl_seconds: 60,
+                    max_object_bytes: 1024 * 1024,
+                    force_path_style: true,
+                    ca_bundle_file: None,
+                },
+                artifact_store::S3Credential {
+                    access_key_id: "test".to_owned(),
+                    secret_access_key: "test".to_owned(),
+                    session_token: None,
+                },
+            )
+            .await?,
+        ))
+    }
+    fn test_configuration() -> super::super::SandboxProcessConfiguration {
+        super::super::SandboxProcessConfiguration {
+            sandbox: crate::sandbox::SandboxConfiguration {
+                namespace: "runner".to_owned(),
+                image: format!("test@sha256:{}", "a".repeat(64)),
+                service_account_name: "runner".to_owned(),
+                image_pull_secret_name: None,
+                cpu_millicores: 100,
+                memory_bytes: 1024 * 1024,
+                workspace_bytes: 1024 * 1024,
+                wall_time_seconds: 900,
+                allowed_egress: std::collections::BTreeSet::from(["10.0.0.1/32:443".to_owned()]),
+                buildkit_image: None,
+                buildkit_config_map_name: None,
+            },
+            object_prefix: "authoring".to_owned(),
+            result_max_bytes: 1024 * 1024,
+            stderr_max_bytes: 1024 * 1024,
+            kubernetes_api_server: "https://kubernetes.invalid".to_owned(),
+            kubernetes_bearer_token_file: "unused".to_owned(),
+            kubernetes_ca_file: "unused".to_owned(),
+            request_timeout_milliseconds: 5000,
+            object_store_ca_file: None,
+            worker_environment: std::collections::BTreeMap::new(),
+        }
+    }
 
     async fn apply_agent_migrations(pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
         sqlx::query("CREATE SCHEMA agent").execute(pool).await?;
@@ -807,6 +1124,8 @@ mod tests {
             api: api.clone(),
             resources: fake_resource.client.clone(),
             store: store.clone(),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
         };
 
         let first_batch = select_pending_batch(&pool).await?;
@@ -877,6 +1196,8 @@ mod tests {
             api,
             resources: fake_resource.client.clone(),
             store: store.clone(),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
         };
         fake_resource
             .state
@@ -1002,6 +1323,8 @@ mod tests {
             api,
             resources: fake_resource.client.clone(),
             store: store.clone(),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
         };
 
         assert!(worker.reconcile(&pending).await?);
@@ -1148,6 +1471,8 @@ mod tests {
             api,
             resources: fake_resource.client.clone(),
             store: store.clone(),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
         };
 
         assert!(worker.reconcile(&pending).await.is_err());
@@ -1170,6 +1495,106 @@ mod tests {
                 .is_empty()
         );
         assert!(fake_kube.state.job_exists.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep NULL-binding recovery, exact owned deletion and Resource release assertions in one external-boundary scenario"
+    )]
+    async fn creating_recovery_settles_frozen_task_and_deletes_owned_objects_before_release()
+    -> Result<(), Box<dyn Error>> {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await?;
+        apply_agent_migrations(&pool).await?;
+        let store = PostgresAgentRunStore::new(pool.clone());
+        let run = AgentRunId::new();
+        let task = TaskRunId::new();
+        let workload = super::super::workload_name(task.as_uuid());
+        let status = resource_status_value(task, false);
+        let typed: TaskResourceStatus = serde_json::from_value(status.clone())?;
+        let frozen = super::super::SandboxResourceRequest {
+            project_id: typed.project_id,
+            course_id: typed.request.course_id,
+            actor_id: typed.owner_id,
+            request_key: typed.request.request_key.clone(),
+            trace_id: "creating-recovery-test".to_owned(),
+            resources: typed.request.requested_resources.clone(),
+            duration_seconds: typed.request.requested_duration_seconds,
+        };
+        insert_agent_run(&pool, run).await?;
+        sqlx::query("UPDATE agent.agent_runs SET project_id=$2 WHERE run_id=$1")
+            .bind(run.as_uuid())
+            .bind(typed.project_id.as_uuid())
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO agent.authoring_sandbox_attempts (run_id,track,attempt_number,execution_generation,task_run_id,namespace,workload_name,binding,state,request_payload,updated_at) VALUES ($1,'environment',1,2,$2,'runner',$3,NULL,'creating',$4,clock_timestamp()-interval '10 seconds')")
+            .bind(run.as_uuid()).bind(task.as_uuid()).bind(&workload).bind(serde_json::to_value(&frozen)?).execute(&pool).await?;
+        let pending = select_pending_batch(&pool)
+            .await?
+            .into_iter()
+            .find(|p| p.task_run_id == task.as_uuid())
+            .ok_or("creating must be selected")?;
+        assert!(pending.binding.is_none());
+        let resource = spawn_resource_client(status, 0).await?;
+        let owner = attempt_ownership_from_parts(run.as_uuid(), task, &frozen.trace_id);
+        let identity = SandboxAuthoringProcess::attempt_identity(
+            "runner",
+            &workload,
+            owner.clone(),
+            &frozen.trace_id,
+        );
+        let kube = spawn_kubernetes(identity, owner, true).await?;
+        let token = tempfile::NamedTempFile::new()?;
+        std::fs::write(token.path(), b"test-kubernetes-token")?;
+        let api = KubernetesApiClient::for_test(
+            KubernetesApiConfiguration {
+                kubernetes_api_server: Url::parse(&kube.base_uri)?,
+                kubernetes_bearer_token_file: token.path().to_owned(),
+                kubernetes_ca_file: PathBuf::from("unused-test-ca"),
+                runner_namespace: "runner".to_owned(),
+                request_timeout_milliseconds: 5000,
+            },
+            reqwest::Client::builder().no_proxy().build()?,
+            "labweaver-agent-test",
+            "agent-test",
+            "LW_AGENT_",
+            SANDBOX_MANAGED_BY,
+            SANDBOX_EVENT_SCOPE,
+        );
+        let worker = Worker {
+            api,
+            resources: resource.client.clone(),
+            store: store.clone(),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
+        };
+        assert!(worker.reconcile(&pending).await?);
+        let saved = store
+            .load_sandbox_attempt(run, AgentTrackKind::Environment, 1, 2)
+            .await?
+            .ok_or("checkpoint missing")?;
+        assert_eq!(saved.state, "released");
+        assert!(saved.binding.is_none());
+        assert_eq!(saved.request_payload, Some(serde_json::to_value(&frozen)?));
+        assert!(!kube.state.job_exists.load(Ordering::SeqCst));
+        assert_eq!(resource.state.release_count.load(Ordering::SeqCst), 1);
+        assert!(
+            resource
+                .state
+                .usage_posts
+                .lock()
+                .map_err(|_| "lock poisoned")?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -1272,6 +1697,10 @@ mod tests {
         grant_type: String,
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep the test-only token authority, Resource HTTP routes and client binding setup together"
+    )]
     async fn spawn_resource_client(
         status: Value,
         fail_usage_count: usize,
@@ -1339,6 +1768,15 @@ mod tests {
         };
         let resource_router = Router::new()
             .route(
+                "/internal/v1/task-resources/{task_run_id}/claim",
+                post(resource_status),
+            )
+            .route("/internal/v1/task-resources", post(resource_create))
+            .route(
+                "/internal/v1/task-resources/{task_run_id}/request",
+                get(resource_request),
+            )
+            .route(
                 "/internal/v1/task-resources/{task_run_id}",
                 get(resource_status),
             )
@@ -1371,6 +1809,26 @@ mod tests {
             _authority: authority_server,
             _resource_server: resource_server,
         })
+    }
+
+    async fn resource_create(
+        State(state): State<FakeResourceState>,
+        Json(_request): Json<Value>,
+    ) -> Json<Value> {
+        Json(
+            state
+                .status
+                .lock()
+                .map_or(Value::Null, |status| status["request"].clone()),
+        )
+    }
+    async fn resource_request(State(state): State<FakeResourceState>) -> Json<Value> {
+        Json(
+            state
+                .status
+                .lock()
+                .map_or(Value::Null, |status| status["request"].clone()),
+        )
     }
 
     async fn resource_status(

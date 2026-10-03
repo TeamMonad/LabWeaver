@@ -17,6 +17,7 @@ use contracts::evaluation::{
 };
 use contracts::{
     ActorId, AgentRunId, ArtifactRef, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision,
+    UtcTimestamp,
 };
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use serde::{Deserialize, Serialize};
@@ -553,6 +554,13 @@ pub struct AuthoringAttemptScope {
     pub track: AgentTrackKind,
     /// Monotonic track-local attempt number.
     pub attempt: u32,
+    /// Positive schema invocation generation within this attempt.
+    pub execution_generation: u64,
+    /// Database-authoritative start of this track attempt.
+    pub started_at: UtcTimestamp,
+    /// Worker and opaque token fencing this attempt.
+    pub worker_id: String,
+    pub lease_token: uuid::Uuid,
     /// Sanitized distributed trace identity.
     pub trace_id: String,
     /// Pinned Claude Code version the sandbox CLI must verify before executing.
@@ -568,6 +576,7 @@ pub struct ClaudeCodeCommand {
     stdin: Arc<[u8]>,
     stdin_sha256: Sha256Digest,
     timeout: Duration,
+    deadline: tokio::time::Instant,
 }
 
 impl ClaudeCodeCommand {
@@ -606,6 +615,9 @@ impl ClaudeCodeCommand {
     pub const fn timeout(&self) -> Duration {
         self.timeout
     }
+    pub(crate) const fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
 }
 
 impl Debug for ClaudeCodeCommand {
@@ -618,6 +630,7 @@ impl Debug for ClaudeCodeCommand {
             .field("stdin", &"<redacted>")
             .field("stdin_sha256", &self.stdin_sha256)
             .field("timeout", &self.timeout)
+            .field("deadline", &self.deadline)
             .finish()
     }
 }
@@ -763,6 +776,14 @@ pub trait ClaudeCodeProcess: Send + Sync {
         false
     }
 
+    /// Reads one already accepted authoring generation after its invocation deadline.
+    /// This cannot create a Resource request, `TaskRun` or model process.
+    async fn recover_authoring_terminal(
+        &self,
+        scope: &AuthoringAttemptScope,
+        cancellation: RunCancellation,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError>;
+
     /// Executes exactly one Claude Code invocation under the given authority.
     async fn execute(
         &self,
@@ -805,6 +826,18 @@ impl Debug for TokioClaudeCodeProcess {
 
 #[async_trait]
 impl ClaudeCodeProcess for TokioClaudeCodeProcess {
+    async fn recover_authoring_terminal(
+        &self,
+        _scope: &AuthoringAttemptScope,
+        cancellation: RunCancellation,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        Err(if cancellation.is_cancelled() {
+            ClaudeCodeProcessError::Cancelled
+        } else {
+            ClaudeCodeProcessError::TimedOut
+        })
+    }
+
     async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
         let command = ClaudeCodeCommand {
             program: CLAUDE_PROGRAM,
@@ -813,6 +846,7 @@ impl ClaudeCodeProcess for TokioClaudeCodeProcess {
             stdin: Arc::from([]),
             stdin_sha256: Sha256Digest::of_bytes(&[]),
             timeout: Duration::from_secs(10),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(10),
         };
         let output = execute_process(
             command,
@@ -1566,6 +1600,26 @@ impl ClaudeCodeRuntime {
             )
         })?;
         let prompt = candidate_json_prompt(&prompt, &schema_text);
+        let deadline = match scope {
+            ExecutionScope::Authoring(scope) => {
+                scope.started_at.get()
+                    + time::Duration::milliseconds(
+                        i64::try_from(self.policy.budget.timeout_milliseconds).unwrap_or(i64::MAX),
+                    )
+            }
+            ExecutionScope::Advisory => {
+                time::OffsetDateTime::now_utc()
+                    + time::Duration::milliseconds(
+                        i64::try_from(self.policy.budget.timeout_milliseconds).unwrap_or(i64::MAX),
+                    )
+            }
+        };
+        let remaining_time = || {
+            Duration::from_millis(
+                u64::try_from((deadline - time::OffsetDateTime::now_utc()).whole_milliseconds())
+                    .unwrap_or(0),
+            )
+        };
         let _permit = if cancellation.is_cancelled() {
             return Err(self.failure(
                 track,
@@ -1576,6 +1630,8 @@ impl ClaudeCodeRuntime {
                 ClaudeCodeRuntimeError::Cancelled,
                 None,
             ));
+        } else if remaining_time().is_zero() {
+            None
         } else {
             tokio::select! {
                 biased;
@@ -1590,8 +1646,9 @@ impl ClaudeCodeRuntime {
                         None,
                     ));
                 }
+                () = tokio::time::sleep(remaining_time()) => None,
                 permit = Arc::clone(&self.in_flight).acquire_owned() => {
-                    permit.map_err(|_| self.failure(
+                    Some(permit.map_err(|_| self.failure(
                         track,
                         &input,
                         &schema,
@@ -1599,45 +1656,109 @@ impl ClaudeCodeRuntime {
                         tool_policy,
                         ClaudeCodeRuntimeError::RuntimeUnavailable,
                         None,
-                    ))?
+                    ))?)
                 }
             }
         };
-        self.verify_runtime_identity().await.map_err(|error| {
-            self.failure(track, &input, &schema, &prompt, tool_policy, error, None)
-        })?;
+        if !remaining_time().is_zero() {
+            self.verify_runtime_identity().await.map_err(|error| {
+                self.failure(track, &input, &schema, &prompt, tool_policy, error, None)
+            })?;
+        }
         let max_repairs = self.policy.budget.max_schema_repairs;
         let mut repairs = 0_u8;
         let mut current_prompt = prompt.clone();
+        let mut total_usage = zero_usage();
+        let mut all_usage_observed = true;
         loop {
-            let command = build_command(&self.policy, &input, &current_prompt, authoring);
-            let process_output = self
-                .process
-                .execute(scope, command, cancellation.clone())
-                .await
-                .map_err(|error| {
-                    let runtime_error = match error {
-                        ClaudeCodeProcessError::Unavailable => {
-                            ClaudeCodeRuntimeError::RuntimeUnavailable
-                        }
-                        ClaudeCodeProcessError::TimedOut => ClaudeCodeRuntimeError::TimedOut,
-                        ClaudeCodeProcessError::Cancelled => ClaudeCodeRuntimeError::Cancelled,
-                        ClaudeCodeProcessError::OutputLimitExceeded => {
-                            ClaudeCodeRuntimeError::OutputLimitExceeded
-                        }
-                        ClaudeCodeProcessError::Io => ClaudeCodeRuntimeError::ExecutionFailed,
-                    };
-                    self.failure(
+            let mut budget =
+                remaining_budget(self.policy.budget, total_usage).map_err(|error| {
+                    let mut failure = self.failure(
                         track,
                         &input,
                         &schema,
                         &current_prompt,
                         tool_policy,
-                        runtime_error,
+                        error,
                         None,
-                    )
+                    );
+                    failure.audit.usage = total_usage;
+                    failure.audit.usage_observed = all_usage_observed && total_usage.requests > 0;
+                    failure
                 })?;
-            let parsed = self
+            budget.timeout_milliseconds =
+                u64::try_from(remaining_time().as_millis()).unwrap_or(u64::MAX);
+            let invocation_scope = match scope {
+                ExecutionScope::Authoring(scope) => {
+                    let mut generation = scope.clone();
+                    generation.execution_generation = u64::from(repairs) + 1;
+                    ExecutionScope::Authoring(generation)
+                }
+                ExecutionScope::Advisory => ExecutionScope::Advisory,
+            };
+            if remaining_time().is_zero() && matches!(scope, ExecutionScope::Advisory) {
+                let mut failure = self.failure(
+                    track,
+                    &input,
+                    &schema,
+                    &current_prompt,
+                    tool_policy,
+                    ClaudeCodeRuntimeError::TimedOut,
+                    None,
+                );
+                failure.audit.usage = total_usage;
+                failure.audit.usage_observed = all_usage_observed && total_usage.requests > 0;
+                return Err(failure);
+            }
+            let process_result = if remaining_time().is_zero() {
+                match &invocation_scope {
+                    ExecutionScope::Authoring(scope) => {
+                        self.process
+                            .recover_authoring_terminal(scope, cancellation.clone())
+                            .await
+                    }
+                    ExecutionScope::Advisory => Err(ClaudeCodeProcessError::TimedOut),
+                }
+            } else {
+                let mut command = build_command_from_bytes(
+                    &self.policy,
+                    budget,
+                    input.bytes(),
+                    input.sha256(),
+                    &current_prompt,
+                    authoring,
+                );
+                command.deadline = tokio::time::Instant::now() + remaining_time();
+                self.process
+                    .execute(&invocation_scope, command, cancellation.clone())
+                    .await
+            };
+            let process_output = process_result.map_err(|error| {
+                let runtime_error = match error {
+                    ClaudeCodeProcessError::Unavailable => {
+                        ClaudeCodeRuntimeError::RuntimeUnavailable
+                    }
+                    ClaudeCodeProcessError::TimedOut => ClaudeCodeRuntimeError::TimedOut,
+                    ClaudeCodeProcessError::Cancelled => ClaudeCodeRuntimeError::Cancelled,
+                    ClaudeCodeProcessError::OutputLimitExceeded => {
+                        ClaudeCodeRuntimeError::OutputLimitExceeded
+                    }
+                    ClaudeCodeProcessError::Io => ClaudeCodeRuntimeError::ExecutionFailed,
+                };
+                let mut failure = self.failure(
+                    track,
+                    &input,
+                    &schema,
+                    &current_prompt,
+                    tool_policy,
+                    runtime_error,
+                    None,
+                );
+                failure.audit.usage = total_usage;
+                failure.audit.usage_observed = false;
+                failure
+            })?;
+            let mut parsed = self
                 .parse_result(
                     track,
                     &input,
@@ -1648,41 +1769,86 @@ impl ClaudeCodeRuntime {
                     expected_environment_class,
                 )
                 .await;
-            if let Err(failure) = &parsed {
-                // Raw provider output is an acceptance-only diagnostic. Keep it
-                // out of ordinary provider-error handling: an error envelope is
-                // not a schema repair candidate and must retain its stable
-                // upstream diagnostic. The directory is injected only into the
-                // isolated worker and the file is private, bounded stdout.
-                let schema_invalid = failure.is_schema_invalid();
-                if schema_invalid {
-                    persist_failed_stdout(track, repairs, process_output.stdout());
-                }
-                let preview = (schema_invalid
-                    || failure.error == ClaudeCodeRuntimeError::ProtocolInvalid)
-                    .then(|| {
-                        String::from_utf8_lossy(process_output.stdout())
-                            .chars()
-                            .take(2_000)
-                            .collect::<String>()
-                    });
-                tracing::warn!(
-                    event = "agent.llm.candidate_parse_failed",
-                    component = "agent-service",
-                    operation = "llm.candidate.parse",
-                    outcome = "failed",
-                    duration_ms = 0_u64,
-                    track = ?track,
-                    repair_attempt = repairs,
-                    stdout_preview = ?preview,
-                    diagnostic_code = failure.diagnostic_code(),
-                    error_kind = ?failure.error,
-                    retryable = schema_invalid,
+            let audit = match &parsed {
+                Ok(execution) => &execution.audit,
+                Err(failure) => failure.audit(),
+            };
+            all_usage_observed &= audit.usage_observed;
+            if audit.usage_observed {
+                total_usage = accumulate_usage(total_usage, audit.usage).map_err(|error| {
+                    let mut failure = self.failure(
+                        track,
+                        &input,
+                        &schema,
+                        &current_prompt,
+                        tool_policy,
+                        error,
+                        Some(&process_output),
+                    );
+                    failure.audit.usage = total_usage;
+                    failure.audit.usage_observed = false;
+                    failure
+                })?;
+            }
+            if let Err(error) = enforce_budget(&self.policy.budget, total_usage) {
+                let mut failure = self.failure(
+                    track,
+                    &input,
+                    &schema,
+                    &current_prompt,
+                    tool_policy,
+                    error,
+                    Some(&process_output),
                 );
+                failure.audit.usage = total_usage;
+                failure.audit.usage_observed = all_usage_observed;
+                return Err(failure);
+            }
+            if cancellation.is_cancelled() {
+                let mut failure = self.failure(
+                    track,
+                    &input,
+                    &schema,
+                    &current_prompt,
+                    tool_policy,
+                    ClaudeCodeRuntimeError::Cancelled,
+                    Some(&process_output),
+                );
+                failure.audit.usage = total_usage;
+                failure.audit.usage_observed = all_usage_observed;
+                return Err(failure);
+            }
+            match &mut parsed {
+                Ok(execution) => {
+                    execution.audit.usage = total_usage;
+                    execution.audit.usage_observed = all_usage_observed;
+                }
+                Err(failure) => {
+                    failure.audit.usage = total_usage;
+                    failure.audit.usage_observed = all_usage_observed;
+                }
+            }
+            if let Err(failure) = &parsed {
+                tracing::warn!(event="agent.llm.candidate_parse_failed",track=?track,repair_attempt=repairs,
+                    diagnostic_code=failure.diagnostic_code(),error_kind=?failure.error,retryable=failure.is_schema_invalid());
             }
             match parsed {
                 Ok(execution) => return Ok(execution),
                 Err(failure) if failure.is_schema_invalid() && repairs < max_repairs => {
+                    if remaining_time().is_zero() && matches!(scope, ExecutionScope::Advisory) {
+                        let mut expired = self.failure(
+                            track,
+                            &input,
+                            &schema,
+                            &current_prompt,
+                            tool_policy,
+                            ClaudeCodeRuntimeError::TimedOut,
+                            None,
+                        );
+                        expired.audit.usage = total_usage;
+                        expired.audit.usage_observed = all_usage_observed;
+                        return Err(expired);
+                    }
                     repairs += 1;
                     tracing::warn!(
                         event = "agent.llm.schema_repair",
@@ -2510,72 +2676,10 @@ fn rewrite_container_schema(value: &mut Value, replaced: &mut bool) {
     }
 }
 
-/// Persists bounded provider stdout only for an explicitly enabled acceptance
-/// diagnostic. The file is never part of a service report and is created with
-/// exclusive creation so concurrent runs cannot overwrite one another.
-fn persist_failed_stdout(track: AgentTrackKind, repairs: u8, stdout: &[u8]) {
-    let Ok(output_dir) = std::env::var("LABWEAVER_LLM_OUTPUT_DIR") else {
-        return;
-    };
-    let directory = std::path::Path::new(&output_dir);
-    if !directory.is_absolute() || std::fs::create_dir_all(directory).is_err() {
-        return;
-    }
-    let name = match track {
-        AgentTrackKind::Environment => "environment",
-        AgentTrackKind::Evaluation => "evaluation",
-        AgentTrackKind::WorkConfiguration => "work_configuration",
-    };
-    let path = directory.join(format!(
-        "llm-{name}-{}-repair{repairs}.stdout",
-        Uuid::now_v7()
-    ));
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let Ok(file) = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-        else {
-            return;
-        };
-        file
-    };
-    #[cfg(not(unix))]
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    else {
-        return;
-    };
-    let _ = std::io::Write::write_all(&mut file, stdout);
-}
-
 /// Both independently retained track outcomes.
 pub struct DualCandidateOutcome {
-    /// Environment track result.
     pub environment: Result<ClaudeCodeExecution, ClaudeCodeFailure>,
-    /// Evaluation track result.
     pub evaluation: Result<ClaudeCodeExecution, ClaudeCodeFailure>,
-}
-
-fn build_command(
-    policy: &ProjectLlmEgressPolicy,
-    input: &ImmutableEgressInput,
-    prompt: &str,
-    authoring: bool,
-) -> ClaudeCodeCommand {
-    build_command_from_bytes(
-        policy,
-        policy.budget,
-        input.bytes(),
-        input.sha256(),
-        prompt,
-        authoring,
-    )
 }
 
 fn build_command_from_bytes(
@@ -2671,6 +2775,7 @@ fn build_command_from_bytes(
         stdin,
         stdin_sha256,
         timeout: Duration::from_millis(budget.timeout_milliseconds),
+        deadline: tokio::time::Instant::now() + Duration::from_millis(budget.timeout_milliseconds),
     }
 }
 
@@ -3502,6 +3607,7 @@ mod tests {
             stdin: std::sync::Arc::from([]),
             stdin_sha256: Sha256Digest::of_bytes(&[]),
             timeout: process_timeout,
+            deadline: tokio::time::Instant::now() + process_timeout,
         }
     }
 

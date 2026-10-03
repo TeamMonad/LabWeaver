@@ -156,6 +156,8 @@ impl SandboxConfiguration {
 /// Everything one admitted attempt needs to render its immutable bundle.
 #[derive(Clone, Debug)]
 pub struct SandboxAttemptSpec {
+    /// Remaining model execution deadline, bounded by configured wall time.
+    pub timeout_seconds: u64,
     /// Durable one-shot task identity; also the deterministic object-name suffix.
     pub task_run_id: Uuid,
     /// Role-neutral ownership identity persisted with the execution binding.
@@ -231,7 +233,9 @@ pub fn build_sandbox_bundle(
     spec: &SandboxAttemptSpec,
 ) -> Result<SandboxBundle, SandboxBundleError> {
     configuration.validate()?;
-    if spec.command.is_empty()
+    if spec.timeout_seconds == 0
+        || spec.timeout_seconds > configuration.wall_time_seconds
+        || spec.command.is_empty()
         || spec.expected_claude_version.is_empty()
         || spec.expected_claude_version.len() > 64
         || spec
@@ -384,15 +388,7 @@ pub fn build_sandbox_bundle(
             document: job,
         },
     ];
-    let cleanup_plan = vec![
-        cleanup_target(&configuration.namespace, "jobs", &job_name),
-        cleanup_target(
-            &configuration.namespace,
-            "networkpolicies",
-            &network_policy_name,
-        ),
-        cleanup_target(&configuration.namespace, "secrets", &secret_name),
-    ];
+    let cleanup_plan = sandbox_cleanup_targets(&configuration.namespace, spec.task_run_id);
     Ok(SandboxBundle {
         bundle: KubernetesJobBundle {
             identity,
@@ -403,6 +399,23 @@ pub fn build_sandbox_bundle(
         network_policy_name,
         job_name,
     })
+}
+
+/// Deterministic owned targets, including partially applied bundles without captured UIDs.
+pub(crate) fn sandbox_cleanup_targets(
+    namespace: &str,
+    task_run_id: Uuid,
+) -> Vec<KubernetesCleanupTarget> {
+    let suffix = &task_run_id.simple().to_string()[..20];
+    vec![
+        cleanup_target(namespace, "jobs", &format!("lw-auth-{suffix}")),
+        cleanup_target(
+            namespace,
+            "networkpolicies",
+            &format!("lw-auth-net-{suffix}"),
+        ),
+        cleanup_target(namespace, "secrets", &format!("lw-auth-secret-{suffix}")),
+    ]
 }
 
 /// Renders one shell command line from a trusted argv with strict quoting.
@@ -815,7 +828,7 @@ fn job_document(
         },
         "spec": {
             "backoffLimit": 0,
-            "activeDeadlineSeconds": configuration.wall_time_seconds,
+            "activeDeadlineSeconds": spec.timeout_seconds,
             "ttlSecondsAfterFinished": 300,
             "template": {
                 "metadata": {
@@ -1056,6 +1069,7 @@ mod tests {
 
     fn spec() -> SandboxAttemptSpec {
         SandboxAttemptSpec {
+            timeout_seconds: 900,
             task_run_id: Uuid::now_v7(),
             ownership: KubernetesOwnership {
                 run_id: Uuid::now_v7(),
@@ -1258,7 +1272,7 @@ mod tests {
         );
         assert_eq!(
             job.document.pointer("/spec/activeDeadlineSeconds"),
-            Some(&serde_json::json!(3_600))
+            Some(&serde_json::json!(900))
         );
         assert_eq!(
             job.document.pointer("/spec/ttlSecondsAfterFinished"),

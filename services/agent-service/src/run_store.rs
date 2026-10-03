@@ -174,6 +174,7 @@ pub struct AgentTrackLease {
     /// Sanitized worker identity.
     pub worker_id: String,
     lease_token: Uuid,
+    started_at: UtcTimestamp,
     cancellation_requested: bool,
 }
 
@@ -892,6 +893,7 @@ impl PostgresAgentRunStore {
         let updated = sqlx::query(
             "UPDATE agent.agent_track_work_items \
              SET state='running', attempt_number=$3, worker_id=$4, lease_token=$5, \
+                 attempt_started_at=date_trunc('milliseconds', clock_timestamp()), \
                  heartbeat_at=date_trunc('milliseconds', clock_timestamp()), \
                  lease_expires_at=date_trunc('milliseconds', clock_timestamp()) \
                      + ($6 * interval '1 millisecond'), updated_at=now() \
@@ -910,6 +912,10 @@ impl PostgresAgentRunStore {
             return Err(AgentRunStoreError::StateConflict);
         }
         update_run(&mut transaction, &run).await?;
+        let started_at: time::OffsetDateTime = sqlx::query_scalar(
+            "SELECT attempt_started_at FROM agent.agent_track_work_items WHERE run_id=$1 AND track=$2",
+        ).bind(run_id.as_uuid()).bind(track_name(track_kind))
+            .fetch_one(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         transaction
             .commit()
             .await
@@ -921,6 +927,8 @@ impl PostgresAgentRunStore {
             attempt,
             worker_id: worker_id.to_owned(),
             lease_token,
+            started_at: UtcTimestamp::from_utc(started_at)
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
             cancellation_requested: claim.cancellation_requested,
         }))
     }
@@ -1312,7 +1320,7 @@ impl PostgresAgentRunStore {
         let cancellation_requested = row
             .try_get::<bool, _>("cancellation_requested")
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
-        let checkpoint = match lease.track {
+        let mut checkpoint = match lease.track {
             AgentTrackKind::Environment => {
                 environment_checkpoint(&run, lease.attempt, outcome, now)?
             }
@@ -1320,6 +1328,18 @@ impl PostgresAgentRunStore {
             AgentTrackKind::WorkConfiguration => {
                 work_configuration_checkpoint(&run, lease.attempt, outcome, now)?
             }
+        };
+        let plan = if cancellation_requested {
+            checkpoint.candidate = None;
+            checkpoint.audit.outcome = RuntimeAuditOutcome::Cancelled;
+            checkpoint.audit.diagnostic_code = Some(
+                crate::claude_code::ClaudeCodeRuntimeError::Cancelled
+                    .diagnostic_code()
+                    .to_owned(),
+            );
+            None
+        } else {
+            plan
         };
         apply_checkpoint(&mut run, &checkpoint)?;
         if let Some(plan) = plan {
@@ -2084,13 +2104,20 @@ pub struct SandboxAttemptCheckpoint {
     /// Deterministic workload name.
     pub workload_name: String,
     /// Persisted execution binding used to prove the reservation on recovery.
-    pub binding: serde_json::Value,
+    pub binding: Option<serde_json::Value>,
     /// Observed Kubernetes object identities.
     pub objects: serde_json::Value,
     /// Durable state of this attempt generation.
     pub state: String,
+    /// Persisted sandbox failure remains a failure even after cleanup and release.
+    pub diagnostic_code: Option<String>,
     /// Uploaded result object key, present after a successful attempt.
     pub result_object_key: Option<String>,
+    /// Exact output keys and complete frozen terminal receipt.
+    pub stderr_object_key: Option<String>,
+    pub export_object_key: Option<String>,
+    pub terminal_receipt: Option<serde_json::Value>,
+    pub request_payload: Option<serde_json::Value>,
     /// Result sha256 written with the terminal observation.
     pub result_sha256: Option<String>,
     /// Result size written with the terminal observation.
@@ -2114,6 +2141,7 @@ impl PostgresAgentRunStore {
         &self,
         intent: &SandboxAttemptIntent,
     ) -> Result<(), AgentRunStoreError> {
+        validate_sandbox_binding(intent)?;
         if intent.attempt == 0
             || intent.execution_generation == 0
             || intent.namespace.trim().is_empty()
@@ -2124,11 +2152,16 @@ impl PostgresAgentRunStore {
         }
         let generation = i64::try_from(intent.execution_generation)
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let existing_generation:Option<i64>=sqlx::query_scalar("SELECT execution_generation FROM agent.authoring_sandbox_attempts WHERE task_run_id=$1")
+            .bind(intent.task_run_id).fetch_optional(&self.pool).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
+        if existing_generation.is_some_and(|existing| existing != generation) {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
         let inserted = sqlx::query(
             "INSERT INTO agent.authoring_sandbox_attempts \
              (run_id,track,attempt_number,task_run_id,execution_generation,namespace,workload_name,binding,state) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'creating') \
-             ON CONFLICT (run_id,track,attempt_number) DO NOTHING",
+             ON CONFLICT (run_id,track,attempt_number,execution_generation) DO NOTHING",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
@@ -2145,19 +2178,227 @@ impl PostgresAgentRunStore {
         if inserted == 1 {
             return Ok(());
         }
+        sqlx::query("UPDATE agent.authoring_sandbox_attempts SET binding=$5,updated_at=now()
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4
+             AND task_run_id=$6 AND namespace=$7 AND workload_name=$8 AND state='creating' AND binding IS NULL")
+             .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt))
+             .bind(generation).bind(&intent.binding).bind(intent.task_run_id).bind(&intent.namespace).bind(&intent.workload_name)
+             .execute(&self.pool).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         let existing = self
-            .load_sandbox_attempt(intent.run_id, intent.track, intent.attempt)
+            .load_sandbox_attempt(
+                intent.run_id,
+                intent.track,
+                intent.attempt,
+                intent.execution_generation,
+            )
             .await?
             .ok_or(AgentRunStoreError::PersistenceFailed)?;
         if existing.task_run_id != intent.task_run_id
             || existing.execution_generation != intent.execution_generation
             || existing.namespace != intent.namespace
             || existing.workload_name != intent.workload_name
-            || existing.binding != intent.binding
+            || existing.binding.as_ref() != Some(&intent.binding)
         {
             return Err(AgentRunStoreError::IdentityMismatch);
         }
         Ok(())
+    }
+
+    /// Fences and records a generation before its first Resource side effect.
+    pub async fn reserve_sandbox_generation(
+        &self,
+        scope: &AuthoringAttemptScope,
+        task_run_id: Uuid,
+        namespace: &str,
+        workload_name: &str,
+        keys: [&str; 3],
+        request_payload: &serde_json::Value,
+    ) -> Result<SandboxAttemptCheckpoint, AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        fence_authoring_scope(&mut transaction, scope).await?;
+        sqlx::query("INSERT INTO agent.authoring_sandbox_attempts
+            (run_id,track,attempt_number,execution_generation,task_run_id,namespace,workload_name,binding,state,
+             result_object_key,stderr_object_key,export_object_key,request_payload)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,'creating',$8,$9,$10,$11)
+            ON CONFLICT (run_id,track,attempt_number,execution_generation) DO NOTHING")
+            .bind(scope.run_id.as_uuid()).bind(track_name(scope.track)).bind(i64::from(scope.attempt))
+            .bind(i64::try_from(scope.execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
+            .bind(task_run_id).bind(namespace).bind(workload_name)
+            .bind(keys[0]).bind(keys[1]).bind(keys[2]).bind(request_payload)
+            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        self.load_sandbox_attempt(
+            scope.run_id,
+            scope.track,
+            scope.attempt,
+            scope.execution_generation,
+        )
+        .await?
+        .ok_or(AgentRunStoreError::StateConflict)
+    }
+
+    /// Returns the immutable dispatched runtime pin, never a current configuration fallback.
+    pub async fn sandbox_claude_version(
+        &self,
+        run_id: AgentRunId,
+    ) -> Result<String, AgentRunStoreError> {
+        sqlx::query_scalar::<_,Option<String>>("SELECT policy #>> '{binding,claudeCodeVersion}' FROM agent.agent_run_dispatches WHERE run_id=$1")
+            .bind(run_id.as_uuid()).fetch_optional(&self.pool).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?
+            .flatten().filter(|v|!v.is_empty()).ok_or(AgentRunStoreError::InvalidContract)
+    }
+
+    /// Records actual cleanup of an unsettled generation after its same Resource task is cancelled.
+    pub async fn release_creating_sandbox(
+        &self,
+        run_id: AgentRunId,
+        track: AgentTrackKind,
+        attempt: u32,
+        task: Uuid,
+        generation: u64,
+    ) -> Result<(), AgentRunStoreError> {
+        let affected=sqlx::query("UPDATE agent.authoring_sandbox_attempts SET state='released',updated_at=now()
+            WHERE task_run_id=$1 AND execution_generation=$2 AND run_id=$3 AND track=$4 AND attempt_number=$5
+              AND state='creating' AND binding IS NULL")
+            .bind(task).bind(i64::try_from(generation).map_err(|_|AgentRunStoreError::InvalidContract)?)
+            .bind(run_id.as_uuid()).bind(track_name(track)).bind(i64::from(attempt))
+            .execute(&self.pool).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?.rows_affected();
+        if affected != 1 {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        Ok(())
+    }
+
+    /// Checks the existing track lease before a new side effect, without renewing it.
+    pub async fn fence_sandbox_generation(
+        &self,
+        scope: &AuthoringAttemptScope,
+    ) -> Result<(), AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        fence_authoring_scope(&mut transaction, scope).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
+    }
+
+    /// Checks current result-read authority and returns the durable cancellation flag.
+    pub(crate) async fn fence_sandbox_read(
+        &self,
+        scope: &AuthoringAttemptScope,
+    ) -> Result<bool, AgentRunStoreError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let cancelled = check_authoring_scope(&mut transaction, scope).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(cancelled)
+    }
+
+    /// Freezes the complete terminal output before deleting its source Job.
+    pub async fn checkpoint_sandbox_receipt(
+        &self,
+        intent: &SandboxAttemptIntent,
+        store_binding: &str,
+        receipt: &serde_json::Value,
+    ) -> Result<serde_json::Value, AgentRunStoreError> {
+        if !receipt.is_object() || receipt.to_string().len() > 16_384 {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let proposed: crate::sandbox_process::FrozenSandboxReceipt =
+            serde_json::from_value(receipt.clone())
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        if !proposed.valid_metadata(store_binding) {
+            return Err(AgentRunStoreError::InvalidContract);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let locked = load_sandbox_usage_row(&mut transaction, intent).await?;
+        if locked
+            .try_get::<Option<String>, _>("diagnostic_code")
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            .is_some()
+        {
+            return Err(AgentRunStoreError::StateConflict);
+        }
+        let keys:(Option<String>,Option<String>,Option<String>)=sqlx::query_as("SELECT result_object_key,stderr_object_key,export_object_key FROM agent.authoring_sandbox_attempts WHERE task_run_id=$1 AND execution_generation=$2")
+            .bind(intent.task_run_id).bind(i64::try_from(intent.execution_generation).map_err(|_|AgentRunStoreError::InvalidContract)?)
+            .fetch_one(&mut *transaction).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
+        let keys = [
+            keys.0
+                .as_deref()
+                .ok_or(AgentRunStoreError::InvalidContract)?,
+            keys.1
+                .as_deref()
+                .ok_or(AgentRunStoreError::InvalidContract)?,
+            keys.2
+                .as_deref()
+                .ok_or(AgentRunStoreError::InvalidContract)?,
+        ];
+        if !proposed.matches_identity(intent.task_run_id, keys) {
+            return Err(AgentRunStoreError::IdentityMismatch);
+        }
+        let row:Option<serde_json::Value>=sqlx::query_scalar("SELECT terminal_receipt FROM agent.authoring_sandbox_attempts
+            WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4 AND task_run_id=$5")
+            .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt))
+            .bind(i64::try_from(intent.execution_generation).map_err(|_|AgentRunStoreError::InvalidContract)?)
+            .bind(intent.task_run_id).fetch_one(&mut *transaction).await.map_err(|_|AgentRunStoreError::PersistenceFailed)?;
+        let canonical = if let Some(existing) = row {
+            let frozen: crate::sandbox_process::FrozenSandboxReceipt =
+                serde_json::from_value(existing.clone())
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+            if !frozen.same_outputs(&proposed) {
+                return Err(AgentRunStoreError::IdentityMismatch);
+            }
+            existing
+        } else {
+            let affected = sqlx::query(
+                "UPDATE agent.authoring_sandbox_attempts SET terminal_receipt=$5,updated_at=now()
+                    WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4
+                      AND task_run_id=$6 AND diagnostic_code IS NULL
+                      AND state IN ('submitted','terminal')",
+            )
+            .bind(intent.run_id.as_uuid())
+            .bind(track_name(intent.track))
+            .bind(i64::from(intent.attempt))
+            .bind(
+                i64::try_from(intent.execution_generation)
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?,
+            )
+            .bind(receipt)
+            .bind(intent.task_run_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+            .rows_affected();
+            if affected != 1 {
+                return Err(AgentRunStoreError::StateConflict);
+            }
+            receipt.clone()
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        Ok(canonical)
     }
 
     /// Records the observed object identities once the bundle has been applied.
@@ -2173,24 +2414,37 @@ impl PostgresAgentRunStore {
         if !objects.is_array() {
             return Err(AgentRunStoreError::InvalidContract);
         }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        load_sandbox_usage_row(&mut transaction, intent).await?;
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET objects=$4, state='submitted', updated_at=now() \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 \
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$5 \
                AND state IN ('creating','submitted')",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
         .bind(objects)
-        .execute(&self.pool)
+        .bind(
+            i64::try_from(intent.execution_generation)
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        )
+        .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .rows_affected();
         if affected != 1 {
             return Err(AgentRunStoreError::StateConflict);
         }
-        Ok(())
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
     }
 
     /// Persists the terminal outcome of one submitted sandbox attempt.
@@ -2227,11 +2481,17 @@ impl PostgresAgentRunStore {
             (None, Some(code)) if !code.is_empty() => ("failed", None, None, None),
             _ => return Err(AgentRunStoreError::InvalidContract),
         };
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        load_sandbox_usage_row(&mut transaction, intent).await?;
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
-             SET state=$4, result_object_key=$5, result_sha256=$6, result_size_bytes=$7, \
+             SET state=CASE WHEN state IN ('cleanup_confirmed','released') THEN state ELSE $4 END, result_object_key=$5, result_sha256=$6, result_size_bytes=$7, \
                  exit_code=$8, diagnostic_code=$9, updated_at=now() \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND state='submitted'",
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$10 AND (state='submitted' OR (state IN ('terminal','cleanup_confirmed','released') AND diagnostic_code IS NULL AND (($9::text IS NULL AND (result_sha256 IS NULL OR (result_sha256=$6 AND exit_code=$8))) OR $9='LW_AGENT_SANDBOX_RECEIPT_INVALID')))",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
@@ -2242,14 +2502,18 @@ impl PostgresAgentRunStore {
         .bind(result_size_bytes)
         .bind(exit_code)
         .bind(diagnostic_code)
-        .execute(&self.pool)
+        .bind(i64::try_from(intent.execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .rows_affected();
         if affected != 1 {
             return Err(AgentRunStoreError::StateConflict);
         }
-        Ok(())
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AgentRunStoreError::PersistenceFailed)
     }
 
     /// Confirms that every attempt-owned object is gone; Resource may be released afterwards.
@@ -2279,12 +2543,16 @@ impl PostgresAgentRunStore {
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET state='cleanup_confirmed', updated_at=now() \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 \
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4 \
                AND state IN ('creating','submitted','terminal','failed')",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
+        .bind(
+            i64::try_from(intent.execution_generation)
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        )
         .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
@@ -2325,11 +2593,12 @@ impl PostgresAgentRunStore {
         let affected = sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET state='released', updated_at=now() \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND state='cleanup_confirmed'",
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4 AND state='cleanup_confirmed'",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
+        .bind(i64::try_from(intent.execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
@@ -2396,10 +2665,11 @@ impl PostgresAgentRunStore {
             sqlx::query(
                 "UPDATE agent.authoring_sandbox_attempts \
                  SET usage_payload=$4,usage_checkpointed_at=now(),usage_diagnostic_code=NULL,updated_at=now() \
-                 WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+                 WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$5",
             )
             .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt)).bind(payload)
-            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            .bind(i64::try_from(intent.execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         }
         transaction
             .commit()
@@ -2488,10 +2758,11 @@ impl PostgresAgentRunStore {
             sqlx::query(
                 "UPDATE agent.authoring_sandbox_attempts \
                  SET usage_observation=$4,usage_observed_at=$5,usage_diagnostic_code=NULL,updated_at=now() \
-                 WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+                 WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$6",
             )
             .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt)).bind(value).bind(measured_until.get())
-            .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            .bind(i64::try_from(intent.execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .execute(&mut *transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
             measured_until
         };
         transaction
@@ -2558,11 +2829,15 @@ impl PostgresAgentRunStore {
         sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET usage_delivered=true,usage_diagnostic_code=NULL,updated_at=now() \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
+        .bind(
+            i64::try_from(intent.execution_generation)
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        )
         .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
@@ -2611,12 +2886,16 @@ impl PostgresAgentRunStore {
         sqlx::query(
             "UPDATE agent.authoring_sandbox_attempts \
              SET usage_diagnostic_code=$4,updated_at=now() \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$5",
         )
         .bind(intent.run_id.as_uuid())
         .bind(track_name(intent.track))
         .bind(i64::from(intent.attempt))
         .bind(diagnostic)
+        .bind(
+            i64::try_from(intent.execution_generation)
+                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+        )
         .execute(&mut *transaction)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
@@ -2636,16 +2915,18 @@ impl PostgresAgentRunStore {
         run_id: AgentRunId,
         track: AgentTrackKind,
         attempt: u32,
+        execution_generation: u64,
     ) -> Result<Option<SandboxAttemptCheckpoint>, AgentRunStoreError> {
         let row = sqlx::query(
             "SELECT task_run_id, execution_generation, namespace, workload_name, binding, objects, \
-                    state, result_object_key, result_sha256, result_size_bytes, exit_code \
+                    state, diagnostic_code, result_object_key, result_sha256, result_size_bytes, exit_code, stderr_object_key, export_object_key, terminal_receipt, request_payload \
              FROM agent.authoring_sandbox_attempts \
-             WHERE run_id=$1 AND track=$2 AND attempt_number=$3",
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4",
         )
         .bind(run_id.as_uuid())
         .bind(track_name(track))
         .bind(i64::from(attempt))
+        .bind(i64::try_from(execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
@@ -2676,8 +2957,23 @@ impl PostgresAgentRunStore {
             state: row
                 .try_get("state")
                 .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            diagnostic_code: row
+                .try_get("diagnostic_code")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
             result_object_key: row
                 .try_get("result_object_key")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            stderr_object_key: row
+                .try_get("stderr_object_key")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            export_object_key: row
+                .try_get("export_object_key")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            terminal_receipt: row
+                .try_get("terminal_receipt")
+                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+            request_payload: row
+                .try_get("request_payload")
                 .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
             result_sha256: row
                 .try_get("result_sha256")
@@ -2695,18 +2991,67 @@ impl PostgresAgentRunStore {
     }
 }
 
+async fn fence_authoring_scope(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &AuthoringAttemptScope,
+) -> Result<(), AgentRunStoreError> {
+    if check_authoring_scope(transaction, scope).await? {
+        return Err(AgentRunStoreError::LeaseLost);
+    }
+    Ok(())
+}
+
+async fn check_authoring_scope(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &AuthoringAttemptScope,
+) -> Result<bool, AgentRunStoreError> {
+    let row=sqlx::query("SELECT project_id,cancellation_requested_at FROM agent.agent_runs WHERE run_id=$1 FOR UPDATE")
+        .bind(scope.run_id.as_uuid()).fetch_optional(&mut **transaction).await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?.ok_or(AgentRunStoreError::LeaseLost)?;
+    if row
+        .try_get::<uuid::Uuid, _>("project_id")
+        .map_err(|_| AgentRunStoreError::InvalidContract)?
+        != scope.project_id.as_uuid()
+    {
+        return Err(AgentRunStoreError::LeaseLost);
+    }
+    let current: Option<bool> = sqlx::query_scalar(
+        "SELECT attempt_started_at=$6 AND lease_expires_at>clock_timestamp()
+         FROM agent.agent_track_work_items WHERE run_id=$1 AND track=$2 AND attempt_number=$3
+         AND worker_id=$4 AND lease_token=$5 AND state='running' FOR UPDATE",
+    )
+    .bind(scope.run_id.as_uuid())
+    .bind(track_name(scope.track))
+    .bind(i64::from(scope.attempt))
+    .bind(&scope.worker_id)
+    .bind(scope.lease_token)
+    .bind(scope.started_at.get())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+    if current != Some(true) || scope.execution_generation == 0 {
+        return Err(AgentRunStoreError::LeaseLost);
+    }
+    Ok(row
+        .try_get::<Option<time::OffsetDateTime>, _>("cancellation_requested_at")
+        .map_err(|_| AgentRunStoreError::InvalidContract)?
+        .is_some())
+}
+
 async fn load_sandbox_usage_row(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     intent: &SandboxAttemptIntent,
 ) -> Result<sqlx::postgres::PgRow, AgentRunStoreError> {
+    validate_sandbox_binding(intent)?;
     let row = sqlx::query(
-        "SELECT task_run_id,execution_generation,namespace,workload_name,binding,state,usage_payload,usage_delivered,usage_diagnostic_code,usage_observation,usage_observed_at \
+        "SELECT task_run_id,execution_generation,namespace,workload_name,binding,state,diagnostic_code,usage_payload,usage_delivered,usage_diagnostic_code,usage_observation,usage_observed_at \
          FROM agent.authoring_sandbox_attempts \
-         WHERE run_id=$1 AND track=$2 AND attempt_number=$3 FOR UPDATE",
+         WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4 FOR UPDATE",
     )
     .bind(intent.run_id.as_uuid()).bind(track_name(intent.track)).bind(i64::from(intent.attempt))
-    .fetch_optional(&mut **transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?
-    .ok_or(AgentRunStoreError::StateConflict)?;
+    .bind(i64::try_from(intent.execution_generation).map_err(|_| AgentRunStoreError::InvalidContract)?)
+        .fetch_optional(&mut **transaction).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?
+    .ok_or(AgentRunStoreError::IdentityMismatch)?;
     let generation = i64::try_from(intent.execution_generation)
         .map_err(|_| AgentRunStoreError::InvalidContract)?;
     if row
@@ -2733,6 +3078,21 @@ async fn load_sandbox_usage_row(
         return Err(AgentRunStoreError::IdentityMismatch);
     }
     Ok(row)
+}
+
+fn validate_sandbox_binding(intent: &SandboxAttemptIntent) -> Result<(), AgentRunStoreError> {
+    let binding: contracts::execution::TaskExecutionBinding =
+        serde_json::from_value(intent.binding.clone())
+            .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    if binding.validate().is_err()
+        || binding.task_run_id.as_uuid() != intent.task_run_id
+        || binding.execution_generation != intent.execution_generation
+        || binding.namespace != intent.namespace
+        || binding.workload_name != intent.workload_name
+    {
+        return Err(AgentRunStoreError::IdentityMismatch);
+    }
+    Ok(())
 }
 
 /// Coordinates reservation, exactly-one execution ownership and terminal persistence.
@@ -3011,6 +3371,10 @@ impl AgentRunService {
             actor_id,
             track: lease.track,
             attempt: lease.attempt,
+            execution_generation: 1,
+            started_at: lease.started_at,
+            worker_id: lease.worker_id.clone(),
+            lease_token: lease.lease_token,
             trace_id: trace_id.to_owned(),
             claude_code_version,
         }

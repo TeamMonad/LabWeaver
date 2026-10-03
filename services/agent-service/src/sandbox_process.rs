@@ -22,9 +22,9 @@ use contracts::execution::{
 };
 use contracts::http::{RecordResourceUsageRequest, TaskResourceStatus};
 use contracts::resource::WorkloadResources;
-use contracts::{TaskRunId, UtcTimestamp};
+use contracts::{ArtifactRef, TaskRunId, UtcTimestamp};
 use persistence_sqlx::Sha256Digest;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use task_execution::admission::{AdmittedExecution, cleanup_unknown};
 use task_execution::kubernetes::{
     KubernetesApiClient, KubernetesApiConfiguration, KubernetesJobBundle, KubernetesJobIdentity,
@@ -58,7 +58,6 @@ const MATERIAL_MEDIA_TYPE: &str = "application/json";
 const RESULT_MEDIA_TYPE: &str = "application/json";
 const STDERR_MEDIA_TYPE: &str = "text/plain";
 const EXPORT_MEDIA_TYPE: &str = contracts::http::PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE;
-const SANDBOX_DEADLINE_SLACK_SECONDS: u64 = 300;
 /// Bounded retries for one usage delivery after workload cleanup and Resource release.
 const USAGE_DELIVERY_ATTEMPTS: u32 = 3;
 /// Delay between two usage delivery attempts.
@@ -173,7 +172,13 @@ impl SandboxAuthoringProcess {
     /// startup failures remain visible to the process supervisor.
     #[must_use = "the cleanup worker handle must be retained by the service supervisor"]
     pub fn spawn_cleanup_worker(&self) -> Option<JoinHandle<()>> {
-        sandbox_cleanup::spawn(self.api.clone(), self.resources.clone(), self.store.clone())
+        sandbox_cleanup::spawn(
+            self.api.clone(),
+            self.resources.clone(),
+            self.store.clone(),
+            self.objects.clone(),
+            self.configuration.clone(),
+        )
     }
 
     async fn execute_authoring(
@@ -182,23 +187,37 @@ impl SandboxAuthoringProcess {
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
-        if let Some(checkpoint) = self
+        let existing = self
             .store
-            .load_sandbox_attempt(scope.run_id, scope.track, scope.attempt)
+            .load_sandbox_attempt(
+                scope.run_id,
+                scope.track,
+                scope.attempt,
+                scope.execution_generation,
+            )
             .await
-            .map_err(|error| {
-                tracing::error!(
-                    event = "agent.authoring.sandbox.stage_failed",
-                    failure_stage = "sandbox.checkpoint",
-                    error_kind = ?error,
-                    "authoring attempt could not read its durable checkpoint",
-                );
-                ClaudeCodeProcessError::Io
-            })?
-        {
-            return self.finish_recovered_attempt(scope, &checkpoint).await;
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if let Some(checkpoint) = existing {
+            if checkpoint.state != "creating" {
+                return self
+                    .finish_recovered_attempt(scope, &checkpoint, command.deadline(), cancellation)
+                    .await;
+            }
+            return Box::pin(self.execute_new_attempt(
+                scope,
+                command,
+                cancellation,
+                Some(checkpoint),
+            ))
+            .await;
         }
-        self.execute_new_attempt(scope, command, cancellation).await
+        if cancellation.is_cancelled() {
+            return Err(ClaudeCodeProcessError::Cancelled);
+        }
+        if tokio::time::Instant::now() >= command.deadline() {
+            return Err(ClaudeCodeProcessError::TimedOut);
+        }
+        Box::pin(self.execute_new_attempt(scope, command, cancellation, None)).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -207,35 +226,77 @@ impl SandboxAuthoringProcess {
         scope: &AuthoringAttemptScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
+        checkpoint: Option<SandboxAttemptCheckpoint>,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
-        let task_run_id = TaskRunId::new();
+        let task_run_id = match &checkpoint {
+            Some(saved) => TaskRunId::from_str(&saved.task_run_id.to_string())
+                .map_err(|_| ClaudeCodeProcessError::Io)?,
+            None => TaskRunId::new(),
+        };
         let workload_name = workload_name(task_run_id.as_uuid());
         let request_key = request_key(scope, task_run_id);
-        let lifecycle = TaskResourceLifecycle::new(
-            self.resources.clone(),
-            task_run_id,
-            scope.project_id,
-            scope.course_id,
-            scope.actor_id,
+        let requested = SandboxResourceRequest {
+            project_id: scope.project_id,
+            course_id: scope.course_id,
+            actor_id: scope.actor_id,
             request_key,
-            WorkloadResources {
+            trace_id: scope.trace_id.clone(),
+            resources: WorkloadResources {
                 cpu_millicores: self.configuration.sandbox.cpu_millicores,
                 memory_bytes: self.configuration.sandbox.memory_bytes,
                 storage_bytes: self.configuration.sandbox.workspace_bytes,
                 gpu: None,
             },
-            self.configuration.sandbox.wall_time_seconds,
-        )
-        .map_err(|error| {
-            tracing::error!(
-                event = "agent.authoring.sandbox.stage_failed",
-                failure_stage = "sandbox.lifecycle",
-                error_kind = ?error,
-                task_run_id = %task_run_id.as_uuid(),
-                "authoring attempt could not build its Resource lifecycle",
-            );
-            ClaudeCodeProcessError::Io
-        })?;
+            duration_seconds: self.configuration.sandbox.wall_time_seconds,
+        };
+        let result_key = object_key(
+            &self.configuration.object_prefix,
+            task_run_id,
+            "result.json",
+        );
+        let stderr_key = object_key(&self.configuration.object_prefix, task_run_id, "stderr.log");
+        let export_key = object_key(&self.configuration.object_prefix, task_run_id, "export.tar");
+        let saved = match checkpoint {
+            Some(saved) => saved,
+            None => self
+                .store
+                .reserve_sandbox_generation(
+                    scope,
+                    task_run_id.as_uuid(),
+                    &self.configuration.sandbox.namespace,
+                    &workload_name,
+                    [&result_key, &stderr_key, &export_key],
+                    &serde_json::to_value(&requested).map_err(|_| ClaudeCodeProcessError::Io)?,
+                )
+                .await
+                .map_err(|_| ClaudeCodeProcessError::Io)?,
+        };
+        if saved.task_run_id != task_run_id.as_uuid()
+            || saved.namespace != self.configuration.sandbox.namespace
+            || saved.workload_name != workload_name
+            || saved.execution_generation != scope.execution_generation
+            || saved.result_object_key.as_deref() != Some(result_key.as_str())
+            || saved.stderr_object_key.as_deref() != Some(stderr_key.as_str())
+            || saved.export_object_key.as_deref() != Some(export_key.as_str())
+        {
+            return Err(ClaudeCodeProcessError::Io);
+        }
+        let request: SandboxResourceRequest =
+            serde_json::from_value(saved.request_payload.ok_or(ClaudeCodeProcessError::Io)?)
+                .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if request.project_id != scope.project_id
+            || request.course_id != scope.course_id
+            || request.actor_id != scope.actor_id
+            || request.request_key != requested.request_key
+        {
+            return Err(ClaudeCodeProcessError::Io);
+        }
+        let lifecycle = request.lifecycle(&self.resources, task_run_id)?;
+        self.store
+            .fence_sandbox_generation(scope)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        let deadline = command.deadline();
         let (cancel_token, _bridge) = bridge_cancellation(&cancellation);
         // The reservation has to exist before it can be claimed: the claim path reads the
         // authoritative request projection and never invents one, so an attempt that skipped this
@@ -252,14 +313,18 @@ impl SandboxAuthoringProcess {
             );
             map_task_resource(&error)
         })?;
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
             lifecycle
                 .cancel("authoring attempt cancelled before resource claim")
                 .await
                 .map_err(|error| map_task_resource(&error))?;
-            return Err(ClaudeCodeProcessError::Cancelled);
+            return Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            });
         }
-        let approval_timeout = Duration::from_secs(self.configuration.sandbox.wall_time_seconds);
+        let approval_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
         let approval = lifecycle
             .claim_after_approval(OBSERVE_POLL, approval_timeout, &cancel_token)
             .await
@@ -268,9 +333,13 @@ impl SandboxAuthoringProcess {
             .acknowledge(&approval, &self.configuration.sandbox.namespace)
             .await
             .map_err(|error| map_task_resource(&error))?;
-        let admitted =
-            AdmittedExecution::admit(&status, 1, workload_name.clone(), scope.trace_id.clone())
-                .map_err(|_| ClaudeCodeProcessError::Io)?;
+        let admitted = AdmittedExecution::admit(
+            &status,
+            scope.execution_generation,
+            workload_name.clone(),
+            scope.trace_id.clone(),
+        )
+        .map_err(|_| ClaudeCodeProcessError::Io)?;
         let binding = admitted.binding().clone();
         let ownership = attempt_ownership(scope, task_run_id);
         let intent = SandboxAttemptIntent {
@@ -278,7 +347,7 @@ impl SandboxAuthoringProcess {
             track: scope.track,
             attempt: scope.attempt,
             task_run_id: task_run_id.as_uuid(),
-            execution_generation: 1,
+            execution_generation: scope.execution_generation,
             namespace: self.configuration.sandbox.namespace.clone(),
             workload_name: workload_name.clone(),
             binding: serde_json::to_value(&binding).map_err(|_| ClaudeCodeProcessError::Io)?,
@@ -287,6 +356,21 @@ impl SandboxAuthoringProcess {
             .begin_sandbox_attempt(&intent)
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
+        self.store
+            .fence_sandbox_generation(scope)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            lifecycle
+                .cancel("authoring deadline or cancellation before submission")
+                .await
+                .map_err(|e| map_task_resource(&e))?;
+            return Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            });
+        }
 
         let now = authority_now()?;
         let material_key = object_key(
@@ -310,11 +394,7 @@ impl SandboxAuthoringProcess {
             )
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
-        let result_key = object_key(
-            &self.configuration.object_prefix,
-            task_run_id,
-            "result.json",
-        );
+
         let result_upload = self
             .objects
             .presign_upload(
@@ -325,7 +405,7 @@ impl SandboxAuthoringProcess {
             )
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
-        let export_key = object_key(&self.configuration.object_prefix, task_run_id, "export.tar");
+
         let export_upload = if self.configuration.sandbox.buildkit_image.is_some() {
             Some(
                 self.objects
@@ -341,7 +421,7 @@ impl SandboxAuthoringProcess {
         } else {
             None
         };
-        let stderr_key = object_key(&self.configuration.object_prefix, task_run_id, "stderr.log");
+
         let stderr_upload = self
             .objects
             .presign_upload(
@@ -353,7 +433,23 @@ impl SandboxAuthoringProcess {
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
 
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() || cancellation.is_cancelled() {
+            lifecycle
+                .cancel("authoring deadline before Job start")
+                .await
+                .map_err(|e| map_task_resource(&e))?;
+            return Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            });
+        }
         let spec = SandboxAttemptSpec {
+            timeout_seconds: remaining
+                .as_secs()
+                .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                .min(self.configuration.sandbox.wall_time_seconds),
             task_run_id: task_run_id.as_uuid(),
             ownership,
             trace_id: scope.trace_id.clone(),
@@ -381,6 +477,21 @@ impl SandboxAuthoringProcess {
         let sandbox_bundle = build_sandbox_bundle(&self.configuration.sandbox, &spec)
             .map_err(|error| stage_failure("sandbox.bundle", &error))?;
         let bundle = sandbox_bundle.bundle;
+        self.store
+            .fence_sandbox_generation(scope)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            lifecycle
+                .cancel("authoring deadline before Job apply")
+                .await
+                .map_err(|e| map_task_resource(&e))?;
+            return Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            });
+        }
         self.api
             .start(&bundle)
             .await
@@ -400,10 +511,6 @@ impl SandboxAuthoringProcess {
             .map_err(|error| stage_failure("sandbox.record", &error))?;
 
         let expected_uid = job_uid(&refs);
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_secs(
-                self.configuration.sandbox.wall_time_seconds + SANDBOX_DEADLINE_SLACK_SECONDS,
-            );
         loop {
             if cancellation.is_cancelled() {
                 let _ = self
@@ -434,20 +541,32 @@ impl SandboxAuthoringProcess {
                             self.configuration.sandbox.workspace_bytes,
                         )
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
-                    let output = self
-                        .assemble_output(
-                            &receipt,
-                            result_key.as_str(),
-                            stderr_key.as_str(),
-                            export_key.as_str(),
+                    let frozen = freeze_terminal_receipt(
+                        self.objects.as_ref(),
+                        task_run_id.as_uuid(),
+                        &receipt,
+                        [&result_key, &stderr_key, &export_key],
+                    )
+                    .await?;
+                    let canonical = self
+                        .store
+                        .checkpoint_sandbox_receipt(
+                            &intent,
+                            self.objects.binding(),
+                            &serde_json::to_value(&frozen)
+                                .map_err(|_| ClaudeCodeProcessError::Io)?,
                         )
-                        .await?;
+                        .await
+                        .map_err(|_| ClaudeCodeProcessError::Io)?;
+                    let frozen: FrozenSandboxReceipt = serde_json::from_value(canonical)
+                        .map_err(|_| ClaudeCodeProcessError::Io)?;
+                    let output = frozen.assemble(self.objects.as_ref(), false).await?;
                     self.store
                         .complete_sandbox_attempt(
                             &intent,
                             Some((
-                                result_key.as_str(),
-                                receipt.result_sha256.as_str(),
+                                &result_key,
+                                &receipt.result_sha256,
                                 receipt.result_size_bytes,
                             )),
                             receipt.exit_code,
@@ -508,13 +627,25 @@ impl SandboxAuthoringProcess {
         &self,
         scope: &AuthoringAttemptScope,
         checkpoint: &SandboxAttemptCheckpoint,
+        deadline: tokio::time::Instant,
+        cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
         let task_run_id = TaskRunId::from_str(&checkpoint.task_run_id.to_string())
             .map_err(|_| ClaudeCodeProcessError::Io)?;
-        let binding: TaskExecutionBinding = serde_json::from_value(checkpoint.binding.clone())
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
+        if checkpoint.diagnostic_code.is_some() {
+            return Err(ClaudeCodeProcessError::Io);
+        }
+        let binding: TaskExecutionBinding = serde_json::from_value(
+            checkpoint
+                .binding
+                .clone()
+                .ok_or(ClaudeCodeProcessError::Io)?,
+        )
+        .map_err(|_| ClaudeCodeProcessError::Io)?;
         if binding.validate().is_err()
             || binding.task_run_id != task_run_id
+            || binding.execution_generation != checkpoint.execution_generation
+            || checkpoint.execution_generation != scope.execution_generation
             || binding.namespace != checkpoint.namespace
             || binding.workload_name != checkpoint.workload_name
         {
@@ -536,12 +667,39 @@ impl SandboxAuthoringProcess {
             execution_generation: checkpoint.execution_generation,
             namespace: checkpoint.namespace.clone(),
             workload_name: checkpoint.workload_name.clone(),
-            binding: checkpoint.binding.clone(),
+            binding: checkpoint
+                .binding
+                .clone()
+                .ok_or(ClaudeCodeProcessError::Io)?,
         };
+        let output = self
+            .recover_output(
+                scope,
+                checkpoint,
+                &intent,
+                &identity,
+                &objects,
+                deadline,
+                cancellation.clone(),
+            )
+            .await?;
+        if self
+            .store
+            .fence_sandbox_read(scope)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?
+        {
+            cancellation.cancel();
+        }
+        let cleanup = async {
         let persisted_usage = load_usage_checkpoint(&self.store, &intent)
             .await
             .map_err(|_| ClaudeCodeProcessError::Io)?;
-        let observed = match self.api.observe(&identity, None).await {
+        let observed = match self
+            .api
+            .observe(&identity, job_uid(&objects).as_deref())
+            .await
+        {
             Ok(
                 KubernetesJobObservation::Completed { observation, .. }
                 | KubernetesJobObservation::Failed { observation, .. },
@@ -554,7 +712,7 @@ impl SandboxAuthoringProcess {
                     task_run_id = %task_run_id.as_uuid(),
                     "recovered authoring attempt is still running; cleanup will wait for terminal state",
                 );
-                return Err(ClaudeCodeProcessError::Io);
+                return Ok(());
             }
             Err(error) => {
                 tracing::warn!(
@@ -564,7 +722,7 @@ impl SandboxAuthoringProcess {
                     error_kind = error.error_kind(),
                     "Kubernetes could not confirm an ended recovered attempt",
                 );
-                return Err(ClaudeCodeProcessError::Io);
+                return Ok(());
             }
         };
         let usage_observation = match self
@@ -623,7 +781,190 @@ impl SandboxAuthoringProcess {
                 self.deliver_checkpoint_usage(&intent, usage).await;
             }
         }
-        Err(ClaudeCodeProcessError::Io)
+        Ok::<(),ClaudeCodeProcessError>(())
+        }.await;
+        if let Err(error) = cleanup {
+            tracing::warn!(event="agent.authoring.sandbox.recovery_deferred",failure_stage="sandbox.cleanup",task_run_id=%task_run_id.as_uuid(),error_kind=?error,"validated terminal output retained while cleanup or metering persistence retries");
+        }
+        if self
+            .store
+            .fence_sandbox_read(scope)
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?
+        {
+            cancellation.cancel();
+        }
+        // A cancelled terminal envelope is retained for the runtime's truthful usage audit;
+        // the runtime and locked completion fence refuse its candidate.
+        Ok(output)
+    }
+
+    // Keep exact generation reads, immutable receipt verification and terminal observation together.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn recover_output(
+        &self,
+        scope: &AuthoringAttemptScope,
+        checkpoint: &SandboxAttemptCheckpoint,
+        intent: &SandboxAttemptIntent,
+        identity: &KubernetesJobIdentity,
+        objects: &[ExecutionObjectRef],
+        deadline: tokio::time::Instant,
+        cancellation: RunCancellation,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        if checkpoint.execution_generation != scope.execution_generation {
+            return Err(ClaudeCodeProcessError::Io);
+        }
+        loop {
+            let checkpoint = self
+                .store
+                .load_sandbox_attempt(
+                    scope.run_id,
+                    scope.track,
+                    scope.attempt,
+                    scope.execution_generation,
+                )
+                .await
+                .map_err(|_| ClaudeCodeProcessError::Io)?
+                .ok_or(ClaudeCodeProcessError::Io)?;
+            if checkpoint.diagnostic_code.is_some() {
+                return Err(ClaudeCodeProcessError::Io);
+            }
+            if let Some(value) = &checkpoint.terminal_receipt {
+                let frozen: FrozenSandboxReceipt = serde_json::from_value(value.clone())
+                    .map_err(|_| ClaudeCodeProcessError::Io)?;
+                frozen
+                    .receipt
+                    .validate(
+                        scope,
+                        self.configuration.result_max_bytes,
+                        self.configuration.stderr_max_bytes,
+                        self.configuration.sandbox.workspace_bytes,
+                    )
+                    .map_err(|_| ClaudeCodeProcessError::Io)?;
+                let keys = [
+                    checkpoint
+                        .result_object_key
+                        .as_deref()
+                        .ok_or(ClaudeCodeProcessError::Io)?,
+                    checkpoint
+                        .stderr_object_key
+                        .as_deref()
+                        .ok_or(ClaudeCodeProcessError::Io)?,
+                    checkpoint
+                        .export_object_key
+                        .as_deref()
+                        .ok_or(ClaudeCodeProcessError::Io)?,
+                ];
+                if !frozen.matches_identity(checkpoint.task_run_id, keys) {
+                    return Err(ClaudeCodeProcessError::Io);
+                }
+                for (key, name) in keys.iter().zip(["result.json", "stderr.log", "export.tar"]) {
+                    if *key
+                        != object_key(
+                            &self.configuration.object_prefix,
+                            TaskRunId::from_str(&checkpoint.task_run_id.to_string())
+                                .map_err(|_| ClaudeCodeProcessError::Io)?,
+                            name,
+                        )
+                    {
+                        return Err(ClaudeCodeProcessError::Io);
+                    }
+                }
+                return frozen
+                    .assemble(self.objects.as_ref(), true)
+                    .await
+                    .map_err(Into::into);
+            }
+            match self
+                .api
+                .observe(identity, job_uid(objects).as_deref())
+                .await
+                .map_err(|_| ClaudeCodeProcessError::Io)?
+            {
+                KubernetesJobObservation::Completed { message, .. } => {
+                    let receipt =
+                        parse_receipt(&message).map_err(|_| ClaudeCodeProcessError::Io)?;
+                    receipt
+                        .validate(
+                            scope,
+                            self.configuration.result_max_bytes,
+                            self.configuration.stderr_max_bytes,
+                            self.configuration.sandbox.workspace_bytes,
+                        )
+                        .map_err(|_| ClaudeCodeProcessError::Io)?;
+                    let keys = [
+                        checkpoint
+                            .result_object_key
+                            .as_deref()
+                            .ok_or(ClaudeCodeProcessError::Io)?,
+                        checkpoint
+                            .stderr_object_key
+                            .as_deref()
+                            .ok_or(ClaudeCodeProcessError::Io)?,
+                        checkpoint
+                            .export_object_key
+                            .as_deref()
+                            .ok_or(ClaudeCodeProcessError::Io)?,
+                    ];
+                    let frozen = freeze_terminal_receipt(
+                        self.objects.as_ref(),
+                        checkpoint.task_run_id,
+                        &receipt,
+                        keys,
+                    )
+                    .await?;
+                    let value = self
+                        .store
+                        .checkpoint_sandbox_receipt(
+                            intent,
+                            self.objects.binding(),
+                            &serde_json::to_value(frozen)
+                                .map_err(|_| ClaudeCodeProcessError::Io)?,
+                        )
+                        .await
+                        .map_err(|_| ClaudeCodeProcessError::Io)?;
+                    let canonical: FrozenSandboxReceipt =
+                        serde_json::from_value(value).map_err(|_| ClaudeCodeProcessError::Io)?;
+                    return canonical
+                        .assemble(self.objects.as_ref(), false)
+                        .await
+                        .map_err(Into::into);
+                }
+                KubernetesJobObservation::Running
+                    if !cancellation.is_cancelled() && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(
+                        OBSERVE_POLL
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                }
+                KubernetesJobObservation::Running if cancellation.is_cancelled() => {
+                    return Err(ClaudeCodeProcessError::Cancelled);
+                }
+                KubernetesJobObservation::Running if tokio::time::Instant::now() >= deadline => {
+                    return Err(ClaudeCodeProcessError::TimedOut);
+                }
+                KubernetesJobObservation::Missing => {
+                    let latest = self
+                        .store
+                        .load_sandbox_attempt(
+                            scope.run_id,
+                            scope.track,
+                            scope.attempt,
+                            scope.execution_generation,
+                        )
+                        .await
+                        .map_err(|_| ClaudeCodeProcessError::Io)?
+                        .ok_or(ClaudeCodeProcessError::Io)?;
+                    if latest.terminal_receipt.is_some() {
+                        continue;
+                    }
+                    return Err(ClaudeCodeProcessError::Io);
+                }
+                _ => return Err(ClaudeCodeProcessError::Io),
+            }
+        }
     }
 
     fn attempt_identity(
@@ -644,59 +985,6 @@ impl SandboxAuthoringProcess {
             ownership,
             trace_id: trace_id.to_owned(),
         }
-    }
-
-    async fn assemble_output(
-        &self,
-        receipt: &SandboxReceipt,
-        result_key: &str,
-        stderr_key: &str,
-        export_key: &str,
-    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
-        let result = if receipt.result_size_bytes == 0 {
-            Vec::new()
-        } else {
-            let frozen = self
-                .objects
-                .freeze_current(result_key, receipt.result_size_bytes, RESULT_MEDIA_TYPE)
-                .await
-                .map_err(|_| ClaudeCodeProcessError::Io)?;
-            if Sha256Digest::of_bytes(&frozen.bytes).to_string() != receipt.result_sha256 {
-                return Err(ClaudeCodeProcessError::Io);
-            }
-            frozen.bytes
-        };
-        let stderr = if receipt.stderr_size_bytes == 0 {
-            Vec::new()
-        } else {
-            let frozen = self
-                .objects
-                .freeze_current(stderr_key, receipt.stderr_size_bytes, STDERR_MEDIA_TYPE)
-                .await
-                .map_err(|_| ClaudeCodeProcessError::Io)?;
-            if Sha256Digest::of_bytes(&frozen.bytes).to_string() != receipt.stderr_sha256 {
-                return Err(ClaudeCodeProcessError::Io);
-            }
-            frozen.bytes
-        };
-        let output = ClaudeCodeProcessOutput::from_raw(Some(receipt.exit_code), result, &stderr);
-        if receipt.export_size_bytes == 0 {
-            return Ok(output);
-        }
-        let frozen = self
-            .objects
-            .freeze_current(export_key, receipt.export_size_bytes, EXPORT_MEDIA_TYPE)
-            .await
-            .map_err(|_| ClaudeCodeProcessError::Io)?;
-        if Sha256Digest::of_bytes(&frozen.bytes).to_string() != receipt.export_sha256 {
-            return Err(ClaudeCodeProcessError::Io);
-        }
-        Ok(
-            output.with_image_export(contracts::supply_chain::ExportedOciImage {
-                layout: frozen.reference,
-                layout_object_key: export_key.to_owned(),
-            }),
-        )
     }
 
     async fn deliver_checkpoint_usage(
@@ -1167,7 +1455,7 @@ fn read_object_store_ca(path: &Path) -> Result<String, SandboxBundleError> {
 }
 
 /// Terminal receipt written by the sandbox attempt.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxReceipt {
     pub result_size_bytes: u64,
@@ -1177,10 +1465,8 @@ pub struct SandboxReceipt {
     pub exit_code: i32,
     pub claude_version: String,
     /// Zero when the attempt exported no OCI layout.
-    #[serde(default)]
     pub export_size_bytes: u64,
-    /// Empty when the attempt exported no OCI layout.
-    #[serde(default)]
+    /// SHA256 of the empty stream when the attempt exported no OCI layout.
     pub export_sha256: String,
 }
 
@@ -1192,17 +1478,273 @@ impl SandboxReceipt {
         stderr_max_bytes: u64,
         export_max_bytes: u64,
     ) -> Result<(), SandboxReceiptError> {
+        self.validate_version(
+            &scope.claude_code_version,
+            result_max_bytes,
+            stderr_max_bytes,
+            export_max_bytes,
+        )
+    }
+    pub(super) fn validate_version(
+        &self,
+        version: &str,
+        result_max_bytes: u64,
+        stderr_max_bytes: u64,
+        export_max_bytes: u64,
+    ) -> Result<(), SandboxReceiptError> {
         if self.result_size_bytes > result_max_bytes
             || self.stderr_size_bytes > stderr_max_bytes
             || self.export_size_bytes > export_max_bytes
-            || (self.result_size_bytes > 0 && !valid_sha256(&self.result_sha256))
-            || (self.stderr_size_bytes > 0 && !valid_sha256(&self.stderr_sha256))
-            || (self.export_size_bytes > 0 && !valid_sha256(&self.export_sha256))
-            || self.claude_version != scope.claude_code_version
+            || !valid_receipt_sha(self.result_size_bytes, &self.result_sha256)
+            || !valid_receipt_sha(self.stderr_size_bytes, &self.stderr_sha256)
+            || !valid_receipt_sha(self.export_size_bytes, &self.export_sha256)
+            || self.claude_version != version
         {
             return Err(SandboxReceiptError::Invalid);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum TerminalReceiptError {
+    Invalid,
+    Unavailable,
+}
+
+fn terminal_object_error(error: &artifact_store::ObjectStoreError) -> TerminalReceiptError {
+    match error {
+        artifact_store::ObjectStoreError::ObjectIdentityInvalid
+        | artifact_store::ObjectStoreError::ObjectIdentityMismatch
+        | artifact_store::ObjectStoreError::ObjectTooLarge
+        | artifact_store::ObjectStoreError::ObjectNotFound => TerminalReceiptError::Invalid,
+        _ => TerminalReceiptError::Unavailable,
+    }
+}
+impl From<TerminalReceiptError> for ClaudeCodeProcessError {
+    fn from(_: TerminalReceiptError) -> Self {
+        Self::Io
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FrozenSandboxReceipt {
+    task_run_id: uuid::Uuid,
+    receipt: SandboxReceipt,
+    keys: [String; 3],
+    references: [Option<ArtifactRef>; 3],
+}
+
+impl FrozenSandboxReceipt {
+    pub(crate) fn matches_identity(&self, task: uuid::Uuid, keys: [&str; 3]) -> bool {
+        self.task_run_id == task && self.keys.iter().zip(keys).all(|(a, b)| a == b)
+    }
+    pub(crate) fn valid_metadata(&self, binding: &str) -> bool {
+        let sizes = [
+            self.receipt.result_size_bytes,
+            self.receipt.stderr_size_bytes,
+            self.receipt.export_size_bytes,
+        ];
+        let media = [RESULT_MEDIA_TYPE, STDERR_MEDIA_TYPE, EXPORT_MEDIA_TYPE];
+        let shas = [
+            &self.receipt.result_sha256,
+            &self.receipt.stderr_sha256,
+            &self.receipt.export_sha256,
+        ];
+        (0..3).all(|i| match (sizes[i], &self.references[i]) {
+            (0, None) => valid_receipt_sha(0, shas[i]),
+            (size, Some(reference)) => {
+                size > 0
+                    && valid_sha256(shas[i])
+                    && reference.size_bytes == size
+                    && reference.store_binding == binding
+                    && !reference.object_version.is_empty()
+                    && reference.media_type == media[i]
+            }
+            _ => false,
+        })
+    }
+    pub(crate) fn same_outputs(&self, other: &Self) -> bool {
+        self.task_run_id == other.task_run_id
+            && self.receipt == other.receipt
+            && self.keys == other.keys
+            && self
+                .references
+                .iter()
+                .zip(&other.references)
+                .all(|(a, b)| match (a, b) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        a.store_binding == b.store_binding
+                            && a.object_version == b.object_version
+                            && a.size_bytes == b.size_bytes
+                            && a.media_type == b.media_type
+                    }
+                    _ => false,
+                })
+    }
+    async fn assemble(
+        &self,
+        objects: &dyn ImmutableObjectStore,
+        verify_export: bool,
+    ) -> Result<ClaudeCodeProcessOutput, TerminalReceiptError> {
+        let sizes = [
+            self.receipt.result_size_bytes,
+            self.receipt.stderr_size_bytes,
+            self.receipt.export_size_bytes,
+        ];
+        let shas = [
+            &self.receipt.result_sha256,
+            &self.receipt.stderr_sha256,
+            &self.receipt.export_sha256,
+        ];
+        let media = [RESULT_MEDIA_TYPE, STDERR_MEDIA_TYPE, EXPORT_MEDIA_TYPE];
+        for index in 0..3 {
+            match (sizes[index], &self.references[index]) {
+                (0, None) => {}
+                (size, Some(reference))
+                    if size > 0
+                        && reference.size_bytes == size
+                        && reference.store_binding == objects.binding()
+                        && !reference.object_version.is_empty()
+                        && reference.media_type == media[index] => {}
+                _ => return Err(TerminalReceiptError::Invalid),
+            }
+        }
+        let mut bytes = [Vec::new(), Vec::new()];
+        for index in 0..2 {
+            if sizes[index] == 0 {
+                if self.references[index].is_some() {
+                    return Err(TerminalReceiptError::Invalid);
+                }
+                continue;
+            }
+            let reference = self.references[index]
+                .as_ref()
+                .ok_or(TerminalReceiptError::Invalid)?;
+            if reference.size_bytes != sizes[index] {
+                return Err(TerminalReceiptError::Invalid);
+            }
+            let object = objects
+                .read_verified(&self.keys[index], reference)
+                .await
+                .map_err(|error| terminal_object_error(&error))?;
+            if Sha256Digest::of_bytes(&object.bytes).to_string() != *shas[index] {
+                return Err(TerminalReceiptError::Invalid);
+            }
+            bytes[index] = object.bytes;
+        }
+        let mut output = ClaudeCodeProcessOutput::from_raw(
+            Some(self.receipt.exit_code),
+            std::mem::take(&mut bytes[0]),
+            &bytes[1],
+        );
+        if self.receipt.export_size_bytes == 0 && self.references[2].is_some() {
+            return Err(TerminalReceiptError::Invalid);
+        }
+        if self.receipt.export_size_bytes > 0 {
+            let reference = self.references[2]
+                .as_ref()
+                .ok_or(TerminalReceiptError::Invalid)?;
+            if reference.size_bytes != self.receipt.export_size_bytes {
+                return Err(TerminalReceiptError::Invalid);
+            }
+            if verify_export {
+                let file = objects
+                    .read_verified_file(&self.keys[2], reference)
+                    .await
+                    .map_err(|error| terminal_object_error(&error))?;
+                if file.sha256() != self.receipt.export_sha256 {
+                    return Err(TerminalReceiptError::Invalid);
+                }
+            }
+            output = output.with_image_export(contracts::supply_chain::ExportedOciImage {
+                layout: reference.clone(),
+                layout_object_key: self.keys[2].clone(),
+            });
+        }
+        Ok(output)
+    }
+}
+
+pub(super) async fn freeze_terminal_receipt(
+    objects: &dyn ImmutableObjectStore,
+    task_run_id: uuid::Uuid,
+    receipt: &SandboxReceipt,
+    keys: [&str; 3],
+) -> Result<FrozenSandboxReceipt, TerminalReceiptError> {
+    let sizes = [
+        receipt.result_size_bytes,
+        receipt.stderr_size_bytes,
+        receipt.export_size_bytes,
+    ];
+    let shas = [
+        &receipt.result_sha256,
+        &receipt.stderr_sha256,
+        &receipt.export_sha256,
+    ];
+    let media = [RESULT_MEDIA_TYPE, STDERR_MEDIA_TYPE, EXPORT_MEDIA_TYPE];
+    let mut references = [None, None, None];
+    for index in 0..2 {
+        if sizes[index] == 0 {
+            continue;
+        }
+        let object = objects
+            .freeze_current(keys[index], sizes[index], media[index])
+            .await
+            .map_err(|error| terminal_object_error(&error))?;
+        if Sha256Digest::of_bytes(&object.bytes).to_string() != *shas[index] {
+            return Err(TerminalReceiptError::Invalid);
+        }
+        references[index] = Some(object.reference);
+    }
+    if receipt.export_size_bytes > 0 {
+        let file = objects
+            .freeze_current_file(keys[2], receipt.export_size_bytes, EXPORT_MEDIA_TYPE)
+            .await
+            .map_err(|error| terminal_object_error(&error))?;
+        if file.sha256() != receipt.export_sha256 {
+            return Err(TerminalReceiptError::Invalid);
+        }
+        references[2] = Some(file.reference().clone());
+    }
+    Ok(FrozenSandboxReceipt {
+        task_run_id,
+        receipt: receipt.clone(),
+        keys: keys.map(str::to_owned),
+        references,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SandboxResourceRequest {
+    project_id: contracts::ProjectId,
+    course_id: Option<contracts::CourseId>,
+    actor_id: contracts::ActorId,
+    request_key: String,
+    pub(super) trace_id: String,
+    resources: WorkloadResources,
+    duration_seconds: u64,
+}
+impl SandboxResourceRequest {
+    pub(super) fn lifecycle(
+        &self,
+        resources: &ResourceClient,
+        task: TaskRunId,
+    ) -> Result<TaskResourceLifecycle, ClaudeCodeProcessError> {
+        TaskResourceLifecycle::new(
+            resources.clone(),
+            task,
+            self.project_id,
+            self.course_id,
+            self.actor_id,
+            self.request_key.clone(),
+            self.resources.clone(),
+            self.duration_seconds,
+        )
+        .map_err(|_| ClaudeCodeProcessError::Io)
     }
 }
 
@@ -1272,6 +1814,10 @@ fn attempt_ownership_from_parts(
         attempt_id: task_run_id.as_uuid(),
         request_sha256,
     }
+}
+
+fn valid_receipt_sha(size: u64, value: &str) -> bool {
+    valid_sha256(value) && (size > 0 || value == Sha256Digest::of_bytes(&[]).to_string())
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -1355,6 +1901,40 @@ fn authority_now() -> Result<UtcTimestamp, ClaudeCodeProcessError> {
 
 #[async_trait]
 impl ClaudeCodeProcess for SandboxAuthoringProcess {
+    async fn recover_authoring_terminal(
+        &self,
+        scope: &AuthoringAttemptScope,
+        cancellation: RunCancellation,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        if cancellation.is_cancelled() {
+            return Err(ClaudeCodeProcessError::Cancelled);
+        }
+        let checkpoint = self
+            .store
+            .load_sandbox_attempt(
+                scope.run_id,
+                scope.track,
+                scope.attempt,
+                scope.execution_generation,
+            )
+            .await
+            .map_err(|_| ClaudeCodeProcessError::Io)?
+            .ok_or(ClaudeCodeProcessError::TimedOut)?;
+        if checkpoint.state == "creating" {
+            return Err(ClaudeCodeProcessError::TimedOut);
+        }
+        if checkpoint.state == "failed" {
+            return Err(ClaudeCodeProcessError::Io);
+        }
+        Box::pin(self.finish_recovered_attempt(
+            scope,
+            &checkpoint,
+            tokio::time::Instant::now(),
+            cancellation,
+        ))
+        .await
+    }
+
     async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
         Err(ClaudeCodeProcessError::Unavailable)
     }
@@ -1372,13 +1952,14 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
         let ExecutionScope::Authoring(scope) = scope else {
             return Err(ClaudeCodeProcessError::Unavailable);
         };
-        self.execute_authoring(scope, command, cancellation).await
+        Box::pin(self.execute_authoring(scope, command, cancellation)).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{SandboxReceipt, SandboxReceiptError, attempt_environment, parse_receipt};
+    use persistence_sqlx::Sha256Digest;
     use std::collections::BTreeMap;
 
     use crate::claude_code::AuthoringAttemptScope;
@@ -1422,6 +2003,7 @@ mod tests {
     const STDERR_MAX_BYTES: u64 = 1024 * 1024;
     const EXPORT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+    #[allow(clippy::expect_used)]
     fn scope() -> AuthoringAttemptScope {
         AuthoringAttemptScope {
             run_id: AgentRunId::new(),
@@ -1430,6 +2012,15 @@ mod tests {
             actor_id: ActorId::new(),
             track: AgentTrackKind::Environment,
             attempt: 1,
+            execution_generation: 1,
+            started_at: contracts::UtcTimestamp::from_utc(
+                time::OffsetDateTime::now_utc()
+                    .replace_nanosecond(0)
+                    .expect("valid nanosecond"),
+            )
+            .expect("valid timestamp"),
+            worker_id: "test-worker".to_owned(),
+            lease_token: uuid::Uuid::now_v7(),
             trace_id: "trace-receipt".to_owned(),
             claude_code_version: "2.1.215".to_owned(),
         }
@@ -1440,11 +2031,11 @@ mod tests {
             result_size_bytes: 12,
             result_sha256: "a".repeat(64),
             stderr_size_bytes: 0,
-            stderr_sha256: String::new(),
+            stderr_sha256: Sha256Digest::of_bytes(&[]).to_string(),
             exit_code: 0,
             claude_version: "2.1.215".to_owned(),
             export_size_bytes: 0,
-            export_sha256: String::new(),
+            export_sha256: Sha256Digest::of_bytes(&[]).to_string(),
         }
     }
 
@@ -1511,21 +2102,193 @@ mod tests {
         let mut drifted = receipt();
         drifted.claude_version = "2.1.999".to_owned();
         assert_eq!(validate(&drifted).err(), Some(SandboxReceiptError::Invalid));
+        let mut malformed_empty = receipt();
+        malformed_empty.stderr_sha256.clear();
+        assert_eq!(
+            validate(&malformed_empty).err(),
+            Some(SandboxReceiptError::Invalid)
+        );
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn receipt_parsing_is_exact_and_bounded() {
-        let message = r#"{"resultSizeBytes":12,"resultSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stderrSizeBytes":0,"stderrSha256":"","exitCode":0,"claudeVersion":"2.1.215"}"#;
+        let message = r#"{"resultSizeBytes":12,"resultSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stderrSizeBytes":0,"stderrSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","exitCode":0,"claudeVersion":"2.1.215","exportSizeBytes":0,"exportSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}"#;
         let receipt = parse_receipt(message).expect("receipt must parse");
         assert_eq!(receipt.result_size_bytes, 12);
         assert_eq!(receipt.claude_version, "2.1.215");
         assert_eq!(receipt.exit_code, 0);
         assert!(parse_receipt("not json").is_err());
+        let mut missing: serde_json::Value = serde_json::from_str(message).expect("fixture JSON");
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("exportSha256");
+        assert!(parse_receipt(&missing.to_string()).is_err());
         assert!(parse_receipt(&"x".repeat(4_097)).is_err());
         assert_eq!(
             parse_receipt(r#"{"extra":true}"#).err(),
             Some(SandboxReceiptError::Invalid)
         );
+    }
+    struct ReceiptObjects {
+        export: Vec<u8>,
+        stream_reads: std::sync::atomic::AtomicUsize,
+        paths: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    }
+
+    impl ReceiptObjects {
+        fn reference(size: u64, media: &str) -> contracts::ArtifactRef {
+            contracts::ArtifactRef {
+                artifact_id: contracts::ArtifactId::new(),
+                store_binding: "receipt-test".to_owned(),
+                object_version: "version-1".to_owned(),
+                size_bytes: size,
+                media_type: media.to_owned(),
+            }
+        }
+        fn file(
+            &self,
+            reference: contracts::ArtifactRef,
+        ) -> Result<artifact_store::VerifiedObjectFile, artifact_store::ObjectStoreError> {
+            let file = artifact_store::VerifiedObjectFile::from_bytes(reference, &self.export)?;
+            self.paths
+                .lock()
+                .map_err(|_| artifact_store::ObjectStoreError::ObjectUnavailable)?
+                .push(file.path().to_path_buf());
+            Ok(file)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl artifact_store::ImmutableObjectStore for ReceiptObjects {
+        async fn delete_orphan(
+            &self,
+            _key: &str,
+            _version: &str,
+        ) -> Result<(), artifact_store::ObjectStoreError> {
+            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+        }
+
+        fn binding(&self) -> &'static str {
+            "receipt-test"
+        }
+        async fn presign_upload(
+            &self,
+            _key: &str,
+            _size: u64,
+            _media: &str,
+            _now: contracts::UtcTimestamp,
+        ) -> Result<artifact_store::PresignedUpload, artifact_store::ObjectStoreError> {
+            Err(artifact_store::ObjectStoreError::SigningFailed)
+        }
+        async fn read_verified(
+            &self,
+            _key: &str,
+            _expected: &contracts::ArtifactRef,
+        ) -> Result<artifact_store::VerifiedObject, artifact_store::ObjectStoreError> {
+            // This fixture has only an export: accepting a byte read would hide a streaming regression.
+            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+        }
+        async fn freeze_current(
+            &self,
+            _key: &str,
+            _size: u64,
+            _media: &str,
+        ) -> Result<artifact_store::VerifiedObject, artifact_store::ObjectStoreError> {
+            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+        }
+        async fn freeze_current_file(
+            &self,
+            _key: &str,
+            size: u64,
+            media: &str,
+        ) -> Result<artifact_store::VerifiedObjectFile, artifact_store::ObjectStoreError> {
+            self.file(Self::reference(size, media))
+        }
+        async fn read_verified_file(
+            &self,
+            _key: &str,
+            expected: &contracts::ArtifactRef,
+        ) -> Result<artifact_store::VerifiedObjectFile, artifact_store::ObjectStoreError> {
+            self.stream_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.file(expected.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn frozen_export_uses_exact_version_file_reads_and_drops_owned_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let objects = ReceiptObjects {
+            export: b"oci-layout-test".to_vec(),
+            stream_reads: std::sync::atomic::AtomicUsize::new(0),
+            paths: std::sync::Mutex::new(Vec::new()),
+        };
+        let empty = Sha256Digest::of_bytes(&[]).to_string();
+        let receipt = SandboxReceipt {
+            result_size_bytes: 0,
+            result_sha256: empty.clone(),
+            stderr_size_bytes: 0,
+            stderr_sha256: empty,
+            exit_code: 7,
+            claude_version: "2.1.215".to_owned(),
+            export_size_bytes: u64::try_from(objects.export.len())?,
+            export_sha256: Sha256Digest::of_bytes(&objects.export).to_string(),
+        };
+        let frozen = super::freeze_terminal_receipt(
+            &objects,
+            uuid::Uuid::now_v7(),
+            &receipt,
+            ["own/result", "own/stderr", "own/export"],
+        )
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+        assert!(frozen.valid_metadata("receipt-test"));
+        let output = frozen
+            .assemble(&objects, true)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(!output.is_success());
+        assert_eq!(
+            objects
+                .stream_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(
+            objects
+                .paths
+                .lock()
+                .map_err(|_| "lock poisoned")?
+                .iter()
+                .all(|p| !p.exists())
+        );
+        let mut same = frozen.clone();
+        same.references[2]
+            .as_mut()
+            .ok_or("export missing")?
+            .artifact_id = contracts::ArtifactId::new();
+        assert!(frozen.same_outputs(&same));
+        same.references[2]
+            .as_mut()
+            .ok_or("export missing")?
+            .object_version = "different-version".to_owned();
+        assert!(!frozen.same_outputs(&same));
+        let mut wrong = frozen;
+        wrong.receipt.export_sha256 = "a".repeat(64);
+        assert!(matches!(
+            wrong.assemble(&objects, true).await,
+            Err(super::TerminalReceiptError::Invalid)
+        ));
+        assert!(
+            objects
+                .paths
+                .lock()
+                .map_err(|_| "lock poisoned")?
+                .iter()
+                .all(|p| !p.exists())
+        );
+        Ok(())
     }
 }

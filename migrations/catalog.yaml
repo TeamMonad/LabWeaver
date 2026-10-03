@@ -118,6 +118,9 @@ domains:
       - id: 17
         file: agent/0017_authoring_sandbox_usage.sql
         sha256: 98534d05b0c42d5b60438bb52b80eca566ffccdcb5bb97dbbaf91067e4ec46b9
+      - id: 18
+        file: agent/0018_authoring_sandbox_generations.sql
+        sha256: f9d2c0f0c24b7e37a98b1fb9252252364f6be2ecbb24483384725aad69dd3fe7
   - name: evaluation
     migrations:
       - id: 1

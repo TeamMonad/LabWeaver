@@ -1129,7 +1129,10 @@ async fn verify_schema(pool: &sqlx::PgPool) -> Result<(), StartupError> {
           AND to_regclass('agent.authoring_sandbox_attempts') IS NOT NULL \
           AND to_regclass('agent.platform_image_import_jobs') IS NOT NULL \
           AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' \
-                      AND table_name='authoring_sandbox_attempts' AND column_name='usage_payload')",
+                      AND table_name='authoring_sandbox_attempts' AND column_name='usage_payload') \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' AND table_name='authoring_sandbox_attempts' AND column_name='terminal_receipt') \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' AND table_name='authoring_sandbox_attempts' AND column_name='request_payload') \
+          AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='agent' AND table_name='agent_track_work_items' AND column_name='attempt_started_at')",
     )
     .fetch_one(pool)
     .await?;
