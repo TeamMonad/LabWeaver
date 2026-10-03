@@ -76,6 +76,10 @@ kubectl -n labweaver-gpu-license exec deploy/fastapi-dls -c fastapi-dls -- \
 
 ## 主机防火墙
 
+Cilium 的 chart 版本和 agent 镜像摘要直接读取 `deploy/versions.lock.yml`，不从私有 inventory 覆盖版本。角色通过官方 chart 的 `image.override` 使用完整的不可变 agent 镜像引用，并校验镜像标签与 chart 版本一致。Operator、Envoy、Hubble 等独立组件使用该版本官方 chart 为各组件提供的镜像，不能套用 agent 的摘要。锁定的 1.19.8 包含 [复杂度与栈优化补丁 #47723](https://github.com/cilium/cilium/pull/47723)，但不能据此保证某个节点的 BPF verifier 错误已解决。
+
+`50-install-network.yml` 是现有网络安装与维护入口，也包含 Gateway API CRD 和 MetalLB 的管理。对已有集群执行前，应审核锁和 Helm values，并获得网络维护许可、安排维护窗口；Cilium 与 Envoy 的滚动更新可能中断 Gateway 和代理长连接。保留上一份批准的版本锁及 Helm revision；需要回滚时，恢复该锁并用 `helm rollback cilium <previous-revision> --namespace kube-system` 恢复整套 release，再检查节点 host endpoint、DNS、API 和公网入口。内核更换及节点重启需要独立的维护批准，不由此入口执行。参见 [Cilium 升级与回滚说明](https://docs.cilium.io/en/stable/operations/upgrade/)。
+
 节点主机防火墙由 **Cilium Host Firewall** 承担，不再使用 firewalld。`cluster_network` 角色在 Cilium Helm values 中启用 `hostFirewall.enabled: true`，并应用 `CiliumClusterwideNetworkPolicy`（`host-firewall-policy.yml.j2`）作为节点防火墙策略：集群节点间与 health 流量整体放行，外部放行 SSH（22）、公网入口（80/443）、WireGuard 管理网（51820/udp）与 ICMP echo。策略在 Cilium 安装后立即应用，`hostFirewall` 启用但尚未有策略选中节点时保持默认放行，因此不会在应用策略前中断管理通道。
 
 节点同时使用 `bpf.masquerade: true` 与 `bpf.hostLegacyRouting: false`，数据面完全走 eBPF，不再依赖 iptables-nft 链。这样 firewalld/iptables 的 flush 不会破坏 pod 与 Gateway 流量，也不需要启动排序或 Cilium 自动恢复逻辑。节点上不安装、不启用 firewalld；`rocky_common` 不再需要“禁用 firewalld”。

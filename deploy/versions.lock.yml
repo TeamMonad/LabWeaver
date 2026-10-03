@@ -70,8 +70,8 @@ kubernetes:
   patch: v1.35.6
 crio: 1.35.5
 cilium:
-  chart: 1.19.5
-  image: quay.io/cilium/cilium:v1.19.5@sha256:20fbbc14ac20b55a292c0dcda5571bf31cde30a7dbc68c29db3e709390ab0732
+  chart: 1.19.8
+  image: quay.io/cilium/cilium:v1.19.8@sha256:e9f7ee1f2f3a41e44339612e3b6b88170bdde7679c9c9461f287bb27702a8ecf
 gateway_api:
   standard_channel: v1.6.0
 metallb:
