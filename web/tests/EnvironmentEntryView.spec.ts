@@ -14,6 +14,9 @@ import {
   listEnvironmentOperations,
   cancelEnvironmentOperation,
   startEnvironment,
+  deleteEnvironment,
+  retryEnvironment,
+  restartEnvironment,
   freezeSubmission,
   getFrozenSubmission,
 } from '@/generated/contracts'
@@ -36,6 +39,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     stopEnvironment: vi.fn(),
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
+    retryEnvironment: vi.fn(),
   }
 })
 
@@ -187,6 +191,7 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject], error: undefined as never })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     window.localStorage.clear()
   })
@@ -309,6 +314,83 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('此项目环境已删除')
     expect(wrapper.find('.environment-selector').exists()).toBe(false)
     expect(wrapper.find('button[aria-expanded="false"]').exists()).toBe(true)
+  })
+
+  it.each(['experiment', 'work'])('reclaims failed cleanup with DELETE for a %s environment', async (environmentClass) => {
+    mockEnvironmentInstance({
+      class: environmentClass, desiredState: 'deleted', observedState: 'failed', failedPhase: 'expiring',
+      operation: { ...mockOperation('failed', { kind: 'expire' }), id: 'op-failed' },
+    })
+    vi.mocked(listEnvironmentOperations).mockResolvedValue({
+      data: { items: [mockOperation('failed', { kind: 'expire' })] }, error: undefined as never,
+    } as never)
+    let finishDelete!: (value: never) => void
+    vi.mocked(deleteEnvironment).mockImplementation(() => new Promise((resolve) => { finishDelete = resolve }))
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(true))
+    const reclaim = wrapper.find('button[aria-label="重试回收"]')
+    expect((reclaim.element as HTMLButtonElement).disabled).toBe(false)
+    expect(wrapper.text()).toContain('资源释放尚未确认')
+    expect(wrapper.findAll('button').some((button) => button.text() === '重试失败的操作')).toBe(false)
+    for (const action of ['启动', '重启']) expect((wrapper.find(`button[aria-label="${action}"]`).element as HTMLButtonElement).disabled).toBe(true)
+    await reclaim.trigger('click')
+    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(deleteEnvironment).toHaveBeenCalledTimes(1))
+    expect(deleteEnvironment).toHaveBeenCalledWith({
+      path: { environmentId: 'env-1' },
+      headers: { 'If-Match': '"rev-11"', 'Idempotency-Key': expect.any(String) },
+    })
+    expect((reclaim.element as HTMLButtonElement).disabled).toBe(true)
+    expect(retryEnvironment).not.toHaveBeenCalled()
+    expect(startEnvironment).not.toHaveBeenCalled()
+    expect(restartEnvironment).not.toHaveBeenCalled()
+    finishDelete({ data: { environmentId: 'env-1', operationId: 'new-delete', revision: 12, statusUrl: '/api/v1/environments/env-1' }, error: undefined } as never)
+    await vi.waitFor(() => expect(getEnvironment).toHaveBeenCalledTimes(2))
+    // The accepted revision fences another delete while the instance read is still stale.
+    expect((reclaim.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it.each(['accepted', 'running', 'cancelling'])('does not duplicate cleanup while the operation is %s', async (state) => {
+    mockEnvironmentInstance({
+      desiredState: 'deleted', observedState: 'failed',
+      operation: { ...mockOperation(state as OperationFixtureState, { kind: 'expire' }), id: `op-${state}` },
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="删除"]').exists()).toBe(true))
+    expect((wrapper.find('button[aria-label="删除"]').element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(false)
+    expect(deleteEnvironment).not.toHaveBeenCalled()
+  })
+
+  it('does not expose recovery actions when environment ownership is denied', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({ error: { diagnosticCode: 'LW_SCOPE_DENIED', detail: '无权访问此环境', status: 403 } } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('LW_SCOPE_DENIED'))
+    expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="删除"]').exists()).toBe(false)
+    expect(deleteEnvironment).not.toHaveBeenCalled()
+  })
+
+  it('shows a denied DELETE and releases the local pending state without pretending cleanup completed', async () => {
+    mockEnvironmentInstance({
+      desiredState: 'deleted', observedState: 'failed',
+      operation: { ...mockOperation('failed', { kind: 'delete' }), id: 'op-failed' },
+    })
+    vi.mocked(deleteEnvironment).mockResolvedValue({ error: { diagnosticCode: 'LW_SCOPE_DENIED', detail: '回收权限已撤销', status: 403 } } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(true))
+    await wrapper.find('button[aria-label="重试回收"]').trigger('click')
+    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('回收权限已撤销'))
+    expect(wrapper.findAll('button').some((button) => button.text() === '重试')).toBe(false)
+    expect(wrapper.text()).toContain('资源释放尚未确认')
+    expect((wrapper.find('button[aria-label="重试回收"]').element as HTMLButtonElement).disabled).toBe(false)
+    expect(deleteEnvironment).toHaveBeenCalledTimes(1)
+    const firstKey = vi.mocked(deleteEnvironment).mock.calls[0][0]?.headers?.['Idempotency-Key']
+    await wrapper.find('button[aria-label="重试回收"]').trigger('click')
+    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(deleteEnvironment).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(deleteEnvironment).mock.calls[1][0]?.headers?.['Idempotency-Key']).not.toBe(firstKey)
   })
 
   it('renders every public operation state and its optional cleanup and diagnostic details', async () => {

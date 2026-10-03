@@ -240,11 +240,11 @@
                 class="text-button error"
                 :disabled="!canDelete(env.instance.data)"
                 :title="lifecycleActionReason(env.instance.data, 'delete')"
-                aria-label="删除"
+                :aria-label="failedCleanup(env.instance.data) ? '重试回收' : '删除'"
                 aria-describedby="lifecycle-action-hint"
                 @click="openDelete(env.instance.data)"
               >
-                删除
+                {{ failedCleanup(env.instance.data) ? '重试回收' : '删除' }}
               </button>
             </template>
           </GcpActionBar>
@@ -265,7 +265,7 @@
             <DiagnosticBanner
               :code="lifecycleDiagnostic.code"
               :message="lifecycleDiagnostic.message"
-              :retryable="lifecycleDiagnostic.retryable"
+              :retryable="lifecycleDiagnostic.retryable && !(env.instance.kind === 'success' && env.instance.data.desiredState === 'deleted')"
               severity="error"
               @retry="retryLifecycle"
             />
@@ -1019,9 +1019,9 @@
 
     <ConfirmDialog
       :open="deleteEnvironment !== null"
-      title="删除环境"
-      description="确定删除该环境吗？所有未持久化的数据将丢失。"
-      confirm-text="删除"
+      :title="deleteEnvironment && failedCleanup(deleteEnvironment) ? '重试回收环境' : '删除环境'"
+      :description="deleteEnvironment && failedCleanup(deleteEnvironment) ? '上次回收失败，资源释放尚未确认。确定重新回收该环境吗？所有未持久化的数据将丢失。' : '确定删除该环境吗？所有未持久化的数据将丢失。'"
+      :confirm-text="deleteEnvironment && failedCleanup(deleteEnvironment) ? '重试回收' : '删除'"
       severity="error"
       @cancel="deleteEnvironment = null"
       @confirm="confirmDeleteEnvironment"
@@ -1372,6 +1372,7 @@ const failedOperation = computed<EnvironmentOperationSnapshotSchema | null>(() =
 })
 
 const retryableOperation = computed<EnvironmentOperationSnapshotSchema | null>(() => {
+  if (env.instance.kind === 'success' && env.instance.data.desiredState === 'deleted') return null
   if (operations.operations.kind !== 'success') return null
   return operations.operations.data
     .filter((op) => op.state === 'failed' && op.retryEligible)
@@ -1479,6 +1480,7 @@ function operationTimelineDescription(op: EnvironmentOperationSnapshotSchema): s
 }
 
 function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
+  if (failedCleanup(data)) return '环境回收失败，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
   const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
   return `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`
 }
@@ -1728,7 +1730,16 @@ async function retryFreeze() {
 function hasActiveLifecycleOperation(data: EnvironmentInstanceSchema): boolean {
   const current = data.operation.state
   if (current === 'accepted' || current === 'running' || current === 'cancelling') return true
+  const accepted = lifecycle.lastAccepted
+  if (accepted?.environmentId === data.id && accepted.revision > data.revision) return true
   return activeOperation.value?.environmentId === data.id
+}
+
+function failedCleanup(data: EnvironmentInstanceSchema): boolean {
+  return data.desiredState === 'deleted'
+    && data.observedState === 'failed'
+    && data.operation.state === 'failed'
+    && ['delete', 'expire', 'cleanup', 'cancel'].includes(data.operation.kind)
 }
 
 function isTerminalEnvironment(data: EnvironmentInstanceSchema): boolean {
@@ -1763,13 +1774,16 @@ function canRestart(data: EnvironmentInstanceSchema) {
 
 function canDelete(data: EnvironmentInstanceSchema) {
   return !isTerminalEnvironment(data)
-    && data.desiredState !== 'deleted'
+    && (data.desiredState !== 'deleted' || (failedCleanup(data) && !hasActiveLifecycleOperation(data)))
     && !(hasActiveLifecycleOperation(data) && data.operation.kind === 'delete')
     && !lifecycle.operating.has(`${data.id}:delete`)
 }
 
 function lifecycleActionReason(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']): string {
   if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+  if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return action === 'delete'
+    ? '上次回收失败，资源释放尚未确认；可以重新提交回收请求。'
+    : '环境正在等待回收，只能重试回收，不能重新启动或恢复环境。'
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
   if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
     return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
@@ -1784,6 +1798,7 @@ function lifecycleActionReason(data: EnvironmentInstanceSchema, action: Lifecycl
 
 function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
   if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
+  if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return '环境回收失败，资源释放尚未确认。请重试回收；回收完成前不能打开控制台或重新启动环境。'
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
   if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
   if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
@@ -1845,7 +1860,7 @@ async function runLifecycle(data: EnvironmentInstanceSchema, action: LifecycleTa
   }
   // Refresh the operations timeline immediately so the new command shows up
   // instead of waiting for the next full page load.
-  await operations.load()
+  await Promise.all([env.load(), operations.load()])
 }
 
 async function retryFailedOperation(data: EnvironmentInstanceSchema) {
@@ -1877,7 +1892,7 @@ async function retryLifecycle() {
   const { environmentId, action } = target
   if (action === 'delete') {
     const instance = env.instance.kind === 'success' ? env.instance.data : undefined
-    if (instance && instance.id === environmentId) {
+    if (instance && instance.id === environmentId && canDelete(instance)) {
       await runLifecycle(instance, 'delete')
     }
     return
@@ -1889,13 +1904,16 @@ async function retryLifecycle() {
 }
 
 function openDelete(data: EnvironmentInstanceSchema) {
+  if (!canDelete(data)) return
   deleteEnvironment.value = data
 }
 
 async function confirmDeleteEnvironment() {
   if (!deleteEnvironment.value) return
-  const data = deleteEnvironment.value
+  const requested = deleteEnvironment.value
   deleteEnvironment.value = null
+  const data = env.instance.kind === 'success' ? env.instance.data : null
+  if (!data || data.id !== requested.id || !canDelete(data)) return
   await runLifecycle(data, 'delete')
 }
 
