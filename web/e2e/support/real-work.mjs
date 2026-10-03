@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { expect } from '@playwright/test'
 import {
   AUTH_STATE,
+  csrfHeaders,
   expectJson,
+  pollJson,
   uuidv7,
 } from './live.mjs'
 
@@ -832,4 +834,322 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, { 
   } finally {
     await context.close()
   }
+}
+
+export async function waitForDeletedEnvironment(request, environmentId) {
+  let latest
+  await expect.poll(async () => {
+    const response = await request.get(`/api/v1/environments/${environmentId}`)
+    if (response.status() === 404) return true
+    latest = await expectJson(response, 'ENVIRONMENT_CLEANUP_READ_FAILED')
+    return latest.observedState === 'deleted'
+  }, { timeout: 240_000, intervals: [1000, 2000, 3000] }).toBe(true)
+  return latest
+}
+
+async function waitForStoppedOrDeletedEnvironment(request, environmentId) {
+  const settled = await pollJson(
+    request,
+    `/api/v1/environments/${environmentId}`,
+    (value) => ['stopped', 'failed', 'deleting', 'deleted'].includes(value.observedState),
+    'REAL_WORK_CLEANUP_ENVIRONMENT_STOPPED_STATUS_FAILED',
+    240_000,
+  )
+  if (settled.observedState === 'deleting') {
+    await waitForDeletedEnvironment(request, environmentId)
+    return { ...settled, observedState: 'deleted' }
+  }
+  if (!['stopped', 'failed', 'deleted'].includes(settled.observedState)) {
+    throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_STOPPED_STATE_INVALID:${settled.observedState}`)
+  }
+  return settled
+}
+
+export async function cleanupWorkResources(request, baseURL, projectId, environmentId, leaseId, requestId) {
+  const failures = []
+  let releaseWaitFailure = null
+  let claimId = null
+  try {
+    if (!leaseId && requestId) {
+      const leases = await expectJson(
+        await request.get(`/api/v1/projects/${projectId}/resource-leases`),
+        'REAL_WORK_CLEANUP_LEASE_LIST_FAILED',
+      )
+      if (!Array.isArray(leases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_INVALID')
+      leaseId = leases.find((lease) => lease.requestId === requestId)?.id ?? null
+
+      if (!leaseId) {
+        let trackedRequest = await expectJson(
+          await request.get(`/api/v1/resource-requests/${requestId}`),
+          'REAL_WORK_CLEANUP_RESOURCE_REQUEST_READ_FAILED',
+        )
+        if (trackedRequest.state === 'reviewing') {
+          const cancelled = await expectJson(
+            await request.post(`/api/v1/resource-requests/${requestId}/cancel`, {
+              headers: await csrfHeaders(request, baseURL, {
+                'Idempotency-Key': uuidv7(),
+                'If-Match': `"rev-${trackedRequest.revision}"`,
+              }),
+              data: {
+                expectedRevision: trackedRequest.revision,
+                reason: 'real Work E2E cleanup',
+              },
+            }),
+            'REAL_WORK_CLEANUP_RESOURCE_REQUEST_CANCEL_FAILED',
+          )
+          expect(cancelled).toMatchObject({ requestId })
+          trackedRequest = await pollJson(
+            request,
+            `/api/v1/resource-requests/${requestId}`,
+            (value) => ['rejected', 'cancelled'].includes(value.state),
+            'REAL_WORK_CLEANUP_RESOURCE_REQUEST_CANCEL_STATUS_FAILED',
+            120_000,
+          )
+          if (trackedRequest.state !== 'cancelled') {
+            throw new Error(`REAL_WORK_CLEANUP_RESOURCE_REQUEST_NOT_CANCELLED:${trackedRequest.state}`)
+          }
+        } else if (trackedRequest.state === 'allocating') {
+          trackedRequest = await pollJson(
+            request,
+            `/api/v1/resource-requests/${requestId}`,
+            (value) => value.state !== 'allocating',
+            'REAL_WORK_CLEANUP_RESOURCE_REQUEST_ALLOCATION_STATUS_FAILED',
+            120_000,
+          )
+          if (trackedRequest.state === 'active' || trackedRequest.state === 'expiring') {
+            const allocatedLeases = await expectJson(
+              await request.get(`/api/v1/projects/${projectId}/resource-leases`),
+              'REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_FAILED',
+            )
+            if (!Array.isArray(allocatedLeases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_INVALID')
+            leaseId = allocatedLeases.find((lease) => lease.requestId === requestId)?.id ?? null
+            if (!leaseId) throw new Error(`REAL_WORK_CLEANUP_LEASE_MISSING:${trackedRequest.state}`)
+          }
+        }
+        if (!leaseId && !['rejected', 'cancelled', 'expired'].includes(trackedRequest.state)) {
+          throw new Error(`REAL_WORK_CLEANUP_RESOURCE_REQUEST_UNSAFE_WITHOUT_LEASE:${trackedRequest.state}`)
+        }
+      }
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+
+  try {
+    if (environmentId) {
+      const currentResponse = await request.get(`/api/v1/environments/${environmentId}`)
+      if (currentResponse.status() !== 404) {
+        let current = await expectJson(currentResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_READ_FAILED')
+        expect(current).toMatchObject({ id: environmentId, projectId })
+        if (current.observedState !== 'deleted') {
+          if (['requested', 'validating', 'building', 'provisioning', 'updating'].includes(current.observedState)) {
+            current = await pollJson(
+              request,
+              `/api/v1/environments/${environmentId}`,
+              (value) => ['ready', 'stopped', 'failed', 'deleting', 'deleted'].includes(value.observedState),
+              'REAL_WORK_CLEANUP_ENVIRONMENT_PROVISION_FAILED',
+              240_000,
+            )
+          }
+          if (current.observedState === 'ready') {
+            const stopAccepted = await expectJson(
+              await request.post(`/api/v1/environments/${environmentId}/stop`, {
+                headers: await csrfHeaders(request, baseURL, {
+                  'Idempotency-Key': uuidv7(),
+                  'If-Match': `"rev-${current.revision}"`,
+                }),
+              }),
+              'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_FAILED',
+            )
+            const stopOperation = await pollJson(
+              request,
+              stopAccepted.statusUrl,
+              (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
+              'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_STATUS_FAILED',
+              240_000,
+            )
+            if (stopOperation.state !== 'succeeded') {
+              const afterStopResponse = await request.get(`/api/v1/environments/${environmentId}`)
+              if (afterStopResponse.status() === 404) {
+                current = { observedState: 'deleted' }
+              } else {
+                const afterStop = await expectJson(afterStopResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_FAILURE_READ_FAILED')
+                if (afterStop.observedState === 'deleting') {
+                  await waitForDeletedEnvironment(request, environmentId)
+                  current = { observedState: 'deleted' }
+                } else {
+                  throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_STOP_OPERATION_FAILED:${stopOperation.state}`)
+                }
+              }
+            }
+            if (stopOperation.state === 'succeeded') {
+              const afterStopResponse = await request.get(`/api/v1/environments/${environmentId}`)
+              current = afterStopResponse.status() === 404
+                ? { observedState: 'deleted' }
+                : await expectJson(afterStopResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_READ_FAILED')
+            }
+          }
+          if (current.observedState === 'deleting') {
+            await waitForDeletedEnvironment(request, environmentId)
+          } else if (!['stopped', 'failed', 'deleted'].includes(current.observedState)) {
+            current = await waitForStoppedOrDeletedEnvironment(request, environmentId)
+          }
+        }
+      }
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+
+  try {
+    if (leaseId) {
+      const leaseResponse = await request.get(`/api/v1/resource-leases/${leaseId}`)
+      const lease = await expectJson(leaseResponse, 'REAL_WORK_CLEANUP_LEASE_READ_FAILED')
+      expect(lease).toMatchObject({ id: leaseId, ...(requestId ? { requestId } : {}) })
+      claimId = lease.claimId
+      if (['active', 'allocating'].includes(lease.state)) {
+        const revoked = await expectJson(
+          await request.post(`/api/v1/resource-leases/${leaseId}/revoke`, {
+            headers: await csrfHeaders(request, baseURL, {
+              'Idempotency-Key': uuidv7(),
+              'If-Match': `"rev-${lease.revision}"`,
+            }),
+            data: { expectedRevision: lease.revision, reason: 'real Work E2E cleanup' },
+          }),
+          'REAL_WORK_CLEANUP_LEASE_REVOKE_FAILED',
+        )
+        expect(revoked).toMatchObject({ id: leaseId })
+      }
+      if (['active', 'allocating', 'expiring'].includes(lease.state)) {
+        try {
+          const settled = await pollJson(
+            request,
+            `/api/v1/resource-leases/${leaseId}`,
+            async (value) => {
+              if (['revoked', 'expired'].includes(value.state)) return true
+              if (!environmentId) return false
+              const environment = await expectJson(
+                await request.get(`/api/v1/environments/${environmentId}`),
+                'REAL_WORK_CLEANUP_ENVIRONMENT_RELEASE_READ_FAILED',
+              )
+              expect(environment).toMatchObject({ id: environmentId, projectId })
+              return environment.desiredState === 'deleted'
+                && environment.observedState === 'failed'
+                && environment.operation?.state === 'failed'
+            },
+            'REAL_WORK_CLEANUP_LEASE_REVOKE_STATUS_FAILED',
+            240_000,
+          )
+          if (!['revoked', 'expired'].includes(settled.state)) {
+            throw new Error('REAL_WORK_CLEANUP_RESOURCE_ENVIRONMENT_OPERATION_FAILED')
+          }
+        } catch (error) {
+          // Keep the diagnostic while attempting the owner's normal delete path.
+          // Release is successful only after the final Resource readback below.
+          if (/REAL_WORK_CLEANUP_(LEASE_REVOKE_STATUS|ENVIRONMENT_RELEASE_READ)_FAILED:/.test(error.message)) {
+            failures.push(error)
+          } else {
+            releaseWaitFailure = error
+          }
+        }
+      } else if (!['revoked', 'expired'].includes(lease.state)) {
+        throw new Error(`REAL_WORK_CLEANUP_LEASE_STATE_INVALID:${lease.state}`)
+      }
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+
+  try {
+    if (environmentId) {
+      const latestResponse = await request.get(`/api/v1/environments/${environmentId}`)
+      if (latestResponse.status() !== 404) {
+        const latest = await expectJson(latestResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_READ_BEFORE_DELETE_FAILED')
+        expect(latest).toMatchObject({ id: environmentId, projectId })
+        if (!['deleting', 'deleted'].includes(latest.observedState)) {
+          const deleteAccepted = await deleteWorkEnvironment(request, baseURL, latest)
+          const deleteOperation = await pollJson(
+            request,
+            deleteAccepted.statusUrl,
+            (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
+            'REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_STATUS_FAILED',
+            240_000,
+          )
+          if (deleteOperation.state !== 'succeeded') {
+            throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_OPERATION_FAILED:${deleteOperation.state}`)
+          }
+        }
+        await waitForDeletedEnvironment(request, environmentId)
+      }
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+
+  try {
+    if (leaseId) {
+      const finalLease = await pollJson(
+        request,
+        `/api/v1/resource-leases/${leaseId}`,
+        (value) => ['revoked', 'expired'].includes(value.state),
+        'REAL_WORK_CLEANUP_LEASE_FINAL_STATUS_FAILED',
+        240_000,
+      )
+      expect(finalLease).toMatchObject({ id: leaseId, ...(claimId ? { claimId } : {}), ...(requestId ? { requestId } : {}) })
+    }
+    if (requestId) {
+      const finalRequest = await pollJson(
+        request,
+        `/api/v1/resource-requests/${requestId}`,
+        (value) => leaseId ? value.state === 'expired' : ['rejected', 'cancelled', 'expired'].includes(value.state),
+        'REAL_WORK_CLEANUP_RESOURCE_REQUEST_FINAL_STATUS_FAILED',
+        240_000,
+      )
+      expect(finalRequest).toMatchObject({ requestId, projectId })
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length > 0) {
+    if (releaseWaitFailure) failures.push(releaseWaitFailure)
+    throw new AggregateError(failures, `REAL_WORK_CLEANUP_FAILED:${failures.map((error) => error.message).join(';')}`)
+  }
+  if (releaseWaitFailure) console.warn('REAL_WORK_CLEANUP_RECOVERED:RESOURCE_RELEASE_WAIT_FAILED')
+}
+
+async function deleteWorkEnvironment(request, baseURL, before) {
+  const path = `/api/v1/environments/${before.id}`
+  const headers = await csrfHeaders(request, baseURL, {
+    'Idempotency-Key': uuidv7(),
+    'If-Match': `"rev-${before.revision}"`,
+  })
+  let response
+  try {
+    response = await request.delete(path, { headers })
+  } catch (error) {
+    // A transport failure may follow a committed delete. Read its exact next
+    // generation before deciding whether the same logical request can be sent.
+    const current = await expectJson(await request.get(path), 'REAL_WORK_CLEANUP_DELETE_RESPONSE_LOST_READ_FAILED')
+    expect(current).toMatchObject({ id: before.id, projectId: before.projectId, leaseId: before.leaseId, capacityBinding: before.capacityBinding })
+    if (current.generation === before.generation + 1
+      && current.operation?.kind === 'delete'
+      && current.operation.acceptedRevision === before.revision + 1
+      && current.operation.id !== before.operation?.id) {
+      return {
+        environmentId: current.id,
+        operationId: current.operation.id,
+        statusUrl: `${path}/operations/${current.operation.id}`,
+      }
+    }
+    if (current.revision !== before.revision || current.generation !== before.generation
+      || current.operation?.id !== before.operation?.id) {
+      throw new Error('REAL_WORK_CLEANUP_DELETE_RESPONSE_LOST_UNCONFIRMED', { cause: error })
+    }
+    // No committed operation was observed. Retain the same key and revision;
+    // never turn an ambiguous transport result into a second delete intent.
+    response = await request.delete(path, { headers })
+  }
+  const accepted = await expectJson(response, 'REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_FAILED')
+  expect(accepted).toMatchObject({ environmentId: before.id })
+  return accepted
 }
