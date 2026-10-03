@@ -21,6 +21,7 @@
       {
         "role": "gate",
         "id": "report-present",
+        "dependsOn": [],
         "runner": {
           "kind": "file_assertion",
           "requiredFiles": [
