@@ -24,6 +24,7 @@ oj_cpp17:
 ansible_probe:
   playbook_profile: linux-nginx-probe-v1/playbook.yml
   ansible_core: 2.20.5
+  ansible_posix: 2.2.2
   openssh_client: 10.5p1
   openssh_client_tarball_sha256: d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
   toolchain: cgr.dev/chainguard/python@sha256:7b79c054afd14f566d1d52ea1d4d037267ec8570efedbc6ead779d89ba943abe

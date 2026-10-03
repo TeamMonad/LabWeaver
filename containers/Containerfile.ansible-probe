@@ -49,12 +49,16 @@ RUN apk add --no-cache build-base ca-certificates curl linux-headers openssl-dev
     && install -D -m 0755 ssh /opt/openssh/bin/ssh
 
 FROM ${ANSIBLE_PROBE_TOOLCHAIN} AS pip-builder
+ARG ANSIBLE_CORE_VERSION
+ARG ANSIBLE_POSIX_VERSION
 USER root
-RUN install -d -m 0755 /opt/labweaver/probe/bin \
-    && python3 -m pip install --no-cache-dir --target=/opt/labweaver/probe/pylib \
-       ansible-core==2.20.5 \
-    && ln -s /opt/labweaver/probe/pylib/bin/ansible-playbook \
-       /opt/labweaver/probe/bin/ansible-playbook
+RUN test -n "${ANSIBLE_CORE_VERSION}" && test -n "${ANSIBLE_POSIX_VERSION}" \
+    && python3 -m venv /opt/labweaver/probe/venv \
+    && /opt/labweaver/probe/venv/bin/python -m pip install --no-cache-dir \
+       "ansible-core==${ANSIBLE_CORE_VERSION}" \
+    && /opt/labweaver/probe/venv/bin/ansible-galaxy collection install --no-deps \
+       --collections-path /opt/labweaver/probe/collections \
+       "ansible.posix:${ANSIBLE_POSIX_VERSION}"
 
 # The generic Evaluation runtime keeps the exact compiler and Python toolchain
 # together so one immutable runtime identity can execute both approved runner
@@ -78,13 +82,12 @@ ENV ANSIBLE_NOCOWS=1 \
     ANSIBLE_LOCALHOST_WARNING=false \
     ANSIBLE_HOME=/work/ansible \
     ANSIBLE_LOCAL_TEMP=/work/ansible/tmp \
-    ANSIBLE_REMOTE_TEMP=/work/ansible-remote/tmp \
     HOME=/work \
     LC_ALL=C.UTF-8 \
     LANG=C.UTF-8 \
     PYTHONUTF8=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/opt/labweaver/probe/pylib
+    PATH=/opt/labweaver/probe/venv/bin:${PATH}
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/labweaver-service"]
 
@@ -105,12 +108,11 @@ ENV ANSIBLE_NOCOWS=1 \
     ANSIBLE_LOCALHOST_WARNING=false \
     ANSIBLE_HOME=/work/ansible \
     ANSIBLE_LOCAL_TEMP=/work/ansible/tmp \
-    ANSIBLE_REMOTE_TEMP=/work/ansible-remote/tmp \
     HOME=/work \
     LC_ALL=C.UTF-8 \
     LANG=C.UTF-8 \
     PYTHONUTF8=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/opt/labweaver/probe/pylib
+    PATH=/opt/labweaver/probe/venv/bin:${PATH}
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/labweaver-service"]

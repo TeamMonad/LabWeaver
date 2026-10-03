@@ -161,6 +161,15 @@ jobs:
               --target agent-runtime
             )
           fi
+          if [[ "$file" == containers/Containerfile.ansible-probe ]]; then
+            ansible_core_version="$(awk '$1 == "ansible_core:" { print $2 }' deploy/versions.lock.yml)"
+            ansible_posix_version="$(awk '$1 == "ansible_posix:" { print $2 }' deploy/versions.lock.yml)"
+            test -n "$ansible_core_version" && test -n "$ansible_posix_version"
+            service_args+=(
+              --build-arg "ANSIBLE_CORE_VERSION=$ansible_core_version"
+              --build-arg "ANSIBLE_POSIX_VERSION=$ansible_posix_version"
+            )
+          fi
           docker buildx build --file "$file" --platform linux/amd64 \
             --build-arg "SOURCE_COMMIT=$source_commit" \
             --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
