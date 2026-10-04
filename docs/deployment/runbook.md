@@ -1004,7 +1004,7 @@ helm -n labweaver-system history labweaver
   Pod 侧解析走 chart 的 `hostAliases`：`agent-service` 的 Pod 模板把 `keycloak.labweaver.2018wzh.top`
   映射到集群内 identity proxy `10.106.242.177`、`portal.labweaver.2018wzh.top` 映射到公网 Gateway VIP
   `10.99.0.140`，因此 Pod 用公网 issuer 完成 OIDC 发现与令牌交换。
-- **修复生效的首个证据**：清掉占用 worker 的陈旧 run（`cancel-stale`，见上文）后，work 旅程的
+- **修复生效的首个证据**：取消占用 worker 的陈旧 run 后，work 旅程的
   agent run（08:58 创建）在**首次尝试**即从 `requested` 走到 `environment:succeeded`（09:26 领取、
   09:30 成功），说明「工具策略 / `--bare` / provider binding / 平台镜像 seed / Harbor 凭据」这几处
   修复合起来已经让 authoring 真正跑通；随后 lab 旅程的 run 立即被领取并进入 authoring。
@@ -1265,7 +1265,8 @@ worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（�
   绑定/批准时长→点批准→在确认框点确认」这一串操作来不及在窗口内完成，POST 从未发出。处置属产品侧审批
   窗口策略（放宽 environment 申请的人工审批窗口，或让审批入口更快/支持预填），本轮按证据记录、不放宽断言。
 - **已知项：并行验收要避开 worker 串行**。agent worker 一次只处理一个 reserved dispatch，验收前用
-  `cancel-stale` 清路、或用 `run` 的默认队列等待；否则旅程会把轮询预算耗在排队上。
+  `run` 的默认队列等待；确需取消本次旧任务时，由 owner 核对精确 ID 后通过正常用户入口操作。
+  否则旅程会把轮询预算耗在排队上。
 
 ### 11.10 本轮重新部署的读回证据（2026-09-24，terminal 补齐上线）
 
@@ -1561,31 +1562,25 @@ resource-service=<新包 digest>` 上线（rollout 成功）。**实测效果**�
 
 ## 12. 用户验收（模拟真实用户操作）
 
-验收入口是 `tools/user_acceptance.py`，它把「可重复」落在三个地方：集群与公网前提的 `preflight`、
-按旅程驱动的 Playwright 运行，以及落到 `artifacts/acceptance/<run-id>/` 的证据与 `summary.json`。
+验收入口是 `tools/user_acceptance.py`：`preflight` 检查集群、公网、身份、凭据、模型、浏览器和
+authoring 队列；`run` 按所选旅程执行真实浏览器操作，向控制台输出结果与失败诊断。
 
-前提（root 私密 → 运行者可读的 0600 副本）：
+运行者需有三个授权账户的私有口令文件 `teacher.password`、`student.password`、`admin.password`。
+凭据目录权限为 0700，文件为 0600；通过 `--credentials-dir` 指定运行者可读的目录，
+默认是项目相对路径 `.private/labweaver-acceptance/credentials`。临时目录需可写，不要求以 root
+运行浏览器，也不要求创建证据目录。
 
-```sh
-sudo install -d -m 700 -o wzh -g wzh /home/wzh/.private/labweaver-acceptance/credentials
-for role in teacher student admin; do
-  sudo install -m 600 -o wzh -g wzh \
-    /var/lib/labweaver/.private/v1/platform-application/keycloak-user-platform-$role-password \
-    /home/wzh/.private/labweaver-acceptance/credentials/$role.password
-done
-```
-
-预检与运行（证据目录必须可写；`artifacts/` 属 root，必要时用 root 运行或指定可写目录）：
+从仓库根目录预检与运行；`run_id` 使用本次新生成的 UUID：
 
 ```sh
 python3 tools/user_acceptance.py preflight \
   --base-url https://portal.labweaver.2018wzh.top \
-  --evidence-dir /home/wzh/LabWeaver/artifacts/acceptance
+  --credentials-dir .private/labweaver-acceptance/credentials
 
 python3 tools/user_acceptance.py run \
   --base-url https://portal.labweaver.2018wzh.top \
-  --run-id <run-id> --journeys lab,work,admin --lab xv6 \
-  --evidence-dir /home/wzh/LabWeaver/artifacts/acceptance
+  --run-id "$run_id" --journeys lab,work,admin --lab xv6 \
+  --credentials-dir .private/labweaver-acceptance/credentials
 ```
 
 旅程映射（与工具内写死的一致）：
@@ -1605,46 +1600,37 @@ python3 tools/user_acceptance.py run \
 「数条排队运行 + 部署 15 分钟 LLM 界 + 镜像构建」放大（`FULL_CHAIN_TIMEOUT_MS` 4h、
 `AUTHORING_RUN_TIMEOUT_MS` 2.5h、`CANDIDATE_BUILD_TIMEOUT_MS` 1h）。
 
-**清理陈旧 run（已实现为子命令，并实测）**：`tools/user_acceptance.py cancel-stale --base-url <url>
-[--auth-dir <dir>] [--keep <run-id 前缀>]` 会列出所有非终态 agent run，用 owner 会话逐个取消
-（`--keep` 保护正在验收的那一条），输出每条的 `http-<状态码>`。**每条 run 都会依次交给全部角色会话尝试**
-（早期版本按 `student→teacher` 顺序遇到第一条读不到的 run 就记 `no-etag` 并跳过，导致只对 teacher
-可见的 run 永远清不掉；`b5b9a05` 已改为按 run 保留最佳结果，实测同一批 4 条 `no-etag` 全部变为
-`http-202`，`pending/preparing/claimed` 随之归零）。它要求 `<auth-dir>`（默认 `<repo>/.auth`）
-里已有该角色的 Playwright 会话，可先执行下面的 `--project=setup` 生成；手工等价步骤与稳定诊断码如下：
-
-**手工步骤（已实测）**：worker 按 `created_at` 串行处理，被跳过的旅程会留下占用
-worker 的运行，因此验收前应把它们取消。取消接口是用户态的，实测步骤如下：
+**取消本次待审批资源申请**：`cancel-resource` 只处理调用者明确指定的一条申请。
+使用有权操作该申请的私有会话，传入本次旅程返回的项目 ID、申请 ID 和 request key；
+`auth_state` 指向仍有效的私有临时会话文件：
 
 ```sh
-# 1) 取得对应角色（通常是 project owner）的新会话；会写 <repo>/.auth/<role>.json
-LABWEAVER_BASE_URL=https://portal.labweaver.2018wzh.top LABWEAVER_IGNORE_HTTPS_ERRORS=1   node web/node_modules/@playwright/test/cli.js test --config=web/playwright.config.mjs --project=setup
-# 2) GET /api/v1/auth/csrf 取 X-CSRF-Token；3) GET /api/v1/projects/<p>/agent-runs/<r> 取 ETag（形如 "rev-1"）
-# 4) POST /api/v1/projects/<p>/agent-runs/<r>/cancel
-#    headers: X-CSRF-Token、If-Match: "rev-N"、Idempotency-Key: <uuid>
-#    body:   {"reason": "..."}          -> 202 接受
+python3 tools/user_acceptance.py cancel-resource \
+  --base-url https://portal.labweaver.2018wzh.top \
+  --auth-state "$auth_state" \
+  --project-id "$project_id" \
+  --request-id "$request_id" \
+  --request-key "$request_key"
 ```
 
-实测要点：`platform-admin` 对项目范围内的 run 会得到 `lw_auth_scope_denied`（403，属正确的权限行为），
-必须用 **owner**（teacher/student）会话；缺 `If-Match` 为 `lw_if_match_required`（412），缺
-`Idempotency-Key` 为 `lw_idempotency_key_required`（400）；取消是异步的，接口返回 202 后队列会随之缩短。
+工具先读取该申请，核对项目、request key 和待审批状态，再取得 CSRF token、ETag 并发出取消请求。
+成功时输出接口结果并返回 0，未取消时返回 1。它不发现、筛选或批量取消旧申请，也不取消 AgentRun；
+已激活资源由 owner 使用正常租约回收流程。处理排队中的 AgentRun 时，需先核对其 owner 和精确 ID，
+通过正常用户入口取消，不得清理其他用户或正在运行的旅程。
 
-证据目录布局：
-
-```
-artifacts/acceptance/<run-id>/
-  summary.json                 # run_id、base_url、git_commit、package_manifest、helm_revision、bundle_sha256、逐旅程 status/diagnostic、起止时间
-  .credentials/                # 0700；每个 0600 口令文件（仅本次运行的副本）
-  <journey>/                   # playwright-report/{report.json,index.html} 与 test-results/**
-  <journey>.stdout.log         # 原始 stdout/stderr
-```
+`run` 在私有临时目录中创建 0700 的凭据、认证状态与 Playwright 输出目录，口令副本为 0600。
+旅程关闭其浏览器上下文；工具退出时删除临时目录及其中的会话、口令副本和 stdout/stderr 文件。
+失败输出经过敏感值遮盖和长度限制；需要详细诊断时，仅在运行期间按权限临时访问 stdout/stderr。
+当前 Playwright 配置关闭截图、trace 和视频，控制台采用 list reporter，不要求保留原始日志或证据包。
+临时文件清理不等于删除项目、失败草稿或计费事实；业务资源按各旅程的正常 owner 回收流程处理。
+失败按真实业务状态报告，不修改数据库或补发事件将失败改写为成功。
 
 失败分类与处置（不得放宽断言）：
 
 - 集群/沙箱/镜像/模型等前提缺失 → 回到 §6 与 §3 补齐后重跑。
 - 身份与路由配置错误（issuer、redirect、allowed_origins、realm client、hostAliases）→ 回到 §11.6 修正并重跑部署。
 - 产品缺陷（页面死路、错误不可读、假进度、刷新重试导致重复资源）→ 改源码与受影响测试，重新打包部署后重跑。
-- 已知但不阻塞的易用性打磨项 → 记入 §11.7，附截图与稳定诊断码。
+- 已知但不阻塞的易用性打磨项 → 记入 Issue/PR，说明复现步骤与稳定诊断码。
 
 ### 11.2.1 施加部署必须与打包一样以 root 运行（实测）
 
@@ -1757,20 +1743,17 @@ Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留
 `LW_OJ_JOB_MISSING`，说明 Job 是**真的缺席超过了两分钟**，而不是观察与清理的短窗口竞态；同窗口
 `evaluation.orphan.reconcile_failed` 持续出现（`14ed6fe` 之后会带 `error_kind`，用于判定是否由它删除）。
 
-### 12.0.1 同一时刻只允许一个验收运行（有独占锁）
+### 12.0.1 同一时刻只允许一个验收运行（外部执行入口协调）
 
-`tools/user_acceptance.py run` 在证据根目录上取 `.acceptance.lock` 的独占 `flock`：已有运行时新的
-调用会立刻以 `LW_ACCEPTANCE_RUN_IN_PROGRESS`（退出码 2）失败，而不是并行去抢那唯一的 authoring
-worker。加这条是因为实测过并发危害：多次重启留下的进程互相排队，队列里出现 4 条 `requested`，
-正在跑的旅程被迫等它们。锁是进程级的（`flock`），子进程实测被阻塞；同进程内重复获取不受限，
-因此**不要**在同一进程里并发调用。
+`tools/user_acceptance.py` 本身不取得独占锁。
+公网验收由外部执行 wrapper 在启动前以 `O_RDONLY` 打开已约定的现有锁文件，取得
+`flock(LOCK_EX | LOCK_NB)`；取得失败即停止，不启动浏览器或创建资源。wrapper 保持锁描述符
+直至完整旅程、正常业务回收以及 `finally` 中的认证状态、临时文件与上下文清理全部结束后再解锁。
+所有并发验收入口必须使用同一锁文件；单独调用工具不提供这一协调保证。
 
-重复启动同一个验收（不同 `--run-id`）先确认没有在跑：`pgrep -af "user_acceptance.py run"`。
-
-**反例（实测踩坑，务必避免）**：在**旅程进行中**执行 `cancel-stale` 会把该旅程自己的 authoring run 一起取消，
-症状是 lab 段以 `LAB_EXPERIMENT_AGENT_RUN_FAILED:cancelled:LW_CONFLICT` 失败——那不是平台缺陷，
-而是操作者误伤。清队列只能在**旅程开始之前**做（`run` 的 preflight 等待就是为此），一旦 journeys
-已在跑，要么等它结束，要么整体停掉循环后重来。
+外部锁只协调验收调用者，不取代 Resource 的容量与租约控制，也不自动取消排队任务。
+`run` 默认在启动旅程前等待 authoring 队列；旅程进行中不得另行取消其 AgentRun 或资源申请。
+需要中止时按精确归属使用正常取消与回收入口，等待清理结束后再开始下一次运行。
 
 ### 12.2.2 evaluation rbacProfile 缺 `list jobs`：orphan 清理从未生效（已修）
 
@@ -2207,7 +2190,7 @@ work_configuration_runner.py` 11 项全绿，env-service 以 `6354f5df…` 滚�
 （ollama `qwen3.6:27b` 经 `ollama-proxy`）在 authoring 的 Claude Code 轮次上间歇
 整轮卡死——run 停在 `running` 且无任何后续事件，直到 60 分钟的执行边界才
 `ExecutionFailed`，而 e2e 的整测超时为 30 分钟。a4-a6 的 lab 尝试全部死于该
-窗口（另有若干次由人工 `cancel-stale` 误伤在线尝试，已记录）。重启
+窗口（另有若干次人工取消误伤在线尝试，已记录）。重启
 `ollama-proxy` 后 authoring 立即恢复为分钟级成功（a6 的 10:35-12:35 连续
 succeeded 可证），但卡死可再次出现。产品代码侧无对应缺陷：同一 authoring 在
 健康窗口内于 4 分钟内产出三个可构建候选。该卡顿是当前 lab 端到端绿灯的唯一
