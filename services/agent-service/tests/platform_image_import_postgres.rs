@@ -300,15 +300,58 @@ async fn run_import(
     Box<dyn std::error::Error>,
 > {
     let upload_id = UploadSessionId::new();
-    let client = reqwest::Client::new();
-    let enqueued = client
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let mut enqueued = client
         .post(format!("{api}/internal/v1/platform-images/import-jobs"))
         .header("Idempotency-Key", format!("import:{upload_id}"))
         .json(&serde_json::json!({"uploadId": upload_id, "request": request}))
         .send()
         .await?;
-    assert_eq!(enqueued.status(), StatusCode::ACCEPTED);
-    let initial: InternalPlatformImageImportJobStatus = enqueued.json().await?;
+    let status = enqueued.status();
+    let json_content_type = enqueued
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            matches!(
+                value.trim(),
+                "application/json" | "application/problem+json"
+            )
+        });
+    let mut body = Vec::new();
+    while let Some(chunk) = enqueued.chunk().await? {
+        assert!(
+            body.len() + chunk.len() <= 16 * 1024,
+            "import enqueue response exceeds fixture bound"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    let response_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let diagnostic = response_json
+        .as_ref()
+        .and_then(|value| value.get("diagnosticCode"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            matches!(
+                *value,
+                "LW_PLATFORM_IMAGE_IMPORT_NOT_FOUND"
+                    | "LW_PLATFORM_IMAGE_IMPORT_STATE_CONFLICT"
+                    | "LW_PLATFORM_IMAGE_IMPORT_REQUEST_INVALID"
+                    | "LW_AGENT_PERSISTENCE_FAILED"
+                    | "LW_AUTH_SERVICE_IDENTITY_DENIED"
+                    | "LW_CONTRACT_DOCUMENT_INVALID"
+            )
+        });
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "enqueue response: json_content_type={json_content_type}, json_object={}, diagnostic={diagnostic:?}",
+        response_json
+            .as_ref()
+            .is_some_and(serde_json::Value::is_object)
+    );
+    let initial: InternalPlatformImageImportJobStatus = serde_json::from_slice(&body)?;
     assert_eq!(initial.upload_id, upload_id);
     assert_eq!(initial.state, PlatformImageImportJobState::Queued);
     let _worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(api.worker.clone().run()));
@@ -416,7 +459,9 @@ async fn import_publishes_every_blob_tags_the_reference_and_pins_the_digest()
         "LW_PLATFORM_IMAGE_STATE_CONFLICT"
     );
 
-    let listed: serde_json::Value = reqwest::Client::new()
+    let listed: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
         .await?
@@ -500,7 +545,9 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
 
     assert!(registry.blob_digests().is_empty());
     assert!(registry.manifest_digest("24.04").is_none());
-    let listed: serde_json::Value = reqwest::Client::new()
+    let listed: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
         .await?
@@ -542,7 +589,9 @@ async fn import_requires_a_configured_platform_registry() -> Result<(), Box<dyn 
 }
 
 async fn listed_entries(api: &str) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let listed: serde_json::Value = reqwest::Client::new()
+    let listed: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
         .await?
