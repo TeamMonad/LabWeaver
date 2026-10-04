@@ -424,6 +424,14 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             axum::routing::any(proxy::forward_control),
         )
         .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}",
+            get(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}/cancel",
+            post(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects/{project_id}/authoring-approvals",
             axum::routing::any(proxy::forward_control),
         )

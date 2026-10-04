@@ -1,6 +1,10 @@
 //! Browser-router coverage with persisted sessions and external service boundaries.
 
-use std::{collections::BTreeSet, error::Error, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    sync::{Arc, LazyLock},
+};
 
 use auth::{CreateBffSession, ServiceTokenClient, ServiceTokenClientConfig};
 use axum::{
@@ -32,6 +36,8 @@ mod support;
 const ORIGIN: &str = "https://portal.example.invalid";
 const AUDIENCE: &str = "labweaver-control";
 const PERMISSION: &str = "control.platform-images.manage";
+static METRICS: LazyLock<Result<telemetry::PrometheusHandle, telemetry::TelemetryError>> =
+    LazyLock::new(|| telemetry::init_metrics("access-browser-test"));
 
 struct Tasks(Vec<tokio::task::JoinHandle<()>>);
 
@@ -138,6 +144,7 @@ async fn control(
         "method": method.as_str(), "path": uri.path(), "actor": actor,
         "session": headers.get("x-labweaver-session-id").and_then(|v| v.to_str().ok()),
         "ifMatch": headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()),
+        "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
         "body": serde_json::from_slice::<Value>(&body).ok(),
         "browserCookie": headers.contains_key(header::COOKIE),
         "browserCsrf": headers.contains_key("x-csrf-token")
@@ -150,10 +157,30 @@ async fn control(
         )
             .into_response();
     }
-    if method == Method::GET {
+    if uri.path().contains("/builds/") && method == Method::GET {
+        (
+            StatusCode::OK,
+            Json(json!({"status": {"state": "running", "revision": 3}})),
+        )
+            .into_response()
+    } else if method == Method::GET {
         (
             StatusCode::OK,
             Json(json!({"state": "importing", "revision": 3})),
+        )
+            .into_response()
+    } else if uri.path().contains("/builds/")
+        && serde_json::from_slice::<Value>(&body).is_ok_and(|value| value["expectedRevision"] == 3)
+    {
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({"status": {"state": "running", "revision": 4, "cancellationRequested": true}})),
+        )
+            .into_response()
+    } else if uri.path().contains("/builds/") {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"diagnosticCode": "LW_AGENT_BUILD_REVISION_CONFLICT", "retryable": false})),
         )
             .into_response()
     } else {
@@ -243,6 +270,14 @@ async fn state(
         .route("/realms/test/token", post(token))
         .route("/api/v1/admin/images/uploads/{id}", any(control))
         .route("/api/v1/admin/images/uploads/{id}/cancel", any(control))
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}",
+            any(control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}/cancel",
+            any(control),
+        )
         .with_state(authority.clone());
     tasks.0.push(tokio::spawn(async move {
         let _ = http_transport::serve_tls(listener, router, server_config).await;
@@ -370,7 +405,10 @@ async fn state(
         evaluation_proxy,
         resource_proxy,
         runtime_proxy,
-        metrics: telemetry::init_metrics("access-browser-test")?,
+        metrics: METRICS
+            .as_ref()
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .clone(),
         nats: nats_boundary(tasks).await?,
     });
     Ok((state, authority.requests))
@@ -539,5 +577,188 @@ async fn admin_upload_status_and_cancel_reach_control_with_session_auth()
     assert_eq!(requests[1]["browserCookie"], false);
     assert_eq!(requests[1]["browserCsrf"], false);
     assert_eq!(requests[2]["actor"], student_session.actor_id.to_string());
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one public-router scenario verifies session authentication, CSRF, delegation and exact build forwarding"
+)]
+async fn candidate_build_status_and_cancel_reach_control_with_session_auth()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let teacher = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool, teacher, &mut tasks)).await?;
+    let owner = session(
+        &state.pool,
+        &state.key_ring,
+        teacher,
+        contracts::PlatformRole::Teacher,
+    )
+    .await?;
+    let other = session(
+        &state.pool,
+        &state.key_ring,
+        Uuid::now_v7(),
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, owner.session_id
+    );
+    let other_cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, other.session_id
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state);
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let project = Uuid::now_v7();
+    let candidate = Uuid::now_v7();
+    let body = json!({"buildRequestId": Uuid::now_v7(), "expectedRevision": 3, "expectedState": "running"});
+    let key = Uuid::now_v7().to_string();
+    for target in ["environment", "evaluation_runner"] {
+        let path = format!("/api/v1/projects/{project}/candidates/{candidate}/builds/{target}");
+        let url = format!("{base}{path}");
+        assert_eq!(
+            client.get(&url).send().await?.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let status = client
+            .get(&url)
+            .header(header::COOKIE, &cookie)
+            .header(header::AUTHORIZATION, "Bearer spoofed")
+            .header("x-labweaver-actor-id", other.actor_id.to_string())
+            .send()
+            .await?;
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(
+            status.json::<Value>().await?,
+            json!({"status": {"state": "running", "revision": 3}})
+        );
+        let cancel = format!("{url}/cancel");
+        for (origin, csrf) in [
+            (None, Some(owner.csrf_token.expose())),
+            (Some(ORIGIN), None),
+            (Some(ORIGIN), Some("wrong")),
+        ] {
+            let mut request = client
+                .post(&cancel)
+                .header(header::COOKIE, &cookie)
+                .json(&body);
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            if let Some(csrf) = csrf {
+                request = request.header("x-csrf-token", csrf);
+            }
+            assert_eq!(request.send().await?.status(), StatusCode::FORBIDDEN);
+        }
+        let accepted = client
+            .post(&cancel)
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, ORIGIN)
+            .header("x-csrf-token", owner.csrf_token.expose())
+            .header(header::IF_MATCH, "\"rev-3\"")
+            .header("Idempotency-Key", &key)
+            .header("x-labweaver-session-id", other.session_id.to_string())
+            .json(&body)
+            .send()
+            .await?;
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            accepted.json::<Value>().await?,
+            json!({"status": {"state": "running", "revision": 4, "cancellationRequested": true}})
+        );
+        let conflict = client.post(&cancel)
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, ORIGIN)
+            .header("x-csrf-token", owner.csrf_token.expose())
+            .header(header::IF_MATCH, "\"rev-2\"")
+            .header("Idempotency-Key", Uuid::now_v7().to_string())
+            .json(&json!({"buildRequestId": body["buildRequestId"], "expectedRevision": 2, "expectedState": "running"}))
+            .send().await?;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            conflict.json::<Value>().await?,
+            json!({"diagnosticCode": "LW_AGENT_BUILD_REVISION_CONFLICT", "retryable": false})
+        );
+        assert_eq!(
+            client
+                .get(&url)
+                .header(header::COOKIE, &other_cookie)
+                .send()
+                .await?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            client
+                .get(&cancel)
+                .header(header::COOKIE, &cookie)
+                .send()
+                .await?
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            client
+                .post(&url)
+                .header(header::COOKIE, &cookie)
+                .send()
+                .await?
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            client
+                .post(format!("{cancel}/extra"))
+                .header(header::COOKIE, &cookie)
+                .send()
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let requests = requests.lock().await;
+    assert_eq!(
+        requests.len(),
+        8,
+        "rejected browser requests never reach Control"
+    );
+    for (records, target) in requests
+        .chunks_exact(4)
+        .zip(["environment", "evaluation_runner"])
+    {
+        let path = format!("/api/v1/projects/{project}/candidates/{candidate}/builds/{target}");
+        assert_eq!(records[0]["path"], path);
+        assert_eq!(records[0]["actor"], teacher.to_string());
+        assert_eq!(records[1]["path"], format!("{path}/cancel"));
+        assert_eq!(records[1]["method"], "POST");
+        assert_eq!(records[1]["body"], body);
+        assert_eq!(records[1]["ifMatch"], "\"rev-3\"");
+        assert_eq!(records[1]["idempotencyKey"], key);
+        assert_eq!(records[1]["actor"], teacher.to_string());
+        assert_eq!(records[1]["session"], owner.session_id.to_string());
+        assert_eq!(records[1]["browserCookie"], false);
+        assert_eq!(records[1]["browserCsrf"], false);
+        assert_eq!(records[2]["body"]["expectedRevision"], 2);
+        assert_eq!(records[3]["actor"], other.actor_id.to_string());
+    }
     Ok(())
 }
