@@ -214,7 +214,9 @@ export async function requestProjectResourceByUi(page, {
   await waitForResourceLists(page)
   const scope = projectName ?? selectedProjectId ?? 'unscoped'
 
-  const releaseSelect = page.getByLabel('已发布版本')
+  const releaseSelect = page.locator('.request-form label')
+    .filter({ has: page.getByText('已发布版本', { exact: true }) })
+    .locator('select')
   await expect(releaseSelect).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   // The release set is an event-sourced read model: the template release is
   // projected asynchronously, so a bare evaluateAll can observe the empty
