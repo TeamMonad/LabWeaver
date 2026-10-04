@@ -414,8 +414,24 @@ impl PgBuildExecutorFenceStore {
             {
                 return Err(BuildExecutorFenceError::StaleGeneration);
             }
+            if cleanup
+                && (context.fence_generation != highest_generation
+                    || context.lease_token != lease_token
+                    || context.deadline_at.get() != previous_deadline)
+            {
+                return Err(BuildExecutorFenceError::IdentityMismatch);
+            }
+            let retry_cleanup = cleanup
+                && context.fence_generation == highest_generation
+                && last_stage_rank == stage_rank
+                && tombstone_generation == Some(highest_generation)
+                && last_request_id == context.stage_request_id.to_string()
+                && last_response
+                    .as_ref()
+                    .is_some_and(retryable_cleanup_response);
             if context.fence_generation == highest_generation
                 && last_request_id == context.stage_request_id.to_string()
+                && !retry_cleanup
             {
                 if let Some(value) = last_response {
                     transaction.rollback().await?;
@@ -426,15 +442,8 @@ impl PgBuildExecutorFenceStore {
             if last_response.is_none() {
                 return Err(BuildExecutorFenceError::InProgress);
             }
-            if cleanup
-                && (context.fence_generation != highest_generation
-                    || context.lease_token != lease_token
-                    || context.deadline_at.get() != previous_deadline)
-            {
-                return Err(BuildExecutorFenceError::IdentityMismatch);
-            }
             if context.fence_generation == highest_generation
-                && (tombstone_generation == Some(highest_generation)
+                && ((tombstone_generation == Some(highest_generation) && !retry_cleanup)
                     || (stage_rank < last_stage_rank
                         && context.stage != BuildProviderStage::Cleanup))
             {
@@ -528,6 +537,21 @@ impl PgBuildExecutorFenceStore {
 enum BuildExecutorAdmission {
     Execute(std::time::Duration),
     Replay(Value),
+}
+
+pub(crate) fn retryable_cleanup_response(value: &Value) -> bool {
+    match serde_json::from_value::<BuildExecutorResponse>(value.clone()) {
+        Ok(BuildExecutorResponse::Failed { failure }) => retryable_cleanup_failure(failure),
+        _ => false,
+    }
+}
+
+pub(crate) const fn retryable_cleanup_failure(failure: BuildProviderFailure) -> bool {
+    failure.retryable
+        && matches!(
+            failure.code,
+            BuildProviderFailureCode::Unavailable | BuildProviderFailureCode::TimedOut
+        )
 }
 
 fn cleanup_timeout(request: &BuildExecutorRequest) -> Result<Duration, BuildExecutorFenceError> {
