@@ -71,6 +71,8 @@
               <div class="rate-main">
                 <strong>{{ rateLabel(rate) }}</strong>
                 <small>{{ rate.unitQuantity }} 基础单位 · {{ rate.unitPrice.amount }} {{ rate.unitPrice.currency }} · {{ formatTimestamp(rate.effectiveFrom) }} 起</small>
+                <small>基础单位：{{ rateDisplayUnits[rate.unit]?.base ?? '未知计费单位' }}</small>
+                <small>{{ equivalentRatePrice(rate.unit, rate.unitQuantity, rate.unitPrice.amount, rate.unitPrice.currency) ?? '金额或基础单位数量无效，无法换算。' }}</small>
                 <small v-if="rate.effectiveUntil">至 {{ formatTimestamp(rate.effectiveUntil) }}</small>
               </div>
               <span class="state-chip">版本 {{ rate.revision }}</span>
@@ -110,7 +112,15 @@
         </label>
         <label>
           <span>每次计费基础单位数</span>
-          <input v-model.number="rateUnitQuantity" class="text-input" type="number" min="1" step="1" required />
+          <input
+            v-model.number="rateUnitQuantity"
+            class="text-input"
+            type="number"
+            min="1"
+            :max="Number.MAX_SAFE_INTEGER"
+            step="1"
+            required
+          >
         </label>
         <label>
           <span>单价</span>
@@ -128,6 +138,15 @@
           <span>结束时间（可选）</span>
           <input v-model="rateEffectiveUntil" class="text-input" type="datetime-local" />
         </label>
+        <p
+          class="rate-equivalent"
+          role="status"
+          aria-live="polite"
+        >
+          基础单位：{{ rateDisplayUnits[rateUnit].base }}。
+          {{ equivalentRatePrice(rateUnit, rateUnitQuantity, rateAmount, rateCurrency) ?? '请输入有效的六位小数金额和安全整数基础单位数量后查看等价单价。' }}
+          换算仅帮助确认单价，不会更改你填写的费率或历史费用。
+        </p>
         <button type="submit" class="filled-button" :disabled="!canSubmitRate || rates.acting !== null">创建费率版本</button>
       </form>
     </section>
@@ -288,6 +307,28 @@ const rateAmount = ref('0.000000')
 const rateCurrency = ref('USD')
 const rateEffectiveFrom = ref(localDateTimeValue())
 const rateEffectiveUntil = ref('')
+const rateDisplayUnits: Record<ResourceBillingUnit, { base: string; label: string; quantity: bigint }> = {
+  cpu_millicore_second: { base: 'CPU millicore 秒', label: '核心小时', quantity: 1000n * 3600n },
+  memory_byte_second: { base: '内存字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
+  storage_byte_second: { base: '存储字节秒', label: 'GiB 小时', quantity: 1024n ** 3n * 3600n },
+  gpu_unit_second: { base: 'GPU 单位秒', label: 'GPU 单位秒', quantity: 1n },
+}
+
+function equivalentRatePrice(unit: ResourceBillingUnit, quantity: number, amount: string, currency: string): string | null {
+  if (!Number.isSafeInteger(quantity) || quantity < 1
+    || typeof amount !== 'string' || typeof currency !== 'string'
+    || !/^(0|[1-9][0-9]*)\.[0-9]{6}$/.test(amount)
+    || !/^[A-Za-z0-9_-]{1,32}$/.test(currency)) return null
+  const display = rateDisplayUnits[unit]
+  if (!display) return null
+  const numerator = BigInt(amount.replace('.', '')) * display.quantity
+  const denominator = BigInt(quantity)
+  let scaled = numerator / denominator
+  const remainder = numerator % denominator
+  if (remainder * 2n > denominator || (remainder * 2n === denominator && scaled % 2n === 1n)) scaled += 1n
+  const formatted = `${scaled / 1_000_000n}.${(scaled % 1_000_000n).toString().padStart(6, '0')}`
+  return `等价单价${remainder === 0n ? '' : '约'}：${formatted} ${currency} / ${display.label}（按六位小数显示）。`
+}
 
 const selectedCharge = computed(() => finance.charges.kind === 'success'
   ? finance.charges.data.find((charge) => charge.id === selectedChargeId.value) ?? null
@@ -461,6 +502,7 @@ onMounted(() => { void rates.load() })
 .rate-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); align-items: end; }
 .rate-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .rate-form button { justify-self: start; }
+.rate-equivalent { grid-column: 1 / -1; margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
 .finance-layout { display: grid; grid-template-columns: minmax(300px, .75fr) minmax(0, 1.25fr); gap: 20px; align-items: start; }
 .budget-card, .charges-card { display: grid; gap: 18px; padding: 20px; }
 .budget-summary { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }

@@ -219,6 +219,89 @@ describe('ResourceFinanceView', () => {
     expect(wrapper.text()).toContain('资源费率已创建。')
   })
 
+  async function mountRateForm() {
+    api.get.mockImplementation(({ url }: { url: string }) => Promise.resolve(
+      url.endsWith('/resource-budget') ? { error: 'LW_RESOURCE_BUDGET_NOT_FOUND' } : { data: [] },
+    ))
+    const wrapper = mountView()
+    await flushPromises()
+    return { wrapper, form: wrapper.get('[data-testid="resource-rate-form"]') }
+  }
+
+  it.each([
+    ['cpu_millicore_second', 3_600_000, '核心小时', 'CPU millicore 秒'],
+    ['memory_byte_second', 3_865_470_566_400, 'GiB 小时', '内存字节秒'],
+    ['storage_byte_second', 3_865_470_566_400, 'GiB 小时', '存储字节秒'],
+  ])('previews %s in resource-hours while submitting the selected canonical quantity', async (unit, quantity, label, base) => {
+    const { wrapper, form } = await mountRateForm()
+    await form.get('select[aria-label="计费单位"]').setValue(unit)
+    await form.get('input[type="number"]').setValue(String(quantity))
+    await form.get('input[inputmode="decimal"]').setValue('1.000000')
+    await form.get('input[type="datetime-local"]').setValue('2030-01-01T00:00')
+    expect(form.get('[role="status"]').text()).toContain(`1.000000 USD / ${label}`)
+    expect(form.get('[role="status"]').text()).toContain(String(base))
+    expect(createResourceRate).not.toHaveBeenCalled()
+
+    vi.mocked(createResourceRate).mockResolvedValue({ data: {} as never, error: undefined as never })
+    await form.trigger('submit')
+    await flushPromises()
+    expect(createResourceRate).toHaveBeenCalledWith({
+      headers: { 'Idempotency-Key': expect.any(String) },
+      body: {
+        unit, unitQuantity: quantity, gpuClass: null, gpuMode: null,
+        unitPrice: { amount: '1.000000', currency: 'USD' },
+        effectiveFrom: new Date('2030-01-01T00:00').toISOString(), effectiveUntil: null,
+      },
+    })
+    expect(wrapper.text()).toContain('资源费率已创建。')
+  })
+
+  it('shows the true GiB-hour equivalent of an existing byte-second rate without rewriting it', async () => {
+    const existing = { id: 'memory-rate', revision: 1, unit: 'memory_byte_second', unitQuantity: 1_000_000,
+      unitPrice: { amount: '1.000000', currency: 'USD' }, effectiveFrom: '2026-09-08T00:00:00Z' }
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [existing] as never, error: undefined as never })
+    const { wrapper } = await mountRateForm()
+    expect(wrapper.get('.rate-list').text()).toContain('1000000 基础单位 · 1.000000 USD')
+    expect(wrapper.get('.rate-list').text()).toContain('3865470.566400 USD / GiB 小时')
+    expect(createResourceRate).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['0.000001', '0.000000'],
+    ['0.000003', '0.000002'],
+    ['0.000005', '0.000002'],
+  ])('rounds a half-unit %s price to nearest even at six decimals', async (amount, expected) => {
+    const { form } = await mountRateForm()
+    await form.get('input[type="number"]').setValue('2')
+    await form.get('input[inputmode="decimal"]').setValue(amount)
+    expect(form.get('[role="status"]').text()).toContain(`等价单价约：${expected} USD / GPU 单位秒`)
+  })
+
+  it('converts a large precise amount without passing it through floating point', async () => {
+    const { form } = await mountRateForm()
+    await form.get('select[aria-label="计费单位"]').setValue('cpu_millicore_second')
+    await form.get('input[type="number"]').setValue('3600000')
+    await form.get('input[inputmode="decimal"]').setValue('9007199254740993.123457')
+    expect(form.get('[role="status"]').text()).toContain('9007199254740993.123457 USD / 核心小时')
+  })
+
+  it.each(['0', '-1', '1.5', '9007199254740992'])('does not submit or replace an invalid quantity %s with zero', async (quantity) => {
+    const { form } = await mountRateForm()
+    await form.get('input[type="number"]').setValue(quantity)
+    await form.get('input[inputmode="decimal"]').setValue('1.000000')
+    expect(form.get('[role="status"]').text()).toContain('有效的六位小数金额和安全整数')
+    expect(form.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await form.trigger('submit')
+    expect(createResourceRate).not.toHaveBeenCalled()
+  })
+
+  it.each(['1.2', 'invalid', '-1.000000'])('leaves a malformed amount %s visibly unconverted', async (amount) => {
+    const { form } = await mountRateForm()
+    await form.get('input[inputmode="decimal"]').setValue(amount)
+    expect(form.get('[role="status"]').text()).toContain('有效的六位小数金额和安全整数')
+    expect(form.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+  })
+
   it('keeps an unrelated 404 as a budget load error', async () => {
     api.get.mockImplementation(({ url }: { url: string }) => {
       if (url.endsWith('/resource-budget')) {

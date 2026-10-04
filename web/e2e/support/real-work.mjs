@@ -16,10 +16,12 @@ const BILLING_UNITS = Object.freeze([
   'memory_byte_second',
   'storage_byte_second',
 ])
-const DEFAULT_RATE_INPUTS = Object.freeze([
-  Object.freeze({ unit: 'cpu_millicore_second', unitQuantity: 1_000_000, amount: '1.000000', currency: 'USD' }),
-  Object.freeze({ unit: 'memory_byte_second', unitQuantity: 1_000_000, amount: '1.000000', currency: 'USD' }),
-  Object.freeze({ unit: 'storage_byte_second', unitQuantity: 1_000_000, amount: '1.000000', currency: 'USD' }),
+// Acceptance demonstration prices only: USD 1 per core-hour / GiB-hour.
+// Existing operator-selected prices remain authoritative; these are not market recommendations.
+export const DEFAULT_RATE_INPUTS = Object.freeze([
+  Object.freeze({ unit: 'cpu_millicore_second', unitQuantity: 1000 * 3600, amount: '1.000000', currency: 'USD' }),
+  Object.freeze({ unit: 'memory_byte_second', unitQuantity: 1024 ** 3 * 3600, amount: '1.000000', currency: 'USD' }),
+  Object.freeze({ unit: 'storage_byte_second', unitQuantity: 1024 ** 3 * 3600, amount: '1.000000', currency: 'USD' }),
 ])
 const GPU_MODES = Object.freeze(['exclusive', 'container_time_slice', 'vm_vgpu'])
 const FIXED_DECIMAL = /^(0|[1-9][0-9]*)\.[0-9]{6}$/
@@ -634,6 +636,9 @@ async function readResourceRates(context, diagnosticCode) {
     diagnosticCode,
   )
   if (!Array.isArray(rates)) throw new Error('REAL_WORK_RATES_RESPONSE_INVALID')
+  if (rates.some((rate) => !Number.isSafeInteger(rate?.unitQuantity) || rate.unitQuantity < 1)) {
+    throw new Error('REAL_WORK_RATE_QUANTITY_INVALID')
+  }
   return rates
 }
 
@@ -708,7 +713,7 @@ async function waitForRateUiReadback(page, target, revision) {
   }, { timeout: 120_000, intervals: [250, 500, 1000] }).toBe(true)
 }
 
-async function ensureRateByUi(page, context, target) {
+export async function ensureRateByUi(page, context, target) {
   let rates = await readResourceRates(context, 'REAL_WORK_RATES_LIST_FAILED')
   let current = rates.filter((rate) => currentRateDimension(rate, target))
   if (current.length > 1) throw new Error(`REAL_WORK_RATE_ACTIVE_AMBIGUOUS:${target.unit}`)
@@ -718,6 +723,14 @@ async function ensureRateByUi(page, context, target) {
       throw new Error(`REAL_WORK_GPU_RATE_ACTIVE_CONFLICT:${target.gpuClass}`)
     }
     return current[0]
+  }
+
+  if (rates.some((rate) => rate.unit === target.unit
+    && (target.unit === 'gpu_unit_second'
+      ? rate.gpuClass === target.gpuClass && rate.gpuMode === target.gpuMode
+      : rate.gpuClass == null && rate.gpuMode == null)
+    && Date.parse(rate.effectiveFrom) > Date.now())) {
+    throw new Error(`REAL_WORK_RATE_FUTURE_CONFIGURED:${target.unit}`)
   }
 
   await createRateByUi(page, target)

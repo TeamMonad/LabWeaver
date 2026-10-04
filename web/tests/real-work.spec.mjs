@@ -6,12 +6,70 @@ import {
   assertRealWorkGpuContainerCandidate,
   createRealWorkPackage,
   cleanupWorkResources,
+  DEFAULT_RATE_INPUTS,
+  ensureRateByUi,
   realWorkConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
 } from '../e2e/support/real-work.mjs'
 
 const GIB = 1024 ** 3
+describe('Work acceptance demonstration rates', () => {
+  const now = Date.parse('2026-10-04T06:00:00Z')
+  const context = (rates) => ({ request: { get: vi.fn(async () => ({ ok: () => true, text: async () => JSON.stringify(rates) })) } })
+  const rate = (target, overrides = {}) => ({
+    id: 'operator-rate', revision: 1, unit: target.unit, unitQuantity: target.unitQuantity,
+    gpuClass: null, gpuMode: null, unitPrice: { amount: '7.000000', currency: 'USD' },
+    effectiveFrom: '2026-10-04T05:00:00Z', effectiveUntil: null, ...overrides,
+  })
+
+  beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(now))
+  afterEach(() => vi.restoreAllMocks())
+
+  it.each([
+    ['cpu_millicore_second', 1000 * 3600],
+    ['memory_byte_second', GIB * 3600],
+    ['storage_byte_second', GIB * 3600],
+  ])('uses one human resource-hour as the %s demonstration price quantity', (unit, quantity) => {
+    const target = DEFAULT_RATE_INPUTS.find((item) => item.unit === unit)
+    expect(target).toBeDefined()
+    expect(Number.isSafeInteger(target.unitQuantity)).toBe(true)
+    expect(quantity / target.unitQuantity * Number(target.amount)).toBe(1)
+    expect(target.currency).toBe('USD')
+  })
+
+  it('keeps the current operator price when a later version is scheduled', async () => {
+    const target = DEFAULT_RATE_INPUTS[1]
+    const current = rate(target, { unitQuantity: 1_000_000, effectiveUntil: '2026-10-05T00:00:00Z' })
+    const future = rate(target, { id: 'future', revision: 2, effectiveFrom: current.effectiveUntil })
+    const page = { getByTestId: vi.fn() }
+    await expect(ensureRateByUi(page, context([future, current]), target)).resolves.toEqual(current)
+    expect(page.getByTestId).not.toHaveBeenCalled()
+  })
+
+  it('does not insert a backdated demonstration price before a scheduled operator rate', async () => {
+    const target = DEFAULT_RATE_INPUTS[0]
+    const page = { getByTestId: vi.fn() }
+    await expect(ensureRateByUi(page, context([rate(target, { effectiveFrom: '2026-10-05T00:00:00Z' })]), target))
+      .rejects.toThrow('REAL_WORK_RATE_FUTURE_CONFIGURED:cpu_millicore_second')
+    expect(page.getByTestId).not.toHaveBeenCalled()
+  })
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects a configured unsafe rate quantity %s before a create action', async (quantity) => {
+    const target = DEFAULT_RATE_INPUTS[0]
+    const page = { getByTestId: vi.fn() }
+    await expect(ensureRateByUi(page, context([rate(target, { unitQuantity: quantity })]), target))
+      .rejects.toThrow('REAL_WORK_RATE_QUANTITY_INVALID')
+    expect(page.getByTestId).not.toHaveBeenCalled()
+  })
+
+  it('keeps the explicit GPU price conflict guard', async () => {
+    const target = { unit: 'gpu_unit_second', unitQuantity: 1, amount: '0.000100', currency: 'USD', gpuClass: 'nvidia-cuda', gpuMode: 'exclusive' }
+    await expect(ensureRateByUi({}, context([rate(target, { gpuClass: target.gpuClass, gpuMode: target.gpuMode })]), target))
+      .rejects.toThrow('REAL_WORK_GPU_RATE_ACTIVE_CONFLICT:nvidia-cuda')
+  })
+})
+
 const VM_ENVIRONMENT = Object.freeze({
   LABWEAVER_E2E_VM_PROVIDER_BINDING: 'kubevirt-primary-v1',
   LABWEAVER_E2E_VM_STORAGE_CLASS_BINDING: 'vm-rwo-primary-v1',
