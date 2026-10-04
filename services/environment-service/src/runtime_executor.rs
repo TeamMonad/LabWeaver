@@ -1023,54 +1023,72 @@ impl KubernetesContainerExecutor {
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
     ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        validate_kubevirt_plan(plan)?;
+        let started = std::time::Instant::now();
+        self.observe_kubevirt_running_gated(fence, plan)
+            .await
+            .map_err(|(failure, gate)| {
+                log_kubevirt_readiness_failure(fence, started, failure, gate, true);
+                failure
+            })
+    }
+
+    async fn observe_kubevirt_running_gated(
+        &self,
+        fence: &KubeVirtBackendFence,
+        plan: &KubeVirtResourcePlan,
+    ) -> Result<KubeVirtRunningObservation, (ProviderFailure, &'static str)> {
+        validate_kubevirt_plan(plan).map_err(|error| (error, "plan_invalid"))?;
         let vm = self
             .get_json(
                 "VirtualMachine",
                 &plan.namespace,
                 &plan.virtual_machine_name,
             )
-            .await?
-            .ok_or_else(unavailable)?;
+            .await
+            .map_err(|error| (error, "vm_read"))?
+            .ok_or_else(|| (unavailable(), "vm_missing"))?;
         let vmi = self
             .get_json(
                 "VirtualMachineInstance",
                 &plan.namespace,
                 &plan.virtual_machine_name,
             )
-            .await?
-            .ok_or_else(unavailable)?;
+            .await
+            .map_err(|error| (error, "vmi_read"))?
+            .ok_or_else(|| (unavailable(), "vmi_missing"))?;
         let pvc = self
             .get_json(
                 "PersistentVolumeClaim",
                 &plan.namespace,
                 &plan.data_volume_name,
             )
-            .await?
-            .ok_or_else(unavailable)?;
+            .await
+            .map_err(|error| (error, "pvc_read"))?
+            .ok_or_else(|| (unavailable(), "pvc_missing"))?;
         let service = self
             .get_json("Service", &plan.namespace, "ssh")
-            .await?
-            .ok_or_else(unavailable)?;
+            .await
+            .map_err(|error| (error, "service_read"))?
+            .ok_or_else(|| (unavailable(), "service_missing"))?;
         if vmi.pointer("/status/phase").and_then(Value::as_str) != Some("Running") {
-            return Err(unavailable());
+            return Err((unavailable(), "vmi_not_running"));
         }
         let guest_ip = vmi
             .pointer("/status/interfaces/0/ipAddress")
             .and_then(Value::as_str)
-            .ok_or_else(unavailable)?
+            .ok_or_else(|| (unavailable(), "guest_ip_missing"))?
             .parse::<IpAddr>()
-            .map_err(|_| invalid_observation())?;
+            .map_err(|_| (invalid_observation(), "guest_ip_invalid"))?;
         let service_cluster_ip = service
             .pointer("/spec/clusterIP")
             .and_then(Value::as_str)
-            .ok_or_else(unavailable)?
+            .ok_or_else(|| (unavailable(), "service_ip_missing"))?
             .parse::<IpAddr>()
-            .map_err(|_| invalid_observation())?;
+            .map_err(|_| (invalid_observation(), "service_ip_invalid"))?;
         let conditions = vmi
             .pointer("/status/conditions")
             .and_then(Value::as_array)
-            .ok_or_else(unavailable)?;
+            .ok_or_else(|| (unavailable(), "vmi_conditions_missing"))?;
         let condition_true = |kind: &str| {
             conditions.iter().any(|condition| {
                 condition.get("type").and_then(Value::as_str) == Some(kind)
@@ -1078,23 +1096,44 @@ impl KubernetesContainerExecutor {
             })
         };
         if !condition_true("Ready") {
-            return Err(unavailable());
+            return Err((unavailable(), "vmi_not_ready"));
         }
-        let guest_agent_connected = condition_true("AgentConnected");
         let ssh_host_key_sha256 = self.probe_ssh_host_key(service_cluster_ip).await?;
         Ok(KubeVirtRunningObservation {
             observed_environment_generation: fence.environment_generation,
-            vm_resource_generation: pointer_u64(&vm, "/metadata/generation")?,
-            observed_vm_resource_generation: pointer_u64(&vm, "/status/observedGeneration")?,
-            vm_uid: pointer_uuid(&vm, "/metadata/uid")?,
-            vmi_uid: pointer_uuid(&vmi, "/metadata/uid")?,
-            root_disk_uid: pointer_uuid(&pvc, "/metadata/uid")?,
+            vm_resource_generation: pointer_u64(&vm, "/metadata/generation").map_err(|error| {
+                (
+                    error,
+                    if vm.pointer("/metadata/generation").is_some() {
+                        "vm_generation_invalid"
+                    } else {
+                        "vm_generation_missing"
+                    },
+                )
+            })?,
+            observed_vm_resource_generation: pointer_u64(&vm, "/status/observedGeneration")
+                .map_err(|error| {
+                    (
+                        error,
+                        if vm.pointer("/status/observedGeneration").is_some() {
+                            "vm_observed_generation_invalid"
+                        } else {
+                            "vm_observed_generation_missing"
+                        },
+                    )
+                })?,
+            vm_uid: pointer_uuid(&vm, "/metadata/uid")
+                .map_err(|error| (error, "vm_uid_invalid"))?,
+            vmi_uid: pointer_uuid(&vmi, "/metadata/uid")
+                .map_err(|error| (error, "vmi_uid_invalid"))?,
+            root_disk_uid: pointer_uuid(&pvc, "/metadata/uid")
+                .map_err(|error| (error, "pvc_uid_invalid"))?,
             guest_ip,
             service_cluster_ip,
             ssh_host_key_sha256,
-            guest_agent_connected,
+            guest_agent_connected: condition_true("AgentConnected"),
             ssh_ready: true,
-            observed_at: timestamp()?,
+            observed_at: timestamp().map_err(|error| (error, "observation_time_invalid"))?,
         })
     }
 
@@ -1103,19 +1142,26 @@ impl KubernetesContainerExecutor {
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
     ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
+        let started = std::time::Instant::now();
+        let mut previous_gate = None;
         loop {
-            match self.observe_kubevirt_running(fence, plan).await {
+            match self.observe_kubevirt_running_gated(fence, plan).await {
                 Ok(observation) => return Ok(observation),
-                Err(error)
-                    if error.code == ProviderFailureCode::Unavailable
-                        && timestamp()?.get() < fence.deadline_at.get() =>
-                {
+                Err((failure, gate)) => {
+                    let retry = failure.code == ProviderFailureCode::Unavailable
+                        && timestamp()?.get() < fence.deadline_at.get();
+                    if previous_gate != Some(gate) || !retry {
+                        log_kubevirt_readiness_failure(fence, started, failure, gate, !retry);
+                        previous_gate = Some(gate);
+                    }
+                    if !retry {
+                        return Err(failure);
+                    }
                     tokio::time::sleep(Duration::from_millis(
                         self.configuration.cleanup_poll_milliseconds,
                     ))
                     .await;
                 }
-                Err(error) => return Err(error),
             }
         }
     }
@@ -1373,7 +1419,10 @@ impl KubernetesContainerExecutor {
             .map_err(|_| invalid_observation())
     }
 
-    async fn probe_ssh_host_key(&self, address: IpAddr) -> Result<Sha256Digest, ProviderFailure> {
+    async fn probe_ssh_host_key(
+        &self,
+        address: IpAddr,
+    ) -> Result<Sha256Digest, (ProviderFailure, &'static str)> {
         let observed = Arc::new(Mutex::new(None));
         let handler = HostKeyProbe {
             observed: Arc::clone(&observed),
@@ -1390,13 +1439,16 @@ impl KubernetesContainerExecutor {
             russh::client::connect(configuration, SocketAddr::new(address, 22), handler),
         )
         .await
-        .map_err(|_| unavailable())?
-        .map_err(|_| unavailable())?;
+        .map_err(|_| (unavailable(), "ssh_connect_timeout"))?
+        .map_err(|_| (unavailable(), "ssh_connect_error"))?;
         connection
             .disconnect(russh::Disconnect::ByApplication, "probe-complete", "en")
             .await
-            .map_err(|_| unavailable())?;
-        observed.lock().await.ok_or_else(unavailable)
+            .map_err(|_| (unavailable(), "ssh_disconnect_error"))?;
+        observed
+            .lock()
+            .await
+            .ok_or_else(|| (unavailable(), "ssh_host_key_missing"))
     }
 
     fn kubevirt_resource_url(&self, resource: &KubeVirtResource) -> Result<Url, ProviderFailure> {
@@ -2164,6 +2216,33 @@ fn cdi_import_failure(error: &CdiImportError) -> ProviderFailure {
         CdiImportError::IdentityMismatch | CdiImportError::CapacityExceeded => rejected(),
         CdiImportError::ImportFailed => unavailable(),
     }
+}
+
+fn log_kubevirt_readiness_failure(
+    fence: &KubeVirtBackendFence,
+    started: std::time::Instant,
+    failure: ProviderFailure,
+    gate: &'static str,
+    terminal: bool,
+) {
+    let remaining = (fence.deadline_at.get() - OffsetDateTime::now_utc())
+        .whole_milliseconds()
+        .max(0);
+    tracing::warn!(
+        event = "environment.kubevirt_executor.readiness_wait",
+        environment_id = %fence.environment_id,
+        operation_id = %fence.operation_id,
+        provider_step = fence.provider_step,
+        attempt = fence.attempt,
+        request_id = %fence.request_id,
+        generation = fence.environment_generation,
+        diagnostic_code = failure.diagnostic_code(),
+        readiness_gate = gate,
+        retryable = failure.retryable,
+        terminal,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        remaining_ms = u64::try_from(remaining).unwrap_or(u64::MAX),
+    );
 }
 
 fn pointer_u64(value: &Value, pointer: &str) -> Result<u64, ProviderFailure> {
@@ -3903,6 +3982,61 @@ mod tests {
             return StatusCode::OK.into_response();
         }
         StatusCode::METHOD_NOT_ALLOWED.into_response()
+    }
+
+    #[tokio::test]
+    async fn readiness_diagnostics_preserve_missing_and_invalid_ip_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let environment_id = contracts::EnvironmentId::new();
+        let namespace = format!("lw-env-{environment_id}");
+        let plan = vm_vgpu_plan_for_test(
+            environment_id,
+            &namespace,
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        let fence = stop_fence(environment_id);
+        let vm_path =
+            format!("/apis/kubevirt.io/v1/namespaces/{namespace}/virtualmachines/runtime");
+        let vmi_path =
+            format!("/apis/kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/runtime");
+        {
+            let mut responses = mock.get_responses.lock().await;
+            responses.insert(vm_path, Some(json!({"status":{"ready":true}})));
+            responses.insert(
+                format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/rootdisk"),
+                Some(json!({})),
+            );
+            responses.insert(
+                format!("/api/v1/namespaces/{namespace}/services/ssh"),
+                Some(json!({"spec":{"clusterIP":"127.0.0.1"}})),
+            );
+        }
+        for (interface, expected) in [
+            (json!({}), ProviderFailureCode::Unavailable),
+            (
+                json!({"ipAddress":"invalid-address"}),
+                ProviderFailureCode::ObservationInvalid,
+            ),
+        ] {
+            mock.get_responses.lock().await.insert(vmi_path.clone(), Some(json!({"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"interfaces":[interface]}})));
+            let failure = executor
+                .observe_kubevirt_running(&fence, &plan)
+                .await
+                .expect_err("Ready without a valid guest IP is insufficient");
+            assert_eq!(failure.code, expected);
+            assert!(failure.retryable);
+        }
+        assert!(
+            mock.events
+                .lock()
+                .await
+                .iter()
+                .all(|event| event.starts_with("GET ")),
+            "diagnostics do not mutate the runtime"
+        );
+        Ok(())
     }
 
     fn stop_fence(environment_id: contracts::EnvironmentId) -> KubeVirtBackendFence {
