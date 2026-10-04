@@ -28,6 +28,7 @@ use crate::{
         BASE_DISK_IMPORT_TIMEOUT, CdiImportError, CdiStorageSizing, KubeVirtBaseDiskImport,
         KubernetesCdiImportClient, ensure_base_disk, storage_matches, validate_cdi_storage_profile,
     },
+    kubevirt_launcher_sizing::{LauncherQuota, cpu_matches, launcher_quota},
 };
 
 const FIELD_MANAGER: &str = "labweaver-runtime-executor";
@@ -715,7 +716,7 @@ impl KubernetesContainerExecutor {
         self.apply_kubevirt_resource(plan, namespace_resource, permit)
             .await?;
         self.ensure_base_disk(plan).await?;
-        let physical_quota = self.kubevirt_storage_quota(plan).await?;
+        let physical_quota = self.kubevirt_quota(plan).await?;
         if let Some(licensing) = vm_vgpu_licensing.as_ref() {
             self.apply_vgpu_private_cloud_init(plan, licensing, permit)
                 .await?;
@@ -738,12 +739,24 @@ impl KubernetesContainerExecutor {
         Ok(())
     }
 
-    /// Keep the approved plan logical; only the applied quota includes CDI filesystem overhead.
-    async fn kubevirt_storage_quota(
+    /// Keep approval and billing logical; reserve the backend's actual concurrent workloads.
+    async fn kubevirt_quota(
         &self,
         plan: &KubeVirtResourcePlan,
     ) -> Result<KubeVirtResource, ProviderFailure> {
         let (quota, disk, logical, scratch) = kubevirt_storage_intent(plan)?;
+        let mut virtual_machines = plan.resources.iter().filter(|r| r.kind == "VirtualMachine");
+        let vm = virtual_machines.next().ok_or_else(rejected)?;
+        if virtual_machines.next().is_some() {
+            return Err(rejected());
+        }
+        validate_kubevirt_resource(plan, vm)?;
+        let kubevirts = self
+            .get_api_json("/apis/kubevirt.io/v1/kubevirts?limit=2")
+            .await?
+            .ok_or_else(rejected)?;
+        let launcher =
+            launcher_quota(&vm.document, &quota.document, &kubevirts).map_err(|_| rejected())?;
         let config = self
             .get_api_json("/apis/cdi.kubevirt.io/v1beta1/cdiconfigs/config")
             .await?
@@ -787,13 +800,34 @@ impl KubernetesContainerExecutor {
             }
         }
         if let Some(existing_quota) = existing_quota {
-            validate_existing_kubevirt_quota(plan, &existing_quota, physical_total)?;
+            validate_existing_kubevirt_quota(plan, &existing_quota, physical_total, &launcher)?;
         }
         let mut quota = quota.clone();
         *quota
             .document
             .pointer_mut("/spec/hard/requests.storage")
             .ok_or_else(rejected)? = json!(physical_total.to_string());
+        let hard = quota
+            .document
+            .pointer_mut("/spec/hard")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(rejected)?;
+        hard.insert(
+            "requests.memory".to_owned(),
+            json!(launcher.memory_request.to_string()),
+        );
+        hard.insert(
+            "limits.memory".to_owned(),
+            json!(launcher.memory_limit.to_string()),
+        );
+        hard.insert(
+            "requests.cpu".to_owned(),
+            json!(format!("{}m", launcher.cpu_request_millicores)),
+        );
+        hard.insert(
+            "limits.cpu".to_owned(),
+            json!(format!("{}m", launcher.cpu_limit_millicores)),
+        );
         validate_kubevirt_resource(plan, &quota)?;
         Ok(quota)
     }
@@ -1586,6 +1620,7 @@ fn validate_existing_kubevirt_quota(
     plan: &KubeVirtResourcePlan,
     document: &Value,
     physical: u64,
+    launcher: &LauncherQuota,
 ) -> Result<(), ProviderFailure> {
     let resource = KubeVirtResource {
         kind: "ResourceQuota".to_owned(),
@@ -1601,6 +1636,28 @@ fn validate_existing_kubevirt_quota(
             .pointer("/spec/hard/requests.storage")
             .and_then(Value::as_str)
             .is_some_and(|value| storage_matches(value, physical))
+        || [
+            ("requests.memory", launcher.memory_request),
+            ("limits.memory", launcher.memory_limit),
+        ]
+        .iter()
+        .any(|(key, expected)| {
+            !document
+                .pointer(&format!("/spec/hard/{key}"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| storage_matches(value, *expected))
+        })
+        || [
+            ("requests.cpu", launcher.cpu_request_millicores),
+            ("limits.cpu", launcher.cpu_limit_millicores),
+        ]
+        .iter()
+        .any(|(key, expected)| {
+            !document
+                .pointer(&format!("/spec/hard/{key}"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| cpu_matches(value, *expected))
+        })
     {
         return Err(rejected());
     }
@@ -2618,8 +2675,15 @@ mod tests {
                     name: "runtime-quota".to_owned(),
                     document: json!({"apiVersion":"v1","kind":"ResourceQuota",
                         "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels,
-                            "annotations":{"labweaver.io/cdi-scratch-storage-bytes":"17179869184"}},
-                        "spec":{"hard":{"requests.storage":"34359738368","pods":"2"}}}),
+                            "annotations":{"labweaver.io/cdi-scratch-storage-bytes":"17179869184",
+                                "labweaver.io/vmi-memory-overhead-bytes":"536870912",
+                                "labweaver.io/cdi-importer-memory-request-bytes":"262144000",
+                                "labweaver.io/cdi-importer-memory-limit-bytes":"1073741824",
+                                "labweaver.io/cdi-importer-cpu-request-millicores":"1000",
+                                "labweaver.io/cdi-importer-cpu-limit-millicores":"4000"}},
+                        "spec":{"hard":{"requests.storage":"34359738368","pods":"2",
+                            "requests.memory":"2946498560","limits.memory":"3758096384",
+                            "requests.cpu":"2","limits.cpu":"5"}}}),
                 },
                 KubeVirtResource {
                     kind: "DataVolume".to_owned(), namespace: Some(namespace.to_owned()),
@@ -2653,7 +2717,11 @@ mod tests {
                         "kind":"VirtualMachine",
                         "metadata":{"name":"runtime","namespace":namespace,"labels":labels},
                         "spec":{"template":{"spec":{
-                            "domain":{"devices":{"gpus":[{"name":"gpu","deviceName":"nvidia.com/GRID_V100DX-2Q"}]}},
+                            "architecture":"amd64",
+                            "domain":{"resources":{"requests":{"memory":"2147483648","cpu":"1"},
+                                "limits":{"memory":"2684354560","cpu":"1"}},
+                                "devices":{"gpus":[{"name":"gpu","deviceName":"nvidia.com/GRID_V100DX-2Q"}],
+                                    "interfaces":[{"name":"default","masquerade":{}}]}},
                             "volumes":[{"name":"cloudinit","cloudInitNoCloud":{
                                 "secretRef":{"name":"cloud-init"},
                                 "networkDataSecretRef":{"name":"cloud-init"}
@@ -2798,7 +2866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kubevirt_storage_quota_inflates_only_applied_storage()
+    async fn kubevirt_quota_preserves_intent_and_accounts_launcher_and_storage()
     -> Result<(), Box<dyn std::error::Error>> {
         let mock = spawn_mock_kubernetes().await?;
         let (_files, executor) = test_kubevirt_executor(&mock).await?;
@@ -2810,7 +2878,7 @@ mod tests {
         );
         let original = serde_json::to_value(&plan)?;
         let quota = executor
-            .kubevirt_storage_quota(&plan)
+            .kubevirt_quota(&plan)
             .await
             .map_err(|error| format!("storage quota rejected: {error:?}"))?;
         let mut expected = kubevirt_storage_intent(&plan)
@@ -2819,6 +2887,10 @@ mod tests {
             .document
             .clone();
         expected["spec"]["hard"]["requests.storage"] = json!("36422329304");
+        expected["spec"]["hard"]["requests.memory"] = json!("3803582144");
+        expected["spec"]["hard"]["limits.memory"] = json!("5177050880");
+        expected["spec"]["hard"]["requests.cpu"] = json!("2005m");
+        expected["spec"]["hard"]["limits.cpu"] = json!("5015m");
         assert_eq!(quota.document, expected);
         assert_eq!(
             serde_json::to_value(&plan)?,
@@ -2852,7 +2924,7 @@ mod tests {
             ("/apis/storage.k8s.io/v1/storageclasses/scratch-class".to_owned(), Some(json!({"metadata":{"name":"scratch-class"},"provisioner":"example/scratch"}))),
         ]);
         let quota = executor
-            .kubevirt_storage_quota(&plan)
+            .kubevirt_quota(&plan)
             .await
             .map_err(|error| format!("quota: {error:?}"))?;
         assert_eq!(
@@ -2871,7 +2943,7 @@ mod tests {
             }
         }
         let quota = executor
-            .kubevirt_storage_quota(&plan)
+            .kubevirt_quota(&plan)
             .await
             .map_err(|error| format!("aligned quota: {error:?}"))?;
         assert_eq!(
@@ -2929,7 +3001,7 @@ mod tests {
                 .await
                 .insert(path.to_owned(), response);
             assert!(
-                executor.kubevirt_storage_quota(&plan).await.is_err(),
+                executor.kubevirt_quota(&plan).await.is_err(),
                 "must reject {path}"
             );
         }
@@ -2986,7 +3058,7 @@ mod tests {
                     .pointer_mut(pointer)
                     .ok_or("intent field missing")? = value;
             }
-            assert!(executor.kubevirt_storage_quota(&plan).await.is_err());
+            assert!(executor.kubevirt_quota(&plan).await.is_err());
         }
         let mut overflow = original.clone();
         for resource in &mut overflow.resources {
@@ -2998,7 +3070,7 @@ mod tests {
                     json!(u64::MAX.to_string());
             }
         }
-        assert!(executor.kubevirt_storage_quota(&overflow).await.is_err());
+        assert!(executor.kubevirt_quota(&overflow).await.is_err());
         assert!(mock.events.lock().await.is_empty());
         Ok(())
     }
@@ -3018,7 +3090,7 @@ mod tests {
         let pvc = install_existing_kubevirt_storage(&mock, &plan).await?;
         let pvc_path = format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/rootdisk");
         assert!(
-            executor.kubevirt_storage_quota(&plan).await.is_ok(),
+            executor.kubevirt_quota(&plan).await.is_ok(),
             "Pending exact-spec PVC is not a sizing failure"
         );
         for (pointer, value) in [
@@ -3036,7 +3108,7 @@ mod tests {
                 .await
                 .insert(pvc_path.clone(), Some(changed));
             assert!(
-                executor.kubevirt_storage_quota(&plan).await.is_err(),
+                executor.kubevirt_quota(&plan).await.is_err(),
                 "must reject {pointer}"
             );
         }
@@ -3047,7 +3119,7 @@ mod tests {
             .await
             .insert(pvc_path.clone(), Some(changed));
         assert!(
-            executor.kubevirt_storage_quota(&plan).await.is_err(),
+            executor.kubevirt_quota(&plan).await.is_err(),
             "mismatched observed capacity must not be ignored while Pending"
         );
         let mut bound = mock
@@ -3064,7 +3136,7 @@ mod tests {
             .await
             .insert(pvc_path.clone(), Some(bound));
         assert!(
-            executor.kubevirt_storage_quota(&plan).await.is_ok(),
+            executor.kubevirt_quota(&plan).await.is_ok(),
             "Bound exact capacity is reusable"
         );
         let quota_path = format!("/api/v1/namespaces/{namespace}/resourcequotas/runtime-quota");
@@ -3081,8 +3153,109 @@ mod tests {
             .await
             .insert(quota_path, Some(changed_quota));
         assert!(
-            executor.kubevirt_storage_quota(&plan).await.is_err(),
+            executor.kubevirt_quota(&plan).await.is_err(),
             "an existing quota must not be enlarged on replay"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kubevirt_quota_rejects_unknown_authority_and_read_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let id = contracts::EnvironmentId::new();
+        let plan = vm_vgpu_plan_for_test(
+            id,
+            &format!("lw-env-{id}"),
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        let instance = json!({"spec":{"configuration":{}},
+            "status":{"observedKubeVirtVersion":"v1.8.4","targetKubeVirtVersion":"v1.8.4"}});
+        for response in [
+            None,
+            Some(json!({"items":[]})),
+            Some(json!({"items":[instance.clone(),instance.clone()]})),
+            Some(json!({"items":[instance.clone()],"metadata":{"continue":"next"}})),
+            Some(json!({"items":[{"spec":{"configuration":{}},
+                "status":{"observedKubeVirtVersion":"v1.8.4","targetKubeVirtVersion":"v1.8.5"}}]})),
+            Some(
+                json!({"items":[{"status":{"observedKubeVirtVersion":"v1.8.4",
+                "targetKubeVirtVersion":"v1.8.4"}}]}),
+            ),
+        ] {
+            mock.events.lock().await.clear();
+            mock.get_responses
+                .lock()
+                .await
+                .insert("/apis/kubevirt.io/v1/kubevirts".to_owned(), response);
+            assert!(executor.kubevirt_quota(&plan).await.is_err());
+            assert_eq!(
+                *mock.events.lock().await,
+                ["GET /apis/kubevirt.io/v1/kubevirts?limit=2"]
+            );
+        }
+        for (status, delay) in [
+            (StatusCode::FORBIDDEN, Duration::ZERO),
+            (StatusCode::OK, Duration::from_millis(2500)),
+        ] {
+            *mock.kubevirt_read.lock().await = Some((status, delay));
+            mock.events.lock().await.clear();
+            assert!(executor.kubevirt_quota(&plan).await.is_err());
+            assert_eq!(
+                *mock.events.lock().await,
+                ["GET /apis/kubevirt.io/v1/kubevirts?limit=2"]
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kubevirt_quota_rejects_each_existing_memory_and_cpu_drift()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let id = contracts::EnvironmentId::new();
+        let namespace = format!("lw-env-{id}");
+        let plan = vm_vgpu_plan_for_test(
+            id,
+            &namespace,
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        install_existing_kubevirt_storage(&mock, &plan).await?;
+        let path = format!("/api/v1/namespaces/{namespace}/resourcequotas/runtime-quota");
+        let original = mock
+            .get_responses
+            .lock()
+            .await
+            .get(&path)
+            .and_then(Clone::clone)
+            .ok_or("quota fixture missing")?;
+        for key in [
+            "requests.memory",
+            "limits.memory",
+            "requests.cpu",
+            "limits.cpu",
+        ] {
+            let mut changed = original.clone();
+            changed["spec"]["hard"][key] = json!("1");
+            mock.get_responses
+                .lock()
+                .await
+                .insert(path.clone(), Some(changed));
+            assert!(
+                executor.kubevirt_quota(&plan).await.is_err(),
+                "must reject {key} drift"
+            );
+        }
+        mock.get_responses.lock().await.insert(path, Some(original));
+        assert!(executor.kubevirt_quota(&plan).await.is_ok());
+        assert!(
+            mock.events
+                .lock()
+                .await
+                .iter()
+                .all(|event| event.starts_with("GET "))
         );
         Ok(())
     }
@@ -3104,6 +3277,10 @@ mod tests {
             "status":{"phase":"Pending"}});
         let mut existing_quota = quota.document.clone();
         existing_quota["spec"]["hard"]["requests.storage"] = json!("36422329304");
+        existing_quota["spec"]["hard"]["requests.memory"] = json!("3803582144");
+        existing_quota["spec"]["hard"]["limits.memory"] = json!("5177050880");
+        existing_quota["spec"]["hard"]["requests.cpu"] = json!("2005m");
+        existing_quota["spec"]["hard"]["limits.cpu"] = json!("5015m");
         let pvc_path = format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/rootdisk");
         mock.get_responses.lock().await.extend([
             (pvc_path, Some(pvc.clone())),
@@ -3368,6 +3545,7 @@ mod tests {
         applied_quota: Arc<Mutex<Option<Value>>>,
         get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
         lifecycle: Option<Arc<Mutex<LifecycleKubernetes>>>,
+        kubevirt_read: Arc<Mutex<Option<(StatusCode, Duration)>>>,
     }
 
     struct MockKubernetes {
@@ -3378,6 +3556,7 @@ mod tests {
         applied_quota: Arc<Mutex<Option<Value>>>,
         get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
         task: tokio::task::JoinHandle<()>,
+        kubevirt_read: Arc<Mutex<Option<(StatusCode, Duration)>>>,
     }
 
     impl Drop for MockKubernetes {
@@ -3405,6 +3584,7 @@ mod tests {
         let applied_private_secret = Arc::new(Mutex::new(None));
         let applied_quota = Arc::new(Mutex::new(None));
         let get_responses = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let kubevirt_read = Arc::new(Mutex::new(None));
         let state = MockKubernetesState {
             deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: Arc::clone(&events),
@@ -3412,6 +3592,7 @@ mod tests {
             applied_quota: Arc::clone(&applied_quota),
             get_responses: Arc::clone(&get_responses),
             lifecycle: lifecycle.map(|fixture| Arc::new(Mutex::new(fixture))),
+            kubevirt_read: Arc::clone(&kubevirt_read),
         };
         let router = Router::new()
             .fallback(mock_kubernetes_handler)
@@ -3427,6 +3608,7 @@ mod tests {
             applied_quota,
             get_responses,
             task,
+            kubevirt_read,
         })
     }
 
@@ -3451,14 +3633,22 @@ mod tests {
             };
             format!("GET {path} {phase}")
         } else {
-            format!("{method} {path}")
+            format!(
+                "{method} {path}{}",
+                if path == "/apis/kubevirt.io/v1/kubevirts" {
+                    "?limit=2"
+                } else {
+                    ""
+                }
+            )
         };
         state.events.lock().await.push(event);
         if let Some(fixture) = &state.lifecycle {
             return lifecycle_kubernetes_response(&mut *fixture.lock().await, request).await;
         }
         if method == Method::GET
-            && let Some(response) = mock_storage_response(&state, &path).await
+            && let Some(response) =
+                mock_storage_response(&state, &path, request.uri().query()).await
         {
             return response;
         }
@@ -3522,7 +3712,33 @@ mod tests {
         StatusCode::OK.into_response()
     }
 
-    async fn mock_storage_response(state: &MockKubernetesState, path: &str) -> Option<Response> {
+    async fn mock_kubevirt_read_response(
+        state: &MockKubernetesState,
+        path: &str,
+        query: Option<&str>,
+    ) -> Option<Response> {
+        if path != "/apis/kubevirt.io/v1/kubevirts" {
+            return None;
+        }
+        if query != Some("limit=2") {
+            return Some(StatusCode::BAD_REQUEST.into_response());
+        }
+        let response = *state.kubevirt_read.lock().await;
+        if let Some((status, delay)) = response {
+            tokio::time::sleep(delay).await;
+            return Some(status.into_response());
+        }
+        None
+    }
+
+    async fn mock_storage_response(
+        state: &MockKubernetesState,
+        path: &str,
+        query: Option<&str>,
+    ) -> Option<Response> {
+        if let Some(response) = mock_kubevirt_read_response(state, path, query).await {
+            return Some(response);
+        }
         if let Some(response) = state.get_responses.lock().await.get(path) {
             return Some(response.clone().map_or_else(
                 || StatusCode::NOT_FOUND.into_response(),
@@ -3540,6 +3756,9 @@ mod tests {
             json!({"metadata":{"name":"local-path"},"provisioner":"rancher.io/local-path"})
         } else if path.ends_with("/storageprofiles/local-path") {
             json!({"metadata":{"name":"local-path"},"status":{"claimPropertySets":null}})
+        } else if path == "/apis/kubevirt.io/v1/kubevirts" {
+            json!({"items":[{"spec":{"configuration":{}},"status":{
+                "observedKubeVirtVersion":"v1.8.4","targetKubeVirtVersion":"v1.8.4"}}]})
         } else {
             return None;
         };

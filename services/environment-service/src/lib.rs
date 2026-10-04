@@ -79,6 +79,7 @@ pub use outbox::{
     PublishFailure,
 };
 mod kubevirt_execution;
+mod kubevirt_launcher_sizing;
 pub use kubevirt_execution::{KubeVirtExecutionInstance, KubeVirtExecutionPermit};
 pub use process::{EnvironmentProcessRuntime, EnvironmentProcessRuntimeError};
 pub use reconciler::{

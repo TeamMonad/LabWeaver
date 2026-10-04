@@ -2427,6 +2427,9 @@ where
         let quota_cpu_limit_millicores = cpu_millicores
             .checked_add(budget.cdi_importer_cpu_limit_millicores)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        // This is compute headroom, applied once to the guest container limit.
+        // KubeVirt adds its own launcher overhead; the executor includes that and
+        // native support containers in the applied quota without changing guest approval.
         let vmi_memory_limit_bytes = memory_bytes
             .checked_add(budget.vmi_memory_overhead_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
@@ -2628,6 +2631,7 @@ where
                             "metadata":{"labels":pod_labels},
                             "spec":{
                                 "terminationGracePeriodSeconds":30,
+                                "architecture":"amd64",
                                 "nodeSelector":{KUBEVIRT_NODE_LABEL_KEY:KUBEVIRT_NODE_LABEL_VALUE},
                                 "domain":{
                                     "resources":{"requests":vmi_requests,"limits":vmi_limits},
