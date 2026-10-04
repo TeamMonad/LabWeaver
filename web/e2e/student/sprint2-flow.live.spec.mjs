@@ -27,6 +27,7 @@ import {
   realWorkResumeConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
+  selectPendingWorkTaskResourceRequest,
   waitForRealWorkCharges,
   waitForDeletedEnvironment,
 } from '../support/real-work.mjs'
@@ -134,40 +135,14 @@ async function approvePendingAgentTaskResourceByUi(adminPage, {
     await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
     'WORK_TASK_RESOURCE_REQUESTS_READ_FAILED',
   )
-  if (!Array.isArray(requests)) throw new Error('WORK_TASK_RESOURCE_REQUESTS_INVALID')
-
-  const compactRunId = runId.replaceAll('-', '').toLowerCase()
-  const requestPrefix = `authoring-${compactRunId}-`
-  const matchingRequests = requests.filter((request) => (
-    typeof request.requestKey === 'string' && request.requestKey.startsWith(requestPrefix)
-  ))
-  if (matchingRequests.length > 1) throw new Error('WORK_TASK_RESOURCE_REQUEST_DUPLICATE')
-  for (const request of matchingRequests) {
-    const identity = request.requestKey.match(
-      /^authoring-([0-9a-f]{32})-(environment|evaluation|work_configuration)-([1-9][0-9]*)-([0-9a-f]{32})$/i,
-    )
-    const taskRunId = request.target?.taskRunId
-    if (
-      request.projectId !== projectId
-      || identity?.[1]?.toLowerCase() !== compactRunId
-      || identity?.[2] !== trackKind
-      || Number(identity?.[3]) !== activeAttempt.number
-      || request.requesterId !== studentActorId
-      || request.target?.kind !== 'task'
-      || typeof taskRunId !== 'string'
-      || taskRunId.replaceAll('-', '').toLowerCase() !== identity?.[4]?.toLowerCase()
-      || typeof request.id !== 'string'
-      || !Number.isSafeInteger(request.requestedResources?.cpuMillicores)
-      || request.requestedResources.cpuMillicores <= 0
-      || !Number.isSafeInteger(request.requestedResources?.memoryBytes)
-      || request.requestedResources.memoryBytes <= 0
-      || !Number.isSafeInteger(request.requestedResources?.storageBytes)
-      || request.requestedResources.storageBytes <= 0
-      || request.requestedResources.gpu != null
-    ) {
-      throw new Error(`WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
-    }
-    if (request.state !== 'reviewing') continue
+  const request = selectPendingWorkTaskResourceRequest(requests, {
+    projectId,
+    runId,
+    trackKind,
+    attemptNumber: activeAttempt.number,
+    studentActorId,
+  })
+  if (request?.state === 'reviewing') {
     if (!Number.isInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
       throw new Error(`WORK_TASK_RESOURCE_DURATION_INVALID:${request.id}`)
     }

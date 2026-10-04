@@ -32,6 +32,51 @@ const VM_SOURCE_REGISTRY_DIGEST = /^docker:\/\/[^\s@]+@sha256:[0-9a-f]{64}$/i
 const VM_DISK_FORMATS = Object.freeze(['qcow2', 'raw'])
 const GIB = 1024 ** 3
 
+export function selectPendingWorkTaskResourceRequest(requests, {
+  projectId,
+  runId,
+  trackKind,
+  attemptNumber,
+  studentActorId,
+}) {
+  if (!Array.isArray(requests)) throw new Error('WORK_TASK_RESOURCE_REQUESTS_INVALID')
+  const compactRunId = runId.replaceAll('-', '').toLowerCase()
+  const requestPrefix = `authoring-${compactRunId}-`
+  const pending = []
+  for (const request of requests) {
+    if (typeof request.requestKey !== 'string' || !request.requestKey.startsWith(requestPrefix)) continue
+    const identity = request.requestKey.match(
+      /^authoring-([0-9a-f]{32})-(environment|evaluation|work_configuration)-([1-9][0-9]*)-([0-9a-f]{32})$/i,
+    )
+    if (!identity) throw new Error(`WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
+    if (identity[2] !== trackKind || Number(identity[3]) !== attemptNumber) continue
+    const taskRunId = request.target?.taskRunId
+    if (
+      request.projectId !== projectId
+      || identity[1].toLowerCase() !== compactRunId
+      || request.requesterId !== studentActorId
+      || request.target?.kind !== 'task'
+      || typeof taskRunId !== 'string'
+      || taskRunId.replaceAll('-', '').toLowerCase() !== identity[4].toLowerCase()
+      || typeof request.id !== 'string'
+      || !Number.isSafeInteger(request.requestedResources?.cpuMillicores)
+      || request.requestedResources.cpuMillicores <= 0
+      || !Number.isSafeInteger(request.requestedResources?.memoryBytes)
+      || request.requestedResources.memoryBytes <= 0
+      || !Number.isSafeInteger(request.requestedResources?.storageBytes)
+      || request.requestedResources.storageBytes <= 0
+      || request.requestedResources.gpu != null
+      || !['reviewing', 'allocating', 'active', 'expiring', 'expired', 'rejected', 'cancelled'].includes(request.state)
+    ) {
+      throw new Error(`WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
+    }
+    if (['expired', 'rejected', 'cancelled'].includes(request.state)) continue
+    pending.push(request)
+  }
+  if (pending.length > 1) throw new Error('WORK_TASK_RESOURCE_REQUEST_DUPLICATE')
+  return pending[0] ?? null
+}
+
 function requireDigestPinnedImage(value) {
   const image = typeof value === 'string' ? value.trim() : ''
   const match = image.match(DIGEST_PINNED_IMAGE)

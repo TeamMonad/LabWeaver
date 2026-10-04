@@ -11,9 +11,82 @@ import {
   realWorkConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
+  selectPendingWorkTaskResourceRequest,
 } from '../e2e/support/real-work.mjs'
 
 const GIB = 1024 ** 3
+describe('Work authoring resource approval selection', () => {
+  const runId = '00000000-0000-7000-8000-000000000001'
+  const taskId = '00000000-0000-7000-8000-000000000002'
+  const otherTaskId = '00000000-0000-7000-8000-000000000003'
+  const scope = { projectId: 'project', runId, trackKind: 'environment', attemptNumber: 1, studentActorId: 'student' }
+  function taskRequest({ task = taskId, track = 'environment', attempt = 1, run = runId, ...overrides } = {}) {
+    return {
+      id: task,
+      projectId: scope.projectId,
+      requesterId: scope.studentActorId,
+      requestKey: `authoring-${run.replaceAll('-', '')}-${track}-${attempt}-${task.replaceAll('-', '')}`,
+      target: { kind: 'task', taskRunId: task },
+      state: 'reviewing',
+      requestedResources: { cpuMillicores: 1000, memoryBytes: GIB, storageBytes: GIB, gpu: null },
+      ...overrides,
+    }
+  }
+
+  it('selects a schema repair request after the same attempt task has expired', () => {
+    const repaired = taskRequest({ task: otherTaskId })
+    expect(selectPendingWorkTaskResourceRequest([taskRequest({ state: 'expired' }), repaired], scope)).toBe(repaired)
+  })
+
+  it('selects only the requested track when both authoring tracks need approval', () => {
+    const environment = taskRequest()
+    const evaluation = taskRequest({ task: otherTaskId, track: 'evaluation' })
+    expect(selectPendingWorkTaskResourceRequest([evaluation, environment], scope)).toBe(environment)
+    expect(selectPendingWorkTaskResourceRequest([evaluation, environment], { ...scope, trackKind: 'evaluation' })).toBe(evaluation)
+  })
+
+  it.each(['reviewing', 'allocating', 'active', 'expiring'])('rejects two effective requests when one is %s', (state) => {
+    expect(() => selectPendingWorkTaskResourceRequest([taskRequest({ state }), taskRequest({ task: otherTaskId })], scope))
+      .toThrow('WORK_TASK_RESOURCE_REQUEST_DUPLICATE')
+  })
+
+  it.each(['expired', 'rejected', 'cancelled'])('does not select terminal history %s', (state) => {
+    expect(selectPendingWorkTaskResourceRequest([taskRequest({ state })], scope)).toBeNull()
+  })
+
+  it('does not approve another run, track, or attempt', () => {
+    expect(selectPendingWorkTaskResourceRequest([
+      taskRequest({ run: otherTaskId }),
+      taskRequest({ track: 'evaluation' }),
+      taskRequest({ attempt: 2 }),
+    ], scope)).toBeNull()
+  })
+
+  it.each([
+    { projectId: 'foreign' },
+    { requesterId: 'foreign' },
+    { target: { kind: 'environment', environmentId: taskId } },
+    { target: { kind: 'task', taskRunId: otherTaskId } },
+    { requestedResources: { cpuMillicores: 0, memoryBytes: GIB, storageBytes: GIB } },
+    { requestedResources: { cpuMillicores: 1000, memoryBytes: GIB, storageBytes: GIB, gpu: { class: 'nvidia-cuda', count: 1 } } },
+    { state: 'revoked' },
+    { state: 'unknown' },
+  ])('rejects invalid same-track request scope %#', (overrides) => {
+    expect(() => selectPendingWorkTaskResourceRequest([taskRequest(overrides)], scope))
+      .toThrow('WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID')
+  })
+
+  it('validates terminal history before excluding it', () => {
+    expect(() => selectPendingWorkTaskResourceRequest([taskRequest({ state: 'expired', requesterId: 'foreign' })], scope))
+      .toThrow('WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID')
+  })
+
+  it('rejects malformed identity under the current run prefix', () => {
+    const request = taskRequest({ requestKey: `authoring-${runId.replaceAll('-', '')}-environment-bad` })
+    expect(() => selectPendingWorkTaskResourceRequest([request], scope)).toThrow('WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID')
+  })
+})
+
 describe('Work acceptance demonstration rates', () => {
   const now = Date.parse('2026-10-04T06:00:00Z')
   const context = (rates) => ({ request: { get: vi.fn(async () => ({ ok: () => true, text: async () => JSON.stringify(rates) })) } })
