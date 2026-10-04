@@ -27,12 +27,12 @@ use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::BuildSource;
 use flate2::read::GzDecoder;
-use futures::executor::block_on;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate as TlsCertificate, ClientTlsConfig, Endpoint, Identity};
 
 use crate::build_pipeline::{
@@ -159,6 +159,7 @@ impl ProductionBuildExecutor {
         &self,
         context: &BuildProviderRequestContext,
         request: &BuildExecutorRequest,
+        cancellation: &CancellationToken,
     ) -> Result<BuildExecutorResponse, BuildProviderFailure> {
         match request {
             BuildExecutorRequest::EnsurePrivateProject { command, identity } => self
@@ -166,7 +167,7 @@ impl ProductionBuildExecutor {
                 .await
                 .map(|project| BuildExecutorResponse::PrivateProjectReady { project }),
             BuildExecutorRequest::Build { command, identity } => self
-                .build(context, command, *identity)
+                .build(context, command, *identity, cancellation)
                 .await
                 .map(|candidate| BuildExecutorResponse::Built { candidate }),
             BuildExecutorRequest::Import { command, identity } => self
@@ -180,6 +181,7 @@ impl ProductionBuildExecutor {
             BuildExecutorRequest::Cleanup {
                 build_request_id,
                 identity,
+                ..
             } => {
                 self.cleanup(*build_request_id, *identity).await?;
                 Ok(BuildExecutorResponse::Cleaned {
@@ -226,6 +228,7 @@ impl ProductionBuildExecutor {
         context: &BuildProviderRequestContext,
         command: &AgentBuildRequested,
         identity: BuildIdentity,
+        cancellation: &CancellationToken,
     ) -> Result<BuiltCandidate, BuildProviderFailure> {
         let BuildSource::Dockerfile {
             context: build_context,
@@ -239,11 +242,17 @@ impl ProductionBuildExecutor {
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
-        let object = match self
-            .objects
-            .read_verified(context_object_key, build_context)
-            .await
-        {
+        let remaining = std::time::Duration::try_from(
+            context.deadline_at.get() - time::OffsetDateTime::now_utc(),
+        )
+        .unwrap_or_default();
+        let read = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(stopped_failure(context)),
+            () = tokio::time::sleep(remaining) => return Err(stopped_failure(context)),
+            result = self.objects.read_verified(context_object_key, build_context) => result,
+        };
+        let object = match read {
             Ok(object) => object,
             Err(error) => {
                 tracing::warn!(
@@ -304,6 +313,7 @@ impl ProductionBuildExecutor {
                 dockerfile_path,
                 &tagged,
                 &command.request.network,
+                cancellation,
             )
             .await?;
         self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
@@ -401,15 +411,7 @@ impl ProductionBuildExecutor {
                 });
             }
         };
-        let tag = format!(
-            "import-{}",
-            digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&digest)
-                .chars()
-                .take(12)
-                .collect::<String>()
-        );
+        let tag = candidate_tag(identity);
         self.persist_built_candidate(context, command, identity, &repository, &tag, &digest)
             .await
     }
@@ -493,15 +495,23 @@ impl ProductionBuildExecutor {
         dockerfile_path: &str,
         tagged: &str,
         network: &BuildNetworkPolicy,
+        cancellation: &CancellationToken,
     ) -> Result<String, BuildProviderFailure> {
         if !self.config.service_image.is_empty() {
             ensure_global_service_image_arg(workspace, dockerfile_path)?;
         }
-        self.rewrite_dockerfile_base_images(workspace, dockerfile_path)
-            .await?;
+        let remaining = std::time::Duration::try_from(
+            request_context.deadline_at.get() - time::OffsetDateTime::now_utc(),
+        )
+        .unwrap_or_default();
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(stopped_failure(request_context)),
+            () = tokio::time::sleep(remaining) => return Err(stopped_failure(request_context)),
+            result = self.rewrite_dockerfile_base_images(workspace, dockerfile_path) => result?,
+        }
         let context = tar_context(workspace)?;
         let endpoint = self.buildkit_endpoint()?;
-        let daemon = BuildkitDaemon::new(endpoint.clone());
         let platform = ImageBuildPlatform {
             os: String::from("linux"),
             architecture: String::from("amd64"),
@@ -514,6 +524,14 @@ impl ProductionBuildExecutor {
                 .label(
                     "labweaver.build-request-id",
                     &request_context.build_request_id.to_string(),
+                )
+                .label(
+                    "labweaver.build-generation",
+                    &request_context.fence_generation.to_string(),
+                )
+                .label(
+                    "labweaver.build-stage-request-id",
+                    &request_context.stage_request_id.to_string(),
                 ),
             network,
             &self.config.service_image,
@@ -523,140 +541,63 @@ impl ProductionBuildExecutor {
         let registry_host = self.config.harbor_registry.clone();
         let username = self.harbor_username.clone();
         let password = self.harbor_password.clone();
-        // bollard's buildkit drivers do not produce `Send` futures; drive the
-        // solve on a dedicated blocking thread and bridge the result back.
-        let outcome: Result<_, Box<bollard::grpc::error::GrpcError>> =
-            tokio::task::spawn_blocking(move || {
+        if cancellation.is_cancelled() {
+            return Err(stopped_failure(request_context));
+        }
+        let remaining = std::time::Duration::try_from(
+            request_context.deadline_at.get() - time::OffsetDateTime::now_utc(),
+        )
+        .map_err(|_| stopped_failure(request_context))?;
+        if remaining.is_zero() {
+            return Err(stopped_failure(request_context));
+        }
+        let solve_endpoint = endpoint.clone();
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        // The non-Send solve and its spawned session tasks share this owned runtime.
+        // Shutdown closes async connections; bounded file/DNS blocking work may outlive it.
+        // Joining alone is not remote stop proof.
+        let thread = std::thread::Builder::new().name("agent-buildkit".to_owned()).spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                    .map_err(|_| execution_unknown())?;
                 let mut credentials = std::collections::HashMap::new();
-                let host: &'static str = Box::leak(registry_host.into_boxed_str());
                 credentials.insert(
-                    host,
+                    registry_host.as_str(),
                     DockerCredentials {
                         username: Some(username),
                         password: Some(password),
                         ..Default::default()
                     },
                 );
-                block_on(daemon.registry(
-                    output,
-                    frontend,
-                    ImageBuildLoadInput::Upload(context),
-                    Some(credentials),
-                ))
-                .map_err(Box::new)
-            })
+                let result = runtime.block_on(async {
+                    let daemon = BuildkitDaemon::new(solve_endpoint);
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => None,
+                        () = tokio::time::sleep(remaining) => None,
+                        result = daemon.registry(output, frontend, ImageBuildLoadInput::Upload(context), Some(credentials)) => Some(result.is_ok()),
+                    }
+                });
+                runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+                Ok(result)
+            }).map_err(|_| execution_unknown())?;
+        let outcome = tokio::task::spawn_blocking(move || thread.join())
             .await
-            .map_err(|_| unavailable())?;
-        if let Err(error) = outcome {
-            tracing::error!(
-                event = "agent.build_executor.buildkit_solve_failed",
-                component = "build-executor",
-                operation = "build.solve",
-                outcome = "failed",
-                duration_ms = 0_u64,
-                diagnostic_code = "LW_AGENT_BUILD_SOLVE_FAILED",
-                error_kind = "buildkit_solve_rejected",
-                failure_stage = "build.solve",
-                retryable = false,
-                error = %error,
-            );
-            return Err(unavailable());
-        }
-        self.buildkit_history_digest(endpoint, tagged, request_context.build_request_id)
-            .await
-    }
-
-    /// Read the authoritative pushed image digest from the `BuildKit` history
-    /// exporter response. The image exporter records `{"digest": ...}` in the
-    /// per-build `exporter_response`; `Harbor` tag association is not guaranteed
-    /// for `BuildKit` pushes, so the digest is the registry identity.
-    async fn buildkit_history_digest(
-        &self,
-        endpoint: Endpoint,
-        tagged: &str,
-        build_request_id: BuildRequestId,
-    ) -> Result<String, BuildProviderFailure> {
-        let channel = endpoint.connect().await.map_err(|_| unavailable())?;
-        let mut client =
-            bollard_buildkit_proto::moby::buildkit::v1::control_client::ControlClient::new(channel);
-        let request = bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRequest {
-            active_only: false,
-            r#ref: String::new(),
-            early_exit: true,
-            filter: Vec::new(),
-            limit: 200,
-        };
-        let mut stream = client
-            .listen_build_history(request)
-            .await
-            .map_err(|_| unavailable())?
-            .into_inner();
-        let label_key = "label:labweaver.build-request-id".to_owned();
-        let label_value = build_request_id.to_string();
-        let mut seen = 0_u64;
-        while let Ok(Some(event)) = stream.message().await {
-            let Some(record) = event.record else { continue };
-            seen += 1;
-            let by_label = record
-                .frontend_attrs
-                .get(&label_key)
-                .is_some_and(|value| value == &label_value);
-            let by_name = record.exporters.iter().any(|exporter| {
-                exporter
-                    .attrs
-                    .get("name")
-                    .is_some_and(|name| name == tagged)
-            });
-            if !by_label && !by_name {
-                continue;
+            .map_err(|_| execution_unknown())?
+            .map_err(|_| execution_unknown())??;
+        let record = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            buildkit_terminal_history(endpoint, tagged, request_context),
+        )
+        .await
+        .map_err(|_| execution_unknown())??;
+        match outcome {
+            Some(true) if record.error.is_none() => {
+                history_record_digest(&record).ok_or_else(output_invalid)
             }
-            if let Some(digest) = history_record_digest(&record) {
-                tracing::info!(
-                    event = "agent.build_executor.buildkit_history_digest",
-                    component = "build-executor",
-                    operation = "build.digest.read",
-                    outcome = "succeeded",
-                    duration_ms = 0_u64,
-                    build_request_id = %build_request_id,
-                    tagged,
-                    records_seen = seen,
-                    digest = %digest,
-                );
-                return Ok(digest);
-            }
-            tracing::warn!(
-                event = "agent.build_executor.buildkit_history_missing_digest",
-                component = "build-executor",
-                operation = "build.digest.read",
-                outcome = "missing",
-                duration_ms = 0_u64,
-                build_request_id = %build_request_id,
-                tagged,
-                records_seen = seen,
-                exporter_response_keys = ?record.exporter_response.keys().collect::<Vec<_>>(),
-                has_result = record.result.is_some(),
-                diagnostic_code = "LW_AGENT_BUILD_DIGEST_MISSING",
-                error_kind = "buildkit_history_digest_missing",
-                failure_stage = "build.digest.read",
-                retryable = false,
-            );
-            return Err(output_invalid());
+            Some(_) => Err(unavailable()),
+            None => Err(stopped_failure(request_context)),
         }
-        tracing::warn!(
-            event = "agent.build_executor.buildkit_history_record_not_found",
-            component = "build-executor",
-            operation = "build.digest.read",
-            outcome = "missing",
-            duration_ms = 0_u64,
-            build_request_id = %build_request_id,
-            tagged,
-            records_seen = seen,
-            diagnostic_code = "LW_AGENT_BUILD_DIGEST_MISSING",
-            error_kind = "buildkit_history_record_not_found",
-            failure_stage = "build.digest.read",
-            retryable = false,
-        );
-        Err(output_invalid())
     }
 
     /// Build a mutually-authenticated `tonic` endpoint for the `BuildKit` daemon.
@@ -751,11 +692,33 @@ impl ProductionBuildExecutor {
         })
     }
 
-    async fn cleanup(
+    async fn candidate_cleanup_reference(
         &self,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
-    ) -> Result<(), BuildProviderFailure> {
+    ) -> Result<Option<(String, String, String, String)>, BuildProviderFailure> {
+        let command_value: Value = sqlx::query_scalar(
+            "SELECT command FROM agent.build_commands WHERE build_request_id=$1",
+        )
+        .bind(build_request_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| unavailable())?;
+        let command: AgentBuildRequested =
+            serde_json::from_value(command_value).map_err(|_| output_invalid())?;
+        command.validate().map_err(|_| rejected())?;
+        if command.request.id != build_request_id
+            || identity
+                != BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
+                    build_request_id.as_uuid().as_bytes(),
+                ))
+        {
+            return Err(identity_mismatch());
+        }
+        let owned_repository = RepositoryIdentity::parse(
+            &command.request.output_repository,
+            &self.config.harbor_registry,
+        )?;
         let row = sqlx::query(
             "SELECT project_name,repository_name,candidate_tag,digest,build_identity,cleaned_at \
              FROM agent.build_executor_artifacts WHERE build_request_id=$1",
@@ -764,35 +727,72 @@ impl ProductionBuildExecutor {
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| unavailable())?;
-        let Some(row) = row else {
-            return Ok(());
+        let project = owned_repository.project;
+        let repository = owned_repository.repository;
+        let imported = matches!(command.request.source, BuildSource::ExportedOci { .. });
+        let tag = candidate_tag(identity);
+        let mut reference = tag.clone();
+        if let Some(row) = &row {
+            let stored_identity: String = row
+                .try_get("build_identity")
+                .map_err(|_| output_invalid())?;
+            let stored_project: String =
+                row.try_get("project_name").map_err(|_| output_invalid())?;
+            let stored_repository: String = row
+                .try_get("repository_name")
+                .map_err(|_| output_invalid())?;
+            let stored_tag: String = row.try_get("candidate_tag").map_err(|_| output_invalid())?;
+            let digest: String = row.try_get("digest").map_err(|_| output_invalid())?;
+            if !valid_digest(&digest) {
+                return Err(output_invalid());
+            }
+            if stored_identity != identity.0.to_string()
+                || stored_project != project
+                || stored_repository != repository
+                || (!imported && stored_tag != tag)
+                || !valid_digest(&digest)
+            {
+                return Err(identity_mismatch());
+            }
+            reference = digest;
+        }
+        // OCI import never writes a mutable tag; its metadata is not deletion authority.
+        if imported {
+            return Ok(None);
+        }
+        Ok(Some((project, repository, tag, reference)))
+    }
+
+    async fn cleanup(
+        &self,
+        build_request_id: BuildRequestId,
+        identity: BuildIdentity,
+    ) -> Result<(), BuildProviderFailure> {
+        let Some((project, repository, tag, reference)) = self
+            .candidate_cleanup_reference(build_request_id, identity)
+            .await?
+        else {
+            return self
+                .mark_candidate_cleaned(build_request_id, identity)
+                .await;
         };
-        let stored_identity: String = row
-            .try_get("build_identity")
-            .map_err(|_| output_invalid())?;
-        if stored_identity != identity.0.to_string() {
-            return Err(identity_mismatch());
-        }
-        if row
-            .try_get::<Option<time::OffsetDateTime>, _>("cleaned_at")
-            .map_err(|_| output_invalid())?
-            .is_some()
+        // A missing artifact row does not prove that an interrupted exporter left no tag.
+        // The admitted execution is already confirmed stopped; verify this owned repository.
+        if self
+            .registry_tag_absent(&project, &repository, &tag)
+            .await?
         {
-            return Ok(());
+            return self
+                .mark_candidate_cleaned(build_request_id, identity)
+                .await;
         }
-        let project: String = row.try_get("project_name").map_err(|_| output_invalid())?;
-        let repository: String = row
-            .try_get("repository_name")
-            .map_err(|_| output_invalid())?;
-        let tag: String = row.try_get("candidate_tag").map_err(|_| output_invalid())?;
-        let digest: String = row.try_get("digest").map_err(|_| output_invalid())?;
         let url = self.harbor_url(&[
             "projects",
             &project,
             "repositories",
             &repository,
             "artifacts",
-            &digest,
+            &reference,
             "tags",
             &tag,
         ])?;
@@ -835,6 +835,15 @@ impl ProductionBuildExecutor {
         {
             return Err(unavailable());
         }
+        self.mark_candidate_cleaned(build_request_id, identity)
+            .await
+    }
+
+    async fn mark_candidate_cleaned(
+        &self,
+        build_request_id: BuildRequestId,
+        identity: BuildIdentity,
+    ) -> Result<(), BuildProviderFailure> {
         sqlx::query(
             "UPDATE agent.build_executor_artifacts SET cleaned_at=clock_timestamp(), \
              updated_at=clock_timestamp() WHERE build_request_id=$1 AND build_identity=$2",
@@ -920,20 +929,54 @@ impl ProductionBuildExecutor {
             .send()
             .await
             .map_err(network)?;
-        if tags_response.status() != StatusCode::OK {
+        let status = tags_response.status();
+        let paginated = tags_response.headers().contains_key(reqwest::header::LINK);
+        if !matches!(status, StatusCode::OK | StatusCode::NOT_FOUND) {
             return Err(unavailable());
         }
         let tags_bytes = tags_response.bytes().await.map_err(network)?;
         if tags_bytes.len() > MAX_HARBOR_RESPONSE_BYTES {
             return Err(output_invalid());
         }
+        let value: Value = serde_json::from_slice(&tags_bytes).map_err(|_| output_invalid())?;
+        if status == StatusCode::NOT_FOUND {
+            return if value
+                .get("errors")
+                .and_then(Value::as_array)
+                .is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.iter().all(|error| {
+                            error.get("code").and_then(Value::as_str) == Some("NAME_UNKNOWN")
+                        })
+                }) {
+                Ok(true)
+            } else {
+                Err(unavailable())
+            };
+        }
+        if !value
+            .get("tags")
+            .is_some_and(|tags| tags.is_null() || tags.is_array())
+        {
+            return Err(output_invalid());
+        }
         let listing: HarborTagList =
             serde_json::from_slice(&tags_bytes).map_err(|_| output_invalid())?;
-        Ok(!listing
+        if listing.name != format!("{project}/{repository}") {
+            return Err(output_invalid());
+        }
+        if listing
             .tags
             .unwrap_or_default()
             .iter()
-            .any(|item| item == tag))
+            .any(|item| item == tag)
+        {
+            return Ok(false);
+        }
+        if paginated {
+            return Err(output_invalid());
+        }
+        Ok(true)
     }
 
     fn harbor_url(&self, segments: &[&str]) -> Result<Url, BuildProviderFailure> {
@@ -1114,6 +1157,7 @@ struct HarborTokenResponse {
 
 #[derive(Deserialize)]
 struct HarborTagList {
+    name: String,
     tags: Option<Vec<String>>,
 }
 
@@ -1123,8 +1167,30 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
         &self,
         context: &BuildProviderRequestContext,
         request: &BuildExecutorRequest,
+        cancellation: &CancellationToken,
     ) -> BuildExecutorResponse {
-        match self.execute_inner(context, request).await {
+        let result = if matches!(
+            request,
+            BuildExecutorRequest::Build { .. } | BuildExecutorRequest::Cleanup { .. }
+        ) {
+            self.execute_inner(context, request, cancellation).await
+        } else {
+            let remaining = std::time::Duration::try_from(
+                context.deadline_at.get() - time::OffsetDateTime::now_utc(),
+            )
+            .unwrap_or_default();
+            // Import publishes only content-addressed blobs/manifest, never a mutable tag.
+            // Dropping this workflow prevents candidate persistence and further requests;
+            // a pending immutable PUT may finish, and cleanup never deletes its digest.
+            let stopped = || stopped_failure(context);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => Err(stopped()),
+                () = tokio::time::sleep(remaining) => Err(stopped()),
+                result = self.execute_inner(context, request, cancellation) => result,
+            }
+        };
+        match result {
             Ok(response) => response,
             Err(failure) => {
                 tracing::error!(
@@ -1230,9 +1296,107 @@ fn validate_dockerfile(root: &Path, relative: &str) -> Result<(), BuildProviderF
     Ok(())
 }
 
-/// Extract the pushed image digest from a `BuildKit` history record. The image
-/// exporter records the digest in `exporter_response`; older or alternative
-/// exporters place it in `result`/`results` descriptors.
+/// Read the authoritative pushed image digest from the `BuildKit` history
+/// exporter response. The image exporter records `{"digest": ...}` in the
+/// per-build `exporter_response`; `Harbor` tag association is not guaranteed
+/// for `BuildKit` pushes, so the digest is the registry identity.
+async fn buildkit_terminal_history(
+    endpoint: Endpoint,
+    tagged: &str,
+    context: &BuildProviderRequestContext,
+) -> Result<bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord, BuildProviderFailure> {
+    let channel = endpoint.connect().await.map_err(|_| execution_unknown())?;
+    let mut client =
+        bollard_buildkit_proto::moby::buildkit::v1::control_client::ControlClient::new(channel);
+    let mut exact_ref = String::new();
+    loop {
+        let request = bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRequest {
+            active_only: false,
+            r#ref: exact_ref.clone(),
+            early_exit: true,
+            filter: Vec::new(),
+            limit: 200,
+        };
+        let mut stream = client
+            .listen_build_history(request)
+            .await
+            .map_err(|_| execution_unknown())?
+            .into_inner();
+        let mut found = None;
+        while let Some(event) = stream.message().await.map_err(|_| execution_unknown())? {
+            let Some(record) = event.record else { continue };
+            if !history_identity_matches(&record, context, tagged) {
+                if !exact_ref.is_empty() {
+                    return Err(execution_unknown());
+                }
+                continue;
+            }
+            if found.is_some() || record.r#ref.is_empty() {
+                return Err(execution_unknown());
+            }
+            found = Some((event.r#type, record));
+        }
+        if let Some((event_type, record)) = found {
+            exact_ref.clone_from(&record.r#ref);
+            if event_type
+                == bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryEventType::Complete
+                    as i32
+                && record.completed_at.is_some()
+            {
+                return Ok(record);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+fn execution_unknown() -> BuildProviderFailure {
+    BuildProviderFailure {
+        code: BuildProviderFailureCode::ExecutionUnknown,
+        retryable: false,
+    }
+}
+
+fn stopped_failure(context: &BuildProviderRequestContext) -> BuildProviderFailure {
+    BuildProviderFailure {
+        code: if time::OffsetDateTime::now_utc() >= context.deadline_at.get() {
+            BuildProviderFailureCode::TimedOut
+        } else {
+            BuildProviderFailureCode::Cancelled
+        },
+        retryable: false,
+    }
+}
+
+fn history_identity_matches(
+    record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+    context: &BuildProviderRequestContext,
+    tagged: &str,
+) -> bool {
+    [
+        (
+            "label:labweaver.build-request-id",
+            context.build_request_id.to_string(),
+        ),
+        (
+            "label:labweaver.build-generation",
+            context.fence_generation.to_string(),
+        ),
+        (
+            "label:labweaver.build-stage-request-id",
+            context.stage_request_id.to_string(),
+        ),
+    ]
+    .iter()
+    .all(|(key, expected)| record.frontend_attrs.get(*key) == Some(expected))
+        && record.exporters.iter().any(|exporter| {
+            exporter
+                .attrs
+                .get("name")
+                .is_some_and(|name| name == tagged)
+        })
+}
+
 fn history_record_digest(
     record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
 ) -> Option<String> {
@@ -1862,5 +2026,297 @@ mod tests {
         );
         assert!(rewritten.contains("FROM docker.io/library/debian:bookworm AS toolchain"));
         assert!(rewritten.contains("RUN apt-get install -y gcc"));
+    }
+    type HistoryStream = std::pin::Pin<
+        Box<
+            dyn futures_util::Stream<
+                    Item = Result<
+                        bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryEvent,
+                        tonic::Status,
+                    >,
+                > + Send,
+        >,
+    >;
+
+    #[derive(Clone)]
+    struct HistoryServer {
+        record: bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+        snapshots: Arc<std::sync::atomic::AtomicUsize>,
+        complete_after: usize,
+        duplicate: bool,
+    }
+
+    #[tonic::async_trait]
+    impl bollard_buildkit_proto::moby::buildkit::v1::control_server::Control for HistoryServer {
+        async fn disk_usage(
+            &self,
+            _: tonic::Request<bollard_buildkit_proto::moby::buildkit::v1::DiskUsageRequest>,
+        ) -> Result<
+            tonic::Response<bollard_buildkit_proto::moby::buildkit::v1::DiskUsageResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        type PruneStream = std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<
+                        Item = Result<
+                            bollard_buildkit_proto::moby::buildkit::v1::UsageRecord,
+                            tonic::Status,
+                        >,
+                    > + Send,
+            >,
+        >;
+        async fn prune(
+            &self,
+            _: tonic::Request<bollard_buildkit_proto::moby::buildkit::v1::PruneRequest>,
+        ) -> Result<tonic::Response<Self::PruneStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        async fn solve(
+            &self,
+            _: tonic::Request<bollard_buildkit_proto::moby::buildkit::v1::SolveRequest>,
+        ) -> Result<
+            tonic::Response<bollard_buildkit_proto::moby::buildkit::v1::SolveResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        type StatusStream = std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<
+                        Item = Result<
+                            bollard_buildkit_proto::moby::buildkit::v1::StatusResponse,
+                            tonic::Status,
+                        >,
+                    > + Send,
+            >,
+        >;
+        async fn status(
+            &self,
+            _: tonic::Request<bollard_buildkit_proto::moby::buildkit::v1::StatusRequest>,
+        ) -> Result<tonic::Response<Self::StatusStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        type SessionStream = std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<
+                        Item = Result<
+                            bollard_buildkit_proto::moby::buildkit::v1::BytesMessage,
+                            tonic::Status,
+                        >,
+                    > + Send,
+            >,
+        >;
+        async fn session(
+            &self,
+            _: tonic::Request<
+                tonic::Streaming<bollard_buildkit_proto::moby::buildkit::v1::BytesMessage>,
+            >,
+        ) -> Result<tonic::Response<Self::SessionStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        async fn list_workers(
+            &self,
+            _: tonic::Request<bollard_buildkit_proto::moby::buildkit::v1::ListWorkersRequest>,
+        ) -> Result<
+            tonic::Response<bollard_buildkit_proto::moby::buildkit::v1::ListWorkersResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        async fn info(
+            &self,
+            _: tonic::Request<bollard_buildkit_proto::moby::buildkit::v1::InfoRequest>,
+        ) -> Result<
+            tonic::Response<bollard_buildkit_proto::moby::buildkit::v1::InfoResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+        type ListenBuildHistoryStream = HistoryStream;
+        async fn listen_build_history(
+            &self,
+            request: tonic::Request<
+                bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRequest,
+            >,
+        ) -> Result<tonic::Response<Self::ListenBuildHistoryStream>, tonic::Status> {
+            use bollard_buildkit_proto::moby::buildkit::v1::{
+                BuildHistoryEvent, BuildHistoryEventType,
+            };
+            let snapshot = self
+                .snapshots
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let request = request.into_inner();
+            assert!(request.r#ref.is_empty() || request.r#ref == self.record.r#ref);
+            let mut record = self.record.clone();
+            let event_type = if snapshot >= self.complete_after {
+                record.completed_at =
+                    Some(bollard_buildkit_proto::google::protobuf::Timestamp::default());
+                BuildHistoryEventType::Complete
+            } else {
+                BuildHistoryEventType::Started
+            };
+            let event = BuildHistoryEvent {
+                r#type: event_type as i32,
+                record: Some(record),
+            };
+            let events = if self.duplicate {
+                vec![Ok(event.clone()), Ok(event)]
+            } else {
+                vec![Ok(event)]
+            };
+            Ok(tonic::Response::new(Box::pin(futures_util::stream::iter(
+                events,
+            ))))
+        }
+        async fn update_build_history(
+            &self,
+            _: tonic::Request<
+                bollard_buildkit_proto::moby::buildkit::v1::UpdateBuildHistoryRequest,
+            >,
+        ) -> Result<
+            tonic::Response<bollard_buildkit_proto::moby::buildkit::v1::UpdateBuildHistoryResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "unused external test boundary",
+            ))
+        }
+    }
+
+    fn history_fixture() -> (
+        BuildProviderRequestContext,
+        String,
+        bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+    ) {
+        use bollard_buildkit_proto::moby::buildkit::v1::{BuildHistoryRecord, Exporter};
+        let context = BuildProviderRequestContext {
+            protocol_version: crate::build_pipeline::BUILD_EXECUTOR_PROTOCOL_VERSION,
+            build_request_id: BuildRequestId::new(),
+            fence_generation: 7,
+            lease_token: uuid::Uuid::new_v4(),
+            stage: crate::build_pipeline::BuildProviderStage::Build,
+            stage_request_id: persistence_sqlx::Sha256Digest::of_bytes(b"stage"),
+            deadline_at: contracts::UtcTimestamp::from_utc(
+                time::OffsetDateTime::now_utc()
+                    .replace_nanosecond(0)
+                    .expect("whole seconds")
+                    + time::Duration::minutes(1),
+            )
+            .expect("deadline"),
+        };
+        let tagged = "harbor.example/project/image:candidate".to_owned();
+        let record = BuildHistoryRecord {
+            r#ref: "exact-solve".to_owned(),
+            frontend_attrs: std::collections::HashMap::from([
+                (
+                    "label:labweaver.build-request-id".to_owned(),
+                    context.build_request_id.to_string(),
+                ),
+                (
+                    "label:labweaver.build-generation".to_owned(),
+                    context.fence_generation.to_string(),
+                ),
+                (
+                    "label:labweaver.build-stage-request-id".to_owned(),
+                    context.stage_request_id.to_string(),
+                ),
+            ]),
+            exporters: vec![Exporter {
+                r#type: "image".to_owned(),
+                attrs: std::collections::HashMap::from([("name".to_owned(), tagged.clone())]),
+            }],
+            ..Default::default()
+        };
+        (context, tagged, record)
+    }
+
+    #[test]
+    fn terminal_history_identity_rejects_foreign_generation_or_tag_only_match() {
+        let (context, tagged, mut record) = history_fixture();
+        assert!(history_identity_matches(&record, &context, &tagged));
+        record.frontend_attrs.insert(
+            "label:labweaver.build-generation".to_owned(),
+            "6".to_owned(),
+        );
+        assert!(!history_identity_matches(&record, &context, &tagged));
+        record.frontend_attrs.clear();
+        assert!(!history_identity_matches(&record, &context, &tagged));
+    }
+
+    #[tokio::test]
+    async fn unreachable_history_keeps_remote_completion_unknown() {
+        let (context, tagged, _) = history_fixture();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserved address");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+        let error = buildkit_terminal_history(
+            Endpoint::from_shared(format!("http://{address}")).expect("endpoint"),
+            &tagged,
+            &context,
+        )
+        .await
+        .expect_err("disconnected history cannot prove stop");
+        assert_eq!(error.code, BuildProviderFailureCode::ExecutionUnknown);
+    }
+
+    #[tokio::test]
+    async fn terminal_history_waits_for_complete_and_rejects_ambiguity_or_missing_completion() {
+        use bollard_buildkit_proto::moby::buildkit::v1::control_server::ControlServer;
+        for (complete_after, duplicate, expected) in [
+            (1, false, true),
+            (0, true, false),
+            (usize::MAX, false, false),
+        ] {
+            let (context, tagged, record) = history_fixture();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test listener");
+            let address = listener.local_addr().expect("address");
+            let incoming = futures_util::stream::unfold(listener, |listener| async {
+                let item = listener.accept().await.map(|(stream, _)| stream);
+                Some((item, listener))
+            });
+            let shutdown = CancellationToken::new();
+            let server = tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(ControlServer::new(HistoryServer {
+                        record,
+                        snapshots: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                        complete_after,
+                        duplicate,
+                    }))
+                    .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned()),
+            );
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(700),
+                buildkit_terminal_history(
+                    Endpoint::from_shared(format!("http://{address}")).expect("endpoint"),
+                    &tagged,
+                    &context,
+                ),
+            )
+            .await;
+            assert_eq!(matches!(result, Ok(Ok(_))), expected);
+            shutdown.cancel();
+            server.await.expect("server join").expect("server stop");
+        }
     }
 }

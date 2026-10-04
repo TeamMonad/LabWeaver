@@ -408,6 +408,7 @@ impl BuildExecutorBackend for CountingBuildExecutor {
         &self,
         _context: &BuildProviderRequestContext,
         request: &BuildExecutorRequest,
+        _cancellation: &tokio_util::sync::CancellationToken,
     ) -> BuildExecutorResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match request {
@@ -426,6 +427,7 @@ impl BuildExecutorBackend for CountingBuildExecutor {
             BuildExecutorRequest::Cleanup {
                 build_request_id,
                 identity,
+                ..
             } => BuildExecutorResponse::Cleaned {
                 build_request_id: *build_request_id,
                 build_identity: *identity,
@@ -587,11 +589,18 @@ fn build_executor_envelope(
                 command.request.id.as_uuid().as_bytes(),
             )),
         },
+        BuildProviderStage::Import => BuildExecutorRequest::Import {
+            command: command.clone(),
+            identity: BuildIdentity(Sha256Digest::of_bytes(
+                command.request.id.as_uuid().as_bytes(),
+            )),
+        },
         BuildProviderStage::Cleanup => BuildExecutorRequest::Cleanup {
             build_request_id: command.request.id,
             identity: BuildIdentity(persistence_sqlx::Sha256Digest::of_bytes(
                 command.request.id.as_uuid().as_bytes(),
             )),
+            timeout_milliseconds: 120_000,
         },
         _ => unreachable!("fixture uses only command-bound stages"),
     };
@@ -766,4 +775,587 @@ fn revision(value: u64) -> Result<Revision, Box<dyn std::error::Error>> {
 
 fn now() -> UtcTimestamp {
     UtcTimestamp::from_str("2026-07-16T08:00:00.000Z").expect("fixed timestamp is valid")
+}
+
+#[derive(Clone)]
+struct CancellableBuildExecutor {
+    started: tokio_util::sync::CancellationToken,
+    stopped: tokio_util::sync::CancellationToken,
+    confirmed: bool,
+}
+
+#[async_trait]
+impl BuildExecutorBackend for CancellableBuildExecutor {
+    async fn execute(
+        &self,
+        context: &BuildProviderRequestContext,
+        request: &BuildExecutorRequest,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> BuildExecutorResponse {
+        match request {
+            BuildExecutorRequest::Build { .. } => {
+                self.started.cancel();
+                cancellation.cancelled().await;
+                self.stopped.cancel();
+                BuildExecutorResponse::Failed {
+                    failure: BuildProviderFailure {
+                        code: if self.confirmed {
+                            BuildProviderFailureCode::Cancelled
+                        } else {
+                            BuildProviderFailureCode::ExecutionUnknown
+                        },
+                        retryable: false,
+                    },
+                }
+            }
+            BuildExecutorRequest::Cleanup {
+                build_request_id,
+                identity,
+                ..
+            } => {
+                assert!(
+                    self.stopped.is_cancelled(),
+                    "cleanup must follow joined execution"
+                );
+                BuildExecutorResponse::Cleaned {
+                    build_request_id: *build_request_id,
+                    build_identity: *identity,
+                }
+            }
+            _ => unreachable!("unused external boundary"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn executor_cleanup_signals_exact_active_build_and_unknown_stop_keeps_fence_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    for confirmed in [true, false] {
+        let command = build_command()?;
+        let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(10))?;
+        let lease = uuid::Uuid::new_v4();
+        let started = tokio_util::sync::CancellationToken::new();
+        let stopped = tokio_util::sync::CancellationToken::new();
+        let executor = Arc::new(FencedBuildExecutor::new(
+            PgBuildExecutorFenceStore::new(pool.clone()),
+            CancellableBuildExecutor {
+                started: started.clone(),
+                stopped: stopped.clone(),
+                confirmed,
+            },
+        ));
+        let build =
+            build_executor_envelope(&command, 1, lease, BuildProviderStage::Build, deadline);
+        let active = executor.clone();
+        let task = tokio::spawn(async move { active.execute(build).await });
+        started.cancelled().await;
+        let cleanup = executor
+            .execute(build_executor_envelope(
+                &command,
+                1,
+                lease,
+                BuildProviderStage::Cleanup,
+                deadline,
+            ))
+            .await;
+        assert!(stopped.is_cancelled());
+        task.await??;
+        if confirmed {
+            assert!(matches!(
+                cleanup?.response,
+                BuildExecutorResponse::Cleaned { .. }
+            ));
+        } else {
+            assert!(matches!(cleanup, Err(BuildExecutorFenceError::InProgress)));
+            // Deadline expiry never authorizes a newer producer over an unknown operation.
+            sqlx::query("UPDATE agent.build_executor_fences SET deadline_at=clock_timestamp()-interval '1 second' WHERE build_request_id=$1")
+                .bind(command.request.id.as_uuid()).execute(&pool).await?;
+            let later = executor
+                .execute(build_executor_envelope(
+                    &command,
+                    2,
+                    uuid::Uuid::new_v4(),
+                    BuildProviderStage::Build,
+                    deadline,
+                ))
+                .await;
+            assert!(matches!(later, Err(BuildExecutorFenceError::InProgress)));
+            let (generation, response): (i32, Option<serde_json::Value>) = sqlx::query_as("SELECT highest_generation,last_response FROM agent.build_executor_fences WHERE build_request_id=$1")
+                .bind(command.request.id.as_uuid()).fetch_one(&pool).await?;
+            assert_eq!(generation, 1);
+            assert!(response.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct RecoveryBuildExecutor {
+    pool: sqlx::PgPool,
+    cleanups: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl BuildExecutorBackend for RecoveryBuildExecutor {
+    async fn execute(
+        &self,
+        _: &BuildProviderRequestContext,
+        request: &BuildExecutorRequest,
+        _: &tokio_util::sync::CancellationToken,
+    ) -> BuildExecutorResponse {
+        match request {
+            BuildExecutorRequest::Build { command, identity } => BuildExecutorResponse::Built {
+                candidate: BuiltCandidate {
+                    build_request_id: command.request.id,
+                    build_identity: *identity,
+                    repository: command.request.output_repository.clone(),
+                    digest: digest(),
+                },
+            },
+            BuildExecutorRequest::Cleanup {
+                build_request_id,
+                identity,
+                ..
+            } => {
+                self.cleanups.fetch_add(1, Ordering::SeqCst);
+                sqlx::query("UPDATE agent.build_executor_artifacts SET cleaned_at=clock_timestamp() WHERE build_request_id=$1 AND build_identity=$2")
+                    .bind(build_request_id.as_uuid()).bind(identity.0.to_string()).execute(&self.pool).await.expect("external registry adapter completion");
+                BuildExecutorResponse::Cleaned {
+                    build_request_id: *build_request_id,
+                    build_identity: *identity,
+                }
+            }
+            _ => unreachable!("unused registry boundary"),
+        }
+    }
+}
+
+struct RecoveryProvider {
+    executor: FencedBuildExecutor<RecoveryBuildExecutor>,
+    command: AgentBuildRequested,
+}
+
+#[async_trait]
+impl BuildSupplyChainProvider for RecoveryProvider {
+    fn builder_binding(&self) -> &str {
+        "buildkit-primary-v1"
+    }
+    fn registry_binding(&self) -> &str {
+        "harbor-primary-v1"
+    }
+    async fn ensure_private_project(
+        &self,
+        _: &BuildProviderRequestContext,
+        _: &AgentBuildRequested,
+        _: BuildIdentity,
+    ) -> Result<PrivateRegistryProject, BuildProviderFailure> {
+        unreachable!("cleanup must not rebuild")
+    }
+    async fn build_candidate(
+        &self,
+        _: &BuildProviderRequestContext,
+        _: &AgentBuildRequested,
+        _: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        unreachable!("cleanup must not rebuild")
+    }
+    async fn import_candidate(
+        &self,
+        _: &BuildProviderRequestContext,
+        _: &AgentBuildRequested,
+        _: BuildIdentity,
+    ) -> Result<BuiltCandidate, BuildProviderFailure> {
+        unreachable!("cleanup must not import")
+    }
+    async fn publish_immutable(
+        &self,
+        _: &BuildProviderRequestContext,
+        _: &BuiltCandidate,
+    ) -> Result<PublishedImage, BuildProviderFailure> {
+        unreachable!("failed command must not publish")
+    }
+    async fn cleanup_candidate(
+        &self,
+        context: &BuildProviderRequestContext,
+        build_request_id: BuildRequestId,
+        identity: BuildIdentity,
+    ) -> Result<(), BuildProviderFailure> {
+        assert_eq!(build_request_id, self.command.request.id);
+        assert_eq!(
+            identity.0,
+            Sha256Digest::of_bytes(build_request_id.as_uuid().as_bytes())
+        );
+        let response = self
+            .executor
+            .execute(build_executor_envelope(
+                &self.command,
+                context.fence_generation,
+                context.lease_token,
+                BuildProviderStage::Cleanup,
+                context.deadline_at,
+            ))
+            .await
+            .expect("exact terminal cleanup admission");
+        assert!(matches!(
+            response.response,
+            BuildExecutorResponse::Cleaned { .. }
+        ));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn terminal_late_build_cleanup_preserves_failure_and_replays_completed_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let command = build_command()?;
+    let store = PgBuildStore::new(pool.clone());
+    store
+        .accept_command("agent-build-command-v1", &command_event(command.clone())?)
+        .await?;
+    sqlx::query("UPDATE agent.build_commands SET state='failed',attempt=1,diagnostic_code='LW_AGENT_BUILD_CLEANUP_FAILED',retryable=false,cleanup_verified=false,completed_at=clock_timestamp() WHERE build_request_id=$1")
+        .bind(command.request.id.as_uuid()).execute(&pool).await?;
+    let identity = Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes());
+    sqlx::query("INSERT INTO agent.build_executor_artifacts(build_request_id,build_identity,repository,project_name,repository_name,candidate_tag,digest) VALUES($1,$2,$3,'labweaver-system',$6,$4,$5)")
+        .bind(command.request.id.as_uuid()).bind(identity.to_string()).bind(&command.request.output_repository)
+        .bind(format!("candidate-{}", &identity.to_string()[..24])).bind(digest()).bind(command.request.output_repository.rsplit('/').next().ok_or("repository")?).execute(&pool).await?;
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let executor = FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        RecoveryBuildExecutor {
+            pool: pool.clone(),
+            cleanups: cleanups.clone(),
+        },
+    );
+    let deadline = add_time(
+        database_now(&pool).await?,
+        time::Duration::milliseconds(500),
+    )?;
+    executor
+        .execute(build_executor_envelope(
+            &command,
+            1,
+            uuid::Uuid::new_v4(),
+            BuildProviderStage::Build,
+            deadline,
+        ))
+        .await?;
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    let worker = BuildWorker::new(
+        store,
+        BuildPipeline::new(
+            RecoveryProvider {
+                executor,
+                command: command.clone(),
+            },
+            policy()?,
+        )?,
+        "cleanup-recovery".to_owned(),
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        2,
+    )?;
+    worker.run_once(now()).await?;
+    let (state, diagnostic, cleaned): (String, String, bool) = sqlx::query_as("SELECT state,diagnostic_code,cleanup_verified FROM agent.build_commands WHERE build_request_id=$1")
+        .bind(command.request.id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(state, "failed");
+    assert_eq!(diagnostic, "LW_AGENT_BUILD_CLEANUP_FAILED");
+    assert!(cleaned);
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    // Simulate interruption after executor completion but before authority flag delivery.
+    sqlx::query("UPDATE agent.build_commands SET cleanup_verified=false,next_attempt_at=clock_timestamp() WHERE build_request_id=$1")
+        .bind(command.request.id.as_uuid()).execute(&pool).await?;
+    worker.run_once(now()).await?;
+    assert_eq!(
+        cleanups.load(Ordering::SeqCst),
+        1,
+        "canonical cleanup replay has no second side effect"
+    );
+    let cleaned: bool = sqlx::query_scalar(
+        "SELECT cleanup_verified FROM agent.build_commands WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(cleaned);
+    Ok(())
+}
+
+struct RegistryTlsListener {
+    listener: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl axum::serve::Listener for RegistryTlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, address) = self.listener.accept().await.expect("test TLS listener");
+            if let Ok(stream) = self.acceptor.accept(stream).await {
+                return (stream, address);
+            }
+        }
+    }
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+#[tokio::test]
+async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
+-> Result<(), Box<dyn std::error::Error>> {
+    use agent_service::build_executor::{ProductionBuildExecutor, ProductionBuildExecutorConfig};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let tls = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(tls.signing_key.serialize_der().into());
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![tls.cert.der().clone()], key)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let host = format!("localhost:{port}");
+    let mut command = build_command()?;
+    command.request.output_repository = format!("{host}/labweaver-system/image");
+    let tag = format!(
+        "candidate-{}",
+        &Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes()).to_string()[..24]
+    );
+    let observed_deletes = Arc::new(AtomicUsize::new(0));
+    let delete_count = observed_deletes.clone();
+    let expected_tag = tag.clone();
+    let listing_mode = Arc::new(AtomicUsize::new(0));
+    let mode = listing_mode.clone();
+    let listing_calls = Arc::new(AtomicUsize::new(0));
+    let calls = listing_calls.clone();
+    let router = axum::Router::new()
+        .route("/service/token", axum::routing::get(|| async { axum::Json(serde_json::json!({"token":"test-token"})) }))
+        .route("/v2/labweaver-system/image/tags/list", axum::routing::get(move || {
+            let tag = expected_tag.clone(); let mode = mode.load(Ordering::SeqCst);
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let (name,tags) = if mode == 0 { ("labweaver-system/image",vec![tag]) } else if mode == 2 { ("foreign/image",vec![]) } else { ("labweaver-system/image",vec![]) };
+                let mut response = axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({"name":name,"tags":tags})));
+                if mode == 1 { response.headers_mut().insert(axum::http::header::LINK, axum::http::HeaderValue::from_static("</v2/labweaver-system/image/tags/list?last=other>; rel=next")); }
+                response
+            }
+        }))
+        .route("/api/v2.0/projects/labweaver-system/repositories/image/artifacts/{reference}/tags/{tag}", axum::routing::delete(move |axum::extract::Path((reference, deleted_tag)): axum::extract::Path<(String,String)>| {
+            let tag = tag.clone(); let count = delete_count.clone(); async move {
+                assert_eq!(reference, tag); assert_eq!(deleted_tag, tag);
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let serve_shutdown = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            RegistryTlsListener {
+                listener,
+                acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(config)),
+            },
+            router,
+        )
+        .with_graceful_shutdown(serve_shutdown.cancelled_owned())
+        .await
+    });
+    let directory = tempfile::tempdir()?;
+    let ca = directory.path().join("ca.pem");
+    std::fs::write(&ca, tls.cert.pem())?;
+    let username = directory.path().join("username");
+    std::fs::write(&username, "test-user")?;
+    let password = directory.path().join("password");
+    std::fs::write(&password, "test-password")?;
+    let objects = Arc::new(
+        artifact_store::S3ImmutableObjectStore::new(
+            artifact_store::S3StoreConfig {
+                binding: "test-objects".to_owned(),
+                endpoint: "https://localhost:1/".parse()?,
+                bucket: "test".to_owned(),
+                region: "test".to_owned(),
+                object_prefix: "test".to_owned(),
+                upload_ttl_seconds: 60,
+                max_object_bytes: 1024,
+                force_path_style: true,
+                ca_bundle_file: None,
+            },
+            artifact_store::S3Credential {
+                access_key_id: "test-access".to_owned(),
+                secret_access_key: "test-secret".to_owned(),
+                session_token: None,
+            },
+        )
+        .await?,
+    );
+    let backend = ProductionBuildExecutor::new(
+        ProductionBuildExecutorConfig {
+            buildctl_path: directory.path().join("buildctl"),
+            buildkit_address: "tcp://localhost:1".to_owned(),
+            buildkit_ca_file: ca.clone(),
+            buildkit_client_certificate_file: ca.clone(),
+            buildkit_client_private_key_file: ca.clone(),
+            docker_config_directory: directory.path().join("docker"),
+            work_directory: directory.path().join("work"),
+            max_unpacked_context_bytes: 1024,
+            harbor_api: format!("https://{host}/").parse()?,
+            harbor_registry: host,
+            harbor_ca_file: ca,
+            harbor_username_file: username,
+            harbor_password_file: password,
+            project_storage_quota_bytes: 1024,
+            robot_subject: "test-robot".to_owned(),
+            service_image: String::new(),
+        },
+        pool.clone(),
+        objects,
+    )
+    .expect("validated production executor fixture");
+    let prelaunch = build_executor_envelope(
+        &command,
+        1,
+        uuid::Uuid::new_v4(),
+        BuildProviderStage::Build,
+        add_time(database_now(&pool).await?, time::Duration::seconds(5))?,
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    assert!(
+        matches!(backend.execute(&prelaunch.context, &prelaunch.request, &cancellation).await,
+        BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::Cancelled),
+        "cancelled pre-build read never reaches unavailable object storage or solve"
+    );
+    PgBuildStore::new(pool.clone())
+        .accept_command("agent-build-command-v1", &command_event(command.clone())?)
+        .await?;
+    let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(5))?;
+    let lease = uuid::Uuid::new_v4();
+    let first = FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        CountingBuildExecutor {
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    first
+        .execute(build_executor_envelope(
+            &command,
+            1,
+            lease,
+            BuildProviderStage::Build,
+            deadline,
+        ))
+        .await?;
+    let production =
+        FencedBuildExecutor::new(PgBuildExecutorFenceStore::new(pool.clone()), backend);
+    let response = production
+        .execute(build_executor_envelope(
+            &command,
+            1,
+            lease,
+            BuildProviderStage::Cleanup,
+            deadline,
+        ))
+        .await?;
+    assert!(
+        matches!(response.response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::Unavailable)
+    );
+    assert_eq!(
+        observed_deletes.load(Ordering::SeqCst),
+        1,
+        "missing artifact row did not conceal the actual tag"
+    );
+    let artifacts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM agent.build_executor_artifacts WHERE build_request_id=$1",
+    )
+    .bind(command.request.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(artifacts, 0);
+    for mode in [1, 2, 3] {
+        listing_mode.store(mode, Ordering::SeqCst);
+        let before = listing_calls.load(Ordering::SeqCst);
+        let mut next = build_command()?;
+        next.request.output_repository = command.request.output_repository.clone();
+        let stage = if mode == 3 {
+            next.request.source = contracts::supply_chain::BuildSource::ExportedOci {
+                image: contracts::supply_chain::ExportedOciImage {
+                    layout: artifact_ref("application/vnd.oci.image.layout.v1.tar+gzip"),
+                    layout_object_key: "exports/image.tar.gz".to_owned(),
+                },
+            };
+            BuildProviderStage::Import
+        } else {
+            BuildProviderStage::Build
+        };
+        PgBuildStore::new(pool.clone())
+            .accept_command("agent-build-command-v1", &command_event(next.clone())?)
+            .await?;
+        let lease = uuid::Uuid::new_v4();
+        let deadline = add_time(database_now(&pool).await?, time::Duration::seconds(5))?;
+        first
+            .execute(build_executor_envelope(&next, 1, lease, stage, deadline))
+            .await?;
+        if mode == 3 {
+            let identity = Sha256Digest::of_bytes(next.request.id.as_uuid().as_bytes());
+            sqlx::query("INSERT INTO agent.build_executor_artifacts(build_request_id,build_identity,repository,project_name,repository_name,candidate_tag,digest) VALUES($1,$2,$3,'labweaver-system','image',$4,$5)")
+                .bind(next.request.id.as_uuid()).bind(identity.to_string()).bind(&next.request.output_repository)
+                .bind(format!("candidate-{}", &identity.to_string()[..24])).bind(digest()).execute(&pool).await?;
+        }
+        let response = production
+            .execute(build_executor_envelope(
+                &next,
+                1,
+                lease,
+                BuildProviderStage::Cleanup,
+                deadline,
+            ))
+            .await?;
+        if mode == 3 {
+            assert!(matches!(
+                response.response,
+                BuildExecutorResponse::Cleaned { .. }
+            ));
+            assert_eq!(
+                listing_calls.load(Ordering::SeqCst),
+                before,
+                "digest-only import never lists or deletes a mutable tag"
+            );
+            let cleaned: bool = sqlx::query_scalar("SELECT cleaned_at IS NOT NULL FROM agent.build_executor_artifacts WHERE build_request_id=$1").bind(next.request.id.as_uuid()).fetch_one(&pool).await?;
+            assert!(cleaned);
+        } else {
+            assert!(
+                matches!(response.response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::OutputInvalid),
+                "incomplete or foreign listing cannot establish absence"
+            );
+        }
+        assert_eq!(observed_deletes.load(Ordering::SeqCst), 1);
+    }
+    shutdown.cancel();
+    server.await??;
+    Ok(())
 }
