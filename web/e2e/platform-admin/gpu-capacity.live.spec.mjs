@@ -159,7 +159,7 @@ function assertAllocationBindingIdle({ requests, leases }, catalogEntries, selec
     if (!entry) throw new Error(`LW_GPU_CAPACITY_CATALOG_CLASS_UNKNOWN:${gpuClass}`)
     if (entry.allocationBinding === selectedEntry.allocationBinding) orphanActiveLeases.push(lease)
   }
-  // The public Lease projection intentionally omits its CapacityClaim/GPU allocation identity;
+  // The public Lease exposes claimId but not the Claim's resolved GPU allocation;
   // direct Environment reservations also have no public list route. Live runs require the
   // coordinated read-only Resource preflight before this UI flow starts.
   if (heldOrPending.length || orphanActiveLeases.length) {
@@ -239,8 +239,9 @@ async function waitForEnvironmentsReady(request, ownedRequests, runtimeKind) {
   }, { timeout: 240_000, intervals: [1000, 2000, 5000] }).toEqual(expected)
 }
 
-async function assertHeldCapacity(request, ownedRequests, ownedLeases, runtimeKind, expectedCount) {
+async function assertHeldCapacity(request, ownedRequests, ownedLeases, entry, release, ownerId, expectedCount) {
   expect(ownedRequests).toHaveLength(expectedCount)
+  expect(new Set(ownedRequests.map((owned) => owned.requestId)).size).toBe(expectedCount)
   expect(new Set(ownedRequests.map((owned) => owned.environmentId)).size).toBe(expectedCount)
   const [resources, environments] = await Promise.all([
     readProjectResources(request, INPUT.projectId),
@@ -251,17 +252,36 @@ async function assertHeldCapacity(request, ownedRequests, ownedLeases, runtimeKi
     const ownedLease = ownedLeases.find((item) => item.requestId === owned.requestId)
     const currentLease = resources.leases.find((item) => item.id === ownedLease?.leaseId)
     expect(currentRequest, `LW_GPU_CAPACITY_REQUEST_NOT_ACTIVE:${owned.requestId}`).toMatchObject({
+      id: owned.requestId,
+      requesterId: ownerId,
+      projectId: INPUT.projectId,
+      target: {
+        kind: 'environment',
+        environmentId: owned.environmentId,
+        releaseId: release.releaseId,
+        releaseVersion: release.releaseVersion,
+      },
       state: 'active',
-      requestedResources: { gpu: { count: 1 } },
+      requestedResources: { gpu: { class: entry.class, count: 1 } },
     })
     expect(currentLease, `LW_GPU_CAPACITY_LEASE_NOT_ACTIVE:${owned.requestId}`).toMatchObject({
+      id: ownedLease?.leaseId,
       requestId: owned.requestId,
       state: 'active',
     })
+    expect(currentLease.claimId, `LW_GPU_CAPACITY_CLAIM_ID_INVALID:${owned.requestId}`).toMatch(/^[0-9a-f-]{36}$/i)
     expect(environments[index], `LW_GPU_CAPACITY_ENVIRONMENT_NOT_READY:${owned.environmentId}`).toMatchObject({
+      id: owned.environmentId,
+      ownerId,
+      projectId: INPUT.projectId,
+      class: 'work',
       observedState: 'ready',
-      runtimeKind,
+      runtimeKind: release.runtimeKind,
+      providerBinding: entry.providerBinding,
+      releaseId: release.releaseId,
+      releaseVersion: release.releaseVersion,
       leaseId: ownedLease.leaseId,
+      capacityBinding: currentLease.claimId,
     })
   }
 }
@@ -324,11 +344,12 @@ async function verifyOwnedGpuEnvironment(studentPage, entry, owned, release, own
     id: owned.environmentId,
     projectId: INPUT.projectId,
     observedState: 'ready',
+    class: 'work',
     runtimeKind: release.runtimeKind,
+    providerBinding: entry.providerBinding,
     ownerId,
     releaseId: release.releaseId,
     releaseVersion: release.releaseVersion,
-    gpuAllocation: { class: entry.class, mode: entry.mode, count: 1, providerBinding: entry.providerBinding },
   })
   if (release.runtimeKind === 'virtual_machine') {
     const connection = await issueEnvironmentSshAccessGrantByUi(studentPage, INPUT.projectId, environment)
@@ -427,7 +448,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
 
     const baselineRequests = [...ownedRequests]
     await waitForEnvironmentsReady(studentPage.request, baselineRequests, release.runtimeKind)
-    await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
+    await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, entry, release, ownerId, entry.capacityUnits)
     for (const owned of baselineRequests) {
       await verifyOwnedGpuEnvironment(studentPage, entry, owned, release, ownerId, sshIdentity)
     }
@@ -440,7 +461,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     expect(blockedRequest?.state).toBe('reviewing')
     expect(blockedState.leases.some((lease) => lease.requestId === contender.requestId)).toBe(false)
 
-    await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
+    await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, entry, release, ownerId, entry.capacityUnits)
     const releasedRequest = baselineRequests[0]
     const releasedLease = ownedLeases.find((lease) => lease.requestId === releasedRequest.requestId)
     if (!releasedLease) throw new Error(`LW_GPU_CAPACITY_RELEASE_LEASE_MISSING:${releasedRequest.requestId}`)
@@ -451,7 +472,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     ])
     ownedLeases.splice(ownedLeases.indexOf(releasedLease), 1)
     const remainingRequests = baselineRequests.slice(1)
-    await assertHeldCapacity(studentPage.request, remainingRequests, ownedLeases, release.runtimeKind, entry.capacityUnits - 1)
+    await assertHeldCapacity(studentPage.request, remainingRequests, ownedLeases, entry, release, ownerId, entry.capacityUnits - 1)
 
     const acquired = await approveGpuRequest(page, contender, entry, null, (accepted) => {
       ownedLeases.push({ requestId: accepted.requestId, leaseId: accepted.leaseId })
@@ -462,7 +483,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     await waitForEnvironmentCreated(studentPage.request, contender.environmentId, release.runtimeKind)
     const fullCapacityRequests = [...remainingRequests, contender]
     await waitForEnvironmentsReady(studentPage.request, fullCapacityRequests, release.runtimeKind)
-    await assertHeldCapacity(studentPage.request, fullCapacityRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
+    await assertHeldCapacity(studentPage.request, fullCapacityRequests, ownedLeases, entry, release, ownerId, entry.capacityUnits)
     await verifyOwnedGpuEnvironment(studentPage, entry, contender, release, ownerId, sshIdentity)
   } catch (error) {
     primaryError = error
