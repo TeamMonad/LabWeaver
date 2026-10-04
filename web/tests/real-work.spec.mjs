@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { expect as playwrightExpect } from '@playwright/test'
 import {
   assertRealWorkVmCandidate,
+  assertRealWorkGpuContainerCandidate,
   createRealWorkPackage,
   cleanupWorkResources,
   realWorkConfig,
@@ -195,6 +196,71 @@ describe('real Work VM package', () => {
   })
 })
 
+
+describe('GPU container Work material and candidate', () => {
+  const image = `harbor.example.test/python@sha256:${'a'.repeat(64)}`
+  const gpu = { class: 'nvidia-cuda', count: 1 }
+  const providerBinding = 'container-primary-v1'
+
+  it('preserves the HTTP seed recipe alongside the owner CUDA terminal', async () => {
+    const material = await createRealWorkPackage(image, { gpu, providerBinding })
+    try {
+      expect(material.environmentSpec).toMatchObject({
+        class: 'work', resources: { gpu },
+        runtime: {
+          kind: 'container', provider_binding: providerBinding, service_port: 8080,
+          terminal: { executable: '/bin/sh', args: [], workingDirectory: '/workspace' },
+        },
+      })
+      expect(material.dockerfile).toContain(`FROM ${image}`)
+      expect(material.dockerfile).toContain('COPY seed.txt /opt/labweaver/workspace-seed/seed.txt')
+      expect(material.dockerfile).toContain('"http.server", "8080"')
+      const readme = await readFile(`${material.directory}/README.md`, 'utf8')
+      expect(readme).toContain('class=work')
+      expect(readme).toContain('count 1')
+      expect(readme).toContain('256 threads, sum 32640, max 255')
+      expect(readme).toContain('libcuda.so.1 must be supplied by the normal NVIDIA runtime')
+      expect(() => assertRealWorkGpuContainerCandidate({ candidate: { spec: material.environmentSpec } }, providerBinding, gpu)).not.toThrow()
+    } finally {
+      await material.cleanup()
+    }
+  })
+
+  it('rejects changed class, GPU allocation, provider, or terminal before approval', async () => {
+    const material = await createRealWorkPackage(image, { gpu, providerBinding })
+    try {
+      const invalidChanges = [
+        (spec) => { spec.class = 'experiment' },
+        (spec) => { spec.resources.gpu.class = 'other-gpu' },
+        (spec) => { spec.resources.gpu.count = 2 },
+        (spec) => { spec.runtime.provider_binding = 'other-provider' },
+        (spec) => { delete spec.runtime.terminal },
+        (spec) => { spec.runtime.terminal.executable = '/bin/bash' },
+        (spec) => { spec.runtime.terminal.args = ['-c', 'true'] },
+        (spec) => { spec.runtime.terminal.workingDirectory = '/tmp' },
+      ]
+      for (const change of invalidChanges) {
+        const spec = structuredClone(material.environmentSpec)
+        change(spec)
+        expect(() => assertRealWorkGpuContainerCandidate({ candidate: { spec } }, providerBinding, gpu))
+          .toThrow('REAL_WORK_GPU_CONTAINER_CANDIDATE_SPEC_INVALID')
+      }
+    } finally {
+      await material.cleanup()
+    }
+  })
+
+  it('keeps CPU container Work without a GPU terminal requirement', async () => {
+    const material = await createRealWorkPackage(image, { providerBinding })
+    try {
+      expect(material.environmentSpec.runtime).not.toHaveProperty('terminal')
+      expect(material.environmentSpec.resources).not.toHaveProperty('gpu')
+      expect(material.dockerfile).toContain('"http.server", "8080"')
+    } finally {
+      await material.cleanup()
+    }
+  })
+})
 
 describe('real Work cleanup through public owner APIs', () => {
   const baseURL = 'https://portal.example.test'

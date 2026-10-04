@@ -82,6 +82,7 @@ async function readCompatibleWorkRelease(request, entry) {
       throw new Error('LW_GPU_CAPACITY_RELEASE_IDENTITY_INVALID')
     }
     expect(view.imageArtifact, 'LW_GPU_CAPACITY_RELEASE_ARTIFACT_MISMATCH').toEqual(candidateRelease.artifact)
+    if (candidate.spec?.class !== 'work') continue
     const runtime = candidate.spec?.runtime
     if (runtime?.kind !== expectedRuntimeKind || runtime.provider_binding !== entry.providerBinding
       || candidate.spec.resources?.gpu?.class !== entry.class

@@ -568,6 +568,9 @@ test('student completes a published lab experiment through the browser terminal'
   let environmentId
   let studentContext
   let adminContext
+  let primaryFailure
+  let primaryFailed = false
+  const cleanupErrors = []
   try {
     let project
     let packageData
@@ -760,18 +763,35 @@ test('student completes a published lab experiment through the browser terminal'
     await assertNoStuckProgress(studentPage, 'student-results')
     await auditAccessibility(studentPage, 'student-results', testInfo)
     studentGuards.assertCleanConsole('student-results')
+  } catch (error) {
+    primaryFailure = error
+    primaryFailed = true
   } finally {
     try {
       if (environmentId) {
-        const cleanupContext = studentContext ?? await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
-        const cleanupPage = await cleanupContext.newPage()
-        await closeExperimentEnvironment(cleanupPage, environmentId, baseURL).catch(() => {})
-        if (!studentContext) await cleanupContext.close()
+        if (!studentContext) studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
+        const cleanupPage = await studentContext.newPage()
+        await closeExperimentEnvironment(cleanupPage, environmentId, baseURL)
       }
-    } finally {
-      await studentContext?.close()
-      await adminContext?.close()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    for (const context of [studentContext, adminContext]) {
+      try {
+        await context?.close()
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+    try {
       if (packageCopy) await rm(packageCopy, { recursive: true, force: true })
+    } catch (error) {
+      cleanupErrors.push(error)
     }
   }
+  if (primaryFailed && cleanupErrors.length > 0) {
+    throw new AggregateError([primaryFailure, ...cleanupErrors], 'LAB_EXPERIMENT_PRIMARY_AND_CLEANUP_FAILED')
+  }
+  if (primaryFailed) throw primaryFailure
+  if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'LAB_EXPERIMENT_CLEANUP_FAILED')
 })

@@ -15,6 +15,7 @@ import {
 } from '../support/live.mjs'
 import {
   assertRealWorkCharges,
+  assertRealWorkGpuContainerCandidate,
   assertRealWorkVmCandidate,
   configureRealWorkBudgetByUi,
   cleanupWorkResources,
@@ -30,6 +31,7 @@ import {
   waitForDeletedEnvironment,
 } from '../support/real-work.mjs'
 import { readActorId } from '../support/real-experiment.mjs'
+import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
 import {
   createRealWorkSshIdentity,
@@ -288,6 +290,7 @@ async function publishWorkTemplate(page, project, packageCopy = null, { adminPag
           throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'build not succeeded'}`)
         }
         realContainerArtifact(candidate)
+        if (REAL_WORK_GPU) assertRealWorkGpuContainerCandidate(candidate, WORK_PROVIDER_BINDING, REAL_WORK_GPU)
       }
       if (REAL_WORK_GPU) {
         expect(candidate.candidate?.spec?.resources?.gpu).toEqual({
@@ -630,6 +633,9 @@ test('student provisions a Work environment, configures it, and releases its cap
     const { packageData, release } = resumed
       ? { packageData: resumed.packageData, release: resumed.release }
       : await publishWorkTemplate(page, project, packageCopy, { adminPage, studentActorId })
+    if (resumed && REAL_WORK_GPU && !REAL_WORK_VM) {
+      assertRealWorkGpuContainerCandidate(resumed.candidateView, WORK_PROVIDER_BINDING, REAL_WORK_GPU)
+    }
     const expectedSeedMarker = packageCopy?.seedMarker ?? resumed?.seedMarker
     const expectedPersistenceMarker = packageCopy?.persistenceMarker ?? resumed?.persistenceMarker
 
@@ -825,6 +831,14 @@ test('student provisions a Work environment, configures it, and releases its cap
         expect(seedBody.trim()).toBe(expectedSeedMarker)
       } else {
       expect(runtimeBody).toContain('Welcome to nginx')
+      }
+    }
+    if (REAL_WORK_GPU && !REAL_WORK_VM) {
+      const terminalPage = await page.context().newPage()
+      try {
+        expect(await runTerminalCudaProbe(terminalPage, project.id, environmentId)).toEqual({ count: 256, sum: 32640, max: 255 })
+      } finally {
+        await terminalPage.close()
       }
     }
     await assertNoStuckProgress(page, 'student-work-environment')
@@ -1054,6 +1068,14 @@ test('student provisions a Work environment, configures it, and releases its cap
         )
         expect(restartedSeedBody.trim()).toBe(expectedSeedMarker)
         expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+        if (REAL_WORK_GPU && !REAL_WORK_VM) {
+          const terminalPage = await page.context().newPage()
+          try {
+            expect(await runTerminalCudaProbe(terminalPage, project.id, environmentId)).toEqual({ count: 256, sum: 32640, max: 255 })
+          } finally {
+            await terminalPage.close()
+          }
+        }
       }
     }
 

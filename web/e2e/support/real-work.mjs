@@ -236,6 +236,7 @@ export async function createRealWorkPackage(
           ],
         },
         service_port: 8080,
+        ...(gpu ? { terminal: { executable: '/bin/sh', args: [], workingDirectory: '/workspace' } } : {}),
       },
     retention: {
       policyId: uuidv7(),
@@ -264,7 +265,12 @@ export async function createRealWorkPackage(
       `The Work must remain class=work and use the ${providerBinding} provider binding.`,
       `The generated Dockerfile must start FROM ${base.image}, copy seed.txt into /opt/labweaver/workspace-seed/seed.txt, and run the Python HTTP service on port 8080 as UID/GID 65534.`,
       `The initial workspace must expose the exact seed marker ${seedMarker} through the HTTP endpoint.`,
-      ...(gpu ? [`The Work resource request must include GPU class ${gpu.class} with count ${gpu.count}.`] : []),
+      ...(gpu ? [
+        `The Work resource request must include GPU class ${gpu.class} with count 1.`,
+        'Preserve runtime.terminal exactly: executable /bin/sh, args [], workingDirectory /workspace, alongside the HTTP service and seed file.',
+        'The owner must run a real CUDA Driver API/PTX kernel through the product terminal: 256 threads, sum 32640, max 255, before and after restart.',
+        'Python3 is required. libcuda.so.1 must be supplied by the normal NVIDIA runtime; missing CUDA must fail without CPU fallback or mocks.',
+      ] : []),
       '',
     ].join('\n')
   const configurationInstructions = [
@@ -327,6 +333,24 @@ function sameVirtualMachineArtifact(actual, expected, code) {
     throw new Error(code)
   }
   return actual
+}
+
+/** Require the approved GPU Work container to support its owner's real CUDA terminal. */
+export function assertRealWorkGpuContainerCandidate(candidate, providerBinding, gpu) {
+  const spec = candidate?.candidate?.spec
+  const runtime = spec?.runtime
+  const terminal = runtime?.terminal
+  if (spec?.class !== 'work'
+    || runtime?.kind !== 'container'
+    || runtime.provider_binding !== providerBinding
+    || !gpu || gpu.count !== 1
+    || spec.resources?.gpu?.class !== gpu.class
+    || spec.resources.gpu.count !== 1
+    || terminal?.executable !== '/bin/sh'
+    || !Array.isArray(terminal.args) || terminal.args.length !== 0
+    || terminal.workingDirectory !== '/workspace') {
+    throw new Error('REAL_WORK_GPU_CONTAINER_CANDIDATE_SPEC_INVALID')
+  }
 }
 
 /** Validate the Control-projected artifact for a fresh VM Work candidate. */
