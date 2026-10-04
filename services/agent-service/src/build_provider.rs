@@ -89,7 +89,27 @@ impl NatsBuildSupplyChainProvider {
             .client
             .send_request(self.subject.clone(), request)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|error| {
+                let failure = unavailable();
+                if context.stage == BuildProviderStage::Cleanup {
+                    let error_kind = match error.kind() {
+                        async_nats::RequestErrorKind::TimedOut => "timeout",
+                        async_nats::RequestErrorKind::NoResponders => "no_responders",
+                        async_nats::RequestErrorKind::Other => "transport_other",
+                    };
+                    tracing::warn!(
+                        event = "agent.build.cleanup_request_failed",
+                        build_request_id = %context.build_request_id,
+                        generation = context.fence_generation,
+                        build_stage = build_stage_name(context.stage),
+                        failure_stage = "cleanup.rpc.request",
+                        error_kind,
+                        diagnostic_code = failure.diagnostic_code(),
+                        retryable = failure.retryable,
+                    );
+                }
+                failure
+            })?;
         if message.payload.len() > MAX_RESPONSE_BYTES {
             return Err(output_invalid());
         }
@@ -882,7 +902,7 @@ const fn build_stage_rank(stage: BuildProviderStage) -> i16 {
     }
 }
 
-const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
+pub(crate) const fn build_stage_name(stage: BuildProviderStage) -> &'static str {
     match stage {
         BuildProviderStage::EnsurePrivateProject => "ensure_private_project",
         BuildProviderStage::Build => "build",

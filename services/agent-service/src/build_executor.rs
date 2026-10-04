@@ -39,7 +39,9 @@ use crate::build_pipeline::{
     BuildIdentity, BuildProviderFailure, BuildProviderFailureCode, BuildProviderRequestContext,
     BuiltCandidate, PrivateRegistryProject, PublishedImage,
 };
-use crate::build_provider::{BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse};
+use crate::build_provider::{
+    BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse, build_stage_name,
+};
 use crate::oci_import::parse_oci_layout;
 use crate::oci_registry::{OciRegistryError, OciRegistryPublisher, RegistryCredentials};
 use crate::platform_images::{PgPlatformImageCatalog, PlatformImageEntry};
@@ -183,7 +185,7 @@ impl ProductionBuildExecutor {
                 identity,
                 ..
             } => {
-                self.cleanup(*build_request_id, *identity).await?;
+                self.cleanup(context, *build_request_id, *identity).await?;
                 Ok(BuildExecutorResponse::Cleaned {
                     build_request_id: *build_request_id,
                     build_identity: *identity,
@@ -694,6 +696,7 @@ impl ProductionBuildExecutor {
 
     async fn candidate_cleanup_reference(
         &self,
+        context: &BuildProviderRequestContext,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
     ) -> Result<Option<(String, String, String, String)>, BuildProviderFailure> {
@@ -703,7 +706,7 @@ impl ProductionBuildExecutor {
         .bind(build_request_id.as_uuid())
         .fetch_one(&self.pool)
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|error| cleanup_database_failure(context, "cleanup.command_read", &error))?;
         let command: AgentBuildRequested =
             serde_json::from_value(command_value).map_err(|_| output_invalid())?;
         command.validate().map_err(|_| rejected())?;
@@ -726,7 +729,7 @@ impl ProductionBuildExecutor {
         .bind(build_request_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|error| cleanup_database_failure(context, "cleanup.artifact_read", &error))?;
         let project = owned_repository.project;
         let repository = owned_repository.repository;
         let imported = matches!(command.request.source, BuildSource::ExportedOci { .. });
@@ -765,25 +768,26 @@ impl ProductionBuildExecutor {
 
     async fn cleanup(
         &self,
+        context: &BuildProviderRequestContext,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure> {
         let Some((project, repository, tag, reference)) = self
-            .candidate_cleanup_reference(build_request_id, identity)
+            .candidate_cleanup_reference(context, build_request_id, identity)
             .await?
         else {
             return self
-                .mark_candidate_cleaned(build_request_id, identity)
+                .mark_candidate_cleaned(context, build_request_id, identity)
                 .await;
         };
         // A missing artifact row does not prove that an interrupted exporter left no tag.
         // The admitted execution is already confirmed stopped; verify this owned repository.
         if self
-            .registry_tag_absent(&project, &repository, &tag)
+            .registry_tag_absent(context, &project, &repository, &tag)
             .await?
         {
             return self
-                .mark_candidate_cleaned(build_request_id, identity)
+                .mark_candidate_cleaned(context, build_request_id, identity)
                 .await;
         }
         let url = self.harbor_url(&[
@@ -811,36 +815,47 @@ impl ProductionBuildExecutor {
                         | StatusCode::NOT_FOUND
                 ) => {}
             Ok(Ok(response)) => {
-                tracing::warn!(
-                    event = "agent.build_executor.harbor_tag_delete_rejected",
-                    build_request_id = %build_request_id,
-                    status = %response.status(),
-                    diagnostic = "LW_AGENT_BUILD_CLEANUP_DELETE_REJECTED",
-                );
-                return Err(unavailable());
+                return Err(cleanup_failure(
+                    context,
+                    "cleanup.tag_delete.response",
+                    "http_status",
+                    Some(response.status().as_u16()),
+                ));
             }
-            Ok(Err(_)) | Err(_) => tracing::warn!(
-                event = "agent.build_executor.harbor_tag_delete_indeterminate",
-                build_request_id = %build_request_id,
-                diagnostic = "LW_AGENT_BUILD_CLEANUP_DELETE_INDETERMINATE"
-            ),
+            Ok(Err(error)) => {
+                cleanup_failure(
+                    context,
+                    "cleanup.tag_delete.request",
+                    task_execution::kubernetes::reqwest_error_kind(&error),
+                    None,
+                );
+            }
+            Err(_) => {
+                cleanup_failure(context, "cleanup.tag_delete.request", "timeout", None);
+            }
         }
         // Harbor can complete the delete while its Core API response remains
         // pending. Registry tag listing is a separate, read-only and
         // authoritative absence check; an indeterminate delete never becomes
         // success unless this exact repository proves the tag is absent.
         if !self
-            .registry_tag_absent(&project, &repository, &tag)
+            .registry_tag_absent(context, &project, &repository, &tag)
             .await?
         {
-            return Err(unavailable());
+            return Err(cleanup_failure(
+                context,
+                "cleanup.tag_delete.verify",
+                "tag_present",
+                None,
+            ));
         }
-        self.mark_candidate_cleaned(build_request_id, identity)
+        self.mark_candidate_cleaned(context, build_request_id, identity)
             .await
     }
 
     async fn mark_candidate_cleaned(
         &self,
+        context: &BuildProviderRequestContext,
         build_request_id: BuildRequestId,
         identity: BuildIdentity,
     ) -> Result<(), BuildProviderFailure> {
@@ -852,12 +867,13 @@ impl ProductionBuildExecutor {
         .bind(identity.0.to_string())
         .execute(&self.pool)
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|error| cleanup_database_failure(context, "cleanup.artifact_mark", &error))?;
         Ok(())
     }
 
     async fn registry_tag_absent(
         &self,
+        context: &BuildProviderRequestContext,
         project: &str,
         repository: &str,
         tag: &str,
@@ -865,31 +881,24 @@ impl ProductionBuildExecutor {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if self
-                .registry_tag_absent_once(project, repository, tag)
+                .registry_tag_absent_once(context, project, repository, tag)
                 .await?
             {
                 return Ok(true);
             }
             if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    event = "agent.build_executor.harbor_tag_delete_pending",
-                    project,
-                    repository,
-                    tag,
-                    diagnostic = "LW_AGENT_BUILD_CLEANUP_DELETE_PENDING",
-                );
                 return Ok(false);
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     }
 
-    async fn registry_tag_absent_once(
+    async fn registry_pull_token(
         &self,
+        context: &BuildProviderRequestContext,
         project: &str,
         repository: &str,
-        tag: &str,
-    ) -> Result<bool, BuildProviderFailure> {
+    ) -> Result<String, BuildProviderFailure> {
         let scope = format!("repository:{project}/{repository}:pull");
         let mut token_url = self.config.harbor_api.clone();
         token_url.set_path("/service/token");
@@ -902,11 +911,19 @@ impl ProductionBuildExecutor {
             .authorized(self.client.get(token_url))
             .send()
             .await
-            .map_err(network)?;
+            .map_err(|error| cleanup_network_failure(context, "cleanup.token.request", &error))?;
         if token_response.status() != StatusCode::OK {
-            return Err(unavailable());
+            return Err(cleanup_failure(
+                context,
+                "cleanup.token.response",
+                "http_status",
+                Some(token_response.status().as_u16()),
+            ));
         }
-        let token_bytes = token_response.bytes().await.map_err(network)?;
+        let token_bytes = token_response
+            .bytes()
+            .await
+            .map_err(|error| cleanup_network_failure(context, "cleanup.token.body", &error))?;
         if token_bytes.len() > MAX_HARBOR_RESPONSE_BYTES {
             return Err(output_invalid());
         }
@@ -915,7 +932,19 @@ impl ProductionBuildExecutor {
         if token.token.is_empty() {
             return Err(output_invalid());
         }
+        Ok(token.token)
+    }
 
+    async fn registry_tag_absent_once(
+        &self,
+        context: &BuildProviderRequestContext,
+        project: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<bool, BuildProviderFailure> {
+        let token = self
+            .registry_pull_token(context, project, repository)
+            .await?;
         let mut tags_url = Url::parse(&format!("https://{}/", self.config.harbor_registry))
             .map_err(|_| rejected())?;
         tags_url
@@ -925,16 +954,26 @@ impl ProductionBuildExecutor {
         let tags_response = self
             .client
             .get(tags_url)
-            .bearer_auth(token.token)
+            .bearer_auth(token)
             .send()
             .await
-            .map_err(network)?;
+            .map_err(|error| {
+                cleanup_network_failure(context, "cleanup.tag_list.request", &error)
+            })?;
         let status = tags_response.status();
         let paginated = tags_response.headers().contains_key(reqwest::header::LINK);
         if !matches!(status, StatusCode::OK | StatusCode::NOT_FOUND) {
-            return Err(unavailable());
+            return Err(cleanup_failure(
+                context,
+                "cleanup.tag_list.response",
+                "http_status",
+                Some(status.as_u16()),
+            ));
         }
-        let tags_bytes = tags_response.bytes().await.map_err(network)?;
+        let tags_bytes = tags_response
+            .bytes()
+            .await
+            .map_err(|error| cleanup_network_failure(context, "cleanup.tag_list.body", &error))?;
         if tags_bytes.len() > MAX_HARBOR_RESPONSE_BYTES {
             return Err(output_invalid());
         }
@@ -951,7 +990,12 @@ impl ProductionBuildExecutor {
                 }) {
                 Ok(true)
             } else {
-                Err(unavailable())
+                Err(cleanup_failure(
+                    context,
+                    "cleanup.tag_list.response",
+                    "absence_unproven",
+                    Some(status.as_u16()),
+                ))
             };
         }
         if !value
@@ -1197,8 +1241,9 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
                     event = "agent.build_executor.stage_failed",
                     build_request_id = %context.build_request_id,
                     generation = context.fence_generation,
-                    stage = ?context.stage,
-                    code = ?failure.code,
+                    build_stage = build_stage_name(context.stage),
+                    diagnostic_code = failure.diagnostic_code(),
+                    retryable = failure.retryable,
                 );
                 BuildExecutorResponse::Failed { failure }
             }
@@ -1607,6 +1652,79 @@ fn network<T>(_error: T) -> BuildProviderFailure {
     unavailable()
 }
 
+fn cleanup_failure(
+    context: &BuildProviderRequestContext,
+    failure_stage: &'static str,
+    error_kind: &'static str,
+    http_status: Option<u16>,
+) -> BuildProviderFailure {
+    let failure = unavailable();
+    tracing::warn!(
+        event = "agent.build_executor.cleanup_boundary_failed",
+        build_request_id = %context.build_request_id,
+        generation = context.fence_generation,
+        build_stage = build_stage_name(context.stage),
+        failure_stage,
+        error_kind,
+        diagnostic_code = failure.diagnostic_code(),
+        retryable = failure.retryable,
+        http_status,
+    );
+    failure
+}
+
+fn cleanup_network_failure(
+    context: &BuildProviderRequestContext,
+    failure_stage: &'static str,
+    error: &reqwest::Error,
+) -> BuildProviderFailure {
+    cleanup_failure(
+        context,
+        failure_stage,
+        task_execution::kubernetes::reqwest_error_kind(error),
+        None,
+    )
+}
+
+fn cleanup_database_failure(
+    context: &BuildProviderRequestContext,
+    failure_stage: &'static str,
+    error: &sqlx::Error,
+) -> BuildProviderFailure {
+    cleanup_failure(
+        context,
+        failure_stage,
+        cleanup_database_error_kind(error),
+        None,
+    )
+}
+
+fn cleanup_database_error_kind(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::Database(error) => cleanup_sqlstate_kind(error.code().as_deref()),
+        sqlx::Error::PoolTimedOut => "pool_timeout",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::RowNotFound => "row_not_found",
+        sqlx::Error::Io(_) => "database_io",
+        sqlx::Error::Tls(_) => "database_tls",
+        _ => "database_other",
+    }
+}
+
+fn cleanup_sqlstate_kind(code: Option<&str>) -> &'static str {
+    match code {
+        Some("42501") => "database_permission_denied",
+        Some(code)
+            if code.len() == 5
+                && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && code.starts_with("08") =>
+        {
+            "database_connection"
+        }
+        _ => "database",
+    }
+}
+
 const fn rejected() -> BuildProviderFailure {
     BuildProviderFailure {
         code: BuildProviderFailureCode::Rejected,
@@ -1643,6 +1761,192 @@ mod tests {
     use crate::platform_images::{PlatformImageKind, PlatformImageStatus};
 
     use super::*;
+
+    struct CleanupTlsListener {
+        listener: tokio::net::TcpListener,
+        acceptor: tokio_rustls::TlsAcceptor,
+    }
+
+    impl axum::serve::Listener for CleanupTlsListener {
+        type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+        type Addr = std::net::SocketAddr;
+
+        async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+            loop {
+                let (stream, address) = self.listener.accept().await.expect("test TLS listener");
+                if let Ok(stream) = self.acceptor.accept(stream).await {
+                    return (stream, address);
+                }
+            }
+        }
+
+        fn local_addr(&self) -> std::io::Result<Self::Addr> {
+            self.listener.local_addr()
+        }
+    }
+
+    async fn cleanup_registry_fixture(
+        directory: &Path,
+        host: &str,
+        certificate: &rcgen::CertifiedKey<rcgen::KeyPair>,
+    ) -> Result<ProductionBuildExecutor, Box<dyn std::error::Error>> {
+        let ca = directory.join("ca.pem");
+        std::fs::write(&ca, certificate.cert.pem())?;
+        let username = directory.join("username");
+        let password = directory.join("password");
+        std::fs::write(&username, "USER_SECRET_SENTINEL")?;
+        std::fs::write(&password, "PASSWORD_SECRET_SENTINEL")?;
+        let objects = S3ImmutableObjectStore::new(
+            artifact_store::S3StoreConfig {
+                binding: "test-objects".to_owned(),
+                endpoint: "https://localhost:1/".parse()?,
+                bucket: "test".to_owned(),
+                region: "test".to_owned(),
+                object_prefix: "test".to_owned(),
+                upload_ttl_seconds: 60,
+                max_object_bytes: 1024,
+                force_path_style: true,
+                ca_bundle_file: None,
+            },
+            artifact_store::S3Credential {
+                access_key_id: "test-access".to_owned(),
+                secret_access_key: "test-secret".to_owned(),
+                session_token: None,
+            },
+        )
+        .await?;
+        Ok(ProductionBuildExecutor::new(
+            ProductionBuildExecutorConfig {
+                buildctl_path: directory.join("buildctl"),
+                buildkit_address: "tcp://localhost:1".to_owned(),
+                buildkit_ca_file: ca.clone(),
+                buildkit_client_certificate_file: ca.clone(),
+                buildkit_client_private_key_file: ca.clone(),
+                docker_config_directory: directory.join("docker"),
+                work_directory: directory.join("work"),
+                max_unpacked_context_bytes: 1024,
+                harbor_api: format!("https://{host}/").parse()?,
+                harbor_registry: host.to_owned(),
+                harbor_ca_file: ca,
+                harbor_username_file: username,
+                harbor_password_file: password,
+                project_storage_quota_bytes: 1024,
+                robot_subject: "test-robot".to_owned(),
+                service_image: String::new(),
+            },
+            sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(50))
+                .connect_lazy("postgres://test:test@localhost:1/test")?,
+            Arc::new(objects),
+        )
+        .expect("validated production executor fixture"))
+    }
+
+    #[tokio::test]
+    async fn cleanup_diagnostics_preserve_token_tag_and_strict_absence_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::response::IntoResponse as _;
+        let mode = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let token_mode = mode.clone();
+        let tag_mode = mode.clone();
+        let router = axum::Router::new()
+            .route("/service/token", axum::routing::get(move || {
+                let mode = token_mode.load(std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if mode == 0 { StatusCode::UNAUTHORIZED.into_response() }
+                    else { axum::Json(json!({"token":"TOKEN_SECRET_SENTINEL"})).into_response() }
+                }
+            }))
+            .route("/v2/project/image/tags/list", axum::routing::get(move || {
+                let mode = tag_mode.load(std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    match mode {
+                        1 => StatusCode::FORBIDDEN.into_response(),
+                        2 => (StatusCode::NOT_FOUND, axum::Json(json!({"errors":[{"code":"NAME_UNKNOWN"}]}))).into_response(),
+                        _ => (StatusCode::NOT_FOUND, axum::Json(json!({"errors":[{"code":"DENIED","message":"BODY_SECRET_SENTINEL"}]}))).into_response(),
+                    }
+                }
+            }));
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
+        let key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(certificate.signing_key.serialize_der().into());
+        let tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.cert.der().clone()], key)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let host = format!("localhost:{}", listener.local_addr()?.port());
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                CleanupTlsListener {
+                    listener,
+                    acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(tls)),
+                },
+                router,
+            )
+            .with_graceful_shutdown(server_shutdown.cancelled_owned())
+            .await
+        });
+        let directory = tempfile::tempdir()?;
+        let backend = cleanup_registry_fixture(directory.path(), &host, &certificate).await?;
+        let (mut context, _, _) = history_fixture();
+        context.stage = crate::build_pipeline::BuildProviderStage::Cleanup;
+        for (index, absent) in [(0, false), (1, false), (2, true), (3, false)] {
+            mode.store(index, std::sync::atomic::Ordering::SeqCst);
+            let result = backend
+                .registry_tag_absent_once(&context, "project", "image", "candidate")
+                .await;
+            if absent {
+                assert!(
+                    result.expect("typed registry absence"),
+                    "only typed registry absence is success"
+                );
+            } else {
+                let failure = result.expect_err("HTTP denial cannot prove absence");
+                assert_eq!(failure.code, BuildProviderFailureCode::Unavailable);
+                assert!(failure.retryable);
+            }
+        }
+        shutdown.cancel();
+        server.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_database_error_classification_never_uses_error_messages() {
+        for (code, kind) in [
+            (Some("42501"), "database_permission_denied"),
+            (Some("08006"), "database_connection"),
+            (Some("08P01"), "database_connection"),
+            (Some("08SECRET_SENTINEL"), "database"),
+            (Some("08!!!"), "database"),
+            (Some("08éé"), "database"),
+            (Some("23505"), "database"),
+            (None, "database"),
+        ] {
+            assert_eq!(cleanup_sqlstate_kind(code), kind);
+        }
+        for (error, kind) in [
+            (sqlx::Error::PoolTimedOut, "pool_timeout"),
+            (sqlx::Error::PoolClosed, "pool_closed"),
+            (sqlx::Error::RowNotFound, "row_not_found"),
+            (
+                sqlx::Error::Io(std::io::Error::other("DATABASE_SECRET_SENTINEL")),
+                "database_io",
+            ),
+            (
+                sqlx::Error::Tls("TLS_SECRET_SENTINEL".into()),
+                "database_tls",
+            ),
+        ] {
+            assert_eq!(cleanup_database_error_kind(&error), kind);
+            let (context, _, _) = history_fixture();
+            let failure = cleanup_database_failure(&context, "cleanup.command_read", &error);
+            assert_eq!(failure.code, BuildProviderFailureCode::Unavailable);
+            assert!(failure.retryable);
+        }
+    }
 
     #[test]
     fn buildkit_address_is_converted_to_mtls_https() {

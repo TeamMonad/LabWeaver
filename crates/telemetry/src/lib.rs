@@ -234,6 +234,9 @@ struct SafeEventVisitor {
 impl SafeEventVisitor {
     fn record_value(&mut self, field: &Field, value: serde_json::Value) {
         let name = field.name();
+        if name == "build_stage" && !value.as_str().is_some_and(valid_build_stage) {
+            return;
+        }
         if safe_log_field(name) {
             self.fields.insert(name.to_owned(), value);
         } else if sensitive_log_field(name) {
@@ -338,6 +341,7 @@ fn safe_log_field(name: &str) -> bool {
             | "diagnostic_code"
             | "error_kind"
             | "failure_stage"
+            | "build_stage"
             | "readiness_gate"
             | "safe_detail"
             | "s3_error_code"
@@ -396,6 +400,13 @@ fn sensitive_log_field(name: &str) -> bool {
             | "transcript"
             | "peer_address"
             | "address"
+    )
+}
+
+fn valid_build_stage(value: &str) -> bool {
+    matches!(
+        value,
+        "ensure_private_project" | "build" | "import" | "publish" | "cleanup"
     )
 }
 
@@ -951,6 +962,100 @@ mod tests {
         assert_eq!(event["token"], "redacted_unclassified");
         assert_eq!(event["safe_detail"], "redacted_unclassified");
         assert!(!output.contains("SENTINEL"));
+        Ok(())
+    }
+
+    #[test]
+    fn formatter_preserves_only_closed_build_stages_without_error_payloads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .event_format(SafeJsonFormatter {
+                service: "agent-service",
+            })
+            .with_writer(SharedWriter(Arc::clone(&bytes)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for build_stage in [
+                "ensure_private_project",
+                "build",
+                "import",
+                "publish",
+                "cleanup",
+            ] {
+                tracing::warn!(
+                    event = "agent.build_executor.stage_failed",
+                    build_stage,
+                    diagnostic_code = "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+                    retryable = true,
+                    http_status = 403_u16,
+                    code = "SOURCE_SECRET_SENTINEL",
+                    stage = "STAGE_SECRET_SENTINEL",
+                    error = "ERROR_SECRET_SENTINEL",
+                    safe_detail = "Bearer SECRET_SENTINEL",
+                );
+            }
+            tracing::warn!(event = "invalid.string", build_stage = "SECRET_SENTINEL");
+            tracing::warn!(event = "invalid.debug", build_stage = ?"SECRET_SENTINEL");
+            tracing::warn!(event = "invalid.numeric", build_stage = 7_u64);
+            tracing::warn!(event = "invalid.bool", build_stage = true);
+        });
+        let output = String::from_utf8(bytes.lock().map_err(|_| "poisoned")?.clone())?;
+        let events: Vec<serde_json::Value> = output
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        assert_eq!(events.len(), 9);
+        for event in &events[..5] {
+            assert_eq!(
+                event["diagnostic_code"],
+                "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE"
+            );
+            assert_eq!(event["retryable"], true);
+            assert_eq!(event["http_status"], 403);
+            assert!(
+                event["build_stage"]
+                    .as_str()
+                    .is_some_and(super::valid_build_stage)
+            );
+            assert!(event.get("code").is_none());
+            assert!(event.get("stage").is_none());
+        }
+        for event in &events[5..] {
+            assert!(event.get("build_stage").is_none());
+        }
+        assert!(!output.contains("SENTINEL"));
+        Ok(())
+    }
+
+    #[test]
+    fn formatter_records_optional_http_status_once_without_fabricating_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .event_format(SafeJsonFormatter {
+                service: "agent-service",
+            })
+            .with_writer(SharedWriter(Arc::clone(&bytes)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for http_status in [Some(403_u16), None] {
+                tracing::warn!(
+                    event = "agent.build_executor.cleanup_boundary_failed",
+                    build_stage = "cleanup",
+                    diagnostic_code = "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
+                    http_status,
+                );
+            }
+        });
+        let output = String::from_utf8(bytes.lock().map_err(|_| "poisoned")?.clone())?;
+        let events: Vec<serde_json::Value> = output
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["http_status"], 403);
+        assert!(events[1].get("http_status").is_none());
         Ok(())
     }
 
