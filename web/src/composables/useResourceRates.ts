@@ -23,20 +23,24 @@ export function useResourceRates() {
   let createRequestFingerprint: string | null = null
   let createRequestKey: string | null = null
   let createRequestSucceeded = false
+  let lastCreateInput: CreateResourceRateRequestSchema | null = null
   let disposed = false
 
-  async function fetchRates(currentGeneration: number): Promise<void> {
+  async function fetchRates(currentGeneration: number): Promise<boolean> {
     try {
       const result = await listResourceRates()
-      if (disposed || currentGeneration !== generation) return
+      if (disposed || currentGeneration !== generation) return false
       if (result.error) {
         rates.value = { kind: 'error', diagnostic: diagnostic(result.error, 'RESOURCE_RATES_LOAD_FAILED', '加载资源费率失败。') }
+        return false
       } else {
         rates.value = result.data.length > 0 ? { kind: 'success', data: result.data } : { kind: 'empty' }
+        return true
       }
     } catch (error) {
-      if (disposed || currentGeneration !== generation) return
+      if (disposed || currentGeneration !== generation) return false
       rates.value = { kind: 'error', diagnostic: diagnostic(error, 'RESOURCE_RATES_LOAD_FAILED', '加载资源费率失败。') }
+      return false
     }
   }
 
@@ -54,6 +58,7 @@ export function useResourceRates() {
 
   async function create(input: CreateResourceRateRequestSchema): Promise<boolean> {
     if (acting.value) return false
+    lastCreateInput = structuredClone(input)
     const fingerprint = JSON.stringify(input)
     if (fingerprint !== createRequestFingerprint || createRequestSucceeded || !createRequestKey) {
       createRequestFingerprint = fingerprint
@@ -79,13 +84,16 @@ export function useResourceRates() {
         return false
       }
       createRequestSucceeded = true
-      const success = { kind: 'success' as const, diagnostic: makeDiagnostic('RESOURCE_RATE_CREATED', '资源费率已创建。', false) }
-      await fetchRates(generation)
-      if (!disposed) outcome.value = success
+      const refreshed = await fetchRates(generation)
+      if (!disposed) outcome.value = { kind: 'success', diagnostic: makeDiagnostic('RESOURCE_RATE_CREATED', refreshed ? '资源费率已创建。' : '资源费率已创建，但列表刷新失败。请仅刷新列表，不要重复创建该版本。', !refreshed) }
       return true
     } finally {
       acting.value = null
     }
+  }
+
+  async function retryCreate(): Promise<boolean> {
+    return lastCreateInput && !createRequestSucceeded ? create(lastCreateInput) : false
   }
 
   onScopeDispose(() => {
@@ -93,5 +101,5 @@ export function useResourceRates() {
     generation += 1
   })
 
-  return reactive({ rates, acting, outcome, load, create })
+  return reactive({ rates, acting, outcome, load, create, retryCreate })
 }
