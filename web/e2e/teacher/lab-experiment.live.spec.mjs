@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
+import { issueAccessGrantAndConnect, hasTerminalLine, typeTerminalCommand } from '../support/real-gpu.mjs'
 
 const LAB_ROOT = fileURLToPath(new URL('../../../examples', import.meta.url))
 
@@ -423,80 +424,6 @@ async function createEnvironmentByStudentUi(page, projectId, releaseId) {
   return accepted.environmentId
 }
 
-async function issueAccessGrantAndConnect(page, projectId, environmentId) {
-  await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  const environmentIdDetails = page.locator('details.environment-id-details')
-  await expect(environmentIdDetails).toBeVisible({ timeout: 120_000 })
-  await environmentIdDetails.locator('summary').click()
-  await expect(environmentIdDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
-  const grantButton = page.getByRole('button', { name: '签发访问授权', exact: true })
-  if (await grantButton.count() > 0) {
-    await expect(grantButton).toBeEnabled({ timeout: 120_000 })
-    await grantButton.click()
-  }
-  await pollJson(
-    page.request,
-    `/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=10`,
-    (value) => Array.isArray(value.items) && value.items.some((item) => item.state === 'active'),
-    'LAB_EXPERIMENT_ACCESS_GRANT_ACTIVE_TIMEOUT',
-    120_000,
-  )
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
-  if (await reconnect.count() > 0) {
-    await expect(reconnect).toBeEnabled({ timeout: 120_000 })
-    await reconnect.click()
-  }
-  const consolePanel = page.locator('.console-panel')
-  await expect(consolePanel).toBeVisible({ timeout: 120_000 })
-  const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
-  if (await openTerminal.count() > 0) {
-    await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
-    await openTerminal.click()
-  }
-  const host = page.locator('.xterm-host')
-  await expect(host).toBeVisible({ timeout: 120_000 })
-  const input = page.locator('.xterm-helper-textarea')
-  await expect(input).toBeAttached({ timeout: 30_000 })
-  return { input }
-}
-
-function normalizeTerminalOutput(value) {
-  const escape = String.fromCharCode(27)
-  const bell = String.fromCharCode(7)
-  const ansiPattern = new RegExp(`${escape}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${bell}]*(?:${bell}|${escape}\\\\))`, 'g')
-  return value
-    .replace(ansiPattern, '')
-    .replace(/\r/g, '')
-}
-
-function hasTerminalLine(output, expected) {
-  const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(?:^|\\n)${escaped}(?:\\n|$)`).test(normalizeTerminalOutput(output))
-}
-
-async function typeTerminalCommand(page, input, frames, command, marker) {
-  const firstFrame = frames.length
-  const uniqueMarker = `${marker}-${uuidv7()}`
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  const host = page.locator('.xterm-host')
-  await expect(host).toBeVisible({ timeout: 120_000 })
-  await host.click()
-  await expect(input).toBeAttached({ timeout: 30_000 })
-  await input.focus()
-  await page.keyboard.type(`{ ${command}; __lw_exit=$?; printf '\\n${uniqueMarker}:%s\\n' "$__lw_exit"; }`)
-  await page.keyboard.press('Enter')
-  await expect
-    .poll(() => {
-      const output = normalizeTerminalOutput(frames.slice(firstFrame).join(''))
-      const match = output.match(new RegExp(`(?:^|\\n)${uniqueMarker}:(\\d+)(?:\\n|$)`))
-      return match?.[1] ?? null
-    }, { timeout: 180_000, intervals: [250, 500, 1000] })
-    .toBe('0')
-  return normalizeTerminalOutput(frames.slice(firstFrame).join(''))
-}
 async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPath) {
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
     waitUntil: 'domcontentloaded',

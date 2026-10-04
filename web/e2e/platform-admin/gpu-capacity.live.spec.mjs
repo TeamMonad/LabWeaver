@@ -2,10 +2,13 @@ import { expect, test } from '@playwright/test'
 import { AUTH_STATE, expectJson } from '../support/live.mjs'
 import {
   approveResourceRequestByUi,
-  cancelProjectResourceRequestByUi,
-  releaseProjectLeaseByUi,
   requestProjectResourceByUi,
 } from '../support/real-resource.mjs'
+import { cleanupWorkResources } from '../support/real-work.mjs'
+import { createRealWorkSshIdentity, readRealWorkVmLicenseStatus, runRealWorkVmCudaProbe } from '../support/real-work-ssh.mjs'
+import { addSshPublicKeyByUi, deleteSshPublicKeyByUi, issueEnvironmentSshAccessGrantByUi } from '../support/ssh-access.mjs'
+import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
+import { readActorId } from '../support/real-experiment.mjs'
 
 const CLASS_ENV = 'LABWEAVER_E2E_GPU_CAPACITY_CLASS'
 const PROJECT_ENV = 'LABWEAVER_E2E_GPU_CAPACITY_PROJECT_ID'
@@ -59,14 +62,36 @@ async function readCompatibleWorkRelease(request, entry) {
   const response = await request.get(`/api/v1/projects/${INPUT.projectId}/environment-template-releases?limit=100`)
   const page = await expectJson(response, 'LW_GPU_CAPACITY_RELEASES_READ_FAILED')
   if (!Array.isArray(page?.items)) throw new Error('LW_GPU_CAPACITY_RELEASES_INVALID')
-  const release = page.items.find((candidate) => {
-    const artifactKind = expectedRuntimeKind === 'virtual_machine' ? 'virtual_machine' : 'container'
-    return candidate.runtimeKind === expectedRuntimeKind
-      && candidate.artifact?.kind === artifactKind
-      && !candidate.withdrawal
-  })
+  let release = null
+  for (const candidateRelease of page.items) {
+    if (candidateRelease.runtimeKind !== expectedRuntimeKind
+      || candidateRelease.artifact?.kind !== expectedRuntimeKind
+      || candidateRelease.withdrawal) continue
+    const view = await expectJson(
+      await request.get(`/api/v1/projects/${INPUT.projectId}/environment-candidates/${candidateRelease.candidateId}`),
+      'LW_GPU_CAPACITY_RELEASE_CANDIDATE_READ_FAILED',
+    )
+    const candidate = view.candidate
+    if (candidate?.id !== candidateRelease.candidateId
+      || candidate.projectId !== INPUT.projectId
+      || candidate.revision !== candidateRelease.candidateRevision
+      || candidateRelease.projectId !== INPUT.projectId
+      || candidateRelease.approval?.decision !== 'approved'
+      || candidateRelease.approval.candidateId !== candidate.id
+      || candidateRelease.approval.candidateRevision !== candidate.revision) {
+      throw new Error('LW_GPU_CAPACITY_RELEASE_IDENTITY_INVALID')
+    }
+    expect(view.imageArtifact, 'LW_GPU_CAPACITY_RELEASE_ARTIFACT_MISMATCH').toEqual(candidateRelease.artifact)
+    const runtime = candidate.spec?.runtime
+    if (runtime?.kind !== expectedRuntimeKind || runtime.provider_binding !== entry.providerBinding
+      || candidate.spec.resources?.gpu?.class !== entry.class
+      || candidate.spec.resources.gpu.count !== 1) continue
+    if (expectedRuntimeKind === 'container' && !runtime.terminal) continue
+    release = candidateRelease
+    break
+  }
   if (!release || typeof release.id !== 'string' || !Number.isInteger(release.version) || release.version < 1) {
-    throw new Error(`LW_GPU_CAPACITY_COMPATIBLE_RELEASE_MISSING:${expectedRuntimeKind}`)
+    throw new Error(`LW_GPU_CAPACITY_GPU_ACCESS_RELEASE_MISSING:${expectedRuntimeKind}:${entry.class}`)
   }
   let storageGiB = 1
   if (expectedRuntimeKind === 'virtual_machine') {
@@ -235,6 +260,7 @@ async function assertHeldCapacity(request, ownedRequests, ownedLeases, runtimeKi
     expect(environments[index], `LW_GPU_CAPACITY_ENVIRONMENT_NOT_READY:${owned.environmentId}`).toMatchObject({
       observedState: 'ready',
       runtimeKind,
+      leaseId: ownedLease.leaseId,
     })
   }
 }
@@ -291,65 +317,71 @@ async function approveGpuRequest(adminPage, request, entry, expectedFailureCode 
   })
 }
 
-async function cleanupOwnedResources(studentPage, projectId, requests, knownLeases) {
+async function verifyOwnedGpuEnvironment(studentPage, entry, owned, release, ownerId, identity) {
+  const environment = await readEnvironment(studentPage.request, owned.environmentId)
+  expect(environment).toMatchObject({
+    id: owned.environmentId,
+    projectId: INPUT.projectId,
+    observedState: 'ready',
+    runtimeKind: release.runtimeKind,
+    ownerId,
+    releaseId: release.releaseId,
+    releaseVersion: release.releaseVersion,
+    gpuAllocation: { class: entry.class, mode: entry.mode, count: 1, providerBinding: entry.providerBinding },
+  })
+  if (release.runtimeKind === 'virtual_machine') {
+    const connection = await issueEnvironmentSshAccessGrantByUi(studentPage, INPUT.projectId, environment)
+    await expect.poll(async () => {
+      let license
+      try {
+        license = await readRealWorkVmLicenseStatus(connection.endpointGrant, identity)
+      } catch (error) {
+        if (error instanceof Error && error.message === 'WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed') return false
+        throw error
+      }
+      expect(license).toMatchObject({ licenseStatus: 'Licensed', licensedGpuCount: 1 })
+      return true
+    }, { timeout: 180_000, intervals: [2000, 5000] }).toBe(true)
+    expect(await runRealWorkVmCudaProbe(connection.endpointGrant, identity)).toEqual({ count: 256, sum: 32640, max: 255 })
+  } else {
+    const terminalPage = await studentPage.context().newPage()
+    try {
+      expect(await runTerminalCudaProbe(terminalPage, INPUT.projectId, environment.id)).toEqual({ count: 256, sum: 32640, max: 255 })
+    } finally {
+      await terminalPage.close()
+    }
+  }
+}
+
+async function cleanupOwnedResources(studentPage, baseURL, requests, knownLeases) {
   const failures = []
-  const releasedEnvironments = new Set()
-  for (const lease of knownLeases) {
-    const request = requests.find((item) => item.requestId === lease.requestId)
-    if (!request) continue
+  for (const owned of requests) {
+    const lease = knownLeases.find((item) => item.requestId === owned.requestId)
     try {
-      await releaseProjectLeaseByUi(studentPage, { projectId, leaseId: lease.leaseId })
-      releasedEnvironments.add(request.environmentId)
+      await cleanupWorkResources(studentPage.request, baseURL, INPUT.projectId, owned.environmentId, lease?.leaseId ?? null, owned.requestId)
     } catch (error) {
       failures.push(error)
     }
   }
-  let resources = null
-  try {
-    resources = await readProjectResources(studentPage.request, projectId)
-  } catch (error) {
-    failures.push(error)
-  }
-  if (resources) {
-    for (const request of requests) {
-      const lease = resources.leases.find((item) => item.requestId === request.requestId)
-      if (lease && !['revoked', 'expired'].includes(lease.state)) {
-        try {
-          await releaseProjectLeaseByUi(studentPage, { projectId, leaseId: lease.id })
-          releasedEnvironments.add(request.environmentId)
-        } catch (error) {
-          failures.push(error)
-        }
-      }
-      if (lease && ['revoked', 'expired'].includes(lease.state)) releasedEnvironments.add(request.environmentId)
-    }
-    const refreshed = await readProjectResources(studentPage.request, projectId).catch((error) => {
-      failures.push(error)
-      return null
-    })
-    if (refreshed) {
-      for (const request of requests) {
-        const current = refreshed.requests.find((item) => item.id === request.requestId)
-        if (current && ['reviewing', 'allocating'].includes(current.state)) {
-          try {
-            await cancelProjectResourceRequestByUi(studentPage, { projectId, requestKey: request.requestKey })
-          } catch (error) {
-            failures.push(error)
-          }
-        }
-      }
-    }
-  }
-  for (const environmentId of releasedEnvironments) {
-    try {
-      await waitForEnvironmentDeleted(studentPage.request, environmentId)
-    } catch (error) {
-      failures.push(error)
-    }
-  }
-  if (failures.length) {
-    throw new AggregateError(failures, `LW_GPU_CAPACITY_CLEANUP_FAILED:${failures.length}`)
-  }
+  if (failures.length) throw new AggregateError(failures, `LW_GPU_CAPACITY_CLEANUP_FAILED:${failures.length}`)
+}
+
+async function readProjectCharges(request) {
+  const charges = await expectJson(await request.get(`/api/v1/projects/${INPUT.projectId}/charges`), 'LW_GPU_CAPACITY_CHARGES_READ_FAILED')
+  if (!Array.isArray(charges)) throw new Error('LW_GPU_CAPACITY_CHARGES_INVALID')
+  return charges
+}
+
+async function assertPositiveGpuCharge(request, priorChargeIds) {
+  // Public charges expose usageRecordId but no Lease identity. This assertion
+  // verifies a new positive project charge, not its attribution to a Lease.
+  await expect.poll(async () => {
+    const charges = await readProjectCharges(request)
+    return charges.some((charge) => !priorChargeIds.has(charge.id) && charge.projectId === INPUT.projectId
+      && charge.settlement === 'settled' && Number(charge.total?.amount) > 0
+      && charge.lines?.some((line) => line.unit === 'gpu_unit_second'
+        && line.quantity > 0 && Number(line.amount?.amount) > 0))
+  }, { timeout: 300_000, intervals: [1000, 2000, 5000] }).toBe(true)
 }
 
 test('platform administrator enforces GPU capacity and admits the waiting request after release', async ({ page, browser, baseURL }) => {
@@ -362,11 +394,20 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
   const ownedLeases = []
   let primaryError = null
   let cleanupError = null
+  let sshIdentity = null
+  let sshKey = null
+  let priorChargeIds = new Set()
   try {
+    const ownerId = await readActorId(studentPage.request)
     const { entry, entries } = await readActiveGpuCatalogEntry(studentPage.request, INPUT.class)
     const release = await readCompatibleWorkRelease(studentPage.request, entry)
+    if (release.runtimeKind === 'virtual_machine') {
+      sshIdentity = await createRealWorkSshIdentity()
+      await addSshPublicKeyByUi(studentPage, sshIdentity, (accepted) => { sshKey = accepted })
+    }
     const globalState = await readGlobalResourceState(page.request)
     assertAllocationBindingIdle(globalState, entries, entry)
+    priorChargeIds = new Set((await readProjectCharges(page.request)).map((charge) => charge.id))
 
     if (entry.capacityUnits > MAX_APPROVED_REQUESTS) {
       throw new Error(`LW_GPU_CAPACITY_SCENARIO_REQUEST_LIMIT_EXCEEDED:${entry.class}:${entry.capacityUnits}:${MAX_APPROVED_REQUESTS}`)
@@ -386,6 +427,9 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     const baselineRequests = [...ownedRequests]
     await waitForEnvironmentsReady(studentPage.request, baselineRequests, release.runtimeKind)
     await assertHeldCapacity(studentPage.request, baselineRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
+    for (const owned of baselineRequests) {
+      await verifyOwnedGpuEnvironment(studentPage, entry, owned, release, ownerId, sshIdentity)
+    }
 
     const contender = await requestGpu(studentPage, entry, 1, release, (accepted) => ownedRequests.push(accepted))
     const blocked = await approveGpuRequest(page, contender, entry, EXPECTED_CAPACITY_FAILURE)
@@ -399,7 +443,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     const releasedRequest = baselineRequests[0]
     const releasedLease = ownedLeases.find((lease) => lease.requestId === releasedRequest.requestId)
     if (!releasedLease) throw new Error(`LW_GPU_CAPACITY_RELEASE_LEASE_MISSING:${releasedRequest.requestId}`)
-    await releaseProjectLeaseByUi(studentPage, { projectId: INPUT.projectId, leaseId: releasedLease.leaseId })
+    await cleanupWorkResources(studentPage.request, baseURL, INPUT.projectId, releasedRequest.environmentId, releasedLease.leaseId, releasedRequest.requestId)
     await Promise.all([
       waitForEnvironmentDeleted(studentPage.request, releasedRequest.environmentId),
       waitForReleasedResource(studentPage.request, releasedRequest, releasedLease),
@@ -418,13 +462,31 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     const fullCapacityRequests = [...remainingRequests, contender]
     await waitForEnvironmentsReady(studentPage.request, fullCapacityRequests, release.runtimeKind)
     await assertHeldCapacity(studentPage.request, fullCapacityRequests, ownedLeases, release.runtimeKind, entry.capacityUnits)
+    await verifyOwnedGpuEnvironment(studentPage, entry, contender, release, ownerId, sshIdentity)
   } catch (error) {
     primaryError = error
   }
   try {
-    await cleanupOwnedResources(studentPage, INPUT.projectId, ownedRequests, ownedLeases)
+    await cleanupOwnedResources(studentPage, baseURL, ownedRequests, ownedLeases)
   } catch (error) {
     cleanupError = error
+  }
+  if (!primaryError && !cleanupError) {
+    try {
+      await assertPositiveGpuCharge(page.request, priorChargeIds)
+    } catch (error) {
+      primaryError = error
+    }
+  }
+  for (const cleanup of [
+    async () => { if (sshKey) await deleteSshPublicKeyByUi(studentPage, sshKey) },
+    async () => { await sshIdentity?.cleanup() },
+  ]) {
+    try {
+      await cleanup()
+    } catch (error) {
+      cleanupError = cleanupError ? new AggregateError([cleanupError, error], 'LW_GPU_CAPACITY_SSH_CLEANUP_FAILED') : error
+    }
   }
   try {
     await studentContext.close()

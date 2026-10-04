@@ -362,6 +362,10 @@ fn plan_is_deterministic_private_and_digest_bound() {
 
     let data_volume = resource(&first, "DataVolume");
     assert_eq!(
+        data_volume.document.pointer("/spec/storage/volumeMode"),
+        Some(&json!("Filesystem"))
+    );
+    assert_eq!(
         data_volume.document.pointer("/spec/sourceRef/kind"),
         Some(&json!("DataSource"))
     );

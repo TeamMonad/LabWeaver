@@ -23,7 +23,7 @@ const SOURCE_REGISTRY_ANNOTATION: &str = "labweaver.io/source-registry";
 const DISK_SHA256_ANNOTATION: &str = "labweaver.io/disk-sha256";
 /// Declared identity rule (`disk-sha256` or `registry-digest`).
 const IDENTITY_ANNOTATION: &str = "labweaver.io/base-disk-identity";
-/// Reviewed PVC capacity recorded so an over-capacity reuse is rejected.
+/// Declared logical disk capacity recorded on the base DV and `DataSource`.
 const CAPACITY_ANNOTATION: &str = "labweaver.io/base-disk-capacity-bytes";
 /// CDI annotation that binds the importer claim immediately.
 const IMMEDIATE_BINDING_ANNOTATION: &str = "cdi.kubevirt.io/storage.bind.immediate.requested";
@@ -38,12 +38,136 @@ pub enum CdiImportError {
     /// The recorded identity disagrees with the resolved binding.
     #[error("LW_ENVIRONMENT_VM_BASE_IDENTITY_MISMATCH")]
     IdentityMismatch,
-    /// The recorded capacity exceeds the reviewed capacity.
+    /// Logical capacity or overhead-derived physical capacity disagrees with the admitted disk.
     #[error("LW_ENVIRONMENT_VM_BASE_CAPACITY_EXCEEDED")]
     CapacityExceeded,
     /// The import could not be created, observed or completed in time.
     #[error("LW_ENVIRONMENT_VM_BASE_IMPORT_FAILED")]
     ImportFailed,
+}
+
+/// Filesystem sizing from CDI's effective configuration, shared by imports and tenant quotas.
+pub(crate) struct CdiStorageSizing {
+    root_overhead: f64,
+    scratch_overhead: f64,
+}
+
+const CDI_ALIGNMENT: u64 = 1 << 20;
+const MAX_EXACT_FLOAT_BYTES: u64 = 1 << 53;
+
+impl CdiStorageSizing {
+    pub(crate) fn from_config(config: &Value, storage_class: &str) -> Result<Self, CdiImportError> {
+        if storage_class.is_empty() {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+        let scratch_class = match config.pointer("/status/scratchSpaceStorageClass") {
+            None | Some(Value::Null) => storage_class,
+            Some(Value::String(value)) if value.is_empty() => storage_class,
+            Some(Value::String(value)) => value,
+            Some(_) => return Err(CdiImportError::IdentityMismatch),
+        };
+        Ok(Self {
+            root_overhead: effective_overhead(config, storage_class)?,
+            scratch_overhead: effective_overhead(config, scratch_class)?,
+        })
+    }
+
+    pub(crate) fn root_bytes(&self, logical: u64) -> Result<u64, CdiImportError> {
+        required_space(self.root_overhead, logical)
+    }
+
+    pub(crate) fn scratch_bytes(&self, logical_budget: u64) -> Result<u64, CdiImportError> {
+        let physical = self.root_bytes(logical_budget)?;
+        let usable = rounded_bytes(bytes_as_float(physical)? / (1.0 + self.root_overhead))?;
+        let usable = usable / CDI_ALIGNMENT * CDI_ALIGNMENT;
+        align_cdi(required_space(self.scratch_overhead, usable)?)
+    }
+}
+
+fn effective_overhead(config: &Value, storage_class: &str) -> Result<f64, CdiImportError> {
+    let overhead = config
+        .pointer("/status/filesystemOverhead")
+        .ok_or(CdiImportError::ImportFailed)?;
+    let by_class = match overhead.get("storageClass") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(values)) => values.get(storage_class),
+        Some(_) => return Err(CdiImportError::ImportFailed),
+    };
+    let configured = by_class
+        .or_else(|| overhead.get("global"))
+        .and_then(Value::as_str)
+        .ok_or(CdiImportError::ImportFailed)?;
+    let parsed = configured
+        .parse::<f64>()
+        .map_err(|_| CdiImportError::CapacityExceeded)?;
+    if !parsed.is_finite() || !(0.0..1.0).contains(&parsed) {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    Ok(parsed)
+}
+
+fn align_cdi(bytes: u64) -> Result<u64, CdiImportError> {
+    if bytes == 0 || bytes > MAX_EXACT_FLOAT_BYTES {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    let aligned = bytes
+        .checked_add(CDI_ALIGNMENT - 1)
+        .map(|value| value / CDI_ALIGNMENT * CDI_ALIGNMENT)
+        .ok_or(CdiImportError::CapacityExceeded)?;
+    if aligned > MAX_EXACT_FLOAT_BYTES {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    Ok(aligned)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "integers are bounded to f64's exact 53-bit range"
+)]
+fn bytes_as_float(bytes: u64) -> Result<f64, CdiImportError> {
+    if bytes == 0 || bytes > MAX_EXACT_FLOAT_BYTES {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    Ok(bytes as f64)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ceil is finite, positive and bounded to the exact integer range before conversion"
+)]
+fn rounded_bytes(value: f64) -> Result<u64, CdiImportError> {
+    let rounded = value.ceil();
+    if !rounded.is_finite() || !(1.0..=9_007_199_254_740_992.0).contains(&rounded) {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    Ok(rounded as u64)
+}
+
+fn required_space(overhead: f64, logical: u64) -> Result<u64, CdiImportError> {
+    rounded_bytes(bytes_as_float(align_cdi(logical)?)? * (1.0 + overhead))
+}
+
+/// Nonzero profile overrides require sizing beyond the managed filesystem calculation.
+pub(crate) fn validate_cdi_storage_profile(
+    profile: Option<&Value>,
+    storage_class: &str,
+) -> Result<(), CdiImportError> {
+    let Some(profile) = profile else {
+        return Ok(());
+    };
+    if required_meta(profile, "name")? != storage_class {
+        return Err(CdiImportError::IdentityMismatch);
+    }
+    if let Some(minimum) =
+        profile.pointer("/metadata/annotations/cdi.kubevirt.io~1minimumSupportedPvcSize")
+        && !minimum
+            .as_str()
+            .is_some_and(|value| storage_matches(value, 0))
+    {
+        return Err(CdiImportError::CapacityExceeded);
+    }
+    Ok(())
 }
 
 /// One fully resolved base-disk import request handed to the CDI importer.
@@ -56,6 +180,7 @@ pub struct KubeVirtBaseDiskImport {
     pub disk_sha256: String,
     pub identity: KubeVirtBaseDiskIdentity,
     pub storage_class_name: String,
+    /// Declared logical disk bytes; CDI adds filesystem overhead to the physical PVC request.
     pub capacity_bytes: u64,
 }
 
@@ -205,6 +330,7 @@ fn data_volume_document(import: &KubeVirtBaseDiskImport) -> Value {
             "source": {"registry": {"url": import.source_registry_digest, "pullMethod": "node"}},
             "storage": {
                 "storageClassName": import.storage_class_name,
+                "volumeMode": "Filesystem",
                 "accessModes": ["ReadWriteOnce"],
                 "resources": {"requests": {"storage": import.capacity_bytes.to_string()}},
             }
@@ -344,18 +470,7 @@ impl KubernetesCdiImportClient {
         if pvc.pointer("/status/phase").and_then(Value::as_str) != Some("Bound") {
             return Ok(());
         }
-        let capacity = pvc
-            .pointer("/spec/resources/requests/storage")
-            .and_then(Value::as_str)
-            .ok_or(CdiImportError::IdentityMismatch)?;
-        if !storage_matches(capacity, import.capacity_bytes)
-            || !pvc
-                .pointer("/status/capacity/storage")
-                .and_then(Value::as_str)
-                .is_some_and(|capacity| storage_matches(capacity, import.capacity_bytes))
-        {
-            return Err(CdiImportError::CapacityExceeded);
-        }
+        let config = self.verify_bound_import_storage(import, &pvc).await?;
         let pods = self
             .list_json(&format!("/api/v1/namespaces/{namespace}/pods"))
             .await?;
@@ -385,10 +500,6 @@ impl KubernetesCdiImportClient {
         if !noauth_image_pull_failure(pod) {
             return Ok(());
         }
-        let config = self
-            .get_json(&format!("{CDI_PREFIX}/cdiconfigs/config"))
-            .await?
-            .ok_or(CdiImportError::ImportFailed)?;
         let refs = pull_secret_names(config.pointer("/status/imagePullSecrets"))?;
         if refs.is_empty() || refs == pull_secret_names(pod.pointer("/spec/imagePullSecrets"))? {
             return Ok(());
@@ -408,6 +519,48 @@ impl KubernetesCdiImportClient {
         } else {
             Err(CdiImportError::ImportFailed)
         }
+    }
+
+    async fn verify_bound_import_storage(
+        &self,
+        import: &KubeVirtBaseDiskImport,
+        pvc: &Value,
+    ) -> Result<Value, CdiImportError> {
+        if pvc
+            .pointer("/spec/storageClassName")
+            .and_then(Value::as_str)
+            != Some(&import.storage_class_name)
+            || !matches!(pvc.pointer("/spec/volumeMode"), None | Some(Value::Null))
+                && pvc.pointer("/spec/volumeMode").and_then(Value::as_str) != Some("Filesystem")
+        {
+            return Err(CdiImportError::IdentityMismatch);
+        }
+        let config = self
+            .get_json(&format!("{CDI_PREFIX}/cdiconfigs/config"))
+            .await?
+            .ok_or(CdiImportError::ImportFailed)?;
+        let profile = self
+            .get_json(&format!(
+                "{CDI_PREFIX}/storageprofiles/{}",
+                import.storage_class_name
+            ))
+            .await?;
+        validate_cdi_storage_profile(profile.as_ref(), &import.storage_class_name)?;
+        let expected_capacity = CdiStorageSizing::from_config(&config, &import.storage_class_name)?
+            .root_bytes(import.capacity_bytes)?;
+        let capacity = pvc
+            .pointer("/spec/resources/requests/storage")
+            .and_then(Value::as_str)
+            .ok_or(CdiImportError::IdentityMismatch)?;
+        if !storage_matches(capacity, expected_capacity)
+            || !pvc
+                .pointer("/status/capacity/storage")
+                .and_then(Value::as_str)
+                .is_some_and(|capacity| storage_matches(capacity, expected_capacity))
+        {
+            return Err(CdiImportError::CapacityExceeded);
+        }
+        Ok(config)
     }
 
     async fn verify_import_pull_secrets(
@@ -631,7 +784,7 @@ fn verify_controller(
     }
     Ok(())
 }
-fn storage_matches(value: &str, bytes: u64) -> bool {
+pub(crate) fn storage_matches(value: &str, bytes: u64) -> bool {
     value == bytes.to_string()
         || [
             ("Ki", 1_u64 << 10),
@@ -662,6 +815,13 @@ fn verify_import_data_volume(
             .pointer("/spec/storage/storageClassName")
             .and_then(Value::as_str)
             != Some(import.storage_class_name.as_str())
+        || !matches!(
+            dv.pointer("/spec/storage/volumeMode"),
+            None | Some(Value::Null)
+        ) && dv
+            .pointer("/spec/storage/volumeMode")
+            .and_then(Value::as_str)
+            != Some("Filesystem")
         || dv
             .pointer("/status/claimName")
             .and_then(Value::as_str)
@@ -786,6 +946,38 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    #[test]
+    fn cdi_sizing_preserves_logical_disk_and_scratch_alignment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = json!({"status":{"scratchSpaceStorageClass":"local-path",
+            "filesystemOverhead":{"global":"0.25","storageClass":{"local-path":"0.06"}}}});
+        let sizing = CdiStorageSizing::from_config(&config, "local-path")?;
+        assert_eq!(sizing.root_bytes(16 << 30)?, 18_210_661_336);
+        assert_eq!(sizing.scratch_bytes(16 << 30)?, 18_211_667_968);
+        assert_eq!(sizing.root_bytes((16 << 30) - 1)?, 18_210_661_336);
+        assert!(sizing.root_bytes(0).is_err());
+        assert!(sizing.root_bytes(MAX_EXACT_FLOAT_BYTES + 1).is_err());
+        assert!(sizing.root_bytes(MAX_EXACT_FLOAT_BYTES).is_err());
+        let different_scratch = json!({"status":{"scratchSpaceStorageClass":"scratch",
+            "filesystemOverhead":{"global":"0.0","storageClass":{"local-path":"0.06","scratch":"0.0"}}}});
+        assert_eq!(
+            CdiStorageSizing::from_config(&different_scratch, "local-path")?
+                .scratch_bytes(16 << 30)?,
+            16 << 30
+        );
+        for invalid in ["NaN", "inf", "-0.1", "1", "invalid"] {
+            let config = json!({"status":{"filesystemOverhead":{"global":invalid}}});
+            assert!(CdiStorageSizing::from_config(&config, "local-path").is_err());
+        }
+        assert!(CdiStorageSizing::from_config(&json!({"status":{}}), "local-path").is_err());
+        let global = CdiStorageSizing::from_config(
+            &json!({"status":{"filesystemOverhead":{"global":"0.0"}}}),
+            "local-path",
+        )?;
+        assert_eq!(global.root_bytes(1)?, CDI_ALIGNMENT);
+        Ok(())
+    }
+
     struct MockCdi {
         documents: Arc<Mutex<BTreeMap<String, Value>>>,
         deletes: Arc<Mutex<Vec<Value>>>,
@@ -854,7 +1046,7 @@ mod tests {
         let mut dv = data_volume_document(&import());
         dv["metadata"]["uid"] = json!("dv-uid");
         dv["status"]["phase"] = json!("ImportScheduled");
-        let pvc = json!({"metadata":{"name":"base-seed","namespace":"labweaver-system","uid":"pvc-uid","ownerReferences":[{"kind":"DataVolume","name":"base-seed","uid":"dv-uid","controller":true}]},"status":{"phase":"Bound","capacity":{"storage":"16Gi"}},"spec":{"resources":{"requests":{"storage":"16Gi"}}}});
+        let pvc = json!({"metadata":{"name":"base-seed","namespace":"labweaver-system","uid":"pvc-uid","ownerReferences":[{"kind":"DataVolume","name":"base-seed","uid":"dv-uid","controller":true}]},"status":{"phase":"Bound","capacity":{"storage":"18210661336"}},"spec":{"storageClassName":"local-path","volumeMode":"Filesystem","resources":{"requests":{"storage":"18210661336"}}}});
         let pod = json!({"metadata":{"name":"importer","namespace":"labweaver-system","uid":"pod-uid","resourceVersion":"10","ownerReferences":[{"kind":"PersistentVolumeClaim","name":"base-seed","uid":"pvc-uid","controller":true}]},"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"base-seed"}}]},"status":{"containerStatuses":[{"name":"server","state":{"waiting":{"reason":"ImagePullBackOff","message":"no basic auth credentials"}}}]}});
         let documents = Arc::new(Mutex::new(BTreeMap::from([
             (
@@ -867,7 +1059,11 @@ mod tests {
             ),
             (
                 format!("{CDI_PREFIX}/cdiconfigs/config"),
-                json!({"status":{"imagePullSecrets":[{"name":"harbor-pull"}]}}),
+                json!({"status":{"imagePullSecrets":[{"name":"harbor-pull"}],"scratchSpaceStorageClass":"local-path","filesystemOverhead":{"global":"0.06","storageClass":{"local-path":"0.06"}}}}),
+            ),
+            (
+                format!("{CDI_PREFIX}/storageprofiles/local-path"),
+                json!({"metadata":{"name":"local-path"}}),
             ),
             (
                 "/api/v1/namespaces/labweaver-system/secrets/harbor-pull".to_owned(),
@@ -914,7 +1110,19 @@ mod tests {
     #[tokio::test]
     async fn stale_noauth_importer_is_reset_once_with_uid_and_revision_preserving_pvc()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (fixture, dv) = fixture().await?;
+        let (fixture, mut dv) = fixture().await?;
+        assert_eq!(dv["spec"]["storage"]["volumeMode"], "Filesystem");
+        dv["spec"]["storage"]
+            .as_object_mut()
+            .expect("DV storage")
+            .remove("volumeMode");
+        fixture
+            .documents
+            .lock()
+            .await
+            .get_mut(&format!("{CDI_PREFIX}/storageprofiles/local-path"))
+            .expect("profile")["metadata"]["annotations"] =
+            json!({"cdi.kubevirt.io/minimumSupportedPvcSize":"0Gi"});
         let pvc=fixture.documents.lock().await["/api/v1/namespaces/labweaver-system/persistentvolumeclaims/base-seed"].clone();
         fixture.client.reset_stale_importer(&import(), &dv).await?;
         fixture.client.reset_stale_importer(&import(), &dv).await?;
@@ -1052,6 +1260,95 @@ mod tests {
             assert!(
                 fixture.deletes.lock().await.is_empty(),
                 "{scenario} deleted shared importer"
+            );
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn importer_retry_rejects_physical_storage_drift()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for scenario in [
+            "wrong-mode",
+            "wrong-overhead",
+            "unknown-overhead",
+            "invalid-overhead",
+            "physical-request-drift",
+            "physical-status-drift",
+            "oversized-pvc",
+            "wrong-storage-class",
+            "block-volume",
+            "unbound",
+            "profile-minimum",
+            "profile-invalid-minimum",
+            "profile-scope-drift",
+        ] {
+            let (fixture, mut dv) = fixture().await?;
+            {
+                let mut docs = fixture.documents.lock().await;
+                match scenario {
+                    "wrong-mode" => {
+                        dv["spec"]["storage"]["volumeMode"] = json!("Block");
+                    }
+                    "wrong-overhead" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/cdiconfigs/config"))
+                            .expect("config")["status"]["filesystemOverhead"]["storageClass"]["local-path"] =
+                            json!("0.07");
+                    }
+                    "unknown-overhead" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/cdiconfigs/config"))
+                            .expect("config")["status"]["filesystemOverhead"] = Value::Null;
+                    }
+                    "invalid-overhead" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/cdiconfigs/config"))
+                            .expect("config")["status"]["filesystemOverhead"]["storageClass"]["local-path"] =
+                            json!("NaN");
+                    }
+                    "profile-minimum" | "profile-invalid-minimum" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/storageprofiles/local-path"))
+                            .expect("profile")["metadata"]["annotations"] = json!({"cdi.kubevirt.io/minimumSupportedPvcSize":if scenario=="profile-minimum" {"32Gi"} else {"invalid"}});
+                    }
+                    "profile-scope-drift" => {
+                        docs.get_mut(&format!("{CDI_PREFIX}/storageprofiles/local-path"))
+                            .expect("profile")["metadata"]["name"] = json!("other");
+                    }
+                    "physical-request-drift"
+                    | "physical-status-drift"
+                    | "oversized-pvc"
+                    | "wrong-storage-class"
+                    | "block-volume"
+                    | "unbound" => {
+                        let pvc = docs.get_mut("/api/v1/namespaces/labweaver-system/persistentvolumeclaims/base-seed").expect("PVC");
+                        match scenario {
+                            "physical-request-drift" => {
+                                pvc["spec"]["resources"]["requests"]["storage"] = json!("16Gi");
+                            }
+                            "physical-status-drift" => {
+                                pvc["status"]["capacity"]["storage"] = json!("16Gi");
+                            }
+                            "oversized-pvc" => {
+                                pvc["spec"]["resources"]["requests"]["storage"] = json!("32Gi");
+                                pvc["status"]["capacity"]["storage"] = json!("32Gi");
+                            }
+                            "wrong-storage-class" => {
+                                pvc["spec"]["storageClassName"] = json!("other");
+                            }
+                            "block-volume" => pvc["spec"]["volumeMode"] = json!("Block"),
+                            "unbound" => pvc["status"]["phase"] = json!("Pending"),
+                            _ => return Err("unknown PVC scenario".into()),
+                        }
+                    }
+                    _ => return Err("unknown storage scenario".into()),
+                }
+            }
+            let result = fixture.client.reset_stale_importer(&import(), &dv).await;
+            if scenario == "unbound" {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err(), "{scenario} unexpectedly accepted");
+            }
+            assert!(
+                fixture.deletes.lock().await.is_empty(),
+                "{scenario} deleted importer"
             );
         }
         Ok(())

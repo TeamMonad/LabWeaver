@@ -4,126 +4,14 @@ import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { CUDA_DRIVER_PROBE, parseCudaProbeResult } from './real-gpu.mjs'
+export { CUDA_PROBE_PTX_TARGET as VM_CUDA_PROBE_PTX_TARGET } from './real-gpu.mjs'
 
 const HOST_KEY_FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/
 const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SSH_HOSTNAME = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/
 const VM_WORKSPACE_FILE = /^workspace(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
-export const VM_CUDA_PROBE_PTX_TARGET = 'sm_60'
-
-const CUDA_DRIVER_PROBE = String.raw`import ctypes
-import sys
-
-PTX = b"""\
-.version 6.0
-.target ${VM_CUDA_PROBE_PTX_TARGET}
-.address_size 64
-
-.visible .entry reduce_stats(
-    .param .u64 output
-)
-{
-    .reg .pred %p;
-    .reg .b32 %r<8>;
-    .reg .b64 %rd<4>;
-    ld.param.u64 %rd0, [output];
-    mov.u32 %r0, %tid.x;
-    mov.u32 %r1, %ctaid.x;
-    mov.u32 %r5, %ntid.x;
-    mad.lo.u32 %r2, %r1, %r5, %r0;
-    setp.lt.u32 %p, %r2, 256;
-    @!%p bra DONE;
-    atom.global.add.u32 %r3, [%rd0], %r2;
-    add.u64 %rd1, %rd0, 4;
-    atom.global.add.u32 %r4, [%rd1], 1;
-    add.u64 %rd2, %rd0, 8;
-    atom.global.max.u32 %r5, [%rd2], %r2;
-DONE:
-    ret;
-}
-"""
-
-def bind(driver, name, arguments):
-    function = getattr(driver, name)
-    function.argtypes = arguments
-    function.restype = ctypes.c_int
-    return function
-
-def check(code, name):
-    if code != 0:
-        raise RuntimeError(f"CUDA_DRIVER_CALL_FAILED:{name}:{code}")
-
-try:
-    driver = ctypes.CDLL("libcuda.so.1")
-except OSError:
-    print("CUDA_DRIVER_LIBRARY_UNAVAILABLE", file=sys.stderr)
-    raise SystemExit(70)
-
-cu_init = bind(driver, "cuInit", [ctypes.c_uint])
-cu_device_get = bind(driver, "cuDeviceGet", [ctypes.POINTER(ctypes.c_int), ctypes.c_int])
-cu_ctx_create = bind(driver, "cuCtxCreate_v2", [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint, ctypes.c_int])
-cu_ctx_destroy = bind(driver, "cuCtxDestroy_v2", [ctypes.c_void_p])
-cu_module_load = bind(driver, "cuModuleLoadData", [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p])
-cu_module_get_function = bind(driver, "cuModuleGetFunction", [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_char_p])
-cu_module_unload = bind(driver, "cuModuleUnload", [ctypes.c_void_p])
-cu_mem_alloc = bind(driver, "cuMemAlloc_v2", [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t])
-cu_mem_free = bind(driver, "cuMemFree_v2", [ctypes.c_uint64])
-cu_memcpy_htod = bind(driver, "cuMemcpyHtoD_v2", [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_size_t])
-cu_memcpy_dtoh = bind(driver, "cuMemcpyDtoH_v2", [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_size_t])
-cu_launch = bind(driver, "cuLaunchKernel", [
-    ctypes.c_void_p,
-    ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
-    ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
-    ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-])
-cu_synchronize = bind(driver, "cuCtxSynchronize", [])
-
-context = ctypes.c_void_p()
-module = ctypes.c_void_p()
-device_output = ctypes.c_uint64()
-try:
-    check(cu_init(0), "cuInit")
-    device = ctypes.c_int()
-    check(cu_device_get(ctypes.byref(device), 0), "cuDeviceGet")
-    check(cu_ctx_create(ctypes.byref(context), 0, device.value), "cuCtxCreate_v2")
-
-    ptx_buffer = ctypes.create_string_buffer(PTX + b"\0")
-    check(cu_module_load(ctypes.byref(module), ctypes.cast(ptx_buffer, ctypes.c_void_p)), "cuModuleLoadData")
-    kernel = ctypes.c_void_p()
-    check(cu_module_get_function(ctypes.byref(kernel), module, b"reduce_stats"), "cuModuleGetFunction")
-
-    check(cu_mem_alloc(ctypes.byref(device_output), ctypes.sizeof(ctypes.c_uint32) * 3), "cuMemAlloc_v2")
-    host_output = (ctypes.c_uint32 * 3)(0, 0, 0)
-    check(cu_memcpy_htod(device_output.value, ctypes.cast(host_output, ctypes.c_void_p), ctypes.sizeof(host_output)), "cuMemcpyHtoD_v2")
-
-    kernel_argument = ctypes.c_uint64(device_output.value)
-    kernel_parameters = (ctypes.c_void_p * 1)(ctypes.cast(ctypes.byref(kernel_argument), ctypes.c_void_p).value)
-    check(cu_launch(
-        kernel, 8, 1, 1, 32, 1, 1, 0, None,
-        ctypes.cast(kernel_parameters, ctypes.c_void_p), None,
-    ), "cuLaunchKernel")
-    check(cu_synchronize(), "cuCtxSynchronize")
-    check(cu_memcpy_dtoh(ctypes.cast(host_output, ctypes.c_void_p), device_output.value, ctypes.sizeof(host_output)), "cuMemcpyDtoH_v2")
-
-    total, count, maximum = (int(value) for value in host_output)
-    print(f"LABWEAVER_CUDA_RESULT count={count} sum={total} max={maximum}")
-    if (count, total, maximum) != (256, 32640, 255):
-        raise RuntimeError("CUDA_DRIVER_RESULT_MISMATCH")
-except SystemExit:
-    raise
-except BaseException as error:
-    message = str(error)
-    print(message if message.startswith("CUDA_DRIVER_") else "CUDA_DRIVER_PROBE_FAILED", file=sys.stderr)
-    raise SystemExit(71)
-finally:
-    if device_output.value:
-        cu_mem_free(device_output.value)
-    if module.value:
-        cu_module_unload(module)
-    if context.value:
-        cu_ctx_destroy(context)
-`
 
 function opensshFingerprint(keyType, encodedKey) {
   if (!/^[A-Za-z0-9@._+-]+$/.test(keyType) || !/^[A-Za-z0-9+/]+={0,2}$/.test(encodedKey)) {
@@ -340,17 +228,7 @@ export async function createRealWorkSshIdentity() {
 /** Run a real CUDA Driver API kernel inside the granted VM and verify readback. */
 export async function runRealWorkVmCudaProbe(endpointGrant, identity) {
   const output = await runPinnedSsh(endpointGrant, identity, 'python3 -', CUDA_DRIVER_PROBE)
-  const resultLine = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => /^LABWEAVER_CUDA_RESULT\s/.test(line))
-  const match = resultLine?.match(/^LABWEAVER_CUDA_RESULT count=(\d+) sum=(\d+) max=(\d+)$/)
-  if (!match) throw new Error('WORK_VM_CUDA_RESULT_MISSING')
-  const result = { count: Number(match[1]), sum: Number(match[2]), max: Number(match[3]) }
-  if (result.count !== 256 || result.sum !== 32640 || result.max !== 255) {
-    throw new Error('WORK_VM_CUDA_RESULT_MISMATCH')
-  }
-  return result
+  return parseCudaProbeResult(output)
 }
 
 export function parseRealWorkVmLicenseStatus(output) {

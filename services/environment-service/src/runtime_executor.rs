@@ -25,8 +25,8 @@ use crate::{
     KubeVirtSecretRef, KubeVirtStoppedObservation, KubeVirtVmVgpuLicenseMode,
     KubeVirtVmVgpuLicensingConfiguration, ProviderFailure, ProviderFailureCode,
     cdi_import::{
-        BASE_DISK_IMPORT_TIMEOUT, CdiImportError, KubeVirtBaseDiskImport,
-        KubernetesCdiImportClient, ensure_base_disk,
+        BASE_DISK_IMPORT_TIMEOUT, CdiImportError, CdiStorageSizing, KubeVirtBaseDiskImport,
+        KubernetesCdiImportClient, ensure_base_disk, storage_matches, validate_cdi_storage_profile,
     },
 };
 
@@ -715,6 +715,7 @@ impl KubernetesContainerExecutor {
         self.apply_kubevirt_resource(plan, namespace_resource, permit)
             .await?;
         self.ensure_base_disk(plan).await?;
+        let physical_quota = self.kubevirt_storage_quota(plan).await?;
         if let Some(licensing) = vm_vgpu_licensing.as_ref() {
             self.apply_vgpu_private_cloud_init(plan, licensing, permit)
                 .await?;
@@ -725,11 +726,110 @@ impl KubernetesContainerExecutor {
             }
             validate_kubevirt_resource(plan, resource)?;
             let mut resource = resource.clone();
+            if resource.kind == "ResourceQuota" {
+                resource = physical_quota.clone();
+            }
             if vm_vgpu_licensing.is_some() && resource.kind == "VirtualMachine" {
                 point_vm_to_private_cloud_init(&mut resource)?;
             }
             self.apply_kubevirt_resource(plan, &resource, permit)
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Keep the approved plan logical; only the applied quota includes CDI filesystem overhead.
+    async fn kubevirt_storage_quota(
+        &self,
+        plan: &KubeVirtResourcePlan,
+    ) -> Result<KubeVirtResource, ProviderFailure> {
+        let (quota, disk, logical, scratch) = kubevirt_storage_intent(plan)?;
+        let config = self
+            .get_api_json("/apis/cdi.kubevirt.io/v1beta1/cdiconfigs/config")
+            .await?
+            .ok_or_else(rejected)?;
+        self.verify_cdi_storage_class(&plan.storage_class_name, true)
+            .await?;
+        let scratch_class = match config.pointer("/status/scratchSpaceStorageClass") {
+            None | Some(Value::Null) => plan.storage_class_name.as_str(),
+            Some(Value::String(value)) if value.is_empty() => plan.storage_class_name.as_str(),
+            Some(Value::String(value)) => value,
+            Some(_) => return Err(rejected()),
+        };
+        if scratch_class != plan.storage_class_name {
+            self.verify_cdi_storage_class(scratch_class, false).await?;
+        }
+        let sizing = CdiStorageSizing::from_config(&config, &plan.storage_class_name)
+            .map_err(|error| cdi_import_failure(&error))?;
+        let physical_root = sizing
+            .root_bytes(logical)
+            .map_err(|error| cdi_import_failure(&error))?;
+        let physical_scratch = sizing
+            .scratch_bytes(scratch)
+            .map_err(|error| cdi_import_failure(&error))?;
+        let physical_total = physical_root
+            .checked_add(physical_scratch)
+            .ok_or_else(rejected)?;
+        let pvc = self
+            .get_json("PersistentVolumeClaim", &plan.namespace, &disk.name)
+            .await?;
+        let existing_quota = self
+            .get_json("ResourceQuota", &plan.namespace, &quota.name)
+            .await?;
+        if let Some(pvc) = pvc {
+            let existing_disk = self
+                .get_json("DataVolume", &plan.namespace, &disk.name)
+                .await?
+                .ok_or_else(rejected)?;
+            validate_existing_kubevirt_disk(plan, disk, &existing_disk, &pvc, physical_root)?;
+            if existing_quota.is_none() {
+                return Err(rejected());
+            }
+        }
+        if let Some(existing_quota) = existing_quota {
+            validate_existing_kubevirt_quota(plan, &existing_quota, physical_total)?;
+        }
+        let mut quota = quota.clone();
+        *quota
+            .document
+            .pointer_mut("/spec/hard/requests.storage")
+            .ok_or_else(rejected)? = json!(physical_total.to_string());
+        validate_kubevirt_resource(plan, &quota)?;
+        Ok(quota)
+    }
+
+    async fn verify_cdi_storage_class(
+        &self,
+        name: &str,
+        check_profile: bool,
+    ) -> Result<(), ProviderFailure> {
+        if !valid_dns_label(name) {
+            return Err(rejected());
+        }
+        let storage_class = self
+            .get_api_json(&format!("/apis/storage.k8s.io/v1/storageclasses/{name}"))
+            .await?
+            .ok_or_else(rejected)?;
+        if storage_class
+            .pointer("/metadata/name")
+            .and_then(Value::as_str)
+            != Some(name)
+            || storage_class
+                .get("provisioner")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return Err(rejected());
+        }
+        if check_profile {
+            let profile = self
+                .get_api_json(&format!(
+                    "/apis/cdi.kubevirt.io/v1beta1/storageprofiles/{name}"
+                ))
+                .await?
+                .ok_or_else(rejected)?;
+            validate_cdi_storage_profile(Some(&profile), name)
+                .map_err(|error| cdi_import_failure(&error))?;
         }
         Ok(())
     }
@@ -1215,8 +1315,12 @@ impl KubernetesContainerExecutor {
         if !namespaced {
             return Err(rejected());
         }
-        let url =
-            self.namespaced_url(&format!("{prefix}/namespaces/{namespace}/{plural}/{name}"))?;
+        self.get_api_json(&format!("{prefix}/namespaces/{namespace}/{plural}/{name}"))
+            .await
+    }
+
+    async fn get_api_json(&self, path: &str) -> Result<Option<Value>, ProviderFailure> {
+        let url = self.namespaced_url(path)?;
         let response = self
             .authorized(self.client.get(url))
             .send()
@@ -1323,6 +1427,184 @@ fn vm_vgpu_licensing_configuration(
         }
         _ => Err(rejected()),
     }
+}
+
+fn kubevirt_storage_intent(
+    plan: &KubeVirtResourcePlan,
+) -> Result<(&KubeVirtResource, &KubeVirtResource, u64, u64), ProviderFailure> {
+    let mut quotas = plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == "ResourceQuota");
+    let quota = quotas.next().ok_or_else(rejected)?;
+    let mut disks = plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == "DataVolume");
+    let disk = disks.next().ok_or_else(rejected)?;
+    if quotas.next().is_some()
+        || disks.next().is_some()
+        || quota.name != "runtime-quota"
+        || disk.name != plan.data_volume_name
+        || quota.namespace.as_deref() != Some(&plan.namespace)
+        || disk.namespace.as_deref() != Some(&plan.namespace)
+        || quota.document.get("apiVersion").and_then(Value::as_str) != Some("v1")
+        || disk.document.get("apiVersion").and_then(Value::as_str)
+            != Some("cdi.kubevirt.io/v1beta1")
+        || disk
+            .document
+            .pointer("/spec/storage/storageClassName")
+            .and_then(Value::as_str)
+            != Some(&plan.storage_class_name)
+        || [quota, disk].iter().any(|resource| {
+            resource
+                .document
+                .pointer("/metadata/labels/labweaver.io~1managed")
+                .and_then(Value::as_str)
+                != Some("true")
+        })
+        || disk
+            .document
+            .pointer("/spec/storage/volumeMode")
+            .and_then(Value::as_str)
+            != Some("Filesystem")
+        || disk.document.pointer("/spec/storage/accessModes") != Some(&json!(["ReadWriteOnce"]))
+    {
+        return Err(rejected());
+    }
+    validate_kubevirt_resource(plan, quota)?;
+    validate_kubevirt_resource(plan, disk)?;
+    let logical =
+        positive_storage_bytes(&disk.document, "/spec/storage/resources/requests/storage")?;
+    let scratch = positive_storage_bytes(
+        &quota.document,
+        "/metadata/annotations/labweaver.io~1cdi-scratch-storage-bytes",
+    )?;
+    let quota_logical = positive_storage_bytes(&quota.document, "/spec/hard/requests.storage")?;
+    if logical < plan.base_disk.capacity_bytes
+        || logical > scratch
+        || logical.checked_add(scratch) != Some(quota_logical)
+    {
+        return Err(rejected());
+    }
+    Ok((quota, disk, logical, scratch))
+}
+
+fn positive_storage_bytes(document: &Value, pointer: &str) -> Result<u64, ProviderFailure> {
+    document
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(rejected)
+}
+
+fn filesystem_volume_mode(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(value)) => value == "Filesystem",
+        _ => false,
+    }
+}
+
+fn validate_existing_kubevirt_disk(
+    plan: &KubeVirtResourcePlan,
+    disk: &KubeVirtResource,
+    existing_disk: &Value,
+    pvc: &Value,
+    physical: u64,
+) -> Result<(), ProviderFailure> {
+    validate_kubevirt_resource(
+        plan,
+        &KubeVirtResource {
+            document: existing_disk.clone(),
+            ..disk.clone()
+        },
+    )?;
+    let disk_uid = pointer_uuid(existing_disk, "/metadata/uid")?;
+    let logical =
+        positive_storage_bytes(&disk.document, "/spec/storage/resources/requests/storage")?;
+    let controllers = pvc
+        .pointer("/metadata/ownerReferences")
+        .and_then(Value::as_array)
+        .ok_or_else(rejected)?
+        .iter()
+        .filter(|owner| owner.get("controller") == Some(&Value::Bool(true)))
+        .collect::<Vec<_>>();
+    let capacity = pvc.pointer("/status/capacity/storage");
+    let capacity_valid = match capacity {
+        None | Some(Value::Null) => {
+            pvc.pointer("/status/phase").and_then(Value::as_str) == Some("Pending")
+        }
+        Some(Value::String(value)) => storage_matches(value, physical),
+        _ => false,
+    };
+    if pvc.pointer("/metadata/name").and_then(Value::as_str) != Some(&plan.data_volume_name)
+        || pvc.pointer("/metadata/namespace").and_then(Value::as_str) != Some(&plan.namespace)
+        || controllers.len() != 1
+        || controllers[0].get("apiVersion").and_then(Value::as_str)
+            != Some("cdi.kubevirt.io/v1beta1")
+        || controllers[0].get("kind").and_then(Value::as_str) != Some("DataVolume")
+        || controllers[0].get("name").and_then(Value::as_str) != Some(&disk.name)
+        || controllers[0].get("uid").and_then(Value::as_str) != Some(&disk_uid.to_string())
+        || existing_disk.pointer("/spec/storage/storageClassName")
+            != disk.document.pointer("/spec/storage/storageClassName")
+        || existing_disk.pointer("/spec/storage/accessModes")
+            != disk.document.pointer("/spec/storage/accessModes")
+        || existing_disk
+            .pointer("/spec/storage/volumeMode")
+            .and_then(Value::as_str)
+            != Some("Filesystem")
+        || !existing_disk
+            .pointer("/spec/storage/resources/requests/storage")
+            .and_then(Value::as_str)
+            .is_some_and(|value| storage_matches(value, logical))
+        || existing_disk.pointer("/spec/sourceRef") != disk.document.pointer("/spec/sourceRef")
+        || existing_disk
+            .pointer("/metadata/deletionTimestamp")
+            .is_some_and(|value| !value.is_null())
+        || pvc
+            .pointer("/spec/storageClassName")
+            .and_then(Value::as_str)
+            != Some(&plan.storage_class_name)
+        || !filesystem_volume_mode(pvc.pointer("/spec/volumeMode"))
+        || pvc
+            .pointer("/metadata/deletionTimestamp")
+            .is_some_and(|value| !value.is_null())
+        || !pvc
+            .pointer("/spec/resources/requests/storage")
+            .and_then(Value::as_str)
+            .is_some_and(|value| storage_matches(value, physical))
+        || !capacity_valid
+    {
+        return Err(rejected());
+    }
+    Ok(())
+}
+
+fn validate_existing_kubevirt_quota(
+    plan: &KubeVirtResourcePlan,
+    document: &Value,
+    physical: u64,
+) -> Result<(), ProviderFailure> {
+    let resource = KubeVirtResource {
+        kind: "ResourceQuota".to_owned(),
+        namespace: Some(plan.namespace.clone()),
+        name: "runtime-quota".to_owned(),
+        document: document.clone(),
+    };
+    validate_kubevirt_resource(plan, &resource)?;
+    if document
+        .pointer("/metadata/deletionTimestamp")
+        .is_some_and(|value| !value.is_null())
+        || !document
+            .pointer("/spec/hard/requests.storage")
+            .and_then(Value::as_str)
+            .is_some_and(|value| storage_matches(value, physical))
+    {
+        return Err(rejected());
+    }
+    Ok(())
 }
 
 fn secret_data_field(document: &Value, key: &str) -> Result<Vec<u8>, ProviderFailure> {
@@ -2304,7 +2586,7 @@ mod tests {
         namespace: &str,
         licensing: KubeVirtVmVgpuLicensingConfiguration,
     ) -> KubeVirtResourcePlan {
-        let labels = json!({"labweaver.io/environment-id": environment_id.to_string()});
+        let labels = json!({"labweaver.io/environment-id": environment_id.to_string(), "labweaver.io/managed":"true"});
         let base_userdata =
             "#cloud-config\nwrite_files:\n  - path: /etc/base\n    content: base\nruncmd:\n";
         KubeVirtResourcePlan {
@@ -2331,6 +2613,23 @@ mod tests {
             // it before reading deployment Secrets or applying the VM's private
             // bootstrap, regardless of plan resource order.
             resources: vec![
+                KubeVirtResource {
+                    kind: "ResourceQuota".to_owned(), namespace: Some(namespace.to_owned()),
+                    name: "runtime-quota".to_owned(),
+                    document: json!({"apiVersion":"v1","kind":"ResourceQuota",
+                        "metadata":{"name":"runtime-quota","namespace":namespace,"labels":labels,
+                            "annotations":{"labweaver.io/cdi-scratch-storage-bytes":"17179869184"}},
+                        "spec":{"hard":{"requests.storage":"34359738368","pods":"2"}}}),
+                },
+                KubeVirtResource {
+                    kind: "DataVolume".to_owned(), namespace: Some(namespace.to_owned()),
+                    name: "rootdisk".to_owned(),
+                    document: json!({"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume",
+                        "metadata":{"name":"rootdisk","namespace":namespace,"labels":labels},
+                        "spec":{"sourceRef":{"kind":"DataSource","namespace":"labweaver-system","name":"ubuntu-vgpu"},
+                            "storage":{"storageClassName":"local-path","volumeMode":"Filesystem","accessModes":["ReadWriteOnce"],
+                                "resources":{"requests":{"storage":"17179869184"}}}}}),
+                },
                 KubeVirtResource {
                     kind: "Secret".to_owned(),
                     namespace: Some(namespace.to_owned()),
@@ -2499,6 +2798,330 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kubevirt_storage_quota_inflates_only_applied_storage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let environment_id = contracts::EnvironmentId::new();
+        let plan = vm_vgpu_plan_for_test(
+            environment_id,
+            &format!("lw-env-{environment_id}"),
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        let original = serde_json::to_value(&plan)?;
+        let quota = executor
+            .kubevirt_storage_quota(&plan)
+            .await
+            .map_err(|error| format!("storage quota rejected: {error:?}"))?;
+        let mut expected = kubevirt_storage_intent(&plan)
+            .map_err(|error| format!("intent: {error:?}"))?
+            .0
+            .document
+            .clone();
+        expected["spec"]["hard"]["requests.storage"] = json!("36422329304");
+        assert_eq!(quota.document, expected);
+        assert_eq!(
+            serde_json::to_value(&plan)?,
+            original,
+            "logical intent and canonical hash must remain unchanged"
+        );
+        assert!(
+            mock.events
+                .lock()
+                .await
+                .iter()
+                .all(|event| event.starts_with("GET "))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kubevirt_storage_quota_uses_effective_scratch_class_and_alignment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let id = contracts::EnvironmentId::new();
+        let mut plan = vm_vgpu_plan_for_test(
+            id,
+            &format!("lw-env-{id}"),
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        mock.get_responses.lock().await.extend([
+            ("/apis/cdi.kubevirt.io/v1beta1/cdiconfigs/config".to_owned(), Some(json!({"status":{
+                "scratchSpaceStorageClass":"scratch-class","filesystemOverhead":{"global":"0.06","storageClass":{"scratch-class":"0"}}}}))),
+            ("/apis/storage.k8s.io/v1/storageclasses/scratch-class".to_owned(), Some(json!({"metadata":{"name":"scratch-class"},"provisioner":"example/scratch"}))),
+        ]);
+        let quota = executor
+            .kubevirt_storage_quota(&plan)
+            .await
+            .map_err(|error| format!("quota: {error:?}"))?;
+        assert_eq!(
+            quota.document.pointer("/spec/hard/requests.storage"),
+            Some(&json!("35390530520"))
+        );
+        mock.get_responses.lock().await.clear();
+        for resource in &mut plan.resources {
+            if resource.kind == "DataVolume" {
+                resource.document["spec"]["storage"]["resources"]["requests"]["storage"] =
+                    json!("1048577");
+            } else if resource.kind == "ResourceQuota" {
+                resource.document["metadata"]["annotations"]["labweaver.io/cdi-scratch-storage-bytes"] =
+                    json!("1048577");
+                resource.document["spec"]["hard"]["requests.storage"] = json!("2097154");
+            }
+        }
+        let quota = executor
+            .kubevirt_storage_quota(&plan)
+            .await
+            .map_err(|error| format!("aligned quota: {error:?}"))?;
+        assert_eq!(
+            quota.document.pointer("/spec/hard/requests.storage"),
+            Some(&json!("5368710"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kubevirt_storage_quota_rejects_unknown_or_invalid_effective_configuration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let id = contracts::EnvironmentId::new();
+        let plan = vm_vgpu_plan_for_test(
+            id,
+            &format!("lw-env-{id}"),
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        let config_path = "/apis/cdi.kubevirt.io/v1beta1/cdiconfigs/config";
+        let profile_path = "/apis/cdi.kubevirt.io/v1beta1/storageprofiles/local-path";
+        for (path, response) in [
+            (config_path, None),
+            (
+                config_path,
+                Some(json!({"status":{"filesystemOverhead":{"global":"NaN"}}})),
+            ),
+            (
+                config_path,
+                Some(json!({"status":{"filesystemOverhead":{"global":"-0.06"}}})),
+            ),
+            (
+                config_path,
+                Some(
+                    json!({"status":{"scratchSpaceStorageClass":"missing","filesystemOverhead":{"global":"0.06"}}}),
+                ),
+            ),
+            ("/apis/storage.k8s.io/v1/storageclasses/local-path", None),
+            (profile_path, None),
+            (
+                profile_path,
+                Some(
+                    json!({"metadata":{"name":"local-path","annotations":{"cdi.kubevirt.io/minimumSupportedPvcSize":"1Gi"}},"status":{"claimPropertySets":[{"accessModes":["ReadWriteOnce"],"volumeMode":"Filesystem"}]}}),
+                ),
+            ),
+            (
+                profile_path,
+                Some(json!({"metadata":{"name":"wrong-class"}})),
+            ),
+        ] {
+            mock.get_responses.lock().await.clear();
+            mock.get_responses
+                .lock()
+                .await
+                .insert(path.to_owned(), response);
+            assert!(
+                executor.kubevirt_storage_quota(&plan).await.is_err(),
+                "must reject {path}"
+            );
+        }
+        assert!(
+            mock.events
+                .lock()
+                .await
+                .iter()
+                .all(|event| event.starts_with("GET "))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kubevirt_storage_quota_rejects_invalid_logical_intent_before_api_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let id = contracts::EnvironmentId::new();
+        let original = vm_vgpu_plan_for_test(
+            id,
+            &format!("lw-env-{id}"),
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        for (kind, pointer, value) in [
+            (
+                "DataVolume",
+                "/spec/storage/resources/requests/storage",
+                json!("0"),
+            ),
+            ("DataVolume", "/spec/storage/volumeMode", json!("Block")),
+            (
+                "ResourceQuota",
+                "/metadata/annotations/labweaver.io~1cdi-scratch-storage-bytes",
+                json!("0"),
+            ),
+            (
+                "ResourceQuota",
+                "/spec/hard/requests.storage",
+                json!("18446744073709551615"),
+            ),
+        ] {
+            let mut plan = original.clone();
+            let resource = plan
+                .resources
+                .iter_mut()
+                .find(|resource| resource.kind == kind)
+                .ok_or("resource missing")?;
+            if pointer.ends_with("volumeMode") {
+                resource.document["spec"]["storage"]["volumeMode"] = value;
+            } else {
+                *resource
+                    .document
+                    .pointer_mut(pointer)
+                    .ok_or("intent field missing")? = value;
+            }
+            assert!(executor.kubevirt_storage_quota(&plan).await.is_err());
+        }
+        let mut overflow = original.clone();
+        for resource in &mut overflow.resources {
+            if resource.kind == "DataVolume" {
+                resource.document["spec"]["storage"]["resources"]["requests"]["storage"] =
+                    json!(u64::MAX.to_string());
+            } else if resource.kind == "ResourceQuota" {
+                resource.document["metadata"]["annotations"]["labweaver.io/cdi-scratch-storage-bytes"] =
+                    json!(u64::MAX.to_string());
+            }
+        }
+        assert!(executor.kubevirt_storage_quota(&overflow).await.is_err());
+        assert!(mock.events.lock().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kubevirt_storage_quota_keeps_existing_disk_and_quota_exact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        let id = contracts::EnvironmentId::new();
+        let namespace = format!("lw-env-{id}");
+        let plan = vm_vgpu_plan_for_test(
+            id,
+            &namespace,
+            vgpu_licensing(KubeVirtVmVgpuLicenseMode::FastapiDls),
+        );
+        let pvc = install_existing_kubevirt_storage(&mock, &plan).await?;
+        let pvc_path = format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/rootdisk");
+        assert!(
+            executor.kubevirt_storage_quota(&plan).await.is_ok(),
+            "Pending exact-spec PVC is not a sizing failure"
+        );
+        for (pointer, value) in [
+            ("/spec/resources/requests/storage", json!("17179869184")),
+            (
+                "/metadata/ownerReferences/0/uid",
+                json!(uuid::Uuid::new_v4()),
+            ),
+            ("/status/phase", json!("Bound")),
+        ] {
+            let mut changed = pvc.clone();
+            *changed.pointer_mut(pointer).ok_or("PVC field missing")? = value;
+            mock.get_responses
+                .lock()
+                .await
+                .insert(pvc_path.clone(), Some(changed));
+            assert!(
+                executor.kubevirt_storage_quota(&plan).await.is_err(),
+                "must reject {pointer}"
+            );
+        }
+        let mut changed = pvc;
+        changed["status"]["capacity"] = json!({"storage":"17179869184"});
+        mock.get_responses
+            .lock()
+            .await
+            .insert(pvc_path.clone(), Some(changed));
+        assert!(
+            executor.kubevirt_storage_quota(&plan).await.is_err(),
+            "mismatched observed capacity must not be ignored while Pending"
+        );
+        let mut bound = mock
+            .get_responses
+            .lock()
+            .await
+            .get(&pvc_path)
+            .and_then(Clone::clone)
+            .ok_or("PVC fixture missing")?;
+        bound["status"]["phase"] = json!("Bound");
+        bound["status"]["capacity"] = json!({"storage":"18210661336"});
+        mock.get_responses
+            .lock()
+            .await
+            .insert(pvc_path.clone(), Some(bound));
+        assert!(
+            executor.kubevirt_storage_quota(&plan).await.is_ok(),
+            "Bound exact capacity is reusable"
+        );
+        let quota_path = format!("/api/v1/namespaces/{namespace}/resourcequotas/runtime-quota");
+        let mut changed_quota = mock
+            .get_responses
+            .lock()
+            .await
+            .get(&quota_path)
+            .and_then(Clone::clone)
+            .ok_or("quota fixture missing")?;
+        changed_quota["spec"]["hard"]["requests.storage"] = json!("34359738368");
+        mock.get_responses
+            .lock()
+            .await
+            .insert(quota_path, Some(changed_quota));
+        assert!(
+            executor.kubevirt_storage_quota(&plan).await.is_err(),
+            "an existing quota must not be enlarged on replay"
+        );
+        Ok(())
+    }
+
+    async fn install_existing_kubevirt_storage(
+        mock: &MockKubernetes,
+        plan: &KubeVirtResourcePlan,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let namespace = &plan.namespace;
+        let (quota, disk, _, _) =
+            kubevirt_storage_intent(plan).map_err(|error| format!("intent: {error:?}"))?;
+        let uid = uuid::Uuid::new_v4();
+        let mut existing_disk = disk.document.clone();
+        existing_disk["metadata"]["uid"] = json!(uid);
+        existing_disk["spec"]["storage"]["resources"]["requests"]["storage"] = json!("16Gi");
+        let pvc = json!({"metadata":{"name":"rootdisk","namespace":namespace,
+            "ownerReferences":[{"controller":true,"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume","name":"rootdisk","uid":uid}]},
+            "spec":{"storageClassName":"local-path","volumeMode":"Filesystem","resources":{"requests":{"storage":"18210661336"}}},
+            "status":{"phase":"Pending"}});
+        let mut existing_quota = quota.document.clone();
+        existing_quota["spec"]["hard"]["requests.storage"] = json!("36422329304");
+        let pvc_path = format!("/api/v1/namespaces/{namespace}/persistentvolumeclaims/rootdisk");
+        mock.get_responses.lock().await.extend([
+            (pvc_path, Some(pvc.clone())),
+            (
+                format!(
+                    "/apis/cdi.kubevirt.io/v1beta1/namespaces/{namespace}/datavolumes/rootdisk"
+                ),
+                Some(existing_disk),
+            ),
+            (
+                format!("/api/v1/namespaces/{namespace}/resourcequotas/runtime-quota"),
+                Some(existing_quota),
+            ),
+        ]);
+        Ok(pvc)
+    }
+
+    #[tokio::test]
     async fn vm_vgpu_apply_reads_named_secrets_and_only_applies_private_bootstrap()
     -> Result<(), Box<dyn std::error::Error>> {
         let mock = spawn_mock_kubernetes().await?;
@@ -2514,6 +3137,24 @@ mod tests {
             .apply_kubevirt_plan(&plan, &permit)
             .await
             .map_err(|error| format!("vGPU plan apply rejected: {error:?}"))?;
+        let quota = mock
+            .applied_quota
+            .lock()
+            .await
+            .clone()
+            .ok_or("quota was not applied")?;
+        assert_eq!(
+            quota.pointer("/spec/hard/requests.storage"),
+            Some(&json!("36422329304"))
+        );
+        assert_eq!(
+            kubevirt_storage_intent(&plan)
+                .map_err(|error| format!("intent: {error:?}"))?
+                .0
+                .document
+                .pointer("/spec/hard/requests.storage"),
+            Some(&json!("34359738368"))
+        );
         let private_secret = mock
             .applied_private_secret
             .lock()
@@ -2724,6 +3365,8 @@ mod tests {
         deployment_applied: Arc<std::sync::atomic::AtomicBool>,
         events: Arc<Mutex<Vec<String>>>,
         applied_private_secret: Arc<Mutex<Option<Value>>>,
+        applied_quota: Arc<Mutex<Option<Value>>>,
+        get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
         lifecycle: Option<Arc<Mutex<LifecycleKubernetes>>>,
     }
 
@@ -2732,6 +3375,8 @@ mod tests {
         ca_pem: String,
         events: Arc<Mutex<Vec<String>>>,
         applied_private_secret: Arc<Mutex<Option<Value>>>,
+        applied_quota: Arc<Mutex<Option<Value>>>,
+        get_responses: Arc<Mutex<std::collections::BTreeMap<String, Option<Value>>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -2758,10 +3403,14 @@ mod tests {
             format!("https://localhost:{}", listener.local_addr()?.port()).parse()?;
         let events = Arc::new(Mutex::new(Vec::new()));
         let applied_private_secret = Arc::new(Mutex::new(None));
+        let applied_quota = Arc::new(Mutex::new(None));
+        let get_responses = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let state = MockKubernetesState {
             deployment_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events: Arc::clone(&events),
             applied_private_secret: Arc::clone(&applied_private_secret),
+            applied_quota: Arc::clone(&applied_quota),
+            get_responses: Arc::clone(&get_responses),
             lifecycle: lifecycle.map(|fixture| Arc::new(Mutex::new(fixture))),
         };
         let router = Router::new()
@@ -2775,6 +3424,8 @@ mod tests {
             ca_pem,
             events,
             applied_private_secret,
+            applied_quota,
+            get_responses,
             task,
         })
     }
@@ -2806,32 +3457,20 @@ mod tests {
         if let Some(fixture) = &state.lifecycle {
             return lifecycle_kubernetes_response(&mut *fixture.lock().await, request).await;
         }
+        if method == Method::GET
+            && let Some(response) = mock_storage_response(&state, &path).await
+        {
+            return response;
+        }
         if is_deployment_patch {
             state
                 .deployment_applied
                 .store(true, std::sync::atomic::Ordering::Release);
         }
-        if method == Method::GET && path.ends_with("/secrets/fastapi-dls-client-token") {
-            return axum::Json(json!({
-                "data": {"client-token": BASE64_STANDARD.encode("secret-client-token")}
-            }))
-            .into_response();
-        }
-        if method == Method::GET && path.ends_with("/secrets/fastapi-dls-tls") {
-            return axum::Json(json!({
-                "data": {"ca.crt": BASE64_STANDARD.encode(
-                    "-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n"
-                )}
-            }))
-            .into_response();
-        }
-        if method == Method::GET && path.ends_with("/secrets/fastapi-dls-signing-root") {
-            return axum::Json(json!({
-                "data": {"ca.crt": BASE64_STANDARD.encode(
-                    "-----BEGIN CERTIFICATE-----\nsigning\n-----END CERTIFICATE-----\n"
-                )}
-            }))
-            .into_response();
+        if method == Method::GET
+            && let Some(response) = mock_vgpu_secret_response(&path)
+        {
+            return response;
         }
         if method == Method::GET && path.ends_with("/datasources/ubuntu-vgpu") {
             return axum::Json(json!({
@@ -2845,14 +3484,20 @@ mod tests {
             }))
             .into_response();
         }
-        if is_private_secret_patch {
+        if is_private_secret_patch
+            || (method == Method::PATCH && path.ends_with("/resourcequotas/runtime-quota"))
+        {
             let Ok(body) = to_bytes(request.into_body(), 1024 * 1024).await else {
                 return StatusCode::BAD_REQUEST.into_response();
             };
             let Ok(document) = serde_json::from_slice::<Value>(&body) else {
                 return StatusCode::BAD_REQUEST.into_response();
             };
-            *state.applied_private_secret.lock().await = Some(document);
+            if is_private_secret_patch {
+                *state.applied_private_secret.lock().await = Some(document);
+            } else {
+                *state.applied_quota.lock().await = Some(document);
+            }
             return StatusCode::OK.into_response();
         }
         if method == Method::GET && is_workspace_claim {
@@ -2875,6 +3520,49 @@ mod tests {
             .into_response();
         }
         StatusCode::OK.into_response()
+    }
+
+    async fn mock_storage_response(state: &MockKubernetesState, path: &str) -> Option<Response> {
+        if let Some(response) = state.get_responses.lock().await.get(path) {
+            return Some(response.clone().map_or_else(
+                || StatusCode::NOT_FOUND.into_response(),
+                |value| axum::Json(value).into_response(),
+            ));
+        }
+        if path.ends_with("/persistentvolumeclaims/rootdisk")
+            || path.ends_with("/resourcequotas/runtime-quota")
+        {
+            return Some(StatusCode::NOT_FOUND.into_response());
+        }
+        let document = if path.ends_with("/cdiconfigs/config") {
+            json!({"status":{"filesystemOverhead":{"global":"0.06"}}})
+        } else if path.ends_with("/storageclasses/local-path") {
+            json!({"metadata":{"name":"local-path"},"provisioner":"rancher.io/local-path"})
+        } else if path.ends_with("/storageprofiles/local-path") {
+            json!({"metadata":{"name":"local-path"},"status":{"claimPropertySets":null}})
+        } else {
+            return None;
+        };
+        Some(axum::Json(document).into_response())
+    }
+
+    fn mock_vgpu_secret_response(path: &str) -> Option<Response> {
+        let (key, content) = if path.ends_with("/secrets/fastapi-dls-client-token") {
+            ("client-token", "secret-client-token")
+        } else if path.ends_with("/secrets/fastapi-dls-tls") {
+            (
+                "ca.crt",
+                "-----BEGIN CERTIFICATE-----\ntls\n-----END CERTIFICATE-----\n",
+            )
+        } else if path.ends_with("/secrets/fastapi-dls-signing-root") {
+            (
+                "ca.crt",
+                "-----BEGIN CERTIFICATE-----\nsigning\n-----END CERTIFICATE-----\n",
+            )
+        } else {
+            return None;
+        };
+        Some(axum::Json(json!({"data":{(key):BASE64_STANDARD.encode(content)}})).into_response())
     }
 
     struct LifecycleKubernetes {

@@ -2436,6 +2436,7 @@ where
         let quota_memory_limit_bytes = vmi_memory_limit_bytes
             .checked_add(budget.cdi_importer_memory_limit_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        // This is logical intent. The executor derives the applied CDI filesystem quota.
         let quota_storage_bytes = storage_bytes
             .checked_add(budget.cdi_scratch_storage_bytes)
             .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
@@ -2610,7 +2611,7 @@ where
                     "metadata":{"name":data_volume_name,"namespace":namespace,"labels":labels,"annotations":annotations},
                     "spec":{
                         "sourceRef":{"kind":"DataSource","namespace":base_binding.data_source_namespace,"name":base_binding.data_source_name},
-                        "storage":{"storageClassName":base_binding.storage_class_name,"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":storage}}}
+                        "storage":{"storageClassName":base_binding.storage_class_name,"volumeMode":"Filesystem","accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":storage}}}
                     }
                 }),
             ),

@@ -61,13 +61,33 @@ The deployment binding requires:
 The path is deployment-owned and must be absolute. The six resource-budget
 values must be non-zero, each CDI limit must be at least its request, and the
 values must match or conservatively exceed the deployed KubeVirt VMI memory
-overhead and CDI workload requests/limits. The scratch budget must be at least
-the approved root-disk request. A wildcard subject, partial binding, private
-key, invalid public key or Container-only field fails startup.
+overhead and CDI workload requests/limits. `cdiScratchStorageBytes` and the
+approved root-disk storage request are logical disk requirements; the scratch
+budget must be at least the approved root-disk request. A wildcard subject,
+partial binding, private key, invalid public key or Container-only field fails
+startup.
 
 VM v1 accepts exactly one entry and it must be SSH port 22. Any additional
 HTTP, HTTPS or SSH entry is rejected instead of being silently omitted from the
 immutable approved spec.
+
+The executor derives physical root-plus-scratch quota from the current
+`CDIConfig.status.filesystemOverhead`, selecting the StorageClass override
+before `global`, and the effective `scratchSpaceStorageClass`. It follows
+[CDI 1.65 sizing](https://github.com/kubevirt/containerized-data-importer/blob/v1.65.0/pkg/util/util.go):
+root bytes align up to 1 MiB before applying overhead and rounding up; scratch
+uses the corresponding usable size rounded down to 1 MiB, applies the scratch
+class overhead, then aligns up to 1 MiB. Only the applied quota uses physical
+bytes; the approved plan, `planSha256` and billing storage remain logical.
+
+Root and seed DataVolumes explicitly request `Filesystem` on an existing
+managed StorageClass. Missing or null StorageProfile `claimPropertySets` does
+not make this explicit mode unsupported. A profile's
+`cdi.kubevirt.io/minimumSupportedPvcSize` must be absent or zero; nonzero or
+malformed overrides are rejected. Existing Bound PVCs must match the exact
+derived physical size and DataVolume controller UID chain. Drift is rejected
+without automatic expansion. A matching Pending PVC remains subject to
+bounded readiness checks and does not establish Ready.
 
 ## Deterministic resource plan
 
@@ -77,10 +97,10 @@ exactly one of each owned runtime object unless noted:
 | Object | Required behavior |
 | --- | --- |
 | Namespace | Deterministic name, Environment/course labels and controlled cleanup finalizer. |
-| ResourceQuota | Guest resources plus explicit VMI-memory and CDI-importer request/limit budgets, one CDI scratch PVC, at most two PVCs and two transient/runtime pods. The VM memory limit is guest memory plus the reviewed VMI overhead, so KubeVirt's derived request cannot exceed the limit when the observed overhead remains within the binding. |
+| ResourceQuota | Guest resources plus explicit VMI-memory and CDI-importer request/limit budgets, one CDI scratch PVC, physical root-plus-scratch storage quota, at most two PVCs and two transient/runtime pods. The VM memory limit is guest memory plus the reviewed VMI overhead, so KubeVirt's derived request cannot exceed the limit when the observed overhead remains within the binding. |
 | NetworkPolicy | Default-deny ingress and egress; one additional SSH ingress rule from the exact Gateway, freeze collector, and (when configured) Evaluation runner namespace and pod selectors; optional reviewed restricted-egress rule. |
 | Secret | Fixed base64 `data.userdata` cloud-init with public user CA only; locked non-root user; no password, root login, forwarding, tunnel, X11, private key or `authorized_keys`. |
-| DataVolume | Exact configured CDI `DataSource` and `StorageClass`, RWO root disk, immutable release/object/hash annotations. |
+| DataVolume | Exact configured CDI `DataSource` and `StorageClass`, RWO Filesystem root disk with the approved logical storage request, immutable release/object/hash annotations. |
 | VirtualMachine | `runStrategy: Always`, hardware-KVM node selector, no graphics, virtio root PVC and cloud-init disk, pod network and SSH readiness probe. |
 | Service | ClusterIP only, port 22, deterministic selector and access-controlled annotation. |
 
