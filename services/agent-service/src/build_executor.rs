@@ -42,7 +42,7 @@ use crate::build_pipeline::{
 use crate::build_provider::{
     BuildExecutorBackend, BuildExecutorRequest, BuildExecutorResponse, build_stage_name,
 };
-use crate::oci_import::parse_oci_layout;
+use crate::oci_import::{MANIFEST_MEDIA_TYPES, parse_oci_layout};
 use crate::oci_registry::{OciRegistryError, OciRegistryPublisher, RegistryCredentials};
 use crate::platform_images::{PgPlatformImageCatalog, PlatformImageEntry};
 
@@ -835,7 +835,7 @@ impl ProductionBuildExecutor {
             }
         }
         // Harbor can complete the delete while its Core API response remains
-        // pending. Registry tag listing is a separate, read-only and
+        // pending. The exact candidate manifest is a separate, read-only and
         // authoritative absence check; an indeterminate delete never becomes
         // success unless this exact repository proves the tag is absent.
         if !self
@@ -945,82 +945,89 @@ impl ProductionBuildExecutor {
         let token = self
             .registry_pull_token(context, project, repository)
             .await?;
-        let mut tags_url = Url::parse(&format!("https://{}/", self.config.harbor_registry))
+        let mut manifest_url = Url::parse(&format!("https://{}/", self.config.harbor_registry))
             .map_err(|_| rejected())?;
-        tags_url
+        manifest_url
             .path_segments_mut()
             .map_err(|()| rejected())?
-            .extend(["v2", project, repository, "tags", "list"]);
-        let tags_response = self
+            .extend(["v2", project, repository, "manifests", tag]);
+        let accepted_types = [
+            MANIFEST_MEDIA_TYPES[0],
+            MANIFEST_MEDIA_TYPES[1],
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        ]
+        .join(", ");
+        let mut manifest_response = self
             .client
-            .get(tags_url)
+            .get(manifest_url)
+            .header(reqwest::header::ACCEPT, accepted_types)
             .bearer_auth(token)
             .send()
             .await
             .map_err(|error| {
-                cleanup_network_failure(context, "cleanup.tag_list.request", &error)
+                cleanup_network_failure(context, "cleanup.manifest.request", &error)
             })?;
-        let status = tags_response.status();
-        let paginated = tags_response.headers().contains_key(reqwest::header::LINK);
-        if !matches!(status, StatusCode::OK | StatusCode::NOT_FOUND) {
+        let status = manifest_response.status();
+        if status == StatusCode::OK {
+            return Ok(false);
+        }
+        if status != StatusCode::NOT_FOUND {
             return Err(cleanup_failure(
                 context,
-                "cleanup.tag_list.response",
+                "cleanup.manifest.response",
                 "http_status",
                 Some(status.as_u16()),
             ));
         }
-        let tags_bytes = tags_response
-            .bytes()
-            .await
-            .map_err(|error| cleanup_network_failure(context, "cleanup.tag_list.body", &error))?;
-        if tags_bytes.len() > MAX_HARBOR_RESPONSE_BYTES {
+        if !manifest_response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|header| header.to_str().ok())
+            .is_some_and(|value| {
+                value.split(';').next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("application/json")
+                })
+            })
+        {
             return Err(output_invalid());
         }
-        let value: Value = serde_json::from_slice(&tags_bytes).map_err(|_| output_invalid())?;
-        if status == StatusCode::NOT_FOUND {
-            return if value
+        let mut manifest_bytes = Vec::new();
+        while let Some(chunk) = manifest_response
+            .chunk()
+            .await
+            .map_err(|error| cleanup_network_failure(context, "cleanup.manifest.body", &error))?
+        {
+            if chunk.len() > MAX_HARBOR_RESPONSE_BYTES - manifest_bytes.len() {
+                return Err(output_invalid());
+            }
+            manifest_bytes.extend_from_slice(&chunk);
+        }
+        let value: Value = serde_json::from_slice(&manifest_bytes).map_err(|_| output_invalid())?;
+        if value.get("type").is_none()
+            && value.get("title").is_none()
+            && value.get("status").is_none()
+            && value
                 .get("errors")
                 .and_then(Value::as_array)
                 .is_some_and(|errors| {
                     !errors.is_empty()
                         && errors.iter().all(|error| {
-                            error.get("code").and_then(Value::as_str) == Some("NAME_UNKNOWN")
+                            matches!(
+                                error.get("code").and_then(Value::as_str),
+                                Some("NAME_UNKNOWN" | "MANIFEST_UNKNOWN" | "NOT_FOUND")
+                            )
                         })
-                }) {
-                Ok(true)
-            } else {
-                Err(cleanup_failure(
-                    context,
-                    "cleanup.tag_list.response",
-                    "absence_unproven",
-                    Some(status.as_u16()),
-                ))
-            };
-        }
-        if !value
-            .get("tags")
-            .is_some_and(|tags| tags.is_null() || tags.is_array())
+                })
         {
-            return Err(output_invalid());
+            return Ok(true);
         }
-        let listing: HarborTagList =
-            serde_json::from_slice(&tags_bytes).map_err(|_| output_invalid())?;
-        if listing.name != format!("{project}/{repository}") {
-            return Err(output_invalid());
-        }
-        if listing
-            .tags
-            .unwrap_or_default()
-            .iter()
-            .any(|item| item == tag)
-        {
-            return Ok(false);
-        }
-        if paginated {
-            return Err(output_invalid());
-        }
-        Ok(true)
+        Err(cleanup_failure(
+            context,
+            "cleanup.manifest.response",
+            "absence_unproven",
+            Some(status.as_u16()),
+        ))
     }
 
     fn harbor_url(&self, segments: &[&str]) -> Result<Url, BuildProviderFailure> {
@@ -1197,12 +1204,6 @@ fn rewrite_runner_base_image_text(text: &str) -> String {
 #[derive(Deserialize)]
 struct HarborTokenResponse {
     token: String,
-}
-
-#[derive(Deserialize)]
-struct HarborTagList {
-    name: String,
-    tags: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -1842,31 +1843,150 @@ mod tests {
         .expect("validated production executor fixture"))
     }
 
-    #[tokio::test]
-    async fn cleanup_diagnostics_preserve_token_tag_and_strict_absence_failures()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn cleanup_manifest_response(mode: usize) -> axum::response::Response {
         use axum::response::IntoResponse as _;
-        let mode = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let value = match mode {
+            1 => return StatusCode::FORBIDDEN.into_response(),
+            2 => json!({"errors":[{"code":"NAME_UNKNOWN"}]}),
+            3 => json!({"errors":[{"code":"DENIED","message":"BODY_SECRET_SENTINEL"}]}),
+            4 => json!({"errors":[{"code":"NOT_FOUND"}]}),
+            5 => json!({"errors":[{"code":"MANIFEST_UNKNOWN"}]}),
+            6 => return ([("content-type", MANIFEST_MEDIA_TYPES[0])], "{}").into_response(),
+            7 => return StatusCode::UNAUTHORIZED.into_response(),
+            8 => json!({"errors":[]}),
+            9 => json!({"errors":[{"code":"NAME_UNKNOWN"},{"code":"DENIED"}]}),
+            10 => json!({"errors":[{"code":"OTHER"}]}),
+            11 => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [("content-type", "text/html")],
+                    "<html>BODY_SECRET_SENTINEL</html>",
+                )
+                    .into_response();
+            }
+            12 => json!({"type":"about:blank","status":404,"title":"BODY_SECRET_SENTINEL"}),
+            13 => json!({"errors":[{"message":"BODY_SECRET_SENTINEL"}]}),
+            14 => return axum::Json(json!({"errors":[{"code":"NOT_FOUND"}]})).into_response(),
+            15 => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({"errors":[{"code":"NOT_FOUND"}]})),
+                )
+                    .into_response();
+            }
+            16 => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [("content-type", "application/json")],
+                    " ".repeat(MAX_HARBOR_RESPONSE_BYTES + 1),
+                )
+                    .into_response();
+            }
+            17 => json!({"errors":{"code":"NOT_FOUND"}}),
+            19 => json!({"type":"about:blank","status":404,"errors":[{"code":"NOT_FOUND"}]}),
+            20 => json!({"errors":[{"code":"MANIFEST_UNKNOWN"},{"code":"OTHER"}]}),
+            21 => json!({"errors":null}),
+            22 => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [("content-type", "text/html")],
+                    r#"{"errors":[{"code":"NOT_FOUND"}]}"#,
+                )
+                    .into_response();
+            }
+            23 => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [("content-type", "application/problem+json")],
+                    r#"{"errors":[{"code":"NOT_FOUND"}]}"#,
+                )
+                    .into_response();
+            }
+            _ => json!({}),
+        };
+        (StatusCode::NOT_FOUND, axum::Json(value)).into_response()
+    }
+
+    fn cleanup_manifest_router(mode: &Arc<std::sync::atomic::AtomicUsize>) -> axum::Router {
+        use axum::response::IntoResponse as _;
         let token_mode = mode.clone();
-        let tag_mode = mode.clone();
-        let router = axum::Router::new()
-            .route("/service/token", axum::routing::get(move || {
-                let mode = token_mode.load(std::sync::atomic::Ordering::SeqCst);
-                async move {
-                    if mode == 0 { StatusCode::UNAUTHORIZED.into_response() }
-                    else { axum::Json(json!({"token":"TOKEN_SECRET_SENTINEL"})).into_response() }
-                }
-            }))
-            .route("/v2/project/image/tags/list", axum::routing::get(move || {
-                let mode = tag_mode.load(std::sync::atomic::Ordering::SeqCst);
-                async move {
-                    match mode {
-                        1 => StatusCode::FORBIDDEN.into_response(),
-                        2 => (StatusCode::NOT_FOUND, axum::Json(json!({"errors":[{"code":"NAME_UNKNOWN"}]}))).into_response(),
-                        _ => (StatusCode::NOT_FOUND, axum::Json(json!({"errors":[{"code":"DENIED","message":"BODY_SECRET_SENTINEL"}]}))).into_response(),
+        let manifest_mode = mode.clone();
+        axum::Router::new()
+            .route(
+                "/service/token",
+                axum::routing::get(
+                    move |axum::extract::Query(query): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >,
+                          headers: axum::http::HeaderMap| {
+                        let mode = token_mode.load(std::sync::atomic::Ordering::SeqCst);
+                        async move {
+                            assert_eq!(
+                                query.get("scope").map(String::as_str),
+                                Some("repository:project/image:pull")
+                            );
+                            assert_eq!(
+                                query.get("service").map(String::as_str),
+                                Some("harbor-registry")
+                            );
+                            assert!(
+                                headers
+                                    .get(reqwest::header::AUTHORIZATION)
+                                    .expect("basic authorization")
+                                    .to_str()
+                                    .expect("authorization text")
+                                    .starts_with("Basic ")
+                            );
+                            if mode == 0 {
+                                StatusCode::UNAUTHORIZED.into_response()
+                            } else {
+                                axum::Json(json!({"token":"TOKEN_SECRET_SENTINEL"})).into_response()
+                            }
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v2/project/image/manifests/candidate",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let mode = manifest_mode.load(std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        assert_eq!(
+                            headers
+                                .get(reqwest::header::AUTHORIZATION)
+                                .expect("pull bearer")
+                                .to_str()
+                                .expect("bearer text"),
+                            "Bearer TOKEN_SECRET_SENTINEL"
+                        );
+                        let accepted: Vec<_> = headers
+                            .get(reqwest::header::ACCEPT)
+                            .expect("manifest media types")
+                            .to_str()
+                            .expect("accept text")
+                            .split(',')
+                            .map(str::trim)
+                            .collect();
+                        assert_eq!(accepted.len(), 4);
+                        for media_type in [
+                            MANIFEST_MEDIA_TYPES[0],
+                            MANIFEST_MEDIA_TYPES[1],
+                            "application/vnd.oci.image.index.v1+json",
+                            "application/vnd.docker.distribution.manifest.list.v2+json",
+                        ] {
+                            assert!(accepted.contains(&media_type));
+                        }
+                        cleanup_manifest_response(mode)
                     }
-                }
-            }));
+                }),
+            )
+    }
+
+    #[tokio::test]
+    async fn cleanup_diagnostics_verify_exact_manifest_and_strict_absence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mode = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let router = cleanup_manifest_router(&mode);
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
         let key =
             rustls::pki_types::PrivateKeyDer::Pkcs8(certificate.signing_key.serialize_der().into());
@@ -1892,20 +2012,26 @@ mod tests {
         let backend = cleanup_registry_fixture(directory.path(), &host, &certificate).await?;
         let (mut context, _, _) = history_fixture();
         context.stage = crate::build_pipeline::BuildProviderStage::Cleanup;
-        for (index, absent) in [(0, false), (1, false), (2, true), (3, false)] {
+        for index in 0..=23 {
             mode.store(index, std::sync::atomic::Ordering::SeqCst);
             let result = backend
                 .registry_tag_absent_once(&context, "project", "image", "candidate")
                 .await;
-            if absent {
-                assert!(
-                    result.expect("typed registry absence"),
-                    "only typed registry absence is success"
+            if matches!(index, 2 | 4 | 5 | 6 | 14) {
+                assert_eq!(
+                    result.expect("typed manifest response"),
+                    matches!(index, 2 | 4 | 5)
                 );
             } else {
-                let failure = result.expect_err("HTTP denial cannot prove absence");
-                assert_eq!(failure.code, BuildProviderFailureCode::Unavailable);
-                assert!(failure.retryable);
+                let failure = result.expect_err("unproven response cannot establish absence");
+                assert_eq!(
+                    failure,
+                    if matches!(index, 11 | 16 | 22 | 23) {
+                        output_invalid()
+                    } else {
+                        unavailable()
+                    }
+                );
             }
         }
         shutdown.cancel();

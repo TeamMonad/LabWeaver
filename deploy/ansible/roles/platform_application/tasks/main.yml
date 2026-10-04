@@ -357,6 +357,62 @@
     fail_msg: PLATFORM_APPLICATION_ACCESS_CONFIGURATION_SCHEMA_INVALID
   no_log: true
 
+- name: Require one formal Portal origin before mutation
+  ansible.builtin.assert:
+    that:
+      - platform_application_access_configuration.oidc.redirect_uri | urlsplit('scheme') == 'https'
+      - platform_application_access_configuration.oidc.redirect_uri | urlsplit('hostname') == platform_application_portal_hostname
+      - platform_application_access_configuration.oidc.redirect_uri | urlsplit('port') in [none, 443]
+      - platform_application_access_configuration.oidc.post_logout_redirect_uri | urlsplit('scheme') == 'https'
+      - platform_application_access_configuration.oidc.post_logout_redirect_uri | urlsplit('hostname') == platform_application_portal_hostname
+      - platform_application_access_configuration.oidc.post_logout_redirect_uri | urlsplit('port') in [none, 443]
+      - platform_application_access_configuration.browser.allowed_origins | length > 0
+      - platform_application_access_configuration.browser.allowed_origins[0] | urlsplit('scheme') == 'https'
+      - platform_application_access_configuration.browser.allowed_origins[0] | urlsplit('hostname') == platform_application_portal_hostname
+      - platform_application_access_configuration.browser.allowed_origins[0] | urlsplit('port') in [none, 443]
+      - platform_application_web_configuration.accessBaseUrl | urlsplit('scheme') == 'https'
+      - platform_application_web_configuration.accessBaseUrl | urlsplit('hostname') == platform_application_portal_hostname
+      - platform_application_web_configuration.accessBaseUrl | urlsplit('port') in [none, 443]
+    fail_msg: PLATFORM_APPLICATION_PORTAL_ORIGIN_CONFLICT
+  vars:
+    platform_application_web_configuration: >-
+      {{ ((platform_application_configuration_objects
+           | selectattr('kind', 'equalto', 'ConfigMap')
+           | selectattr('metadata.name', 'equalto', 'web-config')
+           | first).data['deployment.json']) | from_json }}
+  when: platform_application_portal_route_name | length > 0
+  no_log: true
+
+- name: Verify the approved Portal server certificate before mutation
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - verify
+      - -CAfile
+      - "{{ platform_application_portal_tls_ca_file }}"
+      - -untrusted
+      - "{{ platform_application_portal_tls_certificate_file }}"
+      - -purpose
+      - sslserver
+      - -verify_hostname
+      - "{{ platform_application_portal_hostname }}"
+      - "{{ platform_application_portal_tls_certificate_file }}"
+  register: platform_application_portal_certificate_verification
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  when: platform_application_portal_route_name | length > 0
+  no_log: true
+
+- name: Reject an invalid approved Portal server certificate
+  ansible.builtin.assert:
+    that:
+      - platform_application_portal_certificate_verification.rc == 0
+    fail_msg: PLATFORM_APPLICATION_PORTAL_CERTIFICATE_INVALID
+  when: platform_application_portal_route_name | length > 0
+
 - name: Select reviewed NATS and Evaluation configuration objects
   ansible.builtin.set_fact:
     platform_application_control_secret_objects: >-
@@ -2395,6 +2451,29 @@
          | list }}
   when: platform_application_portal_route_name | length > 0
 
+- name: Require one compatible existing Portal listener before reconciliation
+  ansible.builtin.assert:
+    that:
+      - platform_application_portal_gateway_listener | length <= 1
+      - platform_application_portal_listener.protocol == 'HTTPS'
+      - platform_application_portal_listener.port | int == 443
+      - platform_application_portal_listener.tls.mode == 'Terminate'
+      - platform_application_portal_listener.tls.certificateRefs | length == 1
+      - platform_application_portal_listener.tls.certificateRefs[0].name == platform_application_portal_tls_secret_name
+      - platform_application_portal_listener.tls.certificateRefs[0].kind | default('Secret') == 'Secret'
+      - platform_application_portal_listener.tls.certificateRefs[0].group | default('') == ''
+      - >-
+        platform_application_portal_listener.tls.certificateRefs[0].namespace
+        | default(platform_application_portal_route_namespace) == platform_application_portal_route_namespace
+      - platform_application_portal_listener.allowedRoutes.namespaces.from == 'Selector'
+      - platform_application_portal_listener.allowedRoutes.namespaces.selector.matchLabels['labweaver.io/gateway-routes'] == 'allowed'
+    fail_msg: PLATFORM_APPLICATION_PORTAL_GATEWAY_CONFLICT
+  vars:
+    platform_application_portal_listener: "{{ platform_application_portal_gateway_listener[0] }}"
+  when:
+    - platform_application_portal_route_name | length > 0
+    - platform_application_portal_gateway_listener | length > 0
+
 - name: Add the bounded HTTPS listener when absent
   kubernetes.core.k8s_json_patch:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -2403,6 +2482,12 @@
     namespace: "{{ platform_application_portal_route_namespace }}"
     name: "{{ platform_application_portal_gateway_name }}"
     patch:
+      - op: test
+        path: /metadata/uid
+        value: "{{ platform_application_portal_gateway.resources[0].metadata.uid }}"
+      - op: test
+        path: /spec/listeners
+        value: "{{ platform_application_portal_gateway.resources[0].spec.listeners }}"
       - op: add
         path: /spec/listeners/-
         value:
@@ -2425,6 +2510,32 @@
   when:
     - platform_application_portal_route_name | length > 0
     - platform_application_portal_gateway_listener | length == 0
+
+- name: Reconcile only the approved Portal listener hostname
+  kubernetes.core.k8s_json_patch:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ platform_application_portal_route_namespace }}"
+    name: "{{ platform_application_portal_gateway_name }}"
+    patch:
+      - op: test
+        path: /metadata/uid
+        value: "{{ platform_application_portal_gateway.resources[0].metadata.uid }}"
+      - op: test
+        path: "{{ platform_application_portal_listener_path }}"
+        value: "{{ platform_application_portal_gateway_listener[0] }}"
+      - op: add
+        path: "{{ platform_application_portal_listener_path }}/hostname"
+        value: "{{ platform_application_portal_hostname }}"
+  vars:
+    platform_application_portal_listener_path: >-
+      /spec/listeners/{{ (platform_application_portal_gateway.resources[0].spec.listeners
+                         | map(attribute='name') | list).index(platform_application_portal_gateway_listener_name) }}
+  when:
+    - platform_application_portal_route_name | length > 0
+    - platform_application_portal_gateway_listener | length == 1
+    - platform_application_portal_gateway_listener[0].hostname | default('') != platform_application_portal_hostname
 
 - name: Read back the retained application Gateway after listener reconciliation
   kubernetes.core.k8s_info:
@@ -2449,6 +2560,7 @@
 - name: Require the exact bounded HTTPS listener
   ansible.builtin.assert:
     that:
+      - platform_application_portal_gateway_after.resources[0].metadata.uid == platform_application_portal_gateway.resources[0].metadata.uid
       - platform_application_portal_gateway_listener_after | length == 1
       - platform_application_portal_gateway_listener_after[0].protocol == 'HTTPS'
       - platform_application_portal_gateway_listener_after[0].port | int == 443

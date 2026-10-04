@@ -1610,21 +1610,36 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
     );
     let observed_deletes = Arc::new(AtomicUsize::new(0));
     let delete_count = observed_deletes.clone();
-    let expected_tag = tag.clone();
-    let listing_mode = Arc::new(AtomicUsize::new(0));
-    let mode = listing_mode.clone();
-    let listing_calls = Arc::new(AtomicUsize::new(0));
-    let calls = listing_calls.clone();
+    let expected_tag = Arc::new(std::sync::Mutex::new(tag.clone()));
+    let requested_tag = expected_tag.clone();
+    let manifest_mode = Arc::new(AtomicUsize::new(0));
+    let mode = manifest_mode.clone();
+    let manifest_calls = Arc::new(AtomicUsize::new(0));
+    let calls = manifest_calls.clone();
     let router = axum::Router::new()
-        .route("/service/token", axum::routing::get(|| async { axum::Json(serde_json::json!({"token":"test-token"})) }))
-        .route("/v2/labweaver-system/image/tags/list", axum::routing::get(move || {
-            let tag = expected_tag.clone(); let mode = mode.load(Ordering::SeqCst);
+        .route("/service/token", axum::routing::get(|axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+            assert_eq!(query.get("scope").map(String::as_str), Some("repository:labweaver-system/image:pull"));
+            axum::Json(serde_json::json!({"token":"test-token"}))
+        }))
+        .route("/v2/labweaver-system/image/manifests/{tag}", axum::routing::get(move |axum::extract::Path(tag): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
+            assert_eq!(tag, *requested_tag.lock().expect("expected owned candidate"));
+            assert_eq!(headers.get(axum::http::header::AUTHORIZATION).expect("pull token").to_str().expect("bearer text"), "Bearer test-token");
+            let accepted: Vec<_> = headers.get(axum::http::header::ACCEPT).expect("manifest Accept").to_str().expect("Accept text").split(',').map(str::trim).collect();
+            assert_eq!(accepted.len(), 4);
+            for media_type in ["application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"] { assert!(accepted.contains(&media_type)); }
+            let mode = mode.load(Ordering::SeqCst);
             calls.fetch_add(1, Ordering::SeqCst);
             async move {
-                let (name,tags) = if mode == 0 { ("labweaver-system/image",vec![tag]) } else if mode == 2 { ("foreign/image",vec![]) } else { ("labweaver-system/image",vec![]) };
-                let mut response = axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({"name":name,"tags":tags})));
-                if mode == 1 { response.headers_mut().insert(axum::http::header::LINK, axum::http::HeaderValue::from_static("</v2/labweaver-system/image/tags/list?last=other>; rel=next")); }
-                response
+                use axum::response::IntoResponse as _;
+                if mode == 0 { return ([("content-type", "application/vnd.oci.image.manifest.v1+json")], "{}").into_response(); }
+                let errors = match mode {
+                    1 => serde_json::json!([{"code":"DENIED"}]),
+                    2 => serde_json::json!([{"code":"OTHER"}]),
+                    4 => serde_json::json!([{"code":"NOT_FOUND"}]),
+                    5 => serde_json::json!([]),
+                    _ => serde_json::json!([{"code":"NOT_FOUND"},{"code":"DENIED"}]),
+                };
+                (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"errors": errors}))).into_response()
             }
         }))
         .route("/api/v2.0/projects/labweaver-system/repositories/image/artifacts/{reference}/tags/{tag}", axum::routing::delete(move |axum::extract::Path((reference, deleted_tag)): axum::extract::Path<(String,String)>| {
@@ -1758,11 +1773,15 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
     .fetch_one(&pool)
     .await?;
     assert_eq!(artifacts, 0);
-    for mode in [1, 2, 3] {
-        listing_mode.store(mode, Ordering::SeqCst);
-        let before = listing_calls.load(Ordering::SeqCst);
+    for mode in [1, 2, 3, 4, 5, 6] {
+        manifest_mode.store(mode, Ordering::SeqCst);
+        let before = manifest_calls.load(Ordering::SeqCst);
         let mut next = build_command()?;
         next.request.output_repository = command.request.output_repository.clone();
+        *expected_tag.lock().expect("expected owned candidate") = format!(
+            "candidate-{}",
+            &Sha256Digest::of_bytes(next.request.id.as_uuid().as_bytes()).to_string()[..24]
+        );
         let stage = if mode == 3 {
             next.request.source = contracts::supply_chain::BuildSource::ExportedOci {
                 image: contracts::supply_chain::ExportedOciImage {
@@ -1803,16 +1822,32 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
                 BuildExecutorResponse::Cleaned { .. }
             ));
             assert_eq!(
-                listing_calls.load(Ordering::SeqCst),
+                manifest_calls.load(Ordering::SeqCst),
                 before,
-                "digest-only import never lists or deletes a mutable tag"
+                "digest-only import never queries or deletes a mutable tag"
             );
             let cleaned: bool = sqlx::query_scalar("SELECT cleaned_at IS NOT NULL FROM agent.build_executor_artifacts WHERE build_request_id=$1").bind(next.request.id.as_uuid()).fetch_one(&pool).await?;
             assert!(cleaned);
+        } else if mode == 4 {
+            assert!(matches!(
+                response.response,
+                BuildExecutorResponse::Cleaned { .. }
+            ));
+            let (artifacts, receipt): (i64, serde_json::Value) = sqlx::query_as("SELECT (SELECT count(*) FROM agent.build_executor_artifacts WHERE build_request_id=$1),last_response FROM agent.build_executor_fences WHERE build_request_id=$1")
+                .bind(next.request.id.as_uuid()).fetch_one(&pool).await?;
+            assert_eq!(
+                artifacts, 0,
+                "absence verification never fabricates an artifact"
+            );
+            assert_eq!(
+                receipt,
+                serde_json::to_value(&response.response)?,
+                "same fenced cleanup persists its actual Cleaned response"
+            );
         } else {
             assert!(
-                matches!(response.response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::OutputInvalid),
-                "incomplete or foreign listing cannot establish absence"
+                matches!(response.response, BuildExecutorResponse::Failed { failure } if failure.code == BuildProviderFailureCode::Unavailable),
+                "unproven manifest response cannot establish absence"
             );
         }
         assert_eq!(observed_deletes.load(Ordering::SeqCst), 1);
