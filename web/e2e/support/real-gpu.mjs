@@ -160,10 +160,9 @@ export async function issueAccessGrantAndConnect(page, projectId, environmentId)
   const consolePanel = page.locator('.console-panel')
   await expect(consolePanel).toBeVisible({ timeout: 120_000 })
   const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
-  if (await openTerminal.count() > 0) {
-    await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
-    await openTerminal.click()
-  }
+  await expect(openTerminal).toBeVisible({ timeout: 120_000 })
+  await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
+  await openTerminal.click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   const input = page.locator('.xterm-helper-textarea')

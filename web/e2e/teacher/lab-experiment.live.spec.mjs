@@ -567,10 +567,20 @@ test('student completes a published lab experiment through the browser terminal'
   const packageCopy = resumeExistingRun ? null : await mkdtemp(join(tmpdir(), 'labweaver-lab-'))
   let environmentId
   let studentContext
+  let studentPage
   let adminContext
   let primaryFailure
   let primaryFailed = false
   const cleanupErrors = []
+  const frames = []
+  const terminalSockets = new Map()
+  const captureTerminalSocket = (socket) => {
+    const receive = ({ payload }) => {
+      frames.push(typeof payload === 'string' ? payload : Buffer.from(payload).toString('utf8'))
+    }
+    terminalSockets.set(socket, receive)
+    socket.on('framereceived', receive)
+  }
   try {
     let project
     let packageData
@@ -686,7 +696,7 @@ test('student completes a published lab experiment through the browser terminal'
     teacherGuards.assertCleanConsole('teacher-approval')
 
     studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
-    const studentPage = await studentContext.newPage()
+    studentPage = await studentContext.newPage()
     const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(page, project.id, studentActorId)
@@ -706,13 +716,15 @@ test('student completes a published lab experiment through the browser terminal'
     await auditAccessibility(studentPage, 'student-environment', testInfo)
     const beforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
 
-    const terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
-    const frames = []
-    studentPage.on('websocket', (socket) => {
-      socket.on('framereceived', ({ payload }) => {
-        frames.push(typeof payload === 'string' ? payload : Buffer.from(payload).toString('utf8'))
-      })
-    })
+    studentPage.on('websocket', captureTerminalSocket)
+    let terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
+    if (process.env.LABWEAVER_E2E_LAB === 'cuda') {
+      const starterCommand = "grep -Fx '#define BLOCKS 2' student/gpu_stats.cu && /usr/local/cuda/bin/nvcc -o gpu_stats student/gpu_stats.cu && ./gpu_stats > student/result.txt && cat student/result.txt"
+      const output = await typeTerminalCommand(studentPage, terminal.input, frames, starterCommand, 'LABWEAVER_LAB_STARTER_DONE')
+      expect(hasTerminalLine(output, 'N=256'), 'LAB_EXPERIMENT_GPU_STARTER_COUNT_MISSING').toBe(true)
+      expect(hasTerminalLine(output, 'sum=2016'), 'LAB_EXPERIMENT_GPU_STARTER_SUM_MISSING').toBe(true)
+      expect(hasTerminalLine(output, 'max=63'), 'LAB_EXPERIMENT_GPU_STARTER_MAX_MISSING').toBe(true)
+    }
     const frozen = await freezeStudentSourceByUi(studentPage, project.id, environmentId, LAB.frozenPath)
     const firstResult = await waitForProjectEvaluationResultWithResourceApproval({
       request: studentContext.request,
@@ -729,7 +741,7 @@ test('student completes a published lab experiment through the browser terminal'
     }
 
     if (LAB.fixCommands.length > 0) {
-      await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
+      terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
       for (const [index, command] of LAB.fixCommands.entries()) {
         const output = await typeTerminalCommand(studentPage, terminal.input, frames, command, `LABWEAVER_LAB_DONE_${index}`)
         if (LAB.gpuMode && index === LAB.fixCommands.length - 1) {
@@ -767,6 +779,15 @@ test('student completes a published lab experiment through the browser terminal'
     primaryFailure = error
     primaryFailed = true
   } finally {
+    try {
+      studentPage?.off('websocket', captureTerminalSocket)
+      for (const [socket, receive] of terminalSockets) socket.off('framereceived', receive)
+    } catch (error) {
+      cleanupErrors.push(error)
+    } finally {
+      frames.length = 0
+      terminalSockets.clear()
+    }
     try {
       if (environmentId) {
         if (!studentContext) studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
