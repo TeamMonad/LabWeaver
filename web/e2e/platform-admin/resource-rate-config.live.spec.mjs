@@ -55,7 +55,10 @@ function rowMatches(row, input, revision = null) {
   return Boolean(
     row
       && row.label === rateLabel(input)
-      && row.detail.startsWith(`${UNIT_QUANTITY} 基础单位 · ${input.amount} ${input.currency} ·`)
+      && row.details.some((detail) => detail.startsWith(`${UNIT_QUANTITY} 基础单位 · ${input.amount} ${input.currency} ·`))
+      && row.details.includes('基础单位：GPU 分配单位秒')
+      && row.details.some((detail) => detail.includes(`${input.amount} ${input.currency} / GPU 分配单位秒`))
+      && row.versionState === '现行'
       && Number.isInteger(row.revision)
       && row.revision >= 1
       && (revision === null || row.revision === revision),
@@ -96,10 +99,11 @@ async function readRateRows(page) {
   if (await list.count() === 0) return []
   return list.locator('li.rate-row').evaluateAll((rowElements) => rowElements.map((row) => {
     const label = row.querySelector('.rate-main strong')?.textContent?.trim() || ''
-    const detail = row.querySelector('.rate-main small')?.textContent?.trim() || ''
+    const details = Array.from(row.querySelectorAll('.rate-main small'), (detail) => detail.textContent?.trim() || '')
     const revisionText = row.querySelector('.state-chip')?.textContent || ''
     const revision = Number(revisionText.match(/版本\s+(\d+)/)?.[1] || NaN)
-    return { label, detail, revision }
+    const versionState = revisionText.split('·')[0].trim()
+    return { label, details, revision, versionState }
   }))
 }
 
@@ -130,7 +134,7 @@ async function waitForRateListSettled(page, operation) {
 
 function rowDescription(row) {
   if (!row) return 'missing'
-  return `label=${row.label};detail=${row.detail};revision=${row.revision}`
+  return `label=${row.label};details=${row.details.join(';')};revision=${row.revision};state=${row.versionState}`
 }
 
 async function waitForRateReadback(page, input, revision, operation) {
@@ -150,12 +154,23 @@ async function waitForRateReadback(page, input, revision, operation) {
 
 async function createRateByUi(page, input) {
   const form = page.getByTestId('resource-rate-form')
-  await form.locator('select').first().selectOption(GPU_UNIT)
-  await form.getByLabel('GPU class', { exact: true }).fill(input.gpuClass)
-  await form.getByLabel('分配模式', { exact: true }).selectOption(input.gpuMode)
-  await form.getByLabel('每次计费基础单位数', { exact: true }).fill(String(UNIT_QUANTITY))
-  await form.getByLabel('单价', { exact: true }).fill(input.amount)
+  await form.getByLabel('计费单位', { exact: true }).selectOption(GPU_UNIT)
+  const gpuSelect = form.getByLabel('GPU 目录分配类型', { exact: true })
+  await expect(gpuSelect).toBeEnabled()
+  const gpuOption = `${input.gpuClass}:${input.gpuMode}`
+  await expect(gpuSelect.locator(`option[value="${gpuOption}"]`)).toHaveText(`${input.gpuClass} · ${GPU_MODE_LABELS[input.gpuMode]}`)
+  await gpuSelect.selectOption(gpuOption)
+  await form.getByLabel('费率单价', { exact: true }).fill(input.amount)
   await form.getByLabel('币种', { exact: true }).fill(input.currency)
+  // The UI only accepts future versions. Select the next minute with enough
+  // time to submit, then observe that same version becoming current.
+  const effectiveFrom = await page.evaluate(() => {
+    const date = new Date(Math.ceil((Date.now() + 10_000) / 60_000) * 60_000)
+    const pad = (value) => String(value).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  })
+  await form.getByLabel('生效时间', { exact: true }).fill(effectiveFrom)
+  await expect(form.getByRole('status')).toContainText(`实际提交：${UNIT_QUANTITY} GPU 分配单位秒，金额 ${input.amount} ${input.currency}`)
 
   const createButton = form.getByRole('button', { name: '创建费率版本', exact: true })
   await expect(createButton).toBeEnabled()
@@ -175,10 +190,18 @@ test('platform administrator configures one explicitly requested GPU rate throug
   if (!INPUT) throw new Error('LW_RESOURCE_RATE_INPUT_REQUIRED')
 
   await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: '预算与费用', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible()
   await waitForRateListSettled(page, 'LOAD')
 
   const before = await readCurrentRates(page)
+  const upcoming = before.filter((rate) => rate.unit === GPU_UNIT
+    && rate.gpuClass === INPUT.gpuClass && rate.gpuMode === INPUT.gpuMode
+    && rate.unitQuantity === UNIT_QUANTITY && Date.parse(rate.effectiveFrom) > Date.now())
+  if (upcoming.length > 1) throw new Error(`LW_RESOURCE_RATE_FUTURE_AMBIGUOUS:${INPUT.gpuClass}`)
+  if (upcoming.length === 1 && (upcoming[0].unitPrice?.currency !== INPUT.currency
+    || upcoming[0].unitPrice?.amount !== INPUT.amount)) {
+    throw new Error(`LW_RESOURCE_RATE_FUTURE_CONFLICT:${INPUT.gpuClass}`)
+  }
   const current = before.filter((rate) => currentRateDimension(rate, INPUT))
   if (current.length > 1) throw new Error(`LW_RESOURCE_RATE_ACTIVE_AMBIGUOUS:${INPUT.gpuClass}`)
   if (current.length === 1) {
@@ -189,8 +212,13 @@ test('platform administrator configures one explicitly requested GPU rate throug
     return
   }
 
-  await createRateByUi(page, INPUT)
-  const after = await readCurrentRates(page)
+  if (upcoming.length === 0) await createRateByUi(page, INPUT)
+  let after = []
+  await expect.poll(async () => {
+    after = await readCurrentRates(page)
+    return after.some((rate) => rateMatchesInput(rate, INPUT)
+      && (upcoming.length === 0 || rate.id === upcoming[0].id))
+  }, { timeout: 75_000, intervals: [250, 500, 1000] }).toBe(true)
   const created = after.filter((rate) => currentRateDimension(rate, INPUT))
   if (created.length !== 1 || !rateMatchesInput(created[0], INPUT)) {
     throw new Error(`LW_RESOURCE_RATE_ACTIVE_READBACK_MISMATCH:${INPUT.gpuClass}`)
