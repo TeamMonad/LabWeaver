@@ -23,7 +23,8 @@ use contracts::resource::{
     ResourceUsageRecord,
 };
 use contracts::{
-    ActorId, ChargeId, LeaseId, ProjectId, ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
+    ActorId, ChargeId, DiagnosticCode, LeaseId, ProblemDetails, ProjectId, ResourceRequestId,
+    Revision, TaskRunId, UtcTimestamp,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -1386,12 +1387,7 @@ pub enum ResourceApiError {
 
 impl IntoResponse for ResourceApiError {
     fn into_response(self) -> Response {
-        let diagnostic = self.to_string();
-        let diagnostic_code = diagnostic
-            .split(':')
-            .next()
-            .unwrap_or("LW_RESOURCE_REQUEST_FAILED")
-            .to_owned();
+        let diagnostic_code = resource_diagnostic_code(&self.to_string());
         let status = match &self {
             Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
             Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
@@ -1409,26 +1405,244 @@ impl IntoResponse for ResourceApiError {
             self,
             Self::Store(ResourceStoreError::Persistence(_) | ResourceStoreError::Database(_))
         );
+        let context = telemetry::current_request_context()
+            .unwrap_or_else(telemetry::RequestContext::generate);
+        let request_id = context.request_id().to_owned();
+        let detail = if matches!(self, Self::Store(ResourceStoreError::GpuCapacityExhausted)) {
+            "GPU 容量不足，请等待资源释放或回收已有环境后重试。"
+        } else {
+            "资源请求未通过，请根据诊断信息检查权限、参数或当前资源状态。"
+        };
+        let problem = ProblemDetails {
+            problem_type: format!(
+                "urn:labweaver:problem:{}",
+                diagnostic_code.as_str().to_ascii_lowercase()
+            ),
+            title: "Resource request blocked".to_owned(),
+            status: status.as_u16(),
+            detail: detail.to_owned(),
+            instance: format!("urn:labweaver:request:{request_id}"),
+            diagnostic_code,
+            request_id,
+            trace_id: Some(context.trace_id().to_owned()),
+            retryable,
+            violations: Vec::new(),
+        };
         tracing::warn!(
             event = "resource.api.rejected",
             component = "api-error-boundary",
             operation = "http.request",
             outcome = "rejected",
             duration_ms = 0_u64,
-            diagnostic_code = diagnostic_code.as_str(),
+            diagnostic_code = problem.diagnostic_code.as_str(),
             error_kind = "request_rejected",
             failure_stage = "resource.request.finalize",
             retryable,
             safe_detail = "request_rejected",
             http_status = status.as_u16(),
         );
-        (status, diagnostic_code).into_response()
+        (
+            status,
+            [(header::CONTENT_TYPE, "application/problem+json")],
+            Json(problem),
+        )
+            .into_response()
     }
+}
+
+fn resource_diagnostic_code(diagnostic: &str) -> DiagnosticCode {
+    DiagnosticCode::parse(diagnostic.split(':').next().unwrap_or_default())
+        .unwrap_or_else(|_| DiagnosticCode::registered("LW_RESOURCE_REQUEST_FAILED"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    async fn read_problem(
+        response: Response,
+    ) -> Result<ProblemDetails, Box<dyn std::error::Error>> {
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&axum::http::HeaderValue::from_static(
+                "application/problem+json"
+            ))
+        );
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 4096).await?;
+        let problem: ProblemDetails = serde_json::from_slice(&bytes)?;
+        assert_eq!(problem.status, status.as_u16());
+        Ok(problem)
+    }
+
+    #[tokio::test]
+    async fn api_error_gpu_capacity_preserves_wire_diagnostic_and_correlation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const REQUEST_ID: &str = "01900000-0000-7000-8000-000000000001";
+        const TRACE_ID: &str = "01900000000070008000000000000002";
+        const TRACEPARENT: &str = "00-01900000000070008000000000000002-0190000000007001-01";
+        let router = telemetry::instrument_http(
+            Router::new().route(
+                "/capacity",
+                get(|| async { ResourceApiError::Store(ResourceStoreError::GpuCapacityExhausted) }),
+            ),
+            "resource-service",
+            "api-error-test",
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/capacity")
+                    .header("x-request-id", REQUEST_ID)
+                    .header("traceparent", TRACEPARENT)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some(REQUEST_ID)
+        );
+        let problem = read_problem(response).await?;
+        assert_eq!(
+            problem.diagnostic_code.as_str(),
+            "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"
+        );
+        assert_eq!(
+            problem.problem_type,
+            "urn:labweaver:problem:lw_resource_gpu_capacity_exhausted"
+        );
+        assert_eq!(problem.request_id, REQUEST_ID);
+        assert_eq!(problem.trace_id.as_deref(), Some(TRACE_ID));
+        assert_eq!(
+            problem.instance,
+            format!("urn:labweaver:request:{REQUEST_ID}")
+        );
+        assert!(problem.detail.contains("GPU 容量不足"));
+        assert!(!problem.retryable);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_error_without_http_context_generates_valid_problem_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let problem = read_problem(ResourceApiError::Invalid.into_response()).await?;
+        assert_eq!(
+            uuid::Uuid::parse_str(&problem.request_id)?.get_version_num(),
+            7
+        );
+        let trace_id = problem.trace_id.ok_or("missing trace identity")?;
+        assert_eq!(trace_id.len(), 32);
+        assert!(trace_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(trace_id.bytes().any(|byte| byte != b'0'));
+        assert_eq!(
+            problem.instance,
+            format!("urn:labweaver:request:{}", problem.request_id)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_error_problem_preserves_authorization_revision_and_other_http_statuses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (error, status, diagnostic) in [
+            (
+                ResourceApiError::CallerDenied,
+                StatusCode::FORBIDDEN,
+                "LW_RESOURCE_GATEWAY_DENIED",
+            ),
+            (
+                ResourceApiError::IdentityInvalid,
+                StatusCode::FORBIDDEN,
+                "LW_AUTH_IDENTITY_INVALID",
+            ),
+            (
+                ResourceApiError::ScopeDenied,
+                StatusCode::FORBIDDEN,
+                "LW_AUTH_SCOPE_DENIED",
+            ),
+            (
+                ResourceApiError::RevisionConflict,
+                StatusCode::PRECONDITION_FAILED,
+                "LW_RESOURCE_REVISION_CONFLICT",
+            ),
+            (
+                ResourceApiError::Invalid,
+                StatusCode::BAD_REQUEST,
+                "LW_RESOURCE_REQUEST_INVALID",
+            ),
+            (
+                ResourceApiError::ServiceConfiguration,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LW_AUTH_SERVICE_CONFIG_INVALID",
+            ),
+            (
+                ResourceApiError::Store(ResourceStoreError::NotFound),
+                StatusCode::NOT_FOUND,
+                "LW_RESOURCE_NOT_FOUND",
+            ),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            let problem = read_problem(response).await?;
+            assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+            assert!(!problem.retryable);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_error_transient_problem_keeps_retry_semantics_without_private_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const PRIVATE_DETAIL: &str = "SECRET_SENTINEL postgres://private-dsn:password@database";
+        for (error, diagnostic) in [
+            (
+                ResourceStoreError::Persistence(persistence_sqlx::PersistenceError::Configuration(
+                    PRIVATE_DETAIL.to_owned(),
+                )),
+                "LW_RESOURCE_PERSISTENCE_FAILED",
+            ),
+            (
+                ResourceStoreError::Database(sqlx::Error::Protocol(PRIVATE_DETAIL.to_owned())),
+                "LW_RESOURCE_DATABASE_FAILED",
+            ),
+        ] {
+            let response = ResourceApiError::Store(error).into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let problem = read_problem(response).await?;
+            assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+            assert!(problem.retryable);
+            let serialized = serde_json::to_string(&problem)?;
+            assert!(!serialized.contains("SECRET_SENTINEL"));
+            assert!(!serialized.contains("private-dsn"));
+            assert!(!serialized.contains("password"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn api_error_diagnostic_rejects_malformed_prefix_and_discards_private_suffix() {
+        for invalid in [
+            "",
+            "private database error",
+            "LW_BAD secret",
+            "LW_BAD\nSECRET_SENTINEL",
+        ] {
+            assert_eq!(
+                resource_diagnostic_code(invalid).as_str(),
+                "LW_RESOURCE_REQUEST_FAILED"
+            );
+        }
+        assert_eq!(
+            resource_diagnostic_code("LW_RESOURCE_PERSISTENCE_FAILED: SECRET_SENTINEL").as_str(),
+            "LW_RESOURCE_PERSISTENCE_FAILED"
+        );
+    }
 
     #[test]
     fn delegated_identity_is_not_read_from_http_headers() {
