@@ -49,6 +49,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
 jsonwebtoken.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }
 testcontainers = { version = "=0.25.0", features = ["blocking"] }

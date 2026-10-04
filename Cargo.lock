@@ -133,6 +133,7 @@ dependencies = [
  "futures-util",
  "http-auth",
  "hyper-util",
+ "jsonschema",
  "jsonwebtoken",
  "persistence-sqlx",
  "rand 0.9.5",

@@ -2627,8 +2627,15 @@ fn provider_environment_schema() -> Result<Value, ()> {
 /// Wraps the Evaluation candidate with the per-experiment runner build recipe. Claude can
 /// propose bounded runner recipe files, but it never receives an `ArtifactRef` field to fill in.
 fn provider_evaluation_schema() -> Result<Value, ()> {
-    let evaluation = evaluation_spec_schema().map_err(|_| ())?;
+    let mut evaluation = evaluation_spec_schema().map_err(|_| ())?;
+    // Generated references use #/$defs, so their definitions belong at the wrapper root.
+    let definitions = evaluation
+        .as_object_mut()
+        .ok_or(())?
+        .remove("$defs")
+        .ok_or(())?;
     Ok(serde_json::json!({
+        "$defs": definitions,
         "type": "object",
         "additionalProperties": false,
         "required": ["evaluation", "runnerBuildRecipe"],
@@ -3482,9 +3489,83 @@ mod tests {
         CLAUDE_RUNTIME_PATH, ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
         ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError, RunCancellation, TokioClaudeCodeProcess,
         decimal_to_microusd, execute_process, microusd_to_usd, platform_image_prompt,
-        read_stream_until_result, usd_number_to_microusd,
+        provider_evaluation_schema, read_stream_until_result, usd_number_to_microusd,
     };
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
+
+    #[test]
+    fn provider_evaluation_schema_validates_existing_candidates() -> Result<(), Box<dyn Error>> {
+        let validator = jsonschema::validator_for(
+            &provider_evaluation_schema()
+                .map_err(|()| "provider Evaluation schema could not be generated")?,
+        )?;
+        for fixture in [
+            include_str!("../../../crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml"),
+            include_str!(
+                "../../../crates/contracts/tests/fixtures/evaluation/linux/evaluation.yaml"
+            ),
+        ] {
+            let evaluation = contracts::evaluation::EvaluationSpec::from_yaml(fixture)?;
+            for recipe in [
+                json!({"mode": "package"}),
+                json!({"mode": "submitted", "source_path": "evaluation/context.tar.gz"}),
+                json!({"mode": "generated", "files": [{
+                    "path": "evaluation/Dockerfile", "content": "FROM scratch\n"
+                }]}),
+            ] {
+                let candidate = json!({"evaluation": evaluation, "runnerBuildRecipe": recipe});
+                assert!(validator.is_valid(&candidate));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_evaluation_schema_rejects_invalid_candidates() -> Result<(), Box<dyn Error>> {
+        let validator = jsonschema::validator_for(
+            &provider_evaluation_schema()
+                .map_err(|()| "provider Evaluation schema could not be generated")?,
+        )?;
+        let evaluation = contracts::evaluation::EvaluationSpec::from_yaml(include_str!(
+            "../../../crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml"
+        ))?;
+        let valid = json!({"evaluation": evaluation, "runnerBuildRecipe": {"mode": "package"}});
+        for field in ["evaluation", "runnerBuildRecipe"] {
+            let mut candidate = valid.clone();
+            candidate
+                .as_object_mut()
+                .ok_or("candidate must be an object")?
+                .remove(field);
+            assert!(!validator.is_valid(&candidate));
+        }
+        for (pointer, value) in [
+            (
+                "/evaluation/spec/submission/collector/maxBytes",
+                json!("invalid"),
+            ),
+            ("/evaluation/spec/steps/0/runner/kind", json!("unknown")),
+            ("/runnerBuildRecipe", json!({"mode": "unknown"})),
+            (
+                "/runnerBuildRecipe",
+                json!({"mode": "generated", "files": [{
+                    "path": "evaluation/Dockerfile"
+                }]}),
+            ),
+        ] {
+            let mut candidate = valid.clone();
+            *candidate
+                .pointer_mut(pointer)
+                .ok_or("fixture field must exist")? = value;
+            assert!(!validator.is_valid(&candidate));
+        }
+        let mut candidate = valid.clone();
+        candidate["evaluation"]["metadata"]["unknown"] = json!(true);
+        assert!(!validator.is_valid(&candidate));
+        candidate = valid;
+        candidate["runner_build_context"] = json!({"artifactId": "provider-owned"});
+        assert!(!validator.is_valid(&candidate));
+        Ok(())
+    }
 
     #[test]
     #[allow(clippy::expect_used)]
