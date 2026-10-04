@@ -1,10 +1,12 @@
 ---
 - name: Load the reviewed Cilium chart and image lock
+  tags: [cilium]
   ansible.builtin.set_fact:
     cluster_network_cilium_lock: >-
       {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).cilium }}
 
 - name: Require the locked Cilium image to match the chart release
+  tags: [cilium]
   ansible.builtin.assert:
     that:
       - cluster_network_cilium_lock.chart is match('^[0-9]+[.][0-9]+[.][0-9]+$')
@@ -16,6 +18,7 @@
     fail_msg: CILIUM_RELEASE_LOCK_INVALID
 
 - name: Assert Helm is available on the control plane
+  tags: [cilium]
   ansible.builtin.command: helm version --short
   changed_when: false
 
@@ -28,6 +31,7 @@
                    ~ gateway_api_version ~ '/experimental-install.yaml') }}
 
 - name: Add pinned Helm repositories
+  tags: [cilium]
   kubernetes.core.helm_repository:
     name: "{{ item.name }}"
     repo_url: "{{ item.url }}"
@@ -37,6 +41,7 @@
   environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Install Cilium with kube-proxy replacement and Gateway API
+  tags: [cilium]
   kubernetes.core.helm:
     name: cilium
     chart_ref: cilium/cilium

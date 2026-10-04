@@ -84,6 +84,33 @@ ansible-playbook -i inventories/v1/hosts.yml playbooks/00-preflight.yml \
   -e labweaver_preflight_scope=cluster
 ```
 
+### 1.6 单独维护 Cilium
+
+已有集群仅维护 Cilium 时，获得网络维护许可后使用 `50-install-network.yml --tags cilium`。
+该选择只加载并校验版本锁、检查 Helm、注册已有 Helm repositories 和维护 Cilium release；
+不应用 Gateway API CRD、节点 host policy、MetalLB release 或地址池。repository 注册仍包含
+MetalLB，但不安装或升级 MetalLB。未指定 tag 的完整 playbook 行为保持不变。
+
+先核对源码是批准的 commit 且工作树干净，并审核 `deploy/versions.lock.yml` 中的 chart 与镜像。
+`KUBERNETES_API_ADVERTISE_ADDRESS` 应来自现有 Cilium Helm values 的 `k8sServiceHost`，并与
+kube-apiserver 的 advertise address 或受管 inventory 事实交叉核对；不能猜测地址。
+`ANSIBLE_PYTHON_INTERPRETER` 使用控制器已批准、包含 Kubernetes SDK 的解释器。
+
+```sh
+test "$(git rev-parse HEAD)" = "$APPROVED_SOURCE_REVISION"
+test -z "$(git status --porcelain)"
+ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
+ansible-playbook -i deploy/ansible/inventories/v1/hosts.yml \
+  --vault-password-file deploy/ansible/inventories/v1/.vault-password \
+  deploy/ansible/playbooks/50-install-network.yml --tags cilium \
+  -e "kubernetes_api_advertise_address=$KUBERNETES_API_ADVERTISE_ADDRESS" \
+  -e "ansible_python_interpreter=$ANSIBLE_PYTHON_INTERPRETER"
+```
+
+Cilium 及其 chart 管理的组件会滚动更新，可能中断环境网络和 Gateway 长连接；该 tag
+不排空业务或改变节点内核。执行前安排维护窗口，保留上一份批准的版本锁和 Helm revision，
+并按 `docs/deployment/ansible.md` 核对升级后状态和回滚条件。
+
 ## 2. 构建与发布镜像
 
 打包在干净的源码树上进行（脏树会被 `LW_PACKAGE_INPUT_DIRTY` 拒绝），并锁 Rust 工具链与摘要固定的基础镜像。
