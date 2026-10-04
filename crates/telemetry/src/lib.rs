@@ -297,6 +297,8 @@ fn safe_log_field(name: &str) -> bool {
             | "operation"
             | "outcome"
             | "duration_ms"
+            | "elapsed_ms"
+            | "remaining_ms"
             | "request_id"
             | "trace_id"
             | "actor_id"
@@ -323,6 +325,7 @@ fn safe_log_field(name: &str) -> bool {
             | "event_id"
             | "message_id"
             | "revision"
+            | "generation"
             | "attempt"
             | "delivery_attempt"
             | "max_delivery_attempt"
@@ -335,6 +338,7 @@ fn safe_log_field(name: &str) -> bool {
             | "diagnostic_code"
             | "error_kind"
             | "failure_stage"
+            | "readiness_gate"
             | "safe_detail"
             | "s3_error_code"
             | "s3_request_id"
@@ -350,6 +354,7 @@ fn safe_log_field(name: &str) -> bool {
             | "kind"
             | "phase"
             | "terminal_status"
+            | "terminal"
             | "awarded_points"
             | "max_points"
             | "compile_exit_code"
@@ -884,6 +889,68 @@ mod tests {
             event["s3_request_id"],
             "tx000000000000000000000-0000000000000000-0000000000000000-0000000000000000"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn formatter_preserves_kubevirt_readiness_context_and_redacts_protected_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .event_format(SafeJsonFormatter {
+                service: "environment-service",
+            })
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(SharedWriter(Arc::clone(&bytes)))
+            .finish();
+        let environment_id = "01900000-0000-7000-8000-000000000001";
+        let operation_id = "01900000-0000-7000-8000-000000000002";
+        let request_id = "01900000-0000-7000-8000-000000000003";
+        let gate: &'static str = "vmi_not_running";
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                event = "environment.kubevirt_executor.readiness_wait",
+                environment_id = %environment_id,
+                operation_id = %operation_id,
+                provider_step = 2_u32,
+                attempt = 3_u32,
+                request_id = %request_id,
+                generation = 4_u64,
+                diagnostic_code = "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+                readiness_gate = gate,
+                retryable = true,
+                terminal = false,
+                elapsed_ms = u64::MAX,
+                remaining_ms = 1_000_u64,
+                guest_ip = "GUEST_IP_SENTINEL",
+                model_input = "MODEL_INPUT_SENTINEL",
+                token = "Bearer TOKEN_SENTINEL",
+                safe_detail = "Bearer SECRET_VALUE_SENTINEL",
+            );
+        });
+        let output = String::from_utf8(bytes.lock().map_err(|_| "poisoned")?.clone())?;
+        let event: serde_json::Value = serde_json::from_str(output.trim())?;
+        assert_eq!(
+            event["event"],
+            "environment.kubevirt_executor.readiness_wait"
+        );
+        assert_eq!(event["level"], "WARN");
+        assert_eq!(event["environment_id"].as_str(), Some(environment_id));
+        assert_eq!(event["operation_id"].as_str(), Some(operation_id));
+        assert_eq!(event["request_id"].as_str(), Some(request_id));
+        assert_eq!(event["provider_step"].as_u64(), Some(2));
+        assert_eq!(event["attempt"].as_u64(), Some(3));
+        assert_eq!(event["generation"].as_u64(), Some(4));
+        assert_eq!(event["readiness_gate"].as_str(), Some(gate));
+        assert_eq!(event["terminal"].as_bool(), Some(false));
+        assert_eq!(event["elapsed_ms"].as_u64(), Some(u64::MAX));
+        assert_eq!(event["remaining_ms"].as_u64(), Some(1_000));
+        assert_eq!(event["retryable"].as_bool(), Some(true));
+        assert!(event.get("guest_ip").is_none());
+        assert!(event.get("model_input").is_none());
+        assert_eq!(event["token"], "redacted_unclassified");
+        assert_eq!(event["safe_detail"], "redacted_unclassified");
+        assert!(!output.contains("SENTINEL"));
         Ok(())
     }
 
