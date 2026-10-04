@@ -61,6 +61,8 @@ Every generated container Dockerfile must create a readable (possibly empty) `/o
 
 When the materials request a container but omit optional presentation choices, generate a valid container object. If the supplied package already contains the complete student Dockerfile and its files, prefer build_recipe {"mode":"package"}; otherwise use a generated build_recipe containing a Dockerfile and every file that Dockerfile references. When the materials explicitly require an existing uploaded context, use mode submitted and its exact relative source_path.
 
+If the materials declare resources.gpu, preserve its class and count exactly in the candidate. Omitting GPU, changing its class or count, or substituting a CPU environment is rejected. This requirement applies equally to YAML and JSON EnvironmentSpec materials.
+
 Container runtime nesting is exactly this shape and closes only at the end: "runtime":{"kind":"container","provider_binding":"NAME","service_port":8080,"build_recipe":{"mode":"generated","files":[{"path":"Dockerfile","content":"FROM ..."},{"path":"other","content":"..."}]}}. The files array closes with exactly one ], the build_recipe object closes with exactly one }, and the runtime object closes with exactly one }; never emit a second closing ] after the build_recipe object. When both a files array and an entries array appear, close each array independently and do not merge their brackets.
 
 The generated files array must be a self-contained build context: every relative path named by a COPY, ADD, or `COPY --from` source in the Dockerfile must appear as a generated file whose content is the exact material file content. When the materials include a complete Dockerfile, reproduce it verbatim and include every path it copies, including files under directories such as student/, reference/, tests/, scripts/, profiles/, workspace-seed/, and README.md. Never emit a Dockerfile that copies a path you do not also provide as a generated file.
@@ -126,6 +128,8 @@ impl ImmutableEgressInput {
         if bytes.is_empty() || bytes.len() > MAX_EGRESS_INPUT_BYTES {
             return Err(EgressPreparationError::InputLimitExceeded);
         }
+        declared_environment_spec_from_bytes(&bytes)
+            .map_err(|()| EgressPreparationError::PackageInvalid)?;
         let sha256 = Sha256Digest::of_bytes(&bytes);
         Ok(Self {
             bytes: Arc::from(bytes),
@@ -2197,6 +2201,36 @@ impl ClaudeCodeRuntime {
             ));
         }
         let mut output = output;
+        let declared = if track == AgentTrackKind::Environment {
+            let declared = declared_environment_spec_from_bytes(&input.bytes()).map_err(|()| {
+                failure_with_audit(ClaudeCodeRuntimeError::ProtocolInvalid, audit.clone())
+            })?;
+            if let Some(gpu) = declared
+                .as_ref()
+                .and_then(|spec| spec.pointer("/resources/gpu"))
+                && !gpu.is_null()
+            {
+                let requested: contracts::resource::GpuRequest =
+                    serde_json::from_value(gpu.clone()).map_err(|_| {
+                        failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone())
+                    })?;
+                let proposed = output.pointer("/resources/gpu").cloned().and_then(|gpu| {
+                    serde_json::from_value::<contracts::resource::GpuRequest>(gpu).ok()
+                });
+                if proposed.as_ref() != Some(&requested) {
+                    let mut failure =
+                        failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone());
+                    failure.repair_detail = Some(format!(
+                        "Preserve the materials' resources.gpu exactly: class={}, count={}. Do not omit GPU or substitute a CPU environment.",
+                        requested.class, requested.count,
+                    ));
+                    return Err(failure);
+                }
+            }
+            declared
+        } else {
+            None
+        };
         if track == AgentTrackKind::Environment
             && output.pointer("/runtime/kind").and_then(Value::as_str) == Some("container")
         {
@@ -2258,7 +2292,6 @@ impl ClaudeCodeRuntime {
                     );
                     failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
                 })?;
-            let declared = declared_environment_spec_from_bytes(&input.bytes());
             if let Some(declared) = declared.as_ref() {
                 let restored = preserve_declared_environment_surfaces(&mut output, declared);
                 if !restored.is_empty() {
@@ -3225,17 +3258,46 @@ fn contains_protected_field(output: &Value) -> bool {
 /// The envelope embeds teacher material as JSON strings, so the spec has to be recovered by
 /// parsing each embedded document; both an `environmentSpec` member and a bare spec document are
 /// accepted because the authoring prompt tells the candidate about both shapes.
-fn declared_environment_spec_from_bytes(bytes: &[u8]) -> Option<Value> {
-    let envelope: Value = serde_json::from_slice(bytes).ok()?;
-    envelope.get("files")?.as_array()?.iter().find_map(|file| {
-        let content = file.get("content")?.as_str()?;
-        let document: Value = serde_json::from_str(content).ok()?;
-        if document.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec") {
-            return Some(document);
+fn declared_environment_spec_from_bytes(bytes: &[u8]) -> Result<Option<Value>, ()> {
+    let envelope: Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    let files = envelope.get("files").and_then(Value::as_array).ok_or(())?;
+    for file in files {
+        let named_spec = matches!(
+            file.get("path").and_then(Value::as_str),
+            Some("environment.yaml" | "environment.yml" | "environment.json")
+        );
+        let Some(content) = file.get("content").and_then(Value::as_str) else {
+            if named_spec {
+                return Err(());
+            }
+            continue;
+        };
+        let document: Value = match serde_yaml::from_str(content) {
+            Ok(value) => value,
+            Err(_) if named_spec => return Err(()),
+            Err(_) => continue,
+        };
+        let spec = document.get("environmentSpec").unwrap_or(&document);
+        if spec.get("kind").and_then(Value::as_str) != Some("EnvironmentSpec") {
+            if named_spec || document.get("environmentSpec").is_some() {
+                return Err(());
+            }
+            continue;
         }
-        let spec = document.get("environmentSpec")?.clone();
-        (spec.get("kind").and_then(Value::as_str) == Some("EnvironmentSpec")).then_some(spec)
-    })
+        if spec
+            .get("resources")
+            .is_some_and(|resources| !resources.is_object())
+        {
+            return Err(());
+        }
+        if let Some(gpu) = spec.pointer("/resources/gpu").filter(|gpu| !gpu.is_null()) {
+            let gpu: contracts::resource::GpuRequest =
+                serde_json::from_value(gpu.clone()).map_err(|_| ())?;
+            gpu.validate().map_err(|_| ())?;
+        }
+        return Ok(Some(spec.clone()));
+    }
+    Ok(None)
 }
 
 /// Fills the declared surfaces a candidate left out.
@@ -4046,8 +4108,277 @@ mod tests {
         Ok(())
     }
 
+    struct GpuTestMaterializer {
+        writes: std::sync::atomic::AtomicUsize,
+        artifact: contracts::ArtifactRef,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::candidate_materializer::EnvironmentCandidateMaterializer for GpuTestMaterializer {
+        async fn materialize(
+            &self,
+            _project_id: contracts::ProjectId,
+            _course_id: Option<contracts::CourseId>,
+            _package_id: contracts::ProblemPackageId,
+            _package_revision: contracts::Revision,
+            _plan: &serde_json::Value,
+        ) -> Result<
+            contracts::ArtifactRef,
+            crate::candidate_materializer::CandidateMaterializationError,
+        > {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.artifact.clone())
+        }
+    }
+
+    fn gpu_candidate_fixture() -> Result<serde_json::Value, Box<dyn Error>> {
+        Ok(serde_yaml::from_str(include_str!(
+            "../../../examples/cuda-lab/environment.yaml"
+        ))?)
+    }
+
+    fn gpu_test_input(
+        files: &serde_json::Value,
+    ) -> Result<
+        (
+            super::ClaudeCodeRuntime,
+            super::ImmutableEgressInput,
+            std::sync::Arc<GpuTestMaterializer>,
+        ),
+        Box<dyn Error>,
+    > {
+        let policy: contracts::authoring::ProjectLlmEgressPolicy = serde_json::from_value(json!({
+            "id": contracts::PolicyId::new(), "projectId": contracts::ProjectId::new(),
+            "courseId": null, "revision": 1,
+            "binding": { "runtimeBinding": "claude-code-production", "model": "test-model",
+                "claudeCodeVersion": "2.1.215", "maxInFlightPerWorker": 1 },
+            "budget": { "maxInputTokens": 1000, "maxOutputTokens": 1000, "maxRequests": 3,
+                "maxCostMicrousd": 1000, "timeoutMilliseconds": 1000,
+                "maxTransientRetries": 0, "maxSchemaRepairs": 2 },
+            "deniedDataClasses": ["secret", "token", "private_key",
+                "personally_identifiable_information", "unallowlisted_student_submission"],
+            "studentContentMode": "manifest_allowlist_only",
+            "activatedAt": "2026-07-14T08:00:00.000Z"
+        }))?;
+        let fixture = gpu_candidate_fixture()?;
+        let package = contracts::authoring::ProblemPackage {
+            id: contracts::ProblemPackageId::new(),
+            project_id: policy.project_id,
+            course_id: policy.course_id,
+            revision: contracts::Revision::new(1)?,
+            files: Vec::new(),
+            retention: serde_json::from_value(fixture["retention"].clone())?,
+            completed_at: "2026-07-14T08:00:00.000Z".parse()?,
+        };
+        let input = super::ImmutableEgressInput::from_prepared(
+            serde_json::to_vec(&json!({ "files": files }))?,
+            &package,
+            &policy,
+            "test-classifier".to_owned(),
+            contracts::Revision::new(1)?,
+        )?;
+        let materializer = std::sync::Arc::new(GpuTestMaterializer {
+            writes: std::sync::atomic::AtomicUsize::new(0),
+            artifact: serde_json::from_value(fixture["runtime"]["build_context"].clone())?,
+        });
+        let mut runtime = super::ClaudeCodeRuntime::new(
+            policy,
+            std::sync::Arc::new(TokioClaudeCodeProcess::new(
+                std::collections::BTreeMap::new(),
+            )),
+        )?;
+        runtime.materializer = Some(materializer.clone());
+        Ok((runtime, input, materializer))
+    }
+
+    async fn parse_gpu_candidate(
+        runtime: &super::ClaudeCodeRuntime,
+        input: &super::ImmutableEgressInput,
+        candidate: &serde_json::Value,
+    ) -> Result<super::ClaudeCodeExecution, super::ClaudeCodeFailure> {
+        let session = "01900000-0000-7000-8000-000000000002";
+        let events = [
+            json!({ "type": "system", "subtype": "init", "session_id": session }),
+            json!({ "type": "assistant", "session_id": session, "message": {
+                "role": "assistant", "content": [{ "type": "text", "text": candidate.to_string() }] } }),
+            json!({ "type": "result", "subtype": "success", "is_error": false,
+                "session_id": session, "num_turns": 1, "total_cost_usd": 0,
+                "usage": { "input_tokens": 1, "output_tokens": 1 } }),
+        ];
+        let stdout = events
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        runtime
+            .parse_result(
+                contracts::authoring::AgentTrackKind::Environment,
+                input,
+                &super::provider_environment_schema().unwrap_or(serde_json::Value::Null),
+                super::ENVIRONMENT_PROMPT,
+                super::tool_policy_sha256(false),
+                &super::ClaudeCodeProcessOutput::from_raw(Some(0), stdout.into_bytes(), &[]),
+                contracts::authoring::EnvironmentClass::Experiment,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn declared_gpu_candidate_validation_precedes_materialization()
+    -> Result<(), Box<dyn Error>> {
+        let declared = gpu_candidate_fixture()?;
+        let mut candidate = declared.clone();
+        candidate["runtime"]
+            .as_object_mut()
+            .ok_or("fixture runtime missing")?
+            .remove("build_context");
+        candidate["runtime"]["build_recipe"] = json!({ "mode": "package" });
+        for content in [
+            include_str!("../../../examples/cuda-lab/environment.yaml").to_owned(),
+            declared.to_string(),
+            json!({ "environmentSpec": declared }).to_string(),
+            serde_yaml::to_string(&json!({ "environmentSpec": declared }))?,
+        ] {
+            let (runtime, input, materializer) = gpu_test_input(&json!([
+                { "path": "environment.yaml", "content": content }
+            ]))?;
+            for gpu in [
+                serde_json::Value::Null,
+                json!({ "class": "wrong-class", "count": 1 }),
+                json!({ "class": "v100-exclusive", "count": 2 }),
+            ] {
+                let mut rejected = candidate.clone();
+                rejected["resources"]["gpu"] = gpu;
+                let failure = parse_gpu_candidate(&runtime, &input, &rejected)
+                    .await
+                    .err()
+                    .ok_or("mismatched GPU was accepted")?;
+                assert!(failure.is_schema_invalid());
+                assert_eq!(failure.audit().outcome, super::RuntimeAuditOutcome::Failed);
+                assert!(
+                    failure
+                        .repair_detail
+                        .as_deref()
+                        .is_some_and(|hint| hint.contains("class=v100-exclusive, count=1"))
+                );
+                assert_eq!(
+                    materializer
+                        .writes
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    0
+                );
+            }
+            let mut missing = candidate.clone();
+            missing["resources"]
+                .as_object_mut()
+                .ok_or("fixture resources missing")?
+                .remove("gpu");
+            assert!(
+                parse_gpu_candidate(&runtime, &input, &missing)
+                    .await
+                    .err()
+                    .ok_or("missing GPU was accepted")?
+                    .is_schema_invalid()
+            );
+            assert_eq!(
+                materializer
+                    .writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            let accepted = parse_gpu_candidate(&runtime, &input, &candidate).await?;
+            let super::CandidateDocument::Environment(spec) = accepted.document else {
+                return Err("environment candidate was not returned".into());
+            };
+            assert_eq!(
+                serde_json::to_value(&spec.resources.gpu)?,
+                declared["resources"]["gpu"]
+            );
+            assert_eq!(
+                materializer
+                    .writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn undeclared_gpu_allows_cpu_and_nested_application_config() -> Result<(), Box<dyn Error>>
+    {
+        let mut candidate = gpu_candidate_fixture()?;
+        candidate["runtime"]
+            .as_object_mut()
+            .ok_or("fixture runtime missing")?
+            .remove("build_context");
+        candidate["runtime"]["build_recipe"] = json!({ "mode": "package" });
+        candidate["resources"]
+            .as_object_mut()
+            .ok_or("fixture resources missing")?
+            .remove("gpu");
+        let mut cpu_declared = gpu_candidate_fixture()?;
+        cpu_declared["resources"]
+            .as_object_mut()
+            .ok_or("fixture resources missing")?
+            .remove("gpu");
+        for files in [
+            json!([{ "path": "environment.yaml", "content": serde_yaml::to_string(&cpu_declared)? }]),
+            json!([{ "path": "assignment.md", "content": "# CPU task without a declared spec" }]),
+            json!([{ "path": "student/environment.yaml", "content": "app-config: [" }]),
+        ] {
+            let (runtime, input, materializer) = gpu_test_input(&files)?;
+            assert!(
+                parse_gpu_candidate(&runtime, &input, &candidate)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(
+                materializer
+                    .writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+        Ok(())
+    }
+
     #[test]
-    fn declared_environment_surfaces_are_restored() {
+    fn invalid_declared_gpu_is_rejected_as_input() -> Result<(), Box<dyn Error>> {
+        let declared = gpu_candidate_fixture()?;
+        let mut files = vec![
+            json!([{ "path": "environment.yaml", "content": "resources: [" }]),
+            json!([{ "path": "environment.yaml" }]),
+            json!([{ "path": "environment.yaml", "content": "kind: EvaluationSpec" }]),
+        ];
+        let mut invalid_resources = declared.clone();
+        invalid_resources["resources"] =
+            json!([{ "gpu": { "class": "v100-exclusive", "count": 1 } }]);
+        files.push(json!([{ "path": "environment.yaml", "content": serde_yaml::to_string(&invalid_resources)? }]));
+        for gpu in [
+            json!({ "class": "v100-exclusive", "count": 0 }),
+            json!({ "class": "nvidia.com/gpu", "count": 1 }),
+            json!({ "class": "v100-exclusive" }),
+        ] {
+            let mut invalid = declared.clone();
+            invalid["resources"]["gpu"] = gpu;
+            files.push(json!([{ "path": "environment.yaml", "content": serde_yaml::to_string(&invalid)? }]));
+        }
+        for files in files {
+            let error = gpu_test_input(&files)
+                .err()
+                .ok_or("invalid material input was accepted")?;
+            assert_eq!(
+                error.downcast_ref::<super::EgressPreparationError>(),
+                Some(&super::EgressPreparationError::PackageInvalid)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn declared_environment_surfaces_are_restored() -> Result<(), Box<dyn Error>> {
         let envelope = json!({
             "files": [{
                 "path": "environment.yaml",
@@ -4071,12 +4402,9 @@ mod tests {
             }]
         })
         .to_string();
-        let declared = super::declared_environment_spec_from_bytes(envelope.as_bytes());
-        assert!(
-            declared.is_some(),
-            "the envelope must expose its declared spec"
-        );
-        let declared = declared.unwrap_or_else(|| json!({}));
+        let declared = super::declared_environment_spec_from_bytes(envelope.as_bytes())
+            .map_err(|()| "declared spec could not be parsed")?
+            .ok_or("the envelope must expose its declared spec")?;
         let mut candidate = json!({
             "kind": "EnvironmentSpec",
             "entries": [],
@@ -4091,6 +4419,7 @@ mod tests {
             "/workspace"
         );
         assert_eq!(candidate["entries"][0]["name"], "public-files");
+        Ok(())
     }
 
     #[test]
@@ -4148,7 +4477,10 @@ mod tests {
             "files": [{ "path": "notes.md", "content": "# no spec here" }]
         })
         .to_string();
-        assert!(super::declared_environment_spec_from_bytes(envelope.as_bytes()).is_none());
+        assert_eq!(
+            super::declared_environment_spec_from_bytes(envelope.as_bytes()),
+            Ok(None)
+        );
         let mut candidate = json!({
             "kind": "EnvironmentSpec",
             "runtime": { "kind": "container", "provider_binding": "container-primary-v1" }
