@@ -46,6 +46,7 @@
     name: cilium
     chart_ref: cilium/cilium
     chart_version: "{{ cluster_network_cilium_lock.chart }}"
+    update_repo_cache: true
     release_namespace: kube-system
     create_namespace: false
     values:
