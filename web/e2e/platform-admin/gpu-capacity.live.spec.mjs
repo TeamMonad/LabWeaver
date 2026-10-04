@@ -455,7 +455,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
 
     const contender = await requestGpu(studentPage, entry, 1, release, (accepted) => ownedRequests.push(accepted))
     const blocked = await approveGpuRequest(page, contender, entry, EXPECTED_CAPACITY_FAILURE)
-    expect(blocked).toMatchObject({ blocked: true, diagnosticCode: EXPECTED_CAPACITY_FAILURE })
+    expect(blocked).toMatchObject({ blocked: true, diagnosticCode: EXPECTED_CAPACITY_FAILURE, httpStatus: 409 })
     const blockedState = await readProjectResources(studentPage.request, INPUT.projectId)
     const blockedRequest = blockedState.requests.find((item) => item.id === contender.requestId)
     expect(blockedRequest?.state).toBe('reviewing')

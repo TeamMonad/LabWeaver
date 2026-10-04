@@ -477,6 +477,7 @@ export async function approveResourceRequestByUi(page, {
       requestId: requestId ?? null,
       blocked: true,
       diagnosticCode: actualCode,
+      httpStatus: approvalResponse.status(),
     }
   }
   const approval = await expectJson(approvalResponse, 'LW_ACCEPTANCE_RESOURCE_REQUEST_APPROVAL_FAILED')
