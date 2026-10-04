@@ -8,7 +8,7 @@
 use std::str::FromStr;
 
 use contracts::supply_chain::VirtualMachineDiskFormat;
-use contracts::{ActorId, PlatformImageId, UtcTimestamp};
+use contracts::{ActorId, PlatformImageId, UploadSessionId, UtcTimestamp};
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use crate::oci_import::OciImage;
 use crate::oci_registry::{
-    OciRegistryError, OciRegistryPublisher, RegistryCredentials, ResolvedRegistryImage,
+    OciFileImage, OciRegistryError, OciRegistryPublisher, RegistryCredentials,
+    ResolvedRegistryImage,
 };
 
 pub use contracts::http::{
@@ -249,6 +250,159 @@ impl PgPlatformImageCatalog {
         Ok(entry)
     }
 
+    /// Commits a catalog registration and the durable import job success under one row lock.
+    ///
+    /// The job row is locked before the catalog insert. A cancellation that wins the lock first
+    /// therefore prevents publication, while a successful registration makes a later cancellation
+    /// observe the terminal job and leave the catalog entry intact.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the import lease, catalog registration and succeeded state share one fenced transaction"
+    )]
+    pub async fn register_import_job(
+        &self,
+        upload_id: UploadSessionId,
+        lease_token: Uuid,
+        request: &RegisterPlatformImage,
+    ) -> Result<PlatformImageEntry, PlatformImageStoreError> {
+        request.validate()?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| PlatformImageStoreError::Persistence)?;
+        let job = sqlx::query(
+            "SELECT state,lease_token,cancellation_requested,catalog_id, \
+                    lease_expires_at>date_trunc('milliseconds',clock_timestamp()) AS lease_valid \
+             FROM agent.platform_image_import_jobs WHERE upload_id=$1 FOR UPDATE",
+        )
+        .bind(upload_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PlatformImageStoreError::Persistence)?
+        .ok_or(PlatformImageStoreError::NotFound)?;
+        let state: String = job
+            .try_get("state")
+            .map_err(|_| PlatformImageStoreError::Persistence)?;
+        if state == "succeeded" {
+            let catalog_id = job
+                .try_get::<Option<Uuid>, _>("catalog_id")
+                .map_err(|_| PlatformImageStoreError::Persistence)?
+                .ok_or(PlatformImageStoreError::Persistence)?;
+            let entry = load_entry(&mut transaction, catalog_id).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
+            return Ok(entry);
+        }
+        let current_lease = job
+            .try_get::<Option<Uuid>, _>("lease_token")
+            .map_err(|_| PlatformImageStoreError::Persistence)?;
+        let cancellation_requested: bool = job
+            .try_get("cancellation_requested")
+            .map_err(|_| PlatformImageStoreError::Persistence)?;
+        let lease_valid: Option<bool> = job
+            .try_get("lease_valid")
+            .map_err(|_| PlatformImageStoreError::Persistence)?;
+        if state != "running"
+            || current_lease != Some(lease_token)
+            || cancellation_requested
+            || lease_valid != Some(true)
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
+            return Err(PlatformImageStoreError::Conflict);
+        }
+        let catalog_id = Uuid::now_v7();
+        let inserted = sqlx::query(
+            "INSERT INTO agent.platform_image_catalog \
+             (catalog_id,kind,binding,source_reference,resolved_digest,media_type,size_bytes, \
+              capacity_bytes,disk_sha256,format,status,trust_revision,created_by,created_at, \
+              updated_at,pinned_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,$12,$13,$13,$13) \
+             ON CONFLICT (kind,binding) DO NOTHING",
+        )
+        .bind(catalog_id)
+        .bind(request.kind.as_str())
+        .bind(&request.binding)
+        .bind(&request.source_reference)
+        .bind(&request.resolved_digest)
+        .bind(&request.media_type)
+        .bind(
+            i64::try_from(request.size_bytes)
+                .map_err(|_| PlatformImageStoreError::InvalidRequest)?,
+        )
+        .bind(
+            request
+                .capacity_bytes
+                .map(|capacity| {
+                    i64::try_from(capacity).map_err(|_| PlatformImageStoreError::InvalidRequest)
+                })
+                .transpose()?,
+        )
+        .bind(request.disk_sha256.as_deref())
+        .bind(request.format.map(disk_format_str))
+        .bind(
+            i64::try_from(request.trust_revision)
+                .map_err(|_| PlatformImageStoreError::InvalidRequest)?,
+        )
+        .bind(request.actor_id.as_uuid())
+        .bind(request.now.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PlatformImageStoreError::Persistence)?;
+        if inserted.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
+            return Err(PlatformImageStoreError::Conflict);
+        }
+        insert_audit(
+            &mut transaction,
+            catalog_id,
+            "registered",
+            None,
+            Some(&request.resolved_digest),
+            1,
+            request.actor_id,
+            &request.reason,
+            request.now,
+        )
+        .await?;
+        let entry = load_entry(&mut transaction, catalog_id).await?;
+        let updated = sqlx::query(
+            "UPDATE agent.platform_image_import_jobs \
+             SET state='succeeded',catalog_id=$2,lease_token=NULL,lease_expires_at=NULL, \
+                 revision=revision+1,updated_at=$3,completed_at=$3 \
+             WHERE upload_id=$1 AND state='running' AND lease_token=$4 \
+               AND cancellation_requested=false \
+               AND lease_expires_at>date_trunc('milliseconds',clock_timestamp())",
+        )
+        .bind(upload_id.as_uuid())
+        .bind(catalog_id)
+        .bind(request.now.get())
+        .bind(lease_token)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PlatformImageStoreError::Persistence)?;
+        if updated.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PlatformImageStoreError::Persistence)?;
+            return Err(PlatformImageStoreError::Conflict);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PlatformImageStoreError::Persistence)?;
+        Ok(entry)
+    }
+
     /// Replaces the pinned digest of an active entry.
     ///
     /// # Errors
@@ -461,6 +615,17 @@ pub async fn seed_platform_images(
         let resolved = match registry.resolve(&seed.source_reference).await {
             Ok(resolved) => resolved,
             Err(error) => {
+                // The outcome only carries the stable code; log the closed error
+                // kind too, otherwise an unreachable registry and a wrong
+                // credential are indistinguishable in production.
+                tracing::error!(
+                    event = "agent.platform_image.seed_resolve_failed",
+                    binding = %seed.binding,
+                    source_reference = %seed.source_reference,
+                    error_kind = ?error,
+                    diagnostic_code = error.diagnostic_code(),
+                    outcome = "failed",
+                );
                 outcomes.push(PlatformImageSeedOutcome::Failed {
                     cause: error.diagnostic_code(),
                 });
@@ -892,6 +1057,24 @@ impl PlatformImageRegistry {
         let publisher = self.publisher(repository)?;
         publisher.publish(image).await.map_err(map_registry_error)?;
         publisher.tag(tag, image).await.map_err(map_registry_error)
+    }
+
+    /// Pushes one verified file-backed OCI image by digest and tags it after readback.
+    pub async fn publish_file(
+        &self,
+        reference: &str,
+        image: &OciFileImage,
+    ) -> Result<String, PlatformImageRegistryError> {
+        let (repository, tag) = self.parse_reference(reference)?;
+        let publisher = self.publisher(repository)?;
+        publisher
+            .publish_file(image)
+            .await
+            .map_err(map_registry_error)?;
+        publisher
+            .tag_file(tag, image)
+            .await
+            .map_err(map_registry_error)
     }
 
     fn publisher(

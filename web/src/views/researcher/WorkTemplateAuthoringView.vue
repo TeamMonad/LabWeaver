@@ -139,7 +139,7 @@
           </details>
           <div class="run-actions">
             <button v-if="data.state === 'requested' || data.state === 'running'" type="button" class="outlined-button danger-button" :disabled="agent.acting !== null" @click="agent.cancel">取消 AgentRun</button>
-            <button v-if="data.state === 'failed' || data.state === 'partially_succeeded'" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment 轨道</button>
+            <button v-if="trackCanRetry(data, 'environment')" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment 轨道</button>
           </div>
         </template>
       </AsyncStateView>
@@ -345,7 +345,19 @@ const canUpload = computed(() => {
   const ready = upload.state.kind === 'ready' || upload.state.kind === 'error'
   return Boolean(props.projectId && ready && upload.files.length > 0 && policyRevision.value !== undefined)
 })
-const canStartRun = computed(() => Boolean(packageDone.value && uploadedPackage.value && policy.state.kind === 'success' && !agent.acting))
+const agentRunForCurrentPackage = computed(() => (
+  agent.run.kind === 'success'
+  && uploadedPackage.value !== null
+  && agent.run.data.packageId === uploadedPackage.value.id
+))
+const canStartRun = computed(() => Boolean(
+  packageDone.value
+  && uploadedPackage.value
+  && policy.state.kind === 'success'
+  && agent.run.kind !== 'loading'
+  && !agentRunForCurrentPackage.value
+  && !agent.acting,
+))
 const candidateArtifactReady = computed(() => {
   if (environmentCandidate.value.kind !== 'success') return false
   return candidateArtifactIsReady(environmentCandidate.value.data)
@@ -673,6 +685,13 @@ function onDrop(event: DragEvent) {
 
 function runStateLabel(state: AgentRunSchema['state']) {
   return ({ requested: '已提交', running: '运行中', partially_succeeded: '部分成功', succeeded: '已完成', awaiting_approval: '等待批准', failed: '失败', cancelling: '取消中', cancelled: '已取消' } as Record<AgentRunSchema['state'], string>)[state]
+}
+
+function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][number]['kind']): boolean {
+  if (data.state !== 'failed' && data.state !== 'partially_succeeded' && data.state !== 'cancelled') return false
+  const track = data.tracks.find((item) => item.kind === kind)
+  const latestAttempt = track?.attempts[track.attempts.length - 1]
+  return latestAttempt?.state === 'failed' || latestAttempt?.state === 'cancelled'
 }
 
 function runtimeKindLabel(kind: EnvironmentCandidateViewSchema['candidate']['spec']['runtime']['kind']) {

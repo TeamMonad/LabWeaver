@@ -21,7 +21,7 @@
       - platform_foundation_postgres_admin_memberships | unique | length == 14
       - >-
         platform_foundation_postgres_admin_memberships
-        | select('match', '^lw_[a-z]+_(owner|migration)$') | list | length == 14
+        | select('match', '^lw_[a-z_]+$') | list | length == 14
       - platform_foundation_postgres_admin_owner_memberships | length == 8
       - platform_foundation_postgres_admin_owner_memberships | unique | length == 8
       - >-

@@ -223,6 +223,10 @@
                     <dd><strong>{{ view.candidate.spec.metadata.name }}</strong> · {{ view.candidate.spec.metadata.version }}</dd>
                     <dt>评测步骤</dt>
                     <dd>{{ view.candidate.spec.spec.steps.length }} 个</dd>
+                    <dt>Runner 构建状态</dt>
+                    <dd>{{ buildStateLabel(view.runnerBuild?.state) }}</dd>
+                    <dt>Runner 运行时镜像</dt>
+                    <dd>{{ view.runnerImageArtifact ? '已解析，可供批准' : '尚未就绪' }}</dd>
                     <dt>候选状态</dt>
                     <dd>{{ view.approvals.length > 0 ? '已有审批记录' : '待本次批准' }}</dd>
                   </dl>
@@ -243,6 +247,36 @@
                     <summary>查看 Evaluation 配置</summary>
                     <pre>{{ formatJson(view.candidate.spec) }}</pre>
                   </details>
+                  <div
+                    v-if="view.runnerImageArtifact"
+                    class="artifact-summary"
+                  >
+                    <details class="technical-details">
+                      <summary>查看 Evaluation runner immutable 运行时身份</summary>
+                      <dl class="meta-grid">
+                        <template
+                          v-for="entry in artifactEntries(view.runnerImageArtifact)"
+                          :key="entry.label"
+                        >
+                          <dt>{{ entry.label }}</dt>
+                          <dd><code>{{ entry.value }}</code></dd>
+                        </template>
+                      </dl>
+                    </details>
+                  </div>
+                  <p
+                    v-else
+                    class="state-note"
+                  >
+                    {{ authoring.runnerArtifactRequired ? '容器实验的 Evaluation runner 镜像尚未解析完成，构建成功并解析出镜像后才能批准。' : '本实验使用部署自带的 Evaluation 运行时，无需 per-experiment runner 镜像。' }}
+                  </p>
+                  <DiagnosticBanner
+                    v-if="view.runnerBuild?.diagnosticCode"
+                    :code="view.runnerBuild.diagnosticCode"
+                    :message="`Runner 构建状态：${buildStateLabel(view.runnerBuild.state)}`"
+                    :retryable="false"
+                    severity="warning"
+                  />
                 </article>
               </template>
             </AsyncStateView>
@@ -294,10 +328,28 @@
                   class="bound-artifact"
                 >
                   <details class="technical-details">
-                    <summary>查看将绑定的 immutable 运行时身份</summary>
+                    <summary>查看将绑定的 Environment immutable 运行时身份</summary>
                     <dl class="meta-grid">
                       <template
                         v-for="entry in artifactEntries(authoring.imageArtifact)"
+                        :key="entry.label"
+                      >
+                        <dt>{{ entry.label }}</dt>
+                        <dd><code>{{ entry.value }}</code></dd>
+                      </template>
+                    </dl>
+                  </details>
+                </div>
+
+                <div
+                  v-if="authoring.evaluationRunnerImageArtifact"
+                  class="bound-artifact"
+                >
+                  <details class="technical-details">
+                    <summary>查看将绑定的 Evaluation runner immutable 运行时身份</summary>
+                    <dl class="meta-grid">
+                      <template
+                        v-for="entry in artifactEntries(authoring.evaluationRunnerImageArtifact)"
                         :key="entry.label"
                       >
                         <dt>{{ entry.label }}</dt>
@@ -355,7 +407,7 @@
                       v-model="ownerConfirmed"
                       type="checkbox"
                     >
-                    <span>我已查看两个真实候选的完整配置，并确认批准当前 Project 的材料包、这两个候选及其 immutable 运行时身份。</span>
+                    <span>我已查看两个真实候选的完整配置，并确认批准当前 Project 的材料包、这两个候选及其 Environment 与 Evaluation runner immutable 运行时镜像身份。</span>
                   </label>
                   <label class="reason-field">
                     <span>批准理由（必填，1-500 字）</span>
@@ -379,7 +431,7 @@
                     v-if="!authoring.canApprove"
                     class="state-note"
                   >
-                    需要同时加载两个候选、材料包和已解析的运行时镜像身份，且运行记录必须属于当前项目。
+                    需要同时加载两个候选、材料包和已解析的运行时镜像身份；容器实验还必须解析出 Evaluation runner 镜像，且运行记录必须属于当前项目。
                   </p>
                 </div>
               </article>

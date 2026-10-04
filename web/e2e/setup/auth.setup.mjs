@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { mkdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 
-const authDir = path.resolve('.auth')
+const authDir = path.resolve(process.env.LABWEAVER_AUTH_DIR || '.auth')
 
 const actors = Object.freeze([
   Object.freeze({

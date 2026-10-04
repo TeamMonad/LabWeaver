@@ -30,6 +30,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmEgressPolicy
     );
     document!(
+        "schemas/contracts/v1/project-llm-policy-options.schema.json",
+        crate::authoring::ProjectLlmPolicyOptions
+    );
+    document!(
         "schemas/contracts/v1/project.schema.json",
         crate::project::Project
     );
@@ -604,6 +608,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::RecordResourceUsageRequest
     );
     document!(
+        "schemas/contracts/v1/http/resolve-environment-gpu-allocation-request.schema.json",
+        crate::environment::ResolveEnvironmentGpuAllocationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/resolve-environment-gpu-allocation-response.schema.json",
+        crate::environment::ResolveEnvironmentGpuAllocationResponse
+    );
+    document!(
+        "schemas/contracts/v1/http/release-environment-gpu-allocation-request.schema.json",
+        crate::environment::ReleaseEnvironmentGpuAllocationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/release-environment-gpu-allocation-response.schema.json",
+        crate::environment::ReleaseEnvironmentGpuAllocationResponse
+    );
+    document!(
         "schemas/contracts/v1/http/task-resource-status.schema.json",
         crate::http::TaskResourceStatus
     );
@@ -724,12 +744,32 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::PlatformImageUploadSession
     );
     document!(
+        "schemas/contracts/v1/http/platform-image-upload-status.schema.json",
+        crate::http::PlatformImageUploadStatus
+    );
+    document!(
         "schemas/contracts/v1/http/complete-platform-image-upload-request.schema.json",
         crate::http::CompletePlatformImageUploadRequest
     );
     document!(
+        "schemas/contracts/v1/http/cancel-platform-image-upload-request.schema.json",
+        crate::http::CancelPlatformImageUploadRequest
+    );
+    document!(
         "schemas/contracts/v1/http/internal-platform-image-import-request.schema.json",
         crate::http::InternalPlatformImageImportRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-enqueue-request.schema.json",
+        crate::http::InternalPlatformImageImportEnqueueRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-job-status.schema.json",
+        crate::http::InternalPlatformImageImportJobStatus
+    );
+    document!(
+        "schemas/contracts/v1/http/internal-platform-image-import-cancel-request.schema.json",
+        crate::http::InternalPlatformImageImportCancelRequest
     );
 
     document!(
@@ -1018,6 +1058,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.mutation == MutationContract::IdempotentRevisioned {
             parameters.push(header_parameter("If-Match", true));
         }
+        if matches!(
+            operation.operation_id,
+            "createProjectLlmPolicy" | "createCourseLlmPolicy"
+        ) {
+            parameters.push(header_parameter("If-Match", false));
+        }
         // The BFF interceptor obtains and attaches these headers for browser
         // mutations. Read operations authenticate through the session cookie
         // but do not participate in the CSRF protocol, so keeping the headers
@@ -1178,6 +1224,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"PlatformImageCatalog": contract_ref("http/platform-image-catalog")
                 ,"PlatformImageCatalogView": contract_ref("http/platform-image-catalog-view")
                 ,"PlatformImageUploadSession": contract_ref("http/platform-image-upload-session")
+                ,"PlatformImageUploadStatus": contract_ref("http/platform-image-upload-status")
+                ,"InternalPlatformImageImportJobStatus": contract_ref("http/internal-platform-image-import-job-status")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -1453,7 +1501,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "removeProjectMembership" => "http/remove-project-membership-request",
         "createProjectProblemPackageUpload" => "http/create-problem-package-upload-request",
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
-        "createProjectLlmPolicy" => "project-llm-egress-policy",
+        "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
         "createInternalAgentLlmReview" => "http/internal-agent-llm-review-request",
         "createProjectWorkConfigurationRun" => "http/create-work-configuration-run-request",
@@ -1510,7 +1558,9 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "disablePlatformImage" => "http/disable-platform-image-request",
         "createPlatformImageUpload" => "http/create-platform-image-upload-request",
         "completePlatformImageUpload" => "http/complete-platform-image-upload-request",
-        "importPlatformImage" => "http/internal-platform-image-import-request",
+        "cancelPlatformImageUpload" => "http/cancel-platform-image-upload-request",
+        "enqueuePlatformImageImport" => "http/internal-platform-image-import-enqueue-request",
+        "cancelPlatformImageImportJob" => "http/internal-platform-image-import-cancel-request",
         _ => return None,
     };
     Some(contract_ref(name))
@@ -1536,7 +1586,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "createProjectLlmPolicy"
         | "getActiveProjectLlmPolicy"
+        | "createCourseLlmPolicy"
+        | "getActiveCourseLlmPolicy"
         | "getInternalProjectLlmEgressPolicy" => contract_ref("project-llm-egress-policy"),
+        "getProjectLlmPolicyOptions" => contract_ref("project-llm-policy-options"),
         "createProjectAgentRun"
         | "createProjectWorkConfigurationRun"
         | "approveProjectWorkConfigurationRun"
@@ -1642,12 +1695,19 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             contract_ref("gateway-session")
         }
         "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
-        "registerPlatformImage"
-        | "repinPlatformImage"
-        | "disablePlatformImage"
-        | "completePlatformImageUpload" => contract_ref("http/platform-image-entry-view"),
+        "getPlatformImageUpload" => contract_ref("http/platform-image-upload-status"),
+        "registerPlatformImage" | "repinPlatformImage" | "disablePlatformImage" => {
+            contract_ref("http/platform-image-entry-view")
+        }
+        "completePlatformImageUpload" | "cancelPlatformImageUpload" => {
+            contract_ref("http/platform-image-upload-status")
+        }
         "createPlatformImageUpload" => contract_ref("http/platform-image-upload-session"),
-        "importPlatformImage" => contract_ref("http/platform-image-entry"),
+        "enqueuePlatformImageImport"
+        | "getPlatformImageImportJob"
+        | "cancelPlatformImageImportJob" => {
+            contract_ref("http/internal-platform-image-import-job-status")
+        }
         id if [
             "createEnvironmentTemplateRelease",
             "createEnvironment",

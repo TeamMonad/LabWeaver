@@ -32,14 +32,18 @@ impl EnvironmentProvider for FakeProvider {
         &self,
         _action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        tokio::time::sleep(self.delay).await;
-        Ok(ProviderObservation {
-            next_state: contracts::environment::ObservedEnvironmentState::Ready,
-            endpoints: instance.endpoints.clone(),
-            cleanup_evidence: None,
-            operation_complete: true,
-        })
+    ) -> Result<environment_service::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            tokio::time::sleep(self.delay).await;
+            Ok(ProviderObservation {
+                next_state: contracts::environment::ObservedEnvironmentState::Ready,
+                endpoints: instance.endpoints.clone(),
+                cleanup_evidence: None,
+                operation_complete: true,
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -76,7 +80,9 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
     let reconciler = Reconciler::new(exact, Duration::from_secs(1))?;
     let observation = reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
-        .await?;
+        .await?
+        .completed()
+        .ok_or("provider did not complete")?;
     assert!(observation.operation_complete);
 
     let mut wrong = ProviderRegistry::default();

@@ -117,6 +117,14 @@
                   <span>{{ canOpenConsole(row) ? '控制台' : '控制台不可用' }}</span>
                 </button>
                 <button
+                  v-if="failedCleanup(row)"
+                  type="button"
+                  class="outlined-button small"
+                  @click="openCleanup(row)"
+                >
+                  处理回收
+                </button>
+                <button
                   type="button"
                   class="outlined-button small"
                   @click="selectRowForInspect(row)"
@@ -195,6 +203,14 @@
           >
             <SvgIcon name="terminal" size="sm" aria-hidden="true" />
             <span>{{ canOpenConsole(inspectedEnv) ? '进入终端控制台' : '终端控制台不可用' }}</span>
+          </button>
+          <button
+            v-if="failedCleanup(inspectedEnv)"
+            type="button"
+            class="outlined-button full-width"
+            @click="openCleanup(inspectedEnv)"
+          >
+            处理回收
           </button>
         </div>
       </div>
@@ -394,6 +410,21 @@ function canOpenConsole(env: EnvironmentSummary): boolean {
   return env.desiredState !== 'deleted' && env.observedState !== 'deleting' && env.observedState !== 'deleted'
 }
 
+function failedCleanup(env: EnvironmentSummary): boolean {
+  return env.desiredState === 'deleted'
+    && env.observedState === 'failed'
+    && env.currentOperation?.state === 'failed'
+    && ['delete', 'expire', 'cleanup', 'cancel'].includes(env.currentOperation.kind)
+}
+
+function openCleanup(env: EnvironmentSummary) {
+  if (!failedCleanup(env)) return
+  void router.push({
+    path: '/student/environments',
+    query: { environmentId: env.id, projectId: env.projectId },
+  })
+}
+
 function consoleActionReason(env: EnvironmentSummary): string {
   if (env.observedState === 'deleted') return '此项目环境已删除，无法打开控制台。请创建新的项目环境。'
   if (env.observedState === 'deleting' || env.desiredState === 'deleted') return '删除已请求/正在回收，完成后将无法打开控制台。'
@@ -401,6 +432,7 @@ function consoleActionReason(env: EnvironmentSummary): string {
 }
 
 function nextActionLabel(env: EnvironmentSummary): string {
+  if (failedCleanup(env)) return '环境回收失败，资源释放尚未确认；请进入环境页重试回收'
   if (env.observedState === 'deleted') return '已删除；请创建新的项目环境'
   if (env.observedState === 'deleting' || env.desiredState === 'deleted') return '删除已请求/正在回收；请等待清理完成'
   if (hasActiveOperation(env)) return '正在处理；请等待当前操作完成'

@@ -94,12 +94,14 @@
           <div class="two-columns">
             <label>
               <span>GPU 目录项（可选）</span>
-              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="options.catalog.kind !== 'success'">
+              <select v-model="selectedGpuCatalogId" class="text-input" :disabled="options.catalog.kind !== 'success' || !selectedRelease">
                 <option value="">不申请 GPU</option>
                 <option v-for="entry in gpuCatalogOptions" :key="entry.id" :value="entry.id">
                   {{ entry.class }} · {{ gpuModeLabel(entry.mode) }} · {{ entry.capacityUnits }} units
                 </option>
               </select>
+              <small v-if="!selectedRelease" class="field-note">先选择已发布版本，再显示与运行时兼容的 GPU 目录项。</small>
+              <small v-else-if="options.catalog.kind === 'success' && gpuCatalogOptions.length === 0" class="field-note">当前版本的运行时没有兼容的 GPU 目录项。</small>
             </label>
             <label>
               <span>GPU 数量</span>
@@ -109,6 +111,7 @@
           <div v-if="selectedGpu" class="gpu-detail" role="note">
             <strong>{{ selectedGpu.class }} · {{ gpuModeLabel(selectedGpu.mode) }}</strong>
             <span>目录容量：{{ selectedGpu.capacityUnits }} units · 单次申请上限：{{ selectedGpu.mode === 'container_time_slice' ? '1 个共享时间片' : `${selectedGpu.capacityUnits} 个单位` }}</span>
+            <span v-if="selectedGpu.mode === 'container_time_slice'" data-testid="gpu-sharing-limit">共享时间片不提供独占显存或固定比例算力，其他任务可能影响性能。</span>
             <span v-if="selectedGpuRate">费率：{{ selectedGpuRate.unitPrice.amount }} {{ selectedGpuRate.unitPrice.currency }} / {{ selectedGpuRate.unitQuantity }} GPU 秒</span>
             <span v-else-if="selectedGpuRateAmbiguous">费率：当前有效费率的同一版本存在冲突，无法提交</span>
             <span v-else>费用：尚未配置，当前不能提交这项 GPU 申请。</span>
@@ -140,6 +143,12 @@
               <ul class="resource-list">
                 <li v-for="request in data" :key="request.id" class="resource-row">
                   <div class="resource-row__main"><strong>资源申请</strong><small>{{ request.requestKey }} · {{ resourceTargetLabel(request) }} · {{ resourceSummary(request.requestedResources) }}</small><small>更新于 {{ formatTimestamp(request.updatedAt) }}</small><details class="advanced-details"><summary>查看高级详情</summary><small>申请 ID：{{ request.id }}</small></details></div>
+                  <p
+                    v-if="resourceAllocationFailureMessage(request.diagnosticCode)"
+                    role="alert"
+                  >
+                    {{ resourceAllocationFailureMessage(request.diagnosticCode) }}
+                  </p>
                   <div class="resource-row__actions"><span class="state-chip" :class="`state-chip--${request.state}`">{{ requestStateLabel(request.state) }}</span><button v-if="request.state === 'reviewing' || request.state === 'allocating'" type="button" class="text-button danger-button" :disabled="resources.acting !== null" @click="openCancelConfirmation(request)">取消</button></div>
                 </li>
               </ul>
@@ -189,6 +198,7 @@ import { useAuth } from '@/composables/useAuth'
 import type { ResourceLeaseSchema, ResourceRequestSchema } from '@/generated/contracts'
 import { formatTimestamp, idempotencyKey, newUuidV7 } from '@/utils/format'
 import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
+import { resourceAllocationFailureMessage } from '@/utils/stateLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -235,8 +245,12 @@ type ResourceConfirmation =
 const resourceConfirmation = ref<ResourceConfirmation | null>(null)
 
 const releaseOptions = computed(() => options.releases.kind === 'success' ? options.releases.data : [])
-const gpuCatalogOptions = computed(() => options.catalog.kind === 'success' ? options.catalog.data : [])
 const selectedRelease = computed(() => releaseOptions.value.find((item) => releaseKey(item.id, item.version) === selectedReleaseKey.value) ?? null)
+const gpuCatalogOptions = computed(() => {
+  if (options.catalog.kind !== 'success' || !selectedRelease.value) return []
+  const runtimeMode = selectedRelease.value.runtimeKind === 'virtual_machine' ? 'vm_vgpu' : 'container'
+  return options.catalog.data.filter((entry) => runtimeMode === 'vm_vgpu' ? entry.mode === 'vm_vgpu' : entry.mode !== 'vm_vgpu')
+})
 const selectedGpu = computed(() => gpuCatalogOptions.value.find((item) => item.id === selectedGpuCatalogId.value) ?? null)
 const selectedGpuRateSelection = computed(() => selectedGpu.value
   ? options.gpuRateSelection(selectedGpu.value)
@@ -308,6 +322,15 @@ watch(
 )
 
 watch(
+  () => gpuCatalogOptions.value,
+  (items) => {
+    if (selectedGpuCatalogId.value && !items.some((item) => item.id === selectedGpuCatalogId.value)) {
+      selectedGpuCatalogId.value = ''
+    }
+  },
+)
+
+watch(
   () => selectedGpu.value,
   (entry) => {
     if (!entry) {
@@ -328,6 +351,8 @@ const canSubmit = computed(() => Boolean(
   Number.isInteger(storageGiB.value) && storageGiB.value > 0 &&
   Number.isInteger(durationHours.value) && durationHours.value > 0 &&
   (!selectedGpu.value || (
+    Boolean(selectedGpuRate.value) &&
+    !selectedGpuRateAmbiguous.value &&
     Number.isInteger(gpuCount.value) &&
     gpuCount.value > 0 &&
     gpuCount.value <= selectedGpu.value.capacityUnits
@@ -396,6 +421,7 @@ async function reclaimLease(lease: ResourceLeaseSchema) { await resources.reclai
 function requestEnvironmentId(requestId: string) {
   if (resources.requests.kind !== 'success') return null
   const request = resources.requests.data.find((item) => item.id === requestId)
+  if (resourceAllocationFailureMessage(request?.diagnosticCode)) return null
   return request?.target.kind === 'environment' ? request.target.environmentId : null
 }
 function releaseKey(id: string, version: number) { return id && version > 0 ? `${id}:${version}` : '' }

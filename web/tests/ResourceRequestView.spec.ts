@@ -133,6 +133,30 @@ describe('ResourceRequestView', () => {
     projectsState.selectedProject = projectOne
   })
 
+  it('explains a blocked allocation, hides its invalid connection and retains confirmed reclaim', async () => {
+    mocks.requests = { kind: 'success', data: [{ ...pendingRequest(), state: 'active', diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' }] }
+    mocks.leases = { kind: 'success', data: [activeLease()] }
+    const wrapper = await mountView()
+    expect(wrapper.text()).toContain('分配失败，请回收后重新申请。')
+    expect(wrapper.find('a[href^="/researcher/environments"]').exists()).toBe(false)
+    const reclaim = wrapper.findAll('button').find((button) => button.text() === '回收')!
+    await reclaim.trigger('click')
+    await flushPromises()
+    expect(mocks.reclaim).not.toHaveBeenCalled()
+    document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
+    await flushPromises()
+    expect(mocks.reclaim).toHaveBeenCalledWith(expect.objectContaining({ id: 'lease-1' }), 'researcher requested Work resource reclaim')
+    wrapper.unmount()
+  })
+
+  it('retains the normal connection for an active allocation without a failure diagnostic', async () => {
+    mocks.requests = { kind: 'success', data: [{ ...pendingRequest(), state: 'active' }] }
+    mocks.leases = { kind: 'success', data: [activeLease()] }
+    const wrapper = await mountView()
+    expect(wrapper.get('a[href^="/researcher/environments"]').attributes('href')).toContain('projectId=project-1')
+    wrapper.unmount()
+  })
+
   it('explains user units and gives an honest empty-release next step', async () => {
     mocks.releases = { kind: 'empty' }
     const wrapper = await mountView()
@@ -150,6 +174,39 @@ describe('ResourceRequestView', () => {
     const wrapper = await mountView()
 
     expect(wrapper.find('a[href^="/teacher/materials"]').exists()).toBe(false)
+  })
+
+  it('only offers GPU modes supported by the selected release runtime', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [
+        { id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' },
+        { id: 'release-vm', version: 1, runtimeKind: 'virtual_machine', label: 'VM release', source: 'control' },
+      ],
+    }
+    mocks.catalog = {
+      kind: 'success',
+      data: [
+        { id: 'gpu-container', class: 'nvidia-cuda', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true },
+        { id: 'gpu-vm', class: 'nvidia-v100-2q', mode: 'vm_vgpu', capacityUnits: 16, revision: 1, active: true },
+      ],
+    }
+    const wrapper = await mountView()
+    const releaseSelect = wrapper.findAll('label').find((label) => label.text().includes('已发布版本'))?.get('select')
+    const gpuSelect = wrapper.findAll('label').find((label) => label.text().includes('GPU 目录项'))?.get('select')
+    expect(releaseSelect).toBeDefined()
+    expect(gpuSelect).toBeDefined()
+    expect(gpuSelect!.findAll('option').map((option) => option.element.value)).toEqual(['', 'gpu-container'])
+
+    await releaseSelect!.setValue('release-vm:1')
+    await flushPromises()
+    expect(gpuSelect!.findAll('option').map((option) => option.element.value)).toEqual(['', 'gpu-vm'])
+    await gpuSelect!.setValue('gpu-vm')
+    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+
+    await releaseSelect!.setValue('release-container:1')
+    await flushPromises()
+    expect((gpuSelect!.element as HTMLSelectElement).value).toBe('')
   })
 
   it('requires confirmation for cancellation and reclaim, then clears a target on project switch', async () => {

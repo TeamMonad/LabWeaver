@@ -49,6 +49,10 @@
       - platform_application_keycloak_ca_file | length > 0
       - platform_application_keycloak_hostname is match('^[a-z0-9][a-z0-9.-]+$')
       - platform_application_keycloak_endpoint_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_model_service_port | int > 0
+      - platform_application_model_service_port | int < 65536
+      - platform_application_model_egress_fqdns is sequence
+      - platform_application_model_egress_fqdns is not string
       - (platform_application_lock.platform_vm_bases | length) >= 2
       - (platform_application_lock.platform_vm_bases | length) <= platform_application_vm_base_max_count
       - >-
@@ -130,6 +134,14 @@
       - platform_application_ssh_load_balancer_ip is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
       - platform_application_ssh_shared_ip_key is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
     fail_msg: PLATFORM_APPLICATION_INPUT_INVALID
+
+- name: Validate exact external model egress hostnames
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$')
+    fail_msg: PLATFORM_APPLICATION_MODEL_EGRESS_FQDN_INVALID
+  loop: "{{ platform_application_model_egress_fqdns }}"
 
 - name: Validate retained baseline identity allowances
   ansible.builtin.assert:
@@ -605,6 +617,15 @@
           | first).data['config.yaml'] | from_yaml }}
   no_log: true
 
+- name: Require the reviewed immutable Evaluation runner before applying configuration
+  ansible.builtin.assert:
+    that:
+      - platform_application_control_configuration.control.evaluationRuntime is mapping
+      - platform_application_control_configuration.control.evaluationRuntime.runnerImage is string
+      - platform_application_control_configuration.control.evaluationRuntime.runnerImage is match('^[^@\\s]+@sha256:[0-9a-f]{64}$')
+    fail_msg: PLATFORM_APPLICATION_EVALUATION_RUNNER_IMAGE_INVALID
+  no_log: true
+
 - name: Require Control quarantine subjects to belong to the retained Agent stream
   ansible.builtin.assert:
     that:
@@ -643,6 +664,25 @@
   become: false
   check_mode: false
   changed_when: false
+  no_log: true
+
+- name: Bind the platform service mTLS trust roots
+  ansible.builtin.set_fact:
+    platform_application_mtls_trust_roots: >-
+      {{ (platform_application_configuration_objects
+          | selectattr('kind', 'equalto', 'Secret')
+          | selectattr('metadata.name', 'in', platform_application_required_secrets)
+          | map(attribute='data')
+          | map(attribute='mtls-ca.pem', default='')
+          | select('ne', '')
+          | unique | list) }}
+  no_log: true
+
+- name: Require one shared platform mTLS trust root across service secrets
+  ansible.builtin.assert:
+    that:
+      - platform_application_mtls_trust_roots | length <= 1
+    fail_msg: PLATFORM_APPLICATION_MTLS_TRUST_ROOT_MISMATCH
   no_log: true
 
 - name: Validate private Access seed boundary
@@ -811,7 +851,7 @@
     mode: "0600"
     content: >-
       {{ (platform_application_postgres_service_source.content | b64decode)
-         | regex_replace('(?m)^hostaddr=.*\\n?', '')
+         | regex_replace('(?m)^hostaddr=.*$\n?', '')
          | regex_replace('(?m)^port=.*$', 'port=' ~ (platform_application_postgres_forward_port | string))
          | regex_replace('(?m)^host=.*$', 'hostaddr=127.0.0.1' ~ '\n' ~
              'host=' ~ platform_application_postgres_forward_hostname) }}
@@ -881,7 +921,6 @@
   retries: 6
   delay: 2
   until: platform_application_baseline_apply.rc == 0
-  no_log: true
 
 - name: Render conflict-detecting Access seed reconciliation
   ansible.builtin.template:
@@ -909,7 +948,6 @@
   retries: 6
   delay: 2
   until: platform_application_access_seed_apply.rc == 0
-  no_log: true
 
 - name: Remove temporary database reconciliation material
   ansible.builtin.file:
@@ -2051,27 +2089,30 @@
     namespace: "{{ platform_application_namespace }}"
     name: "{{ item.seed_data_volume_name }}"
   register: platform_application_vm_base_dv
+  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop_control:
+    label: "{{ item.binding }}"
 
 - name: Reject a conflicting immutable VM base DataVolume
   ansible.builtin.assert:
     that:
-      - platform_application_vm_base_dv.resources | length <= 1
+      - item.resources | length <= 1
       - >-
-        platform_application_vm_base_dv.resources | length == 0 or
-        platform_application_vm_base_dv.resources[0].spec.source.registry.url ==
-        item.registry_url
+        item.resources | length == 0 or
+        item.resources[0].spec.source.registry.url ==
+        item.item.registry_url
       - >-
-        platform_application_vm_base_dv.resources | length == 0 or
-        platform_application_vm_base_dv.resources[0].spec.storage.storageClassName ==
-        item.storage_class_name
+        item.resources | length == 0 or
+        item.resources[0].spec.storage.storageClassName ==
+        item.item.storage_class_name
       - >-
-        platform_application_vm_base_dv.resources | length == 0 or
-        platform_application_vm_base_dv.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
-        item.disk_sha256
+        item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/disk-sha256'] ==
+        item.item.disk_sha256
     fail_msg: PLATFORM_VM_BASE_DATAVOLUME_CONFLICT
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop: "{{ platform_application_vm_base_dv.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Import the immutable VM base disk when absent
   kubernetes.core.k8s:
@@ -2081,30 +2122,30 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataVolume
       metadata:
-        name: "{{ item.seed_data_volume_name }}"
+        name: "{{ item.item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
-          labweaver.io/source-release: "{{ item.release }}"
-          labweaver.io/source-registry: "{{ item.registry_url }}"
-          labweaver.io/disk-sha256: "{{ item.disk_sha256 }}"
+          labweaver.io/source-release: "{{ item.item.release }}"
+          labweaver.io/source-registry: "{{ item.item.registry_url }}"
+          labweaver.io/disk-sha256: "{{ item.item.disk_sha256 }}"
       spec:
         source:
           registry:
-            url: "{{ item.registry_url }}"
+            url: "{{ item.item.registry_url }}"
             pullMethod: node
         storage:
-          storageClassName: "{{ item.storage_class_name }}"
+          storageClassName: "{{ item.item.storage_class_name }}"
           accessModes: [ReadWriteOnce]
           resources:
             requests:
-              storage: "{{ item.storage_request }}"
-  when: platform_application_vm_base_dv.resources | length == 0
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+              storage: "{{ item.item.storage_request }}"
+  when: item.resources | length == 0
+  loop: "{{ platform_application_vm_base_dv.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Reconcile immediate binding for the immutable VM base
   kubernetes.core.k8s:
@@ -2185,17 +2226,17 @@
 - name: Reject a conflicting immutable VM base DataSource
   ansible.builtin.assert:
     that:
-      - platform_application_vm_base_source.resources | length <= 1
+      - item.resources | length <= 1
       - >-
-        platform_application_vm_base_source.resources | length == 0 or
-        (platform_application_vm_base_source.resources[0].spec.source.pvc.name ==
-         item.seed_data_volume_name and
-         platform_application_vm_base_source.resources[0].spec.source.pvc.namespace ==
+        item.resources | length == 0 or
+        (item.resources[0].spec.source.pvc.name ==
+         item.item.seed_data_volume_name and
+         item.resources[0].spec.source.pvc.namespace ==
          platform_application_namespace)
     fail_msg: PLATFORM_VM_BASE_DATASOURCE_CONFLICT
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop: "{{ platform_application_vm_base_source.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Publish the immutable VM base DataSource when absent
   kubernetes.core.k8s:
@@ -2205,23 +2246,23 @@
       apiVersion: cdi.kubevirt.io/v1beta1
       kind: DataSource
       metadata:
-        name: "{{ item.data_source_name }}"
+        name: "{{ item.item.data_source_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
-          labweaver.io/source-release: "{{ item.release }}"
-          labweaver.io/source-registry: "{{ item.registry_url }}"
-          labweaver.io/disk-sha256: "{{ item.disk_sha256 }}"
+          labweaver.io/source-release: "{{ item.item.release }}"
+          labweaver.io/source-registry: "{{ item.item.registry_url }}"
+          labweaver.io/disk-sha256: "{{ item.item.disk_sha256 }}"
       spec:
         source:
           pvc:
-            name: "{{ item.seed_data_volume_name }}"
+            name: "{{ item.item.seed_data_volume_name }}"
             namespace: "{{ platform_application_namespace }}"
-  when: platform_application_vm_base_source.resources | length == 0
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  when: item.resources | length == 0
+  loop: "{{ platform_application_vm_base_source.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Read back the immutable VM base DataSource
   kubernetes.core.k8s_info:
@@ -2238,21 +2279,21 @@
 - name: Require the immutable VM base identity
   ansible.builtin.assert:
     that:
-      - platform_application_vm_base_source_readback.resources | length == 1
-      - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.name == item.seed_data_volume_name
-      - platform_application_vm_base_source_readback.resources[0].spec.source.pvc.namespace == platform_application_namespace
+      - item.resources | length == 1
+      - item.resources[0].spec.source.pvc.name == item.item.seed_data_volume_name
+      - item.resources[0].spec.source.pvc.namespace == platform_application_namespace
       - >-
-        platform_application_vm_base_source_readback.resources[0]
+        item.resources[0]
         .metadata.annotations['labweaver.io/source-registry'] ==
-        item.registry_url
+        item.item.registry_url
       - >-
-        platform_application_vm_base_source_readback.resources[0]
+        item.resources[0]
         .metadata.annotations['labweaver.io/disk-sha256'] ==
-        item.disk_sha256
+        item.item.disk_sha256
     fail_msg: PLATFORM_VM_BASE_IDENTITY_INVALID
-  loop: "{{ platform_application_lock.platform_vm_bases }}"
+  loop: "{{ platform_application_vm_base_source_readback.results }}"
   loop_control:
-    label: "{{ item.binding }}"
+    label: "{{ item.item.binding }}"
 
 - name: Reconcile the application Harbor pull credential
   kubernetes.core.k8s:
@@ -2521,6 +2562,54 @@
           }}
   no_log: true
 
+- name: Bind the build executor service to the immutable package image
+  ansible.builtin.set_fact:
+    platform_application_build_executor_configuration_object: >-
+      {{
+        platform_application_configuration_objects
+        | selectattr('kind', 'equalto', 'ConfigMap')
+        | selectattr('metadata.name', 'equalto', 'build-executor-config')
+        | first
+      }}
+  no_log: true
+
+- name: Apply the package-bound build executor configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: >-
+        {{ platform_application_build_executor_configuration_object.metadata }}
+      data:
+        config.yaml: >-
+          {{
+            (
+              platform_application_build_executor_configuration_object.data['config.yaml']
+              | from_yaml
+              | combine(
+                  {
+                    'executor': (
+                      (
+                        platform_application_build_executor_configuration_object.data['config.yaml']
+                        | from_yaml
+                      ).executor
+                      | combine(
+                          {
+                            'serviceImage':
+                              platform_application_evaluation_worker_image
+                          }
+                        )
+                    )
+                  }
+                )
+              | to_nice_yaml(indent=2, sort_keys=false)
+            )
+          }}
+  no_log: true
+
 - name: Bind the authoring sandbox to the immutable package image
   ansible.builtin.set_fact:
     platform_application_agent_configuration_object: >-
@@ -2662,6 +2751,63 @@
         )
     fail_msg: PLATFORM_APPLICATION_EVALUATION_DEFAULT_DENY_INVALID
 
+- name: Require the reviewed evaluation runner service account bindings
+  ansible.builtin.assert:
+    that:
+      - platform_application_evaluation_configuration.execution.ojServiceAccountName == 'oj-runner'
+      - platform_application_evaluation_configuration.execution.ansibleProbeServiceAccountName == 'ansible-probe'
+      - platform_application_evaluation_configuration.execution.imagePullSecretName == platform_application_evaluation_pull_secret_name
+    fail_msg: PLATFORM_APPLICATION_EVALUATION_RUNNER_BINDING_INVALID
+  no_log: true
+
+- name: Reconcile the permanent evaluation runner service accounts
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ item }}"
+        namespace: "{{ platform_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      automountServiceAccountToken: false
+  loop:
+    - "{{ platform_application_evaluation_configuration.execution.ojServiceAccountName }}"
+    - "{{ platform_application_evaluation_configuration.execution.ansibleProbeServiceAccountName }}"
+
+- name: Reconcile the permanent evaluation runner object-store egress policy
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: oj-runner-object-store-egress
+        namespace: "{{ platform_application_evaluation_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        podSelector: {}
+        policyTypes: [Egress]
+        egress:
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: "{{ platform_application_data_namespace }}"
+            ports: "{{ [{'port': platform_application_object_store_service_port | int, 'protocol': 'TCP'}] }}"
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: kube-system
+            ports: "{{ [{'port': 53, 'protocol': 'UDP'}, {'port': 53, 'protocol': 'TCP'}] }}"
+
 - name: Reconcile the permanent ansible probe namespace default deny
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -2708,10 +2854,14 @@
         )
     fail_msg: PLATFORM_APPLICATION_PROBE_DEFAULT_DENY_INVALID
 
-- name: Require the evaluation worker to use the platform image pull identity
+- name: Validate the evaluation freeze worker registry pull configuration
   ansible.builtin.assert:
     that:
-      - platform_application_evaluation_pull_secret_name == platform_application_image_pull_secret_name
+      - platform_application_harbor_username | length > 0
+      - platform_application_harbor_password | length > 0
+      - >-
+        platform_application_evaluation_configuration.coordinator.workerRegistryPullConfigFile ==
+        '/etc/labweaver/secrets/registry-pull-config.json'
     fail_msg: PLATFORM_APPLICATION_EVALUATION_REGISTRY_PULL_CONFIG_INVALID
   no_log: true
 
@@ -2802,6 +2952,24 @@
           platform_application_authoring_default_deny.resources[0].spec.egress | default([]) == []
         )
     fail_msg: PLATFORM_APPLICATION_AUTHORING_DEFAULT_DENY_INVALID
+
+# The reviewed model endpoint is a host service, and Cilium classifies any
+# traffic to a node address as the `host` entity. A NetworkPolicy ipBlock can
+# never match that entity, so the model allowance has to be a
+# CiliumNetworkPolicy. It stays port-scoped: no other host port is admitted.
+- name: Reconcile the reviewed platform egress for the authoring sandbox
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ lookup('template', 'authoring-platform-egress.yml.j2') | from_yaml }}"
+
+- name: Reconcile the reviewed model egress for the platform services
+  kubernetes.core.k8s:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ lookup('template', 'platform-model-egress.yml.j2') | from_yaml }}"
 
 - name: Reconcile the tokenless authoring runner service account
   kubernetes.core.k8s:
@@ -2964,6 +3132,8 @@
               - matchLabels:
                   k8s:io.kubernetes.pod.namespace: "{{ platform_application_evaluation_namespace }}"
                   app.kubernetes.io/name: evaluation-freeze-worker
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_evaluation_namespace }}"
             toPorts:
               - ports:
                   - port: "5432"
@@ -2979,6 +3149,16 @@
               - matchLabels:
                   k8s:io.kubernetes.pod.namespace: "{{ platform_application_namespace }}"
                   app.kubernetes.io/name: web
+            toPorts:
+              - ports:
+                  - port: "9000"
+                    protocol: TCP
+          # The authoring sandbox fetches its reviewed material and uploads its
+          # result through the same object store, so the attempt namespace needs
+          # the object-store port only.
+          - fromEndpoints:
+              - matchLabels:
+                  k8s:io.kubernetes.pod.namespace: "{{ platform_application_authoring_namespace }}"
             toPorts:
               - ports:
                   - port: "9000"

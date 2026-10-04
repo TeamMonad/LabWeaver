@@ -316,6 +316,13 @@
             <span class="meta-label">Diagnostic</span>
             <code class="meta-value">{{ approval.selectedRequest.diagnosticCode }}</code>
           </div>
+          <p
+            v-if="resourceAllocationFailureMessage(approval.selectedRequest.diagnosticCode)"
+            role="alert"
+            class="state-note"
+          >
+            {{ resourceAllocationFailureMessage(approval.selectedRequest.diagnosticCode) }}可在资源使用授权中撤销这次授权。
+          </p>
         </div>
 
         <div class="approval-controls">
@@ -507,13 +514,13 @@
             class="approval-buttons"
           >
             <button
-              v-if="approval.selectedRequest.state === 'allocating'"
+              v-if="approval.selectedRequest.state === 'rejected'"
               type="button"
               class="outlined-button"
               :disabled="!validReason || approval.acting !== null"
               @click="openRequestConfirm('retry')"
             >
-              重试分配
+              重新送审
             </button>
             <p
               v-else
@@ -723,7 +730,7 @@ import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { requestFingerprint, useResourceApproval, type LeaseActionKind, type RequestActionKind, type BatchActionOutcome, type RequestActionItem } from '@/composables/useResourceApproval'
 import type { ResourceRequestSchema, ResourceRequestSchemaResourceTarget, ResourceRequestState, WorkloadResources } from '@/generated/contracts'
 import { formatBytes, formatTimestamp } from '@/utils/format'
-import { resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
+import { resourceAllocationFailureMessage, resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
 
 const GIB = 1024 ** 3
 const DEFAULT_PROVIDER_BINDING = ''
@@ -1114,7 +1121,7 @@ const requestConfirmTitle = computed(() => {
     case 'reject':
       return '确认拒绝资源申请'
     case 'retry':
-      return '确认重试分配'
+      return '确认重新送审'
     default:
       return ''
   }

@@ -44,23 +44,52 @@ public_ingress_entry_node_selector:
 # Hostnames published through the public Gateway. Each route lives in the
 # namespace of its backend Service so no cross-namespace ReferenceGrant is
 # needed for the backend reference.
+#
+# A route carries an ordered `rules` list. Each rule matches one or more path
+# prefixes and names the backend Service that serves them; the browser reaches
+# the API and the console WebSocket on the same origin as the single-page app,
+# so those paths are routed to the access Service instead of the static web
+# runtime. A rule may instead carry a `redirect` (no backend), which is how the
+# bare apex hostname sends visitors to the portal.
 public_ingress_routes:
   - name: portal-public
     namespace: labweaver-system
     hostnames:
-      - labweaver.2018wzh.top
       - portal.labweaver.2018wzh.top
-    service: web
-    port: 8080
+    rules:
+      - paths:
+          - /api
+          - /auth
+          - /connect
+        service: access-service
+        port: 8080
+      - paths:
+          - /
+        service: web
+        port: 8080
+  - name: portal-apex-redirect
+    namespace: labweaver-system
+    hostnames:
+      - labweaver.2018wzh.top
+    redirect:
+      scheme: https
+      hostname: portal.labweaver.2018wzh.top
+      status_code: 301
   - name: keycloak-public
     namespace: keycloak-system
     hostnames:
       - keycloak.labweaver.2018wzh.top
-    service: labweaver-keycloak-http
-    port: 8080
+    rules:
+      - paths:
+          - /
+        service: labweaver-keycloak-http
+        port: 8080
   - name: harbor-public
     namespace: harbor
     hostnames:
       - harbor.labweaver.2018wzh.top
-    service: harbor
-    port: 80
+    rules:
+      - paths:
+          - /
+        service: harbor
+        port: 80

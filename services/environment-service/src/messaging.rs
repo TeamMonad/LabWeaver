@@ -306,50 +306,54 @@ impl EnvironmentProvider for NatsEnvironmentProvider {
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure> {
-        let request = ProviderRequest {
-            version: 1,
-            operation_id: instance.operation.id,
-            provider_step: instance.operation.provider_step,
-            action,
-            instance: instance.clone(),
-        };
-        let payload = serde_json::to_vec(&request).map_err(|_| invalid_observation())?;
-        let message = self
-            .client
-            .request(self.subject.clone(), payload.into())
-            .await
-            .map_err(|_| unavailable())?;
-        if message.payload.len() > MAX_COMMAND_BYTES {
-            return Err(invalid_observation());
-        }
-        let response: ProviderResponse =
-            serde_json::from_slice(&message.payload).map_err(|_| invalid_observation())?;
-        match response {
-            ProviderResponse::Succeeded {
-                version,
-                operation_id,
-                provider_step,
-                observation,
-            } if version == 1
-                && operation_id == instance.operation.id
-                && provider_step == instance.operation.provider_step =>
-            {
-                Ok(observation)
+    ) -> Result<crate::ProviderOutcome<ProviderObservation>, ProviderFailure> {
+        async {
+            let request = ProviderRequest {
+                version: 1,
+                operation_id: instance.operation.id,
+                provider_step: instance.operation.provider_step,
+                action,
+                instance: instance.clone(),
+            };
+            let payload = serde_json::to_vec(&request).map_err(|_| invalid_observation())?;
+            let message = self
+                .client
+                .request(self.subject.clone(), payload.into())
+                .await
+                .map_err(|_| unavailable())?;
+            if message.payload.len() > MAX_COMMAND_BYTES {
+                return Err(invalid_observation());
             }
-            ProviderResponse::Failed {
-                version,
-                operation_id,
-                provider_step,
-                failure,
-            } if version == 1
-                && operation_id == instance.operation.id
-                && provider_step == instance.operation.provider_step =>
-            {
-                Err(failure)
+            let response: ProviderResponse =
+                serde_json::from_slice(&message.payload).map_err(|_| invalid_observation())?;
+            match response {
+                ProviderResponse::Succeeded {
+                    version,
+                    operation_id,
+                    provider_step,
+                    observation,
+                } if version == 1
+                    && operation_id == instance.operation.id
+                    && provider_step == instance.operation.provider_step =>
+                {
+                    Ok(observation)
+                }
+                ProviderResponse::Failed {
+                    version,
+                    operation_id,
+                    provider_step,
+                    failure,
+                } if version == 1
+                    && operation_id == instance.operation.id
+                    && provider_step == instance.operation.provider_step =>
+                {
+                    Err(failure)
+                }
+                _ => Err(invalid_observation()),
             }
-            _ => Err(invalid_observation()),
         }
+        .await
+        .map(crate::ProviderOutcome::Completed)
     }
 }
 

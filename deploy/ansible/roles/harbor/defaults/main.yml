@@ -1,5 +1,4 @@
 ---
-harbor_project_name: labweaver-system
 harbor_chart_archive: /var/lib/labweaver/bundle/harbor-1.19.1.tgz
 harbor_dnsmasq_enabled: true
 harbor_component_resources:

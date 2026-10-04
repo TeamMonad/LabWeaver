@@ -1,11 +1,7 @@
 ---
-# This deliberately does not import site.yml. Harbor is reconciled only after
-# its backup and cluster preflight complete.
 - import_playbook: 00-preflight.yml
 
 - name: Reconcile Harbor and its public route
   hosts: control_plane
   gather_facts: false
-  # A new, identity-bound backup is mandatory before Harbor can reconcile.
-  # The Harbor role verifies the resulting evidence before its first mutation.
-  roles: [backup, harbor, platform_harbor_route]
+  roles: [harbor, platform_harbor_route]

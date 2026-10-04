@@ -8,6 +8,7 @@
 pub mod api;
 pub mod clients;
 pub mod messaging;
+pub mod platform_image_jobs;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -18,7 +19,7 @@ use contracts::authoring::{
     AgentRun, AgentRunPurpose, AgentRunState, AgentTrackKind, AuthoringApproval,
     AuthoringApprovalPublicationStatus, AuthoringPublicationState, CandidateApproval,
     CandidateDecision, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, PackageFile,
-    ProblemPackage, ProjectLlmEgressPolicy, RuntimeKind,
+    ProblemPackage, ProjectLlmEgressPolicy, ProjectLlmPolicyOptions, RuntimeKind,
 };
 use contracts::evaluation::{
     CollectorSpec, EvaluationExecutionBinding, EvaluationRuntimeIdentity, EvaluationSpec,
@@ -29,13 +30,15 @@ use contracts::events::{
 };
 use contracts::http::{
     AddProjectMembershipRequest, AgentWorkExecutionIntentMetadata, ApproveWorkConfigurationRequest,
-    AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery, CandidateBuildState,
-    CandidateBuildView, CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
+    AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery,
+    CancelPlatformImageUploadRequest, CandidateBuildState, CandidateBuildView,
+    CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
     CreatePlatformImageUploadRequest, CreateProblemPackageUploadRequest, EnvironmentCandidateView,
-    EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactRecord,
-    IdempotencyKey, InternalPublishEvaluationReleaseRequest, PlatformImageEntry, PlatformImageKind,
-    PlatformImageStatus, PlatformImageUploadSession, PlatformImageUploadTarget,
+    EnvironmentPublicationAdmissionQuery, EvaluationCandidateView, GeneratedArtifactKind,
+    GeneratedArtifactRecord, IdempotencyKey, InternalPublishEvaluationReleaseRequest,
+    PlatformImageEntry, PlatformImageKind, PlatformImageStatus, PlatformImageUploadSession,
+    PlatformImageUploadState, PlatformImageUploadStatus, PlatformImageUploadTarget,
     ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
     RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
     WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
@@ -66,6 +69,7 @@ const CREATE_UPLOAD: &str = "control_create_problem_package_upload_v1";
 const COMPLETE_UPLOAD: &str = "control_complete_problem_package_upload_v1";
 const CREATE_PLATFORM_IMAGE_UPLOAD: &str = "control_create_platform_image_upload_v1";
 const COMPLETE_PLATFORM_IMAGE_UPLOAD: &str = "control_complete_platform_image_upload_v1";
+const CANCEL_PLATFORM_IMAGE_UPLOAD: &str = "control_cancel_platform_image_upload_v1";
 const CREATE_POLICY: &str = "control_create_llm_policy_v1";
 const DECIDE_CANDIDATE: &str = "control_decide_candidate_v1";
 const CREATE_WORK_RELEASE: &str = "control_create_work_environment_template_release_v1";
@@ -119,6 +123,8 @@ pub struct ControlConfig {
     pub virtual_machine_bases: VirtualMachineBaseCatalog,
     /// Single deployment-owned Evaluation runtime identity template.
     pub evaluation_runtime: EvaluationRuntimePolicy,
+    /// Non-secret deployment-owned defaults for project AI policy authoring.
+    pub llm_policy_options: ProjectLlmPolicyOptions,
 }
 
 /// Non-secret immutable Evaluation runtime fields; package identity is derived per candidate.
@@ -154,6 +160,9 @@ pub struct ContainerBuildPolicy {
     pub output_repository_prefix: String,
     /// Candidate-context-relative Dockerfile path.
     pub dockerfile_path: String,
+    /// Candidate-context-relative Dockerfile path for the per-experiment Evaluation runner image.
+    #[serde(default = "default_runner_dockerfile_path")]
+    pub runner_dockerfile_path: String,
     /// Explicit build-time network posture.
     pub network: BuildNetworkPolicy,
     /// Hard end-to-end build deadline.
@@ -208,6 +217,7 @@ impl ControlConfig {
         let container_build_valid = self.container_build.validate();
         let virtual_machine_base_valid = self.virtual_machine_bases.validate();
         let evaluation_runtime_valid = self.evaluation_runtime.identity().is_ok();
+        let llm_policy_options_valid = self.llm_policy_options.validate().is_ok();
         if !(package_prefix_valid
             && upload_ttl_valid
             && completion_lease_valid
@@ -217,6 +227,7 @@ impl ControlConfig {
             && container_build_valid
             && virtual_machine_base_valid
             && evaluation_runtime_valid)
+            || !llm_policy_options_valid
         {
             tracing::error!(
                 event = "control.configuration_invalid",
@@ -229,12 +240,17 @@ impl ControlConfig {
                 container_build_valid,
                 virtual_machine_base_valid,
                 evaluation_runtime_valid,
+                llm_policy_options_valid,
                 "deployment-owned Control policy failed validation"
             );
             return Err(ControlError::ConfigurationInvalid);
         }
         Ok(())
     }
+}
+
+fn default_runner_dockerfile_path() -> String {
+    "evaluation/Dockerfile".to_owned()
 }
 
 impl ContainerBuildPolicy {
@@ -259,6 +275,9 @@ impl ContainerBuildPolicy {
             && !prefix.contains("..")
             && repository_scope.is_some()
             && !self.dockerfile_path.trim().is_empty()
+            && contracts::validate_relative_path(&self.dockerfile_path).is_ok()
+            && !self.runner_dockerfile_path.trim().is_empty()
+            && contracts::validate_relative_path(&self.runner_dockerfile_path).is_ok()
             && self.max_duration_milliseconds > 0
             && self.max_cpu_millicores > 0
             && self.max_memory_bytes > 0
@@ -293,23 +312,6 @@ impl VirtualMachineBaseCatalog {
             })
     }
 
-    /// Resolves the exact reviewed entry named by the candidate bindings.
-    fn resolve(
-        &self,
-        provider_binding: &str,
-        storage_class_binding: &str,
-        base_disk: &VirtualMachineBaseDisk,
-    ) -> Option<&VirtualMachineBasePolicy> {
-        if provider_binding != self.provider_binding
-            || storage_class_binding != self.storage_class_binding
-        {
-            return None;
-        }
-        self.bases
-            .iter()
-            .find(|entry| &entry.base_disk == base_disk)
-    }
-
     /// Resolves one reviewed base disk from the static policy or the Agent image catalog.
     ///
     /// The deployment bindings are checked first, then the deployment bounds are enforced across
@@ -317,7 +319,8 @@ impl VirtualMachineBaseCatalog {
     /// static `bases` length must fit `max_bases`, and no accepted catalog capacity may exceed
     /// `max_capacity_bytes`. A catalog that violates a bound is rejected here instead of being
     /// silently truncated. A static `bases` entry always wins and is returned exactly as before;
-    /// otherwise an active virtual-machine catalog entry is accepted only when the declared
+    /// otherwise an active virtual-machine catalog entry at the current trust revision is accepted
+    /// only when the declared
     /// `docker://<repository>@<digest>` identity names that entry (same binding, repository digest,
     /// reviewed capacity, declared format, and unpacked disk sha256), so a registry-reference
     /// inventory entry can never be published.
@@ -328,6 +331,7 @@ impl VirtualMachineBaseCatalog {
         storage_class_binding: &str,
         base_disk: &VirtualMachineBaseDisk,
         catalog: &[PlatformImageEntry],
+        trust_revision: Revision,
     ) -> Option<(ImageArtifactId, VirtualMachineDiskFormat)> {
         if provider_binding != self.provider_binding
             || storage_class_binding != self.storage_class_binding
@@ -355,16 +359,23 @@ impl VirtualMachineBaseCatalog {
         if let Some(policy) = self
             .bases
             .iter()
-            .find(|entry| &entry.base_disk == base_disk)
+            .find(|entry| entry.base_disk.binding == base_disk.binding)
         {
-            return Some((policy.artifact_id, policy.format));
+            return (&policy.base_disk == base_disk).then_some((policy.artifact_id, policy.format));
         }
         let declared_source = base_disk.source_registry_digest.strip_prefix("docker://")?;
-        let declared_digest = declared_source.rsplit_once('@')?.1;
+        let (declared_repository, declared_digest) = declared_source.rsplit_once('@')?;
         let entry = catalog.iter().find(|entry| {
+            let reference = entry.source_reference.split('@').next().unwrap_or_default();
+            let repository = reference
+                .rsplit_once(':')
+                .filter(|(_, tag)| !tag.contains('/'))
+                .map_or(reference, |(repository, _)| repository);
             entry.kind == PlatformImageKind::VirtualMachine
                 && entry.status == PlatformImageStatus::Active
+                && entry.trust_revision == trust_revision.get()
                 && entry.binding == base_disk.binding
+                && repository == declared_repository
                 && entry.resolved_digest == declared_digest
                 && entry.capacity_bytes == Some(base_disk.capacity_bytes)
                 && entry.format.is_some()
@@ -425,6 +436,12 @@ impl ControlService {
             objects,
             config,
         })
+    }
+
+    /// Returns the non-secret deployment-owned project AI policy defaults.
+    #[must_use]
+    pub fn project_llm_policy_options(&self) -> ProjectLlmPolicyOptions {
+        self.config.llm_policy_options.clone()
     }
 
     /// Creates a project and its initial Access-owned owner membership in one
@@ -1486,7 +1503,10 @@ impl ControlService {
         )
         .bind(&request.archive_media_type)
         .bind(&key)
-        .bind(request.disk_format.map(disk_format_str))
+        .bind(request.disk_format.map(|format| match format {
+            VirtualMachineDiskFormat::Raw => "raw",
+            VirtualMachineDiskFormat::Qcow2 => "qcow2",
+        }))
         .bind(request.disk_path.as_deref())
         .bind(
             request
@@ -1512,19 +1532,21 @@ impl ControlService {
         Ok(session)
     }
 
-    /// Claims one completion lease and freezes the uploaded archive at one exact object version.
+    /// Queues one platform image import without performing object-store or downstream I/O.
     ///
-    /// A retry that reclaims an expired lease with the same idempotency key re-reads the version
-    /// recorded by the first attempt. A completed import is never replayed: the Agent catalog is
-    /// the only authority for the resulting entry and the administrator re-reads the listing.
-    pub async fn begin_platform_image_completion(
+    /// The completion idempotency record stores the same public status returned to the caller, so
+    /// a retry after the HTTP request completed cannot allocate a second worker or operation.
+    pub async fn queue_platform_image_completion(
         &self,
         actor_id: ActorId,
         upload_id: UploadSessionId,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
-    ) -> Result<PlatformImageImportStaging, ControlError> {
-        let request_hash = canonical_hash(&json!({"actorId": actor_id, "uploadId": upload_id}))?;
+    ) -> Result<PlatformImageUploadStatus, ControlError> {
+        let request_hash = canonical_hash(&json!({
+            "actorId": actor_id,
+            "uploadId": upload_id,
+        }))?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         match IdempotencyStore::reserve(
             &mut transaction,
@@ -1536,17 +1558,19 @@ impl ControlService {
         .await
         .map_err(|_| ControlError::PersistenceFailed)?
         {
-            IdempotencyDecision::Replay(_) => {
-                return Err(ControlError::PlatformImageUploadStateConflict);
+            IdempotencyDecision::Replay(value) => {
+                transaction.rollback().await.map_err(db)?;
+                return serde_json::from_value(value)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch);
             }
             IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
-            IdempotencyDecision::InProgress | IdempotencyDecision::Reserved => {}
+            IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
+            IdempotencyDecision::Reserved => {}
         }
         let row = sqlx::query(
-            "SELECT kind,binding,target_reference,trust_revision,reason,archive_bytes, \
-                    archive_media_type,object_key,object_version,artifact_id,state, \
-                    disk_format,disk_path,capacity_bytes, \
-                    completion_idempotency_key,completion_request_sha256,completion_lease_expires_at \
+            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id, \
+                    completion_idempotency_key,completion_request_sha256, \
+                    expires_at<=clock_timestamp() AS expired \
              FROM control.platform_image_upload_sessions WHERE upload_id=$1 FOR UPDATE",
         )
         .bind(upload_id.as_uuid())
@@ -1555,213 +1579,149 @@ impl ControlService {
         .map_err(db)?
         .ok_or(ControlError::PlatformImageUploadNotFound)?;
         let state: String = row.try_get("state").map_err(db)?;
-        let stored_key: Option<String> = row.try_get("completion_idempotency_key").map_err(db)?;
-        let stored_hash: Option<String> = row.try_get("completion_request_sha256").map_err(db)?;
-        let lease_expires_at: Option<time::OffsetDateTime> =
-            row.try_get("completion_lease_expires_at").map_err(db)?;
-        let resuming = stored_key.as_deref() == Some(idempotency_key.as_str())
-            && stored_hash.as_deref() == Some(request_hash.to_string().as_str());
-        match state.as_str() {
-            "pending" => {}
-            "importing"
-                if resuming && lease_expires_at.is_some_and(|expires| expires <= now.get()) => {}
-            "importing" => return Err(ControlError::OperationInProgress),
-            _ => return Err(ControlError::PlatformImageUploadStateConflict),
+        if (state == "pending" && row.try_get::<bool, _>("expired").map_err(db)?)
+            || row
+                .try_get::<Option<String>, _>("terminal_diagnostic")
+                .map_err(db)?
+                .as_deref()
+                == Some("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")
+        {
+            return Err(ControlError::PlatformImageUploadExpired);
         }
-        let lease_token = Uuid::now_v7();
-        let lease_seconds = i64::try_from(self.config.completion_lease_seconds)
-            .map_err(|_| ControlError::ConfigurationInvalid)?;
-        sqlx::query(
+        if state != "pending" {
+            return Err(ControlError::PlatformImageUploadStateConflict);
+        }
+        let updated = sqlx::query(
             "UPDATE control.platform_image_upload_sessions \
-             SET state='importing',completion_idempotency_key=$2, \
-                 completion_request_sha256=$3,completion_lease_token=$4, \
-                 completion_lease_expires_at=date_trunc('milliseconds',clock_timestamp())+($5*interval '1 second'), \
-                 updated_at=$6 \
-             WHERE upload_id=$1 AND state IN ('pending','importing')",
+             SET state='queued',completion_idempotency_key=$2, \
+                 completion_request_sha256=$3,revision=revision+1, \
+                 cancel_requested=false,updated_at=$4 \
+             WHERE upload_id=$1 AND state='pending' AND expires_at>clock_timestamp() \
+             RETURNING upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id",
         )
         .bind(upload_id.as_uuid())
         .bind(idempotency_key.as_str())
         .bind(request_hash.to_string())
-        .bind(lease_token)
-        .bind(lease_seconds)
         .bind(now.get())
-        .execute(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(db)?;
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadExpired)?;
+        let status = platform_image_upload_status_from_row(&updated)?;
+        let value = serde_json::to_value(&status).map_err(|_| ControlError::ContractInvalid)?;
+        IdempotencyStore::complete(
+            &mut transaction,
+            Domain::Control,
+            COMPLETE_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            &value,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?;
         transaction.commit().await.map_err(db)?;
+        Ok(status)
+    }
 
-        let object_key: String = row.try_get("object_key").map_err(db)?;
-        let archive_bytes = u64::try_from(row.try_get::<i64, _>("archive_bytes").map_err(db)?)
-            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        let archive_media_type: String = row.try_get("archive_media_type").map_err(db)?;
-        let stored_version: Option<String> = row.try_get("object_version").map_err(db)?;
-        let stored_artifact: Option<Uuid> = row.try_get("artifact_id").map_err(db)?;
-        let verified = match (stored_version, stored_artifact) {
-            (Some(version), Some(artifact_id)) => {
-                let expected = contracts::ArtifactRef {
-                    artifact_id: artifact_id_from_uuid(artifact_id)?,
-                    store_binding: self.objects.binding().to_owned(),
-                    object_version: version,
-                    size_bytes: archive_bytes,
-                    media_type: archive_media_type,
-                };
-                self.objects
-                    .read_verified(&object_key, &expected)
-                    .await
-                    .map_err(ControlError::from)
+    /// Reads the current public status of one platform image upload.
+    pub async fn platform_image_upload_status(
+        &self,
+        upload_id: UploadSessionId,
+    ) -> Result<PlatformImageUploadStatus, ControlError> {
+        let row = sqlx::query(
+            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id \
+             FROM control.platform_image_upload_sessions WHERE upload_id=$1",
+        )
+        .bind(upload_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadNotFound)?;
+        platform_image_upload_status_from_row(&row)
+    }
+
+    /// Requests cancellation of one queued or running import using the public revision fence.
+    pub async fn cancel_platform_image_upload(
+        &self,
+        actor_id: ActorId,
+        upload_id: UploadSessionId,
+        request: &CancelPlatformImageUploadRequest,
+        idempotency_key: &IdempotencyKey,
+        now: UtcTimestamp,
+    ) -> Result<PlatformImageUploadStatus, ControlError> {
+        let request_hash = canonical_hash(&json!({
+            "actorId": actor_id,
+            "uploadId": upload_id,
+            "request": request,
+        }))?;
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Control,
+            CANCEL_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?
+        {
+            IdempotencyDecision::Replay(value) => {
+                transaction.rollback().await.map_err(db)?;
+                return serde_json::from_value(value)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch);
             }
-            (None, None) => self
-                .objects
-                .freeze_current(&object_key, archive_bytes, &archive_media_type)
-                .await
-                .map_err(ControlError::from),
-            _ => Err(ControlError::PersistenceIdentityMismatch),
-        }?;
+            IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
+            IdempotencyDecision::Reserved => {}
+        }
+        let row = sqlx::query(
+            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id \
+             FROM control.platform_image_upload_sessions WHERE upload_id=$1 FOR UPDATE",
+        )
+        .bind(upload_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PlatformImageUploadNotFound)?;
+        let revision = Revision::new(
+            u64::try_from(row.try_get::<i64, _>("revision").map_err(db)?)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+        )
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if revision != request.expected_revision {
+            return Err(ControlError::RevisionConflict);
+        }
+        let state: String = row.try_get("state").map_err(db)?;
+        let next_state = match state.as_str() {
+            "pending" | "queued" => "queued",
+            "freezing" | "importing" | "cancelling" => "cancelling",
+            _ => return Err(ControlError::PlatformImageUploadStateConflict),
+        };
         let updated = sqlx::query(
             "UPDATE control.platform_image_upload_sessions \
-             SET artifact_id=$3,object_version=$4,updated_at=$5 \
-             WHERE upload_id=$1 AND state='importing' AND completion_lease_token=$2 \
-               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
-               AND (artifact_id IS NULL OR (artifact_id=$3 AND object_version=$4))",
+             SET state=$2,cancel_requested=true,revision=revision+1,updated_at=$3 \
+             WHERE upload_id=$1 AND revision=$4 \
+             RETURNING upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id",
         )
         .bind(upload_id.as_uuid())
-        .bind(lease_token)
-        .bind(verified.reference.artifact_id.as_uuid())
-        .bind(&verified.reference.object_version)
+        .bind(next_state)
         .bind(now.get())
-        .execute(&self.pool)
+        .bind(i64::try_from(revision.get()).map_err(|_| ControlError::ContractInvalid)?)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(db)?;
-        if updated.rows_affected() != 1 {
-            return Err(ControlError::OperationLeaseLost);
-        }
-        Ok(PlatformImageImportStaging {
-            kind: platform_image_kind_from_str(&row.try_get::<String, _>("kind").map_err(db)?)?,
-            binding: row.try_get("binding").map_err(db)?,
-            target_reference: row.try_get("target_reference").map_err(db)?,
-            trust_revision: u64::try_from(row.try_get::<i64, _>("trust_revision").map_err(db)?)
-                .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
-            reason: row.try_get("reason").map_err(db)?,
-            disk_format: row
-                .try_get::<Option<String>, _>("disk_format")
-                .map_err(db)?
-                .map(|format| parse_disk_format(&format))
-                .transpose()?,
-            disk_path: row.try_get("disk_path").map_err(db)?,
-            capacity_bytes: row
-                .try_get::<Option<i64>, _>("capacity_bytes")
-                .map_err(db)?
-                .map(|capacity| {
-                    u64::try_from(capacity).map_err(|_| ControlError::PersistenceIdentityMismatch)
-                })
-                .transpose()?,
-            archive: verified.reference,
-            archive_object_key: object_key,
-            actor_id,
-        })
-    }
-
-    /// Marks one staging session imported and schedules the staged archive for deletion.
-    pub async fn finish_platform_image_import(
-        &self,
-        upload_id: UploadSessionId,
-        catalog_id: PlatformImageId,
-        now: UtcTimestamp,
-    ) -> Result<(), ControlError> {
-        let mut transaction = self.pool.begin().await.map_err(db)?;
-        let row = sqlx::query(
-            "UPDATE control.platform_image_upload_sessions \
-             SET state='imported',imported_catalog_id=$2,completion_lease_token=NULL, \
-                 completion_lease_expires_at=NULL,updated_at=$3 \
-             WHERE upload_id=$1 AND state='importing' \
-               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
-             RETURNING object_key,object_version,completion_idempotency_key",
-        )
-        .bind(upload_id.as_uuid())
-        .bind(catalog_id.as_uuid())
-        .bind(now.get())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(db)?
-        .ok_or(ControlError::OperationLeaseLost)?;
-        let object_key: String = row.try_get("object_key").map_err(db)?;
-        let object_version: Option<String> = row.try_get("object_version").map_err(db)?;
-        schedule_staged_archive_cleanup(
+        let status = platform_image_upload_status_from_row(&updated)?;
+        let value = serde_json::to_value(&status).map_err(|_| ControlError::ContractInvalid)?;
+        IdempotencyStore::complete(
             &mut transaction,
-            upload_id,
-            &object_key,
-            object_version.as_deref(),
+            Domain::Control,
+            CANCEL_PLATFORM_IMAGE_UPLOAD,
+            idempotency_key.as_str(),
+            &value,
         )
-        .await?;
-        if let Some(completion_key) = row
-            .try_get::<Option<String>, _>("completion_idempotency_key")
-            .map_err(db)?
-        {
-            IdempotencyStore::complete(
-                &mut transaction,
-                Domain::Control,
-                COMPLETE_PLATFORM_IMAGE_UPLOAD,
-                &completion_key,
-                &json!({"uploadId": upload_id, "catalogId": catalog_id}),
-            )
-            .await
-            .map_err(|_| ControlError::PersistenceFailed)?;
-        }
-        transaction.commit().await.map_err(db)?;
-        Ok(())
-    }
-
-    /// Records one terminal import failure and schedules any frozen version for deletion.
-    ///
-    /// The upstream diagnostic from the Agent authority is stored verbatim so an administrator
-    /// can distinguish a registry rejection from a conflicting catalog binding.
-    pub async fn fail_platform_image_import(
-        &self,
-        upload_id: UploadSessionId,
-        diagnostic: &str,
-        now: UtcTimestamp,
-    ) -> Result<(), ControlError> {
-        let mut transaction = self.pool.begin().await.map_err(db)?;
-        let row = sqlx::query(
-            "UPDATE control.platform_image_upload_sessions \
-             SET state='failed',terminal_diagnostic=$2,completion_lease_token=NULL, \
-                 completion_lease_expires_at=NULL,updated_at=$3 \
-             WHERE upload_id=$1 AND state='importing' \
-               AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
-             RETURNING object_key,object_version,completion_idempotency_key",
-        )
-        .bind(upload_id.as_uuid())
-        .bind(diagnostic)
-        .bind(now.get())
-        .fetch_optional(&mut *transaction)
         .await
-        .map_err(db)?
-        .ok_or(ControlError::OperationLeaseLost)?;
-        let object_key: String = row.try_get("object_key").map_err(db)?;
-        let object_version: Option<String> = row.try_get("object_version").map_err(db)?;
-        schedule_staged_archive_cleanup(
-            &mut transaction,
-            upload_id,
-            &object_key,
-            object_version.as_deref(),
-        )
-        .await?;
-        if let Some(completion_key) = row
-            .try_get::<Option<String>, _>("completion_idempotency_key")
-            .map_err(db)?
-        {
-            sqlx::query(
-                "DELETE FROM control.idempotency_ledger \
-                 WHERE operation=$1 AND idempotency_key=$2 AND state='in_progress'",
-            )
-            .bind(COMPLETE_PLATFORM_IMAGE_UPLOAD)
-            .bind(completion_key)
-            .execute(&mut *transaction)
-            .await
-            .map_err(db)?;
-        }
+        .map_err(|_| ControlError::PersistenceFailed)?;
         transaction.commit().await.map_err(db)?;
-        Ok(())
+        Ok(status)
     }
 
     /// Counts non-withdrawn Environment template releases per pinned image digest.
@@ -1805,30 +1765,50 @@ impl ControlService {
         Ok(references)
     }
 
-    /// Activates one append-only course policy under a course-scoped lock.
+    /// Activates one course policy under a course-scoped lock.
+    ///
+    /// A missing expected revision creates the first policy. Updating an active policy must
+    /// provide its current revision so concurrent edits fail closed.
     pub async fn activate_policy(
         &self,
         course_id: CourseId,
         policy: ProjectLlmEgressPolicy,
         idempotency_key: &IdempotencyKey,
+        expected_revision: Option<Revision>,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
-        self.activate_policy_in_scope(policy.project_id, Some(course_id), policy, idempotency_key)
-            .await
+        self.activate_policy_in_scope(
+            policy.project_id,
+            Some(course_id),
+            policy,
+            idempotency_key,
+            expected_revision,
+        )
+        .await
     }
 
-    /// Activates one append-only project policy, including independent Work projects.
+    /// Activates one project policy, including independent Work projects.
+    ///
+    /// A missing expected revision creates the first policy. Updating an active policy must
+    /// provide its current revision so concurrent edits fail closed.
     pub async fn activate_project_policy(
         &self,
         project_id: ProjectId,
         policy: ProjectLlmEgressPolicy,
         idempotency_key: &IdempotencyKey,
+        expected_revision: Option<Revision>,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
         let project = self.project(project_id).await?;
         if project.state == ProjectState::Archived {
             return Err(ControlError::ProjectArchived);
         }
-        self.activate_policy_in_scope(project_id, project.course_id, policy, idempotency_key)
-            .await
+        self.activate_policy_in_scope(
+            project_id,
+            project.course_id,
+            policy,
+            idempotency_key,
+            expected_revision,
+        )
+        .await
     }
 
     async fn activate_policy_in_scope(
@@ -1837,11 +1817,16 @@ impl ControlService {
         course_id: Option<CourseId>,
         mut policy: ProjectLlmEgressPolicy,
         idempotency_key: &IdempotencyKey,
+        expected_revision: Option<Revision>,
     ) -> Result<ProjectLlmEgressPolicy, ControlError> {
         if policy.project_id != project_id || policy.course_id != course_id {
             return Err(ControlError::ProjectMismatch);
         }
         policy.validate().map_err(|_| ControlError::PolicyInvalid)?;
+        self.config
+            .llm_policy_options
+            .validate_policy_binding(&policy.binding)
+            .map_err(|_| ControlError::PolicyInvalid)?;
         let request_hash = canonical_hash(&policy)?;
         let mut transaction = self.pool.begin().await.map_err(db)?;
         advisory_project_lock(&mut transaction, project_id).await?;
@@ -1863,6 +1848,19 @@ impl ControlService {
             IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
             IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
             IdempotencyDecision::Reserved => {}
+        }
+        let current = sqlx::query_scalar::<_, i64>(
+            "SELECT revision FROM control.project_llm_policies \
+             WHERE project_id=$1 AND superseded_at IS NULL",
+        )
+        .bind(project_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db)?
+        .map(revision_from_i64)
+        .transpose()?;
+        if current != expected_revision {
+            return Err(ControlError::RevisionConflict);
         }
         let next = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(revision),0)+1 FROM control.project_llm_policies WHERE project_id=$1",
@@ -2518,15 +2516,13 @@ impl ControlService {
         &self,
         course_id: CourseId,
         candidate_id: CandidateId,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentCandidateView, ControlError> {
         let candidate = self.environment_candidate(course_id, candidate_id).await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
         let build = load_candidate_build(&self.pool, course_id, &candidate).await?;
-        let image_artifact = resolve_candidate_image_artifact(
-            &candidate,
-            build.as_ref(),
-            &self.config.virtual_machine_bases,
-        );
+        let image_artifact =
+            resolve_candidate_image_artifact(&candidate, build.as_ref(), &self.config, catalog);
         Ok(EnvironmentCandidateView {
             candidate,
             approvals,
@@ -2541,17 +2537,15 @@ impl ControlService {
         &self,
         project_id: ProjectId,
         candidate_id: CandidateId,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentCandidateView, ControlError> {
         let candidate = self
             .project_environment_candidate(project_id, candidate_id)
             .await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
         let build = load_candidate_build_project(&self.pool, project_id, &candidate).await?;
-        let image_artifact = resolve_candidate_image_artifact(
-            &candidate,
-            build.as_ref(),
-            &self.config.virtual_machine_bases,
-        );
+        let image_artifact =
+            resolve_candidate_image_artifact(&candidate, build.as_ref(), &self.config, catalog);
         Ok(EnvironmentCandidateView {
             candidate,
             approvals,
@@ -2587,9 +2581,13 @@ impl ControlService {
     ) -> Result<EvaluationCandidateView, ControlError> {
         let candidate = self.evaluation_candidate(course_id, candidate_id).await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        let runner_build = load_evaluation_runner_build(&self.pool, course_id, &candidate).await?;
+        let runner_image_artifact = resolve_runner_image_artifact(runner_build.as_ref())?;
         Ok(EvaluationCandidateView {
             candidate,
             approvals,
+            runner_build,
+            runner_image_artifact,
             trust_revision: self.config.trust_revision,
         })
     }
@@ -2604,9 +2602,14 @@ impl ControlService {
             .project_evaluation_candidate(project_id, candidate_id)
             .await?;
         let approvals = load_candidate_approvals(&self.pool, candidate_id).await?;
+        let runner_build =
+            load_evaluation_runner_build_project(&self.pool, project_id, &candidate).await?;
+        let runner_image_artifact = resolve_runner_image_artifact(runner_build.as_ref())?;
         Ok(EvaluationCandidateView {
             candidate,
             approvals,
+            runner_build,
+            runner_image_artifact,
             trust_revision: self.config.trust_revision,
         })
     }
@@ -2687,6 +2690,12 @@ impl ControlService {
                     releases.candidate_revision AS release_candidate_revision,\
                     releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract,\
                     projects.owner_actor_id,\
+                    (projects.owner_actor_id=$4 OR EXISTS( \
+                         SELECT 1 FROM access.project_memberships m \
+                          WHERE m.project_id=projects.project_id AND m.actor_id=$4 \
+                            AND m.state='active' \
+                            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
+                         AS actor_can_view_work,\
                     candidates.project_id AS candidate_project_id,candidates.course_id AS candidate_course_id,\
                     candidates.revision AS candidate_revision,candidates.contract AS candidate_contract,\
                     publications.contract AS publication_contract \
@@ -2717,7 +2726,7 @@ impl ControlService {
         .await
         .map_err(db)?
         .ok_or(ControlError::NotFound)?;
-        project_release_view(&row, project_id, actor_id)
+        project_release_view(&row, project_id)
     }
 
     /// Lists immutable releases in one project with an optional course filter.
@@ -2739,6 +2748,12 @@ impl ControlService {
                     releases.candidate_revision AS release_candidate_revision,\
                     releases.contract AS release_contract,withdrawals.contract AS withdrawal_contract,\
                     projects.owner_actor_id,\
+                    (projects.owner_actor_id=$5 OR EXISTS( \
+                         SELECT 1 FROM access.project_memberships m \
+                          WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
+                            AND m.state='active' \
+                            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()))) \
+                         AS actor_can_view_work,\
                     candidates.project_id AS candidate_project_id,candidates.course_id AS candidate_course_id,\
                     candidates.revision AS candidate_revision,candidates.contract AS candidate_contract,\
                     publications.contract AS publication_contract \
@@ -2758,9 +2773,14 @@ impl ControlService {
              WHERE releases.project_id=$1 \
                AND ($2::uuid IS NULL OR releases.course_id IS NOT DISTINCT FROM $2) \
                AND releases.version>$3 \
-               AND ((candidates.contract->'spec'->>'class'='work' AND projects.owner_actor_id=$5) \
-                    OR (candidates.contract->'spec'->>'class'='experiment' \
-                        AND publications.environment_release_id=releases.release_id)) \
+               AND ( (candidates.contract->'spec'->>'class'='work' \
+                     AND (projects.owner_actor_id=$5 OR EXISTS( \
+                          SELECT 1 FROM access.project_memberships m \
+                           WHERE m.project_id=projects.project_id AND m.actor_id=$5 \
+                             AND m.state='active' \
+                             AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp()) ))) \
+                     OR (candidates.contract->'spec'->>'class'='experiment' \
+                         AND publications.environment_release_id=releases.release_id) ) \
              ORDER BY releases.version,releases.release_id LIMIT $4",
         )
         .bind(project_id.as_uuid())
@@ -2772,7 +2792,7 @@ impl ControlService {
         .await
         .map_err(db)?;
         rows.into_iter()
-            .map(|row| project_release_view(&row, project_id, actor_id))
+            .map(|row| project_release_view(&row, project_id))
             .collect()
     }
 
@@ -2821,6 +2841,7 @@ impl ControlService {
     }
 
     /// Projects Agent-owned candidates using their exact source event identity.
+    #[allow(clippy::too_many_arguments)] // one transaction-wide projection API; a struct would churn every caller
     pub async fn project_candidates(
         &self,
         event_id: EventId,
@@ -2829,12 +2850,16 @@ impl ControlService {
         evaluation: Option<&EvaluationCandidate>,
         environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
+        evaluation_runner_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<(), ControlError> {
         run.validate().map_err(|_| ControlError::ContractInvalid)?;
         if environment.is_none() && evaluation.is_none() {
             return Err(ControlError::CandidateMissing);
         }
         if generated_context.is_some() && environment.is_none() {
+            return Err(ControlError::ContractInvalid);
+        }
+        if evaluation_runner_context.is_some() && evaluation.is_none() {
             return Err(ControlError::ContractInvalid);
         }
         if let Some(candidate) = environment {
@@ -2920,12 +2945,25 @@ impl ControlService {
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
             )
             .await?;
+            enqueue_evaluation_runner_build(
+                &mut transaction,
+                &self.config,
+                run.project_id,
+                run.course_id,
+                run.package_id,
+                environment,
+                candidate,
+                evaluation_runner_context,
+                candidate.created_at,
+            )
+            .await?;
         }
         transaction.commit().await.map_err(db)?;
         Ok(())
     }
 
     /// Consumes one sequenced Agent event and its authoritative readback in one transaction.
+    #[allow(clippy::too_many_arguments)] // one transaction-wide inbox API; a struct would churn every caller
     pub async fn consume_agent_run_event(
         &self,
         event: &CloudEvent<AgentRunEvent>,
@@ -2934,6 +2972,7 @@ impl ControlService {
         evaluation: Option<&EvaluationCandidate>,
         environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
         generated_context: Option<&GeneratedArtifactRecord>,
+        evaluation_runner_context: Option<&GeneratedArtifactRecord>,
     ) -> Result<InboxDecision, ControlError> {
         let contract = EVENT_CONTRACTS
             .iter()
@@ -2953,6 +2992,9 @@ impl ControlService {
             return Err(ControlError::ProjectionConflict);
         }
         if generated_context.is_some() && environment.is_none() {
+            return Err(ControlError::ContractInvalid);
+        }
+        if evaluation_runner_context.is_some() && evaluation.is_none() {
             return Err(ControlError::ContractInvalid);
         }
         if let Some(candidate) = environment {
@@ -3068,6 +3110,18 @@ impl ControlService {
                 self.config.evaluation_schema_sha256,
                 event.id,
                 serde_json::to_value(candidate).map_err(|_| ControlError::ContractInvalid)?,
+            )
+            .await?;
+            enqueue_evaluation_runner_build(
+                &mut transaction,
+                &self.config,
+                run.project_id,
+                run.course_id,
+                run.package_id,
+                environment,
+                candidate,
+                evaluation_runner_context,
+                event.time,
             )
             .await?;
         }
@@ -3274,6 +3328,7 @@ impl ControlService {
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
+        catalog: &[PlatformImageEntry],
     ) -> Result<CandidateApproval, ControlError> {
         let project = self.project(project_id).await?;
         if project.state == ProjectState::Archived {
@@ -3289,6 +3344,7 @@ impl ControlService {
             expected_revision,
             idempotency_key,
             now,
+            catalog,
         )
         .await
     }
@@ -3305,6 +3361,7 @@ impl ControlService {
         expected_revision: Revision,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
+        catalog: &[PlatformImageEntry],
     ) -> Result<CandidateApproval, ControlError> {
         if request.reason.trim().is_empty() || request.candidate_revision != expected_revision {
             return Err(ControlError::RevisionConflict);
@@ -3410,6 +3467,9 @@ impl ControlService {
             .ok_or(ControlError::ProjectNotFound)?;
             if owner != actor_id.as_uuid() {
                 return Err(ControlError::ProjectGovernanceDenied);
+            }
+            if candidate.spec.runtime.kind() == RuntimeKind::VirtualMachine {
+                resolve_candidate_image_artifact(&candidate, None, &self.config, catalog)?;
             }
         }
         let expected_schema = match kind.as_str() {
@@ -3822,6 +3882,43 @@ impl ControlService {
             catalog,
         )
         .await?;
+        let (evaluation_runtime_identity, evaluation_runner_image_artifact) =
+            match &environment.spec.runtime {
+                contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => {
+                    let runner_artifact = request
+                        .evaluation_runner_image_artifact
+                        .as_ref()
+                        .ok_or(ControlError::EvaluationRunnerArtifactRequired)?;
+                    validate_authoring_runner_artifact(
+                        &mut transaction,
+                        project_id,
+                        project.course_id,
+                        &evaluation,
+                        runner_artifact,
+                    )
+                    .await?;
+                    let ImageArtifact::Container {
+                        repository, digest, ..
+                    } = runner_artifact
+                    else {
+                        return Err(ControlError::ArtifactMismatch);
+                    };
+                    let identity = EvaluationRuntimeIdentity {
+                        provider_binding: self.config.evaluation_runtime.provider_binding.clone(),
+                        runner_image: format!("{repository}@{digest}"),
+                    };
+                    identity
+                        .validate()
+                        .map_err(|_| ControlError::ReleaseEvidenceInvalid)?;
+                    (identity, Some(runner_artifact.clone()))
+                }
+                contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+                    if request.evaluation_runner_image_artifact.is_some() {
+                        return Err(ControlError::ArtifactMismatch);
+                    }
+                    (self.config.evaluation_runtime.identity()?, None)
+                }
+            };
 
         let next_revision = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(revision),0)+1 FROM control.authoring_approvals WHERE project_id=$1",
@@ -3844,8 +3941,9 @@ impl ControlService {
             environment_candidate_revision: environment.revision,
             evaluation_candidate_id: evaluation.id,
             evaluation_candidate_revision: evaluation.revision,
-            evaluation_runtime_identity: self.config.evaluation_runtime.identity()?,
+            evaluation_runtime_identity,
             image_artifact: request.image_artifact.clone(),
+            evaluation_runner_image_artifact,
             actor_id,
             reason: request.reason.trim().to_owned(),
             approved_at: now,
@@ -3859,8 +3957,9 @@ impl ControlService {
             "INSERT INTO control.authoring_approvals \
              (approval_id,project_id,course_id,revision,package_id,package_revision, \
               environment_candidate_id,environment_candidate_revision,evaluation_candidate_id, \
-              evaluation_candidate_revision,image_artifact_id,actor_id,reason,contract,approved_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+              evaluation_candidate_revision,image_artifact_id,evaluation_runner_image_artifact_id, \
+              actor_id,reason,contract,approved_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         )
         .bind(approval.id.as_uuid())
         .bind(project_id.as_uuid())
@@ -3873,6 +3972,12 @@ impl ControlService {
         .bind(approval.evaluation_candidate_id.as_uuid())
         .bind(i64_revision(approval.evaluation_candidate_revision)?)
         .bind(approval.image_artifact.id().as_uuid())
+        .bind(
+            approval
+                .evaluation_runner_image_artifact
+                .as_ref()
+                .map(|artifact| artifact.id().as_uuid()),
+        )
         .bind(actor_id.as_uuid())
         .bind(&approval.reason)
         .bind(&approval_contract)
@@ -4917,6 +5022,7 @@ impl ControlService {
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
         trace_id: &str,
+        catalog: &[PlatformImageEntry],
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
         if request.project_id != project_id {
             return Err(ControlError::ProjectMismatch);
@@ -5038,7 +5144,8 @@ impl ControlService {
                        ON artifacts.image_artifact_id=builds.image_artifact_id \
                       WHERE builds.project_id=$1 AND builds.course_id IS NOT DISTINCT FROM $2 \
                         AND builds.candidate_id=$3 AND builds.candidate_revision=$4 \
-                        AND builds.candidate_sha256=$5 AND builds.state='succeeded' FOR SHARE",
+                        AND builds.candidate_sha256=$5 AND builds.target='environment' \
+                        AND builds.state='succeeded' FOR SHARE",
                 )
                 .bind(project_id.as_uuid())
                 .bind(course_id.map(CourseId::as_uuid))
@@ -5066,15 +5173,21 @@ impl ControlService {
                 storage_class_binding,
                 ..
             } => {
-                let policy = self
+                let (artifact_id, format) = self
                     .config
                     .virtual_machine_bases
-                    .resolve(provider_binding, storage_class_binding, base_disk)
+                    .resolve_with_catalog(
+                        provider_binding,
+                        storage_class_binding,
+                        base_disk,
+                        catalog,
+                        self.config.trust_revision,
+                    )
                     .ok_or(ControlError::ArtifactMismatch)?;
                 ImageArtifact::VirtualMachine {
-                    id: policy.artifact_id,
-                    base_disk: policy.base_disk.clone(),
-                    format: policy.format,
+                    id: artifact_id,
+                    base_disk: base_disk.clone(),
+                    format,
                 }
             }
         };
@@ -6002,31 +6115,49 @@ fn validate_upload_request(
     Ok(())
 }
 
-/// Verified platform image archive staged by Control for the Agent import.
-#[derive(Clone, Debug)]
-pub struct PlatformImageImportStaging {
-    /// Reviewed platform image kind.
-    pub kind: PlatformImageKind,
-    /// Catalog binding the imported image is registered under.
-    pub binding: String,
-    /// Reviewed `<registry-host>/<repository>:<tag>` the archive is tagged as.
-    pub target_reference: String,
-    /// Exact frozen object identity of the uploaded archive.
-    pub archive: contracts::ArtifactRef,
-    /// Object-store key of the frozen archive.
-    pub archive_object_key: String,
-    /// Reviewed supply-chain trust revision.
-    pub trust_revision: u64,
-    /// Administrator requesting the import.
-    pub actor_id: ActorId,
-    /// Administrator reason recorded with the catalog entry.
-    pub reason: String,
-    /// Declared virtual-machine disk encoding; absent for a container or registry-reference upload.
-    pub disk_format: Option<VirtualMachineDiskFormat>,
-    /// Relative path of the disk inside the frozen archive, when one was declared.
-    pub disk_path: Option<String>,
-    /// Declared virtual-machine disk capacity in bytes, when one was declared.
-    pub capacity_bytes: Option<u64>,
+fn platform_image_upload_status_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<PlatformImageUploadStatus, ControlError> {
+    let upload_id =
+        UploadSessionId::from_str(&row.try_get::<Uuid, _>("upload_id").map_err(db)?.to_string())
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
+        "pending" => PlatformImageUploadState::Pending,
+        "queued" if row.try_get::<bool, _>("cancel_requested").map_err(db)? => {
+            PlatformImageUploadState::Cancelling
+        }
+        "queued" => PlatformImageUploadState::Queued,
+        "freezing" => PlatformImageUploadState::Freezing,
+        "importing" => PlatformImageUploadState::Importing,
+        "cancelling" => PlatformImageUploadState::Cancelling,
+        "imported" => PlatformImageUploadState::Imported,
+        "failed" => PlatformImageUploadState::Failed,
+        "cancelled" => PlatformImageUploadState::Cancelled,
+        _ => return Err(ControlError::PersistenceIdentityMismatch),
+    };
+    let revision = Revision::new(
+        u64::try_from(row.try_get::<i64, _>("revision").map_err(db)?)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?,
+    )
+    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let catalog_id = row
+        .try_get::<Option<Uuid>, _>("imported_catalog_id")
+        .map(|value| {
+            value
+                .map(|id| {
+                    PlatformImageId::from_str(&id.to_string())
+                        .map_err(|_| ControlError::PersistenceIdentityMismatch)
+                })
+                .transpose()
+        })
+        .map_err(db)??;
+    Ok(PlatformImageUploadStatus {
+        upload_id,
+        state,
+        revision,
+        diagnostic: row.try_get("terminal_diagnostic").map_err(db)?,
+        catalog_id,
+    })
 }
 
 fn platform_image_upload_key(prefix: &str, upload_id: UploadSessionId) -> String {
@@ -6036,7 +6167,7 @@ fn platform_image_upload_key(prefix: &str, upload_id: UploadSessionId) -> String
     )
 }
 
-fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, ControlError> {
+pub(crate) fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, ControlError> {
     match value {
         "container" => Ok(PlatformImageKind::Container),
         "virtual_machine" => Ok(PlatformImageKind::VirtualMachine),
@@ -6044,14 +6175,7 @@ fn platform_image_kind_from_str(value: &str) -> Result<PlatformImageKind, Contro
     }
 }
 
-const fn disk_format_str(format: VirtualMachineDiskFormat) -> &'static str {
-    match format {
-        VirtualMachineDiskFormat::Qcow2 => "qcow2",
-        VirtualMachineDiskFormat::Raw => "raw",
-    }
-}
-
-fn parse_disk_format(value: &str) -> Result<VirtualMachineDiskFormat, ControlError> {
+pub(crate) fn parse_disk_format(value: &str) -> Result<VirtualMachineDiskFormat, ControlError> {
     match value {
         "qcow2" => Ok(VirtualMachineDiskFormat::Qcow2),
         "raw" => Ok(VirtualMachineDiskFormat::Raw),
@@ -6065,6 +6189,7 @@ fn validate_platform_image_upload(
     if !contracts::http::valid_platform_image_binding(&request.binding)
         || request.archive_media_type != contracts::http::PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE
         || request.archive_bytes == 0
+        || request.archive_bytes > contracts::http::PLATFORM_IMAGE_ARCHIVE_MAX_BYTES
         || request.trust_revision == 0
         || request.reason.trim().is_empty()
         || request.reason.chars().count() > 512
@@ -6109,8 +6234,9 @@ async fn schedule_staged_archive_cleanup(
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO control.object_cleanup_ledger (object_key,object_version,upload_id) \
-         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+        "INSERT INTO control.object_cleanup_ledger (object_key,object_version,upload_id,next_attempt_at) \
+         SELECT $1,$2,$3,GREATEST(now(),expires_at) FROM control.platform_image_upload_sessions \
+         WHERE upload_id=$3 ON CONFLICT DO NOTHING",
     )
     .bind(object_key)
     .bind(object_version)
@@ -6282,12 +6408,13 @@ async fn enqueue_container_build(
         None
     } else {
         Some(
-            resolve_container_context_object_key(
+            resolve_generated_context_object_key(
                 transaction,
                 project_id,
                 course_id,
                 package_id,
                 build_context,
+                GeneratedArtifactKind::BuildContext,
                 generated_context,
             )
             .await?,
@@ -6298,7 +6425,7 @@ async fn enqueue_container_build(
         "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
                 candidate_sha256,command_sha256,state,contract \
          FROM control.container_build_projections \
-         WHERE candidate_id=$1 AND candidate_revision=$2 FOR UPDATE",
+         WHERE candidate_id=$1 AND candidate_revision=$2 AND target='environment' FOR UPDATE",
     )
     .bind(candidate.id.as_uuid())
     .bind(i64_revision(candidate.revision)?)
@@ -6310,7 +6437,10 @@ async fn enqueue_container_build(
             &row,
             project_id,
             course_id,
-            candidate,
+            candidate.id,
+            candidate.revision,
+            canonical_hash(&candidate.spec)?,
+            build_context,
             context_object_key.as_deref(),
             environment_image_export,
         )?;
@@ -6341,6 +6471,7 @@ async fn enqueue_container_build(
             project_id,
             course_id,
             candidate.id,
+            "",
         ),
         network: config.container_build.network.clone(),
         max_duration_milliseconds: config.container_build.max_duration_milliseconds,
@@ -6365,9 +6496,9 @@ async fn enqueue_container_build(
     let inserted = sqlx::query(
         "INSERT INTO control.container_build_projections \
          (build_request_id,project_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
-          command_sha256,state,contract,created_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9) \
-         ON CONFLICT (candidate_id,candidate_revision) DO NOTHING",
+          command_sha256,state,target,contract,created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'requested','environment',$8,$9) \
+         ON CONFLICT (candidate_id,candidate_revision,target) DO NOTHING",
     )
     .bind(command.request.id.as_uuid())
     .bind(project_id.as_uuid())
@@ -6392,7 +6523,7 @@ async fn enqueue_container_build(
             "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
                     candidate_sha256,command_sha256,state,contract \
              FROM control.container_build_projections \
-             WHERE candidate_id=$1 AND candidate_revision=$2 FOR UPDATE",
+             WHERE candidate_id=$1 AND candidate_revision=$2 AND target='environment' FOR UPDATE",
         )
         .bind(candidate.id.as_uuid())
         .bind(i64_revision(candidate.revision)?)
@@ -6404,7 +6535,10 @@ async fn enqueue_container_build(
             &row,
             project_id,
             course_id,
-            candidate,
+            candidate.id,
+            candidate.revision,
+            canonical_hash(&candidate.spec)?,
+            build_context,
             context_object_key.as_deref(),
             environment_image_export,
         )?;
@@ -6459,11 +6593,229 @@ async fn enqueue_container_build(
     Ok(())
 }
 
+/// Enqueues the second, per-experiment Evaluation runner build for a Container experiment.
+///
+/// The runner image is built through the same single-image `BuildKit` pipeline as the environment
+/// image. Deployment-owned VM evaluation has no runner image and is left untouched.
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_evaluation_runner_build(
+    transaction: &mut Transaction<'_, Postgres>,
+    config: &ControlConfig,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
+    package_id: ProblemPackageId,
+    environment: Option<&EnvironmentCandidate>,
+    evaluation: &EvaluationCandidate,
+    evaluation_runner_context: Option<&GeneratedArtifactRecord>,
+    created_at: UtcTimestamp,
+) -> Result<(), ControlError> {
+    evaluation
+        .validate()
+        .map_err(|_| ControlError::ContractInvalid)?;
+    if evaluation.project_id != project_id {
+        return Err(ControlError::ProjectMismatch);
+    }
+    if evaluation.course_id != course_id {
+        return Err(ControlError::CourseMismatch);
+    }
+    let Some(environment) = environment else {
+        return Ok(());
+    };
+    if !matches!(
+        environment.spec.runtime,
+        contracts::authoring::EnvironmentRuntimeSpec::Container { .. }
+    ) {
+        return Ok(());
+    }
+    let Some(runner_build_context) = &evaluation.runner_build_context else {
+        return Ok(());
+    };
+
+    let context_object_key = resolve_generated_context_object_key(
+        transaction,
+        project_id,
+        course_id,
+        package_id,
+        runner_build_context,
+        GeneratedArtifactKind::EvaluationRunnerBuildContext,
+        evaluation_runner_context,
+    )
+    .await?;
+
+    let existing = sqlx::query(
+        "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
+                candidate_sha256,command_sha256,state,contract \
+         FROM control.container_build_projections \
+         WHERE candidate_id=$1 AND candidate_revision=$2 AND target='evaluation_runner' FOR UPDATE",
+    )
+    .bind(evaluation.id.as_uuid())
+    .bind(i64_revision(evaluation.revision)?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(db)?;
+    if let Some(row) = existing {
+        validate_existing_container_build_projection(
+            &row,
+            project_id,
+            course_id,
+            evaluation.id,
+            evaluation.revision,
+            canonical_hash(&evaluation.spec)?,
+            runner_build_context,
+            Some(context_object_key.as_str()),
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let build_request = BuildRequest {
+        id: BuildRequestId::new(),
+        project_id,
+        course_id,
+        candidate_id: evaluation.id,
+        candidate_revision: evaluation.revision,
+        builder_binding: config.container_build.builder_binding.clone(),
+        source: BuildSource::Dockerfile {
+            context: runner_build_context.clone(),
+            context_object_key: context_object_key.clone(),
+            dockerfile_path: config.container_build.runner_dockerfile_path.clone(),
+        },
+        output_repository: container_build_output_repository(
+            config,
+            project_id,
+            course_id,
+            evaluation.id,
+            "",
+        ),
+        network: config.container_build.network.clone(),
+        max_duration_milliseconds: config.container_build.max_duration_milliseconds,
+        max_cpu_millicores: config.container_build.max_cpu_millicores,
+        max_memory_bytes: config.container_build.max_memory_bytes,
+        created_at,
+    };
+    build_request
+        .validate()
+        .map_err(|_| ControlError::ContractInvalid)?;
+    let command = AgentBuildRequested {
+        idempotency_key: format!("build:{}", build_request.id),
+        request: build_request,
+    };
+    command
+        .validate()
+        .map_err(|_| ControlError::ContractInvalid)?;
+    let candidate_sha256 = canonical_hash(&evaluation.spec)?;
+    let command_sha256 = canonical_hash(&command)?;
+    let command_contract =
+        serde_json::to_value(&command).map_err(|_| ControlError::ContractInvalid)?;
+    let inserted = sqlx::query(
+        "INSERT INTO control.container_build_projections \
+         (build_request_id,project_id,course_id,candidate_id,candidate_revision,candidate_sha256, \
+          command_sha256,state,target,contract,created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'requested','evaluation_runner',$8,$9) \
+         ON CONFLICT (candidate_id,candidate_revision,target) DO NOTHING",
+    )
+    .bind(command.request.id.as_uuid())
+    .bind(project_id.as_uuid())
+    .bind(course_id.map(CourseId::as_uuid))
+    .bind(evaluation.id.as_uuid())
+    .bind(i64_revision(evaluation.revision)?)
+    .bind(candidate_sha256.to_string())
+    .bind(command_sha256.to_string())
+    .bind(&command_contract)
+    .bind(created_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        if is_unique_violation(&error) {
+            ControlError::ProjectionConflict
+        } else {
+            db(error)
+        }
+    })?;
+    if inserted.rows_affected() == 0 {
+        let row = sqlx::query(
+            "SELECT build_request_id,project_id,course_id,candidate_id,candidate_revision, \
+                    candidate_sha256,command_sha256,state,contract \
+             FROM control.container_build_projections \
+             WHERE candidate_id=$1 AND candidate_revision=$2 AND target='evaluation_runner' FOR UPDATE",
+        )
+        .bind(evaluation.id.as_uuid())
+        .bind(i64_revision(evaluation.revision)?)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::PersistenceIdentityMismatch)?;
+        validate_existing_container_build_projection(
+            &row,
+            project_id,
+            course_id,
+            evaluation.id,
+            evaluation.revision,
+            canonical_hash(&evaluation.spec)?,
+            runner_build_context,
+            Some(context_object_key.as_str()),
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let event_id = EventId::new();
+    let contract = event_contract(BUILD_REQUEST_SUBJECT)?;
+    let event = CloudEvent {
+        specversion: SPEC_VERSION.to_owned(),
+        id: event_id,
+        source: contract.source().to_owned(),
+        event_type: BUILD_REQUEST_SUBJECT.to_owned(),
+        subject: BUILD_REQUEST_SUBJECT.to_owned(),
+        time: created_at,
+        datacontenttype: "application/json".to_owned(),
+        dataschema: contract.data_schema(),
+        project_id,
+        course_id,
+        aggregate_revision: Revision::new(1).map_err(|_| ControlError::ContractInvalid)?,
+        aggregate_sequence: Sequence(1),
+        trace_id: format!("build:{}", command.request.id),
+        data: command,
+    };
+    event
+        .validate(contract)
+        .map_err(|_| ControlError::ContractInvalid)?;
+    let payload = serde_json::to_value(&event).map_err(|_| ControlError::ContractInvalid)?;
+    OutboxStore::enqueue(
+        transaction,
+        Domain::Control,
+        event_id.as_uuid(),
+        BUILD_REQUEST_SUBJECT,
+        BUILD_REQUEST_SUBJECT,
+        event.data.request.id.as_uuid(),
+        1,
+        &payload,
+        canonical_hash(&payload)?,
+    )
+    .await
+    .map_err(|_| ControlError::PersistenceFailed)?;
+    tracing::info!(
+        event = "control.evaluation_runner_build.requested",
+        project_id = %project_id,
+        course_id = ?course_id,
+        run_id = %evaluation.run_id,
+        candidate_id = %evaluation.id,
+        candidate_revision = evaluation.revision.get(),
+        build_request_id = %event.data.request.id,
+        "Evaluation runner build projection enqueued",
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_existing_container_build_projection(
     row: &sqlx::postgres::PgRow,
     project_id: ProjectId,
     course_id: Option<CourseId>,
-    candidate: &EnvironmentCandidate,
+    candidate_id: CandidateId,
+    candidate_revision: Revision,
+    candidate_sha256: Sha256Digest,
+    build_context: &contracts::ArtifactRef,
     context_object_key: Option<&str>,
     environment_image_export: Option<&contracts::supply_chain::ExportedOciImage>,
 ) -> Result<(), ControlError> {
@@ -6494,24 +6846,19 @@ fn validate_existing_container_build_projection(
         .map_err(db)?
         .parse()
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let expected_candidate_sha256 = canonical_hash(&candidate.spec)?;
-    let expected_revision = i64_revision(candidate.revision)?;
+    let expected_candidate_sha256 = candidate_sha256;
+    let expected_revision = i64_revision(candidate_revision)?;
     let expected_course_id = course_id.map(CourseId::as_uuid);
-    let contracts::authoring::EnvironmentRuntimeSpec::Container { build_context, .. } =
-        &candidate.spec.runtime
-    else {
-        return Err(ControlError::PersistenceIdentityMismatch);
-    };
     let request_matches = persisted_project_id == project_id.as_uuid()
         && persisted_course_id == expected_course_id
-        && persisted_candidate_id == candidate.id.as_uuid()
+        && persisted_candidate_id == candidate_id.as_uuid()
         && persisted_candidate_revision == expected_revision
         && persisted_candidate_sha256 == expected_candidate_sha256
         && build_request_id == command.request.id.as_uuid()
         && command.request.project_id == project_id
         && command.request.course_id == course_id
-        && command.request.candidate_id == candidate.id
-        && command.request.candidate_revision == candidate.revision
+        && command.request.candidate_id == candidate_id
+        && command.request.candidate_revision == candidate_revision
         && match (&command.request.source, environment_image_export) {
             (
                 BuildSource::Dockerfile {
@@ -6532,12 +6879,13 @@ fn validate_existing_container_build_projection(
     Ok(())
 }
 
-async fn resolve_container_context_object_key(
+async fn resolve_generated_context_object_key(
     transaction: &mut Transaction<'_, Postgres>,
     project_id: ProjectId,
     course_id: Option<CourseId>,
     package_id: ProblemPackageId,
     build_context: &contracts::ArtifactRef,
+    expected_kind: GeneratedArtifactKind,
     generated_context: Option<&GeneratedArtifactRecord>,
 ) -> Result<String, ControlError> {
     let package_row = sqlx::query(
@@ -6601,7 +6949,7 @@ async fn resolve_container_context_object_key(
     }
 
     let generated = generated_context.ok_or(ControlError::PersistenceIdentityMismatch)?;
-    if generated.kind != contracts::http::GeneratedArtifactKind::BuildContext
+    if generated.kind != expected_kind
         || generated.artifact != *build_context
         || generated.project_id != project_id
         || generated.course_id != course_id
@@ -6626,9 +6974,10 @@ fn container_build_output_repository(
     project_id: ProjectId,
     course_id: Option<CourseId>,
     candidate_id: CandidateId,
+    suffix: &str,
 ) -> String {
     format!(
-        "{}/{}-{candidate_id}",
+        "{}/{}-{candidate_id}{suffix}",
         config
             .container_build
             .output_repository_prefix
@@ -6747,6 +7096,7 @@ async fn validate_authoring_artifact(
                  WHERE builds.build_request_id=$1 AND builds.project_id=$2 \
                    AND builds.course_id IS NOT DISTINCT FROM $3 \
                    AND builds.candidate_id=$4 AND builds.candidate_revision=$5 \
+                   AND builds.target='environment' \
                    AND builds.state='succeeded' FOR SHARE",
             )
             .bind(build_request_id.as_uuid())
@@ -6789,7 +7139,13 @@ async fn validate_authoring_artifact(
         ) => {
             let (artifact_id, format) = config
                 .virtual_machine_bases
-                .resolve_with_catalog(provider_binding, storage_class_binding, base_disk, catalog)
+                .resolve_with_catalog(
+                    provider_binding,
+                    storage_class_binding,
+                    base_disk,
+                    catalog,
+                    config.trust_revision,
+                )
                 .ok_or(ControlError::ArtifactMismatch)?;
             let expected = ImageArtifact::VirtualMachine {
                 id: artifact_id,
@@ -6803,6 +7159,68 @@ async fn validate_authoring_artifact(
         }
         _ => Err(ControlError::ArtifactMismatch),
     }
+}
+
+/// Verifies that a selected Evaluation runner artifact is the exact artifact produced by the
+/// per-experiment runner build of the selected Evaluation candidate.
+///
+/// A Container experiment must carry a resolvable runner build context and a succeeded runner
+/// build projection; anything else fails closed with a stable diagnostic.
+async fn validate_authoring_runner_artifact(
+    transaction: &mut Transaction<'_, Postgres>,
+    project_id: ProjectId,
+    course_id: Option<CourseId>,
+    evaluation: &EvaluationCandidate,
+    artifact: &ImageArtifact,
+) -> Result<(), ControlError> {
+    if evaluation.runner_build_context.is_none() {
+        return Err(ControlError::EvaluationRunnerArtifactRequired);
+    }
+    let ImageArtifact::Container {
+        build_request_id, ..
+    } = artifact
+    else {
+        return Err(ControlError::ArtifactMismatch);
+    };
+    let row = sqlx::query(
+        "SELECT builds.build_request_id,builds.candidate_sha256,artifacts.artifact \
+         FROM control.container_build_projections builds \
+         JOIN control.image_artifact_projections artifacts \
+           ON artifacts.image_artifact_id=builds.image_artifact_id \
+         WHERE builds.build_request_id=$1 AND builds.project_id=$2 \
+           AND builds.course_id IS NOT DISTINCT FROM $3 \
+           AND builds.candidate_id=$4 AND builds.candidate_revision=$5 \
+           AND builds.target='evaluation_runner' \
+           AND builds.state='succeeded' FOR SHARE",
+    )
+    .bind(build_request_id.as_uuid())
+    .bind(project_id.as_uuid())
+    .bind(course_id.map(CourseId::as_uuid))
+    .bind(evaluation.id.as_uuid())
+    .bind(i64_revision(evaluation.revision)?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(db)?
+    .ok_or(ControlError::EvaluationRunnerArtifactRequired)?;
+    let persisted_build_request: Uuid = row.try_get("build_request_id").map_err(db)?;
+    if persisted_build_request != build_request_id.as_uuid() {
+        return Err(ControlError::PersistenceIdentityMismatch);
+    }
+    let persisted_candidate_hash: Sha256Digest = row
+        .try_get::<String, _>("candidate_sha256")
+        .map_err(db)?
+        .parse()
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    if persisted_candidate_hash != canonical_hash(&evaluation.spec)? {
+        return Err(ControlError::ArtifactMismatch);
+    }
+    let persisted_artifact: ImageArtifact =
+        serde_json::from_value(row.try_get("artifact").map_err(db)?)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    if persisted_artifact != *artifact {
+        return Err(ControlError::ArtifactMismatch);
+    }
+    Ok(())
 }
 
 fn reject_sensitive_payload(value: &Value) -> Result<(), ControlError> {
@@ -7150,12 +7568,13 @@ async fn load_candidate_approvals(
 /// Resolve the artifact that is safe to present as the approval input.
 ///
 /// Container candidates require a succeeded, Control-projected build. VM
-/// candidates have no build projection; their artifact is the deployment-owned
-/// base only when every reviewed binding still matches the active policy.
+/// candidates have no build projection; their artifact must resolve through the
+/// current reviewed static policy or trusted Agent catalog.
 fn resolve_candidate_image_artifact(
     candidate: &EnvironmentCandidate,
     build: Option<&CandidateBuildView>,
-    virtual_machine_bases: &VirtualMachineBaseCatalog,
+    config: &ControlConfig,
+    catalog: &[PlatformImageEntry],
 ) -> Result<Option<ImageArtifact>, ControlError> {
     let artifact = match &candidate.spec.runtime {
         contracts::authoring::EnvironmentRuntimeSpec::Container { .. } => build
@@ -7166,13 +7585,23 @@ fn resolve_candidate_image_artifact(
             base_disk,
             storage_class_binding,
             ..
-        } => virtual_machine_bases
-            .resolve(provider_binding, storage_class_binding, base_disk)
-            .map(|policy| ImageArtifact::VirtualMachine {
-                id: policy.artifact_id,
-                base_disk: policy.base_disk.clone(),
-                format: policy.format,
-            }),
+        } => {
+            let (id, format) = config
+                .virtual_machine_bases
+                .resolve_with_catalog(
+                    provider_binding,
+                    storage_class_binding,
+                    base_disk,
+                    catalog,
+                    config.trust_revision,
+                )
+                .ok_or(ControlError::ArtifactMismatch)?;
+            Some(ImageArtifact::VirtualMachine {
+                id,
+                base_disk: base_disk.clone(),
+                format,
+            })
+        }
     };
 
     if let Some(artifact) = &artifact
@@ -7189,8 +7618,92 @@ async fn load_candidate_build(
     course_id: CourseId,
     candidate: &EnvironmentCandidate,
 ) -> Result<Option<CandidateBuildView>, ControlError> {
-    let candidate_sha256 = canonical_hash(&candidate.spec)?;
-    let row = sqlx::query(
+    load_build_view(
+        pool,
+        BuildScope::Course(course_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "environment",
+        "environment",
+    )
+    .await
+}
+
+async fn load_candidate_build_project(
+    pool: &PgPool,
+    project_id: ProjectId,
+    candidate: &EnvironmentCandidate,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    load_build_view(
+        pool,
+        BuildScope::Project(project_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "environment",
+        "environment",
+    )
+    .await
+}
+
+async fn load_evaluation_runner_build(
+    pool: &PgPool,
+    course_id: CourseId,
+    candidate: &EvaluationCandidate,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    load_build_view(
+        pool,
+        BuildScope::Course(course_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "evaluation",
+        "evaluation_runner",
+    )
+    .await
+}
+
+async fn load_evaluation_runner_build_project(
+    pool: &PgPool,
+    project_id: ProjectId,
+    candidate: &EvaluationCandidate,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    load_build_view(
+        pool,
+        BuildScope::Project(project_id),
+        candidate.id,
+        candidate.revision,
+        canonical_hash(&candidate.spec)?,
+        "evaluation",
+        "evaluation_runner",
+    )
+    .await
+}
+
+enum BuildScope {
+    Course(CourseId),
+    Project(ProjectId),
+}
+
+async fn load_build_view(
+    pool: &PgPool,
+    scope: BuildScope,
+    candidate_id: CandidateId,
+    candidate_revision: Revision,
+    candidate_sha256: Sha256Digest,
+    candidate_kind: &str,
+    target: &str,
+) -> Result<Option<CandidateBuildView>, ControlError> {
+    let scope_column = match scope {
+        BuildScope::Course(_) => "course_id",
+        BuildScope::Project(_) => "project_id",
+    };
+    let scope_id = match scope {
+        BuildScope::Course(course_id) => course_id.as_uuid(),
+        BuildScope::Project(project_id) => project_id.as_uuid(),
+    };
+    let query = format!(
         "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
                 artifacts.artifact \
          FROM control.container_build_projections builds \
@@ -7200,21 +7713,28 @@ async fn load_candidate_build(
           AND candidates.content_sha256=builds.candidate_sha256 \
          LEFT JOIN control.image_artifact_projections artifacts \
            ON artifacts.image_artifact_id=builds.image_artifact_id \
-         WHERE builds.course_id=$1 AND builds.candidate_id=$2 \
-           AND candidates.course_id=$1 AND candidates.candidate_kind='environment' \
+         WHERE builds.{scope_column}=$1 AND builds.candidate_id=$2 AND builds.target=$5 \
+           AND candidates.{scope_column}=$1 AND candidates.candidate_kind=$6 \
            AND candidates.state='validated' AND candidates.revision=$3 \
            AND candidates.content_sha256=$4",
-    )
-    .bind(course_id.as_uuid())
-    .bind(candidate.id.as_uuid())
-    .bind(i64_revision(candidate.revision)?)
-    .bind(candidate_sha256.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(db)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
+    );
+    let row = sqlx::query(&query)
+        .bind(scope_id)
+        .bind(candidate_id.as_uuid())
+        .bind(i64_revision(candidate_revision)?)
+        .bind(candidate_sha256.to_string())
+        .bind(target)
+        .bind(candidate_kind)
+        .fetch_optional(pool)
+        .await
+        .map_err(db)?;
+    row.map(|row| candidate_build_view_from_row(&row))
+        .transpose()
+}
+
+fn candidate_build_view_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<CandidateBuildView, ControlError> {
     let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
         "requested" => CandidateBuildState::Requested,
         "succeeded" => CandidateBuildState::Succeeded,
@@ -7246,83 +7766,31 @@ async fn load_candidate_build(
     {
         return Err(ControlError::PersistenceIdentityMismatch);
     }
-    Ok(Some(CandidateBuildView {
+    Ok(CandidateBuildView {
         state,
         artifact,
         diagnostic_code,
         cleanup_verified,
-    }))
+    })
 }
 
-async fn load_candidate_build_project(
-    pool: &PgPool,
-    project_id: ProjectId,
-    candidate: &EnvironmentCandidate,
-) -> Result<Option<CandidateBuildView>, ControlError> {
-    let candidate_sha256 = canonical_hash(&candidate.spec)?;
-    let row = sqlx::query(
-        "SELECT builds.state,builds.terminal_diagnostic,builds.cleanup_verified, \
-                artifacts.artifact \
-         FROM control.container_build_projections builds \
-         JOIN control.candidates candidates \
-           ON candidates.candidate_id=builds.candidate_id \
-          AND candidates.revision=builds.candidate_revision \
-          AND candidates.content_sha256=builds.candidate_sha256 \
-         LEFT JOIN control.image_artifact_projections artifacts \
-           ON artifacts.image_artifact_id=builds.image_artifact_id \
-         WHERE builds.project_id=$1 AND builds.candidate_id=$2 \
-           AND candidates.project_id=$1 AND candidates.candidate_kind='environment' \
-           AND candidates.state='validated' AND candidates.revision=$3 \
-           AND candidates.content_sha256=$4",
-    )
-    .bind(project_id.as_uuid())
-    .bind(candidate.id.as_uuid())
-    .bind(i64_revision(candidate.revision)?)
-    .bind(candidate_sha256.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(db)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let state = match row.try_get::<String, _>("state").map_err(db)?.as_str() {
-        "requested" => CandidateBuildState::Requested,
-        "succeeded" => CandidateBuildState::Succeeded,
-        "failed" => CandidateBuildState::Failed,
-        "cancelled" => CandidateBuildState::Cancelled,
-        _ => return Err(ControlError::PersistenceIdentityMismatch),
-    };
-    let artifact = row
-        .try_get::<Option<Value>, _>("artifact")
-        .map_err(db)?
-        .map(|value| {
-            serde_json::from_value(value).map_err(|_| ControlError::PersistenceIdentityMismatch)
-        })
-        .transpose()?;
-    let diagnostic_code = row
-        .try_get::<Option<String>, _>("terminal_diagnostic")
-        .map_err(db)?
-        .map(DiagnosticCode::parse)
-        .transpose()
-        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-    let cleanup_verified: Option<bool> = row.try_get("cleanup_verified").map_err(db)?;
-    let evidence_is_complete = artifact.is_some();
-    if (state == CandidateBuildState::Succeeded) != evidence_is_complete
-        || (state == CandidateBuildState::Requested
-            && (diagnostic_code.is_some() || cleanup_verified.is_some()))
-        || (matches!(
-            state,
-            CandidateBuildState::Failed | CandidateBuildState::Cancelled
-        ) && diagnostic_code.is_none())
+/// Resolve the per-experiment runner artifact safe to present for an Evaluation candidate.
+///
+/// Only a succeeded, Control-projected runner build presents an artifact. Deployment-owned VM
+/// evaluation has no runner build and therefore returns null.
+fn resolve_runner_image_artifact(
+    build: Option<&CandidateBuildView>,
+) -> Result<Option<ImageArtifact>, ControlError> {
+    let artifact = build
+        .filter(|view| view.state == CandidateBuildState::Succeeded)
+        .and_then(|view| view.artifact.clone());
+    if let Some(artifact) = &artifact
+        && (matches!(artifact, ImageArtifact::VirtualMachine { .. })
+            || artifact.validate().is_err())
     {
         return Err(ControlError::PersistenceIdentityMismatch);
     }
-    Ok(Some(CandidateBuildView {
-        state,
-        diagnostic_code,
-        cleanup_verified,
-        artifact,
-    }))
+    Ok(artifact)
 }
 
 async fn load_contract_tx<T>(
@@ -7390,7 +7858,6 @@ fn release_view(
 fn project_release_view(
     row: &sqlx::postgres::PgRow,
     project_id: ProjectId,
-    actor_id: ActorId,
 ) -> Result<EnvironmentTemplateReleaseView, ControlError> {
     let view = release_view(row)?;
     let release = &view.release;
@@ -7437,12 +7904,7 @@ fn project_release_view(
     {
         return Err(ControlError::PersistenceIdentityMismatch);
     }
-    let owner_actor_id = ActorId::from_str(
-        &row.try_get::<Uuid, _>("owner_actor_id")
-            .map_err(db)?
-            .to_string(),
-    )
-    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let actor_can_view_work: bool = row.try_get("actor_can_view_work").map_err(db)?;
     let candidate_project_id = ProjectId::from_str(
         &row.try_get::<Uuid, _>("candidate_project_id")
             .map_err(db)?
@@ -7474,7 +7936,7 @@ fn project_release_view(
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
     match candidate.spec.class {
         EnvironmentClass::Work => {
-            if owner_actor_id != actor_id {
+            if !actor_can_view_work {
                 return Err(ControlError::NotFound);
             }
             if row
@@ -7698,6 +8160,8 @@ pub enum ControlError {
     PlatformImageUploadNotFound,
     #[error("LW_PLATFORM_IMAGE_UPLOAD_STATE_CONFLICT")]
     PlatformImageUploadStateConflict,
+    #[error("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")]
+    PlatformImageUploadExpired,
     #[error("{0}")]
     PackageVerificationFailed(String),
     #[error("LW_PACKAGE_OBJECT_VERIFICATION_FAILED: {0}")]
@@ -7748,6 +8212,8 @@ pub enum ControlError {
     ReleaseEvidenceStale,
     #[error("LW_RELEASE_ARTIFACT_NOT_AUTHORITATIVE")]
     ArtifactNotAuthoritative,
+    #[error("LW_EVALUATION_RUNNER_ARTIFACT_REQUIRED")]
+    EvaluationRunnerArtifactRequired,
     #[error("LW_RELEASE_ARTIFACT_MISMATCH")]
     ArtifactMismatch,
     #[error("LW_RELEASE_NOT_FOUND")]
@@ -7807,6 +8273,7 @@ mod tests {
                 builder_binding: "buildkit-primary-v1".to_owned(),
                 output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
                 dockerfile_path: "Dockerfile".to_owned(),
+                runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
                 network: BuildNetworkPolicy::DenyAll,
                 max_duration_milliseconds: 600_000,
                 max_cpu_millicores: 2_000,
@@ -7834,6 +8301,16 @@ mod tests {
             evaluation_runtime: EvaluationRuntimePolicy {
                 provider_binding: "evaluation-primary-v1".to_owned(),
                 runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+            },
+            llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+                models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                    model: "fixture-provider-v1".to_owned(),
+                    label: "Fixture model".to_owned(),
+                }],
+                default_model: "fixture-provider-v1".to_owned(),
+                runtime_binding: "claude-code-test".to_owned(),
+                claude_code_version: "2.1.207".to_owned(),
+                max_in_flight_per_worker: 2,
             },
         })
     }
@@ -7905,7 +8382,7 @@ mod tests {
             format: config.virtual_machine_bases.bases[0].format,
         };
         assert_eq!(
-            resolve_candidate_image_artifact(&candidate, None, &config.virtual_machine_bases,)?,
+            resolve_candidate_image_artifact(&candidate, None, &config, &[])?,
             Some(expected.clone())
         );
 
@@ -7916,14 +8393,10 @@ mod tests {
         {
             *provider_binding = "other-provider".to_owned();
         }
-        assert_eq!(
-            resolve_candidate_image_artifact(
-                &provider_mismatch,
-                None,
-                &config.virtual_machine_bases,
-            )?,
-            None
-        );
+        assert!(matches!(
+            resolve_candidate_image_artifact(&provider_mismatch, None, &config, &[],),
+            Err(ControlError::ArtifactMismatch)
+        ));
 
         let mut storage_mismatch = candidate.clone();
         if let EnvironmentRuntimeSpec::VirtualMachine {
@@ -7933,14 +8406,10 @@ mod tests {
         {
             *storage_class_binding = "other-storage".to_owned();
         }
-        assert_eq!(
-            resolve_candidate_image_artifact(
-                &storage_mismatch,
-                None,
-                &config.virtual_machine_bases,
-            )?,
-            None
-        );
+        assert!(matches!(
+            resolve_candidate_image_artifact(&storage_mismatch, None, &config, &[],),
+            Err(ControlError::ArtifactMismatch)
+        ));
 
         let mut disk_mismatch = candidate;
         if let EnvironmentRuntimeSpec::VirtualMachine { base_disk, .. } =
@@ -7951,38 +8420,43 @@ mod tests {
                 "a".repeat(64)
             );
         }
-        assert_eq!(
-            resolve_candidate_image_artifact(&disk_mismatch, None, &config.virtual_machine_bases)?,
-            None
-        );
+        assert!(matches!(
+            resolve_candidate_image_artifact(&disk_mismatch, None, &config, &[]),
+            Err(ControlError::ArtifactMismatch)
+        ));
         Ok(())
     }
 
     #[test]
-    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only() {
+    fn virtual_machine_base_catalog_resolves_reviewed_bindings_only()
+    -> Result<(), Box<dyn std::error::Error>> {
         let catalog = multi_base_catalog();
         assert!(catalog.validate());
         let ubuntu = &catalog.bases[0].base_disk;
         let cirros = &catalog.bases[1].base_disk;
         assert_eq!(
             catalog
-                .resolve(
+                .resolve_with_catalog(
                     &catalog.provider_binding,
                     &catalog.storage_class_binding,
                     cirros,
+                    &[],
+                    Revision::new(1)?,
                 )
-                .map(|entry| entry.base_disk.binding.as_str()),
-            Some("cirros-0.6-v1")
+                .map(|(id, _)| id),
+            Some(catalog.bases[1].artifact_id)
         );
 
         let mut unknown = cirros.clone();
         unknown.binding = "alpine-3.22-v1".to_owned();
         assert!(
             catalog
-                .resolve(
+                .resolve_with_catalog(
                     &catalog.provider_binding,
                     &catalog.storage_class_binding,
                     &unknown,
+                    &[],
+                    Revision::new(1)?,
                 )
                 .is_none()
         );
@@ -7994,10 +8468,12 @@ mod tests {
         );
         assert!(
             catalog
-                .resolve(
+                .resolve_with_catalog(
                     &catalog.provider_binding,
                     &catalog.storage_class_binding,
                     &drift,
+                    &[],
+                    Revision::new(1)?,
                 )
                 .is_none()
         );
@@ -8020,6 +8496,7 @@ mod tests {
             },
         ];
         assert!(!duplicate.validate());
+        Ok(())
     }
 
     fn multi_base_catalog() -> VirtualMachineBaseCatalog {

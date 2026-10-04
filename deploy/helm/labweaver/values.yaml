@@ -51,6 +51,13 @@ workloads:
     args: []
     configMap: control-service-config
     secret: control-service-secrets
+    # Platform image completion stages the uploaded archive here before it
+    # hands the immutable object to Agent. Keep this workload-specific budget
+    # separate from the small default used by ordinary API services.
+    tmpSizeLimit: 3Gi
+    resources:
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 1Gi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 3Gi}
     env:
       LABWEAVER_CONTROL_CONFIG_FILE: /etc/labweaver/config/config.yaml
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
@@ -108,11 +115,16 @@ workloads:
     secret: agent-service-secrets
     rbacProfile: authoring
     kubernetesApi: true
+    # One VM disk import can hold the staged archive, expanded disk, and
+    # containerdisk layer concurrently. The import gate permits one such
+    # operation per Agent process; reserve 8 GiB and allow the bounded 24 GiB
+    # working set plus headroom.
+    tmpSizeLimit: 32Gi
+    resources:
+      requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 8Gi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 32Gi}
     env:
       LABWEAVER_AGENT_CONFIG_FILE: /etc/labweaver/config/config.yaml
-      # Acceptance-only VM candidate diagnostics. The directory is backed by
-      # the existing pod-scoped /tmp volume and is removed with the pod.
-      LABWEAVER_LLM_OUTPUT_DIR: /tmp
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
       LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
       LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/oidc-ca.pem
@@ -187,7 +199,7 @@ workloads:
       LABWEAVER_RESOURCE_USAGE_BASE_URI: https://resource-service:9448/
       LABWEAVER_RESOURCE_USAGE_CA_PATH: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_RESOURCE_USAGE_AUDIENCE: labweaver-resource
-      LABWEAVER_RESOURCE_USAGE_SCOPES: resource.usage.record
+      LABWEAVER_RESOURCE_USAGE_SCOPES: resource.usage.record resource.gpu.resolve resource.gpu.release
       LABWEAVER_RESOURCE_USAGE_TIMEOUT_MILLISECONDS: "5000"
       LABWEAVER_NATS_CA_PATH: /etc/labweaver/secrets/nats-ca.pem
       LABWEAVER_NATS_CLIENT_CERT_PATH: /etc/labweaver/secrets/nats-client.crt
@@ -397,3 +409,13 @@ network:
   kubernetesApiPorts: [443, 6443]
   gatewayIngressCidrs: []
   externalServiceEndpoints: []
+
+internalIdentityProxy:
+  enabled: false
+  namespace: keycloak-system
+  replicas: 2
+  hostname: keycloak.labweaver.internal
+  backendAddress: labweaver-keycloak-http
+  backendPort: 8080
+  tlsSecret: labweaver-keycloak-tls
+  clusterIP: ""

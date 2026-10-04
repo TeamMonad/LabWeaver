@@ -16,7 +16,7 @@
       :message="bannerFailure.message"
       :retryable="bannerFailure.retryable"
       severity="error"
-      @retry="images.load"
+      @retry="retryBanner"
     />
 
     <section class="catalog-card md-card" aria-labelledby="catalog-heading">
@@ -81,7 +81,7 @@
       <form class="admin-form" @submit.prevent="submitRegister">
         <label>
           <span>类型</span>
-          <select v-model="registerForm.kind" class="text-input">
+          <select v-model="registerForm.kind" class="text-input" aria-label="类型">
             <option value="container">container</option>
             <option value="virtual_machine">virtual_machine</option>
           </select>
@@ -116,7 +116,7 @@
       <form class="admin-form" @submit.prevent="submitUpload">
         <label>
           <span>类型</span>
-          <select v-model="uploadForm.kind" class="text-input">
+          <select v-model="uploadForm.kind" class="text-input" aria-label="类型">
             <option value="container">container</option>
             <option value="virtual_machine">virtual_machine</option>
           </select>
@@ -136,7 +136,7 @@
         <template v-if="uploadForm.kind === 'virtual_machine'">
           <label>
             <span>磁盘格式</span>
-            <select v-model="uploadForm.diskFormat" class="text-input">
+            <select v-model="uploadForm.diskFormat" class="text-input" aria-label="磁盘格式">
               <option value="qcow2">qcow2</option>
               <option value="raw">raw</option>
             </select>
@@ -158,8 +158,45 @@
           <span>{{ uploadForm.kind === 'virtual_machine' ? '虚拟机模板归档（.tar/.qcow2/.raw/.img）' : 'OCI 归档（.tar）' }}</span>
           <input ref="fileInput" class="text-input" type="file" :accept="uploadAccept" @change="selectFile" />
         </label>
+        <p class="upload-limit-hint">归档大小上限：5 GB（5,000,000,000 字节）。</p>
         <button type="submit" class="filled-button" :disabled="busy || !uploadFile">上传并导入</button>
       </form>
+      <section v-if="uploadStatusLabel" class="upload-status" role="status" aria-live="polite">
+        <div class="upload-status-header">
+          <strong>镜像导入：{{ uploadStatusLabel }}</strong>
+          <span v-if="uploadProgress !== null">{{ uploadProgress }}%</span>
+        </div>
+        <p v-if="uploadStatusDiagnostic">{{ uploadStatusDiagnostic.message }}</p>
+        <small v-if="uploadStatusDiagnostic" class="upload-diagnostic-code">{{ uploadStatusDiagnostic.code }}</small>
+        <div class="row-actions">
+          <button
+            v-if="images.uploadActive && !images.uploadCancellationPending"
+            type="button"
+            class="outlined-button small"
+            :disabled="cancellingUpload"
+            @click="cancelUpload"
+          >
+            取消上传
+          </button>
+          <button
+            v-if="images.uploadCancellationPending && images.state.kind === 'error'"
+            type="button"
+            class="outlined-button small"
+            :disabled="refreshingUpload"
+            @click="refreshUploadStatus"
+          >
+            {{ refreshingUpload ? '正在刷新…' : '刷新任务状态' }}
+          </button>
+          <button
+            v-if="canRetryUpload"
+            type="button"
+            class="outlined-button small"
+            @click="retryUploadCompletion"
+          >
+            重试导入
+          </button>
+        </div>
+      </section>
       <DiagnosticBanner
         v-if="uploadDescriptorFailure"
         :code="uploadDescriptorFailure.code"
@@ -188,13 +225,18 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataTableColumn } from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
-import { usePlatformImages, type UploadPlatformImageInput } from '@/composables/usePlatformImages'
+import {
+  MAX_PLATFORM_IMAGE_ARCHIVE_BYTES,
+  usePlatformImages,
+  type UploadPlatformImageInput,
+} from '@/composables/usePlatformImages'
 import { formatBytes, truncateSha256 } from '@/utils/format'
 import { makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type {
   PlatformImageEntryViewSchema,
   PlatformImageKind,
   PlatformImageStatus,
+  PlatformImageUploadState,
   VirtualMachineDiskFormat,
 } from '@/generated/contracts'
 
@@ -208,6 +250,8 @@ const uploadFile = ref<File | null>(null)
 const operationReason = ref('')
 const repinTrustRevision = ref(1)
 const pending = ref<PendingAction | null>(null)
+const cancellingUpload = ref(false)
+const refreshingUpload = ref(false)
 
 const registerForm = reactive<{
   kind: PlatformImageKind
@@ -254,9 +298,43 @@ const catalogColumns: DataTableColumn<CatalogRow>[] = [
   { key: 'actions', title: '操作' },
 ]
 
-const busy = computed(() => images.state.kind === 'loading' || images.state.kind === 'uploading')
+const busy = computed(() => images.state.kind === 'loading' || images.state.kind === 'uploading' || images.uploadActive)
 const actionReady = computed(() => operationReason.value.trim().length > 0)
 const uploadProgress = computed(() => (images.state.kind === 'uploading' ? images.state.progress : null))
+
+const UPLOAD_STATE_LABELS: Record<PlatformImageUploadState, string> = {
+  pending: '等待启动',
+  queued: '排队中',
+  freezing: '冻结归档',
+  importing: '导入中',
+  cancelling: '取消中',
+  imported: '已导入',
+  failed: '导入失败',
+  cancelled: '已取消',
+}
+
+const uploadStatusLabel = computed(() => {
+  if (images.state.kind === 'uploading') return '上传中'
+  if (images.state.kind === 'processing') return UPLOAD_STATE_LABELS[images.state.state]
+  if (images.state.kind === 'terminal') return UPLOAD_STATE_LABELS[images.state.state]
+  if (images.state.kind === 'error' && images.state.uploadId) return '需要操作'
+  return null
+})
+
+const uploadStatusDiagnostic = computed(() => {
+  if (images.state.kind === 'terminal') return images.state.diagnostic ?? null
+  if (images.state.kind === 'error' && images.state.uploadId) return images.state.diagnostic
+  return null
+})
+
+const canRetryUpload = computed(() => (
+  images.state.kind === 'error'
+  && Boolean(images.state.uploadId)
+  && images.uploadActive
+  && images.uploadCompletionRetryable
+  && !images.uploadCancellationPending
+  && images.state.diagnostic.retryable
+))
 
 /** A virtual-machine archive may hold a raw disk image, so it accepts more than the OCI layout tar. */
 const uploadAccept = computed(() => (uploadForm.kind === 'virtual_machine' ? '.tar,.qcow2,.raw,.img' : '.tar'))
@@ -323,7 +401,19 @@ function statusLabel(status: PlatformImageStatus): string {
 
 function selectFile(event: Event) {
   const selected = (event.target as HTMLInputElement).files
-  uploadFile.value = selected && selected.length > 0 ? selected[0] : null
+  uploadDescriptorFailure.value = null
+  const file = selected && selected.length > 0 ? selected[0] : null
+  if (file && file.size > MAX_PLATFORM_IMAGE_ARCHIVE_BYTES) {
+    uploadFile.value = null
+    uploadDescriptorFailure.value = makeDiagnostic(
+      'PLATFORM_IMAGE_UPLOAD_TOO_LARGE',
+      '所选归档超过 5 GB（5,000,000,000 字节）限制。',
+      false,
+    )
+    if (fileInput.value) fileInput.value.value = ''
+    return
+  }
+  uploadFile.value = file
 }
 
 function openAction(action: 'repin' | 'disable', entry: PlatformImageEntryViewSchema) {
@@ -387,7 +477,49 @@ async function submitUpload() {
   uploadForm.capacityBytes = ''
 }
 
-onMounted(() => images.load())
+async function retryBanner() {
+  if (
+    images.state.kind === 'error'
+    && images.state.uploadId
+    && images.uploadCompletionRetryable
+    && !images.uploadCancellationPending
+    && images.state.diagnostic.retryable
+  ) {
+    await images.retryUploadCompletion()
+    return
+  }
+  if (images.state.kind === 'error' && images.state.uploadId) return
+  await images.load()
+}
+
+async function retryUploadCompletion() {
+  await images.retryUploadCompletion()
+}
+
+async function cancelUpload() {
+  if (cancellingUpload.value) return
+  cancellingUpload.value = true
+  try {
+    await images.cancelUpload()
+  } finally {
+    cancellingUpload.value = false
+  }
+}
+
+async function refreshUploadStatus() {
+  if (refreshingUpload.value) return
+  refreshingUpload.value = true
+  try {
+    await images.resumeUpload()
+  } finally {
+    refreshingUpload.value = false
+  }
+}
+
+onMounted(async () => {
+  await images.load()
+  await images.resumeUpload()
+})
 </script>
 
 <style scoped>
@@ -396,7 +528,7 @@ onMounted(() => images.load())
 .page-header h2, .section-heading h3 { margin: 0; color: var(--md-sys-color-on-surface); }
 .page-header h2 { font: var(--md-sys-headline-small); }
 .section-heading h3 { font: var(--md-sys-title-large); }
-.page-subtitle, .section-heading p, .operation-hint, .upload-progress, .upload-file { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
+.page-subtitle, .section-heading p, .operation-hint, .upload-progress, .upload-file, .upload-limit-hint, .upload-status p { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
 .catalog-card, .register-card, .upload-card { display: grid; gap: 16px; padding: 20px; }
 .admin-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
 .admin-form label, .operation-credentials label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
@@ -407,6 +539,8 @@ textarea.text-input { resize: vertical; }
 .operation-credentials { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); padding-top: 16px; border-top: 1px solid var(--md-sys-color-outline-variant); }
 .operation-hint { grid-column: 1 / -1; margin: 0; }
 .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.upload-status { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-variant); }
+.upload-status-header { display: flex; justify-content: space-between; gap: 12px; color: var(--md-sys-color-on-surface); font: var(--md-sys-label-large); }
 .state-chip { display: inline-flex; white-space: nowrap; padding: 3px 8px; border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .state-chip--active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 .state-chip--disabled { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }

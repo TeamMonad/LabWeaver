@@ -374,9 +374,19 @@ impl OrphanReconciler {
                 _ = interval.tick() => {}
             }
             if let Err(error) = self.reconcile_once().await {
+                // `error` is a protected field name, so every pass reported the same redacted text
+                // and the failing stage was unrecoverable from the log. The variant discriminates
+                // configuration from the Kubernetes API from the control-plane lookup, which is
+                // what an operator needs to route the failure.
+                let error_kind = match error {
+                    OrphanReconcileError::ConfigurationInvalid => "configuration_invalid",
+                    OrphanReconcileError::Kubernetes(_) => "kubernetes",
+                    OrphanReconcileError::Control => "control_lookup",
+                };
                 tracing::error!(
                     event = "evaluation.orphan.reconcile_failed",
                     diagnostic_code = "LW_EVALUATION_ORPHAN_RECONCILE_FAILED",
+                    error_kind = error_kind,
                     error = %error,
                     "orphan reconcile pass failed; the next pass retries",
                 );

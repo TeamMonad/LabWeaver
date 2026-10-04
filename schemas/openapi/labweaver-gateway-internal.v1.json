@@ -109,6 +109,9 @@
       "InternalImageArtifactResolution": {
         "$ref": "../contracts/v1/http/internal-image-artifact-resolution.schema.json"
       },
+      "InternalPlatformImageImportJobStatus": {
+        "$ref": "../contracts/v1/http/internal-platform-image-import-job-status.schema.json"
+      },
       "InternalPublishEvaluationReleaseRequest": {
         "$ref": "../contracts/v1/http/internal-publish-evaluation-release-request.schema.json"
       },
@@ -152,6 +155,9 @@
       },
       "PlatformImageUploadSession": {
         "$ref": "../contracts/v1/http/platform-image-upload-session.schema.json"
+      },
+      "PlatformImageUploadStatus": {
+        "$ref": "../contracts/v1/http/platform-image-upload-status.schema.json"
       },
       "ProblemDetails": {
         "properties": {
@@ -2613,10 +2619,10 @@
         "summary": "Persist cancellation for one Agent LLM review"
       }
     },
-    "/internal/v1/platform-images/imports": {
+    "/internal/v1/platform-images/import-jobs": {
       "post": {
         "description": "Permission: agent.control.invoke. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
-        "operationId": "importPlatformImage",
+        "operationId": "enqueuePlatformImageImport",
         "parameters": [
           {
             "in": "header",
@@ -2631,18 +2637,18 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "../contracts/v1/http/internal-platform-image-import-request.schema.json"
+                "$ref": "../contracts/v1/http/internal-platform-image-import-enqueue-request.schema.json"
               }
             }
           },
           "required": true
         },
         "responses": {
-          "201": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "../contracts/v1/http/platform-image-entry.schema.json"
+                  "$ref": "../contracts/v1/http/internal-platform-image-import-job-status.schema.json"
                 }
               }
             },
@@ -2697,7 +2703,7 @@
             ]
           }
         ],
-        "summary": "importPlatformImage",
+        "summary": "enqueuePlatformImageImport",
         "x-labweaver-allowed-roles": [
           "platform_admin"
         ],
@@ -2712,6 +2718,212 @@
         "x-labweaver-permission": "agent.control.invoke",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/platform-images/import-jobs/{uploadId}": {
+      "get": {
+        "description": "Permission: agent.control.invoke. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformImageImportJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uploadId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/internal-platform-image-import-job-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.control.invoke"
+            ]
+          }
+        ],
+        "summary": "getPlatformImageImportJob",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "agent.control.invoke",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/internal/v1/platform-images/import-jobs/{uploadId}/cancel": {
+      "post": {
+        "description": "Permission: agent.control.invoke. Timeout: 30000 ms. Cancellable: true. Retryable: false. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "cancelPlatformImageImportJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uploadId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/internal-platform-image-import-cancel-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/internal-platform-image-import-job-status.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "agent.control.invoke"
+            ]
+          }
+        ],
+        "summary": "cancelPlatformImageImportJob",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": true,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "agent.control.invoke",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": false,
         "x-labweaver-scope": "service",
         "x-labweaver-timeout-ms": 30000
       }

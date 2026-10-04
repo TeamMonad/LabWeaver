@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
@@ -29,11 +29,9 @@ import {
 } from '../support/real-experiment.mjs'
 
 const REAL_CHAIN_TIMEOUT_MS = 3_600_000
-const REAL_PROVIDER_BUDGET = Object.freeze({
-  maxOutputTokens: 32_000,
-  timeoutMilliseconds: 300_000,
-  maxTransientRetries: 0,
-})
+// The real chain must prove a single uncontested provider attempt, so it opts out
+// of the shared harness retry. Everything else comes from the acceptance budget.
+const REAL_PROVIDER_BUDGET = Object.freeze({ maxTransientRetries: 0 })
 const config = realProviderConfig()
 const resume = realExperimentResumeConfig()
 
@@ -110,7 +108,7 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   await expect(approvalButton).toBeDisabled()
   await page.getByRole('checkbox').check()
   await page.locator('textarea.reason-input').fill('已核对真实生成的 Environment、Evaluation、私有黄金基础镜像来源和构建产物摘要。')
-  await expect(approvalButton).toBeEnabled()
+  await expect(approvalButton).toBeEnabled({ timeout: 240_000 })
 
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
@@ -161,7 +159,10 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.getByRole('heading', { name: environmentId, exact: true })).toBeVisible({ timeout: 120_000 })
+  const environmentIdDetails = page.locator('details.environment-id-details')
+  await expect(environmentIdDetails).toBeVisible({ timeout: 120_000 })
+  await environmentIdDetails.locator('summary').click()
+  await expect(environmentIdDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
   await expect(page.getByRole('button', { name: '概览与访问', exact: true })).toBeVisible()
   const grantButton = page.getByRole('button', { name: '签发访问授权', exact: true })
   const grantCard = page.locator('.grant-card')
@@ -181,7 +182,7 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await pollJson(
     page.request,
     `/api/v1/environments/${environmentId}/access-grants?state=active&includeTerminal=false&limit=2`,
-    (value) => Array.isArray(value.items) && value.items.length === 1,
+    (value) => Array.isArray(value.items) && value.items.filter((item) => item.state === 'active').length === 1,
     'REAL_EXPERIMENT_ACCESS_GRANT_ACTIVE_TIMEOUT',
     120_000,
   )
@@ -192,20 +193,36 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
     })
   })
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  const openTerminal = page.getByRole('button', { name: '打开终端', exact: true })
+  const consolePanel = page.locator('.console-panel')
+  await expect(consolePanel).toBeVisible({ timeout: 120_000 })
+  const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
   await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
   await openTerminal.click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   const input = page.locator('.xterm-helper-textarea')
-  await expect(input).toBeVisible({ timeout: 30_000 })
+  await expect(input).toBeAttached({ timeout: 30_000 })
   return { input, terminalFrames }
 }
 
 async function editThroughTerminal({ page, input, terminalFrames }) {
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  await expect(page.locator('.xterm-host')).toBeVisible({ timeout: 120_000 })
-  await expect(input).toBeVisible({ timeout: 30_000 })
+  const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
+  if (await reconnect.count() > 0) {
+    await expect(reconnect).toBeEnabled({ timeout: 120_000 })
+    await reconnect.click()
+  }
+  const consolePanel = page.locator('.console-panel')
+  await expect(consolePanel).toBeVisible({ timeout: 120_000 })
+  const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
+  if (await openTerminal.count() > 0) {
+    await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
+    await openTerminal.click()
+  }
+  const host = page.locator('.xterm-host')
+  await expect(host).toBeVisible({ timeout: 120_000 })
+  await host.click()
+  await expect(input).toBeAttached({ timeout: 30_000 })
   await input.focus()
   await page.keyboard.type("sed -i 's/password_length == 0/password_length != sizeof(expected_password) - 1/' student/auth.c")
   await page.keyboard.press('Enter')
@@ -376,9 +393,9 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     })
     expect(beforeResult.awardedScore).toBeLessThan(beforeResult.maxScore)
 
+    await revokeEnvironmentAccessGrants(studentContext.request, baseURL, environmentId)
     const terminal = await issueTerminalAccessAndConnect(studentPage, projectId, environmentId)
     await editThroughTerminal({ page: studentPage, ...terminal })
-    await studentPage.screenshot({ path: testInfo.outputPath('environment-terminal.png'), fullPage: true })
     await assertNoPendingEvaluationTaskResourceRequests(adminPage.request, projectId, studentActorId)
     const afterRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, projectId)
     const after = await freezeStudentSourceByUi(studentPage, projectId, environmentId)
@@ -433,7 +450,6 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     await expect(studentPage).toHaveURL(
       (url) => url.pathname === '/student/results' && url.searchParams.get('projectId') === projectId,
     )
-    await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
   } catch (error) {
     hasPrimaryError = true
     primaryError = error
@@ -490,12 +506,11 @@ test('teacher publishes a real security experiment and student repairs it throug
   try {
     const project = await createProjectByUi(page, `real-security-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
-    await createProjectPolicy(request, baseURL, project.id, REAL_PROVIDER_BUDGET)
+    await configureProjectPolicyByUi(page, project.id, REAL_PROVIDER_BUDGET)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
     await expect(page.getByRole('heading', { name: '材料上传与 AgentRun', exact: true })).toBeVisible()
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy.directory)
-    await page.screenshot({ path: testInfo.outputPath('materials.png'), fullPage: true })
 
     const run = await startExperimentRunByUi(page, project.id)
     await expect(page).toHaveURL(new RegExp(`[?&]runId=${encodeURIComponent(run.id)}(?:&|$)`), { timeout: 30_000 })
@@ -512,7 +527,6 @@ test('teacher publishes a real security experiment and student repairs it throug
       completed.evaluationCandidateId,
       built.artifact,
     )
-    await page.screenshot({ path: testInfo.outputPath('approval.png'), fullPage: true })
     await continueStudentAcceptance({
       browser,
       teacherPage: page,

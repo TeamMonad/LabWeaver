@@ -5,7 +5,7 @@
 //! (`IdentityExpired` covers an expired, not-yet-valid, over-long-lived, or
 //! key-mismatched certificate), pins the target host key through a russh
 //! handshake before writing `known_hosts`, runs the fixed `ansible-playbook`
-//! with a scrubbed environment, and reduces the `ansible.builtin.json` callback
+//! with a scrubbed environment, and reduces the `ansible.posix.json` callback
 //! output to typed facts and payload-free evidence. Domain failures become
 //! fail-closed terminal evidence; infrastructure failures abort with a stable
 //! [`AnsibleProbeWorkerError`] diagnostic.
@@ -13,9 +13,9 @@
 //! Playbook contract (frozen package content): the request's
 //! `playbook_profile` is a normalized package-relative path below
 //! `/input/evaluator`. The selected playbook runs against one host (the target
-//! IPv4) and contains exactly one task named `labweaver_probe_facts` whose
-//! per-host result carries a flat `labweaver_probe_facts` object of fact name
-//! to boolean or string.
+//! IPv4). Its literal package/service/stat observations are validated before
+//! connecting; facts come from module results, never a playbook-supplied score
+//! or precomputed facts object.
 #![allow(
     clippy::needless_pass_by_value,
     clippy::useless_conversion,
@@ -36,6 +36,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write as _,
     path::{Path, PathBuf},
@@ -80,14 +81,16 @@ const EVIDENCE_ROOT: &str = "/evidence";
 const INVENTORY_PATH: &str = "/work/inventory.ini";
 const KNOWN_HOSTS_PATH: &str = "/work/known_hosts";
 const EVIDENCE_PATH: &str = "/evidence/evidence.json";
-const ANSIBLE_PLAYBOOK_PATH: &str = "/opt/labweaver/probe/bin/ansible-playbook";
+const ANSIBLE_PLAYBOOK_PATH: &str = "/opt/labweaver/probe/venv/bin/ansible-playbook";
 const ANSIBLE_CONFIG_PATH: &str = "/opt/labweaver/probe/ansible.cfg";
 const EVALUATOR_ROOT: &str = "/input/evaluator";
-const FACTS_TASK_NAME: &str = "labweaver_probe_facts";
+const COLLECTIONS_PATH: &str = "/opt/labweaver/probe/collections";
+const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_BYTES: u64 = 1024 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
 const MAX_SECRET_MATERIAL_BYTES: u64 = 64 * 1024;
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
+const EVALUATION_PRINCIPAL: &str = "labweaver-evaluation";
 
 /// Executes one validated read-only probe request inside the isolated Kubernetes Job.
 ///
@@ -141,6 +144,214 @@ fn require_supported_profile(
 
 fn playbook_path(playbook_profile: &str) -> PathBuf {
     Path::new(EVALUATOR_ROOT).join(playbook_profile)
+}
+
+/// The concrete observation surface of one immutable, read-only playbook.
+struct ProbeProfile {
+    modules: BTreeSet<String>,
+    stat_paths: BTreeSet<String>,
+}
+
+fn validate_playbook(
+    bytes: &[u8],
+    request: &AnsibleProbeExecutionRequest,
+) -> Result<ProbeProfile, AnsibleProbeWorkerError> {
+    let invalid = || AnsibleProbeWorkerError::ProfileInvalid;
+    if bytes.len() > MAX_PROFILE_BYTES {
+        return Err(invalid());
+    }
+    // YAML Value rejects duplicate mapping keys before conversion to JSON.
+    let yaml: serde_yaml::Value = serde_yaml::from_slice(bytes).map_err(|_| invalid())?;
+    let document = serde_json::to_value(yaml).map_err(|_| invalid())?;
+    let plays = document
+        .as_array()
+        .filter(|plays| plays.len() == 1)
+        .ok_or_else(invalid)?;
+    let play = plays[0].as_object().ok_or_else(invalid)?;
+    require_keys(play, &["name", "hosts", "gather_facts", "tasks"])?;
+    if play.get("hosts").and_then(Value::as_str) != Some("probe")
+        || play.get("gather_facts").and_then(Value::as_bool) != Some(false)
+        || play.get("name").is_some_and(|value| !literal_label(value))
+    {
+        return Err(invalid());
+    }
+    let tasks = play
+        .get("tasks")
+        .and_then(Value::as_array)
+        .filter(|tasks| !tasks.is_empty() && tasks.len() <= crate::ansible_probe::MAX_FACTS)
+        .ok_or_else(invalid)?;
+    let mut profile = ProbeProfile {
+        modules: BTreeSet::new(),
+        stat_paths: BTreeSet::new(),
+    };
+    let mut names = BTreeSet::new();
+    for task in tasks {
+        let task = task.as_object().ok_or_else(invalid)?;
+        require_keys(
+            task,
+            &[
+                "name",
+                "register",
+                "loop",
+                "ansible.builtin.package_facts",
+                "ansible.builtin.service_facts",
+                "ansible.builtin.stat",
+            ],
+        )?;
+        let name = task
+            .get("name")
+            .filter(|name| literal_label(name))
+            .ok_or_else(invalid)?;
+        if !names.insert(name.as_str().ok_or_else(invalid)?) {
+            return Err(invalid());
+        }
+        if task.get("register").is_some_and(|value| {
+            !value.as_str().is_some_and(|name| {
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                    && name.starts_with("labweaver_probe_")
+            })
+        }) {
+            return Err(invalid());
+        }
+        let modules: Vec<_> = crate::ansible_probe::ALLOWED_PROBE_MODULES
+            .iter()
+            .filter(|module| task.contains_key(**module))
+            .collect();
+        if modules.len() != 1
+            || !request
+                .module_allowlist
+                .iter()
+                .any(|module| module == *modules[0])
+        {
+            return Err(invalid());
+        }
+        let module = *modules[0];
+        if module != "ansible.builtin.stat" && !profile.modules.insert(module.to_owned()) {
+            return Err(invalid());
+        }
+        profile.modules.insert(module.to_owned());
+        let args = &task[module];
+        match module {
+            "ansible.builtin.package_facts" => {
+                if task.contains_key("loop") {
+                    return Err(invalid());
+                }
+                if !args.is_null() {
+                    let args = args.as_object().ok_or_else(invalid)?;
+                    require_keys(args, &["manager", "strategy"])?;
+                    if args.get("manager").is_some_and(|value| {
+                        !value.as_str().is_some_and(|manager| {
+                            [
+                                "auto", "apt", "rpm", "apk", "pacman", "pkg", "pkg_info", "portage",
+                            ]
+                            .contains(&manager)
+                        })
+                    }) || args.get("strategy").is_some_and(|value| {
+                        !value
+                            .as_str()
+                            .is_some_and(|strategy| ["first", "all"].contains(&strategy))
+                    }) {
+                        return Err(invalid());
+                    }
+                }
+            }
+            "ansible.builtin.service_facts" => {
+                if task.contains_key("loop")
+                    || !(args.is_null() || args.as_object().is_some_and(|args| args.is_empty()))
+                {
+                    return Err(invalid());
+                }
+            }
+            "ansible.builtin.stat" => {
+                let args = args.as_object().ok_or_else(invalid)?;
+                require_keys(
+                    args,
+                    &[
+                        "path",
+                        "get_checksum",
+                        "checksum_algorithm",
+                        "follow",
+                        "get_mime",
+                        "get_attributes",
+                    ],
+                )?;
+                for key in ["get_checksum", "follow", "get_mime", "get_attributes"] {
+                    if args.get(key).is_some_and(|value| !value.is_boolean()) {
+                        return Err(invalid());
+                    }
+                }
+                if args
+                    .get("checksum_algorithm")
+                    .is_some_and(|value| value.as_str() != Some("sha256"))
+                    || (args.get("get_checksum").and_then(Value::as_bool) != Some(false)
+                        && args.get("checksum_algorithm").and_then(Value::as_str) != Some("sha256"))
+                {
+                    return Err(invalid());
+                }
+                let path = args
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?;
+                if path == "{{ item }}" {
+                    let paths = task
+                        .get("loop")
+                        .and_then(Value::as_array)
+                        .filter(|paths| !paths.is_empty())
+                        .ok_or_else(invalid)?;
+                    for path in paths {
+                        add_stat_path(&mut profile, path.as_str().ok_or_else(invalid)?)?;
+                    }
+                } else {
+                    if task.contains_key("loop") {
+                        return Err(invalid());
+                    }
+                    add_stat_path(&mut profile, path)?;
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(profile)
+}
+
+fn require_keys(
+    object: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), AnsibleProbeWorkerError> {
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(AnsibleProbeWorkerError::ProfileInvalid);
+    }
+    Ok(())
+}
+
+fn literal_label(value: &Value) -> bool {
+    value.as_str().is_some_and(|label| {
+        !label.is_empty()
+            && label.len() <= 256
+            && !label.chars().any(char::is_control)
+            && !label.contains(['{', '}'])
+    })
+}
+
+fn add_stat_path(profile: &mut ProbeProfile, path: &str) -> Result<(), AnsibleProbeWorkerError> {
+    let mut facts = AnsibleProbeFacts::new();
+    if path.contains(['{', '}'])
+        || profile.stat_paths.len() >= crate::ansible_probe::MAX_FACTS
+        || facts
+            .insert(
+                &format!("file.{path}.exists"),
+                ProbeFactValue::Boolean(false),
+            )
+            .is_err()
+        || !profile.stat_paths.insert(path.to_owned())
+    {
+        return Err(AnsibleProbeWorkerError::ProfileInvalid);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -197,7 +408,24 @@ async fn execute_probe(
     request: &AnsibleProbeExecutionRequest,
 ) -> Result<ProbeOutcome, AnsibleProbeWorkerError> {
     require_runtime_image(request)?;
-    if let Err(status) = validate_ssh_identity(request) {
+    let profile_file = fs::File::open(playbook_path(&request.playbook_profile))
+        .map_err(|_| AnsibleProbeWorkerError::ProfileInvalid)?;
+    if profile_file
+        .metadata()
+        .map_err(|_| AnsibleProbeWorkerError::ProfileInvalid)?
+        .len()
+        > MAX_PROFILE_BYTES as u64
+    {
+        return Err(AnsibleProbeWorkerError::ProfileInvalid);
+    }
+    let mut profile_bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(profile_file, MAX_PROFILE_BYTES as u64 + 1),
+        &mut profile_bytes,
+    )
+    .map_err(|_| AnsibleProbeWorkerError::ProfileInvalid)?;
+    let profile = validate_playbook(&profile_bytes, request)?;
+    if let Err(status) = validate_ssh_identity() {
         return Ok(ProbeOutcome::fail_closed(status, 0, 0));
     }
     let started = Instant::now();
@@ -243,7 +471,7 @@ async fn execute_probe(
             output_bytes,
         ));
     }
-    let facts = match extract_facts(&process.stdout, request) {
+    let facts = match extract_facts(&process.stdout, request, &profile) {
         Ok(facts) => facts,
         Err(status) => {
             return Ok(ProbeOutcome::fail_closed(status, duration, output_bytes));
@@ -286,10 +514,10 @@ fn bounded_duration(started: Instant, request: &AnsibleProbeExecutionRequest) ->
 ///
 /// Missing or unreadable Secret material is infrastructure failure; material
 /// that parses but is not a currently valid, short-lived user certificate bound
-/// to the mounted private key and probe username is `IdentityExpired`.
-fn validate_ssh_identity(
-    request: &AnsibleProbeExecutionRequest,
-) -> Result<(), AnsibleProbeTerminalStatus> {
+/// to the mounted private key and Evaluation purpose is `IdentityExpired`.
+/// The guest login username is separate from the purpose principal authorized
+/// by its Environment-managed AuthorizedPrincipalsFile.
+fn validate_ssh_identity() -> Result<(), AnsibleProbeTerminalStatus> {
     let private_key_bytes = read_secret(Path::new(PRIVATE_KEY_PATH))?;
     let certificate_bytes = read_secret(Path::new(CERTIFICATE_PATH))?;
     let private_key = PrivateKey::from_openssh(&private_key_bytes)
@@ -300,6 +528,14 @@ fn validate_ssh_identity(
         .map_err(|_| AnsibleProbeTerminalStatus::IdentityExpired)?;
     let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp())
         .map_err(|_| AnsibleProbeTerminalStatus::IdentityExpired)?;
+    validate_certificate_identity(&private_key, &certificate, now)
+}
+
+fn validate_certificate_identity(
+    private_key: &PrivateKey,
+    certificate: &Certificate,
+    now: u64,
+) -> Result<(), AnsibleProbeTerminalStatus> {
     let ttl_bound = now
         .checked_add(MAX_WALL_TIME_SECONDS)
         .ok_or(AnsibleProbeTerminalStatus::IdentityExpired)?;
@@ -307,11 +543,12 @@ fn validate_ssh_identity(
         || certificate.valid_after() > now
         || certificate.valid_before() <= now
         || certificate.valid_before() > ttl_bound
-        || certificate.public_key() != private_key.public_key().key_data()
         || certificate
-            .valid_principals()
-            .iter()
-            .all(|principal| principal != &request.target.username)
+            .valid_before()
+            .checked_sub(certificate.valid_after())
+            .is_none_or(|ttl| ttl > MAX_WALL_TIME_SECONDS)
+        || certificate.public_key() != private_key.public_key().key_data()
+        || certificate.valid_principals() != [EVALUATION_PRINCIPAL]
     {
         return Err(AnsibleProbeTerminalStatus::IdentityExpired);
     }
@@ -413,14 +650,11 @@ async fn fetch_verified_host_key(
 fn build_inventory(request: &AnsibleProbeExecutionRequest) -> String {
     format!(
         "[probe]\n{host} ansible_user={user} ansible_port={port} \
-ansible_ssh_private_key_file={key} ansible_ssh_certificate_file={certificate} \
-ansible_ssh_known_hosts_file={known_hosts} ansible_host_key_checking=True\n",
+ansible_ssh_private_key_file={key} ansible_host_key_checking=True\n",
         host = request.target.host,
         user = request.target.username,
         port = request.target.port,
         key = PRIVATE_KEY_PATH,
-        certificate = CERTIFICATE_PATH,
-        known_hosts = KNOWN_HOSTS_PATH,
     )
 }
 
@@ -430,13 +664,25 @@ fn playbook_command(request: &AnsibleProbeExecutionRequest) -> Command {
     let mut command = Command::new(ANSIBLE_PLAYBOOK_PATH);
     command
         .env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("PATH", "/opt/labweaver/probe/venv/bin:/usr/local/bin:/usr/bin:/bin")
         .env("HOME", WORK_ROOT)
         .env("TMPDIR", WORK_ROOT)
         .env("ANSIBLE_CONFIG", ANSIBLE_CONFIG_PATH)
-        .env("ANSIBLE_STDOUT_CALLBACK", "ansible.builtin.json")
+        .env("ANSIBLE_COLLECTIONS_PATH", COLLECTIONS_PATH)
+        .env("ANSIBLE_STDOUT_CALLBACK", "ansible.posix.json")
+        .env("ANSIBLE_JSON_INDENT", "0")
+        .env("ANSIBLE_HOME", "/work/ansible")
+        .env("ANSIBLE_LOCAL_TEMP", "/work/ansible/tmp")
+        .env("LC_ALL", "C.UTF-8")
+        .env("LANG", "C.UTF-8")
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("ANSIBLE_FORCE_COLOR", "0")
         .env("ANSIBLE_DEPRECATION_WARNINGS", "0")
+        .env("ANSIBLE_SSH_COMMON_ARGS", format!(
+            "-o CertificateFile={CERTIFICATE_PATH} -o UserKnownHostsFile={KNOWN_HOSTS_PATH} \
+-o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes"
+        ))
         .current_dir(WORK_ROOT)
         .arg("-i")
         .arg(INVENTORY_PATH)
@@ -444,23 +690,28 @@ fn playbook_command(request: &AnsibleProbeExecutionRequest) -> Command {
     command
 }
 
-/// Reduces the `ansible.builtin.json` callback document to typed facts.
+/// Reduces actual `ansible.posix.json` module observations to asserted facts.
 ///
 /// The stats gate runs first: unreachable maps to `HostUnreachable` and failed
-/// tasks to `InfrastructureError`. A structurally broken document, a missing or
-/// duplicated facts task, or any fact failing the bounded typed insert is
-/// `FactsMalformed`.
+/// tasks to `InfrastructureError`. Foreign hosts, unapproved actions, changes,
+/// duplicate observations and malformed values fail closed. No synthetic facts
+/// task or debug output is accepted.
 fn extract_facts(
     stdout: &[u8],
     request: &AnsibleProbeExecutionRequest,
+    profile: &ProbeProfile,
 ) -> Result<AnsibleProbeFacts, AnsibleProbeTerminalStatus> {
+    let malformed = || AnsibleProbeTerminalStatus::FactsMalformed;
     let document: Value =
         serde_json::from_slice(stdout).map_err(|_| AnsibleProbeTerminalStatus::FactsMalformed)?;
     let host = request.target.host.to_string();
-    let host_stats = document
+    let stats = document
         .get("stats")
         .and_then(Value::as_object)
-        .and_then(|stats| stats.get(&host))
+        .filter(|stats| stats.len() == 1 && stats.contains_key(&host))
+        .ok_or_else(malformed)?;
+    let host_stats = stats
+        .get(&host)
         .and_then(Value::as_object)
         .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?;
     let unreachable = host_stats
@@ -477,53 +728,282 @@ fn extract_facts(
     if failures > 0 {
         return Err(AnsibleProbeTerminalStatus::InfrastructureError);
     }
+    for key in ["changed", "ignored", "rescued"] {
+        if host_stats.get(key).and_then(Value::as_u64) != Some(0) {
+            return Err(malformed());
+        }
+    }
+    if !host_stats
+        .get("ok")
+        .and_then(Value::as_u64)
+        .is_some_and(|ok| ok > 0)
+    {
+        return Err(malformed());
+    }
     let plays = document
         .get("plays")
         .and_then(Value::as_array)
         .filter(|plays| !plays.is_empty())
         .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?;
-    let mut facts_object = None;
+    let mut packages = None;
+    let mut services = None;
+    let mut files = BTreeMap::new();
+    let mut task_ids = BTreeSet::new();
+    let mut observed_modules = BTreeSet::new();
+    let mut observed_tasks = 0_u64;
     for play in plays {
         let tasks = play
             .get("tasks")
             .and_then(Value::as_array)
             .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?;
         for task in tasks {
-            let name = task
-                .pointer("/task/name")
+            let task_id = task
+                .pointer("/task/id")
                 .and_then(Value::as_str)
-                .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?;
-            if name == FACTS_TASK_NAME {
-                if facts_object.is_some() {
-                    return Err(AnsibleProbeTerminalStatus::FactsMalformed);
+                .filter(|id| !id.is_empty())
+                .ok_or_else(malformed)?;
+            if !task_ids.insert(task_id) {
+                return Err(malformed());
+            }
+            let hosts = task
+                .get("hosts")
+                .and_then(Value::as_object)
+                .filter(|hosts| hosts.len() == 1 && hosts.contains_key(&host))
+                .ok_or_else(malformed)?;
+            let result = &hosts[&host];
+            require_unchanged_result(result)?;
+            let action = result
+                .get("action")
+                .and_then(Value::as_str)
+                .filter(|action| {
+                    profile.modules.contains(*action)
+                        && request
+                            .module_allowlist
+                            .iter()
+                            .any(|module| module == action)
+                })
+                .ok_or_else(malformed)?;
+            observed_tasks += 1;
+            observed_modules.insert(action.to_owned());
+            match action {
+                "ansible.builtin.package_facts" => {
+                    if packages.is_some() {
+                        return Err(malformed());
+                    }
+                    packages = Some(
+                        result
+                            .pointer("/ansible_facts/packages")
+                            .and_then(Value::as_object)
+                            .ok_or_else(malformed)?,
+                    );
+                    for versions in packages.ok_or_else(malformed)?.values() {
+                        for version in versions
+                            .as_array()
+                            .filter(|versions| !versions.is_empty())
+                            .ok_or_else(malformed)?
+                        {
+                            validate_observed_text(version.get("version").ok_or_else(malformed)?)?;
+                        }
+                    }
                 }
-                let host_result = task
-                    .get("hosts")
-                    .and_then(Value::as_object)
-                    .and_then(|hosts| hosts.get(&host))
-                    .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?;
-                facts_object = Some(
-                    host_result
-                        .get(FACTS_TASK_NAME)
-                        .and_then(Value::as_object)
-                        .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?,
-                );
+                "ansible.builtin.service_facts" => {
+                    if services.is_some() {
+                        return Err(malformed());
+                    }
+                    services = Some(
+                        result
+                            .pointer("/ansible_facts/services")
+                            .and_then(Value::as_object)
+                            .ok_or_else(malformed)?,
+                    );
+                    for service in services.ok_or_else(malformed)?.values() {
+                        validate_observed_text(service.get("state").ok_or_else(malformed)?)?;
+                    }
+                }
+                "ansible.builtin.stat" => {
+                    if let Some(results) = result.get("results") {
+                        for result in results
+                            .as_array()
+                            .filter(|results| !results.is_empty())
+                            .ok_or_else(malformed)?
+                        {
+                            record_stat(result, profile, &mut files)?;
+                        }
+                    } else {
+                        record_stat(result, profile, &mut files)?;
+                    }
+                }
+                _ => return Err(malformed()),
             }
         }
     }
-    let facts_object = facts_object.ok_or(AnsibleProbeTerminalStatus::FactsMalformed)?;
+    if observed_tasks == 0
+        || host_stats.get("ok").and_then(Value::as_u64) != Some(observed_tasks)
+        || observed_modules != profile.modules
+        || files.keys().cloned().collect::<BTreeSet<_>>() != profile.stat_paths
+    {
+        return Err(malformed());
+    }
     let mut facts = AnsibleProbeFacts::new();
-    for (name, value) in facts_object {
-        let value = match value {
-            Value::Bool(value) => ProbeFactValue::Boolean(*value),
-            Value::String(value) => ProbeFactValue::Text(value.clone()),
-            _ => return Err(AnsibleProbeTerminalStatus::FactsMalformed),
+    for assertion in &request.assertions {
+        let name = assertion.fact();
+        let value = if name == "host.reachable" {
+            Some(ProbeFactValue::Boolean(true))
+        } else if let Some(rest) = name.strip_prefix("package.") {
+            if let Some(package) = rest.strip_suffix(".installed") {
+                packages
+                    .map(|packages| packages.get(package))
+                    .map(|package| match package {
+                        None => Ok(ProbeFactValue::Boolean(false)),
+                        Some(package) => package
+                            .as_array()
+                            .filter(|versions| !versions.is_empty())
+                            .map(|_| ProbeFactValue::Boolean(true))
+                            .ok_or_else(malformed),
+                    })
+                    .transpose()?
+            } else if let Some(package) = rest.strip_suffix(".version") {
+                packages
+                    .and_then(|packages| packages.get(package))
+                    .map(|versions| {
+                        let versions = versions
+                            .as_array()
+                            .filter(|versions| versions.len() == 1)
+                            .ok_or_else(malformed)?;
+                        text_fact(versions[0].get("version").ok_or_else(malformed)?)
+                    })
+                    .transpose()?
+            } else {
+                None
+            }
+        } else if let Some(rest) = name.strip_prefix("service.") {
+            let (service, active) = if let Some(service) = rest.strip_suffix(".active") {
+                (service, true)
+            } else if let Some(service) = rest.strip_suffix(".state") {
+                (service, false)
+            } else {
+                return Err(malformed());
+            };
+            let service = services.and_then(|services| {
+                services
+                    .get(&format!("{service}.service"))
+                    .or_else(|| services.get(service))
+            });
+            if let Some(service) = service {
+                let state = service
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .ok_or_else(malformed)?;
+                Some(if active {
+                    ProbeFactValue::Boolean(state == "running")
+                } else {
+                    ProbeFactValue::Text(state.to_owned())
+                })
+            } else {
+                services
+                    .map(|_| ProbeFactValue::Boolean(false))
+                    .filter(|_| active)
+            }
+        } else if let Some(rest) = name.strip_prefix("file.") {
+            let (path, field) = if let Some(path) = rest.strip_suffix(".exists") {
+                (path, "exists")
+            } else if let Some(path) = rest.strip_suffix(".sha256") {
+                (path, "checksum")
+            } else if let Some(path) = rest.strip_suffix(".mode") {
+                (path, "mode")
+            } else {
+                return Err(malformed());
+            };
+            files
+                .get(path)
+                .and_then(|stat| stat.get(field))
+                .map(|value| {
+                    if field == "exists" {
+                        value
+                            .as_bool()
+                            .map(ProbeFactValue::Boolean)
+                            .ok_or_else(malformed)
+                    } else {
+                        text_fact(value)
+                    }
+                })
+                .transpose()?
+        } else {
+            None
         };
-        facts
-            .insert(name, value)
-            .map_err(|_| AnsibleProbeTerminalStatus::FactsMalformed)?;
+        if let Some(value) = value {
+            // Multiple assertions may intentionally ask the same fact.
+            if facts.get(name).is_none() {
+                facts.insert(name, value).map_err(|_| malformed())?;
+            }
+        };
     }
     Ok(facts)
+}
+
+fn require_unchanged_result(result: &Value) -> Result<(), AnsibleProbeTerminalStatus> {
+    if result.get("changed").and_then(Value::as_bool) != Some(false)
+        || ["failed", "skipped", "unreachable"].iter().any(|key| {
+            result
+                .get(*key)
+                .is_some_and(|value| value.as_bool() != Some(false))
+        })
+    {
+        return Err(AnsibleProbeTerminalStatus::FactsMalformed);
+    }
+    Ok(())
+}
+
+fn record_stat<'a>(
+    result: &'a Value,
+    profile: &ProbeProfile,
+    files: &mut BTreeMap<String, &'a serde_json::Map<String, Value>>,
+) -> Result<(), AnsibleProbeTerminalStatus> {
+    let malformed = || AnsibleProbeTerminalStatus::FactsMalformed;
+    require_unchanged_result(result)?;
+    let path = result
+        .pointer("/invocation/module_args/path")
+        .and_then(Value::as_str)
+        .filter(|path| profile.stat_paths.contains(*path))
+        .ok_or_else(malformed)?;
+    let stat = result
+        .get("stat")
+        .and_then(Value::as_object)
+        .ok_or_else(malformed)?;
+    if stat.get("exists").and_then(Value::as_bool).is_none()
+        || (stat.get("exists").and_then(Value::as_bool) == Some(false)
+            && ["checksum", "mode"]
+                .iter()
+                .any(|key| stat.contains_key(*key)))
+        || files.insert(path.to_owned(), stat).is_some()
+    {
+        return Err(malformed());
+    }
+    let mut typed = AnsibleProbeFacts::new();
+    for (field, suffix) in [("mode", "mode"), ("checksum", "sha256")] {
+        if let Some(value) = stat.get(field) {
+            typed
+                .insert(&format!("file.{path}.{suffix}"), text_fact(value)?)
+                .map_err(|_| malformed())?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_observed_text(value: &Value) -> Result<(), AnsibleProbeTerminalStatus> {
+    if !value.as_str().is_some_and(|text| {
+        !text.is_empty() && text.len() <= crate::ansible_probe::MAX_FACT_STRING_BYTES
+    }) {
+        return Err(AnsibleProbeTerminalStatus::FactsMalformed);
+    }
+    Ok(())
+}
+
+fn text_fact(value: &Value) -> Result<ProbeFactValue, AnsibleProbeTerminalStatus> {
+    value
+        .as_str()
+        .map(|text| ProbeFactValue::Text(text.to_owned()))
+        .ok_or(AnsibleProbeTerminalStatus::FactsMalformed)
 }
 
 fn build_evidence(
@@ -599,6 +1079,20 @@ fn receipt_for(
     .map_err(|_| AnsibleProbeWorkerError::EvidenceInvalid)?;
     let total_assertions = u32::try_from(evidence.assertion_results.len())
         .map_err(|_| AnsibleProbeWorkerError::EvidenceInvalid)?;
+    let known_assertions = u32::try_from(
+        evidence
+            .assertion_results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result.status,
+                    crate::ansible_probe::AnsibleProbeAssertionStatus::Passed
+                        | crate::ansible_probe::AnsibleProbeAssertionStatus::Failed
+                )
+            })
+            .count(),
+    )
+    .map_err(|_| AnsibleProbeWorkerError::EvidenceInvalid)?;
     let receipt = AnsibleProbeEvidenceReceipt {
         schema_version: ANSIBLE_PROBE_EVIDENCE_RECEIPT_SCHEMA_VERSION.to_owned(),
         run_id: evidence.run_id,
@@ -611,6 +1105,7 @@ fn receipt_for(
         terminal_status: evidence.terminal_status,
         diagnostic_code: evidence.diagnostic_code.clone(),
         passed_assertions,
+        known_assertions,
         total_assertions,
     };
     receipt.validate_for(request)?;
@@ -819,9 +1314,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANSIBLE_CONFIG_PATH, ANSIBLE_PLAYBOOK_PATH, CERTIFICATE_PATH, EVALUATOR_ROOT,
-        KNOWN_HOSTS_PATH, PRIVATE_KEY_PATH, ProbeOutcome, build_evidence, build_inventory,
-        extract_facts, playbook_path, receipt_for, require_supported_profile,
+        ANSIBLE_CONFIG_PATH, ANSIBLE_PLAYBOOK_PATH, CERTIFICATE_PATH, COLLECTIONS_PATH,
+        EVALUATOR_ROOT, KNOWN_HOSTS_PATH, PRIVATE_KEY_PATH, ProbeOutcome, ProbeProfile,
+        build_evidence, build_inventory, extract_facts, playbook_command, playbook_path,
+        receipt_for, require_supported_profile, validate_certificate_identity, validate_playbook,
     };
     use crate::ansible_probe::{
         ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeAssertionStatus,
@@ -893,9 +1389,22 @@ mod tests {
     #[test]
     fn callback_facts_parse_into_typed_facts_and_close_the_evidence_loop()
     -> Result<(), Box<dyn std::error::Error>> {
-        let request = request();
+        let mut request = request();
+        request.assertions.extend([
+            assertion("service.nginx.state", &json!("running")),
+            assertion("package.nginx.installed", &json!(true)),
+            assertion("package.nginx.version", &json!("1.24.0-2ubuntu7")),
+            assertion(
+                "file./etc/nginx/sites-available/default.exists",
+                &json!(true),
+            ),
+            assertion(
+                "file./etc/nginx/sites-available/default.sha256",
+                &json!("a".repeat(64)),
+            ),
+        ]);
         let stdout = fixture("ansible_probe_callback.json");
-        let facts = extract_facts(&stdout, &request)
+        let facts = extract_facts(&stdout, &request, &profile())
             .map_err(AnsibleProbeTerminalStatus::diagnostic_code)?;
         assert_eq!(
             facts.get("service.nginx.active"),
@@ -926,8 +1435,9 @@ mod tests {
         let evidence_bytes = serde_jcs::to_vec(&evidence)?;
         let receipt = receipt_for(&request, &evidence, &evidence_bytes)?;
         receipt.validate_for(&request)?;
-        assert_eq!(receipt.passed_assertions, 3);
-        assert_eq!(receipt.total_assertions, 3);
+        assert_eq!(receipt.passed_assertions, 8);
+        assert_eq!(receipt.known_assertions, 8);
+        assert_eq!(receipt.total_assertions, 8);
 
         // A tampered receipt or evidence body never validates for the request.
         let mut forged = receipt.clone();
@@ -966,7 +1476,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                extract_facts(document.as_bytes(), &request)
+                extract_facts(document.as_bytes(), &request, &profile())
                     .err()
                     .map(AnsibleProbeTerminalStatus::diagnostic_code),
                 Some(expected),
@@ -976,50 +1486,297 @@ mod tests {
 
         let duplicated = fixture("ansible_probe_callback_duplicated_task.json");
         assert_eq!(
-            extract_facts(&duplicated, &request)
+            extract_facts(&duplicated, &request, &profile())
                 .err()
                 .map(AnsibleProbeTerminalStatus::diagnostic_code),
             Some("LW_AP_FACTS_MALFORMED")
         );
     }
 
+    fn profile() -> ProbeProfile {
+        ProbeProfile {
+            modules: request().module_allowlist.into_iter().collect(),
+            stat_paths: ["/etc/nginx/sites-available/default".to_owned()]
+                .into_iter()
+                .collect(),
+        }
+    }
+
     #[test]
-    fn facts_mapping_is_bounded_and_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn callback_rejects_mutation_foreign_actions_and_malformed_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
         let request = request();
-        let callback = |facts: serde_json::Value| {
-            serde_json::to_vec(&json!({
-                "plays":[{"tasks":[{
-                    "hosts":{"192.168.56.10":{"labweaver_probe_facts":facts}},
-                    "task":{"name":"labweaver_probe_facts"},
-                }]}],
-                "stats":{"192.168.56.10":{"unreachable":0,"failures":0,"ok":1}},
-            }))
-        };
-        // Unknown fact families and non-scalar values are malformed.
-        for facts in [
-            json!({"tcp.80.open":true}),
-            json!({"service.nginx.active":1}),
-            json!({"service.nginx.state":["running"]}),
-            json!({"service.nginx.state":"x".repeat(300)}),
+        let original: serde_json::Value =
+            serde_json::from_slice(&fixture("ansible_probe_callback.json"))?;
+        for (pointer, value) in [
+            ("/plays/0/tasks/0/hosts/192.168.56.10/changed", json!(true)),
+            (
+                "/plays/0/tasks/0/hosts/192.168.56.10/action",
+                json!("ansible.builtin.command"),
+            ),
+            (
+                "/plays/0/tasks/0/hosts/192.168.56.10/ansible_facts/packages/nginx",
+                json!({"version":"1"}),
+            ),
+            (
+                "/plays/0/tasks/1/hosts/192.168.56.10/ansible_facts/services/nginx.service/state",
+                json!(["running"]),
+            ),
+            (
+                "/plays/0/tasks/1/hosts/192.168.56.10/ansible_facts/services/nginx.service/state",
+                json!("x".repeat(300)),
+            ),
+            (
+                "/plays/0/tasks/2/hosts/192.168.56.10/results/0/stat/mode",
+                json!(644),
+            ),
+            (
+                "/plays/0/tasks/2/hosts/192.168.56.10/results/0/stat/checksum",
+                json!("invalid"),
+            ),
+            (
+                "/plays/0/tasks/2/hosts/192.168.56.10/results/0/invocation/module_args/path",
+                json!("/etc/shadow"),
+            ),
         ] {
+            let mut document = original.clone();
+            *document
+                .pointer_mut(pointer)
+                .ok_or("missing fixture pointer")? = value;
             assert_eq!(
-                extract_facts(&callback(facts)?, &request)
-                    .err()
-                    .map(AnsibleProbeTerminalStatus::diagnostic_code),
-                Some("LW_AP_FACTS_MALFORMED")
+                extract_facts(&serde_json::to_vec(&document)?, &request, &profile()).err(),
+                Some(AnsibleProbeTerminalStatus::FactsMalformed)
             );
         }
-        // The fact count bound is enforced during insertion.
-        let mut overflow = serde_json::Map::new();
-        for index in 0..=crate::ansible_probe::MAX_FACTS {
-            overflow.insert(format!("service.service-{index}.active"), json!(true));
-        }
+        let mut foreign = original.clone();
+        foreign["plays"][0]["tasks"][0]["hosts"]["192.168.56.11"] = json!({"changed":false});
         assert_eq!(
-            extract_facts(&callback(serde_json::Value::Object(overflow))?, &request)
-                .err()
-                .map(AnsibleProbeTerminalStatus::diagnostic_code),
-            Some("LW_AP_FACTS_MALFORMED")
+            extract_facts(&serde_json::to_vec(&foreign)?, &request, &profile()).err(),
+            Some(AnsibleProbeTerminalStatus::FactsMalformed)
         );
+        let mut duplicated_stat = original.clone();
+        let result =
+            duplicated_stat["plays"][0]["tasks"][2]["hosts"]["192.168.56.10"]["results"][0].clone();
+        duplicated_stat["plays"][0]["tasks"][2]["hosts"]["192.168.56.10"]["results"] =
+            json!([result, result]);
+        assert_eq!(
+            extract_facts(&serde_json::to_vec(&duplicated_stat)?, &request, &profile()).err(),
+            Some(AnsibleProbeTerminalStatus::FactsMalformed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_observations_never_fabricate_file_mode_digest_or_package_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut request = request();
+        request.assertions = vec![
+            assertion("package.nginx.installed", &json!(true)),
+            assertion("package.nginx.version", &json!("1")),
+            assertion(
+                "file./etc/nginx/sites-available/default.exists",
+                &json!(true),
+            ),
+            assertion(
+                "file./etc/nginx/sites-available/default.mode",
+                &json!("0644"),
+            ),
+            assertion(
+                "file./etc/nginx/sites-available/default.sha256",
+                &json!("a".repeat(64)),
+            ),
+        ];
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fixture("ansible_probe_callback.json"))?;
+        document["plays"][0]["tasks"][0]["hosts"]["192.168.56.10"]["ansible_facts"]["packages"] =
+            json!({});
+        document["plays"][0]["tasks"][2]["hosts"]["192.168.56.10"]["results"][0]["stat"] =
+            json!({"exists":false});
+        let facts = extract_facts(&serde_json::to_vec(&document)?, &request, &profile())
+            .map_err(AnsibleProbeTerminalStatus::diagnostic_code)?;
+        assert_eq!(
+            facts.get("package.nginx.installed"),
+            Some(&ProbeFactValue::Boolean(false))
+        );
+        assert_eq!(
+            facts.get("file./etc/nginx/sites-available/default.exists"),
+            Some(&ProbeFactValue::Boolean(false))
+        );
+        assert_eq!(facts.len(), 2);
+        assert_eq!(
+            crate::ansible_probe::evaluate_assertions(&facts, &request.assertions)[3].status,
+            AnsibleProbeAssertionStatus::FactUnknown
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn profile_validation_rejects_mutating_and_controller_actions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = request();
+        let shipped =
+            include_bytes!("../../../containers/ansible-probe/linux-nginx-probe-v1/playbook.yml");
+        let profile = validate_playbook(shipped, &request)?;
+        assert_eq!(profile.stat_paths.len(), 4);
+        let original: serde_json::Value = serde_yaml::from_slice(shipped)?;
+        for (pointer, value) in [
+            ("/0/hosts", json!("all")),
+            ("/0/gather_facts", json!(true)),
+            (
+                "/0/tasks/0/ansible.builtin.package_facts/manager",
+                json!("{{ lookup('pipe', 'id') }}"),
+            ),
+            (
+                "/0/tasks/2/ansible.builtin.stat/path",
+                json!("{{ lookup('file', '/etc/shadow') }}"),
+            ),
+            (
+                "/0/tasks/2/ansible.builtin.stat/checksum_algorithm",
+                json!("sha1"),
+            ),
+        ] {
+            let mut document = original.clone();
+            *document
+                .pointer_mut(pointer)
+                .ok_or("missing profile pointer")? = value;
+            assert!(validate_playbook(&serde_json::to_vec(&document)?, &request).is_err());
+        }
+        for (key, value) in [
+            ("become", json!(true)),
+            ("delegate_to", json!("localhost")),
+            (
+                "vars",
+                json!({"ansible_ssh_common_args":"-o StrictHostKeyChecking=no"}),
+            ),
+            ("ansible.builtin.command", json!("id")),
+            ("include_tasks", json!("other.yml")),
+            ("register", json!("ansible_ssh_common_args")),
+        ] {
+            let mut document = original.clone();
+            document[0]["tasks"][0][key] = value;
+            assert!(validate_playbook(&serde_json::to_vec(&document)?, &request).is_err());
+        }
+        assert!(
+            validate_playbook(
+                b"- hosts: probe\n  hosts: all\n  gather_facts: false\n  tasks: []\n",
+                &request
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_uses_trusted_venv_callback_and_certificate_host_pin() {
+        let command = playbook_command(&request());
+        let command = command.as_std();
+        let environment: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(command.get_program(), ANSIBLE_PLAYBOOK_PATH);
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("ANSIBLE_STDOUT_CALLBACK")),
+            Some(&Some(std::ffi::OsStr::new("ansible.posix.json")))
+        );
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("ANSIBLE_COLLECTIONS_PATH")),
+            Some(&Some(std::ffi::OsStr::new(COLLECTIONS_PATH)))
+        );
+        assert!(!environment.contains_key(std::ffi::OsStr::new("PYTHONPATH")));
+        let ssh = environment
+            .get(std::ffi::OsStr::new("ANSIBLE_SSH_COMMON_ARGS"))
+            .and_then(|value| *value)
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        for required in [
+            "StrictHostKeyChecking=yes",
+            "IdentitiesOnly=yes",
+            "GlobalKnownHostsFile=/dev/null",
+            CERTIFICATE_PATH,
+            KNOWN_HOSTS_PATH,
+        ] {
+            assert!(ssh.contains(required));
+        }
+    }
+
+    #[test]
+    fn ssh_identity_requires_evaluation_purpose_short_lifetime_and_matching_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
+        let ca = PrivateKey::from(Ed25519Keypair::from_seed(&[0x41; 32]));
+        let subject = PrivateKey::from(Ed25519Keypair::from_seed(&[0x42; 32]));
+        let other = PrivateKey::from(Ed25519Keypair::from_seed(&[0x43; 32]));
+        let now = 1_800_000_000;
+        for (principal, after, before, key_matches, passes) in [
+            ("labweaver-evaluation", now - 1, now + 299, true, true),
+            ("labweaver-collector", now - 1, now + 299, true, false),
+            ("labweaver", now - 1, now + 299, true, false),
+            ("labweaver-evaluation", now + 1, now + 299, true, false),
+            ("labweaver-evaluation", now - 10, now, true, false),
+            ("labweaver-evaluation", now - 10, now + 299, true, false),
+            ("labweaver-evaluation", now - 1, now + 299, false, false),
+        ] {
+            let mut builder = certificate::Builder::new(
+                vec![0x44; certificate::Builder::RECOMMENDED_NONCE_SIZE],
+                subject.public_key(),
+                after,
+                before,
+            )?;
+            builder
+                .cert_type(certificate::CertType::User)?
+                .valid_principal(principal)?;
+            let certificate = builder.sign(&ca)?;
+            assert_eq!(
+                validate_certificate_identity(
+                    if key_matches { &subject } else { &other },
+                    &certificate,
+                    now
+                )
+                .is_ok(),
+                passes
+            );
+        }
+        let mut multiple = certificate::Builder::new(
+            vec![0x45; certificate::Builder::RECOMMENDED_NONCE_SIZE],
+            subject.public_key(),
+            now - 1,
+            now + 299,
+        )?;
+        multiple
+            .cert_type(certificate::CertType::User)?
+            .valid_principal("labweaver-evaluation")?
+            .valid_principal("labweaver-agent")?;
+        assert!(validate_certificate_identity(&subject, &multiple.sign(&ca)?, now).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_distinguishes_observed_mismatch_from_unknown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = request();
+        for (observed, known) in [(Some(false), 3), (None, 2)] {
+            let mut facts = crate::ansible_probe::AnsibleProbeFacts::new();
+            facts.insert("host.reachable", ProbeFactValue::Boolean(true))?;
+            facts.insert(
+                "file./etc/nginx/sites-available/default.mode",
+                ProbeFactValue::Text("0644".to_owned()),
+            )?;
+            if let Some(active) = observed {
+                facts.insert("service.nginx.active", ProbeFactValue::Boolean(active))?;
+            }
+            let outcome = ProbeOutcome::Evaluated {
+                facts,
+                duration_milliseconds: 1,
+                output_bytes: 1,
+            };
+            let evidence = build_evidence(&request, request.request_sha256()?, &outcome)?;
+            assert_eq!(
+                evidence.terminal_status,
+                AnsibleProbeTerminalStatus::AssertionsFailed
+            );
+            let receipt = receipt_for(&request, &evidence, &serde_jcs::to_vec(&evidence)?)?;
+            assert_eq!(receipt.passed_assertions, 2);
+            assert_eq!(receipt.known_assertions, known);
+            assert_eq!(receipt.total_assertions, 3);
+        }
         Ok(())
     }
 
@@ -1041,6 +1798,7 @@ mod tests {
         let receipt = receipt_for(&request, &evidence, &serde_jcs::to_vec(&evidence)?)?;
         receipt.validate_for(&request)?;
         assert_eq!(receipt.passed_assertions, 0);
+        assert_eq!(receipt.known_assertions, 0);
         assert_eq!(receipt.diagnostic_code, "LW_AP_TIMEOUT");
         Ok(())
     }
@@ -1053,9 +1811,7 @@ mod tests {
             inventory,
             format!(
                 "[probe]\n192.168.56.10 ansible_user=labweaver ansible_port=22 \
-ansible_ssh_private_key_file={PRIVATE_KEY_PATH} \
-ansible_ssh_certificate_file={CERTIFICATE_PATH} \
-ansible_ssh_known_hosts_file={KNOWN_HOSTS_PATH} ansible_host_key_checking=True\n"
+ansible_ssh_private_key_file={PRIVATE_KEY_PATH} ansible_host_key_checking=True\n"
             )
         );
         assert_eq!(
@@ -1066,7 +1822,7 @@ ansible_ssh_known_hosts_file={KNOWN_HOSTS_PATH} ansible_host_key_checking=True\n
         );
         assert_eq!(
             ANSIBLE_PLAYBOOK_PATH,
-            "/opt/labweaver/probe/bin/ansible-playbook"
+            "/opt/labweaver/probe/venv/bin/ansible-playbook"
         );
         assert_eq!(ANSIBLE_CONFIG_PATH, "/opt/labweaver/probe/ansible.cfg");
 

@@ -6,6 +6,8 @@ LabWeaver 应用部署面向已有 Kubernetes，不要求特定路由器、PVE�
 
 服务账户身份使用 Keycloak 与 TLS；私钥、令牌和数据库密码以 Secret 文件提供。配置与日志不记录真实凭据、个人环境路径或用户提交内容。网络策略同时考虑服务调用与不可信实验边界，网络可达不能替代 Access 授权。
 
+BuildKit 构建出口由 `platform_buildkit_egress_mode` 控制，取值为 `open` 或 `restricted`。`open` 刻意允许构建步骤访问任意出口（保留 DNS 与既有入站限制），是本部署针对 Agent 生成实验镜像的安全评审选择；这使构建过程可访问公网并拉取任意依赖，构建产物不构成供应链完整性边界，受影响范围必须按该前提评估。`restricted` 使用 `platform_buildkit_egress_fqdns` 与 `platform_buildkit_egress_registry_cidrs` 组成 fail-closed 的并集允许清单。当前部署为 `open`。无论部署模式如何，`deny_all` 构建请求仍由执行器按次强制 BuildKit `network=none`。
+
 GPU 资源目录需要配置设备模式、可用资源名和规格：容器时间片与独占不能混淆，VM vGPU 依赖实际 KubeVirt mdev/驱动支持。不满足声明规格时应明确不可用，不以 Mock 或普通容器替代。
 
 部署前需检查现有依赖、权限和存储能力。应用维护与共享基础设施清理分别执行，清理必须识别具体归属、依赖和恢复路径，不使用全局删除或宽泛通配。

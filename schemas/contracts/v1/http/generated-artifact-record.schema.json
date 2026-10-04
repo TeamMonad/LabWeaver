@@ -48,6 +48,7 @@
       "description": "Immutable output class recorded by Agent for generated objects.",
       "enum": [
         "build_context",
+        "evaluation_runner_build_context",
         "work_script",
         "verification_script"
       ],

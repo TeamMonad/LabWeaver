@@ -1,5 +1,6 @@
 \set ON_ERROR_STOP on
 BEGIN;
+SET ROLE lw_access_owner;
 {% for membership in resource_application_access_seed.courseMemberships %}
 DO $resource_seed$
 DECLARE

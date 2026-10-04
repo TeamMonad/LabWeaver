@@ -77,7 +77,10 @@ function environment(id: string, overrides: Record<string, unknown> = {}) {
 async function mountAt(projectId: string) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/student/labs', component: MyLabsView }],
+    routes: [
+      { path: '/student/labs', component: MyLabsView },
+      { path: '/student/environments', component: { template: '<div />' } },
+    ],
   })
   await router.push({ path: '/student/labs', query: { projectId } })
   await router.isReady()
@@ -133,6 +136,35 @@ describe('MyLabsView', () => {
     expect(wrapper.findAll('button').some((button) => button.text().includes('控制台') && !(button.element as HTMLButtonElement).disabled)).toBe(true)
     expect(router.currentRoute.value.query.projectId).toBe('project-1')
     expect(vi.mocked(listEnvironments)).toHaveBeenCalledWith({ query: { projectId: 'project-1', courseId: 'course-1' } })
+  })
+
+  it('opens failed cleanup in the same project while keeping its console disabled', async () => {
+    vi.mocked(listEnvironments).mockResolvedValue({
+      data: { items: [environment('failed-cleanup', {
+        desiredState: 'deleted', observedState: 'failed',
+        currentOperation: { kind: 'expire', state: 'failed', retryEligible: true },
+      })] } as never, error: undefined as never,
+    })
+    const { wrapper, router } = await mountAt('project-1')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('处理回收'))
+    expect(wrapper.text()).toContain('资源释放尚未确认')
+    expect((wrapper.find('button[aria-label="控制台不可用"]').element as HTMLButtonElement).disabled).toBe(true)
+    await wrapper.findAll('button').find((button) => button.text() === '处理回收')!.trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/student/environments'))
+    expect(router.currentRoute.value.query).toEqual({ environmentId: 'failed-cleanup', projectId: 'project-1' })
+    wrapper.unmount()
+  })
+
+  it.each(['accepted', 'running', 'cancelling', 'succeeded'])('does not offer cleanup recovery when the operation is %s', async (state) => {
+    vi.mocked(listEnvironments).mockResolvedValue({
+      data: { items: [environment('cleanup-pending', {
+        desiredState: 'deleted', observedState: 'failed', currentOperation: { kind: 'expire', state },
+      })] } as never, error: undefined as never,
+    })
+    const { wrapper } = await mountAt('project-1')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('cleanup-pending'))
+    expect(wrapper.findAll('button').some((button) => button.text() === '处理回收')).toBe(false)
+    wrapper.unmount()
   })
 
   it('does not fall back to another project while the requested project is loading', async () => {

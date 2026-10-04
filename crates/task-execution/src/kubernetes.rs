@@ -495,14 +495,21 @@ impl KubernetesApiClient {
         }
         verify_owned(&job, &identity.ownership, self.managed_by)?;
         let succeeded = job.pointer("/status/succeeded").and_then(Value::as_u64) == Some(1);
-        let failed = job
-            .pointer("/status/failed")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            > 0;
-        if !succeeded && !failed {
+        let failed_condition = job
+            .pointer("/status/conditions")
+            .and_then(Value::as_array)
+            .and_then(|conditions| {
+                conditions.iter().find(|condition| {
+                    condition.pointer("/type").and_then(Value::as_str) == Some("Failed")
+                        && condition.pointer("/status").and_then(Value::as_str) == Some("True")
+                })
+            });
+        // A failed Pod counter can precede Pod termination and the terminal Job condition.
+        if !succeeded && failed_condition.is_none() {
             return Ok(KubernetesJobObservation::Running);
         }
+        let job_reason = failed_condition
+            .and_then(|condition| condition.pointer("/reason").and_then(Value::as_str));
         let pods = self
             .list_pods(identity.namespace.as_str(), identity.ownership.attempt_id)
             .await?;
@@ -510,6 +517,22 @@ impl KubernetesApiClient {
             .pointer("/items")
             .and_then(Value::as_array)
             .ok_or(KubernetesJobError::ObservationInvalid)?;
+        if !succeeded && items.is_empty() {
+            return Ok(KubernetesJobObservation::Failed {
+                diagnostic_code: if job_reason == Some("DeadlineExceeded") {
+                    identity.deadline_diagnostic_code
+                } else {
+                    identity.failed_diagnostic_code
+                }
+                .to_owned(),
+                observation: build_observation(
+                    ExecutionWorkloadState::Failed,
+                    None,
+                    None,
+                    ExecutionTiming::unknown(),
+                )?,
+            });
+        }
         if items.len() != 1 {
             return Err(KubernetesJobError::ObservationInvalid);
         }
@@ -542,16 +565,6 @@ impl KubernetesApiClient {
                 observation,
             });
         }
-        let job_reason = job
-            .pointer("/status/conditions")
-            .and_then(Value::as_array)
-            .and_then(|conditions| {
-                conditions.iter().find(|condition| {
-                    condition.pointer("/type").and_then(Value::as_str) == Some("Failed")
-                        && condition.pointer("/status").and_then(Value::as_str) == Some("True")
-                })
-            })
-            .and_then(|condition| condition.pointer("/reason").and_then(Value::as_str));
         let observation =
             build_observation(ExecutionWorkloadState::Failed, terminated, pod_name, timing)?;
         if job_reason == Some("DeadlineExceeded") {
@@ -1794,6 +1807,16 @@ mod tests {
         }
     }
 
+    fn failed_pod(ownership: &KubernetesOwnership, terminated: &Value) -> Value {
+        let mut pod = job_document(ownership, "pod-1");
+        pod["apiVersion"] = json!("v1");
+        pod["kind"] = json!("Pod");
+        pod["status"] = json!({"containerStatuses":[{
+            "name":"program-runner", "state":{"terminated":terminated},
+        }]});
+        pod
+    }
+
     struct FakeCluster {
         api: KubernetesApiClient,
         objects: Arc<Mutex<BTreeMap<String, Value>>>,
@@ -2177,6 +2200,179 @@ mod tests {
             .validate()
             .map_err(|_| "observation must validate")?;
         let _ = ExecutionObservation::clone(&observation);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_waits_for_terminal_job_after_failed_pod_disappears()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let ownership = ownership("request-sha");
+        let bundle = bundle(&ownership);
+        cluster.api.start(&bundle).await?;
+        let job_path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        let pod_path = format!("/api/v1/namespaces/{NAMESPACE}/pods/pod-1");
+        let uid = {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            let job = state.get_mut(&job_path).ok_or("applied Job must exist")?;
+            job["status"] = json!({"failed":1});
+            let uid = job["metadata"]["uid"]
+                .as_str()
+                .ok_or("Job UID missing")?
+                .to_owned();
+            state.insert(
+                pod_path.clone(),
+                failed_pod(
+                    &ownership,
+                    &json!({
+                        "exitCode":137, "reason":"Error",
+                    }),
+                ),
+            );
+            uid
+        };
+        assert_eq!(
+            cluster.api.observe(&bundle.identity, Some(&uid)).await?,
+            KubernetesJobObservation::Running
+        );
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            state.remove(&pod_path);
+            state.get_mut(&job_path).ok_or("Job missing")?["status"] = json!({
+                "failed":1, "conditions":[
+                    {"type":"FailureTarget", "status":"True", "reason":"DeadlineExceeded"},
+                    {"type":"Failed", "status":"False"},
+                ],
+            });
+        }
+        assert_eq!(
+            cluster.api.observe(&bundle.identity, Some(&uid)).await?,
+            KubernetesJobObservation::Running
+        );
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            state.get_mut(&job_path).ok_or("Job missing")?["status"] = json!({
+                "failed":1, "conditions":[{"type":"Failed", "status":"True", "reason":"DeadlineExceeded"}],
+            });
+        }
+        let KubernetesJobObservation::Failed {
+            diagnostic_code,
+            observation,
+        } = cluster.api.observe(&bundle.identity, Some(&uid)).await?
+        else {
+            return Err("expected authoritative deadline failure".into());
+        };
+        assert_eq!(diagnostic_code, bundle.identity.deadline_diagnostic_code);
+        assert_eq!(observation.state, ExecutionWorkloadState::Failed);
+        assert_eq!(observation.exit_code, None);
+        assert_eq!(observation.started_at, None);
+        assert_eq!(observation.terminated_at, None);
+        assert_eq!(observation.pod_name, None);
+        observation.validate().map_err(|_| "observation invalid")?;
+        assert_eq!(cluster.patches.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_terminal_failure_preserves_owned_container_diagnostics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let ownership = ownership("request-sha");
+        let bundle = bundle(&ownership);
+        cluster.api.start(&bundle).await?;
+        let job_path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        let pod_path = format!("/api/v1/namespaces/{NAMESPACE}/pods/pod-1");
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            state.get_mut(&job_path).ok_or("Job missing")?["status"] = json!({
+                "failed":1, "conditions":[{"type":"Failed", "status":"True", "reason":"BackoffLimitExceeded"}],
+            });
+        }
+        for (terminated, expected) in [
+            (
+                json!({"exitCode":137, "reason":"OOMKilled"}),
+                "LW_OJ_MEMORY_LIMIT",
+            ),
+            (
+                json!({"exitCode":1, "reason":"Error", "message":"LW_OJ_JOB_CANCELLED"}),
+                "LW_OJ_JOB_CANCELLED",
+            ),
+            (json!({"exitCode":2, "reason":"Error"}), "LW_OJ_JOB_FAILED"),
+        ] {
+            {
+                let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+                state.insert(pod_path.clone(), failed_pod(&ownership, &terminated));
+            }
+            let KubernetesJobObservation::Failed {
+                diagnostic_code,
+                observation,
+            } = cluster.api.observe(&bundle.identity, None).await?
+            else {
+                return Err("expected terminal failure".into());
+            };
+            assert_eq!(diagnostic_code, expected);
+            assert_eq!(
+                observation.exit_code.map(i64::from),
+                terminated["exitCode"].as_i64()
+            );
+            assert_eq!(observation.pod_name.as_deref(), Some("pod-1"));
+        }
+        cluster
+            .objects
+            .lock()
+            .map_err(|_| "fake state poisoned")?
+            .remove(&pod_path);
+        let KubernetesJobObservation::Failed {
+            diagnostic_code,
+            observation,
+        } = cluster.api.observe(&bundle.identity, None).await?
+        else {
+            return Err("expected terminal failure without remaining Pod".into());
+        };
+        assert_eq!(diagnostic_code, bundle.identity.failed_diagnostic_code);
+        assert_eq!(observation.exit_code, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_failed_job_rejects_foreign_or_ambiguous_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cluster = fake_cluster().await?;
+        let ownership = ownership("request-sha");
+        let bundle = bundle(&ownership);
+        cluster.api.start(&bundle).await?;
+        let job_path = format!("/apis/batch/v1/namespaces/{NAMESPACE}/jobs/{JOB_NAME}");
+        let pod_path = format!("/api/v1/namespaces/{NAMESPACE}/pods/pod-1");
+        let pod = failed_pod(&ownership, &json!({"exitCode":137, "reason":"OOMKilled"}));
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            state.get_mut(&job_path).ok_or("Job missing")?["status"] = json!({
+                "conditions":[{"type":"Failed", "status":"True", "reason":"DeadlineExceeded"}],
+            });
+            let mut foreign = pod.clone();
+            foreign["metadata"]["labels"]["labweaver.io/attempt-id"] = json!(Uuid::now_v7());
+            state.insert(pod_path.clone(), foreign);
+        }
+        assert!(matches!(
+            cluster.api.observe(&bundle.identity, None).await,
+            Err(KubernetesJobError::IdentityConflict)
+        ));
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            state.insert(pod_path, pod.clone());
+            state.insert(format!("/api/v1/namespaces/{NAMESPACE}/pods/pod-2"), pod);
+        }
+        assert!(matches!(
+            cluster.api.observe(&bundle.identity, None).await,
+            Err(KubernetesJobError::ObservationInvalid)
+        ));
+        assert!(matches!(
+            cluster
+                .api
+                .observe(&bundle.identity, Some("replaced-uid"))
+                .await,
+            Err(KubernetesJobError::IdentityConflict)
+        ));
         Ok(())
     }
 

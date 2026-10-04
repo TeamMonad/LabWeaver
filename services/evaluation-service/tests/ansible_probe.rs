@@ -156,9 +156,40 @@ fn valid_request_passes_and_evaluates_nginx_facts() -> Result<(), Box<dyn std::e
         terminal_status: evidence.terminal_status,
         diagnostic_code: evidence.diagnostic_code.clone(),
         passed_assertions: 2,
+        known_assertions: 2,
         total_assertions: 2,
     };
     receipt.validate_for(&request)?;
+
+    for (status, passed, known, valid) in [
+        (AnsibleProbeTerminalStatus::Succeeded, 2, 1, false),
+        (AnsibleProbeTerminalStatus::Succeeded, 1, 2, false),
+        (AnsibleProbeTerminalStatus::AssertionsFailed, 1, 2, true),
+        (AnsibleProbeTerminalStatus::AssertionsFailed, 1, 1, true),
+        (AnsibleProbeTerminalStatus::AssertionsFailed, 2, 2, false),
+        (AnsibleProbeTerminalStatus::AssertionsFailed, 2, 1, false),
+        (AnsibleProbeTerminalStatus::AssertionsFailed, 1, 3, false),
+        (AnsibleProbeTerminalStatus::HostUnreachable, 0, 0, true),
+        (AnsibleProbeTerminalStatus::HostUnreachable, 0, 1, false),
+        (AnsibleProbeTerminalStatus::InfrastructureError, 1, 1, false),
+    ] {
+        let mut candidate = receipt.clone();
+        candidate.terminal_status = status;
+        candidate.diagnostic_code = status.diagnostic_code().to_owned();
+        candidate.passed_assertions = passed;
+        candidate.known_assertions = known;
+        assert_eq!(candidate.validate_for(&request).is_ok(), valid);
+    }
+    let mut old_wire = serde_json::to_value(&receipt)?;
+    old_wire
+        .as_object_mut()
+        .ok_or("receipt must be an object")?
+        .remove("knownAssertions");
+    assert!(serde_json::from_value::<AnsibleProbeEvidenceReceipt>(old_wire).is_err());
+    let mut old_schema = receipt;
+    old_schema.schema_version =
+        "evaluation.labweaver.io/ansible-probe-evidence-receipt/v1".to_owned();
+    assert!(old_schema.validate_for(&request).is_err());
     Ok(())
 }
 

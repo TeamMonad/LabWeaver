@@ -1,0 +1,40 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: authoring-platform-egress
+  namespace: {{ platform_application_authoring_namespace }}
+  labels:
+    app.kubernetes.io/part-of: labweaver
+    app.kubernetes.io/managed-by: ansible
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [host, remote-node]
+      toPorts:
+        - ports:
+            - port: "{{ platform_application_model_service_port | string }}"
+              protocol: TCP
+{% for hostname in platform_application_model_egress_fqdns %}
+    - toFQDNs:
+        - matchName: "{{ hostname }}"
+      toPorts:
+        - ports:
+            - port: "{{ platform_application_model_service_port | string }}"
+              protocol: TCP
+{% endfor %}
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ platform_application_model_namespace }}
+      toPorts:
+        - ports:
+            - port: "{{ platform_application_model_service_port | string }}"
+              protocol: TCP
+    # A CIDR allowance never matches an in-cluster pod destination, so the
+    # object store is admitted as an endpoint of the data namespace.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ platform_application_data_namespace }}
+      toPorts:
+        - ports:
+            - port: "{{ platform_application_object_store_service_port | string }}"
+              protocol: TCP

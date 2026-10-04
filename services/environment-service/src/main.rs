@@ -157,7 +157,10 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
         .bind(required_table)
         .fetch_one(&pool)
         .await?;
-    if !schema_ready {
+    let incarnation_schema_ready = !matches!(kind, RuntimeKind::KubeVirt) || sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='environment' AND table_name='kubevirt_executor_fences' AND column_name='execution_owner')",
+    ).fetch_one(&pool).await?;
+    if !schema_ready || !incarnation_schema_ready {
         return Err(MainError::SchemaUnavailable);
     }
     let objects = Arc::new(
@@ -225,21 +228,52 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
             )?;
         }
         RuntimeKind::KubeVirt => {
-            let executor =
-                FencedKubeVirtExecutor::new(PgKubeVirtExecutorFenceStore::new(pool), backend);
+            let namespace = std::env::var("LABWEAVER_EXECUTOR_POD_NAMESPACE")
+                .map_err(|_| MainError::Configuration)?;
+            let pod_name = std::env::var("LABWEAVER_EXECUTOR_POD_NAME")
+                .map_err(|_| MainError::Configuration)?;
+            let pod_uid = uuid::Uuid::parse_str(
+                &std::env::var("LABWEAVER_EXECUTOR_POD_UID")
+                    .map_err(|_| MainError::Configuration)?,
+            )
+            .map_err(|_| MainError::Configuration)?;
+            let container_name = std::env::var("LABWEAVER_EXECUTOR_CONTAINER_NAME")
+                .map_err(|_| MainError::Configuration)?;
+            let instance = backend
+                .kubevirt_execution_instance(
+                    &namespace,
+                    &pod_name,
+                    pod_uid,
+                    &container_name,
+                    uuid::Uuid::new_v4(),
+                )
+                .await
+                .map_err(|_| MainError::Configuration)?;
+            let executor = FencedKubeVirtExecutor::new(
+                PgKubeVirtExecutorFenceStore::new(pool),
+                backend,
+                instance,
+            );
+            executor.prepare_startup().await?;
             let server = NatsKubeVirtExecutorServer::new(
                 nats,
                 deployment.nats.kubevirt_request_subject,
                 executor,
             )?;
-            tokio::try_join!(
-                async { server.serve().await.map_err(MainError::KubeVirtExecutor) },
-                async {
-                    service_runtime::run("kubevirt-executor")
-                        .await
-                        .map_err(MainError::Service)
+            let (shutdown, receiver) = tokio::sync::watch::channel(false);
+            let serving = server.serve(receiver);
+            tokio::pin!(serving);
+            let health = service_runtime::run("kubevirt-executor");
+            tokio::pin!(health);
+            tokio::select! {
+                result=&mut health => {
+                    shutdown.send_replace(true);
+                    let drained=serving.await;
+                    result.map_err(MainError::Service)?;
+                    drained?;
                 }
-            )?;
+                result=&mut serving => {result?;}
+            }
         }
     }
     Ok(())

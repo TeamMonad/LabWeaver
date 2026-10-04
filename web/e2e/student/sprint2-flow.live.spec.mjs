@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
@@ -15,23 +15,69 @@ import {
 } from '../support/live.mjs'
 import {
   assertRealWorkCharges,
+  assertRealWorkGpuContainerCandidate,
+  assertRealWorkVmCandidate,
   configureRealWorkBudgetByUi,
+  cleanupWorkResources,
   createRealWorkPackage,
   ensureRealWorkRates,
   inspectRealWorkFinanceByUi,
   realWorkConfig,
+  realWorkGpuConfig,
   realWorkResumeConfig,
+  realWorkVmConfig,
   readResumablePublishedWork,
   waitForRealWorkCharges,
+  waitForDeletedEnvironment,
 } from '../support/real-work.mjs'
+import { readActorId } from '../support/real-experiment.mjs'
+import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
+import { approveResourceRequestByUi } from '../support/real-resource.mjs'
+import {
+  createRealWorkSshIdentity,
+  readRealWorkVmLicenseStatus,
+  readRealWorkVmWorkspaceFile,
+  runRealWorkVmCudaProbe,
+} from '../support/real-work-ssh.mjs'
+import {
+  addSshPublicKeyByUi as addStudentSshKeyByUi,
+  deleteSshPublicKeyByUi as deleteStudentSshKeyByUi,
+  issueEnvironmentSshAccessGrantByUi as issueWorkAccessGrantByUi,
+  waitForActiveAccessGrant,
+} from '../support/ssh-access.mjs'
+import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 
-const WORK_PROVIDER_BINDING = 'kubernetes-work-local-hostpath'
 const PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
+const GPU_MODE_LABELS = Object.freeze({
+  exclusive: '独占',
+  container_time_slice: '容器时间片',
+  vm_vgpu: 'VM vGPU',
+})
+const GIB = 1024 ** 3
+const VM_PERSISTENCE_MARKER_PATH = 'workspace/persistence-marker.txt'
 
-const FULL_CHAIN_TIMEOUT_MS = 1_800_000
-const REAL_WORK_CONFIG = realWorkConfig()
+// The agent worker runs one reserved dispatch at a time, so a journey can sit
+// behind earlier runs before its own authoring starts. These ceilings cover a
+// queued run plus the deployment's own fifteen minute per-candidate LLM bound
+// and the image build that follows it.
+const FULL_CHAIN_TIMEOUT_MS = 14_400_000
+const AUTHORING_RUN_TIMEOUT_MS = 9_000_000
+const CANDIDATE_BUILD_TIMEOUT_MS = 3_600_000
+const REAL_WORK_VM = realWorkVmConfig()
+const REAL_WORK_CONFIG = realWorkConfig({ virtualMachine: Boolean(REAL_WORK_VM) })
 const REAL_WORK_RESUME = realWorkResumeConfig()
-const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME)
+const REAL_WORK_GPU = realWorkGpuConfig()
+const AUTHORING_RESOURCE_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
+  || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
+  || 'container-primary-v1'
+const WORK_PROVIDER_BINDING = REAL_WORK_VM?.providerBinding
+  ?? process.env.LABWEAVER_E2E_PROVIDER_BINDING
+  ?? 'kubernetes-work-local-hostpath'
+const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME || REAL_WORK_VM)
+if (REAL_WORK_GPU && !REAL_WORK_MODE) throw new Error('LABWEAVER_E2E_WORK_GPU_REQUIRES_REAL_PROVIDER')
+if (REAL_WORK_VM && REAL_WORK_GPU?.mode !== 'vm_vgpu') throw new Error('LABWEAVER_E2E_VM_REQUIRES_VM_VGPU')
+if (REAL_WORK_GPU?.mode === 'vm_vgpu' && !REAL_WORK_VM) throw new Error('LABWEAVER_E2E_VM_VGPU_REQUIRES_VM_CONFIGURATION')
 
 test.describe.configure({ timeout: FULL_CHAIN_TIMEOUT_MS })
 
@@ -43,18 +89,111 @@ function terminalRunState(value) {
   return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value)
 }
 
-async function publishWorkTemplate(page, project, packageCopy = null) {
-  await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await selectProjectByUi(page, project.id)
-  await page.getByRole('button', { name: '生成 Work 模板', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '生成 Work 模板', exact: true })).toBeVisible()
+async function approvePendingAgentTaskResourceByUi(adminPage, {
+  projectId,
+  run,
+  runId,
+  packageId,
+  policyId,
+  policyRevision,
+  studentActorId,
+  trackKind,
+  purposeKind,
+  environmentClass = null,
+  environmentId = null,
+  environmentRevision = null,
+}) {
+  if (
+    run.id !== runId
+    || run.projectId !== projectId
+    || run.packageId !== packageId
+    || run.policyId !== policyId
+    || run.policyRevision !== policyRevision
+    || run.purpose?.kind !== purposeKind
+    || (purposeKind === 'authoring' && run.purpose.environmentClass !== environmentClass)
+    || (purposeKind === 'work_configuration'
+      && (run.purpose.environmentId !== environmentId
+        || run.purpose.environmentRevision !== environmentRevision
+        || run.purpose.actorId !== studentActorId))
+  ) {
+    throw new Error('WORK_TASK_RESOURCE_RUN_SCOPE_INVALID')
+  }
 
-  const fileInput = page.getByTestId('work-template-file-input')
+  const track = run.tracks?.find((item) => item.kind === trackKind)
+  if (!track) throw new Error('WORK_TASK_RESOURCE_TRACK_MISSING')
+  const activeAttempts = track.attempts?.filter((attempt) => (
+    ['pending', 'running', 'repairing', 'awaiting_approval'].includes(attempt.state)
+  )) ?? []
+  if (activeAttempts.length === 0) return
+  if (activeAttempts.length !== 1 || activeAttempts[0].number !== 1) {
+    throw new Error('WORK_TASK_RESOURCE_ATTEMPT_UNEXPECTED')
+  }
+  const activeAttempt = activeAttempts[0]
+
+  const requests = await expectJson(
+    await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`),
+    'WORK_TASK_RESOURCE_REQUESTS_READ_FAILED',
+  )
+  if (!Array.isArray(requests)) throw new Error('WORK_TASK_RESOURCE_REQUESTS_INVALID')
+
+  const compactRunId = runId.replaceAll('-', '').toLowerCase()
+  const requestPrefix = `authoring-${compactRunId}-`
+  const matchingRequests = requests.filter((request) => (
+    typeof request.requestKey === 'string' && request.requestKey.startsWith(requestPrefix)
+  ))
+  if (matchingRequests.length > 1) throw new Error('WORK_TASK_RESOURCE_REQUEST_DUPLICATE')
+  for (const request of matchingRequests) {
+    const identity = request.requestKey.match(
+      /^authoring-([0-9a-f]{32})-(environment|evaluation|work_configuration)-([1-9][0-9]*)-([0-9a-f]{32})$/i,
+    )
+    const taskRunId = request.target?.taskRunId
+    if (
+      request.projectId !== projectId
+      || identity?.[1]?.toLowerCase() !== compactRunId
+      || identity?.[2] !== trackKind
+      || Number(identity?.[3]) !== activeAttempt.number
+      || request.requesterId !== studentActorId
+      || request.target?.kind !== 'task'
+      || typeof taskRunId !== 'string'
+      || taskRunId.replaceAll('-', '').toLowerCase() !== identity?.[4]?.toLowerCase()
+      || typeof request.id !== 'string'
+      || !Number.isSafeInteger(request.requestedResources?.cpuMillicores)
+      || request.requestedResources.cpuMillicores <= 0
+      || !Number.isSafeInteger(request.requestedResources?.memoryBytes)
+      || request.requestedResources.memoryBytes <= 0
+      || !Number.isSafeInteger(request.requestedResources?.storageBytes)
+      || request.requestedResources.storageBytes <= 0
+      || request.requestedResources.gpu != null
+    ) {
+      throw new Error(`WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
+    }
+    if (request.state !== 'reviewing') continue
+    if (!Number.isInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
+      throw new Error(`WORK_TASK_RESOURCE_DURATION_INVALID:${request.id}`)
+    }
+    await approveResourceRequestByUi(adminPage, {
+      requestKey: request.requestKey,
+      projectId,
+      requestId: request.id,
+      requesterId: studentActorId,
+      durationSeconds: request.requestedDurationSeconds,
+      providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
+    })
+  }
+}
+
+async function publishWorkTemplate(page, project, packageCopy = null, { adminPage, studentActorId }) {
   const packageDirectory = packageCopy?.directory ?? await mkdtemp(join(tmpdir(), 'labweaver-work-package-'))
   const ownsPackageDirectory = !packageCopy
   try {
+    await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, {
+      waitUntil: 'domcontentloaded',
+    })
+    await selectProjectByUi(page, project.id)
+    await page.getByRole('button', { name: '生成 Work 模板', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '生成 Work 模板', exact: true })).toBeVisible()
+
+    const fileInput = page.getByTestId('work-template-file-input')
     if (ownsPackageDirectory) await writeFile(join(packageDirectory, 'README.md'), PACKAGE_CONTENT, 'utf8')
     await fileInput.setInputFiles(packageDirectory)
     await expect(page.getByRole('list', { name: '待上传材料文件', exact: true })).toContainText('README.md')
@@ -78,15 +217,39 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
     await page.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
     const runResponse = await runResponsePromise
     const acceptedRun = await expectJson(runResponse, 'WORK_TEMPLATE_RUN_CREATE_FAILED')
-    expect(acceptedRun).toMatchObject({ id: expect.any(String), projectId: project.id })
+    expect(acceptedRun).toMatchObject({
+      id: expect.any(String),
+      projectId: project.id,
+      packageId: packageData.id,
+      policyId: expect.any(String),
+      policyRevision: expect.any(Number),
+    })
     expect(acceptedRun.purpose?.environmentClass ?? acceptedRun.environmentClass).toBe('work')
 
     const run = await pollJson(
       page.request,
       `/api/v1/projects/${project.id}/agent-runs/${acceptedRun.id}`,
-      (value) => terminalRunState(value.state),
+      async (value) => {
+        if (!terminalRunState(value.state)) {
+          await approvePendingAgentTaskResourceByUi(adminPage, {
+            projectId: project.id,
+            run: value,
+            runId: acceptedRun.id,
+            packageId: packageData.id,
+            policyId: acceptedRun.policyId,
+            policyRevision: acceptedRun.policyRevision,
+            studentActorId,
+            trackKind: 'environment',
+            purposeKind: 'authoring',
+            environmentClass: 'work',
+          })
+        }
+        return terminalRunState(value.state)
+      },
       'WORK_TEMPLATE_RUN_STATUS_FAILED',
-      300_000,
+      // A real authoring run drives the sandbox CLI against the deployment's
+      // model, so it can take as long as the harness LLM timeout allows.
+      AUTHORING_RUN_TIMEOUT_MS,
     )
     if (run.state !== 'succeeded') {
       throw new Error(`WORK_TEMPLATE_RUN_FAILED:${run.state}:${run.tracks?.map((track) => track.attempts?.map(diagnosticCode).join(',')).join(';') ?? 'no tracks'}`)
@@ -98,34 +261,59 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
       page.request,
       project.id,
       environmentTrack.candidateId,
-      (value) => ['succeeded', 'failed', 'cancelled'].includes(value.build?.state),
-      'WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
-      300_000,
+      (value) => {
+        if (REAL_WORK_VM) return Boolean(value.candidate)
+        return ['succeeded', 'failed', 'cancelled'].includes(value.build?.state)
+      },
+      REAL_WORK_VM ? 'WORK_TEMPLATE_VM_CANDIDATE_READ_FAILED' : 'WORK_TEMPLATE_CANDIDATE_BUILD_STATUS_FAILED',
+      CANDIDATE_BUILD_TIMEOUT_MS,
     )
     if (candidate.candidate?.spec?.class !== 'work') throw new Error('WORK_TEMPLATE_CANDIDATE_CLASS_INVALID')
-    if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
-      throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
+    if (!candidate.imageArtifact) {
+      throw new Error(`WORK_TEMPLATE_CANDIDATE_ARTIFACT_NOT_READY:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
     }
     if (REAL_WORK_MODE) {
       const runtime = candidate.candidate?.spec?.runtime
-      expect(runtime).toMatchObject({
-        kind: 'container',
-        provider_binding: WORK_PROVIDER_BINDING,
-        service_port: 8080,
-        build_context: {
-          artifactId: expect.any(String),
-          objectVersion: expect.any(String),
-        },
-      })
-      realContainerArtifact(candidate)
+      if (REAL_WORK_VM) {
+        assertRealWorkVmCandidate(candidate, REAL_WORK_VM, REAL_WORK_GPU)
+      } else {
+        expect(runtime).toMatchObject({
+          kind: 'container',
+          provider_binding: WORK_PROVIDER_BINDING,
+          service_port: 8080,
+          build_context: {
+            artifactId: expect.any(String),
+            objectVersion: expect.any(String),
+          },
+        })
+        if (candidate.build?.state !== 'succeeded') {
+          throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'build not succeeded'}`)
+        }
+        realContainerArtifact(candidate)
+        if (REAL_WORK_GPU) assertRealWorkGpuContainerCandidate(candidate, WORK_PROVIDER_BINDING, REAL_WORK_GPU)
+      }
+      if (REAL_WORK_GPU) {
+        expect(candidate.candidate?.spec?.resources?.gpu).toEqual({
+          class: REAL_WORK_GPU.class,
+          count: REAL_WORK_GPU.count,
+        })
+      }
+    } else if (candidate.build?.state !== 'succeeded') {
+      throw new Error(`WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'build not succeeded'}`)
     }
 
     const candidateCard = page.getByTestId('work-template-candidate')
     await expect(candidateCard).toBeVisible({ timeout: 120_000 })
-    await expect(candidateCard).toContainText('构建完成', { timeout: 120_000 })
+    if (REAL_WORK_VM) {
+      await expect(candidateCard).toContainText(REAL_WORK_VM.baseDisk.binding, { timeout: 120_000 })
+    } else {
+      await expect(candidateCard).toContainText('构建完成', { timeout: 120_000 })
+    }
     await candidateCard.getByTestId('work-template-candidate-confirmation').check()
     await candidateCard.getByPlaceholder('说明为什么批准这个 Work Environment 候选').fill(
-      '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。',
+      REAL_WORK_VM
+        ? '已核对 Work EnvironmentSpec、虚拟机基础镜像和项目安全约束。'
+        : '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。',
     )
     const approveButton = candidateCard.getByRole('button', { name: '批准 Environment 候选', exact: true })
     await expect(approveButton).toBeEnabled()
@@ -155,7 +343,12 @@ async function publishWorkTemplate(page, project, packageCopy = null) {
       'WORK_TEMPLATE_RELEASE_STATUS_FAILED',
       120_000,
     )
-    expect(release).toMatchObject({ projectId: project.id, runtimeKind: 'container', version: expect.any(Number) })
+    expect(release).toMatchObject({
+      projectId: project.id,
+      runtimeKind: REAL_WORK_VM ? 'virtual_machine' : 'container',
+      version: expect.any(Number),
+    })
+    if (REAL_WORK_VM) expect(release.artifact).toEqual(candidate.imageArtifact)
     await expect(page.getByTestId('work-template-resource-link')).toBeVisible()
     return { packageData, run, candidate, release }
   } finally {
@@ -201,35 +394,6 @@ async function waitForEnvironment(request, environmentId, expectedState) {
   return value
 }
 
-async function waitForDeletedEnvironment(request, environmentId) {
-  let latest
-  await expect.poll(async () => {
-    const response = await request.get(`/api/v1/environments/${environmentId}`)
-    if (response.status() === 404) return true
-    latest = await expectJson(response, 'ENVIRONMENT_CLEANUP_READ_FAILED')
-    return latest.observedState === 'deleted'
-  }, { timeout: 240_000, intervals: [1000, 2000, 3000] }).toBe(true)
-  return latest
-}
-
-async function waitForStoppedOrDeletedEnvironment(request, environmentId) {
-  const settled = await pollJson(
-    request,
-    `/api/v1/environments/${environmentId}`,
-    (value) => ['stopped', 'failed', 'deleting', 'deleted'].includes(value.observedState),
-    'REAL_WORK_CLEANUP_ENVIRONMENT_STOPPED_STATUS_FAILED',
-    240_000,
-  )
-  if (settled.observedState === 'deleting') {
-    await waitForDeletedEnvironment(request, environmentId)
-    return { ...settled, observedState: 'deleted' }
-  }
-  if (!['stopped', 'failed', 'deleted'].includes(settled.observedState)) {
-    throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_STOPPED_STATE_INVALID:${settled.observedState}`)
-  }
-  return settled
-}
-
 async function expectProblem(response, expectedStatus, expectedDiagnostic, label) {
   const bodyText = await response.text()
   let body
@@ -268,20 +432,6 @@ async function verifyCrossProjectEnvironmentDenied(browser, baseURL, projectId, 
   } finally {
     await context.close()
   }
-}
-
-async function waitForActiveAccessGrant(request, grantId) {
-  const grant = await pollJson(
-    request,
-    `/api/v1/access-grants/${grantId}`,
-    (value) => ['active', 'denied', 'expired', 'revoked'].includes(value.state),
-    'WORK_ACCESS_GRANT_STATUS_FAILED',
-    120_000,
-  )
-  if (grant.state !== 'active') {
-    throw new Error(`WORK_ACCESS_GRANT_NOT_ACTIVE:${grant.state}:${grant.reasonCode ?? 'reason missing'}`)
-  }
-  return grant
 }
 
 async function requestNewConnectionAfterLeaseRevoke(request, baseURL, projectId, environment, endpointIds) {
@@ -335,7 +485,13 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
     await expect(targetEnvironmentValue).toHaveCount(1)
     await expect(targetEnvironmentValue).toHaveText(requestBody.target.environmentId)
     await page.getByLabel('资源申请操作理由', { exact: true }).fill('已确认项目 Work 发布版本与 CPU 容量申请。')
-    await page.getByLabel('执行后端绑定', { exact: true }).fill(WORK_PROVIDER_BINDING)
+    if (requestBody.resources?.gpu) {
+      const provider = page.getByRole('combobox', { name: 'GPU Provider Binding', exact: true })
+      await expect(provider).toBeEnabled()
+      await provider.selectOption(WORK_PROVIDER_BINDING)
+    } else {
+      await page.getByRole('textbox', { name: '执行后端绑定', exact: true }).fill(WORK_PROVIDER_BINDING)
+    }
     await page.getByLabel('批准时长（秒）', { exact: true }).fill(String(requestBody.durationSeconds))
     const approveButton = page.getByRole('button', { name: '批准', exact: true })
     await expect(approveButton).toBeEnabled()
@@ -347,6 +503,11 @@ async function approveResourceRequest(browser, baseURL, requestBody) {
     await approveButton.click()
     await page.getByRole('alertdialog').getByRole('button', { name: '确认', exact: true }).click()
     const response = await responsePromise
+    expect(response.request().postDataJSON()).toMatchObject({
+      providerBinding: WORK_PROVIDER_BINDING,
+      durationSeconds: requestBody.durationSeconds,
+      resources: requestBody.resources,
+    })
     const approval = await expectJson(response, 'RESOURCE_REQUEST_APPROVAL_FAILED')
     expect(approval).toMatchObject({ requestId: requestBody.requestId, leaseId: expect.any(String) })
     return approval
@@ -421,200 +582,10 @@ function httpEndpointGrant(grant) {
   return httpGrant
 }
 
-async function cleanupWorkResources(request, baseURL, projectId, environmentId, leaseId, requestId) {
-  if (!leaseId && requestId) {
-    const leases = await expectJson(
-      await request.get(`/api/v1/projects/${projectId}/resource-leases`),
-      'REAL_WORK_CLEANUP_LEASE_LIST_FAILED',
-    )
-    if (!Array.isArray(leases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_INVALID')
-    leaseId = leases.find((lease) => lease.requestId === requestId)?.id ?? null
-
-    if (!leaseId) {
-      let trackedRequest = await expectJson(
-        await request.get(`/api/v1/resource-requests/${requestId}`),
-        'REAL_WORK_CLEANUP_RESOURCE_REQUEST_READ_FAILED',
-      )
-      if (trackedRequest.state === 'reviewing') {
-        const cancelled = await expectJson(
-          await request.post(`/api/v1/resource-requests/${requestId}/cancel`, {
-            headers: await csrfHeaders(request, baseURL, {
-              'Idempotency-Key': uuidv7(),
-              'If-Match': `"rev-${trackedRequest.revision}"`,
-            }),
-            data: {
-              expectedRevision: trackedRequest.revision,
-              reason: 'real Work E2E cleanup',
-            },
-          }),
-          'REAL_WORK_CLEANUP_RESOURCE_REQUEST_CANCEL_FAILED',
-        )
-        expect(cancelled).toMatchObject({ requestId })
-        trackedRequest = await pollJson(
-          request,
-          `/api/v1/resource-requests/${requestId}`,
-          (value) => ['rejected', 'cancelled'].includes(value.state),
-          'REAL_WORK_CLEANUP_RESOURCE_REQUEST_CANCEL_STATUS_FAILED',
-          120_000,
-        )
-        if (trackedRequest.state !== 'cancelled') {
-          throw new Error(`REAL_WORK_CLEANUP_RESOURCE_REQUEST_NOT_CANCELLED:${trackedRequest.state}`)
-        }
-      } else if (trackedRequest.state === 'allocating') {
-        trackedRequest = await pollJson(
-          request,
-          `/api/v1/resource-requests/${requestId}`,
-          (value) => value.state !== 'allocating',
-          'REAL_WORK_CLEANUP_RESOURCE_REQUEST_ALLOCATION_STATUS_FAILED',
-          120_000,
-        )
-        if (trackedRequest.state === 'active' || trackedRequest.state === 'expiring') {
-          const allocatedLeases = await expectJson(
-            await request.get(`/api/v1/projects/${projectId}/resource-leases`),
-            'REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_FAILED',
-          )
-          if (!Array.isArray(allocatedLeases)) throw new Error('REAL_WORK_CLEANUP_LEASE_LIST_AFTER_ALLOCATION_INVALID')
-          leaseId = allocatedLeases.find((lease) => lease.requestId === requestId)?.id ?? null
-          if (!leaseId) throw new Error(`REAL_WORK_CLEANUP_LEASE_MISSING:${trackedRequest.state}`)
-        }
-      }
-      if (!leaseId && !['rejected', 'cancelled', 'expired'].includes(trackedRequest.state)) {
-        throw new Error(`REAL_WORK_CLEANUP_RESOURCE_REQUEST_UNSAFE_WITHOUT_LEASE:${trackedRequest.state}`)
-      }
-    }
-  }
-
-  if (environmentId) {
-    const currentResponse = await request.get(`/api/v1/environments/${environmentId}`)
-    if (currentResponse.status() !== 404) {
-      let current = await expectJson(currentResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_READ_FAILED')
-      if (current.observedState !== 'deleted') {
-        if (['requested', 'validating', 'building', 'provisioning', 'updating'].includes(current.observedState)) {
-          current = await pollJson(
-            request,
-            `/api/v1/environments/${environmentId}`,
-            (value) => ['ready', 'stopped', 'failed', 'deleting', 'deleted'].includes(value.observedState),
-            'REAL_WORK_CLEANUP_ENVIRONMENT_PROVISION_FAILED',
-            240_000,
-          )
-        }
-        if (current.observedState === 'ready') {
-          const stopAccepted = await expectJson(
-            await request.post(`/api/v1/environments/${environmentId}/stop`, {
-              headers: await csrfHeaders(request, baseURL, {
-                'Idempotency-Key': uuidv7(),
-                'If-Match': `"rev-${current.revision}"`,
-              }),
-            }),
-            'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_FAILED',
-          )
-          const stopOperation = await pollJson(
-            request,
-            stopAccepted.statusUrl,
-            (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
-            'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_STATUS_FAILED',
-            240_000,
-          )
-          if (stopOperation.state !== 'succeeded') {
-            const afterStopResponse = await request.get(`/api/v1/environments/${environmentId}`)
-            if (afterStopResponse.status() === 404) {
-              current = { observedState: 'deleted' }
-            } else {
-              const afterStop = await expectJson(afterStopResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_FAILURE_READ_FAILED')
-              if (afterStop.observedState === 'deleting') {
-                await waitForDeletedEnvironment(request, environmentId)
-                current = { observedState: 'deleted' }
-              } else {
-                throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_STOP_OPERATION_FAILED:${stopOperation.state}`)
-              }
-            }
-          }
-          if (stopOperation.state === 'succeeded') {
-            const afterStopResponse = await request.get(`/api/v1/environments/${environmentId}`)
-            current = afterStopResponse.status() === 404
-              ? { observedState: 'deleted' }
-              : await expectJson(afterStopResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_STOP_READ_FAILED')
-          }
-        }
-        if (current.observedState === 'deleting') {
-          await waitForDeletedEnvironment(request, environmentId)
-        } else if (!['stopped', 'failed', 'deleted'].includes(current.observedState)) {
-          current = await waitForStoppedOrDeletedEnvironment(request, environmentId)
-        }
-      }
-    }
-  }
-
-  if (leaseId) {
-    const leaseResponse = await request.get(`/api/v1/resource-leases/${leaseId}`)
-    if (leaseResponse.status() !== 404) {
-      const lease = await expectJson(leaseResponse, 'REAL_WORK_CLEANUP_LEASE_READ_FAILED')
-      if (['active', 'allocating'].includes(lease.state)) {
-        const revoked = await expectJson(
-          await request.post(`/api/v1/resource-leases/${leaseId}/revoke`, {
-            headers: await csrfHeaders(request, baseURL, {
-              'Idempotency-Key': uuidv7(),
-              'If-Match': `"rev-${lease.revision}"`,
-            }),
-            data: {
-              expectedRevision: lease.revision,
-              reason: 'real Work E2E cleanup',
-            },
-          }),
-          'REAL_WORK_CLEANUP_LEASE_REVOKE_FAILED',
-        )
-        expect(revoked).toMatchObject({ id: leaseId })
-      }
-      if (['active', 'allocating', 'expiring'].includes(lease.state)) {
-        const finalLease = await pollJson(
-          request,
-          `/api/v1/resource-leases/${leaseId}`,
-          (value) => ['revoked', 'expired'].includes(value.state),
-          'REAL_WORK_CLEANUP_LEASE_REVOKE_STATUS_FAILED',
-          240_000,
-        )
-        if (!['revoked', 'expired'].includes(finalLease.state)) {
-          throw new Error(`REAL_WORK_CLEANUP_LEASE_NOT_TERMINAL:${finalLease.state}`)
-        }
-      } else if (!['revoked', 'expired'].includes(lease.state)) {
-        throw new Error(`REAL_WORK_CLEANUP_LEASE_STATE_INVALID:${lease.state}`)
-      }
-    }
-  }
-
-  if (environmentId) {
-    const latestResponse = await request.get(`/api/v1/environments/${environmentId}`)
-    if (latestResponse.status() !== 404) {
-      const latest = await expectJson(latestResponse, 'REAL_WORK_CLEANUP_ENVIRONMENT_READ_BEFORE_DELETE_FAILED')
-      if (['stopped', 'failed'].includes(latest.observedState)) {
-        const deleteAccepted = await expectJson(
-          await request.post(`/api/v1/environments/${environmentId}/delete`, {
-            headers: await csrfHeaders(request, baseURL, {
-              'Idempotency-Key': uuidv7(),
-              'If-Match': `"rev-${latest.revision}"`,
-            }),
-          }),
-          'REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_FAILED',
-        )
-        const deleteOperation = await pollJson(
-          request,
-          deleteAccepted.statusUrl,
-          (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
-          'REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_STATUS_FAILED',
-          240_000,
-        )
-        if (deleteOperation.state !== 'succeeded') throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_OPERATION_FAILED:${deleteOperation.state}`)
-      } else if (!['deleting', 'deleted'].includes(latest.observedState)) {
-        throw new Error(`REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_STATE_INVALID:${latest.observedState}`)
-      }
-      await waitForDeletedEnvironment(request, environmentId)
-    }
-  }
-}
-
 test('student provisions a Work environment, configures it, and releases its capacity', async ({ page, browser, baseURL }) => {
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
   if (REAL_WORK_RESUME && REAL_WORK_CONFIG) throw new Error('REAL_WORK_RESUME_AND_FULL_PROVIDER_CONFIG_CONFLICT')
+  const guards = installUsabilityGuards(page)
 
   await expectProblem(
     await page.request.get('/api/v1/resource-requests'),
@@ -630,27 +601,46 @@ test('student provisions a Work environment, configures it, and releases its cap
   )
 
   const resumed = REAL_WORK_RESUME
-    ? await readResumablePublishedWork(page.request, REAL_WORK_RESUME)
+    ? await readResumablePublishedWork(page.request, REAL_WORK_RESUME, { gpu: REAL_WORK_GPU, vm: REAL_WORK_VM })
     : null
   const project = resumed?.project ?? await createProjectByUi(page, `live-work-${Date.now()}-${uuidv7().slice(0, 8)}`)
   if (resumed) {
     await page.goto(`/researcher/workspaces?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
   }
   await selectProjectByUi(page, project.id)
-  if (!resumed) await createProjectPolicy(page.request, baseURL, project.id)
-  const packageCopy = REAL_WORK_CONFIG ? await createRealWorkPackage(REAL_WORK_CONFIG.goldenBaseImage) : null
+  if (!resumed) await configureProjectPolicyByUi(page, project.id)
+  const packageCopy = !resumed && (REAL_WORK_VM || REAL_WORK_CONFIG)
+    ? await createRealWorkPackage(REAL_WORK_VM ? null : REAL_WORK_CONFIG.goldenBaseImage, {
+      gpu: REAL_WORK_GPU,
+      providerBinding: WORK_PROVIDER_BINDING,
+      vm: REAL_WORK_VM,
+    })
+    : null
   let trackedEnvironmentId = null
   let trackedLeaseId = null
   let trackedRequestId = null
+  let vmSshIdentity = null
+  let vmSshKey = null
+  let adminContext = null
+  let adminPage = null
+  let studentActorId = null
+  let primaryFailure = null
+  const cleanupFailures = []
   try {
+    adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+    adminPage = await adminContext.newPage()
+    studentActorId = await readActorId(page.request)
     const { packageData, release } = resumed
       ? { packageData: resumed.packageData, release: resumed.release }
-      : await publishWorkTemplate(page, project, packageCopy)
+      : await publishWorkTemplate(page, project, packageCopy, { adminPage, studentActorId })
+    if (resumed && REAL_WORK_GPU && !REAL_WORK_VM) {
+      assertRealWorkGpuContainerCandidate(resumed.candidateView, WORK_PROVIDER_BINDING, REAL_WORK_GPU)
+    }
     const expectedSeedMarker = packageCopy?.seedMarker ?? resumed?.seedMarker
     const expectedPersistenceMarker = packageCopy?.persistenceMarker ?? resumed?.persistenceMarker
 
     if (REAL_WORK_MODE) {
-      await ensureRealWorkRates(browser, baseURL)
+      await ensureRealWorkRates(browser, baseURL, { gpu: REAL_WORK_GPU })
       await configureRealWorkBudgetByUi(browser, baseURL, project.id)
     }
 
@@ -660,10 +650,33 @@ test('student provisions a Work environment, configures it, and releases its cap
     const releaseSelect = page.getByLabel('已发布版本')
     await expect(releaseSelect.locator(`option[value="${release.id}:${release.version}"]`)).toHaveCount(1, { timeout: 120_000 })
     await releaseSelect.selectOption(`${release.id}:${release.version}`)
+    if (REAL_WORK_GPU) {
+      const requiredRuntimeKind = REAL_WORK_VM ? 'virtual_machine' : 'container'
+      if (release.runtimeKind !== requiredRuntimeKind) {
+        throw new Error(`REAL_WORK_GPU_RUNTIME_MISMATCH:${REAL_WORK_GPU.mode}:${release.runtimeKind}`)
+      }
+      const gpuSelect = page.getByRole('combobox', { name: 'GPU 目录项（可选）', exact: true })
+      await expect(gpuSelect).toBeEnabled({ timeout: 120_000 })
+      const gpuValue = await gpuSelect.locator('option').evaluateAll((options, target) => {
+        const expected = `${target.class} · ${target.modeLabel}`
+        return options.find((option) => (option.textContent ?? '').trim().startsWith(expected))?.value ?? null
+      }, { class: REAL_WORK_GPU.class, modeLabel: GPU_MODE_LABELS[REAL_WORK_GPU.mode] })
+      if (!gpuValue) throw new Error(`REAL_WORK_GPU_CATALOG_OPTION_MISSING:${REAL_WORK_GPU.class}:${REAL_WORK_GPU.mode}`)
+      await gpuSelect.selectOption(gpuValue)
+      await expect(page.locator('.gpu-detail')).toContainText(`${REAL_WORK_GPU.class} · ${GPU_MODE_LABELS[REAL_WORK_GPU.mode]}`)
+      const gpuCount = page.getByLabel('GPU 数量', { exact: true })
+      if (await gpuCount.isEditable()) await gpuCount.fill(String(REAL_WORK_GPU.count))
+      else await expect(gpuCount).toHaveValue(String(REAL_WORK_GPU.count))
+    }
     await page.getByLabel('CPU（m）').fill('1000')
     await page.getByLabel('时长（小时）').fill('1')
     await page.getByLabel('内存（GiB）').fill('2')
-    await page.getByLabel('存储（GiB）').fill('10')
+    const vmBaseDiskCapacityBytes = REAL_WORK_VM ? release.artifact?.base_disk?.capacityBytes : null
+    if (REAL_WORK_VM && (!Number.isSafeInteger(vmBaseDiskCapacityBytes) || vmBaseDiskCapacityBytes < 1)) {
+      throw new Error('REAL_WORK_VM_RELEASE_BASE_DISK_CAPACITY_INVALID')
+    }
+    const storageGiB = REAL_WORK_VM ? Math.max(16, Math.ceil(vmBaseDiskCapacityBytes / GIB)) : 10
+    await page.getByLabel('存储（GiB）').fill(String(storageGiB))
     const resourceResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === '/api/v1/resource-requests'
@@ -671,11 +684,23 @@ test('student provisions a Work environment, configures it, and releases its cap
     await page.getByRole('button', { name: '提交资源申请', exact: true }).click()
     const resourceResponse = await resourceResponsePromise
     const accepted = await expectJson(resourceResponse, 'RESOURCE_REQUEST_CREATE_FAILED')
+    const onAcceptedResourceRequest = (acceptedRequest, response) => {
+      if (typeof acceptedRequest?.requestId !== 'string' || acceptedRequest.requestId === '') {
+        throw new Error('RESOURCE_REQUEST_CREATE_ID_MISSING')
+      }
+      trackedRequestId = acceptedRequest.requestId
+      const body = response.request().postDataJSON()
+      const environmentId = body?.target?.environmentId ?? acceptedRequest.environmentId
+      if (typeof environmentId === 'string' && environmentId !== '') trackedEnvironmentId = environmentId
+      return body
+    }
+    const requestBody = onAcceptedResourceRequest(accepted, resourceResponse)
+    requestBody.requestId = accepted.requestId
     expect(accepted).toMatchObject({ requestId: expect.any(String) })
-    const requestBody = resourceResponse.request().postDataJSON()
     expect(requestBody).toMatchObject({ projectId: project.id, target: { kind: 'environment', releaseId: release.id, releaseVersion: release.version } })
-  requestBody.requestId = accepted.requestId
-  trackedRequestId = accepted.requestId
+    if (REAL_WORK_GPU) {
+      expect(requestBody.resources?.gpu).toEqual({ class: REAL_WORK_GPU.class, count: REAL_WORK_GPU.count })
+    }
     const environmentId = requestBody.target.environmentId
     trackedEnvironmentId = environmentId
 
@@ -698,8 +723,12 @@ test('student provisions a Work environment, configures it, and releases its cap
     await expect(connectLink).toBeVisible({ timeout: 120_000 })
     await connectLink.click()
     await expect(page).toHaveURL(new RegExp(`[?&]environmentId=${encodeURIComponent(environmentId)}(?:&|$)`))
-    await expect(page.locator('.resource-title-row').getByRole('heading', { name: environmentId, exact: true })).toBeVisible({ timeout: 120_000 })
-    await expect(page.locator('.env-meta-grid')).toContainText('容器')
+    // The console titles a Work environment `work-<environment id>`, so match the
+    // rendered heading by containment rather than by an exact id comparison.
+    await expect(
+      page.locator('.resource-title-row').getByRole('heading', { name: environmentId }),
+    ).toBeVisible({ timeout: 120_000 })
+    await expect(page.locator('.env-meta-grid')).toContainText(REAL_WORK_VM ? '虚拟机' : '容器')
     const environment = await waitForEnvironment(page.request, environmentId, 'ready')
     expect(environment.class).toBe('work')
     expect(environment.projectId).toBe(project.id)
@@ -713,26 +742,41 @@ test('student provisions a Work environment, configures it, and releases its cap
     expect(new Set(endpointIds).size).toBe(endpointIds.length)
     await verifyCrossProjectEnvironmentDenied(browser, baseURL, project.id, environmentId)
 
-    await expect(page.getByRole('button', { name: '签发访问授权', exact: true })).toBeVisible({ timeout: 120_000 })
-    const accessGrantResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/environments/${environmentId}/access-grants`
-    })
-    await page.getByRole('button', { name: '签发访问授权', exact: true }).click()
-    const accessGrantResponse = await accessGrantResponsePromise
-    const requestedAccessGrant = await expectJson(accessGrantResponse, 'WORK_ACCESS_GRANT_CREATE_FAILED')
-    expect(requestedAccessGrant).toMatchObject({
-      id: expect.any(String),
-      projectId: project.id,
-      environmentId,
-      environmentRevision: environment.revision,
-      state: 'requested',
-    })
-    const accessGrant = await waitForActiveAccessGrant(page.request, requestedAccessGrant.id)
+    let accessGrant
+    let expectedAccessGrantId
+    let sshEndpointGrant = null
+    if (REAL_WORK_VM) {
+      vmSshIdentity = await createRealWorkSshIdentity()
+      await addStudentSshKeyByUi(page, vmSshIdentity, (acceptedKey) => {
+        vmSshKey = acceptedKey
+      })
+      const issued = await issueWorkAccessGrantByUi(page, project.id, environment)
+      accessGrant = issued.grant
+      expectedAccessGrantId = accessGrant.id
+      sshEndpointGrant = issued.endpointGrant
+    } else {
+      await expect(page.getByRole('button', { name: '签发访问授权', exact: true })).toBeVisible({ timeout: 120_000 })
+      const accessGrantResponsePromise = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'POST'
+          && url.pathname === `/api/v1/environments/${environmentId}/access-grants`
+      })
+      await page.getByRole('button', { name: '签发访问授权', exact: true }).click()
+      const accessGrantResponse = await accessGrantResponsePromise
+      const requestedAccessGrant = await expectJson(accessGrantResponse, 'WORK_ACCESS_GRANT_CREATE_FAILED')
+      expect(requestedAccessGrant).toMatchObject({
+        id: expect.any(String),
+        projectId: project.id,
+        environmentId,
+        environmentRevision: environment.revision,
+        state: 'requested',
+      })
+      expectedAccessGrantId = requestedAccessGrant.id
+      accessGrant = await waitForActiveAccessGrant(page.request, requestedAccessGrant.id)
+    }
     let revocationTargetGrant = accessGrant
     expect(accessGrant).toMatchObject({
-      id: requestedAccessGrant.id,
+      id: expectedAccessGrantId,
       projectId: project.id,
       environmentId,
       environmentRevision: environment.revision,
@@ -757,28 +801,49 @@ test('student provisions a Work environment, configures it, and releases its cap
         expect(endpointGrant.connectUrl).toBe(`/connect/${endpointGrant.id}/`)
       }
     }
-    const httpGrant = accessGrant.endpointGrants.find(
-      (endpointGrant) => (endpointGrant.protocol === 'http' || endpointGrant.protocol === 'https')
-        && typeof endpointGrant.connectUrl === 'string',
-    )
-    if (!httpGrant?.connectUrl) throw new Error('WORK_ACCESS_GRANT_HTTP_CONNECTION_MISSING')
-    const runtimeResponse = await page.request.get(httpGrant.connectUrl)
-    const runtimeBody = await runtimeResponse.text()
-    if (!runtimeResponse.ok()) {
-      throw new Error(`WORK_ACCESS_GRANT_RUNTIME_GET_FAILED:${runtimeResponse.status()}:${runtimeBody.slice(0, 2000)}`)
-    }
-    expect(runtimeResponse.status()).toBe(200)
-    if (REAL_WORK_MODE) {
-      const seedBody = await readWorkFile(
-        page.request,
-        httpGrant.connectUrl,
-        'seed.txt',
-        'REAL_WORK_SEED_FILE_READ_FAILED',
-      )
-      expect(seedBody.trim()).toBe(expectedSeedMarker)
+    if (REAL_WORK_VM) {
+      const vmLicense = await readRealWorkVmLicenseStatus(sshEndpointGrant, vmSshIdentity)
+      expect(vmLicense).toMatchObject({
+        driverVersion: expect.any(String),
+        licenseStatus: 'Licensed',
+      })
+      const vmResult = await runRealWorkVmCudaProbe(sshEndpointGrant, vmSshIdentity)
+      expect(vmResult).toEqual({ count: 256, sum: 32640, max: 255 })
     } else {
+      const httpGrant = accessGrant.endpointGrants.find(
+        (endpointGrant) => (endpointGrant.protocol === 'http' || endpointGrant.protocol === 'https')
+          && typeof endpointGrant.connectUrl === 'string',
+      )
+      if (!httpGrant?.connectUrl) throw new Error('WORK_ACCESS_GRANT_HTTP_CONNECTION_MISSING')
+      const runtimeResponse = await page.request.get(httpGrant.connectUrl)
+      const runtimeBody = await runtimeResponse.text()
+      if (!runtimeResponse.ok()) {
+        throw new Error(`WORK_ACCESS_GRANT_RUNTIME_GET_FAILED:${runtimeResponse.status()}:${runtimeBody.slice(0, 2000)}`)
+      }
+      expect(runtimeResponse.status()).toBe(200)
+      if (REAL_WORK_MODE) {
+        const seedBody = await readWorkFile(
+          page.request,
+          httpGrant.connectUrl,
+          'seed.txt',
+          'REAL_WORK_SEED_FILE_READ_FAILED',
+        )
+        expect(seedBody.trim()).toBe(expectedSeedMarker)
+      } else {
       expect(runtimeBody).toContain('Welcome to nginx')
+      }
     }
+    if (REAL_WORK_GPU && !REAL_WORK_VM) {
+      const terminalPage = await page.context().newPage()
+      try {
+        expect(await runTerminalCudaProbe(terminalPage, project.id, environmentId)).toEqual({ count: 256, sum: 32640, max: 255 })
+      } finally {
+        await terminalPage.close()
+      }
+    }
+    await assertNoStuckProgress(page, 'student-work-environment')
+    await auditAccessibility(page, 'student-work-environment')
+    guards.assertCleanConsole('student-work-environment')
 
     await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
@@ -789,21 +854,70 @@ test('student provisions a Work environment, configures it, and releases its cap
     await page.getByLabel('材料包 ID').fill(packageData.id)
     await page.getByLabel('材料包 Revision').fill(String(packageData.revision))
     await page.getByLabel(/我确认 Agent 可能修改该 Work/).check()
-    const planResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'GET'
-        && url.pathname.startsWith(`/api/v1/projects/${project.id}/agent-runs/`)
-        && url.pathname.endsWith('/work-configuration/plan')
-    })
-    const configurationResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/projects/${project.id}/work-configuration-runs`
-    })
+    const planResponsePromise = page.waitForResponse(
+      (response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'GET'
+          && url.pathname.startsWith(`/api/v1/projects/${project.id}/agent-runs/`)
+          && url.pathname.endsWith('/work-configuration/plan')
+      },
+      { timeout: 300_000 },
+    )
+    const configurationResponsePromise = page.waitForResponse(
+      (response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'POST'
+          && url.pathname === `/api/v1/projects/${project.id}/work-configuration-runs`
+      },
+      { timeout: 300_000 },
+    )
     await page.getByRole('button', { name: '生成 Work 配置', exact: true }).click()
     const configurationResponse = await configurationResponsePromise
     const configurationRun = await expectJson(configurationResponse, 'WORK_CONFIGURATION_RUN_CREATE_FAILED')
     expect(configurationRun).toMatchObject({ id: expect.any(String), projectId: project.id })
+    const configurationRequestBody = configurationResponse.request().postDataJSON()
+    expect(configurationRequestBody).toMatchObject({
+      projectId: project.id,
+      packageId: packageData.id,
+      packageRevision: packageData.revision,
+      environmentId,
+      environmentRevision: expect.any(Number),
+      policyId: expect.any(String),
+      policyRevision: expect.any(Number),
+    })
+    if (
+      !Number.isInteger(configurationRequestBody.environmentRevision)
+      || configurationRequestBody.environmentRevision < 1
+      || !Number.isInteger(configurationRequestBody.policyRevision)
+      || configurationRequestBody.policyRevision < 1
+    ) {
+      throw new Error('WORK_CONFIGURATION_REQUEST_SCOPE_INVALID')
+    }
+    const configurationRunStatus = await pollJson(
+      page.request,
+      `/api/v1/projects/${project.id}/agent-runs/${configurationRun.id}`,
+      async (value) => {
+        await approvePendingAgentTaskResourceByUi(adminPage, {
+          projectId: project.id,
+          run: value,
+          runId: configurationRun.id,
+          packageId: packageData.id,
+          policyId: configurationRequestBody.policyId,
+          policyRevision: configurationRequestBody.policyRevision,
+          studentActorId,
+          trackKind: 'work_configuration',
+          purposeKind: 'work_configuration',
+          environmentId: configurationRequestBody.environmentId,
+          environmentRevision: configurationRequestBody.environmentRevision,
+        })
+        return value.state === 'awaiting_approval' || terminalRunState(value.state)
+      },
+      'WORK_CONFIGURATION_RUN_STATUS_FAILED',
+      300_000,
+    )
+    if (configurationRunStatus.state !== 'awaiting_approval') {
+      throw new Error(`WORK_CONFIGURATION_RUN_FAILED_BEFORE_PLAN:${configurationRunStatus.state}`)
+    }
     const configurationPlan = await expectJson(await planResponsePromise, 'WORK_CONFIGURATION_PLAN_LOAD_FAILED')
     expect(configurationPlan).toMatchObject({
       plan: {
@@ -849,37 +963,48 @@ test('student provisions a Work environment, configures it, and releases its cap
 
     if (REAL_WORK_MODE) {
       const configuredEnvironment = await waitForEnvironment(page.request, environmentId, 'ready')
-      const existingGrant = await expectJson(
-        await page.request.get(`/api/v1/access-grants/${accessGrant.id}`),
-        'REAL_WORK_ACCESS_GRANT_READ_AFTER_CONFIGURATION_FAILED',
-      )
-      let configuredConnection
-      if (existingGrant.state === 'active' && existingGrant.environmentRevision === configuredEnvironment.revision) {
-        configuredConnection = { grant: existingGrant, httpGrant: httpEndpointGrant(existingGrant) }
-      } else {
-        configuredConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, configuredEnvironment)
+      if (REAL_WORK_VM) {
+        const configuredConnection = await issueWorkAccessGrantByUi(page, project.id, configuredEnvironment)
         revocationTargetGrant = configuredConnection.grant
+        const configuredPersistenceBody = await readRealWorkVmWorkspaceFile(
+          configuredConnection.endpointGrant,
+          vmSshIdentity,
+          VM_PERSISTENCE_MARKER_PATH,
+        )
+        expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+      } else {
+        const existingGrant = await expectJson(
+          await page.request.get(`/api/v1/access-grants/${accessGrant.id}`),
+          'REAL_WORK_ACCESS_GRANT_READ_AFTER_CONFIGURATION_FAILED',
+        )
+        let configuredConnection
+        if (existingGrant.state === 'active' && existingGrant.environmentRevision === configuredEnvironment.revision) {
+          configuredConnection = { grant: existingGrant, httpGrant: httpEndpointGrant(existingGrant) }
+        } else {
+          configuredConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, configuredEnvironment)
+          revocationTargetGrant = configuredConnection.grant
+        }
+        const configuredBody = await readWorkEndpoint(
+          page.request,
+          configuredConnection.httpGrant.connectUrl,
+          'REAL_WORK_CONFIGURED_ENDPOINT_READ_FAILED',
+        )
+        expect(configuredBody).toContain('seed.txt')
+        const configuredSeedBody = await readWorkFile(
+          page.request,
+          configuredConnection.httpGrant.connectUrl,
+          'seed.txt',
+          'REAL_WORK_CONFIGURED_SEED_FILE_READ_FAILED',
+        )
+        const configuredPersistenceBody = await readWorkFile(
+          page.request,
+          configuredConnection.httpGrant.connectUrl,
+          'persistence-marker.txt',
+          'REAL_WORK_CONFIGURED_PERSISTENCE_FILE_READ_FAILED',
+        )
+        expect(configuredSeedBody.trim()).toBe(expectedSeedMarker)
+        expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
       }
-      const configuredBody = await readWorkEndpoint(
-        page.request,
-        configuredConnection.httpGrant.connectUrl,
-        'REAL_WORK_CONFIGURED_ENDPOINT_READ_FAILED',
-      )
-      expect(configuredBody).toContain('seed.txt')
-      const configuredSeedBody = await readWorkFile(
-        page.request,
-        configuredConnection.httpGrant.connectUrl,
-        'seed.txt',
-        'REAL_WORK_CONFIGURED_SEED_FILE_READ_FAILED',
-      )
-      const configuredPersistenceBody = await readWorkFile(
-        page.request,
-        configuredConnection.httpGrant.connectUrl,
-        'persistence-marker.txt',
-        'REAL_WORK_CONFIGURED_PERSISTENCE_FILE_READ_FAILED',
-      )
-      expect(configuredSeedBody.trim()).toBe(expectedSeedMarker)
-      expect(configuredPersistenceBody.trim()).toBe(expectedPersistenceMarker)
 
       await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}&environmentId=${encodeURIComponent(environmentId)}`, { waitUntil: 'domcontentloaded' })
       const restartButton = page.getByRole('button', { name: '重启', exact: true })
@@ -910,35 +1035,71 @@ test('student provisions a Work environment, configures it, and releases its cap
         state: 'succeeded',
       })
       const restartedEnvironment = await waitForEnvironment(page.request, environmentId, 'ready')
-      const restartedConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, restartedEnvironment)
-      revocationTargetGrant = restartedConnection.grant
-      const restartedSeedBody = await readWorkFile(
-        page.request,
-        restartedConnection.httpGrant.connectUrl,
-        'seed.txt',
-        'REAL_WORK_RESTARTED_SEED_FILE_READ_FAILED',
-      )
-      const restartedPersistenceBody = await readWorkFile(
-        page.request,
-        restartedConnection.httpGrant.connectUrl,
-        'persistence-marker.txt',
-        'REAL_WORK_RESTARTED_PERSISTENCE_FILE_READ_FAILED',
-      )
-      expect(restartedSeedBody.trim()).toBe(expectedSeedMarker)
-      expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+      if (REAL_WORK_VM) {
+        const restartedConnection = await issueWorkAccessGrantByUi(page, project.id, restartedEnvironment)
+        revocationTargetGrant = restartedConnection.grant
+        const restartedPersistenceBody = await readRealWorkVmWorkspaceFile(
+          restartedConnection.endpointGrant,
+          vmSshIdentity,
+          VM_PERSISTENCE_MARKER_PATH,
+        )
+        expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+        const restartedVmLicense = await readRealWorkVmLicenseStatus(restartedConnection.endpointGrant, vmSshIdentity)
+        expect(restartedVmLicense).toMatchObject({
+          driverVersion: expect.any(String),
+          licenseStatus: 'Licensed',
+        })
+        const restartedCudaResult = await runRealWorkVmCudaProbe(restartedConnection.endpointGrant, vmSshIdentity)
+        expect(restartedCudaResult).toEqual({ count: 256, sum: 32640, max: 255 })
+      } else {
+        const restartedConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, restartedEnvironment)
+        revocationTargetGrant = restartedConnection.grant
+        const restartedSeedBody = await readWorkFile(
+          page.request,
+          restartedConnection.httpGrant.connectUrl,
+          'seed.txt',
+          'REAL_WORK_RESTARTED_SEED_FILE_READ_FAILED',
+        )
+        const restartedPersistenceBody = await readWorkFile(
+          page.request,
+          restartedConnection.httpGrant.connectUrl,
+          'persistence-marker.txt',
+          'REAL_WORK_RESTARTED_PERSISTENCE_FILE_READ_FAILED',
+        )
+        expect(restartedSeedBody.trim()).toBe(expectedSeedMarker)
+        expect(restartedPersistenceBody.trim()).toBe(expectedPersistenceMarker)
+        if (REAL_WORK_GPU && !REAL_WORK_VM) {
+          const terminalPage = await page.context().newPage()
+          try {
+            expect(await runTerminalCudaProbe(terminalPage, project.id, environmentId)).toEqual({ count: 256, sum: 32640, max: 255 })
+          } finally {
+            await terminalPage.close()
+          }
+        }
+      }
     }
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('button', { name: '续期', exact: true })).toBeVisible({ timeout: 120_000 })
+    // The resources page lists every project lease, including the authoring
+    // config sandbox's task lease, so the FIRST 续期 button is not necessarily
+    // this Work environment's. Scope to the lease row that links into the
+    // environments console (only environment-targeted leases carry it).
+    const workLeaseRenewButton = page
+      .locator('li.resource-row')
+      .filter({ has: page.locator('a[href*="/researcher/environments"]') })
+      .getByRole('button', { name: '续期', exact: true })
+    await expect(workLeaseRenewButton).toBeVisible({ timeout: 120_000 })
     const renewResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${lease.id}/renew`
     })
-    await page.getByRole('button', { name: '续期', exact: true }).click()
+    await workLeaseRenewButton.click()
     const renewedLease = await expectJson(await renewResponsePromise, 'RESOURCE_LEASE_RENEW_FAILED')
     expect(renewedLease).toMatchObject({ id: lease.id, state: 'active', revision: expect.any(Number) })
     expect(new Date(renewedLease.expiresAt).getTime()).toBeGreaterThan(new Date(lease.expiresAt).getTime())
+    await assertNoStuckProgress(page, 'researcher-resource-lease')
+    await auditAccessibility(page, 'researcher-resource-lease')
 
     await page.goto(`/researcher/environments?projectId=${encodeURIComponent(project.id)}&environmentId=${encodeURIComponent(environmentId)}`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('button', { name: '停止', exact: true })).toBeEnabled({ timeout: 120_000 })
@@ -1007,12 +1168,21 @@ test('student provisions a Work environment, configures it, and releases its cap
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('button', { name: '回收', exact: true })).toBeVisible({ timeout: 120_000 })
+    const workLeaseReclaimButton = page
+      .locator('li.resource-row')
+      .filter({ has: page.locator('a[href*="/researcher/environments"]') })
+      .getByRole('button', { name: '回收', exact: true })
+    await expect(workLeaseReclaimButton).toBeVisible({ timeout: 120_000 })
     const reclaimResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname === `/api/v1/resource-leases/${lease.id}/revoke`
     })
-    await page.getByRole('button', { name: '回收', exact: true }).click()
+    await workLeaseReclaimButton.click()
+    // 回收 opens the same confirm dialog as the admin release helper; the
+    // revoke POST only fires after the confirm action.
+    const reclaimDialog = page.locator('dialog.confirm-dialog[role="alertdialog"]')
+    await expect(reclaimDialog).toBeVisible()
+    await reclaimDialog.locator('.filled-button').click()
     const revokedLease = await expectJson(await reclaimResponsePromise, 'RESOURCE_LEASE_RECLAIM_FAILED')
     expect(revokedLease).toMatchObject({ id: lease.id })
     const finalLease = await pollJson(
@@ -1024,10 +1194,17 @@ test('student provisions a Work environment, configures it, and releases its cap
     )
     if (finalLease.state !== 'revoked') throw new Error(`RESOURCE_LEASE_NOT_REVOKED:${finalLease.state}`)
     await waitForDeletedEnvironment(page.request, environmentId)
+    if (vmSshKey) {
+      await deleteStudentSshKeyByUi(page, vmSshKey)
+      vmSshKey = null
+    }
+    await assertNoStuckProgress(page, 'researcher-resource-released')
+    await auditAccessibility(page, 'researcher-resource-released')
+    guards.assertCleanConsole('researcher-resource-released')
     if (REAL_WORK_MODE) {
-      const finance = await waitForRealWorkCharges(browser, baseURL, project.id)
-      assertRealWorkCharges(finance.charges)
-      await inspectRealWorkFinanceByUi(browser, baseURL, project.id)
+      const finance = await waitForRealWorkCharges(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
+      assertRealWorkCharges(finance.charges, REAL_WORK_GPU)
+      await inspectRealWorkFinanceByUi(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
     }
     const deniedConnection = await requestNewConnectionAfterLeaseRevoke(
       page.request,
@@ -1041,16 +1218,46 @@ test('student provisions a Work environment, configures it, and releases its cap
       reasonCode: 'LW_ACCESS_ENDPOINT_ELIGIBILITY_DENIED',
     })
   } catch (error) {
-    if (!REAL_WORK_MODE) throw error
-    try {
-      await cleanupWorkResources(page.request, baseURL, project.id, trackedEnvironmentId, trackedLeaseId, trackedRequestId)
-    } catch (cleanupError) {
-      const primaryMessage = error instanceof Error ? error.message : String(error)
-      const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-      throw new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_CLEANUP_FAILED:${cleanupMessage}`, { cause: error })
+    primaryFailure = error
+    if (REAL_WORK_MODE) {
+      try {
+        await cleanupWorkResources(page.request, baseURL, project.id, trackedEnvironmentId, trackedLeaseId, trackedRequestId)
+      } catch (cleanupError) {
+        const primaryMessage = error instanceof Error ? error.message : String(error)
+        const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        primaryFailure = new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_CLEANUP_FAILED:${cleanupMessage}`, { cause: error })
+      }
     }
-    throw error
   } finally {
-    await packageCopy?.cleanup()
+    try {
+      if (vmSshKey) await deleteStudentSshKeyByUi(page, vmSshKey)
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    try {
+      await packageCopy?.cleanup()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    try {
+      await vmSshIdentity?.cleanup()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    try {
+      await adminContext?.close()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+  }
+  if (primaryFailure && cleanupFailures.length > 0) {
+    const primaryMessage = primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
+    const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
+    throw new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: primaryFailure })
+  }
+  if (primaryFailure) throw primaryFailure
+  if (cleanupFailures.length > 0) {
+    const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
+    throw new Error(`REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: cleanupFailures[0] })
   }
 })

@@ -60,6 +60,93 @@ pub struct PgBuildStore {
 }
 
 impl PgBuildStore {
+    async fn reserve_terminal_cleanup(
+        &self,
+        delay: Duration,
+    ) -> Result<Option<(AgentBuildRequested, BuildExecutionFence)>, BuildStoreError> {
+        let delay_ms =
+            i64::try_from(delay.as_millis()).map_err(|_| BuildStoreError::ConfigurationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT c.command,c.attempt,f.lease_token,f.deadline_at,f.last_response,a.build_identity,a.digest \
+             FROM agent.build_commands c JOIN agent.build_executor_fences f USING(build_request_id) \
+             JOIN agent.build_executor_artifacts a USING(build_request_id) \
+             WHERE c.state IN ('failed','cancelled') AND c.cleanup_verified=false \
+               AND c.next_attempt_at<=clock_timestamp() AND c.attempt=f.highest_generation \
+               AND ((f.last_stage IN ('build','import') AND f.tombstone_generation IS NULL AND f.last_response->>'status'='built') \
+                 OR (f.last_stage='cleanup' AND f.tombstone_generation=f.highest_generation AND f.last_response->>'status'='cleaned')) \
+             ORDER BY c.created_at FOR UPDATE OF c SKIP LOCKED LIMIT 1",
+        ).fetch_optional(&mut *transaction).await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let command: AgentBuildRequested = serde_json::from_value(row.try_get("command")?)
+            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        command
+            .validate()
+            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let receipt: crate::build_provider::BuildExecutorResponse =
+            serde_json::from_value(row.try_get("last_response")?)
+                .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let identity = Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes());
+        let stored_identity: String = row.try_get("build_identity")?;
+        let stored_digest: String = row.try_get("digest")?;
+        let valid_receipt = match receipt {
+            crate::build_provider::BuildExecutorResponse::Built { candidate } => {
+                candidate.build_request_id == command.request.id
+                    && candidate.build_identity.0 == identity
+                    && candidate.repository == command.request.output_repository
+                    && candidate.digest == stored_digest
+            }
+            crate::build_provider::BuildExecutorResponse::Cleaned {
+                build_request_id,
+                build_identity,
+            } => build_request_id == command.request.id && build_identity.0 == identity,
+            _ => false,
+        };
+        if !valid_receipt || stored_identity != identity.to_string() {
+            return Err(BuildStoreError::IdentityMismatch);
+        }
+        let fence = BuildExecutionFence::new(
+            u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| BuildStoreError::IdentityMismatch)?,
+            row.try_get("lease_token")?,
+            UtcTimestamp::from_utc(row.try_get("deadline_at")?)
+                .map_err(|_| BuildStoreError::ClockInvalid)?,
+        )
+        .map_err(|_| BuildStoreError::IdentityMismatch)?;
+        sqlx::query("UPDATE agent.build_commands SET next_attempt_at=clock_timestamp()+($2::bigint * interval '1 millisecond') WHERE build_request_id=$1")
+            .bind(command.request.id.as_uuid()).bind(delay_ms).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(Some((command, fence)))
+    }
+
+    async fn complete_terminal_cleanup(
+        &self,
+        command: &AgentBuildRequested,
+        fence: BuildExecutionFence,
+    ) -> Result<(), BuildStoreError> {
+        let identity = Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes());
+        let updated = sqlx::query(
+            "UPDATE agent.build_commands c SET cleanup_verified=true,revision=revision+1,updated_at=clock_timestamp() \
+             WHERE c.build_request_id=$1 AND c.attempt=$2 AND c.state IN ('failed','cancelled') AND c.cleanup_verified=false \
+             AND EXISTS(SELECT 1 FROM agent.build_executor_fences f WHERE f.build_request_id=c.build_request_id \
+                        AND f.highest_generation=$2 AND f.lease_token=$3 AND f.deadline_at=$4 \
+                        AND f.last_stage='cleanup' AND f.tombstone_generation=$2 \
+                        AND f.last_response->>'status'='cleaned' \
+                        AND f.last_response->>'buildRequestId'=$5 AND f.last_response->>'buildIdentity'=$6) \
+             AND EXISTS(SELECT 1 FROM agent.build_executor_artifacts a WHERE a.build_request_id=c.build_request_id \
+                        AND a.build_identity=$6 AND a.cleaned_at IS NOT NULL)",
+        ).bind(command.request.id.as_uuid()).bind(i32::try_from(fence.generation).map_err(|_| BuildStoreError::IdentityMismatch)?)
+            .bind(fence.lease_token).bind(fence.deadline_at.get()).bind(command.request.id.to_string()).bind(identity.to_string())
+            .execute(&self.pool).await?;
+        if updated.rows_affected() != 1 {
+            return Err(BuildStoreError::FenceLost);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -568,6 +655,23 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
     }
 
     pub async fn run_once(&self, now: UtcTimestamp) -> Result<BuildWorkerOutcome, BuildStoreError> {
+        if let Some((command, fence)) = self
+            .store
+            .reserve_terminal_cleanup(self.retry_delay)
+            .await?
+        {
+            match self.pipeline.recover_cleanup(&command, fence).await {
+                Ok(()) => {
+                    self.store
+                        .complete_terminal_cleanup(&command, fence)
+                        .await?;
+                }
+                Err(error) => {
+                    tracing::warn!(event="agent.build.cleanup_recovery_deferred", build_request_id=%command.request.id, generation=fence.generation, diagnostic_code=error.diagnostic_code());
+                }
+            }
+            return Ok(BuildWorkerOutcome::Idle);
+        }
         let Some(lease) = self
             .store
             .claim_due(&self.worker_id, self.lease_duration)

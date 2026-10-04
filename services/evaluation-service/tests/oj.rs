@@ -2,11 +2,13 @@
 
 use std::str::FromStr as _;
 
+use contracts::evaluation::EvaluationSpec;
 use evaluation_service::oj::{
     OJ_EVIDENCE_SCHEMA_VERSION, OjCaseBinding, OjCaseEvidence, OjCaseStatus, OjCheckerKind,
     OjError, OjExecutionEvidence, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,
     OjFileBinding, OjProcessEvidence, OjTerminalStatus, aggregate_case_evidence, check_output,
 };
+use evaluation_service::{StepExecutionPlan, plan_deterministic_step};
 use persistence_sqlx::Sha256Digest;
 use uuid::Uuid;
 
@@ -358,5 +360,158 @@ fn student_projection_excludes_private_cases_commands_logs_and_evidence_identity
     }
     assert!(public.contains("wrong_answer"));
     assert!(public.contains("\"awardedPoints\":32"));
+    Ok(())
+}
+
+fn program_score_spec(checker: &str) -> String {
+    format!(
+        r#"apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: checker-selection-v1
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include: [src/main.cpp]
+      maxBytes: 1048576
+    llmReadable: []
+  steps:
+    - role: gate
+      id: compile
+      runner:
+        kind: program
+        toolchainProfile: cpp17-approved-v1
+        phase: compile
+        input: src/main.cpp
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 268435456
+          outputBytes: 1048576
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: score
+      id: score-answer
+      dependsOn: [compile]
+      runner:
+        kind: program
+        toolchainProfile: cpp17-approved-v1
+        phase: test
+        input: src/main.cpp
+        testGroups:
+          - name: basic
+            source: evaluator://tests/basic
+            maxPoints: 40
+          - name: edge
+            source: evaluator://tests/edge
+            maxPoints: 60
+        limits:
+          wallTimeSeconds: 2
+          memoryBytes: 268435456
+          outputBytes: 1048576
+      checker:
+        {checker}
+      score:
+        max: 100
+      failurePolicy: continue
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 100
+    gates:
+      - step: compile
+        requiredStatus: passed
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen: []
+"#
+    )
+}
+
+fn planned_program_checker(
+    yaml: &str,
+    step_id: &str,
+) -> Result<OjCheckerKind, Box<dyn std::error::Error>> {
+    let spec = EvaluationSpec::from_yaml(yaml)?;
+    let step = spec
+        .body()
+        .steps()
+        .iter()
+        .find(|step| step.id() == step_id)
+        .ok_or("missing program score step")?;
+    match plan_deterministic_step(step)? {
+        StepExecutionPlan::Program { checker, .. } => Ok(checker),
+        _ => Err("expected a program execution plan".into()),
+    }
+}
+
+#[test]
+fn declared_checker_kind_selects_token_and_exact_program_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        planned_program_checker(&program_score_spec("kind: token"), "score-answer")?,
+        OjCheckerKind::Token
+    );
+    assert_eq!(
+        planned_program_checker(&program_score_spec("kind: exact"), "score-answer")?,
+        OjCheckerKind::Exact
+    );
+    assert_eq!(
+        planned_program_checker(
+            include_str!("../../../examples/xv6-lab/evaluation.yaml"),
+            "smoke-tests"
+        )?,
+        OjCheckerKind::Token
+    );
+    Ok(())
+}
+
+#[test]
+fn unsupported_program_test_checker_fails_instead_of_silently_using_exact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let yaml =
+        program_score_spec("kind: json_schema\n        schemaRef: evaluator://schemas/result.json");
+    let spec = EvaluationSpec::from_yaml(&yaml)?;
+    let step = spec
+        .body()
+        .steps()
+        .iter()
+        .find(|step| step.id() == "score-answer")
+        .ok_or("missing score-answer step")?;
+    assert!(matches!(
+        plan_deterministic_step(step),
+        Err(evaluation_service::ExecutionError::StepInvalid)
+    ));
+    Ok(())
+}
+
+#[test]
+fn token_checker_keeps_per_case_point_accounting() -> Result<(), Box<dyn std::error::Error>> {
+    let request = request(OjCheckerKind::Token);
+    assert_eq!(request.checker, Some(OjCheckerKind::Token));
+    assert!(check_output(OjCheckerKind::Token, b"1\t2\r\n", b" 1  2 \n"));
+
+    let accepted = aggregate_case_evidence(
+        &request,
+        &[
+            evidence("basic", OjCaseStatus::Accepted, 40),
+            evidence("edge", OjCaseStatus::Accepted, 60),
+        ],
+    )?;
+    assert_eq!(accepted.status, OjTerminalStatus::Accepted);
+    assert_eq!((accepted.awarded_points, accepted.max_points), (80, 80));
+    assert_eq!(accepted.passed_cases, 2);
+
+    let partial = aggregate_case_evidence(
+        &request,
+        &[
+            evidence("basic", OjCaseStatus::Accepted, 40),
+            evidence("edge", OjCaseStatus::WrongAnswer, 0),
+        ],
+    )?;
+    assert_eq!((partial.awarded_points, partial.max_points), (32, 80));
+    assert_eq!(partial.passed_cases, 1);
     Ok(())
 }

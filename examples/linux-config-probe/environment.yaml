@@ -1,0 +1,38 @@
+{
+  "apiVersion": "environment.labweaver.io/v1",
+  "kind": "EnvironmentSpec",
+  "name": "linux-config-probe",
+  "class": "experiment",
+  "resources": {
+    "cpuMillicores": 1000,
+    "memoryBytes": 2147483648,
+    "storageBytes": 17179869184
+  },
+  "network": { "mode": "deny_all" },
+  "entries": [{ "name": "ssh", "protocol": "ssh", "servicePort": 22 }],
+  "security": {
+    "userPolicy": "non_root_required",
+    "rootFilesystemPolicy": "mutable_required",
+    "privilegeEscalationPolicy": "deny",
+    "publicExposurePolicy": "deny",
+    "securityProfileBinding": "restricted-v1"
+  },
+  "runtime": {
+    "kind": "virtual_machine",
+    "provider_binding": "kubevirt-primary-v1",
+    "base_disk": {
+      "binding": "lw127-vgpu-guest-20260930142122-53da2968",
+      "sourceRegistryDigest": "docker://harbor.lab.lan/labweaver-system/lw127-vgpu-guest-20260930142122-53da2968@sha256:f4eeaa2c6401eb2d830cca183f17e3efaa02438cc5a34f7de5aca7fedde506dd",
+      "capacityBytes": 17179869184
+    },
+    "storage_class_binding": "vm-rwo-primary-v1",
+    "ssh_port": 22
+  },
+  "retention": {
+    "policyId": "01900000-0000-7000-8000-000000000012",
+    "policyRevision": 1,
+    "class": "course_material",
+    "retainUntil": "2036-01-01T00:00:00.000Z",
+    "disposition": "delete"
+  }
+}

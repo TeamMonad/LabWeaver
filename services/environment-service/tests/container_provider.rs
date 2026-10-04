@@ -439,11 +439,15 @@ async fn provision_returns_one_stable_healthy_endpoint() {
     let first = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("provision succeeds");
+        .expect("provision succeeds")
+        .completed()
+        .expect("provider completed");
     let second = provider
         .execute(ReconcileAction::Observe, &instance)
         .await
-        .expect("observe succeeds");
+        .expect("observe succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(first.next_state, ObservedEnvironmentState::Ready);
     assert!(first.operation_complete);
@@ -487,13 +491,17 @@ async fn restart_reuses_operation_acceptance_revision_across_observations() {
     provider
         .execute(ReconcileAction::Restart, &instance)
         .await
-        .expect("first restart reconciliation succeeds");
+        .expect("first restart reconciliation succeeds")
+        .completed()
+        .expect("provider completed");
 
     instance.revision = revision(13);
     provider
         .execute(ReconcileAction::Restart, &instance)
         .await
-        .expect("retrying the same restart succeeds");
+        .expect("retrying the same restart succeeds")
+        .completed()
+        .expect("provider completed");
 
     instance.operation.id = OperationId::new();
     instance.operation.accepted_revision = revision(8);
@@ -501,7 +509,9 @@ async fn restart_reuses_operation_acceptance_revision_across_observations() {
     provider
         .execute(ReconcileAction::Restart, &instance)
         .await
-        .expect("a distinct restart succeeds");
+        .expect("a distinct restart succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(
         backend
@@ -526,7 +536,9 @@ async fn cleanup_deletes_the_namespace_and_requires_evidence() {
     let checkpoint = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup enters deleting state");
+        .expect("cleanup enters deleting state")
+        .completed()
+        .expect("provider completed");
     assert_eq!(checkpoint.next_state, ObservedEnvironmentState::Deleting);
     assert!(!checkpoint.operation_complete);
     assert!(checkpoint.cleanup_evidence.is_none());
@@ -535,7 +547,9 @@ async fn cleanup_deletes_the_namespace_and_requires_evidence() {
     let observation = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup succeeds");
+        .expect("cleanup succeeds")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(observation.next_state, ObservedEnvironmentState::Deleted);
     assert!(observation.operation_complete);
@@ -608,10 +622,13 @@ async fn withdrawal_blocks_new_use_but_still_allows_stop() {
         projection.release.approval.trust_revision,
     );
 
+    instance.release_id = ReleaseId::new(); // Cleanup must not need a resolvable release.
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
-        .expect("withdrawal must not prevent fail-closed stop");
+        .expect("withdrawal must not prevent fail-closed stop")
+        .completed()
+        .expect("provider completed");
     assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
     assert_eq!(
         backend
@@ -630,15 +647,26 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
     instance.observed_state = ObservedEnvironmentState::Expiring;
     instance.desired_state = DesiredEnvironmentState::Deleted;
     instance.operation.kind = EnvironmentOperationKind::Expire;
+    instance.operation.access_revocation_revision = Some(instance.revision);
+    instance.release_id = ReleaseId::new();
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider(projection, backend.clone());
 
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
-        .expect("expire stop succeeds");
+        .expect("expire stop succeeds")
+        .completed()
+        .expect("provider completed");
 
-    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Deleting);
+    let deleting = environment_service::apply_provider_observation(
+        &instance,
+        instance.operation.id,
+        observation.clone(),
+    )
+    .expect("expire advances through the real deletion state");
+    assert_eq!(deleting.observed_state, ObservedEnvironmentState::Deleting);
     assert!(!observation.operation_complete);
     assert!(observation.endpoints.is_empty());
     assert_eq!(
@@ -647,7 +675,7 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
             .lock()
             .expect("operations lock")
             .as_slice(),
-        ["scale:0"]
+        [] as [&str; 0]
     );
 }
 
@@ -773,6 +801,91 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
     instance.release_version = projection.release.version;
     "container-primary-v1".clone_into(&mut instance.provider_binding);
     instance
+}
+
+#[test]
+fn experiment_gpu_allocation_renders_the_extended_resource_on_the_pod() {
+    let projection = gpu_projection();
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(gpu_allocation("a100-exclusive", 1));
+    instance
+        .gpu_allocation
+        .as_mut()
+        .expect("GPU allocation")
+        .allocation_binding = "nvidia.com/gpu.shared".to_owned();
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("resolved Experiment GPU allocation is rendered");
+    let deployment = resource(&plan, "Deployment");
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu.shared"),
+        Some(&json!("1"))
+    );
+    assert_eq!(
+        deployment
+            .document
+            .pointer("/spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu.shared"),
+        Some(&json!("1"))
+    );
+    let quota = resource(&plan, "ResourceQuota");
+    assert_eq!(
+        quota
+            .document
+            .pointer("/spec/hard/limits.nvidia.com~1gpu.shared"),
+        Some(&json!("1"))
+    );
+}
+
+#[test]
+fn experiment_gpu_release_without_a_durable_allocation_fails_closed() {
+    let projection = gpu_projection();
+    let instance = instance_for(&projection);
+    assert!(instance.gpu_allocation.is_none());
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+#[test]
+fn experiment_gpu_allocation_must_match_the_declared_class_and_count() {
+    let projection = gpu_projection();
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(gpu_allocation("a100-exclusive", 2));
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+fn gpu_projection() -> ReleasePublished {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(contracts::resource::GpuRequest {
+        class: "a100-exclusive".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU experiment projection");
+    projection
+}
+
+fn gpu_allocation(class: &str, count: u32) -> contracts::resource::GpuAllocation {
+    contracts::resource::GpuAllocation {
+        entry_id: contracts::GpuCatalogEntryId::new(),
+        class: class.to_owned(),
+        count,
+        mode: contracts::resource::GpuAllocationMode::Exclusive,
+        provider_binding: "container-primary-v1".to_owned(),
+        allocation_binding: "nvidia.com/gpu".to_owned(),
+        catalog_revision: revision(1),
+    }
 }
 
 #[allow(

@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fastapi-dls-clients
+  namespace: {{ fastapi_dls_namespace }}
+  labels:
+    app.kubernetes.io/name: fastapi-dls
+    app.kubernetes.io/part-of: labweaver-infrastructure
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fastapi-dls
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+{% for key, value in fastapi_dls_allowed_client_namespace_selector.items() %}
+              {{ key }}: "{{ value }}"
+{% endfor %}
+          podSelector:
+            matchLabels:
+{% for key, value in fastapi_dls_allowed_client_pod_selector.items() %}
+              {{ key }}: "{{ value }}"
+{% endfor %}
+      ports:
+        - port: 8443
+          protocol: TCP

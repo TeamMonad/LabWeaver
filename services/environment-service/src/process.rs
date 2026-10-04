@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
-use contracts::environment::EnvironmentOperationKind;
+use contracts::environment::{EnvironmentOperationKind, ReleaseEnvironmentGpuAllocationRequest};
 use contracts::supply_chain::VirtualMachineDiskFormat;
 use contracts::{ActorId, PolicyId, Revision, UtcTimestamp};
 use serde::Deserialize;
@@ -18,12 +18,13 @@ use crate::{
     FreezeBindingConfiguration, FreezeBindingService, JetStreamCommandConsumer,
     JetStreamEventPublisher, JetStreamReleaseConsumer, KubeVirtBaseDiskBinding, KubeVirtProvider,
     KubeVirtProviderConfiguration, KubeVirtResourceBudget, KubeVirtSshBootstrap,
-    KubernetesWorkExecutionBackend, LifecycleCommand, NatsAccessRevoker,
-    NatsContainerProviderBackend, NatsEnvironmentProvider, NatsKubeVirtProviderBackend,
-    NatsMessagingError, NatsResourceLeaseVerifier, OutboxDispatchError, OutboxDispatcher,
-    PgEnvironmentStore, PgKubeVirtObservationStore, PgReleaseProjectionStore, ProviderRegistry,
-    ReconcileError, ReconcileWorker, ReconcileWorkerError, Reconciler, RuntimeVmBasePolicy,
-    VmFreezeBindingConfiguration, WorkAdmissionClient, connect_nats_mtls,
+    KubeVirtVmVgpuLicensingConfiguration, KubernetesWorkExecutionBackend, LifecycleCommand,
+    NatsAccessRevoker, NatsContainerProviderBackend, NatsEnvironmentProvider,
+    NatsKubeVirtProviderBackend, NatsMessagingError, NatsResourceLeaseVerifier,
+    OutboxDispatchError, OutboxDispatcher, PgEnvironmentStore, PgKubeVirtObservationStore,
+    PgReleaseProjectionStore, ProviderRegistry, ReconcileError, ReconcileWorker,
+    ReconcileWorkerError, Reconciler, RuntimeVmBasePolicy, VmFreezeBindingConfiguration,
+    WorkAdmissionClient, connect_nats_mtls,
 };
 
 const DATABASE_URL: &str = "LABWEAVER_DATABASE_URL";
@@ -293,7 +294,8 @@ impl EnvironmentProcessRuntime {
                                     .cdi_scratch_storage_bytes
                                     .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
                             )?,
-                        )?,
+                        )?
+                        .with_vm_vgpu_licensing(configuration.vm_vgpu_licensing()?)?,
                     )?;
                     registry.register(Arc::new(provider))?;
                 }
@@ -361,6 +363,7 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
+        .with_gpu_allocations(self.resource_usage_client.clone())
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.
@@ -393,7 +396,13 @@ impl EnvironmentProcessRuntime {
                 shutdown_rx.clone()
             ),
             release_loop(release_store, &mut release_consumer, shutdown_rx.clone()),
-            reconcile_loop(store.clone(), worker, worker_id, shutdown_rx.clone()),
+            reconcile_loop(
+                store.clone(),
+                worker,
+                worker_id,
+                Some(resource_usage_client.clone()),
+                shutdown_rx.clone()
+            ),
             outbox_loop(outbox, shutdown_rx.clone()),
             resource_usage_loop(store.clone(), resource_usage_client, shutdown_rx.clone(),),
             work_execution_recovery_loop(work_executions, shutdown_rx.clone()),
@@ -495,6 +504,7 @@ async fn reconcile_loop(
     store: PgEnvironmentStore,
     worker: ReconcileWorker,
     worker_id: String,
+    gpu_allocations: Option<crate::metering::ResourceUsageClient>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
     let mut interval = tokio::time::interval(WORKER_INTERVAL);
@@ -508,7 +518,11 @@ async fn reconcile_loop(
             _ = interval.tick() => {
                 let now = store.current_time().await?;
                 let outcome = worker.run_once(&worker_id, now).await?;
+                if let Some(client) = &gpu_allocations {
+                    release_deleted_gpu_environments(&store, client).await?;
+                }
                 match outcome {
+                    crate::reconciler::ReconcileWorkerOutcome::Pending => { tracing::debug!(event = "environment.reconcile.pending", outcome = "pending"); }
                     crate::reconciler::ReconcileWorkerOutcome::Idle => { tracing::debug!(event = "environment.reconcile.idle", outcome = "idle"); }
                     crate::reconciler::ReconcileWorkerOutcome::LeaseLost => { tracing::warn!(event = "environment.reconcile.lease_lost", outcome = "ownership_lost", failure_stage = "reconcile", error_kind = "concurrency", retryable = false); }
                     crate::reconciler::ReconcileWorkerOutcome::Advanced { terminal, .. } => { tracing::info!(event = "environment.reconcile.advanced", outcome = if terminal { "terminal" } else { "advanced" }); }
@@ -518,6 +532,44 @@ async fn reconcile_loop(
             }
         }
     }
+}
+
+/// Releases durable Experiment GPU reservations once an Environment reaches Deleted.
+///
+/// Deletion is terminal: the instance can never render the GPU again, so its reservation must not
+/// be retained. A failed release leaves the aggregate untouched for the next reconcile pass.
+async fn release_deleted_gpu_environments(
+    store: &PgEnvironmentStore,
+    client: &crate::metering::ResourceUsageClient,
+) -> Result<(), EnvironmentProcessRuntimeError> {
+    for instance in store.list_deleted_gpu_environments(32).await? {
+        let Some(allocation) = instance.gpu_allocation.as_ref() else {
+            continue;
+        };
+        let request = ReleaseEnvironmentGpuAllocationRequest {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            owner_actor_id: instance.owner_id,
+            trace_id: format!("environment-gpu-release-{}", instance.id),
+        };
+        match client.release_gpu_allocation(&request).await {
+            Ok(_) => {
+                store.clear_environment_gpu_allocation(instance.id).await?;
+            }
+            Err(error) => {
+                tracing::error!(
+                    event = "environment.gpu_allocation.release_failed",
+                    environment_id = %instance.id,
+                    gpu_class = %allocation.class,
+                    diagnostic_code = error.diagnostic_code(),
+                    error_kind = "resource_dependency",
+                    retryable = true,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn outbox_loop(
@@ -776,6 +828,7 @@ struct ProviderBindingConfiguration {
     active_trust_revision: Option<u64>,
     base_disks: Option<Vec<BaseDiskConfiguration>>,
     runtime_vm_base: Option<RuntimeVmBaseConfiguration>,
+    vm_vgpu_licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
     gateway_pod_label: Option<String>,
     collector_namespace: Option<String>,
     collector_pod_label: Option<String>,
@@ -897,6 +950,18 @@ impl ProviderBindingConfiguration {
         .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)
     }
 
+    fn vm_vgpu_licensing(
+        &self,
+    ) -> Result<Option<KubeVirtVmVgpuLicensingConfiguration>, EnvironmentProcessRuntimeError> {
+        let Some(configuration) = self.vm_vgpu_licensing.as_ref() else {
+            return Ok(None);
+        };
+        configuration
+            .validate()
+            .map_err(|_| EnvironmentProcessRuntimeError::ConfigParse)?;
+        Ok(Some(configuration.clone()))
+    }
+
     fn vm_guest_user(&self) -> Result<String, EnvironmentProcessRuntimeError> {
         let bases = self
             .base_disks
@@ -942,6 +1007,7 @@ impl ProviderBindingConfiguration {
     fn has_kubevirt_fields(&self) -> bool {
         self.base_disks.is_some()
             || self.runtime_vm_base.is_some()
+            || self.vm_vgpu_licensing.is_some()
             || self.gateway_pod_label.is_some()
             || self.collector_namespace.is_some()
             || self.collector_pod_label.is_some()

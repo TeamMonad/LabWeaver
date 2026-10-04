@@ -1,0 +1,32 @@
+{
+  "$defs": {
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Idempotent Resource release readback. `released` is false when no reservation remained.",
+  "properties": {
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "released": {
+      "type": "boolean"
+    },
+    "version": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "environmentId",
+    "released"
+  ],
+  "title": "ReleaseEnvironmentGpuAllocationResponse",
+  "type": "object"
+}

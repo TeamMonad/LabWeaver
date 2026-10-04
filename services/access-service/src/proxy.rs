@@ -1701,8 +1701,7 @@ fn valid_control_path(path: &str) -> bool {
     (path.starts_with("/api/v1/courses/")
         || path == "/api/v1/projects"
         || path.starts_with("/api/v1/projects/")
-        || path == "/api/v1/admin/images"
-        || path.starts_with("/api/v1/admin/images/"))
+        || valid_admin_image_path(path))
         && !path.contains("//")
         && !path.contains('\\')
         && !lowercase.contains("%2f")
@@ -1710,6 +1709,33 @@ fn valid_control_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|segment| segment != "." && segment != "..")
+}
+
+fn valid_admin_image_path(path: &str) -> bool {
+    if !safe_path(path) {
+        return false;
+    }
+    let segments = path.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["", "api", "v1", "admin", "images"] | ["", "api", "v1", "admin", "images", "uploads"] => {
+            true
+        }
+        ["", "api", "v1", "admin", "images", "uploads", id]
+        | [
+            "",
+            "api",
+            "v1",
+            "admin",
+            "images",
+            "uploads",
+            id,
+            "complete" | "cancel",
+        ] => id.parse::<contracts::UploadSessionId>().is_ok(),
+        ["", "api", "v1", "admin", "images", id, "repin" | "disable"] => {
+            id.parse::<contracts::PlatformImageId>().is_ok()
+        }
+        _ => false,
+    }
 }
 
 fn valid_environment_path(path: &str) -> bool {
@@ -1884,6 +1910,25 @@ mod tests {
             "/api/v1/admin/images/uploads/{}/complete",
             uuid::Uuid::now_v7()
         )));
+        let upload = contracts::UploadSessionId::new();
+        assert!(valid_control_path(&format!(
+            "/api/v1/admin/images/uploads/{upload}"
+        )));
+        assert!(valid_control_path(&format!(
+            "/api/v1/admin/images/uploads/{upload}/cancel"
+        )));
+        assert!(!valid_control_path(&format!(
+            "/api/v1/admin/images/uploads/{upload}/other"
+        )));
+        assert!(!valid_control_path(&format!(
+            "/api/v1/admin/images/uploads/{upload}/cancel/extra"
+        )));
+        assert!(!valid_control_path(
+            "/api/v1/admin/images/uploads/not-an-id"
+        ));
+        assert!(!valid_control_path(
+            "/api/v1/admin/images/uploads/%252e%252e"
+        ));
         assert!(valid_control_path(
             "/api/v1/admin/images/01890000-0000-7000-8000-000000000000/repin"
         ));

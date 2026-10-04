@@ -1,4 +1,4 @@
-//! PostgreSQL evidence for Resource authority schema and pending Lease semantics.
+//! PostgreSQL integration tests for Resource authority and pending Lease semantics.
 
 #![allow(
     clippy::doc_markdown,
@@ -28,6 +28,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use auth::{ServiceAuthConfig, ServiceTokenVerifier, TransportSecurityMode};
+use contracts::environment::{
+    ReleaseEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationRequest,
+};
 use contracts::http::{
     CreateResourceRateRequest, InternalCreateTaskResourceRequest, RecordResourceUsageRequest,
     UpsertResourceBudgetRequest,
@@ -64,7 +67,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -78,6 +81,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0009_settlement_retry.sql"),
         include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
         include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
+        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql"),
     ))
     .execute(&pool)
     .await?;
@@ -249,6 +253,8 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
             handoff.claim.id,
             handoff.claim.revision,
             "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+            approval.approver_id,
+            "trace-resource-handoff-failed",
         )
         .await?;
     assert_eq!(
@@ -457,6 +463,173 @@ async fn resource_store_commits_request_approval_claim_lease_and_renewal_as_fenc
         before_failed_renewal, after_failed_renewal,
         "a failed fenced transition must not leave an outbox row"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_cleanup_reclaims_lease_after_failed_attempt_backoff()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let resources = WorkloadResources {
+        cpu_millicores: 500,
+        memory_bytes: 512 * 1024 * 1024,
+        storage_bytes: 1024 * 1024 * 1024,
+        gpu: None,
+    };
+    let request = ResourceRequest {
+        id: ResourceRequestId::new(),
+        generation: 1,
+        request_key: "cleanup-retry-1".into(),
+        requester_id: ActorId::new(),
+        course_id: Some(CourseId::new()),
+        project_id: ProjectId::new(),
+        target: ResourceTarget::Environment {
+            environment_id: EnvironmentId::new(),
+            release_id: ReleaseId::new(),
+            release_version: 1,
+        },
+        requested_resources: resources.clone(),
+        requested_duration_seconds: 600,
+        state: ResourceRequestState::Reviewing,
+        revision: Revision::new(1)?,
+        created_at: now,
+        updated_at: now,
+        diagnostic_code: None,
+    };
+    store
+        .create("resource-create-cleanup", &request, "trace-create-cleanup")
+        .await?;
+    let approval = ResourceApproval {
+        id: ResourceApprovalId::new(),
+        request_id: request.id,
+        request_revision: Revision::new(1)?,
+        approver_id: ActorId::new(),
+        provider_binding: "kubernetes-standard".into(),
+        approved_resources: resources.clone(),
+        approved_duration_seconds: 600,
+        reason: "capacity approved".into(),
+        valid_until: UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?,
+        created_at: now,
+    };
+    let allocation = PendingAllocation {
+        claim: CapacityClaim {
+            id: CapacityClaimId::new(),
+            request_id: request.id,
+            approval_id: approval.id,
+            provider_binding: approval.provider_binding.clone(),
+            workload_resources: resources.clone(),
+            quota_resources: resources,
+            gpu_allocation: None,
+            state: contracts::resource::CapacityClaimState::Reserved,
+            revision: Revision::new(1)?,
+        },
+        lease_id: LeaseId::new(),
+    };
+    store
+        .approve(
+            "resource-approve-cleanup",
+            request.id,
+            &approval,
+            &allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 3600,
+            },
+            "trace-approve-cleanup",
+        )
+        .await?;
+    let provisioning = store
+        .claim_next_capacity_shell()
+        .await?
+        .expect("one reserved capacity claim");
+    let _ready = store
+        .mark_capacity_shell_ready(
+            provisioning.claim.id,
+            provisioning.claim.revision,
+            "lw-work-test",
+            "namespace-uid",
+            "quota-uid",
+        )
+        .await?;
+    let active_from = store.current_time().await?;
+    let active_expires = UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?;
+    let active = store
+        .activate_lease(
+            allocation.lease_id,
+            Revision::new(1)?,
+            active_from,
+            active_expires,
+            approval.approver_id,
+            "trace-activate-cleanup",
+        )
+        .await?;
+    let handoff = store
+        .next_ready_capacity_handoff()
+        .await?
+        .expect("ready shell remains Resource-owned until Environment acknowledges");
+    let handed_off = store
+        .mark_capacity_handed_off(
+            handoff.claim.id,
+            handoff.claim.revision,
+            handoff.lease.id,
+            handoff.lease.revision,
+        )
+        .await?;
+    let expiring = store
+        .begin_lease_expiry(
+            active.id,
+            active.revision,
+            Some("researcher requested reclaim".to_owned()),
+            approval.approver_id,
+            "trace-expire-cleanup",
+        )
+        .await?;
+
+    // Three transient cleanup rejections move the attempt ledger past its retry budget
+    // into the terminal-looking "failed" row that used to permanently suppress the claim.
+    for _ in 0..3 {
+        store
+            .record_reconciliation_failure(
+                handed_off.id,
+                "expire_environment",
+                "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
+            )
+            .await?;
+    }
+    let failed_state: String = sqlx::query_scalar(
+        "SELECT state FROM resource.capacity_attempts WHERE claim_id=$1 AND step='expire_environment' ORDER BY attempt DESC LIMIT 1",
+    )
+    .bind(handed_off.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(failed_state, "failed");
+
+    // While the failed attempt's backoff has not elapsed, the claim is legitimately
+    // suppressed so the driver does not hot-loop it.
+    assert!(
+        store
+            .next_lease_cleanup(approval.approver_id)
+            .await?
+            .is_none(),
+        "a cleanup attempt still inside its backoff must not be re-picked"
+    );
+
+    // Once the backoff elapses (the Environment may have become deletable in the
+    // meantime), cleanup must be re-attempted instead of permanently leaking the lease.
+    sqlx::query(
+        "UPDATE resource.capacity_attempts SET next_attempt_at=clock_timestamp()-interval '1 minute' \
+         WHERE claim_id=$1 AND step='expire_environment'",
+    )
+    .bind(handed_off.id.as_uuid())
+    .execute(&pool)
+    .await?;
+    let retried = store
+        .next_lease_cleanup(approval.approver_id)
+        .await?
+        .expect("cleanup must re-pick after the failed attempt backoff elapses");
+    assert_eq!(retried.lease.id, expiring.id);
     Ok(())
 }
 
@@ -1338,6 +1511,163 @@ async fn gpu_reservation_counts_across_catalog_revisions_for_one_physical_pool()
 }
 
 #[tokio::test]
+async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let now = store.current_time().await?;
+    let provider_binding = "kubernetes-standard".to_owned();
+    let allocation_binding = "nvidia.com/gpu".to_owned();
+    let catalog = GpuCatalogEntry {
+        id: GpuCatalogEntryId::new(),
+        class: "a100-exclusive".to_owned(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: provider_binding.clone(),
+        capacity_units: 1,
+        allocation_binding,
+        revision: Revision::new(1)?,
+        active: true,
+    };
+    store
+        .create_gpu_catalog_entry("environment-gpu-catalog", &catalog)
+        .await?;
+    store
+        .record_gpu_capacity_observation(
+            catalog.id,
+            1,
+            "test-observer",
+            now,
+            UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
+        )
+        .await?;
+
+    let project_id = ProjectId::new();
+    let owner_actor_id = ActorId::new();
+    let first_environment = EnvironmentId::new();
+    let resolve = |environment_id: EnvironmentId, class: &str, count: u32| {
+        ResolveEnvironmentGpuAllocationRequest {
+            version: 1,
+            environment_id,
+            project_id,
+            course_id: None,
+            owner_actor_id,
+            provider_binding: provider_binding.clone(),
+            gpu: GpuRequest {
+                class: class.to_owned(),
+                count,
+            },
+            trace_id: format!("environment-gpu-{environment_id}"),
+        }
+    };
+
+    let first = store
+        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(first.class, "a100-exclusive");
+    assert_eq!(first.count, 1);
+
+    // The same Environment identity replays the durable reservation instead of double counting.
+    let replayed = store
+        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(replayed, first);
+
+    // A different class or count for the same identity is a conflict, not a silent re-allocation.
+    let mismatched = store
+        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 2))
+        .await;
+    assert!(matches!(
+        mismatched,
+        Err(resource_service::store::ResourceStoreError::EnvironmentGpuReservationConflict)
+    ));
+
+    // An unknown class fails closed before any capacity is reserved.
+    let unknown = store
+        .resolve_environment_gpu_allocation(&resolve(EnvironmentId::new(), "unknown-class", 1))
+        .await;
+    assert!(matches!(
+        unknown,
+        Err(resource_service::store::ResourceStoreError::GpuCatalogMissing)
+    ));
+
+    // The single observed unit is owned by the first Environment, so a second cannot be admitted.
+    let second_environment = EnvironmentId::new();
+    let exhausted = store
+        .resolve_environment_gpu_allocation(&resolve(second_environment, "a100-exclusive", 1))
+        .await;
+    assert!(matches!(
+        exhausted,
+        Err(resource_service::store::ResourceStoreError::GpuCapacityExhausted)
+    ));
+
+    let release = |environment_id: EnvironmentId| ReleaseEnvironmentGpuAllocationRequest {
+        version: 1,
+        environment_id,
+        project_id,
+        owner_actor_id,
+        trace_id: format!("environment-gpu-release-{environment_id}"),
+    };
+    assert!(
+        store
+            .release_environment_gpu_allocation(&release(first_environment))
+            .await?
+    );
+    // Release is idempotent.
+    assert!(
+        !store
+            .release_environment_gpu_allocation(&release(first_environment))
+            .await?
+    );
+
+    // Releasing the first Environment makes the unit available to the second.
+    let admitted = store
+        .resolve_environment_gpu_allocation(&resolve(second_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(admitted.count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let provider_binding = "kubernetes-standard".to_owned();
+    let catalog = GpuCatalogEntry {
+        id: GpuCatalogEntryId::new(),
+        class: "a100-exclusive".to_owned(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: provider_binding.clone(),
+        capacity_units: 1,
+        allocation_binding: "nvidia.com/gpu".to_owned(),
+        revision: Revision::new(1)?,
+        active: true,
+    };
+    store
+        .create_gpu_catalog_entry("environment-gpu-stale-catalog", &catalog)
+        .await?;
+    let request = ResolveEnvironmentGpuAllocationRequest {
+        version: 1,
+        environment_id: EnvironmentId::new(),
+        project_id: ProjectId::new(),
+        course_id: None,
+        owner_actor_id: ActorId::new(),
+        provider_binding,
+        gpu: GpuRequest {
+            class: "a100-exclusive".to_owned(),
+            count: 1,
+        },
+        trace_id: "environment-gpu-stale".to_owned(),
+    };
+    let result = store.resolve_environment_gpu_allocation(&request).await;
+    assert!(matches!(
+        result,
+        Err(resource_service::store::ResourceStoreError::GpuObservationStale)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_gpu_approvals_serialize_on_the_shared_admission_lock()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
@@ -1903,6 +2233,459 @@ async fn create_active_request(
     Ok((request, lease))
 }
 
+// A real GPU reservation makes cleanup/admission assertions exercise the pool authority.
+async fn work_handoff_fixture(
+    pool: &sqlx::PgPool,
+) -> Result<
+    (
+        PgResourceStore,
+        ResourceRequest,
+        CapacityClaim,
+        contracts::resource::ResourceLease,
+        ActorId,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let store = PgResourceStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let catalog = GpuCatalogEntry {
+        id: GpuCatalogEntryId::new(),
+        class: "handoff-gpu".into(),
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: "kubernetes-standard".into(),
+        capacity_units: 1,
+        allocation_binding: "nvidia.com/gpu".into(),
+        revision: Revision::new(1)?,
+        active: true,
+    };
+    store
+        .create_gpu_catalog_entry("handoff-catalog", &catalog)
+        .await?;
+    store
+        .record_gpu_capacity_observation(
+            catalog.id,
+            1,
+            "test-observer",
+            now,
+            UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))?,
+        )
+        .await?;
+    let (request, approval, allocation) =
+        gpu_bundle(now, ProjectId::new(), "handoff-work", "handoff-gpu", 1);
+    store
+        .create("handoff-create", &request, "trace-create")
+        .await?;
+    store
+        .approve(
+            "handoff-approve",
+            request.id,
+            &approval,
+            &allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 3600,
+            },
+            "trace-approve",
+        )
+        .await?;
+    let claim = store
+        .claim_next_capacity_shell()
+        .await?
+        .expect("reserved claim")
+        .claim;
+    let claim = store
+        .mark_capacity_shell_ready(
+            claim.id,
+            claim.revision,
+            "lw-work-handoff-test",
+            "namespace-uid",
+            "quota-uid",
+        )
+        .await?;
+    let active_from = store.current_time().await?;
+    let lease = store
+        .activate_lease(
+            allocation.lease_id,
+            Revision::new(1)?,
+            active_from,
+            UtcTimestamp::from_utc(active_from.get() + time::Duration::minutes(10))?,
+            approval.approver_id,
+            "trace-activate",
+        )
+        .await?;
+    Ok((
+        store.clone(),
+        store.load(request.id).await?,
+        claim,
+        lease,
+        approval.approver_id,
+    ))
+}
+
+#[tokio::test]
+async fn work_handoff_publishes_only_the_third_failure_as_one_consistent_request_revision()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let (store, request, mut claim, lease, actor) = work_handoff_fixture(&pool).await?;
+    for attempt in 1..=3 {
+        claim = store
+            .retry_or_block_capacity_handoff(
+                claim.id,
+                claim.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+                actor,
+                "trace-handoff-failure",
+            )
+            .await?;
+        let current = store.load(request.id).await?;
+        if attempt < 3 {
+            assert_eq!(current, request);
+        } else {
+            assert_eq!(
+                claim.state,
+                contracts::resource::CapacityClaimState::Blocked
+            );
+            assert_eq!(current.state, ResourceRequestState::Active);
+            assert_eq!(current.revision.get(), request.revision.get() + 1);
+            assert_eq!(
+                current.diagnostic_code.as_deref(),
+                Some("LW_RESOURCE_WORK_ALLOCATION_BLOCKED")
+            );
+            assert_eq!(
+                store
+                    .list_owned(request.requester_id, request.project_id, request.course_id)
+                    .await?,
+                vec![current.clone()]
+            );
+            assert_eq!(store.list_all_requests().await?, vec![current.clone()]);
+            let (revision, diagnostic, contract): (i64, String, Value) = sqlx::query_as(
+                "SELECT revision,diagnostic_code,contract FROM resource.resource_requests WHERE request_id=$1")
+                .bind(request.id.as_uuid()).fetch_one(&pool).await?;
+            assert_eq!(revision, i64::try_from(current.revision.get())?);
+            assert_eq!(diagnostic, "LW_RESOURCE_WORK_ALLOCATION_BLOCKED");
+            assert_eq!(
+                serde_json::from_value::<ResourceRequest>(contract)?,
+                current
+            );
+            let (subject, payload): (String, Value) = sqlx::query_as(
+                "SELECT subject,payload FROM resource.outbox_events WHERE aggregate_id=$1 AND aggregate_sequence=$2")
+                .bind(request.id.as_uuid()).bind(revision).fetch_one(&pool).await?;
+            assert_eq!(
+                subject,
+                contracts::events::subjects::RESOURCE_REQUEST_STATE_CHANGED
+            );
+            assert_eq!(payload["data"]["request"], serde_json::to_value(&current)?);
+            let (from, to, recorded_actor): (String, String, Uuid) = sqlx::query_as(
+                "SELECT from_state,to_state,actor_id FROM resource.resource_request_transitions WHERE request_id=$1 AND sequence=$2")
+                .bind(request.id.as_uuid()).bind(revision).fetch_one(&pool).await?;
+            assert_eq!((from.as_str(), to.as_str()), ("active", "active"));
+            assert_eq!(recorded_actor, actor.as_uuid());
+        }
+    }
+    assert!(
+        store
+            .retry_or_block_capacity_handoff(
+                claim.id,
+                claim.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+                actor,
+                "trace-duplicate"
+            )
+            .await
+            .is_err()
+    );
+    let attempts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT state,diagnostic_code FROM resource.capacity_attempts WHERE claim_id=$1 AND step='handoff_environment' ORDER BY attempt")
+        .bind(claim.id.as_uuid()).fetch_all(&pool).await?;
+    assert_eq!(
+        attempts.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(),
+        vec!["retry", "retry", "failed"]
+    );
+    assert!(
+        attempts
+            .iter()
+            .all(|a| a.1 == "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE")
+    );
+    let retained: String = sqlx::query_scalar(
+        "SELECT last_diagnostic_code FROM resource.capacity_claims WHERE claim_id=$1",
+    )
+    .bind(claim.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE");
+    assert_eq!(store.load_lease(lease.id).await?, lease);
+    let reserved: String = sqlx::query_scalar(
+        "SELECT state FROM resource.gpu_capacity_reservations WHERE claim_id=$1",
+    )
+    .bind(claim.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reserved, "reserved");
+    Ok(())
+}
+
+#[tokio::test]
+async fn work_handoff_does_not_reactivate_a_request_when_revoke_has_won()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let (store, request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
+    for _ in 0..2 {
+        store
+            .retry_or_block_capacity_handoff(
+                claim.id,
+                claim.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+                actor,
+                "trace-retry",
+            )
+            .await?;
+    }
+    store
+        .revoke_lease(
+            "revoke-before-failure",
+            lease.id,
+            lease.revision,
+            "reclaim Work".into(),
+            actor,
+            "trace-revoke-first",
+        )
+        .await?;
+    let expiring = store.load(request.id).await?;
+    let blocked = store
+        .retry_or_block_capacity_handoff(
+            claim.id,
+            claim.revision,
+            "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+            actor,
+            "trace-after-revoke",
+        )
+        .await?;
+    assert_eq!(
+        blocked.state,
+        contracts::resource::CapacityClaimState::Blocked
+    );
+    assert_eq!(store.load(request.id).await?, expiring);
+    assert_eq!(expiring.state, ResourceRequestState::Expiring);
+    assert_eq!(expiring.diagnostic_code, None);
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.outbox_events WHERE aggregate_id=$1 AND payload->'data'->'request'->>'diagnosticCode'='LW_RESOURCE_WORK_ALLOCATION_BLOCKED'")
+        .bind(request.id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(published, 0);
+    Ok(())
+}
+
+// Wait on a real PostgreSQL blocking relationship rather than a timing guess.
+async fn wait_for_database_waiter(
+    pool: &sqlx::PgPool,
+    blocker: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let has_waiter: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker)
+            .fetch_one(pool)
+            .await?;
+            if has_waiter {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn work_handoff_racing_revoke_and_cleanup_preserves_release_and_gpu_capacity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let (store, request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
+    for _ in 0..2 {
+        store
+            .retry_or_block_capacity_handoff(
+                claim.id,
+                claim.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+                actor,
+                "trace-retry",
+            )
+            .await?;
+    }
+    // Hold Claim while failure waits. The failure must already own Lease; revoke then
+    // queues behind it instead of holding Lease and waiting for the same Claim.
+    let mut guard = pool.begin().await?;
+    let guard_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
+    sqlx::query("SELECT claim_id FROM resource.capacity_claims WHERE claim_id=$1 FOR UPDATE")
+        .bind(claim.id.as_uuid())
+        .execute(&mut *guard)
+        .await?;
+    let failure_store = store.clone();
+    let failure = tokio::spawn(async move {
+        failure_store
+            .retry_or_block_capacity_handoff(
+                claim.id,
+                claim.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+                actor,
+                "trace-racing-failure",
+            )
+            .await
+    });
+    wait_for_database_waiter(&pool, guard_pid).await?;
+    let mut probe = pool.begin().await?;
+    assert!(
+        sqlx::query(
+            "SELECT lease_id FROM resource.resource_leases WHERE lease_id=$1 FOR UPDATE NOWAIT"
+        )
+        .bind(lease.id.as_uuid())
+        .execute(&mut *probe)
+        .await
+        .is_err(),
+        "handoff must own Lease before waiting on Claim"
+    );
+    probe.rollback().await?;
+    let revoke_store = store.clone();
+    let revoke = tokio::spawn(async move {
+        revoke_store
+            .revoke_lease(
+                "racing-revoke",
+                lease.id,
+                lease.revision,
+                "reclaim failed Work".into(),
+                actor,
+                "trace-revoke",
+            )
+            .await
+    });
+    let handoff_pid: i32 =
+        sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))")
+            .bind(guard_pid)
+            .fetch_one(&pool)
+            .await?;
+    wait_for_database_waiter(&pool, handoff_pid).await?;
+    guard.commit().await?;
+    let blocked = tokio::time::timeout(Duration::from_secs(10), failure).await???;
+    let expiring = tokio::time::timeout(Duration::from_secs(10), revoke).await???;
+    assert_eq!(
+        store.load(request.id).await?.state,
+        ResourceRequestState::Expiring
+    );
+    assert_eq!(store.load(request.id).await?.diagnostic_code, None);
+    let releasing = store
+        .mark_capacity_releasing(blocked.id, blocked.revision)
+        .await?;
+    let (next, approval, allocation) = gpu_bundle(
+        store.current_time().await?,
+        request.project_id,
+        "new-work",
+        "handoff-gpu",
+        1,
+    );
+    store
+        .create("new-work-create", &next, "trace-new-create")
+        .await?;
+    // Revoke has won: a stale handoff cannot republish Active while cleanup is blocked.
+    let mut guard = pool.begin().await?;
+    let guard_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
+    sqlx::query("SELECT claim_id FROM resource.capacity_claims WHERE claim_id=$1 FOR UPDATE")
+        .bind(claim.id.as_uuid())
+        .execute(&mut *guard)
+        .await?;
+    let cleanup_store = store.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_store
+            .complete_pre_handoff_release(
+                releasing.id,
+                releasing.revision,
+                expiring.id,
+                expiring.revision,
+                actor,
+                "trace-cleanup",
+            )
+            .await
+    });
+    wait_for_database_waiter(&pool, guard_pid).await?;
+    // Admission runs while cleanup holds the owned Lease/Request but cannot yet
+    // release its reservation. Shared-pool admission must still reject oversubscription.
+    assert!(matches!(
+        store
+            .approve(
+                "new-work-approve",
+                next.id,
+                &approval,
+                &allocation,
+                ApprovalPolicy {
+                    min_duration_seconds: 60,
+                    max_duration_seconds: 3600
+                },
+                "trace-new-approve"
+            )
+            .await,
+        Err(resource_service::store::ResourceStoreError::GpuCapacityExhausted)
+    ));
+    let failure_store = store.clone();
+    let stale_failure = tokio::spawn(async move {
+        failure_store
+            .retry_or_block_capacity_handoff(
+                claim.id,
+                claim.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_UNAVAILABLE",
+                actor,
+                "trace-stale-failure",
+            )
+            .await
+    });
+    let cleanup_pid: i32 =
+        sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))")
+            .bind(guard_pid)
+            .fetch_one(&pool)
+            .await?;
+    wait_for_database_waiter(&pool, cleanup_pid).await?;
+    guard.commit().await?;
+    let released = tokio::time::timeout(Duration::from_secs(10), cleanup).await???;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), stale_failure)
+            .await??
+            .is_err()
+    );
+    assert_eq!(
+        released.state,
+        contracts::resource::ResourceLeaseState::Revoked
+    );
+    assert_eq!(
+        store.load(request.id).await?.state,
+        ResourceRequestState::Expired
+    );
+    assert_eq!(store.load(request.id).await?.diagnostic_code, None);
+    let reservation: String = sqlx::query_scalar(
+        "SELECT state FROM resource.gpu_capacity_reservations WHERE claim_id=$1",
+    )
+    .bind(claim.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reservation, "released");
+    // The same authoritative GPU pool is usable by a new request only after release.
+    store
+        .approve(
+            "new-work-approve",
+            next.id,
+            &approval,
+            &allocation,
+            ApprovalPolicy {
+                min_duration_seconds: 60,
+                max_duration_seconds: 3600,
+            },
+            "trace-new-approve",
+        )
+        .await?;
+    Ok(())
+}
+
 async fn migrated_pool()
 -> Result<(testcontainers::ContainerAsync<Postgres>, sqlx::PgPool), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
@@ -1915,7 +2698,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -1928,7 +2711,8 @@ async fn migrated_pool()
         include_str!("../../../migrations/resource/0008_v3_project_gpu_billing.sql"),
         include_str!("../../../migrations/resource/0009_settlement_retry.sql"),
         include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
-        include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql")
+        include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
+        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql")
     ))
     .execute(&pool)
     .await?;

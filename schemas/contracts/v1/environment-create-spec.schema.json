@@ -16,6 +16,59 @@
       ],
       "type": "string"
     },
+    "GpuAllocation": {
+      "additionalProperties": false,
+      "description": "The catalog resolution captured on an approved capacity claim.",
+      "properties": {
+        "allocationBinding": {
+          "type": "string"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entryId": {
+          "$ref": "#/$defs/GpuCatalogEntryId",
+          "description": "Exact catalog row used to resolve this allocation."
+        },
+        "mode": {
+          "$ref": "#/$defs/GpuAllocationMode"
+        },
+        "providerBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entryId",
+        "class",
+        "count",
+        "mode",
+        "providerBinding",
+        "allocationBinding",
+        "catalogRevision"
+      ],
+      "type": "object"
+    },
+    "GpuAllocationMode": {
+      "description": "Allocation mode selected by the Resource GPU catalog.\n\nCallers submit only a catalog class and count. The mode is resolved from the\nactive catalog entry and is never accepted as an untrusted request override.",
+      "enum": [
+        "exclusive",
+        "container_time_slice",
+        "vm_vgpu"
+      ],
+      "type": "string"
+    },
+    "GpuCatalogEntryId": {
+      "description": "Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.",
+      "type": "string"
+    },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
@@ -27,6 +80,12 @@
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
     },
     "RuntimeKind": {
       "description": "Runtime kind shared by candidates, releases, and instances.",
@@ -69,6 +128,17 @@
     },
     "eligibilityExpiresAt": {
       "$ref": "#/$defs/UtcTimestamp"
+    },
+    "gpuAllocation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Resource-resolved Experiment GPU allocation held for this environment instance.\n\nExperiment creation resolves this through Resource before the aggregate is accepted; Work\nenvironments keep their allocation on the Lease authorization instead and leave this absent."
     },
     "leaseId": {
       "anyOf": [

@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   createProjectByUi,
-  createProjectPolicy,
+  configureProjectPolicyByUi,
   csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
@@ -95,7 +95,7 @@ test('teacher authors an independent project and publishes its complete experime
 
   const project = await createProjectByUi(page, `live-authoring-${Date.now()}-${uuidv7().slice(0, 8)}`)
   await selectProjectByUi(page, project.id)
-  const policy = await createProjectPolicy(page.context().request, baseURL, project.id)
+  const policy = await configureProjectPolicyByUi(page, project.id)
   const packageData = await uploadPackage(page.context().request, baseURL, project.id, policy.revision)
   const initialRun = await startAuthoringRun(page.context().request, baseURL, project.id, packageData, policy)
   const completed = await waitForCompletedAuthoringRun(page.context().request, project.id, initialRun.id)

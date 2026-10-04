@@ -71,7 +71,10 @@
               <p class="eyebrow">Project 详情</p>
               <h3 id="project-detail-heading">{{ selectedProject.name }}</h3>
             </div>
-            <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+            <div class="project-detail-actions">
+              <RouterLink class="outlined-button small" :to="{ path: '/researcher/ai-policy', query: { projectId: selectedProject.id } }">项目 AI 设置</RouterLink>
+              <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+            </div>
           </div>
 
           <form class="project-form" @submit.prevent="saveProject">
@@ -154,7 +157,13 @@
                 <p>查看这个项目中的工作环境，或为项目申请新的 Work 资源。</p>
               </div>
               <div class="section-actions">
-                <button type="button" class="icon-button" aria-label="刷新 Work 环境" :disabled="workEnvironments.environments.kind === 'loading'" @click="workEnvironments.load">
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="刷新 Work 环境"
+                  :disabled="workEnvironments.environments.kind === 'loading'"
+                  @click="refreshWork"
+                >
                   <SvgIcon name="refresh" size="sm" aria-hidden="true" />
                 </button>
                 <RouterLink
@@ -167,6 +176,28 @@
                 </RouterLink>
               </div>
             </div>
+            <AsyncStateView
+              :state="workResources.requests"
+              loading-text="加载项目环境资源申请…"
+              @retry="workResources.load"
+            >
+              <template #empty />
+              <template #success>
+                <p
+                  v-for="request in failedEnvironmentResourceRequests"
+                  :key="request.id"
+                  role="alert"
+                >
+                  环境资源申请失败。{{ resourceAllocationFailureMessage(request.diagnosticCode) }}
+                  <RouterLink
+                    class="text-button"
+                    :to="{ path: '/researcher/resources', query: { projectId: selectedProjectId } }"
+                  >
+                    处理资源申请
+                  </RouterLink>
+                </p>
+              </template>
+            </AsyncStateView>
             <AsyncStateView :state="workEnvironments.environments" empty-text="这个项目还没有 Work 环境。" @retry="workEnvironments.load">
               <template #success="{ data }">
                 <ul class="work-list">
@@ -249,10 +280,11 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
+import { useProjectResources } from '@/composables/useProjectResources'
 import { useProjectMemberships, useProjects } from '@/composables/useProjects'
 import type { ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
-import { environmentStateLabel } from '@/utils/stateLabels'
+import { environmentStateLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -275,6 +307,18 @@ const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : 
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
 const members = useProjectMemberships(selectedProjectId)
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
+const workResources = useProjectResources(selectedProjectId)
+const failedEnvironmentResourceRequests = computed(() => workResources.requests.kind === 'success'
+  ? workResources.requests.data.filter((request) => request.projectId === selectedProjectId.value
+    && request.target.kind === 'environment'
+    && request.state === 'active'
+    && resourceAllocationFailureMessage(request.diagnosticCode))
+  : [])
+
+function refreshWork() {
+  void workEnvironments.load()
+  void workResources.load()
+}
 
 const createOpen = ref(false)
 const newName = ref('')
@@ -393,6 +437,7 @@ async function confirmDestructiveAction() {
 .eyebrow { font: var(--md-sys-label-medium); text-transform: uppercase; letter-spacing: .05em; }
 .workspace-layout { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(0, 1.4fr); gap: 20px; align-items: start; }
 .project-list, .project-detail { padding: 20px; }
+.project-detail-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
 .project-items { display: grid; gap: 6px; margin-top: 18px; }
 .project-item { width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 14px; border: 1px solid transparent; border-radius: var(--md-sys-shape-medium); background: transparent; color: var(--md-sys-color-on-surface); text-align: left; cursor: pointer; }
 .project-item:hover { background: var(--md-sys-color-surface-container-high); }
@@ -416,6 +461,7 @@ textarea.text-input { resize: vertical; }
 .filled-button.small { min-height: 32px; padding: 0 12px; font: var(--md-sys-label-medium); }
 .filled-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--md-sys-color-primary); background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); }
 .outlined-button { border: 1px solid var(--md-sys-color-outline); background: transparent; color: var(--md-sys-color-primary); }
+.outlined-button.small { min-height: 32px; padding: 0 11px; font: var(--md-sys-label-medium); }
 .text-button { min-height: 32px; border: 0; background: transparent; color: var(--md-sys-color-primary); }
 .danger-button { color: var(--md-sys-color-error); border-color: var(--md-sys-color-error); }
 .filled-button:disabled, .outlined-button:disabled, .text-button:disabled { opacity: .5; cursor: not-allowed; }

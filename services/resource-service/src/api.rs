@@ -8,6 +8,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use contracts::environment::{
+    ReleaseEnvironmentGpuAllocationRequest, ReleaseEnvironmentGpuAllocationResponse,
+    ResolveEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationResponse,
+};
 use contracts::http::{
     AcknowledgeTaskResourceRequest, ApproveResourceRequest, CreateResourceAdjustmentRequest,
     CreateResourceRateRequest, CreateResourceRequest, InternalCreateTaskResourceRequest,
@@ -93,6 +97,10 @@ impl ResourceApiState {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one router keeps the public and internal route surfaces auditable together"
+)]
 pub fn resource_api_router(state: ResourceApiState) -> Router {
     let public = Router::new()
         .route("/api/v1/resource-requests", post(create_request))
@@ -181,6 +189,14 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             post(cancel_task_resource),
         )
         .route("/internal/v1/resource/usage", post(record_internal_usage))
+        .route(
+            "/internal/v1/environment-gpu-allocations",
+            post(resolve_environment_gpu_allocation),
+        )
+        .route(
+            "/internal/v1/environment-gpu-allocations/release",
+            post(release_environment_gpu_allocation),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             internal_service_auth,
@@ -884,6 +900,57 @@ async fn record_internal_usage(
     ))
 }
 
+/// Resolves and reserves one Experiment GPU allocation for an authenticated Environment caller.
+async fn resolve_environment_gpu_allocation(
+    State(state): State<ResourceApiState>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
+    Json(input): Json<ResolveEnvironmentGpuAllocationRequest>,
+) -> Result<Json<ResolveEnvironmentGpuAllocationResponse>, ResourceApiError> {
+    require_environment_service(&state, &identity)?;
+    let allocation = state
+        .store
+        .resolve_environment_gpu_allocation(&input)
+        .await?;
+    Ok(Json(ResolveEnvironmentGpuAllocationResponse {
+        version: 1,
+        environment_id: input.environment_id,
+        provider_binding: input.provider_binding,
+        allocation,
+    }))
+}
+
+/// Releases one Experiment GPU reservation for an authenticated Environment caller.
+async fn release_environment_gpu_allocation(
+    State(state): State<ResourceApiState>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
+    Json(input): Json<ReleaseEnvironmentGpuAllocationRequest>,
+) -> Result<Json<ReleaseEnvironmentGpuAllocationResponse>, ResourceApiError> {
+    require_environment_service(&state, &identity)?;
+    let released = state
+        .store
+        .release_environment_gpu_allocation(&input)
+        .await?;
+    Ok(Json(ReleaseEnvironmentGpuAllocationResponse {
+        version: 1,
+        environment_id: input.environment_id,
+        released,
+    }))
+}
+
+fn require_environment_service(
+    state: &ResourceApiState,
+    identity: &auth::ServiceIdentity,
+) -> Result<(), ResourceApiError> {
+    let expected = state
+        .environment_service_client_id
+        .as_deref()
+        .ok_or(ResourceApiError::ServiceConfiguration)?;
+    if identity.client_id != expected {
+        return Err(ResourceApiError::ScopeDenied);
+    }
+    Ok(())
+}
+
 async fn list_rates(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
@@ -1200,6 +1267,12 @@ async fn internal_service_auth(
 fn internal_route_permission(path: &str) -> Option<&'static str> {
     if path == "/internal/v1/resource/usage" {
         return Some("resource.usage.record");
+    }
+    if path == "/internal/v1/environment-gpu-allocations" {
+        return Some("resource.gpu.resolve");
+    }
+    if path == "/internal/v1/environment-gpu-allocations/release" {
+        return Some("resource.gpu.release");
     }
     if path == "/internal/v1/task-resources" {
         return Some("resource.task.create");

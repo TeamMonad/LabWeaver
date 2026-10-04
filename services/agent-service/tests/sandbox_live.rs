@@ -450,6 +450,7 @@ fn rendered_bundle(
         buildkit_config_map_name: environment.buildkit_config_map.clone(),
     };
     let spec = SandboxAttemptSpec {
+        timeout_seconds: configuration.wall_time_seconds,
         task_run_id,
         ownership,
         trace_id: format!("live-{task_run_id}"),

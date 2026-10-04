@@ -76,13 +76,24 @@
         <h3 id="config-heading">生成 Work 配置</h3>
         <p class="section-note">材料包和策略均由服务端解析。这里提交的是引用和运行时选择，不接受浏览器直接注入镜像或平台权限。</p>
 
-        <AsyncStateView :state="policy" empty-text="当前项目没有已激活的 LLM 策略。请先由管理员配置。" @retry="reloadPolicy">
+        <AsyncStateView :state="policy" empty-text="当前项目没有已激活的项目 AI 设置。请先完成配置。" @retry="reloadPolicy">
           <template #success="{ data }">
             <div class="policy-summary">
               <div><span>模型</span><code>{{ data.binding.model }}</code></div>
               <div><span>Claude Code</span><code>{{ data.binding.claudeCodeVersion }}</code></div>
               <div><span>策略</span><code>rev-{{ data.revision }}</code></div>
               <div><span>预算</span><code>{{ data.budget.maxRequests }} requests / {{ data.budget.maxInputTokens }} input tokens</code></div>
+            </div>
+          </template>
+          <template #empty>
+            <div class="policy-missing" data-testid="software-policy-missing">
+              <p>当前项目没有已激活的项目 AI 设置。完成配置后才能生成 Work 配置。</p>
+              <RouterLink
+                class="outlined-button"
+                :to="{ path: '/researcher/ai-policy', query: { projectId: selectedProjectId } }"
+              >
+                打开项目 AI 设置
+              </RouterLink>
             </div>
           </template>
         </AsyncStateView>
@@ -145,8 +156,8 @@
                     <code v-if="attempt.diagnosticCode">{{ attempt.diagnosticCode }}</code>
                   </li>
                 </ul>
-                <button v-if="(data.state === 'failed' || data.state === 'partially_succeeded') && track.kind === 'work_configuration' && !data.plan" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('work_configuration')">重试 Work 配置</button>
-                <button v-if="(data.state === 'failed' || data.state === 'partially_succeeded') && track.kind === 'environment'" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment</button>
+                <button v-if="track.kind === 'work_configuration' && trackCanRetry(data, 'work_configuration') && !data.plan" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('work_configuration')">重试 Work 配置</button>
+                <button v-if="track.kind === 'environment' && trackCanRetry(data, 'environment')" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('environment')">重试 Environment</button>
               </article>
             </div>
             <section v-if="workConfigurationNeedsNewTask(data)" class="work-plan-retry-hint" aria-label="创建新的 Work 配置任务">
@@ -272,7 +283,18 @@ const approvalReason = ref('')
 const restartConfirmed = ref(false)
 const approvalExpiresAt = ref('')
 const approving = ref(false)
-const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success'))
+const existingRunForCurrentInputs = computed(() => {
+  if (agent.run.kind !== 'success' || policy.value.kind !== 'success' || !selectedEnvironment.value || !packageId.value.trim()) return false
+  const current = agent.run.data
+  return current.projectId === selectedProjectId.value
+    && current.packageId === packageId.value.trim()
+    && current.policyId === policy.value.data.id
+    && current.policyRevision === policy.value.data.revision
+    && current.purpose.kind === 'work_configuration'
+    && current.purpose.environmentId === selectedEnvironment.value.id
+    && current.purpose.environmentRevision === selectedEnvironment.value.revision
+})
+const canStart = computed(() => Boolean(selectedProject.value && packageId.value.trim() && Number.isInteger(packageRevision.value) && packageRevision.value > 0 && selectedEnvironment.value && impactAcknowledged.value && policy.value.kind === 'success' && agent.run.kind !== 'loading' && !existingRunForCurrentInputs.value))
 const canApprovePlan = computed(() => {
   if (plan.value.kind !== 'success' || agent.run.kind !== 'success' || agent.run.data.state !== 'awaiting_approval') return false
   if (!approvalReason.value.trim() || !approvalExpiresAt.value) return false
@@ -483,6 +505,13 @@ function workConfigurationNeedsNewTask(data: AgentRunSchema) {
     && (data.state === 'failed' || data.state === 'partially_succeeded' || data.state === 'cancelled')
 }
 
+function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][number]['kind']): boolean {
+  if (data.state !== 'failed' && data.state !== 'partially_succeeded' && data.state !== 'cancelled') return false
+  const track = data.tracks.find((item) => item.kind === kind)
+  const latestAttempt = track?.attempts[track.attempts.length - 1]
+  return latestAttempt?.state === 'failed' || latestAttempt?.state === 'cancelled'
+}
+
 function prepareNewTask() {
   packageId.value = ''
   packageRevision.value = 1
@@ -516,6 +545,8 @@ function runStateLabel(state: string) {
 .project-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 9px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .config-layout { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(0, 1.3fr); gap: 20px; align-items: start; }
 .config-card, .run-card { padding: 20px; }
+.policy-missing { display: grid; justify-items: start; gap: 10px; margin: 18px 0; padding: 13px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); }
+.policy-missing p { margin: 0; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .policy-summary, .run-overview, .plan-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; margin: 18px 0; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); font: var(--md-sys-body-small); }
 .policy-summary span, .run-overview span, .plan-meta > div > span:first-child { color: var(--md-sys-color-on-surface-variant); }

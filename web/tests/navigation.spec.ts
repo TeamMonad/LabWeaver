@@ -35,7 +35,7 @@ describe('navigation rules', () => {
   it('makes all groups available when the user has all platform roles', () => {
     const groups = navigationGroupsForRoles(['teacher', 'student', 'admin'])
     expect(groups.map((group) => group.id)).toEqual(['teaching', 'student', 'work', 'admin'])
-    expect(groups.find((group) => group.id === 'work')?.items).toHaveLength(4)
+    expect(groups.find((group) => group.id === 'work')?.items).toHaveLength(5)
   })
 
   it('keeps project context and global admin actions separate', () => {

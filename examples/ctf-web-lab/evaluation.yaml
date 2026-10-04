@@ -1,0 +1,73 @@
+apiVersion: evaluation.labweaver.io/v1
+kind: EvaluationSpec
+metadata:
+  name: ctf-web-flag-vault-lab
+  version: "1.0.0"
+spec:
+  submission:
+    collector:
+      kind: workspace_snapshot
+      include:
+        - student/flag.txt
+      exclude: []
+      maxBytes: 1048576
+    llmReadable: []
+  steps:
+    - role: gate
+      id: proof-present
+      runner:
+        kind: file_assertion
+        requiredFiles:
+          - student/flag.txt
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: gate
+      id: proof-format
+      dependsOn: [proof-present]
+      runner:
+        kind: program
+        toolchainProfile: ctf-python
+        phase: compile
+        input: student/flag.txt
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 536870912
+          outputBytes: 1048576
+      checker:
+        kind: exit_code
+        expected: 0
+      failurePolicy: stop
+    - role: score
+      id: flag-check
+      dependsOn: [proof-format]
+      runner:
+        kind: program
+        toolchainProfile: ctf-python
+        phase: test
+        input: student/flag.txt
+        testGroups:
+          - name: flag
+            source: evaluator://tests/ctf-python/flag
+            maxPoints: 100
+        limits:
+          wallTimeSeconds: 30
+          memoryBytes: 536870912
+          outputBytes: 1048576
+      checker:
+        kind: exact
+      score:
+        max: 100
+      failurePolicy: continue
+  aggregation:
+    kind: deterministic_sum
+    maxScore: 100
+    gates:
+      - step: proof-format
+        requiredStatus: passed
+  review:
+    teacherApprovalRequiredForRelease: true
+    forceManualWhen:
+      - infrastructureError
+      - invalidEvidence

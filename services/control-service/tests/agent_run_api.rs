@@ -356,6 +356,7 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             builder_binding: "buildkit-primary-v1".to_owned(),
             output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
+            runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,
@@ -383,6 +384,16 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         evaluation_runtime: EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),
             runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+        },
+        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                model: "fixture-provider-v1".to_owned(),
+                label: "Fixture model".to_owned(),
+            }],
+            default_model: "fixture-provider-v1".to_owned(),
+            runtime_binding: "claude-code-test".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
         },
     })
 }

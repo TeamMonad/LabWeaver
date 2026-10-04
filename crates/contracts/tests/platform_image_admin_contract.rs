@@ -26,6 +26,8 @@ fn platform_image_operations_publish_the_reviewed_contract()
         security,
         mutation,
         success_status,
+        cancellable,
+        retryable,
         scope,
     ) in [
         (
@@ -37,6 +39,8 @@ fn platform_image_operations_publish_the_reviewed_contract()
             Security::BffSession,
             MutationContract::None,
             200,
+            false,
+            true,
             OperationScopeKind::Global,
         ),
         (
@@ -48,6 +52,8 @@ fn platform_image_operations_publish_the_reviewed_contract()
             Security::BffSession,
             MutationContract::IdempotentCreate,
             201,
+            false,
+            true,
             OperationScopeKind::Global,
         ),
         (
@@ -59,6 +65,8 @@ fn platform_image_operations_publish_the_reviewed_contract()
             Security::BffSession,
             MutationContract::IdempotentRevisioned,
             200,
+            false,
+            true,
             OperationScopeKind::Global,
         ),
         (
@@ -70,6 +78,8 @@ fn platform_image_operations_publish_the_reviewed_contract()
             Security::BffSession,
             MutationContract::IdempotentRevisioned,
             200,
+            false,
+            true,
             OperationScopeKind::Global,
         ),
         (
@@ -81,6 +91,8 @@ fn platform_image_operations_publish_the_reviewed_contract()
             Security::BffSession,
             MutationContract::IdempotentCreate,
             201,
+            false,
+            true,
             OperationScopeKind::Global,
         ),
         (
@@ -91,18 +103,74 @@ fn platform_image_operations_publish_the_reviewed_contract()
             "platform_image:write",
             Security::BffSession,
             MutationContract::IdempotentRevisioned,
-            201,
+            202,
+            true,
+            true,
             OperationScopeKind::Global,
         ),
         (
-            "importPlatformImage",
+            "getPlatformImageUpload",
+            ApiSurface::Public,
+            Method::Get,
+            "/api/v1/admin/images/uploads/{uploadId}",
+            "platform_image:read",
+            Security::BffSession,
+            MutationContract::None,
+            200,
+            false,
+            true,
+            OperationScopeKind::Global,
+        ),
+        (
+            "cancelPlatformImageUpload",
+            ApiSurface::Public,
+            Method::Post,
+            "/api/v1/admin/images/uploads/{uploadId}/cancel",
+            "platform_image:write",
+            Security::BffSession,
+            MutationContract::IdempotentRevisioned,
+            202,
+            true,
+            true,
+            OperationScopeKind::Global,
+        ),
+        (
+            "enqueuePlatformImageImport",
             ApiSurface::GatewayInternal,
             Method::Post,
-            "/internal/v1/platform-images/imports",
+            "/internal/v1/platform-images/import-jobs",
             "agent.control.invoke",
             Security::ServiceJwt,
             MutationContract::IdempotentCreate,
-            201,
+            202,
+            false,
+            true,
+            OperationScopeKind::Service,
+        ),
+        (
+            "getPlatformImageImportJob",
+            ApiSurface::GatewayInternal,
+            Method::Get,
+            "/internal/v1/platform-images/import-jobs/{uploadId}",
+            "agent.control.invoke",
+            Security::ServiceJwt,
+            MutationContract::None,
+            200,
+            false,
+            true,
+            OperationScopeKind::Service,
+        ),
+        (
+            "cancelPlatformImageImportJob",
+            ApiSurface::GatewayInternal,
+            Method::Post,
+            "/internal/v1/platform-images/import-jobs/{uploadId}/cancel",
+            "agent.control.invoke",
+            Security::ServiceJwt,
+            MutationContract::IdempotentCreate,
+            202,
+            true,
+            false,
             OperationScopeKind::Service,
         ),
     ] {
@@ -121,14 +189,14 @@ fn platform_image_operations_publish_the_reviewed_contract()
             &[PlatformRole::PlatformAdmin],
             "{operation_id}"
         );
-        assert!(!operation.cancellable, "{operation_id}");
-        assert!(operation.retryable, "{operation_id}");
+        assert_eq!(operation.cancellable, cancellable, "{operation_id}");
+        assert_eq!(operation.retryable, retryable, "{operation_id}");
     }
     Ok(())
 }
 
 #[test]
-fn generated_openapi_types_every_platform_image_body_and_response()
+fn generated_openapi_types_platform_image_catalog_bodies_and_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     let public: Value = serde_json::from_str(include_str!(
         "../../../schemas/openapi/labweaver-public.v1.json"
@@ -194,6 +262,16 @@ fn generated_openapi_types_every_platform_image_body_and_response()
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn generated_openapi_types_async_upload_and_agent_job_bodies_and_responses()
+-> Result<(), Box<dyn std::error::Error>> {
+    let public: Value = serde_json::from_str(include_str!(
+        "../../../schemas/openapi/labweaver-public.v1.json"
+    ))?;
+    let paths = public["paths"].as_object().ok_or("paths missing")?;
     let create_upload = &paths["/api/v1/admin/images/uploads"]["post"];
     assert_eq!(
         create_upload["requestBody"]["content"]["application/json"]["schema"]["$ref"],
@@ -209,26 +287,46 @@ fn generated_openapi_types_every_platform_image_body_and_response()
         "../contracts/v1/http/complete-platform-image-upload-request.schema.json"
     );
     assert_eq!(
-        complete["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
-        "../contracts/v1/http/platform-image-entry-view.schema.json"
+        complete["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/http/platform-image-upload-status.schema.json"
+    );
+    let status = &paths["/api/v1/admin/images/uploads/{uploadId}"]["get"];
+    assert_eq!(status["operationId"], "getPlatformImageUpload");
+    assert_eq!(
+        status["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/http/platform-image-upload-status.schema.json"
+    );
+    let cancel = &paths["/api/v1/admin/images/uploads/{uploadId}/cancel"]["post"];
+    assert_eq!(cancel["operationId"], "cancelPlatformImageUpload");
+    assert_eq!(
+        cancel["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/http/platform-image-upload-status.schema.json"
     );
 
     let internal: Value = serde_json::from_str(include_str!(
         "../../../schemas/openapi/labweaver-gateway-internal.v1.json"
     ))?;
-    let import = &internal["paths"]["/internal/v1/platform-images/imports"]["post"];
-    assert_eq!(import["operationId"], "importPlatformImage");
+    let import = &internal["paths"]["/internal/v1/platform-images/import-jobs"]["post"];
+    assert_eq!(import["operationId"], "enqueuePlatformImageImport");
     assert_eq!(
         import["security"],
         json!([{ "serviceJwt": ["agent.control.invoke"] }])
     );
     assert_eq!(
         import["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-        "../contracts/v1/http/internal-platform-image-import-request.schema.json"
+        "../contracts/v1/http/internal-platform-image-import-enqueue-request.schema.json"
     );
     assert_eq!(
-        import["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
-        "../contracts/v1/http/platform-image-entry.schema.json"
+        import["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/http/internal-platform-image-import-job-status.schema.json"
+    );
+    assert_eq!(
+        internal["paths"]["/internal/v1/platform-images/import-jobs/{uploadId}"]["get"]["operationId"],
+        "getPlatformImageImportJob"
+    );
+    assert_eq!(
+        internal["paths"]["/internal/v1/platform-images/import-jobs/{uploadId}/cancel"]["post"]["operationId"],
+        "cancelPlatformImageImportJob"
     );
     Ok(())
 }

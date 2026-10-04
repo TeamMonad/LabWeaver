@@ -17,6 +17,23 @@ use crate::{
 
 pub type ProviderObservation = crate::lifecycle::AppliedProviderObservation;
 
+/// An accepted execution may still be in progress without a new observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderOutcome<T> {
+    Pending,
+    Completed(T),
+}
+
+impl<T> ProviderOutcome<T> {
+    #[must_use]
+    pub fn completed(self) -> Option<T> {
+        match self {
+            Self::Pending => None,
+            Self::Completed(value) => Some(value),
+        }
+    }
+}
+
 /// One explicit, bounded Provider side effect selected from durable state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +73,8 @@ pub enum ProviderFailureCode {
     Rejected,
     ObservationInvalid,
     CleanupFailed,
+    Timeout,
+    Cancelled,
 }
 
 impl ProviderFailureCode {
@@ -67,6 +86,8 @@ impl ProviderFailureCode {
             Self::Rejected => "LW_ENVIRONMENT_PROVIDER_REJECTED",
             Self::ObservationInvalid => "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
             Self::CleanupFailed => "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
+            Self::Timeout => "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
+            Self::Cancelled => "LW_ENVIRONMENT_PROVIDER_CANCELLED",
         }
     }
 }
@@ -80,7 +101,7 @@ pub trait EnvironmentProvider: Send + Sync {
         &self,
         action: ReconcileAction,
         instance: &EnvironmentInstance,
-    ) -> Result<ProviderObservation, ProviderFailure>;
+    ) -> Result<ProviderOutcome<ProviderObservation>, ProviderFailure>;
 }
 
 /// Exact-name Provider registry. Duplicate and empty bindings are rejected.
@@ -155,6 +176,10 @@ impl ReconcileWorker {
     }
 
     /// Claims and processes at most one due operation.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the lease, pending schedule and observation commit share one bounded reconcile decision"
+    )]
     pub async fn run_once(
         &self,
         worker_id: &str,
@@ -184,7 +209,18 @@ impl ReconcileWorker {
             });
         }
         match self.reconciler.execute_once(&lease.instance, now).await {
-            Ok(observation) => {
+            Ok(ProviderOutcome::Pending) => {
+                let updated = Self::defer_non_terminal_observation(
+                    &lease.instance,
+                    self.store.current_time().await?,
+                    self.retry_delay,
+                )?;
+                if !self.persist_reconciled(&lease, &updated).await? {
+                    return Ok(ReconcileWorkerOutcome::LeaseLost);
+                }
+                Ok(ReconcileWorkerOutcome::Pending)
+            }
+            Ok(ProviderOutcome::Completed(observation)) => {
                 let returned_observation = (observation.next_state, observation.operation_complete);
                 let updated = match apply_provider_observation(
                     &lease.instance,
@@ -323,6 +359,7 @@ impl ReconcileWorker {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReconcileWorkerOutcome {
+    Pending,
     Idle,
     /// The aggregate revision or operation lease changed while this worker was reconciling.
     LeaseLost,
@@ -380,7 +417,7 @@ impl Reconciler {
         &self,
         instance: &EnvironmentInstance,
         now: UtcTimestamp,
-    ) -> Result<ProviderObservation, ReconcileError> {
+    ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
         let provider = self.registry.resolve(&instance.provider_binding)?;
         let result = timeout(self.provider_timeout, provider.execute(action, instance))
@@ -557,6 +594,7 @@ mod tests {
             release_version: 1,
             lease_id: None,
             capacity_binding: None,
+            gpu_allocation: None,
             provider_binding: "container-primary-v1".to_owned(),
             desired_state: DesiredEnvironmentState::Running,
             observed_state: ObservedEnvironmentState::Provisioning,

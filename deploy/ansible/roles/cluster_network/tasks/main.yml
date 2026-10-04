@@ -1,4 +1,20 @@
 ---
+- name: Load the reviewed Cilium chart and image lock
+  ansible.builtin.set_fact:
+    cluster_network_cilium_lock: >-
+      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).cilium }}
+
+- name: Require the locked Cilium image to match the chart release
+  ansible.builtin.assert:
+    that:
+      - cluster_network_cilium_lock.chart is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+      - >-
+        cluster_network_cilium_lock.image is match(
+          '^quay[.]io/cilium/cilium:v'
+          ~ (cluster_network_cilium_lock.chart | regex_escape)
+          ~ '@sha256:[0-9a-f]{64}$')
+    fail_msg: CILIUM_RELEASE_LOCK_INVALID
+
 - name: Assert Helm is available on the control plane
   ansible.builtin.command: helm version --short
   changed_when: false
@@ -24,10 +40,12 @@
   kubernetes.core.helm:
     name: cilium
     chart_ref: cilium/cilium
-    chart_version: "{{ cilium_chart_version }}"
+    chart_version: "{{ cluster_network_cilium_lock.chart }}"
     release_namespace: kube-system
     create_namespace: false
     values:
+      image:
+        override: "{{ cluster_network_cilium_lock.image }}"
       kubeProxyReplacement: true
       k8sServiceHost: "{{ kubernetes_api_advertise_address }}"
       k8sServicePort: 6443

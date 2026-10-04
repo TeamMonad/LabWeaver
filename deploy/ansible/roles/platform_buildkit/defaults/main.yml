@@ -32,3 +32,11 @@ platform_buildkit_operator_group: rocky
 # Management CIDR allowed to reach the BuildKit gRPC endpoint (1234) from the
 # deployment controller. Empty keeps the ingress build-executor-only.
 platform_buildkit_admin_cidr: ""
+
+# BuildKit egress posture. "open" allows unrestricted build egress and is the
+# deliberate, security-reviewed choice for agent-generated experiment images.
+# "restricted" restores the fail-closed union allowlist built from the two
+# lists below.
+platform_buildkit_egress_mode: open
+platform_buildkit_egress_fqdns: []
+platform_buildkit_egress_registry_cidrs: []

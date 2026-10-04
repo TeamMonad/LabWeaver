@@ -179,6 +179,7 @@ describe('SoftwareConfigView', () => {
     )
     expect(wrapper.text()).toContain('Apply the requested packages')
     expect(wrapper.text()).toContain('sudo apt-get update')
+    expect((wrapper.get('form.config-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('requires a future approval expiry before approving a Work plan', async () => {
@@ -252,6 +253,31 @@ describe('SoftwareConfigView', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('Submitted'))
   })
 
+  it('only exposes retry actions for tracks whose latest attempt failed', async () => {
+    const partiallySucceededRun = {
+      ...run,
+      state: 'partially_succeeded',
+      plan: null,
+      tracks: [
+        { kind: 'work_configuration', candidateId: null, attempts: [{ number: 1, state: 'failed', diagnosticCode: 'WORK_CONFIG_FAILED' }] },
+        { kind: 'environment', candidateId: 'candidate-1', attempts: [{ number: 1, state: 'succeeded' }] },
+      ],
+    }
+    vi.mocked(createProjectWorkConfigurationRun).mockResolvedValue({ data: partiallySucceededRun as never, error: undefined as never })
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: { stubs: { RouterLink: true } },
+    })
+
+    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-1')
+    await wrapper.find('select[required]').setValue('environment-1')
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.find('form.config-form').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('重试 Work 配置'))
+
+    expect(wrapper.text()).not.toContain('重试 Environment')
+  })
+
   it('requires a new Work configuration task after a failed run has an immutable plan', async () => {
     const failedRun = {
       ...run,
@@ -278,6 +304,12 @@ describe('SoftwareConfigView', () => {
     expect((wrapper.find('input[type="number"]').element as HTMLInputElement).value).toBe('1')
     expect((wrapper.find('select[required]').element as HTMLSelectElement).value).toBe('')
     expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
+
+    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-2')
+    await wrapper.find('select[required]').setValue('environment-1')
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.find('form.config-form').trigger('submit')
+    await vi.waitFor(() => expect(createProjectWorkConfigurationRun).toHaveBeenCalledTimes(2))
   })
 
   it('keeps a route project while the shared project list is loading', async () => {

@@ -1170,6 +1170,18 @@ mod tests {
 
     #[async_trait]
     impl ClaudeCodeProcess for NeverProcess {
+        async fn recover_authoring_terminal(
+            &self,
+            _scope: &crate::claude_code::AuthoringAttemptScope,
+            cancellation: RunCancellation,
+        ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+            Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            })
+        }
+
         async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
             Err(ClaudeCodeProcessError::Unavailable)
         }
@@ -1192,6 +1204,18 @@ mod tests {
 
     #[async_trait]
     impl ClaudeCodeProcess for RecordingProcess {
+        async fn recover_authoring_terminal(
+            &self,
+            _scope: &crate::claude_code::AuthoringAttemptScope,
+            cancellation: RunCancellation,
+        ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+            Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            })
+        }
+
         async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
             self.version_calls.fetch_add(1, Ordering::AcqRel);
             Ok("2.1.207".to_owned())

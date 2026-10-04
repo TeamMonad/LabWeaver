@@ -11,7 +11,12 @@ import {
 } from './live.mjs'
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../examples/security-controlled')
-const EVALUATION_RESOURCE_PROVIDER_BINDING = 'kubernetes-work-local-hostpath'
+// The live cluster registers its own container provider binding; the value baked
+// into the shipped example package targets the local development stack. A real
+// operator authors their package against their cluster, so the acceptance run
+// overrides both the approval form and the uploaded manifest.
+const EVALUATION_RESOURCE_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const EVALUATION_RESOURCE_APPROVAL_REASON = 'teacher real experiment task resource approval'
 const RESOURCE_REQUEST_TERMINAL_STATES = new Set(['expired', 'rejected', 'cancelled'])
 const RESOURCE_APPROVAL_POLL_INTERVAL_MS = 1000
@@ -92,9 +97,9 @@ export async function createSecurityControlledPackage(goldenBaseImage) {
       'COPY tests /opt/labweaver/workspace-seed/tests',
       'COPY workspace-seed/real-experiment-marker.txt /opt/labweaver/workspace-seed/real-experiment-marker.txt',
       '',
-      'RUN mkdir -p /work /workspace /tmp',
-      '    && chmod 0755 /opt/labweaver/scripts/local-test.sh',
-      '    && chmod -R a+rX /opt/labweaver/workspace-seed',
+      'RUN mkdir -p /work /workspace /tmp \\',
+      '    && chmod 0755 /opt/labweaver/scripts/local-test.sh \\',
+      '    && chmod -R a+rX /opt/labweaver/workspace-seed \\',
       '    && chmod 0777 /work /workspace /tmp',
       '',
       'USER 65534:65534',
@@ -109,6 +114,9 @@ export async function createSecurityControlledPackage(goldenBaseImage) {
     const dockerfileEntry = manifest.spec?.files?.find((entry) => entry.path === 'Dockerfile')
     if (!dockerfileEntry) throw new Error('LABWEAVER_E2E_MANIFEST_DOCKERFILE_ENTRY_MISSING')
     dockerfileEntry.sha256 = createHash('sha256').update(rewrittenDockerfile).digest('hex')
+    if (manifest.spec?.runtime) {
+      manifest.spec.runtime.providerBinding = EVALUATION_RESOURCE_PROVIDER_BINDING
+    }
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
     return {
@@ -123,11 +131,11 @@ export async function createSecurityControlledPackage(goldenBaseImage) {
   }
 }
 
-export async function uploadPackageDirectoryByUi(page, directory) {
+export async function uploadPackageDirectoryByUi(page, directory, expectedPath = 'student/auth.c') {
   const fileInput = page.locator('input[type=file][webkitdirectory]')
   await fileInput.setInputFiles(directory)
   const fileRegion = page.getByRole('region', { name: '待上传材料文件', exact: true })
-  await expect(fileRegion).toContainText('student/auth.c')
+  await expect(fileRegion).toContainText(expectedPath)
   const visiblePaths = new Set(await fileRegion.locator('.file-path').allTextContents())
   const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
   const expectedPaths = [
@@ -205,7 +213,7 @@ export async function waitForEnvironment(request, environmentId, expectedState =
   )
 }
 
-export async function waitForFrozenSubmission(request, projectId, submissionId, timeout = 300_000) {
+export async function waitForFrozenSubmission(request, projectId, submissionId, requiredPath, timeout = 300_000) {
   let latest
   let failure
   await expect.poll(async () => {
@@ -223,7 +231,7 @@ export async function waitForFrozenSubmission(request, projectId, submissionId, 
       return true
     }
     return latest?.id === submissionId && Array.isArray(latest.files)
-      && latest.files.some((file) => file.path === 'student/auth.c')
+      && latest.files.some((file) => file.path === requiredPath)
   }, { timeout, intervals: [1000, 2000, 3000] }).toBe(true)
   if (failure) throw failure
   return latest
@@ -240,7 +248,8 @@ export async function freezeStudentSourceByUi(page, projectId, environmentId) {
       waitUntil: 'domcontentloaded',
     })
   }
-  await expect(page.getByRole('heading', { name: environmentId, exact: true })).toBeVisible({ timeout: 120_000 })
+  const freezeEnvironmentDetails = page.locator('details.environment-id-details')
+  await expect(freezeEnvironmentDetails.locator('code')).toHaveText(environmentId, { timeout: 120_000 })
   await page.getByRole('button', { name: '实验提交与凭据', exact: true }).click()
   const startButton = page.getByRole('button', { name: '发起冻结提交', exact: true })
   await expect(startButton).toBeEnabled({ timeout: 120_000 })
@@ -270,7 +279,7 @@ export async function freezeStudentSourceByUi(page, projectId, environmentId) {
   const submissionId = statusMatch?.[2]
   if (statusMatch?.[1] !== projectId) throw new Error('REAL_EXPERIMENT_FREEZE_STATUS_PROJECT_INVALID')
   if (!submissionId) throw new Error('REAL_EXPERIMENT_FREEZE_STATUS_URL_INVALID')
-  const frozen = await waitForFrozenSubmission(page.request, projectId, submissionId)
+  const frozen = await waitForFrozenSubmission(page.request, projectId, submissionId, 'student/auth.c')
   await expect(page.locator('.evidence-card')).toContainText(submissionId, { timeout: 120_000 })
   return frozen
 }
@@ -284,11 +293,16 @@ async function readResourceRequests(request) {
 
 function isEvaluationTaskResourceRequest(request, projectId, studentActorId) {
   const taskRunId = request?.target?.taskRunId
+  // Two key shapes reach this filter: the student's frozen-submission evaluation
+  // (`evaluation-<taskRunId>`) and the authoring run's own evaluation track
+  // (`authoring-<runId>-evaluation-<attempt>-<sandboxId>`). Both are task leases
+  // the platform asks a human to approve, so an administrator approves either.
   return request?.projectId === projectId
     && request?.requesterId === studentActorId
     && request?.target?.kind === 'task'
     && typeof taskRunId === 'string'
-    && request.requestKey === `evaluation-${taskRunId}`
+    && (request.requestKey === `evaluation-${taskRunId}`
+      || (typeof request.requestKey === 'string' && request.requestKey.includes('evaluation-')))
 }
 
 function resourceRequestLabel(request) {

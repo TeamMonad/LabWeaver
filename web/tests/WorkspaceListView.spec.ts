@@ -7,6 +7,9 @@ import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
   remove: vi.fn(),
+  requests: [] as Record<string, unknown>[],
+  requestState: null as Record<string, unknown> | null,
+  loadResources: vi.fn(),
 }))
 
 const projectOne = {
@@ -66,6 +69,10 @@ vi.mock('@/composables/useProjectWorkEnvironments', () => ({
   }),
 }))
 
+vi.mock('@/composables/useProjectResources', () => ({
+  useProjectResources: () => reactive({ requests: mocks.requestState ?? { kind: 'success', data: mocks.requests }, load: mocks.loadResources }),
+}))
+
 async function mountView(projectId = 'project-1') {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -80,10 +87,42 @@ async function mountView(projectId = 'project-1') {
 
 describe('WorkspaceListView', () => {
   beforeEach(() => {
+    mocks.requests = []
+    mocks.requestState = null
+    mocks.loadResources.mockReset()
     mocks.archive.mockReset()
     mocks.remove.mockReset()
     projectsState.selectedProjectId = projectOne.id
     projectsState.selectedProject = projectOne
+  })
+
+  it('shows a blocked Work allocation without an environment and keeps recovery in its project', async () => {
+    mocks.requests = [
+      { id: 'blocked-1', projectId: 'project-1', state: 'active', target: { kind: 'environment' }, diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' },
+      { id: 'blocked-2', projectId: 'project-2', state: 'active', target: { kind: 'environment' }, diagnosticCode: 'LW_RESOURCE_WORK_ALLOCATION_BLOCKED' },
+    ]
+    const { wrapper, router } = await mountView()
+    expect(wrapper.findAll('[role="alert"]').filter((alert) => alert.text().includes('分配失败'))).toHaveLength(1)
+    expect(wrapper.get('a[href^="/researcher/resources"]').attributes('href')).toContain('projectId=project-1')
+    await router.push({ path: '/researcher/workspaces', query: { projectId: 'project-2' } })
+    await flushPromises()
+    expect(wrapper.findAll('[role="alert"]').filter((alert) => alert.text().includes('分配失败'))).toHaveLength(1)
+    expect(wrapper.get('a[href^="/researcher/resources"]').attributes('href')).toContain('projectId=project-2')
+    wrapper.unmount()
+  })
+
+  it('shows resource loading and errors instead of silently treating unreadable requests as healthy', async () => {
+    mocks.requestState = { kind: 'loading', message: '正在读取资源申请' }
+    const loading = await mountView()
+    expect(loading.wrapper.text()).toContain('正在读取资源申请')
+    loading.wrapper.unmount()
+    mocks.requestState = { kind: 'error', diagnostic: { code: 'RESOURCE_UNAVAILABLE', message: '资源申请暂时无法读取', retryable: true } }
+    const failed = await mountView()
+    expect(failed.wrapper.text()).toContain('资源申请暂时无法读取')
+    const retry = failed.wrapper.findAll('button').find((button) => button.text().includes('重试'))!
+    await retry.trigger('click')
+    expect(mocks.loadResources).toHaveBeenCalledTimes(1)
+    failed.wrapper.unmount()
   })
 
   it('requires confirmation before archiving or removing a member', async () => {
