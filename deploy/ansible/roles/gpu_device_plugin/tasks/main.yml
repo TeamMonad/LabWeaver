@@ -143,6 +143,7 @@
           sharing:
             timeSlicing:
               renameByDefault: true
+              failRequestsGreaterThanOne: true
               resources:
                 - name: {{ gpu_device_plugin_exclusive_resource_name }}
                   replicas: {{ gpu_device_plugin_shared_replicas }}
