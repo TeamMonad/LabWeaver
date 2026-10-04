@@ -861,8 +861,17 @@
           },
           {
             "in": "query",
-            "name": "courseId",
+            "name": "projectId",
             "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "courseId",
+            "required": false,
             "schema": {
               "format": "uuid",
               "type": "string"

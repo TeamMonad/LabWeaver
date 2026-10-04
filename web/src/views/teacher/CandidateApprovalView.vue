@@ -142,6 +142,8 @@
                     <dt>已有审批记录</dt>
                     <dd>{{ view.approvals.length }} 条（只读）</dd>
                   </dl>
+                  <CandidateBuildTask v-if="view.build" :project-id="view.candidate.projectId"
+                    :candidate-id="view.candidate.id" target="environment" />
                   <details class="technical-details">
                     <summary>查看候选技术详情</summary>
                     <dl class="meta-grid">
@@ -230,6 +232,8 @@
                     <dt>候选状态</dt>
                     <dd>{{ view.approvals.length > 0 ? '已有审批记录' : '待本次批准' }}</dd>
                   </dl>
+                  <CandidateBuildTask v-if="view.runnerBuild" :project-id="view.candidate.projectId"
+                    :candidate-id="view.candidate.id" target="evaluation_runner" />
                   <details class="technical-details">
                     <summary>查看候选技术详情</summary>
                     <dl class="meta-grid">
@@ -547,6 +551,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjects } from '@/composables/useProjects'

@@ -1359,3 +1359,176 @@ async fn stopped_export_without_artifact_row_must_verify_its_real_owned_tag()
     server.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn cancellation_and_completion_use_one_terminal_fence()
+-> Result<(), Box<dyn std::error::Error>> {
+    use agent_service::build_pipeline::{BuildCancellation, BuildExecutionFence};
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let store = PgBuildStore::new(pool.clone());
+    // External registry completion is represented by the existing executor fixture. Its
+    // actual fenced cleanup persists the receipt; a pipeline return alone is insufficient.
+    for (cancel_first, receipt) in [(true, true), (true, false), (false, true)] {
+        let command = build_command()?;
+        store
+            .accept_command("agent-build-command-v1", &command_event(command.clone())?)
+            .await?;
+        let lease = store
+            .claim_due("completion-race", Duration::from_secs(30))
+            .await?
+            .ok_or("no lease")?;
+        let token: uuid::Uuid = sqlx::query_scalar(
+            "SELECT lease_token FROM agent.build_commands WHERE build_request_id=$1",
+        )
+        .bind(command.request.id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        let started = database_now(&pool).await?;
+        let deadline = add_time(
+            started,
+            time::Duration::milliseconds(command.request.max_duration_milliseconds as i64),
+        )?;
+        let output = BuildPipeline::new(
+            SlowProvider {
+                cleanup_called: Arc::new(AtomicBool::new(false)),
+                build_delay: Duration::ZERO,
+                fail_build: false,
+            },
+            policy()?,
+        )?
+        .execute(
+            &command,
+            started,
+            BuildExecutionFence::new(lease.attempt, token, deadline)?,
+            &BuildCancellation::new(),
+        )
+        .await?;
+        if receipt {
+            let identity = output.build_identity.0.to_string();
+            sqlx::query("INSERT INTO agent.build_executor_artifacts(build_request_id,build_identity,repository,project_name,repository_name,candidate_tag,digest) VALUES($1,$2,$3,'labweaver-system','race',$4,$5)")
+                .bind(command.request.id.as_uuid()).bind(&identity).bind(&command.request.output_repository)
+                .bind(format!("candidate-{}", &identity[..24])).bind(digest()).execute(&pool).await?;
+            let executor = FencedBuildExecutor::new(
+                PgBuildExecutorFenceStore::new(pool.clone()),
+                RecoveryBuildExecutor {
+                    pool: pool.clone(),
+                    cleanups: Arc::new(AtomicUsize::new(0)),
+                },
+            );
+            executor
+                .execute(build_executor_envelope(
+                    &command,
+                    lease.attempt,
+                    token,
+                    BuildProviderStage::Build,
+                    deadline,
+                ))
+                .await?;
+            executor
+                .execute(build_executor_envelope(
+                    &command,
+                    lease.attempt,
+                    token,
+                    BuildProviderStage::Cleanup,
+                    deadline,
+                ))
+                .await?;
+        }
+        let query = InternalAgentBuildStatusQuery {
+            project_id: command.request.project_id,
+            course_id: command.request.course_id,
+        };
+        let running = store.load_status(command.request.id, &query).await?;
+        let cancel = InternalAgentBuildCancellationRequest {
+            project_id: query.project_id,
+            course_id: query.course_id,
+            build_request_id: command.request.id,
+            expected_state: running.state,
+            expected_revision: running.revision,
+            actor_id: ActorId::new(),
+            requested_at: database_now(&pool).await?,
+        };
+        let key = IdempotencyKey::parse(&format!("race:{}", command.request.id))?;
+        if cancel_first {
+            store.request_cancellation(&cancel, &key).await?;
+        }
+        assert_eq!(
+            store
+                .complete(&lease, &output, started, "completion-race")
+                .await?,
+            !cancel_first
+        );
+        if !cancel_first {
+            assert!(matches!(
+                store.request_cancellation(&cancel, &key).await,
+                Err(agent_service::build_store::BuildStoreError::StateConflict)
+            ));
+        }
+        let terminal = store.load_status(command.request.id, &query).await?;
+        assert_eq!(
+            terminal.state,
+            if cancel_first {
+                InternalAgentBuildState::Cancelled
+            } else {
+                InternalAgentBuildState::Succeeded
+            }
+        );
+        assert_eq!(
+            terminal.cleanup_verified,
+            if cancel_first { Some(receipt) } else { None }
+        );
+        let (attempt, released): (i32,bool) = sqlx::query_as("SELECT attempt,lease_token IS NULL AND worker_id IS NULL AND lease_expires_at IS NULL FROM agent.build_commands WHERE build_request_id=$1")
+            .bind(command.request.id.as_uuid()).fetch_one(&pool).await?;
+        assert_eq!(attempt, lease.attempt as i32);
+        assert!(released);
+        if receipt {
+            let fence: (i32,uuid::Uuid,time::OffsetDateTime) = sqlx::query_as("SELECT highest_generation,lease_token,deadline_at FROM agent.build_executor_fences WHERE build_request_id=$1")
+                .bind(command.request.id.as_uuid()).fetch_one(&pool).await?;
+            assert_eq!(fence, (attempt, token, deadline.get()));
+        }
+        let artifacts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM agent.image_artifacts WHERE build_request_id=$1",
+        )
+        .bind(command.request.id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(artifacts, i64::from(!cancel_first));
+        let completed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM agent.outbox_events WHERE aggregate_id=$1 AND subject=$2",
+        )
+        .bind(command.request.id.as_uuid())
+        .bind(subjects::AGENT_BUILD_COMPLETED)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(completed, i64::from(!cancel_first));
+        let failed: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT payload FROM agent.outbox_events WHERE aggregate_id=$1 AND subject=$2",
+        )
+        .bind(command.request.id.as_uuid())
+        .bind(subjects::AGENT_BUILD_FAILED)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(failed.len(), usize::from(cancel_first));
+        if cancel_first {
+            assert_eq!(
+                failed[0]["data"]["diagnosticCode"],
+                "LW_AGENT_BUILD_CANCELLED"
+            );
+        }
+        assert!(
+            store
+                .claim_due("no-replay", Duration::from_secs(30))
+                .await?
+                .is_none()
+        );
+    }
+    Ok(())
+}

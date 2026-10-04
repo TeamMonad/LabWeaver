@@ -576,6 +576,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::EnvironmentCandidateView
     );
     document!(
+        "schemas/contracts/v1/http/candidate-build-task.schema.json",
+        crate::http::CandidateBuildTask
+    );
+    document!(
+        "schemas/contracts/v1/http/cancel-candidate-build-request.schema.json",
+        crate::http::CancelCandidateBuildRequest
+    );
+    document!(
         "schemas/contracts/v1/http/evaluation-candidate-view.schema.json",
         crate::http::EvaluationCandidateView
     );
@@ -990,6 +998,17 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         let mut parameters = path_parameters(operation.path);
         if matches!(
             operation.operation_id,
+            "getProjectCandidateBuild" | "cancelProjectCandidateBuild"
+        ) {
+            for parameter in &mut parameters {
+                if parameter["name"] == "target" {
+                    parameter["schema"] =
+                        json!({"type":"string","enum":["environment","evaluation_runner"]});
+                }
+            }
+        }
+        if matches!(
+            operation.operation_id,
             "listEnvironmentTemplateReleases"
                 | "listEvaluationReleases"
                 | "listOwnProjectEvaluationResults"
@@ -1301,7 +1320,7 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
             paths.insert(
                 "/internal/v1/build-requests/{buildRequestId}".to_owned(),
-                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security": internal_security("agent_build:read"),"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"get":{"operationId":"getInternalAgentBuild","summary":"Read the Agent-owned build state and revision for an exact course","security": internal_security("agent_build:read"),"parameters":[{"name":"buildRequestId","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}],"responses":{"200":{"description":"Authoritative build status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InternalAgentBuildCancellationResult"}}}},"403":{"$ref":"#/components/responses/Problem"},"404":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/internal/v1/agent-runs/{runId}/tracks/{track}/retry".to_owned(),
@@ -1503,6 +1522,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "completeProjectProblemPackageUpload" => "http/complete-problem-package-upload-request",
         "createProjectLlmPolicy" | "createCourseLlmPolicy" => "project-llm-egress-policy",
         "createProjectAgentRun" => "http/create-agent-run-request",
+        "cancelProjectCandidateBuild" => "http/cancel-candidate-build-request",
         "createInternalAgentLlmReview" => "http/internal-agent-llm-review-request",
         "createProjectWorkConfigurationRun" => "http/create-work-configuration-run-request",
         "approveProjectWorkConfigurationRun" => "http/approve-work-configuration-request",
@@ -1606,6 +1626,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "completeProjectAuthoringApproval" => contract_ref("authoring-approval"),
         "getProjectAuthoringApproval" => contract_ref("authoring-approval-publication-status"),
         "getProjectEnvironmentCandidate" => contract_ref("http/environment-candidate-view"),
+        "getProjectCandidateBuild" | "cancelProjectCandidateBuild" => {
+            contract_ref("http/candidate-build-task")
+        }
         "getProjectEvaluationCandidate" => contract_ref("http/evaluation-candidate-view"),
         "createEvaluationRelease" | "getEvaluationRelease" | "withdrawEvaluationRelease" => {
             contract_ref("evaluation-release")

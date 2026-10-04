@@ -1171,6 +1171,78 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
             .await,
         Err(ControlError::ProjectionConflict)
     ));
+    let build_id: Uuid = sqlx::query_scalar(
+        "SELECT build_request_id FROM control.container_build_projections WHERE candidate_id=$1",
+    )
+    .bind(environment.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let build_id = BuildRequestId::from_str(&build_id.to_string())?;
+    service
+        .project_build_failure(
+            EventId::new(),
+            project_id,
+            Some(course_id),
+            &contracts::events::AgentBuildFailed {
+                build_request_id: build_id,
+                diagnostic_code: "LW_AGENT_BUILD_CANCELLED".to_owned(),
+                retryable: false,
+                cleanup_verified: true,
+            },
+        )
+        .await?;
+    // A replayed authoring outcome must not rebuild the cancelled immutable candidate.
+    service
+        .project_candidates(
+            EventId::new(),
+            &run,
+            Some(&environment),
+            Some(&evaluation),
+            Some(&export),
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.outbox_events WHERE subject=$1")
+            .bind(contracts::events::subjects::AGENT_BUILD_REQUESTED)
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    let artifact = ImageArtifact::Container {
+        id: ImageArtifactId::new(),
+        build_request_id: build_id,
+        repository: "harbor.internal/labweaver-system/late-cancelled-image".to_owned(),
+        digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    assert!(matches!(
+        service
+            .project_artifact(EventId::new(), project_id, Some(course_id), &artifact)
+            .await,
+        Err(ControlError::ProjectionConflict)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM control.container_build_projections WHERE build_request_id=$1"
+        )
+        .bind(build_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "cancelled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.image_artifact_projections WHERE image_artifact_id=$1"
+        )
+        .bind(match artifact {
+            ImageArtifact::Container { id, .. } => id.as_uuid(),
+            ImageArtifact::VirtualMachine { .. } => unreachable!(),
+        })
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     Ok(())
 }
 

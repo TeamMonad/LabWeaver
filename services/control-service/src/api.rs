@@ -24,7 +24,8 @@ use contracts::authoring::{
 };
 use contracts::http::{
     AddProjectMembershipRequest, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
-    AuthoringPublicationAdmissionQuery, CancelPlatformImageUploadRequest, CandidateDecisionRequest,
+    AuthoringPublicationAdmissionQuery, CancelCandidateBuildRequest,
+    CancelPlatformImageUploadRequest, CandidateBuildTarget, CandidateDecisionRequest,
     CompleteAuthoringApprovalRequest, CompletePlatformImageUploadRequest,
     CompleteProblemPackageUploadRequest, CreateAgentRunRequest,
     CreateEnvironmentTemplateReleaseRequest, CreateEvaluationReleaseRequest,
@@ -155,6 +156,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/tracks/{track}/retry",
             post(retry_project_agent_run),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}",
+            get(get_project_candidate_build),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}/cancel",
+            post(cancel_project_candidate_build),
         )
         .route(
             "/api/v1/projects/{project_id}/environment-candidates/{candidate_id}",
@@ -1194,6 +1203,60 @@ async fn get_project_evaluation_candidate(
         .project_evaluation_candidate_view(project_id, candidate_id)
         .await?;
     Ok(with_etag(StatusCode::OK, &value, value.candidate.revision))
+}
+
+async fn get_project_candidate_build(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, candidate_id, target)): Path<(ProjectId, CandidateId, CandidateBuildTarget)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectCandidateBuild",
+        project_id,
+    )
+    .await?;
+    let task = state
+        .control
+        .candidate_build(&state.agent, project_id, candidate_id, target)
+        .await?;
+    Ok(with_etag(StatusCode::OK, &task, task.status.revision))
+}
+
+async fn cancel_project_candidate_build(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((project_id, candidate_id, target)): Path<(ProjectId, CandidateId, CandidateBuildTarget)>,
+    headers: HeaderMap,
+    Json(request): Json<CancelCandidateBuildRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "cancelProjectCandidateBuild",
+        project_id,
+    )
+    .await?;
+    if etag(&headers)? != request.expected_revision {
+        return Err(ControlError::RevisionConflict.into());
+    }
+    let task = state
+        .control
+        .cancel_candidate_build(
+            &state.agent,
+            project_id,
+            candidate_id,
+            target,
+            &request,
+            decision.actor.actor_id,
+            &idempotency(&headers)?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::ACCEPTED, &task, task.status.revision))
 }
 
 async fn decide_project_environment_candidate(

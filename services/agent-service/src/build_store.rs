@@ -321,13 +321,26 @@ impl PgBuildStore {
         .ok_or(BuildStoreError::FenceLost)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "terminal cancellation fence, artifact and outbox share one atomic boundary"
+    )]
     pub async fn complete(
         &self,
         lease: &BuildCommandLease,
         output: &BuildPipelineOutput,
+        started_at: UtcTimestamp,
         trace_id: &str,
-    ) -> Result<(), BuildStoreError> {
-        let _ = &output.build_identity;
+    ) -> Result<bool, BuildStoreError> {
+        let execution_deadline = add_duration(
+            started_at,
+            Duration::from_millis(lease.command.request.max_duration_milliseconds),
+        )?;
+        if output.build_identity.0
+            != Sha256Digest::of_bytes(lease.command.request.id.as_uuid().as_bytes())
+        {
+            return Err(BuildStoreError::IdentityMismatch);
+        }
         if output.registry_project.build_request_id != lease.command.request.id
             || output.registry_project.build_identity != output.build_identity
             || !output.registry_project.private
@@ -351,6 +364,58 @@ impl PgBuildStore {
         let mut transaction = self.pool.begin().await?;
         fence_running(&mut transaction, lease).await?;
         let authority_now = transaction_time(&mut transaction).await?;
+        let cancellation_requested: bool = sqlx::query_scalar(
+            "SELECT cancellation_requested FROM agent.build_commands WHERE build_request_id=$1",
+        )
+        .bind(lease.command.request.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if cancellation_requested {
+            // A cancellation accepted before this terminal transaction must not create an
+            // artifact or a late completion event. Verify the successful pipeline's durable
+            // cleanup receipt rather than treating its return value alone as cleanup authority.
+            let cleaned: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM agent.build_executor_fences f \
+                 JOIN agent.build_executor_artifacts a USING(build_request_id) \
+                 WHERE f.build_request_id=$1 AND f.highest_generation=$2 AND f.lease_token=$3 \
+                   AND f.last_stage='cleanup' AND f.tombstone_generation=$2 \
+                   AND f.last_response->>'status'='cleaned' \
+                   AND f.last_response->>'buildRequestId'=$4 AND f.last_response->>'buildIdentity'=$5 \
+                   AND a.build_identity=$5 AND a.repository=$6 AND a.cleaned_at IS NOT NULL \
+                   AND f.deadline_at=$7 AND a.candidate_tag=$8)",
+            ).bind(build_request_id.as_uuid())
+                .bind(i32::try_from(lease.attempt).map_err(|_| BuildStoreError::IdentityMismatch)?)
+                .bind(lease.lease_token).bind(build_request_id.to_string())
+                .bind(output.build_identity.0.to_string()).bind(&lease.command.request.output_repository)
+                .bind(execution_deadline.get()).bind(format!("candidate-{}", &output.build_identity.0.to_string()[..24]))
+                .fetch_one(&mut *transaction).await?;
+            let data = AgentBuildFailed {
+                build_request_id,
+                diagnostic_code: "LW_AGENT_BUILD_CANCELLED".to_owned(),
+                retryable: false,
+                cleanup_verified: cleaned,
+            };
+            terminal_update(
+                &mut transaction,
+                lease,
+                "cancelled",
+                Some(&data.diagnostic_code),
+                Some(false),
+                Some(cleaned),
+            )
+            .await?;
+            enqueue_terminal_event(
+                &mut transaction,
+                lease,
+                subjects::AGENT_BUILD_FAILED,
+                authority_now,
+                trace_id,
+                &data,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(false);
+        }
         sqlx::query(
             "INSERT INTO agent.image_artifacts \
              (image_artifact_id,build_request_id,image_digest,evidence_sha256,state,contract,registry_project_evidence) \
@@ -379,7 +444,7 @@ impl PgBuildStore {
         )
         .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn fail(
@@ -563,6 +628,8 @@ impl PgBuildStore {
             state,
             revision: next_revision,
             cancellation_requested: true,
+            diagnostic_code: None,
+            cleanup_verified: None,
         };
         let value = serde_json::to_value(&result).map_err(|_| BuildStoreError::ContractInvalid)?;
         IdempotencyStore::complete(
@@ -584,7 +651,7 @@ impl PgBuildStore {
         query: &InternalAgentBuildStatusQuery,
     ) -> Result<InternalAgentBuildCancellationResult, BuildStoreError> {
         let row = sqlx::query(
-            "SELECT project_id,course_id,command_sha256,state,revision,cancellation_requested \
+            "SELECT project_id,course_id,command_sha256,state,revision,cancellation_requested,diagnostic_code,cleanup_verified \
              FROM agent.build_commands WHERE build_request_id=$1",
         )
         .bind(build_request_id.as_uuid())
@@ -613,6 +680,12 @@ impl PgBuildStore {
             state: parse_build_state(&row.try_get::<String, _>("state")?)?,
             revision: revision_from_i64(row.try_get("revision")?)?,
             cancellation_requested: row.try_get("cancellation_requested")?,
+            diagnostic_code: row
+                .try_get::<Option<String>, _>("diagnostic_code")?
+                .map(contracts::DiagnosticCode::parse)
+                .transpose()
+                .map_err(|_| BuildStoreError::ContractInvalid)?,
+            cleanup_verified: row.try_get("cleanup_verified")?,
         })
     }
 }
@@ -681,16 +754,25 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
         };
         match self.execute_with_heartbeat(&lease, now).await? {
             Ok(output) => {
-                self.store
+                let completed = self
+                    .store
                     .complete(
                         &lease,
                         &output,
+                        now,
                         &format!("build:{}", lease.command.request.id),
                     )
                     .await?;
-                Ok(BuildWorkerOutcome::Completed {
-                    build_request_id: lease.command.request.id,
-                })
+                if completed {
+                    Ok(BuildWorkerOutcome::Completed {
+                        build_request_id: lease.command.request.id,
+                    })
+                } else {
+                    Ok(BuildWorkerOutcome::Failed {
+                        build_request_id: lease.command.request.id,
+                        diagnostic_code: "LW_AGENT_BUILD_CANCELLED",
+                    })
+                }
             }
             Err(error)
                 if error.retryable

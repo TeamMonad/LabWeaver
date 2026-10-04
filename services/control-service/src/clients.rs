@@ -356,17 +356,17 @@ impl AgentClient {
         Ok(metadata)
     }
 
-    /// Sends one fully fenced build cancellation over the existing Control mTLS identity.
+    /// Sends one fully fenced build cancellation over the authenticated Control service identity.
     pub async fn cancel_build(
         &self,
         build_request_id: BuildRequestId,
         request: &InternalAgentBuildCancellationRequest,
         key: &IdempotencyKey,
-    ) -> Result<InternalAgentBuildCancellationResult, DownstreamError> {
+    ) -> Result<InternalAgentBuildCancellationResult, AdminDownstreamError> {
         if request.build_request_id != build_request_id {
-            return Err(DownstreamError::IdentityMismatch);
+            return Err(DownstreamError::IdentityMismatch.into());
         }
-        send_json(
+        send_json_admin(
             self.client
                 .post(self.config.endpoint(&format!(
                     "internal/v1/build-requests/{build_request_id}/cancel"
@@ -384,8 +384,8 @@ impl AgentClient {
         &self,
         build_request_id: BuildRequestId,
         query: &InternalAgentBuildStatusQuery,
-    ) -> Result<InternalAgentBuildCancellationResult, DownstreamError> {
-        send_json(
+    ) -> Result<InternalAgentBuildCancellationResult, AdminDownstreamError> {
+        send_json_admin(
             self.client
                 .get(
                     self.config
@@ -909,9 +909,9 @@ async fn send_json<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// Administrator-facing variant of [`send_json`] that preserves an upstream RFC 9457 diagnostic.
+/// Public-facing variant of [`send_json`] that preserves an upstream RFC 9457 diagnostic.
 ///
-/// The administrator gateway must not replace the Agent's stable diagnostic with a locally
+/// The public gateway must not replace the Agent's stable diagnostic with a locally
 /// inferred status class, so a decodable `application/problem+json` response is carried through
 /// payload-free. Any other failure keeps exactly the local classification of [`send_json`].
 async fn send_json_admin<T: serde::de::DeserializeOwned>(
@@ -1018,7 +1018,7 @@ pub enum AdminDownstreamError {
     /// Payload-free local classification.
     #[error(transparent)]
     Transport(#[from] DownstreamError),
-    /// Preserved upstream diagnostic for the administrator boundary.
+    /// Preserved upstream diagnostic for the public boundary.
     #[error("{0}")]
     Problem(DownstreamProblem),
 }

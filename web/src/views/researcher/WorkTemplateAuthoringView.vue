@@ -192,6 +192,9 @@
           <p v-if="data.candidate.spec.class !== 'work'" class="candidate-diagnostic" role="alert">该候选的 Environment class 不是 work，不能发布为 Work 模板。</p>
           <p v-else-if="!data.imageArtifact" class="candidate-diagnostic" role="status">运行时 artifact 尚未就绪。候选生成完成后刷新此卡片。</p>
 
+          <CandidateBuildTask v-if="data.build" :project-id="data.candidate.projectId"
+            :candidate-id="data.candidate.id" target="environment" />
+
           <div v-if="data.approvals.length > 0" class="approval-history">
             <h5>批准记录</h5>
             <ul>
@@ -275,6 +278,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { appendProjectEnvironmentCandidateDecision, createEnvironmentTemplateRelease, getEnvironmentTemplateRelease, getProjectEnvironmentCandidate } from '@/generated/contracts'
 import type {

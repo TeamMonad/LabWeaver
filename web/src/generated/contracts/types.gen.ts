@@ -2834,6 +2834,32 @@ export type AuthoringPublicationAdmissionQuerySchemaProjectId = string;
 export type AuthoringPublicationAdmissionQuerySchemaRevision = number;
 
 /**
+ * CancelCandidateBuildRequest
+ *
+ * The state and revision the caller actually reviewed before requesting cancellation.
+ */
+export type CancelCandidateBuildRequestSchema = {
+    buildRequestId: CancelCandidateBuildRequestSchemaBuildRequestId;
+    expectedRevision: CancelCandidateBuildRequestSchemaRevision;
+    expectedState: InternalAgentBuildState;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type CancelCandidateBuildRequestSchemaBuildRequestId = string;
+
+/**
+ * Agent-owned durable state used as an optimistic precondition for build cancellation.
+ */
+export type InternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CancelCandidateBuildRequestSchemaRevision = number;
+
+/**
  * CancelPlatformImageUploadRequest
  *
  * Revision-fenced cancellation of a platform image upload.
@@ -2846,6 +2872,74 @@ export type CancelPlatformImageUploadRequestSchema = {
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CancelPlatformImageUploadRequestSchemaRevision = number;
+
+/**
+ * CandidateBuildTask
+ *
+ * Authoritative Agent task state for one project-scoped candidate build.
+ */
+export type CandidateBuildTaskSchema = {
+    candidateId: CandidateBuildTaskSchemaCandidateId;
+    status: CandidateBuildTaskSchemaInternalAgentBuildCancellationResult;
+    target: CandidateBuildTarget;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type CandidateBuildTaskSchemaBuildRequestId = string;
+
+/**
+ * One existing build target attached to an immutable candidate.
+ */
+export type CandidateBuildTarget = 'environment' | 'evaluation_runner';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CandidateId`.
+ */
+export type CandidateBuildTaskSchemaCandidateId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CandidateBuildTaskSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type CandidateBuildTaskSchemaDiagnosticCode = string;
+
+/**
+ * Durable result returned for an accepted or exactly replayed build cancellation.
+ */
+export type CandidateBuildTaskSchemaInternalAgentBuildCancellationResult = {
+    buildRequestId: CandidateBuildTaskSchemaBuildRequestId;
+    cancellationRequested: boolean;
+    cleanupVerified?: boolean | null;
+    courseId?: CandidateBuildTaskSchemaCourseId | null;
+    diagnosticCode?: CandidateBuildTaskSchemaDiagnosticCode | null;
+    projectId: CandidateBuildTaskSchemaProjectId;
+    revision: CandidateBuildTaskSchemaRevision;
+    state: CandidateBuildTaskSchemaInternalAgentBuildState;
+};
+
+/**
+ * Agent-owned durable state used as an optimistic precondition for build cancellation.
+ */
+export type CandidateBuildTaskSchemaInternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CandidateBuildTaskSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CandidateBuildTaskSchemaRevision = number;
 
 /**
  * CandidateDecisionRequest
@@ -5317,7 +5411,7 @@ export type InternalAgentBuildCancellationRequestSchema = {
     buildRequestId: InternalAgentBuildCancellationRequestSchemaBuildRequestId;
     courseId?: InternalAgentBuildCancellationRequestSchemaCourseId | null;
     expectedRevision: InternalAgentBuildCancellationRequestSchemaRevision;
-    expectedState: InternalAgentBuildState;
+    expectedState: InternalAgentBuildCancellationRequestSchemaInternalAgentBuildState;
     projectId: InternalAgentBuildCancellationRequestSchemaProjectId;
     requestedAt: InternalAgentBuildCancellationRequestSchemaUtcTimestamp;
 };
@@ -5340,7 +5434,7 @@ export type InternalAgentBuildCancellationRequestSchemaCourseId = string;
 /**
  * Agent-owned durable state used as an optimistic precondition for build cancellation.
  */
-export type InternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type InternalAgentBuildCancellationRequestSchemaInternalAgentBuildState = 'requested' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -5365,7 +5459,9 @@ export type InternalAgentBuildCancellationRequestSchemaUtcTimestamp = string;
 export type InternalAgentBuildCancellationResultSchema = {
     buildRequestId: InternalAgentBuildCancellationResultSchemaBuildRequestId;
     cancellationRequested: boolean;
+    cleanupVerified?: boolean | null;
     courseId?: InternalAgentBuildCancellationResultSchemaCourseId | null;
+    diagnosticCode?: InternalAgentBuildCancellationResultSchemaDiagnosticCode | null;
     projectId: InternalAgentBuildCancellationResultSchemaProjectId;
     revision: InternalAgentBuildCancellationResultSchemaRevision;
     state: InternalAgentBuildCancellationResultSchemaInternalAgentBuildState;
@@ -5380,6 +5476,14 @@ export type InternalAgentBuildCancellationResultSchemaBuildRequestId = string;
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type InternalAgentBuildCancellationResultSchemaCourseId = string;
+
+/**
+ * Stable machine-readable diagnostic code.
+ *
+ * Consumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so
+ * additive diagnostics do not force a wire-version change.
+ */
+export type InternalAgentBuildCancellationResultSchemaDiagnosticCode = string;
 
 /**
  * Agent-owned durable state used as an optimistic precondition for build cancellation.
@@ -13695,6 +13799,148 @@ export type GetProjectAuthoringApprovalResponses = {
 };
 
 export type GetProjectAuthoringApprovalResponse = GetProjectAuthoringApprovalResponses[keyof GetProjectAuthoringApprovalResponses];
+
+export type GetProjectCandidateBuildData = {
+    body?: never;
+    path: {
+        projectId: string;
+        candidateId: string;
+        target: 'environment' | 'evaluation_runner';
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}';
+};
+
+export type GetProjectCandidateBuildErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectCandidateBuildError = GetProjectCandidateBuildErrors[keyof GetProjectCandidateBuildErrors];
+
+export type GetProjectCandidateBuildResponses = {
+    /**
+     * Successful response
+     */
+    200: CandidateBuildTaskSchema;
+};
+
+export type GetProjectCandidateBuildResponse = GetProjectCandidateBuildResponses[keyof GetProjectCandidateBuildResponses];
+
+export type CancelProjectCandidateBuildData = {
+    body: CancelCandidateBuildRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        projectId: string;
+        candidateId: string;
+        target: 'environment' | 'evaluation_runner';
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}/cancel';
+};
+
+export type CancelProjectCandidateBuildErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CancelProjectCandidateBuildError = CancelProjectCandidateBuildErrors[keyof CancelProjectCandidateBuildErrors];
+
+export type CancelProjectCandidateBuildResponses = {
+    /**
+     * Successful response
+     */
+    202: CandidateBuildTaskSchema;
+};
+
+export type CancelProjectCandidateBuildResponse = CancelProjectCandidateBuildResponses[keyof CancelProjectCandidateBuildResponses];
 
 export type ListProjectResourceChargesData = {
     body?: never;

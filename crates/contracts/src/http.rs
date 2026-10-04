@@ -742,6 +742,32 @@ pub struct CandidateBuildView {
     pub cleanup_verified: Option<bool>,
 }
 
+/// One existing build target attached to an immutable candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateBuildTarget {
+    Environment,
+    EvaluationRunner,
+}
+
+/// Authoritative Agent task state for one project-scoped candidate build.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateBuildTask {
+    pub candidate_id: CandidateId,
+    pub target: CandidateBuildTarget,
+    pub status: InternalAgentBuildCancellationResult,
+}
+
+/// The state and revision the caller actually reviewed before requesting cancellation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelCandidateBuildRequest {
+    pub build_request_id: crate::BuildRequestId,
+    pub expected_state: InternalAgentBuildState,
+    pub expected_revision: Revision,
+}
+
 /// Control-owned teacher read model for one immutable Environment candidate.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1231,6 +1257,8 @@ pub struct InternalAgentBuildCancellationResult {
     pub state: InternalAgentBuildState,
     pub revision: Revision,
     pub cancellation_requested: bool,
+    pub diagnostic_code: Option<DiagnosticCode>,
+    pub cleanup_verified: Option<bool>,
 }
 
 /// Terminal or in-progress Agent result used to rebuild Control projections after replay.
@@ -2480,6 +2508,34 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}",
+        "getProjectCandidateBuild",
+        "candidate:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/projects/{projectId}/candidates/{candidateId}/builds/{target}/cancel",
+        "cancelProjectCandidateBuild",
+        "candidate:approve",
+        Oidc,
+        IdempotentRevisioned,
+        202,
+        false,
+        false,
         ALL_ROLES,
         Project
     ),

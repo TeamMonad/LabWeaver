@@ -179,7 +179,7 @@ describe('WorkTemplateAuthoringView', () => {
   async function mountView() {
     const wrapper = mount(WorkTemplateAuthoringView, {
       props: { projectId: 'project-1', courseId: 'course-1' },
-      global: { stubs: { RouterLink: true } },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
     })
     const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
     await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
@@ -369,7 +369,7 @@ describe('WorkTemplateAuthoringView', () => {
     })
     const wrapper = mount(WorkTemplateAuthoringView, {
       props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-1', releaseId: 'release-1' },
-      global: { stubs: { RouterLink: true } },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
     })
 
     await vi.waitFor(() => expect(getProjectAgentRun).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-1' } }))
