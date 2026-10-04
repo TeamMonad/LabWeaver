@@ -185,43 +185,113 @@ export function hasTerminalLine(output, expected) {
   return new RegExp(`(?:^|\\n)${escaped}(?:\\n|$)`).test(normalizeTerminalOutput(output))
 }
 
+/** Keep every physical PTY input line below the canonical line discipline limit. */
+export function cudaProbeTerminalCommand() {
+  const encoded = Buffer.from(CUDA_DRIVER_PROBE).toString('base64')
+  const lines = encoded.match(/.{1,512}/g)
+  return [
+    "python3 -c 'import base64,sys; exec(base64.b64decode(b\"\".join(sys.stdin.buffer.read().split()), validate=True))' <<'LW_CUDA_SCRIPT'",
+    ...lines,
+    'LW_CUDA_SCRIPT',
+  ].join('\n')
+}
+
+export function terminalCommandLines(command, marker) {
+  if (!/^[A-Za-z0-9_-]+$/.test(marker)) throw new Error('TERMINAL_COMMAND_MARKER_INVALID')
+  const lines = [
+    'if',
+    ...command.split('\n'),
+    'then',
+    '__lw_exit=0',
+    'else',
+    '__lw_exit=$?',
+    'fi',
+    `printf '\\n${marker}:%s\\n' "$__lw_exit"`,
+  ]
+  if (lines.some((line) => line.includes('\r') || Buffer.byteLength(line) > 4095)) {
+    throw new Error('TERMINAL_COMMAND_INPUT_LINE_INVALID')
+  }
+  return lines
+}
+
+export function terminalCommandExit(output, marker) {
+  if (!/^[A-Za-z0-9_-]+$/.test(marker)) throw new Error('TERMINAL_COMMAND_MARKER_INVALID')
+  const matches = [...normalizeTerminalOutput(output).matchAll(new RegExp(`(?:^|\\n)${marker}:(\\d+)(?=\\n)`, 'g'))]
+  if (matches.length === 0) return null
+  const exit = Number(matches[0][1])
+  if (matches.length !== 1 || !Number.isInteger(exit) || exit > 255) {
+    throw new Error('TERMINAL_COMMAND_MARKER_INVALID')
+  }
+  return exit
+}
+
+export function terminalCommandFailure(output, exit) {
+  const diagnostic = normalizeTerminalOutput(output).split('\n').map((line) => line.trim()).find((line) => (
+    /^(?:CUDA_DRIVER_LIBRARY_UNAVAILABLE|CUDA_DRIVER_RESULT_MISMATCH|CUDA_DRIVER_PROBE_FAILED)$/.test(line)
+    || /^CUDA_DRIVER_CALL_FAILED:(?:cuInit|cuDeviceGet|cuCtxCreate_v2|cuModuleLoadData|cuModuleGetFunction|cuMemAlloc_v2|cuMemcpyHtoD_v2|cuLaunchKernel|cuCtxSynchronize|cuMemcpyDtoH_v2):-?\d{1,10}$/.test(line)
+  ))
+  const code = exit === null ? 'TERMINAL_COMMAND_MARKER_MISSING' : 'TERMINAL_COMMAND_FAILED'
+  return new Error(`${code}:exit=${exit ?? 'null'}:cuda=${diagnostic ?? 'none'}`)
+}
+
 export async function typeTerminalCommand(page, input, frames, command, marker) {
   const firstFrame = frames.length
   const uniqueMarker = `${marker}-${uuidv7()}`
+  const lines = terminalCommandLines(command, uniqueMarker)
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   await host.click()
   await expect(input).toBeAttached({ timeout: 30_000 })
   await input.focus()
-  await page.keyboard.type(`{ ${command}; __lw_exit=$?; printf '\\n${uniqueMarker}:%s\\n' "$__lw_exit"; }`)
-  await page.keyboard.press('Enter')
-  await expect
-    .poll(() => {
-      const output = normalizeTerminalOutput(frames.slice(firstFrame).join(''))
-      const match = output.match(new RegExp(`(?:^|\\n)${uniqueMarker}:(\\d+)(?:\\n|$)`))
-      return match?.[1] ?? null
-    }, { timeout: 180_000, intervals: [250, 500, 1000] })
-    .toBe('0')
-  return normalizeTerminalOutput(frames.slice(firstFrame).join(''))
+  for (const line of lines) {
+    await page.keyboard.type(line)
+    await page.keyboard.press('Enter')
+  }
+  let exit = null
+  let markerInvalid = false
+  try {
+    await expect.poll(() => {
+      try {
+        exit = terminalCommandExit(frames.slice(firstFrame).join(''), uniqueMarker)
+      } catch (error) {
+        if (error.message !== 'TERMINAL_COMMAND_MARKER_INVALID') throw error
+        markerInvalid = true
+        return 'invalid'
+      }
+      return exit
+    }, { timeout: 180_000, intervals: [250, 500, 1000] }).not.toBeNull()
+  } catch {
+    if (markerInvalid) throw new Error('TERMINAL_COMMAND_MARKER_INVALID')
+    throw terminalCommandFailure(frames.slice(firstFrame).join(''), exit)
+  }
+  if (markerInvalid) throw new Error('TERMINAL_COMMAND_MARKER_INVALID')
+  const output = normalizeTerminalOutput(frames.slice(firstFrame).join(''))
+  exit = terminalCommandExit(output, uniqueMarker)
+  if (exit !== 0) throw terminalCommandFailure(output, exit)
+  return output
 }
 
 /** Run the same real Driver API kernel through the owner's product terminal. */
 export async function runTerminalCudaProbe(page, projectId, environmentId) {
   const frames = []
+  const sockets = new Map()
   const capture = (socket) => {
-    socket.on('framereceived', ({ payload }) => {
+    const receive = ({ payload }) => {
       frames.push(typeof payload === 'string' ? payload : Buffer.from(payload).toString('utf8'))
-    })
+    }
+    sockets.set(socket, receive)
+    socket.on('framereceived', receive)
   }
   page.on('websocket', capture)
   try {
     const terminal = await issueAccessGrantAndConnect(page, projectId, environmentId)
-    const encoded = Buffer.from(CUDA_DRIVER_PROBE).toString('base64')
-    const command = `python3 -c 'import base64; exec(base64.b64decode("${encoded}"))'`
+    const command = cudaProbeTerminalCommand()
     const output = await typeTerminalCommand(page, terminal.input, frames, command, 'LABWEAVER_CAPACITY_CUDA_DONE')
     return parseCudaProbeResult(output)
   } finally {
     page.off('websocket', capture)
+    for (const [socket, receive] of sockets) socket.off('framereceived', receive)
+    frames.length = 0
   }
 }

@@ -1,4 +1,15 @@
 import { describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  CUDA_DRIVER_PROBE,
+  cudaProbeTerminalCommand,
+  normalizeTerminalOutput,
+  terminalCommandExit,
+  terminalCommandFailure,
+  terminalCommandLines,
+  typeTerminalCommand,
+} from '../e2e/support/real-gpu.mjs'
 import {
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
@@ -114,5 +125,134 @@ GPU 00000000:01:00.0
       [],
       { timeoutMs: 1000, outputCode: 'PROCESS_TEST', outputLimitBytes: 4 },
     )).rejects.toThrow('PROCESS_TEST_START_FAILED')
+  })
+})
+
+
+function runCanonicalShell(lines, errexit = false) {
+  const output = execFileSync('python3', ['-c', String.raw`
+import json,os,pty,re,select,signal,sys,termios,time
+request=json.load(sys.stdin)
+lines=request["lines"]
+pid,fd=pty.fork()
+if pid==0:
+    os.execl('/bin/sh','sh','-i',*(['-e'] if request['errexit'] else []))
+captured=b''
+def drain(wait):
+    global captured
+    end=time.monotonic()+wait
+    while time.monotonic()<end:
+        readable,_,_=select.select([fd],[],[],max(0,end-time.monotonic()))
+        if not readable: break
+        try: captured+=os.read(fd,65536)
+        except OSError: break
+try:
+    canonical=bool(termios.tcgetattr(fd)[3]&termios.ICANON)
+    drain(.1)
+    for line in lines:
+        os.write(fd,(line+'\r').encode())
+        drain(.02)
+    deadline=time.monotonic()+5
+    while re.search(rb'(?:^|\n)TEST_DONE:\d+\r?\n',captured) is None and time.monotonic()<deadline:
+        drain(.1)
+    text=captured.replace(b'\r',b'').decode('utf8',errors='replace')
+    digest=re.search(r'(?:^|\n)PAYLOAD_SHA256=([a-f0-9]{64})\n',text)
+    size=re.search(r'(?:^|\n)PAYLOAD_BYTES=(\d+)\n',text)
+    exit_code=re.findall(r'(?:^|\n)TEST_DONE:(\d+)\n',text)
+    print(json.dumps({'canonical':canonical,'sha256':digest.group(1) if digest else None,'bytes':int(size.group(1)) if size else None,'exit':exit_code,'shellAlive':bool(re.search(r'(?:^|\n)SHELL_ALIVE\n',text))}))
+finally:
+    try: os.write(fd,b'exit\r'); drain(.1)
+    except OSError: pass
+    os.close(fd)
+    end=time.monotonic()+1
+    while time.monotonic()<end:
+        found,_=os.waitpid(pid,os.WNOHANG)
+        if found: break
+        time.sleep(.01)
+    else:
+        os.kill(pid,signal.SIGKILL); os.waitpid(pid,0)
+`], { input: JSON.stringify({ lines, errexit }), encoding: 'utf8', timeout: 10_000 })
+  return JSON.parse(output)
+}
+
+describe('real GPU terminal transport', () => {
+  it('transports the unchanged CUDA script in short, quoted here-document lines', () => {
+    const command = cudaProbeTerminalCommand()
+    const lines = command.split('\n')
+    expect(lines[0]).toContain("<<'LW_CUDA_SCRIPT'")
+    expect(lines.at(-1)).toBe('LW_CUDA_SCRIPT')
+    expect(lines.slice(1, -1).every((line) => Buffer.byteLength(line) <= 512)).toBe(true)
+    expect(Buffer.from(lines.slice(1, -1).join(''), 'base64')).toEqual(Buffer.from(CUDA_DRIVER_PROBE))
+    expect(terminalCommandLines(command, 'TEST_DONE').every((line) => Buffer.byteLength(line) <= 1024)).toBe(true)
+  })
+
+  it('requires a complete unique result line rather than command echo, prompts, or partial frames', () => {
+    expect(terminalCommandExit("printf '\\nTEST_DONE:%s\\n' 0\r\n> TEST_DONE:0\r\n", 'TEST_DONE')).toBeNull()
+    expect(terminalCommandExit('\nTEST_DONE:0', 'TEST_DONE')).toBeNull()
+    expect(terminalCommandExit('\nTEST_DONE:7\r\n', 'TEST_DONE')).toBe(7)
+    expect(terminalCommandExit('\nTEST_DONE:0\r\n', 'TEST_DONE')).toBe(0)
+    expect(() => terminalCommandExit('\nTEST_DONE:0\nTEST_DONE:1\n', 'TEST_DONE')).toThrow('TERMINAL_COMMAND_MARKER_INVALID')
+    expect(() => terminalCommandExit('\nTEST_DONE:999\n', 'TEST_DONE')).toThrow('TERMINAL_COMMAND_MARKER_INVALID')
+  })
+
+  it('normalizes terminal ANSI sequences and exposes only known CUDA diagnostics on failure', () => {
+    const escape = String.fromCharCode(27)
+    const output = `${escape}[31mCUDA_DRIVER_CALL_FAILED:cuInit:100${escape}[0m\r\n${escape}]0;private title${String.fromCharCode(7)}`
+    expect(normalizeTerminalOutput(output)).toBe('CUDA_DRIVER_CALL_FAILED:cuInit:100\n')
+    expect(terminalCommandFailure(output, 71).message)
+      .toBe('TERMINAL_COMMAND_FAILED:exit=71:cuda=CUDA_DRIVER_CALL_FAILED:cuInit:100')
+    expect(terminalCommandFailure('CUDA_DRIVER_SECRET=private-content\nother private content', null).message)
+      .toBe('TERMINAL_COMMAND_MARKER_MISSING:exit=null:cuda=none')
+    expect(() => terminalCommandLines('x'.repeat(4096), 'TEST_DONE')).toThrow('TERMINAL_COMMAND_INPUT_LINE_INVALID')
+  })
+
+  it.each(['duplicate', 'out-of-range'])('rejects %s markers immediately through the terminal frame and actual poll boundary', async (kind) => {
+    const frames = []
+    const locator = {
+      _apiName: 'Locator',
+      _expect: async () => ({ matches: true }),
+      click: async () => {},
+      focus: async () => {},
+    }
+    let line = ''
+    const page = {
+      getByRole: () => locator,
+      locator: () => locator,
+      keyboard: {
+        type: async (value) => { line = value },
+        press: async () => {
+          const marker = line.match(/(TEST_DONE-[0-9a-f-]+):%s/)?.[1]
+          if (marker) frames.push(kind === 'duplicate' ? `\n${marker}:0\n${marker}:1\n` : `\n${marker}:999\n`)
+        },
+      },
+    }
+    await expect(typeTerminalCommand(page, locator, frames, 'true', 'TEST_DONE'))
+      .rejects.toThrow('TERMINAL_COMMAND_MARKER_INVALID')
+  }, 2000)
+
+  it.runIf(process.platform === 'linux')('captures nonzero exits and keeps normal and errexit shells alive', () => {
+    const lines = [...terminalCommandLines('false', 'TEST_DONE'), "printf 'SHELL_ALIVE\\n'"]
+    for (const errexit of [false, true]) {
+      expect(runCanonicalShell(lines, errexit)).toMatchObject({
+        canonical: true,
+        exit: ['1'],
+        shellAlive: true,
+      })
+    }
+  })
+
+  it.runIf(process.platform === 'linux')('roundtrips the full probe through a real canonical /bin/sh PTY without executing CUDA', () => {
+    const command = cudaProbeTerminalCommand().split('\n')
+    // The receiver replaces only execution at the external interpreter boundary with a hash.
+    command[0] = "python3 -c 'import base64,hashlib,sys; data=base64.b64decode(b\"\".join(sys.stdin.buffer.read().split()), validate=True); print(\"PAYLOAD_SHA256=\"+hashlib.sha256(data).hexdigest()); print(\"PAYLOAD_BYTES=\"+str(len(data)))' <<'LW_CUDA_SCRIPT'"
+    const lines = terminalCommandLines(command.join('\n'), 'TEST_DONE')
+    const output = runCanonicalShell(lines)
+    expect(output).toEqual({
+      canonical: true,
+      sha256: createHash('sha256').update(CUDA_DRIVER_PROBE).digest('hex'),
+      bytes: Buffer.byteLength(CUDA_DRIVER_PROBE),
+      exit: ['0'],
+      shellAlive: false,
+    })
   })
 })
