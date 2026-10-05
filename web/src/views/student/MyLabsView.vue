@@ -2,10 +2,14 @@
   <div class="my-labs">
     <header class="page-header">
       <div class="header-title-row">
-        <h2>我的项目环境</h2>
+        <h2>{{ props.teacherMode ? '项目环境' : '我的项目环境' }}</h2>
         <span class="header-badge" v-if="state.kind === 'success'">{{ state.data.length }} 个环境</span>
       </div>
-      <p class="page-subtitle">查看当前项目创建的环境；进入终端控制台或提交评测材料。</p>
+      <p class="page-subtitle">
+        {{ props.teacherMode
+          ? '查看当前项目下的课程实验和 Work 环境；进入控制台管理运行状态与访问授权。'
+          : '查看当前项目创建的环境；进入终端控制台或提交评测材料。' }}
+      </p>
     </header>
 
     <DiagnosticBanner
@@ -19,7 +23,9 @@
     <DiagnosticBanner
       v-else-if="isContextMissing"
       code="PROJECT_CONTEXT_MISSING"
-      message="项目上下文未绑定，无法加载你的实验列表。请通过顶栏项目选择器选择项目或联系管理员。"
+      :message="props.teacherMode
+        ? '项目上下文未绑定，无法加载项目环境。请通过顶栏项目选择器选择项目或联系管理员。'
+        : '项目上下文未绑定，无法加载你的实验列表。请通过顶栏项目选择器选择项目或联系管理员。'"
       :retryable="false"
       severity="error"
     />
@@ -36,6 +42,7 @@
       >
         <template #leading>
           <button
+            v-if="!props.teacherMode"
             type="button"
             class="filled-button"
             @click="openCreateDrawer"
@@ -71,7 +78,7 @@
             :rows="filteredRows"
             empty-text="没有匹配过滤条件的项目环境"
             interactive
-            aria-label="我的项目环境列表"
+            :aria-label="props.teacherMode ? '项目环境列表' : '我的项目环境列表'"
             @row-click="(row) => selectRowForInspect(row as unknown as EnvironmentSummary)"
           >
             <template #displayLabel="{ row }">
@@ -136,7 +143,9 @@
           </DataTable>
 
           <p class="labs-hint" role="status">
-            点击行可原地查看项目环境规格与端点详情；点击「创建项目环境」从已发布模板快速启动新环境。
+            {{ props.teacherMode
+              ? '点击行可查看项目环境规格与端点详情；进入控制台后可管理生命周期和访问授权。'
+              : '点击行可原地查看项目环境规格与端点详情；点击「创建项目环境」从已发布模板快速启动新环境。' }}
           </p>
         </template>
 
@@ -144,8 +153,9 @@
           <div class="empty-labs-pane">
             <SvgIcon name="science" size="xl" aria-hidden="true" />
             <h3>暂无项目环境</h3>
-            <p>当前项目还没有环境。可从教师已发布的模板创建一个项目环境。</p>
+            <p>{{ props.teacherMode ? '当前项目还没有可管理的环境。' : '当前项目还没有环境。可从教师已发布的模板创建一个项目环境。' }}</p>
             <button
+              v-if="!props.teacherMode"
               type="button"
               class="filled-button"
               @click="openCreateDrawer"
@@ -178,19 +188,19 @@
               <CopyButton :text="inspectedEnv.id" label="复制环境 ID" />
             </div>
           </div>
-            <div class="prop-row">
-              <span class="prop-label">Runtime 类型</span>
-              <span class="prop-value">{{ inspectedEnv.runtimeKind === 'container' ? '容器环境 (Container)' : '虚拟机环境 (KubeVirt VM)' }}</span>
-            </div>
-            <div class="prop-row">
-              <span class="prop-label">用途</span>
-              <span class="prop-value">{{ environmentClassLabel(inspectedEnv.class) }}</span>
-            </div>
-            <div class="prop-row">
-              <span class="prop-label">到期时间</span>
-              <span class="prop-value">{{ formatTimestamp(inspectedEnv.eligibilityExpiresAt) }}</span>
-            </div>
-            <p class="inspect-next-action" role="status">{{ nextActionLabel(inspectedEnv) }}</p>
+          <div class="prop-row">
+            <span class="prop-label">Runtime 类型</span>
+            <span class="prop-value">{{ inspectedEnv.runtimeKind === 'container' ? '容器环境 (Container)' : '虚拟机环境 (KubeVirt VM)' }}</span>
+          </div>
+          <div class="prop-row">
+            <span class="prop-label">用途</span>
+            <span class="prop-value">{{ environmentClassLabel(inspectedEnv.class) }}</span>
+          </div>
+          <div class="prop-row">
+            <span class="prop-label">到期时间</span>
+            <span class="prop-value">{{ formatTimestamp(inspectedEnv.eligibilityExpiresAt) }}</span>
+          </div>
+          <p class="inspect-next-action" role="status">{{ nextActionLabel(inspectedEnv) }}</p>
         </div>
 
         <div class="inspect-actions">
@@ -218,7 +228,7 @@
 
     <!-- Create Environment Modal (GCP Style Template Selector) -->
     <div
-      v-if="showCreateModal"
+      v-if="showCreateModal && !props.teacherMode"
       class="create-modal-overlay"
       role="dialog"
       aria-label="创建项目环境"
@@ -291,8 +301,8 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { fetchProjectEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjects } from '@/composables/useProjects'
-import { listEnvironments } from '@/generated/contracts'
 import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DataTable from '@/components/common/DataTable.vue'
@@ -307,6 +317,16 @@ import { formatTimestamp, idempotencyKey } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import { environmentStateLabel } from '@/utils/stateLabels'
+
+const props = withDefaults(defineProps<{
+  /** Route used to open the shared environment control console. */
+  environmentPath?: string
+  /** Teacher inventory shows all classes in the selected project and does not create environments. */
+  teacherMode?: boolean
+}>(), {
+  environmentPath: '/student/environments',
+  teacherMode: false,
+})
 
 const projects = useProjects()
 const route = useRoute()
@@ -420,7 +440,7 @@ function failedCleanup(env: EnvironmentSummary): boolean {
 function openCleanup(env: EnvironmentSummary) {
   if (!failedCleanup(env)) return
   void router.push({
-    path: '/student/environments',
+    path: props.environmentPath,
     query: { environmentId: env.id, projectId: env.projectId },
   })
 }
@@ -481,14 +501,14 @@ async function load() {
     return
   }
   state.value = { kind: 'loading', message: '加载实验列表…' }
-  const result = await listEnvironments({
-    query: {
+  let items: EnvironmentSummary[]
+  try {
+    items = await fetchProjectEnvironments({
       projectId: id,
-      ...(courseId.value ? { courseId: courseId.value } : {}),
-    },
-  })
-  if (result.error) {
-    const problem = extractProblemDetails(result.error)
+      ...(!props.teacherMode && courseId.value ? { courseId: courseId.value } : {}),
+    })
+  } catch (error) {
+    const problem = extractProblemDetails(error)
     state.value = {
       kind: 'error',
       diagnostic: makeDiagnostic(
@@ -499,7 +519,6 @@ async function load() {
     }
     return
   }
-  const items = result.data.items ?? []
   state.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
   scheduleRefresh()
 }
@@ -571,7 +590,7 @@ function openEnvironment(environmentId: string) {
     return
   }
   void router.push({
-    path: '/student/environments',
+    path: props.environmentPath,
     query: {
       environmentId,
       ...(projectId.value ? { projectId: projectId.value } : {}),

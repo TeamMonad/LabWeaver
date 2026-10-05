@@ -61,7 +61,7 @@ const routes: RouteRecordRaw[] = [
   roleRoute('teacher', '/teacher', '教师工作台', () => import('@/views/TeacherView.vue'), [
     { path: 'overview', component: () => import('@/views/teacher/TeacherOverviewView.vue'), meta: { title: '实验总览' } },
     { path: 'labs', component: () => import('@/views/teacher/LabListView.vue'), meta: { title: '实验' } },
-    { path: 'environments', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '环境' }, props: { title: '环境', description: '在此查看实验运行环境、配额和健康诊断。' } },
+    { path: 'environments', component: () => import('@/views/teacher/WorkbenchModuleView.vue'), meta: { title: '环境' } },
     { path: 'materials', component: () => import('@/views/teacher/MaterialUploadView.vue'), meta: { title: '材料' } },
     { path: 'approvals', component: () => import('@/views/teacher/CandidateApprovalView.vue'), meta: { title: '审批' } },
   ]),

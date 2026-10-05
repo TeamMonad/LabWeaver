@@ -55,6 +55,7 @@ export LABWEAVER_KUBECONFIG="$PWD/.private/kubeconfig-v1-admin.conf"
   - `https://labweaver.2018wzh.top`、`https://portal.labweaver.2018wzh.top` → `labweaver-system/web:8080`
   - `https://keycloak.labweaver.2018wzh.top` → `keycloak-system/labweaver-keycloak-http:8080`
   - `https://harbor.labweaver.2018wzh.top` → `harbor/harbor:80`
+  - `labweaver.2018wzh.top:2222` → OpenSSH Gateway 的独立 VIP（`public_ingress_ssh_gateway_vip`），供 Access 签发的 SSH 命令使用。
 - 内部门户路由在私有 values 中可覆盖（例如当前 `.private/helm-values-current.yaml` 使用 `portal.labweaver.internal`）。以私有清单和实时 HTTPRoute 为准。
 
 ### 1.4 节点事实（preflight 强制项）
@@ -736,34 +737,15 @@ helm -n labweaver-system history labweaver
 
 ### 11.7 模型服务可达性（authoring 与 Work 模板生成的前提）
 
-- v1 的模型服务是宿主机上的 ollama（`labweaver-llm` 命名空间的 `ollama` Service 用手工 Endpoints
-  指向 `49.52.27.63:11434`）。**Pod 直连节点 IP 会被 Cilium 归类为 `host` entity**：即使
-  NetworkPolicy 的 `ipBlock` 写了 `49.52.27.63/32:11434`，策略也不会命中，authoring 的 AgentRun 会以
-  `LW_PROVIDER_UNAVAILABLE` 失败（`sandbox` 里的 Claude Code 既取不到模型也取不到包对象）。
-- 可用的形态是**集群内代理**：在 `labweaver-llm` 里跑一个 TCP 转发 Pod（本环境用 nginx `stream`
-  转发到 `49.52.27.63:11434`，镜像取 Harbor 的 `base-web-runtime`，需要同命名空间的 Harbor
-  pull secret）并暴露 ClusterIP Service `ollama-proxy:11434`。sandbox 的每次尝试只允许
-  `NetworkPolicy`，而它对 host entity 无效；代理是**普通 Pod**，所以 ipBlock 能命中。
-
-  ```yaml
-  # ConfigMap ollama-proxy-config (namespace labweaver-llm), key nginx.conf:
-  #   worker_processes 1; error_log /dev/stderr info; pid /tmp/nginx.pid;
-  #   events { worker_connections 512; }
-  #   stream { server { listen 11434; proxy_pass 49.52.27.63:11434;
-  #                     proxy_connect_timeout 5s; proxy_timeout 1800s; } }
-  # Deployment ollama-proxy: 1 replica, image
-  #   harbor.lab.lan/labweaver-system/base-web-runtime@sha256:42a7d7f2ee23e9f5a1dcdf3647ba5c585bbd18f79e79cd817e70e8cd61c55779
-  #   (mount the ConfigMap at /etc/nginx/nginx.conf, imagePullSecrets:
-  #    harbor-labweaver-system-pull 复制到该命名空间)
-  # Service ollama-proxy: ClusterIP, port/targetPort 11434
-  ```
-
-  需要同时改三处：`agent-service-config/anthropic-base-url` =
-  `http://ollama-proxy.labweaver-llm.svc.cluster.local:11434`、
-  values 的 `network.externalServiceEndpoints` 加 `10.0.0.0/8:11434`、
-  `agent-service-config` 的 `sandbox.allowed_egress` 加 `10.0.0.0/8:11434`；角色的
-  `platform-model-egress`/`authoring-model-egress` 两条 `CiliumNetworkPolicy` 再按
-  `platform_application_model_namespace` 放行该端口。
+- v1 的模型服务是宿主机上的 Ollama（`labweaver-llm` 命名空间的 `ollama` Service 用手工
+  Endpoints 指向 `49.52.27.63:11434`）。Agent 配置必须使用
+  `http://ollama.labweaver-llm.svc.cluster.local:11434`，模型固定为部署输入中的
+  `qwen3.6:35b`；不通过 `ollama-proxy`，也不使用云端回退。
+- `platform-model-egress` 和 `authoring-platform-egress` 由 Ansible 管理，只在 11434 端口
+  允许 `host`/`remote-node`、`labweaver-llm` 命名空间端点及已审阅的 FQDN。由于节点地址是
+  Cilium 的 `host` entity，不能用 per-attempt `NetworkPolicy` 的 `ipBlock` 代替这两条策略。
+  每次尝试仍只在 `sandbox.allowed_egress` 中声明对象存储的精确 CIDR 和端口；不要把整个
+  `10.0.0.0/8` 或旧的 `ollama-proxy` 地址加入其中。
 - 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
 - **预算必须按「一次 authoring 会话」而不是「一次请求」来设**。authoring 的 provider 调用由
   `AUTHORING_MAX_TURNS = 60` 限次（`services/agent-service/src/claude_code.rs:2933`），每回合都会
@@ -1602,11 +1584,13 @@ authoring 队列；`run` 按所选旅程执行真实浏览器操作，向控制�
 ```sh
 python3 tools/user_acceptance.py preflight \
   --base-url https://portal.labweaver.2018wzh.top \
+  --model qwen3.6:35b \
   --credentials-dir .private/labweaver-acceptance/credentials
 
 python3 tools/user_acceptance.py run \
   --base-url https://portal.labweaver.2018wzh.top \
   --run-id "$run_id" --journeys lab,work,admin --lab xv6 \
+  --model qwen3.6:35b \
   --credentials-dir .private/labweaver-acceptance/credentials
 ```
 
@@ -1627,23 +1611,9 @@ python3 tools/user_acceptance.py run \
 「数条排队运行 + 部署 15 分钟 LLM 界 + 镜像构建」放大（`FULL_CHAIN_TIMEOUT_MS` 4h、
 `AUTHORING_RUN_TIMEOUT_MS` 2.5h、`CANDIDATE_BUILD_TIMEOUT_MS` 1h）。
 
-**取消本次待审批资源申请**：`cancel-resource` 只处理调用者明确指定的一条申请。
-使用有权操作该申请的私有会话，传入本次旅程返回的项目 ID、申请 ID 和 request key；
-`auth_state` 指向仍有效的私有临时会话文件：
-
-```sh
-python3 tools/user_acceptance.py cancel-resource \
-  --base-url https://portal.labweaver.2018wzh.top \
-  --auth-state "$auth_state" \
-  --project-id "$project_id" \
-  --request-id "$request_id" \
-  --request-key "$request_key"
-```
-
-工具先读取该申请，核对项目、request key 和待审批状态，再取得 CSRF token、ETag 并发出取消请求。
-成功时输出接口结果并返回 0，未取消时返回 1。它不发现、筛选或批量取消旧申请，也不取消 AgentRun；
-已激活资源由 owner 使用正常租约回收流程。处理排队中的 AgentRun 时，需先核对其 owner 和精确 ID，
-通过正常用户入口取消，不得清理其他用户或正在运行的旅程。
+**取消与回收**：验收旅程通过资源申请页、环境控制台和材料页的可见操作取消申请、回收租约、
+取消 AgentRun 或删除环境。脚本不提供绕过这些界面的资源变更命令；处理排队中的 AgentRun 时，
+需先核对其 owner 和精确 ID，再通过正常用户入口取消，不得清理其他用户或正在运行的旅程。
 
 `run` 在私有临时目录中创建 0700 的凭据、认证状态与 Playwright 输出目录，口令副本为 0600。
 旅程关闭其浏览器上下文；工具退出时删除临时目录及其中的会话、口令副本和 stdout/stderr 文件。
@@ -2213,15 +2183,10 @@ POSIX 声明，存在 `/bin/bash`（POSIX 超集）时改用 bash；显式
 `/bin/dash`/`/bin/bash` 仍按原样执行。`services/environment-service/tests/
 work_configuration_runner.py` 11 项全绿，env-service 以 `6354f5df…` 滚动上线。
 
-**lab 旅程当前未通过的原因（环境侧，非产品缺陷）**：本地模型后端
-（ollama `qwen3.6:27b` 经 `ollama-proxy`）在 authoring 的 Claude Code 轮次上间歇
-整轮卡死——run 停在 `running` 且无任何后续事件，直到 60 分钟的执行边界才
-`ExecutionFailed`，而 e2e 的整测超时为 30 分钟。a4-a6 的 lab 尝试全部死于该
-窗口（另有若干次人工取消误伤在线尝试，已记录）。重启
-`ollama-proxy` 后 authoring 立即恢复为分钟级成功（a6 的 10:35-12:35 连续
-succeeded 可证），但卡死可再次出现。产品代码侧无对应缺陷：同一 authoring 在
-健康窗口内于 4 分钟内产出三个可构建候选。该卡顿是当前 lab 端到端绿灯的唯一
-已知阻塞。
+模型服务使用 `labweaver-llm/ollama` 的直连 Service 和部署输入中的
+`qwen3.6:35b`。AgentRun 无法生成时，先检查该 Service 的 Endpoints、Agent
+ConfigMap 的 `anthropic-base-url`/`anthropic-model` 以及 `platform-model-egress`
+和 `authoring-platform-egress` 的 11434 端口策略；不要切换到旧代理或云端回退。
 
 ### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
 

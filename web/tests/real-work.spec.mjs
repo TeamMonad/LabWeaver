@@ -1,6 +1,22 @@
 import { readFile, readdir } from 'node:fs/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { expect as playwrightExpect } from '@playwright/test'
+
+const cleanupUi = vi.hoisted(() => ({
+  cancelRequest: vi.fn(),
+  stopEnvironment: vi.fn(),
+  releaseLease: vi.fn(),
+  deleteEnvironment: vi.fn(),
+}))
+
+vi.mock('../e2e/support/environment-lifecycle.mjs', () => ({
+  stopEnvironmentByUi: cleanupUi.stopEnvironment,
+  deleteEnvironmentByUi: cleanupUi.deleteEnvironment,
+}))
+vi.mock('../e2e/support/real-resource.mjs', () => ({
+  cancelProjectResourceRequestByUi: cleanupUi.cancelRequest,
+  releaseProjectLeaseByUi: cleanupUi.releaseLease,
+}))
+
 import {
   assertRealWorkVmCandidate,
   assertRealWorkGpuContainerCandidate,
@@ -393,141 +409,93 @@ describe('GPU container Work material and candidate', () => {
   })
 })
 
-describe('real Work cleanup through public owner APIs', () => {
+describe('real Work cleanup through visible owner controls', () => {
   const baseURL = 'https://portal.example.test'
   const environmentPath = '/api/v1/environments/environment'
   const leasePath = '/api/v1/resource-leases/lease'
   const requestPath = '/api/v1/resource-requests/request'
+  const ready = {
+    id: 'environment', projectId: 'project', leaseId: 'lease', revision: 4,
+    desiredState: 'running', observedState: 'ready',
+  }
+  const stopped = { ...ready, revision: 5, desiredState: 'stopped', observedState: 'stopped' }
   const failed = {
-    id: 'environment', projectId: 'project', leaseId: 'lease', capacityBinding: 'claim',
-    revision: 4, generation: 2, desiredState: 'deleted', observedState: 'failed',
+    ...stopped, desiredState: 'deleted', observedState: 'failed',
     operation: { id: 'expire', kind: 'expire', state: 'failed', acceptedRevision: 3 },
   }
-  const deleted = { ...failed, revision: 6, generation: 3, observedState: 'deleted', operation: { id: 'delete', kind: 'delete', state: 'succeeded', acceptedRevision: 5 } }
-  const expiring = { id: 'lease', requestId: 'request', claimId: 'claim', revision: 3, state: 'expiring' }
-  const revoked = { ...expiring, state: 'revoked' }
+  const deleted = { ...failed, revision: 6, observedState: 'deleted', operation: { id: 'delete', kind: 'delete', state: 'succeeded', acceptedRevision: 5 } }
+  const activeLease = { id: 'lease', requestId: 'request', claimId: 'claim', revision: 3, state: 'active' }
+  const revokedLease = { ...activeLease, state: 'revoked' }
   const expiredRequest = { id: 'request', projectId: 'project', state: 'expired' }
-  const accepted = { environmentId: 'environment', operationId: 'delete', statusUrl: `${environmentPath}/operations/delete` }
 
   function response(body, status = 200) {
     return { ok: () => status >= 200 && status < 300, status: () => status, text: async () => JSON.stringify(body) }
   }
 
-  function http({ environments = [failed, failed, failed, deleted], leases = [expiring, expiring, revoked], operation = { state: 'succeeded' }, finalRequest = expiredRequest, deletes = [response(accepted)], posts = [response(expiring)] } = {}) {
-    const snapshots = new Map([
-      [environmentPath, [...environments]], [leasePath, [...leases]],
-      [requestPath, [finalRequest]], ['/api/v1/auth/csrf', [{ csrfToken: 'test-csrf' }]],
-      [accepted.statusUrl, [operation]],
-    ])
-    function next(values) {
-      if (!values?.length) throw new Error('UNEXPECTED_HTTP_REQUEST')
+  function http(sequences) {
+    const snapshots = new Map(Object.entries(sequences).map(([path, values]) => [path, [...values]]))
+    function next(path) {
+      const values = snapshots.get(path)
+      if (!values?.length) throw new Error(`UNEXPECTED_READ:${path}`)
       return values.length > 1 ? values.shift() : values[0]
     }
-    return {
-      get: vi.fn(async (path) => response(next(snapshots.get(path)))),
-      post: vi.fn(async () => next(posts)),
-      delete: vi.fn(async () => {
-        const result = next(deletes)
-        if (result instanceof Error) throw result
-        return result
-      }),
-    }
+    return { get: vi.fn(async (path) => response(next(path))) }
   }
 
   beforeEach(() => {
-    // Exercise the real polling predicates once per supplied HTTP snapshot;
-    // the live polling duration remains unchanged in the acceptance helper.
-    vi.spyOn(playwrightExpect, 'poll').mockImplementation((read) => ({
-      toBe: async (value) => expect(await read()).toBe(value),
-    }))
+    vi.clearAllMocks()
+    cleanupUi.stopEnvironment.mockResolvedValue(stopped)
+    cleanupUi.releaseLease.mockResolvedValue({ ...revokedLease, released: true })
+    cleanupUi.deleteEnvironment.mockResolvedValue(deleted)
+    cleanupUi.cancelRequest.mockResolvedValue({ ...expiredRequest, state: 'cancelled' })
   })
+
   afterEach(() => vi.restoreAllMocks())
 
-  it('releases an active lease through Resource before deleting the environment', async () => {
-    const request = http({ environments: [failed, failed, deleted], leases: [{ ...expiring, state: 'active' }, revoked, revoked] })
-    await cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')
-    expect(request.post).toHaveBeenCalledOnce()
-    expect(request.post.mock.calls[0][0]).toBe(`${leasePath}/revoke`)
-    expect(request.post.mock.invocationCallOrder[0]).toBeLessThan(request.delete.mock.invocationCallOrder[0])
-    expect(request.delete).toHaveBeenCalledWith(environmentPath, { headers: expect.objectContaining({ 'If-Match': '"rev-4"', 'X-CSRF-Token': 'test-csrf', Origin: baseURL }) })
-  })
-
-  it.each(['terminal failure', 'timeout'])('continues owner DELETE after the first Resource wait ends with %s', async (failure) => {
-    const pending = { ...failed, observedState: 'expiring', operation: { ...failed.operation, state: 'running' } }
-    const request = http({ environments: [failed, failure === 'timeout' ? pending : failed, failed, deleted] })
-    const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')
-    expect(request.post).not.toHaveBeenCalled()
-    expect(request.delete).toHaveBeenCalledOnce()
-    expect(diagnostic).toHaveBeenCalledWith('REAL_WORK_CLEANUP_RECOVERED:RESOURCE_RELEASE_WAIT_FAILED')
-    expect(request.get).toHaveBeenCalledWith(requestPath)
-  })
-
-  it('aggregates failed delete and unconfirmed release without hiding either', async () => {
-    const request = http({ operation: { state: 'failed' }, leases: [expiring] })
-    let failure
-    try { await cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request') } catch (error) { failure = error }
-    expect(failure).toBeInstanceOf(AggregateError)
-    expect(failure.errors).toHaveLength(3)
-    expect(failure.message).toContain('REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_OPERATION_FAILED:failed')
-    expect(request.delete).toHaveBeenCalledOnce()
-  })
-
-  it('requires the Resource request to settle even after deleted and revoked readbacks', async () => {
-    const request = http({ finalRequest: { ...expiredRequest, state: 'expiring' } })
-    await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toBeInstanceOf(AggregateError)
-    expect(request.get).toHaveBeenCalledWith(requestPath)
-  })
-
-  it.each([
-    { id: 'another-request', projectId: 'project', state: 'expired' },
-    { id: 'request', projectId: 'another-project', state: 'expired' },
-    { requestId: 'request', projectId: 'project', state: 'expired' },
-  ])('rejects terminal Resource readback with a different public identity: %j', async (finalRequest) => {
-    const request = http({ finalRequest })
-    await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toBeInstanceOf(AggregateError)
-    expect(request.get).toHaveBeenCalledWith(requestPath)
-  })
-
-  it('does not treat a forbidden delete as absence or retry it', async () => {
-    const request = http({ deletes: [response({ diagnosticCode: 'LW_SCOPE_DENIED' }, 403)] })
-    await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toThrow('REAL_WORK_CLEANUP_ENVIRONMENT_DELETE_FAILED:403')
-    expect(request.delete).toHaveBeenCalledOnce()
-  })
-
-  it('retains a forbidden Resource wait read even if later owner cleanup succeeds', async () => {
-    const request = http({ environments: [failed, failed, deleted] })
-    const get = request.get.getMockImplementation()
-    let environmentReads = 0
-    request.get.mockImplementation(async (path) => {
-      if (path === environmentPath && ++environmentReads === 2) return response({ diagnosticCode: 'LW_SCOPE_DENIED' }, 403)
-      return get(path)
+  it('uses the visible stop, lease release, and delete controls in order', async () => {
+    const request = http({
+      [environmentPath]: [ready, stopped, deleted],
+      [leasePath]: [activeLease, revokedLease, revokedLease],
+      [requestPath]: [expiredRequest],
     })
-    await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toThrow('REAL_WORK_CLEANUP_ENVIRONMENT_RELEASE_READ_FAILED:403')
-    expect(request.delete).toHaveBeenCalledOnce()
+    await cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request', { kind: 'page' })
+    expect(cleanupUi.stopEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ projectId: 'project', environmentId: 'environment' }))
+    expect(cleanupUi.releaseLease).toHaveBeenCalledWith(expect.anything(), { projectId: 'project', requestId: 'request', leaseId: 'lease' })
+    expect(cleanupUi.deleteEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ projectId: 'project', environmentId: 'environment' }))
+    expect(cleanupUi.stopEnvironment.mock.invocationCallOrder[0]).toBeLessThan(cleanupUi.releaseLease.mock.invocationCallOrder[0])
+    expect(cleanupUi.releaseLease.mock.invocationCallOrder[0]).toBeLessThan(cleanupUi.deleteEnvironment.mock.invocationCallOrder[0])
+    expect(request.get).not.toHaveBeenCalledWith(expect.stringContaining('/cancel'))
   })
 
-  it('recovers a lost delete response by reading the exact next delete generation', async () => {
-    const committed = { ...deleted, observedState: 'deleting', operation: { ...deleted.operation, state: 'running' } }
-    const request = http({ environments: [failed, failed, failed, committed, deleted], deletes: [new Error('transport lost')] })
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')
-    expect(request.delete).toHaveBeenCalledOnce()
-    expect(request.get).toHaveBeenCalledWith(accepted.statusUrl)
+  it('cancels a pending resource request through the visible resource page', async () => {
+    const request = http({
+      '/api/v1/projects/project/resource-leases': [[]],
+      [requestPath]: [{ id: 'request', projectId: 'project', requestKey: 'run:resource', state: 'reviewing' }, { ...expiredRequest, state: 'cancelled' }],
+      [environmentPath]: [deleted],
+    })
+    await cleanupWorkResources(request, baseURL, 'project', 'environment', null, 'request', { kind: 'page' })
+    expect(cleanupUi.cancelRequest).toHaveBeenCalledWith(expect.anything(), { projectId: 'project', requestKey: 'run:resource' })
+    expect(cleanupUi.stopEnvironment).not.toHaveBeenCalled()
+    expect(cleanupUi.deleteEnvironment).not.toHaveBeenCalled()
   })
 
-  it('retains one logical key and revision when no delete was committed', async () => {
-    const request = http({ environments: [failed, failed, failed, failed, deleted], deletes: [new Error('transport lost'), response(accepted)] })
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')
-    expect(request.delete).toHaveBeenCalledTimes(2)
-    expect(request.delete.mock.calls[1]).toEqual(request.delete.mock.calls[0])
+  it('re-reads an active request lease before releasing it', async () => {
+    const request = http({
+      '/api/v1/projects/project/resource-leases': [[], [activeLease]],
+      [requestPath]: [
+        { id: 'request', projectId: 'project', requestKey: 'run:resource', state: 'active' },
+        { ...expiredRequest, requestKey: 'run:resource' },
+      ],
+      [environmentPath]: [ready, stopped, deleted],
+      [leasePath]: [activeLease, revokedLease, revokedLease],
+    })
+    await cleanupWorkResources(request, baseURL, 'project', 'environment', null, 'request', { kind: 'page' })
+    expect(cleanupUi.releaseLease).toHaveBeenCalledWith(expect.anything(), { projectId: 'project', requestId: 'request', leaseId: 'lease' })
+    expect(cleanupUi.cancelRequest).not.toHaveBeenCalled()
   })
 
-  it('does not start another intent when a lost response has a different generation', async () => {
-    const unrelated = { ...deleted, generation: 4, operation: { ...deleted.operation, id: 'unrelated' } }
-    const request = http({ environments: [failed, failed, failed, unrelated], deletes: [new Error('transport lost')] })
-    await expect(cleanupWorkResources(request, baseURL, 'project', 'environment', 'lease', 'request')).rejects.toThrow('REAL_WORK_CLEANUP_DELETE_RESPONSE_LOST_UNCONFIRMED')
-    expect(request.delete).toHaveBeenCalledOnce()
+  it('requires a browser page before attempting cleanup mutations', async () => {
+    await expect(cleanupWorkResources({ get: vi.fn() }, baseURL, 'project', 'environment', null, null))
+      .rejects.toThrow('REAL_WORK_CLEANUP_UI_PAGE_REQUIRED')
   })
 })

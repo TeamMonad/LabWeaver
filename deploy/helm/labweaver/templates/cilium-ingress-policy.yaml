@@ -21,7 +21,10 @@ specs:
       matchLabels:
         app.kubernetes.io/name: openssh-gateway
     ingress:
-      - fromEntities: [world]
+      # The public node listener is a host-network TCP bridge. Keep the
+      # existing public path and admit only the node entities needed by that
+      # bridge in addition to external clients.
+      - fromEntities: [world, host, remote-node]
         toPorts:
           - ports:
               - {port: "2222", protocol: TCP}

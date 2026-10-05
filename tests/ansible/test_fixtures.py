@@ -1116,7 +1116,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("fromEntities: [ingress]", policy)
         self.assertIn('{port: "8080", protocol: TCP}', policy)
         self.assertIn("app.kubernetes.io/name: openssh-gateway", policy)
-        self.assertIn("fromEntities: [world]", policy)
+        self.assertIn("fromEntities: [world, host, remote-node]", policy)
         self.assertIn('{port: "2222", protocol: TCP}', policy)
 
     def test_agent_runtime_egress_allows_all_destinations_and_ports(self) -> None:

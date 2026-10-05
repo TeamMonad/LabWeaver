@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 
 /**
@@ -18,15 +18,6 @@ const LOADING_SETTLE_TIMEOUT_MS = 30_000
 const AXE_TAGS = Object.freeze(['wcag2a', 'wcag2aa'])
 const BLOCKING_IMPACTS = Object.freeze(['serious', 'critical'])
 
-/** Test metadata for artifact attachment; null outside a running test. */
-function activeTestInfo() {
-  try {
-    return test.info()
-  } catch {
-    return null
-  }
-}
-
 /**
  * Chromium reports a failed subresource or fetch as a console message of type
  * `error`, even when the application handled it (for example the console page
@@ -34,7 +25,7 @@ function activeTestInfo() {
  * still starting and the platform answers 503). That message is browser noise,
  * not an application error: nothing about it reaches the user as an unhandled
  * surface. Keep the two apart so the assertion still covers what a user cannot
- * act on while the raw network log stays visible in the evidence.
+ * act on while raw network messages remain in memory for diagnostics.
  */
 const BROWSER_RESOURCE_LOG = /^Failed to load resource:/
 
@@ -42,7 +33,7 @@ const BROWSER_RESOURCE_LOG = /^Failed to load resource:/
  * Collect the two failure classes a user cannot act on: unhandled console
  * errors and uncaught page exceptions. Call `assertCleanConsole` at each
  * journey checkpoint so the failing surface is named. Browser resource-load
- * logs are recorded separately and printed, never asserted.
+ * logs are recorded separately and never printed or asserted.
  */
 export function installUsabilityGuards(page) {
   const consoleErrors = []
@@ -65,10 +56,6 @@ export function installUsabilityGuards(page) {
     networkErrors,
     pageErrors,
     assertCleanConsole(label) {
-      if (networkErrors.length > 0) {
-        // Surfaced for the evidence trail, not treated as an application error.
-        console.warn(`${label}: browser resource logs: ${networkErrors.join(' | ')}`)
-      }
       const recorded = [
         ...consoleErrors.map((text) => `console: ${text}`),
         ...pageErrors.map((text) => `pageerror: ${text}`),
@@ -125,27 +112,11 @@ export async function assertNoStuckProgress(page, label, { timeout = LOADING_SET
 }
 
 /**
- * Run the WCAG A/AA axe scan. Serious and critical violations fail the journey;
- * every scan is attached to the test result so the remaining findings are
- * recorded with evidence instead of disappearing.
+ * Run the WCAG A/AA axe scan. Serious and critical violations fail the journey.
+ * The scan stays in-process and does not attach reports or other artifacts.
  */
-export async function auditAccessibility(page, label, testInfo = null) {
+export async function auditAccessibility(page, label) {
   const results = await new AxeBuilder({ page }).withTags([...AXE_TAGS]).analyze()
-  const info = testInfo ?? activeTestInfo()
-  if (info) {
-    await info.attach(`${label}-axe.json`, {
-      body: JSON.stringify({
-        label,
-        url: page.url(),
-        blockingImpacts: [...BLOCKING_IMPACTS],
-        tags: [...AXE_TAGS],
-        violations: results.violations,
-        incomplete: results.incomplete,
-        passCount: results.passes.length,
-      }, null, 2),
-      contentType: 'application/json',
-    })
-  }
   const blocking = results.violations.filter((violation) => BLOCKING_IMPACTS.includes(violation.impact))
   if (blocking.length > 0) {
     throw new Error(`${label}:LW_ACCEPTANCE_A11Y_SERIOUS:${blocking.map((violation) => `${violation.impact}:${violation.id} (${violation.nodes.length} node(s): ${violation.nodes

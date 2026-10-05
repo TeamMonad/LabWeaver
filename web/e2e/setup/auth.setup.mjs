@@ -34,6 +34,10 @@ const actors = Object.freeze([
   }),
 ])
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function requiredEnvironment(name) {
   const value = process.env[name]?.trim()
   if (!value) throw new Error(`PW_AUTH_CONFIGURATION_MISSING:${name}`)
@@ -58,9 +62,15 @@ async function authenticate({ browser, baseURL, actor }) {
   const context = await browser.newContext({ baseURL })
   const page = await context.newPage()
   try {
-    await page.goto(`/auth/login?return_to=${encodeURIComponent(actor.landingPath)}`, {
+    // Start from the public home and use its visible login control. This keeps
+    // the setup journey aligned with the path a new user can actually follow.
+    await page.goto('/', {
       waitUntil: 'domcontentloaded',
     })
+    await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible()
+    const login = page.getByRole('button', { name: '登录', exact: true }).first()
+    await expect(login).toBeVisible()
+    await login.click({ noWaitAfter: true })
     await expect(page.locator('#username')).toBeVisible()
     await page.locator('#username').fill(username)
     await page.locator('#password').fill(password)
@@ -71,14 +81,15 @@ async function authenticate({ browser, baseURL, actor }) {
       page.locator('#kc-login').click({ noWaitAfter: true }),
     ])
     // When authentication returns to the task home, follow the actor's
-    // authorized task link before asserting the protected landing page.
+    // authorized task card before asserting the protected landing page. The
+    // drawer can be collapsed into a rail whose accessible labels include the
+    // group name, so the public home card is the stable user-facing entry.
     if (!new URL(page.url()).pathname.startsWith(actor.landingPath)) {
-      const taskNav = page.getByRole('navigation', { name: '任务导航', exact: true })
-      const taskLink = taskNav.getByRole('link', { name: actor.entryLabel, exact: true })
-      if (!(await taskLink.isVisible())) {
-        await page.getByRole('button', { name: '打开导航', exact: true }).click()
-      }
-      await expect(taskLink).toBeVisible()
+      await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible()
+      const taskLink = page.locator('.task-grid').getByRole('link', {
+        name: new RegExp(`^${escapeRegExp(actor.entryLabel)}`),
+      })
+      await expect(taskLink).toHaveCount(1, { timeout: 60_000 })
       await taskLink.click()
     }
     await expect(page.getByRole('heading', { name: actor.heading }).first()).toBeVisible()

@@ -164,10 +164,13 @@ describe('GCP Console Components', () => {
   })
 
   describe('GcpProjectSelector', () => {
-    it('displays the selected project and its course association', async () => {
+    it('displays project names without exposing internal IDs in the normal selector view', async () => {
       const wrapper = mount(GcpProjectSelector)
       await vi.waitFor(() => expect(wrapper.text()).toContain('CS101 Operating Systems'))
-      expect(wrapper.text()).toContain('project-cs101')
+      expect(wrapper.text()).not.toContain('project-cs101')
+      await wrapper.find('.selector-trigger').trigger('click')
+      await vi.waitFor(() => expect(wrapper.find('.selector-menu').text()).toContain('AI201 Model Engineering'))
+      expect(wrapper.find('.selector-menu').text()).not.toContain('project-cs101')
     })
 
     it('opens dropdown when trigger is clicked', async () => {

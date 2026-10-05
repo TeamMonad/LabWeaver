@@ -13,11 +13,6 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   }
 })
 
-vi.mock('@/utils/crypto', () => ({
-  sha256File: vi.fn(async (file: File) => `sha256-${file.name}`),
-  computeManifestSha256: vi.fn(async () => 'manifest-sha256'),
-}))
-
 function makeFile(name: string, content: string): File {
   return new File([content], name, { type: 'text/plain' })
 }
@@ -115,7 +110,32 @@ describe('useProjectProblemPackageUpload', () => {
     )
   })
 
-  it('sorts files by package path regardless of arrival order so manifest hashing stays deterministic', async () => {
+  it('discards a directory selection when the project changes while files are collected', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    let provideFile!: (file: File) => void
+    const delayedEntry = {
+      name: 'README.md',
+      isDirectory: false,
+      isFile: true,
+      file: (success: (file: File) => void) => {
+        provideFile = success
+      },
+    } as unknown as FileSystemFileEntry
+
+    const pending = upload.addDirectoryItems([makeDataTransferItem(delayedEntry)] as unknown as DataTransferItemList)
+    projectId.value = 'project-2'
+    provideFile(makeFile('README.md', '# old project'))
+
+    await pending
+
+    expect(upload.files).toHaveLength(0)
+    expect(upload.state.kind).toBe('idle')
+  })
+
+  it('sorts files by package path regardless of arrival order', async () => {
     const projectId = ref<string | null>('project-1')
     const policyRevision = ref<number | undefined>(1)
     const courseId = ref<string | null | undefined>('course-1')

@@ -162,12 +162,15 @@ function mockEnvironmentInstance(overrides: Record<string, unknown> = {}) {
   vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never })
 }
 
-async function mountAt(query: Record<string, string> = {}, withProjectSelector = false) {
+async function mountAt(query: Record<string, string> = {}, withProjectSelector = false, teacherMode = false) {
   const router = createRouter({
     history: createWebHistory(),
-    routes: [{ path: '/student/environments', name: 'student-environments', component: EnvironmentEntryView }],
+    routes: [
+      { path: '/student/environments', name: 'student-environments', component: EnvironmentEntryView },
+      { path: '/teacher/environments', name: 'teacher-environments', component: EnvironmentEntryView, props: { teacherMode } },
+    ],
   })
-  await router.push({ path: '/student/environments', query })
+  await router.push({ path: teacherMode ? '/teacher/environments' : '/student/environments', query })
   await router.isReady()
   const component = defineComponent({
     setup: () => () => h('div', [
@@ -275,6 +278,40 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('启动')
     await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
     expect(wrapper.text()).toContain('ssh')
+  })
+
+  it('keeps teacher console navigation in the teacher workbench and omits student submission controls', async () => {
+    mockEnvironmentInstance({ displayLabel: '教师可管理环境' })
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, true)
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('教师可管理环境'))
+    expect(wrapper.text()).toContain('教师项目环境')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('实验提交与凭据'))).toBe(false)
+    expect(wrapper.find('.freeze-section').exists()).toBe(false)
+    const backLink = wrapper.find('a[href^="/teacher/environments"]')
+    expect(backLink.exists()).toBe(true)
+    expect(backLink.attributes('href')).toContain('projectId=project-1')
+  })
+
+  it('keeps teacher freeze recovery in the operations timeline without exposing freeze controls', async () => {
+    mockEnvironmentInstance({ displayLabel: '教师可管理环境' })
+    vi.mocked(listEnvironmentOperations).mockResolvedValue({
+      data: { items: [mockOperation('running', { kind: 'freeze', operationId: 'freeze-running' })] },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, true)
+    await vi.waitFor(() => expect(wrapper.text()).toContain('教师可管理环境'))
+
+    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('冻结提交处理中，终端已暂时断开'))
+    expect(wrapper.find('.freeze-section').exists()).toBe(false)
+    expect(wrapper.text()).toContain('查看操作状态')
+    expect(wrapper.text()).not.toContain('查看提交状态')
+
+    await wrapper.findAll('button').find((button) => button.text() === '查看操作状态')!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('操作与诊断时间线'))
+    expect(wrapper.find('.freeze-section').exists()).toBe(false)
   })
 
   it('uses the environment display name and keeps the full ID in secondary details', async () => {
@@ -489,7 +526,7 @@ describe('EnvironmentEntryView', () => {
     })
 
     await vi.waitFor(() => expect(wrapper.find('.selector-trigger').text()).toContain('Second project'))
-    expect(wrapper.find('.selector-trigger').text()).toContain('project-2')
+    expect(wrapper.find('.selector-trigger').text()).not.toContain('project-2')
     expect(router.currentRoute.value.query.environmentId).toBe('env-2')
   })
 

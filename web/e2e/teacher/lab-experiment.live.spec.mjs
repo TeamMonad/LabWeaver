@@ -3,8 +3,8 @@ import {
   AUTH_STATE,
   createProjectByUi,
   configureProjectPolicyByUi,
-  csrfHeaders,
   expectJson,
+  navigateFromHomeByUi,
   pollEnvironmentCandidate,
   pollJson,
   selectProjectByUi,
@@ -27,6 +27,8 @@ import { fileURLToPath } from 'node:url'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
 import { issueAccessGrantAndConnect, hasTerminalLine, typeTerminalCommand } from '../support/real-gpu.mjs'
+import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
+import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 
 const LAB_ROOT = fileURLToPath(new URL('../../../examples', import.meta.url))
 
@@ -410,7 +412,8 @@ async function readExistingPublishedApproval(
 }
 
 async function createEnvironmentByStudentUi(page, projectId, releaseId) {
-  await page.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
+  if (page.url() === 'about:blank') await navigateFromHomeByUi(page, '我的实验')
+  else await page.goto(`/student/labs?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, projectId)
   await page.getByRole('button', { name: /创建项目环境/ }).first().click()
   const dialog = page.getByRole('dialog', { name: '创建项目环境', exact: true })
@@ -453,40 +456,21 @@ async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPat
   return frozen
 }
 
-async function waitForCleanupEnvironmentState(request, environmentId) {
-  let latest
-  await expect.poll(async () => {
-    const response = await request.get(`/api/v1/environments/${environmentId}`)
-    if (response.status() === 404) {
-      latest = { observedState: 'deleted' }
-      return true
-    }
-    latest = await expectJson(response, 'LAB_EXPERIMENT_ENVIRONMENT_CLEANUP_READ_FAILED')
-    return ['stopped', 'failed', 'deleting', 'deleted'].includes(latest.observedState)
-  }, { timeout: 240_000, intervals: [1000, 2000, 3000] }).toBe(true)
-  return latest
-}
-
-async function revokeEnvironmentAccessGrants(request, baseURL, environmentId) {
-  const listResponse = await request.get(`/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=100`)
+async function revokeEnvironmentAccessGrants(page, projectId, environmentId) {
+  const listResponse = await page.request.get(`/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=100`)
   if (listResponse.status() === 404) return
   const listed = await expectJson(listResponse, 'LAB_EXPERIMENT_ACCESS_GRANTS_CLEANUP_LIST_FAILED')
   for (const item of listed.items ?? []) {
-    let grantResponse = await request.get(`/api/v1/access-grants/${item.id}`)
+    let grantResponse = await page.request.get(`/api/v1/access-grants/${item.id}`)
     if (grantResponse.status() === 404) continue
     let grant = await expectJson(grantResponse, 'LAB_EXPERIMENT_ACCESS_GRANT_CLEANUP_READ_FAILED')
     if (!['requested', 'active'].includes(grant.state)) continue
-    const revokeResponse = await request.post(`/api/v1/access-grants/${grant.id}/revoke`, {
-      headers: await csrfHeaders(request, baseURL, {
-        'Idempotency-Key': uuidv7(),
-        'If-Match': `"rev-${grant.revision}"`,
-      }),
-      data: { grantId: grant.id, reasonCode: 'lab_acceptance_cleanup' },
-    })
-    const revoked = await expectJson(revokeResponse, 'LAB_EXPERIMENT_ACCESS_GRANT_CLEANUP_REVOKE_FAILED')
-    expect(revoked).toMatchObject({ id: grant.id, state: 'revoked' })
+    if (grant.state === 'requested') {
+      throw new Error(`LAB_EXPERIMENT_ACCESS_GRANT_REQUESTED_NOT_VISIBLE:${grant.id}`)
+    }
+    await revokeEnvironmentAccessGrantByUi(page, projectId, environmentId, grant.id)
     grant = await pollJson(
-      request,
+      page.request,
       `/api/v1/access-grants/${grant.id}`,
       (value) => ['revoked', 'denied', 'expired'].includes(value.state),
       'LAB_EXPERIMENT_ACCESS_GRANT_CLEANUP_STATUS_FAILED',
@@ -496,58 +480,14 @@ async function revokeEnvironmentAccessGrants(request, baseURL, environmentId) {
   }
 }
 
-async function closeExperimentEnvironment(page, environmentId, baseURL) {
-  const request = page.request
-  await revokeEnvironmentAccessGrants(request, baseURL, environmentId)
-  const currentResponse = await request.get(`/api/v1/environments/${environmentId}`)
-  if (currentResponse.status() === 404) return
-  let current = await expectJson(currentResponse, 'LAB_EXPERIMENT_ENVIRONMENT_READ_FOR_CLEANUP_FAILED')
-  if (current.observedState === 'deleted') return
-  if (current.observedState === 'ready') {
-    const stopResponse = await request.post(`/api/v1/environments/${environmentId}/stop`, {
-      headers: await csrfHeaders(request, baseURL, {
-        'Idempotency-Key': uuidv7(),
-        'If-Match': `"rev-${current.revision}"`,
-      }),
-    })
-    const accepted = await expectJson(stopResponse, 'LAB_EXPERIMENT_ENVIRONMENT_STOP_FAILED')
-    await pollJson(
-      request,
-      accepted.statusUrl,
-      (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
-      'LAB_EXPERIMENT_ENVIRONMENT_STOP_STATUS_FAILED',
-      240_000,
-    )
-    current = await waitForCleanupEnvironmentState(request, environmentId)
-  } else if (['stopping', 'expiring', 'deleting'].includes(current.observedState)) {
-    current = await waitForCleanupEnvironmentState(request, environmentId)
-  }
-  if (current.observedState === 'deleted') return
-  const latestResponse = await request.get(`/api/v1/environments/${environmentId}`)
-  if (latestResponse.status() === 404) return
-  current = await expectJson(latestResponse, 'LAB_EXPERIMENT_ENVIRONMENT_READ_BEFORE_DELETE_FAILED')
-  if (current.observedState === 'deleted') return
-  const deleteResponse = await request.delete(`/api/v1/environments/${environmentId}`, {
-    headers: await csrfHeaders(request, baseURL, {
-      'Idempotency-Key': uuidv7(),
-      'If-Match': `"rev-${current.revision}"`,
-    }),
+async function closeExperimentEnvironment(page, projectId, environmentId) {
+  await revokeEnvironmentAccessGrants(page, projectId, environmentId)
+  await deleteEnvironmentByUi(page, {
+    routePrefix: 'student',
+    projectId,
+    environmentId,
+    label: 'LAB_EXPERIMENT_ENVIRONMENT_DELETE',
   })
-  const accepted = await expectJson(deleteResponse, 'LAB_EXPERIMENT_ENVIRONMENT_DELETE_FAILED')
-  const operation = await pollJson(
-    request,
-    accepted.statusUrl,
-    (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
-    'LAB_EXPERIMENT_ENVIRONMENT_DELETE_STATUS_FAILED',
-    240_000,
-  )
-  if (operation.state !== 'succeeded') {
-    throw new Error(`LAB_EXPERIMENT_ENVIRONMENT_DELETE_OPERATION_FAILED:${operation.state}`)
-  }
-  current = await waitForCleanupEnvironmentState(request, environmentId)
-  if (current.observedState !== 'deleted') {
-    throw new Error(`LAB_EXPERIMENT_ENVIRONMENT_NOT_DELETED:${current.observedState}`)
-  }
 }
 
 test('student completes a published lab experiment through the browser terminal', async ({ browser, page, baseURL }, testInfo) => {
@@ -565,6 +505,7 @@ test('student completes a published lab experiment through the browser terminal'
     throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_REQUIRES_TARGET')
   }
   const packageCopy = resumeExistingRun ? null : await mkdtemp(join(tmpdir(), 'labweaver-lab-'))
+  let projectId = resumeProjectId || null
   let environmentId
   let studentContext
   let studentPage
@@ -649,6 +590,7 @@ test('student completes a published lab experiment through the browser terminal'
         await writeFile(sourcePath, starterSource, 'utf8')
       }
       project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
+      projectId = project.id
       await selectProjectByUi(page, project.id)
       await configureProjectPolicyByUi(page, project.id)
       await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
@@ -792,7 +734,8 @@ test('student completes a published lab experiment through the browser terminal'
       if (environmentId) {
         if (!studentContext) studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
         const cleanupPage = await studentContext.newPage()
-        await closeExperimentEnvironment(cleanupPage, environmentId, baseURL)
+        if (!projectId) cleanupErrors.push(new Error('LAB_EXPERIMENT_CLEANUP_PROJECT_ID_MISSING'))
+        else await closeExperimentEnvironment(cleanupPage, projectId, environmentId)
       }
     } catch (error) {
       cleanupErrors.push(error)

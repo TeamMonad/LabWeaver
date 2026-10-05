@@ -11,7 +11,6 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -99,8 +98,12 @@ class AcceptanceHarnessTest(unittest.TestCase):
         )
         self.assertEqual(MODULE.JOURNEYS["admin"].project, "platform-admin")
 
-    def test_model_is_read_from_anthropic_model_without_cluster_fallback(self) -> None:
-        self.assertEqual(MODULE.resolve_model(None, {"ANTHROPIC_MODEL": "glm-5.3"}), "glm-5.3")
+    def test_model_requires_explicit_acceptance_binding_without_cluster_fallback(self) -> None:
+        self.assertEqual(MODULE.resolve_model(None, {"ANTHROPIC_MODEL": "glm-5.3"}), "")
+        self.assertEqual(
+            MODULE.resolve_model(None, {"LABWEAVER_E2E_PROVIDER_MODEL": "qwen3.6:35b"}),
+            "qwen3.6:35b",
+        )
         self.assertEqual(
             MODULE.resolve_model(
                 None,
@@ -252,71 +255,6 @@ class AcceptanceHarnessTest(unittest.TestCase):
         self.assertIn("ANTHROPIC_AUTH_TOKEN=<redacted>", rendered)
         self.assertNotIn("bearer-secret", rendered)
         self.assertNotIn("env-secret", rendered)
-
-    def test_cancel_resource_requires_exact_project_and_request_scope(self) -> None:
-        calls: list[tuple[str, str]] = []
-
-        def http(url, cookie, **kwargs):  # noqa: ANN001, ANN003
-            calls.append((url, kwargs.get("method", "GET")))
-            if url.endswith("/csrf"):
-                return 200, b'{"csrfToken":"token"}', {}
-            if kwargs.get("method") == "POST":
-                return 202, b'{"state":"cancelled"}', {}
-            return (
-                200,
-                b'{"projectId":"project-1","requestKey":"run-1:resource-1","state":"reviewing"}',
-                {"etag": '"rev-3"'},
-            )
-
-        with tempfile.TemporaryDirectory() as temporary:
-            auth_state = Path(temporary) / "admin.json"
-            auth_state.write_text(
-                json.dumps({"cookies": [{"name": "session", "value": "v"}]}),
-                encoding="utf-8",
-            )
-            with mock.patch.object(MODULE, "_http", http):
-                result = MODULE.cancel_resource_request(
-                    base_url="https://portal.example.test",
-                    auth_state=auth_state,
-                    project_id="project-1",
-                    request_id="resource-1",
-                    request_key="run-1:resource-1",
-                )
-
-        self.assertEqual(result["state"], "cancelled")
-        self.assertEqual(calls[-1][1], "POST")
-
-    def test_cancel_resource_does_not_mutate_mismatched_request(self) -> None:
-        calls: list[tuple[str, str]] = []
-
-        def http(url, cookie, **kwargs):  # noqa: ANN001, ANN003
-            calls.append((url, kwargs.get("method", "GET")))
-            return (
-                200,
-                b'{"projectId":"other-project","requestKey":"other-key","state":"reviewing"}',
-                {"etag": '"rev-1"'},
-            )
-
-        with tempfile.TemporaryDirectory() as temporary:
-            auth_state = Path(temporary) / "admin.json"
-            auth_state.write_text(
-                json.dumps({"cookies": [{"name": "session", "value": "v"}]}),
-                encoding="utf-8",
-            )
-            with mock.patch.object(MODULE, "_http", http):
-                result = MODULE.cancel_resource_request(
-                    base_url="https://portal.example.test",
-                    auth_state=auth_state,
-                    project_id="project-1",
-                    request_id="resource-1",
-                    request_key="run-1:resource-1",
-                )
-
-        self.assertIsNone(result)
-        self.assertEqual(
-            calls,
-            [("https://portal.example.test/api/v1/resource-requests/resource-1", "GET")],
-        )
 
     def test_execute_journey_stops_a_hung_browser(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

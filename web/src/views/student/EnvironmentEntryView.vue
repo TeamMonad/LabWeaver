@@ -148,10 +148,10 @@
           <div class="gcp-resource-header">
             <div class="gcp-breadcrumbs">
               <RouterLink
-                :to="{ path: isWorkConnection ? '/researcher/workspaces' : '/student/labs', query: projectId ? { projectId } : undefined }"
+                :to="{ path: environmentListPath, query: projectId ? { projectId } : undefined }"
                 class="breadcrumb-link"
               >
-                {{ isWorkConnection ? 'Work 项目环境' : '课程实验环境' }}
+                {{ breadcrumbLabel }}
               </RouterLink>
               <span class="breadcrumb-sep">/</span>
               <span
@@ -316,7 +316,7 @@
               <span>异步操作与诊断</span>
             </button>
             <button
-              v-if="!isWorkConnection"
+              v-if="!isWorkConnection && !props.teacherMode"
               type="button"
               class="detail-tab"
               :class="{ 'detail-tab--active': activeTab === 'freeze' }"
@@ -582,9 +582,9 @@
                   <button
                     type="button"
                     class="outlined-button"
-                    @click="activeTab = 'freeze'"
+                    @click="activeTab = props.teacherMode ? 'operations' : 'freeze'"
                   >
-                    查看提交状态
+                    {{ props.teacherMode ? '查看操作状态' : '查看提交状态' }}
                   </button>
                 </div>
                 <div
@@ -801,7 +801,7 @@
 
               <!-- TAB 4: Freeze & Submission -->
               <div
-                v-if="!isWorkConnection"
+                v-if="!isWorkConnection && !props.teacherMode"
                 v-show="activeTab === 'freeze'"
                 class="tab-pane"
               >
@@ -1069,6 +1069,13 @@ import {
   type EnvironmentInstanceWithFreeze,
 } from '@/types/access'
 
+const props = withDefaults(defineProps<{
+  /** Teacher inventory and console share the same lifecycle/access controls. */
+  teacherMode?: boolean
+}>(), {
+  teacherMode: false,
+})
+
 const route = useRoute()
 const router = useRouter()
 const projects = useProjects()
@@ -1116,6 +1123,12 @@ const courseId = computed(() => {
 })
 const isContextMissing = computed(() => !projectId.value)
 const isWorkConnection = computed(() => route.path.startsWith('/researcher/') || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const environmentListPath = computed(() => props.teacherMode
+  ? '/teacher/environments'
+  : isWorkConnection.value ? '/researcher/workspaces' : '/student/labs')
+const breadcrumbLabel = computed(() => props.teacherMode
+  ? '教师项目环境'
+  : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
 const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 

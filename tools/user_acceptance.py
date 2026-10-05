@@ -23,7 +23,6 @@ import json
 import os
 import re
 import stat
-import ssl
 import subprocess
 import tempfile
 import time
@@ -238,7 +237,9 @@ def acceptance_environment(
 
     environment = dict(environ)
     environment["LABWEAVER_BASE_URL"] = base_url
-    environment["LABWEAVER_IGNORE_HTTPS_ERRORS"] = "1"
+    # Acceptance must exercise the public certificate chain. Override any
+    # developer-local setting so a browser run cannot silently bypass TLS.
+    environment["LABWEAVER_IGNORE_HTTPS_ERRORS"] = "0"
     environment[ANTHROPIC_MODEL_ENV] = model
     environment[MODEL_ENV] = model
     environment["LABWEAVER_AUTH_DIR"] = str(auth_dir)
@@ -479,9 +480,16 @@ def resolve_model(
     environ: Mapping[str, str],
     _run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
 ) -> str:
-    """Resolve the provider model from the root `ANTHROPIC_MODEL` target only."""
+    """Resolve an explicitly selected acceptance model.
 
-    return (explicit or environ.get(ANTHROPIC_MODEL_ENV) or "").strip()
+    The acceptance launcher may load the repository's root ``.env`` for other
+    local defaults.  That file can contain a developer's unrelated
+    ``ANTHROPIC_MODEL`` and must never silently select the model used for a
+    public run.  Require the command-line selection or the dedicated
+    acceptance variable instead.
+    """
+
+    return (explicit or environ.get(MODEL_ENV) or "").strip()
 
 
 def resolve_provider_binding(
@@ -593,123 +601,6 @@ def _join(base_url: str, path: str) -> str:
 JOURNEY_TIMEOUT_SECONDS = 15_000.0
 JOURNEY_TIMEOUT = "LW_ACCEPTANCE_JOURNEY_TIMEOUT"
 JOURNEY_TIMEOUT_EXIT_CODE = 124
-
-RESOURCE_CANCEL_REASON = "acceptance harness cleanup of this run's resource request"
-
-
-def _auth_cookie(role_file: Path) -> str | None:
-    """Session cookie header from a Playwright storage state, if it exists."""
-
-    try:
-        state = json.loads(role_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    cookies = state.get("cookies") or []
-    if not cookies:
-        return None
-    return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
-
-
-def _http(
-    url: str,
-    cookie: str,
-    *,
-    origin: str,
-    method: str = "GET",
-    body: Mapping[str, object] | None = None,
-    token: str | None = None,
-    etag: str | None = None,
-) -> tuple[int, bytes, Mapping[str, str]]:
-    headers = {
-        "Cookie": cookie,
-        "Accept": "application/json",
-        "Origin": origin,
-        "Content-Type": "application/json",
-    }
-    if token:
-        headers["X-CSRF-Token"] = token
-    if etag:
-        headers["If-Match"] = etag
-    if method == "POST":
-        headers["Idempotency-Key"] = str(uuid.uuid4())
-    request = urllib.request.Request(
-        url,
-        method=method,
-        data=json.dumps(body).encode() if body is not None else None,
-        headers=headers,
-    )
-    context = ssl.create_default_context()
-    # Resource request details can contain long provider metadata. Keep the
-    # response bounded without truncating a normal request payload.
-    max_body_bytes = 8 * 1024 * 1024
-    try:
-        with urllib.request.urlopen(request, context=context, timeout=25.0) as response:
-            return response.status, response.read(max_body_bytes), dict(response.headers)
-    except urllib.error.HTTPError as error:
-        return error.code, error.read(max_body_bytes), dict(error.headers)
-
-
-def cancel_resource_request(
-    *,
-    base_url: str,
-    auth_state: Path,
-    project_id: str,
-    request_id: str,
-    request_key: str,
-) -> dict[str, object] | None:
-    """Cancel one request after checking its exact project and request key.
-
-    This command is intentionally incapable of discovering or selecting stale
-    requests. The caller must pass the identifiers returned by the current
-    journey; a mismatched project or request key is rejected before mutation.
-    """
-
-    if not project_id.strip() or not request_id.strip() or not request_key.strip():
-        raise AcceptanceError(JOURNEY_FAILED, "project, request and request key are required")
-    cookie = _auth_cookie(auth_state)
-    if not cookie:
-        return None
-    status, body, headers = _http(
-        _join(base_url, f"/api/v1/resource-requests/{request_id}"),
-        cookie,
-        origin=base_url,
-    )
-    if status != 200:
-        return None
-    try:
-        detail = json.loads(body)
-    except ValueError:
-        return None
-    if (
-        detail.get("projectId") != project_id
-        or detail.get("requestKey") != request_key
-        or detail.get("state") not in {"requested", "reviewing"}
-    ):
-        return None
-    _, csrf_body, _ = _http(_join(base_url, "/api/v1/auth/csrf"), cookie, origin=base_url)
-    try:
-        csrf = json.loads(csrf_body)
-    except ValueError:
-        return None
-    token = csrf.get("csrfToken") or csrf.get("token")
-    etag = headers.get("etag") or headers.get("ETag")
-    if not token or not etag:
-        return None
-    cancel_status, cancel_body, _ = _http(
-        _join(base_url, f"/api/v1/resource-requests/{request_id}/cancel"),
-        cookie,
-        origin=base_url,
-        method="POST",
-        body={"reason": RESOURCE_CANCEL_REASON},
-        token=token,
-        etag=etag,
-    )
-    try:
-        result = json.loads(cancel_body)
-    except ValueError:
-        result = {"status": cancel_status}
-    return result if cancel_status in {200, 201, 202} else None
-
 
 def queued_dispatch_count(
     run_kubectl: Callable[[Sequence[str]], tuple[int, str, str]],
@@ -1169,16 +1060,6 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--credentials-dir", default=str(DEFAULT_CREDENTIALS_DIR))
     preflight.add_argument("--model", default=None)
 
-    cancel = subparsers.add_parser(
-        "cancel-resource",
-        help="cancel one resource request identified by this run",
-    )
-    cancel.add_argument("--base-url", required=True)
-    cancel.add_argument("--auth-state", required=True)
-    cancel.add_argument("--project-id", required=True)
-    cancel.add_argument("--request-id", required=True)
-    cancel.add_argument("--request-key", required=True)
-
     run = subparsers.add_parser("run", help="run the selected browser journeys")
     run.add_argument("--base-url", required=True)
     run.add_argument("--run-id", required=True)
@@ -1221,20 +1102,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         for code in result.diagnostics:
             print(code, file=sys.stderr)
         return result.exit_code
-
-    if args.command == "cancel-resource":
-        result = cancel_resource_request(
-            base_url=args.base_url,
-            auth_state=Path(args.auth_state),
-            project_id=args.project_id,
-            request_id=args.request_id,
-            request_key=args.request_key,
-        )
-        if result is None:
-            print("resource request was not cancelled", file=sys.stderr)
-            return 1
-        print(json.dumps(result, sort_keys=True))
-        return 0
 
     result = run_acceptance(args)
     for code in result.diagnostics:

@@ -133,8 +133,21 @@ export async function configureProjectPolicyByUi(page, projectId, budgetOverride
   return await expectJson(await responsePromise, 'PROJECT_POLICY_UI_SAVE_FAILED')
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Enter a role workbench through the public home task cards. */
+export async function navigateFromHomeByUi(page, taskLabel) {
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible({ timeout: 60_000 })
+  const task = page.locator('.task-grid').getByRole('link', { name: new RegExp(`^${escapeRegExp(taskLabel)}`) })
+  await expect(task).toHaveCount(1, { timeout: 60_000 })
+  await task.click()
+}
+
 export async function createProjectByUi(page, name) {
-  await page.goto('/researcher/workspaces', { waitUntil: 'domcontentloaded' })
+  await navigateFromHomeByUi(page, '项目与工作空间')
   await page.getByRole('heading', { name: '项目与工作空间', exact: true }).waitFor()
   await page.getByRole('button', { name: '新建项目', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '新建项目' })
@@ -143,39 +156,25 @@ export async function createProjectByUi(page, name) {
   const responsePromise = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/projects')
   await dialog.getByRole('button', { name: '创建项目', exact: true }).click()
   const project = await expectJson(await responsePromise, 'PROJECT_CREATE_FAILED')
-  await page.getByRole('option', { name: new RegExp(project.id) }).waitFor()
+  const trigger = page.getByRole('button', { name: '选择项目', exact: true })
+  await expect(trigger.locator('.trigger-primary')).toHaveText(project.name, { timeout: 30_000 })
   return project
 }
 
 export async function selectProjectByUi(page, projectId) {
+  const projects = await expectJson(await page.request.get('/api/v1/projects'), 'PROJECT_LIST_FOR_SELECTOR_FAILED')
+  if (!Array.isArray(projects)) throw new Error('PROJECT_LIST_FOR_SELECTOR_INVALID')
+  const project = projects.find((item) => item?.id === projectId)
+  if (!project || typeof project.name !== 'string' || project.name.trim() === '') {
+    throw new Error(`PROJECT_SELECTOR_PROJECT_NOT_FOUND:${projectId}`)
+  }
   const trigger = page.getByRole('button', { name: '选择项目', exact: true })
   await trigger.click()
   const dialog = page.getByRole('dialog', { name: '项目选择器' })
-  const option = dialog.getByRole('option', { name: new RegExp(projectId) })
-  await option.waitFor()
+  const option = dialog.locator('button.project-item').filter({ hasText: project.name })
+  await expect(option).toHaveCount(1, { timeout: 30_000 })
   await option.click()
-  await expect(trigger).toContainText(projectId)
-}
-
-export async function uploadPackage(request, baseURL, projectId, policyRevision = 1) {
-  const content = Buffer.from('# LabWeaver live Work fixture\n\nUse the managed environment.\n', 'utf8')
-  const files = [{ path: 'README.md', sizeBytes: content.byteLength, mediaType: 'text/markdown' }]
-  const sessionResponse = await request.post(`/api/v1/projects/${projectId}/problem-package-uploads`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-    data: { projectId, courseId: null, files, retentionPolicyRevision: policyRevision },
-  })
-  const session = await expectJson(sessionResponse, 'PACKAGE_UPLOAD_SESSION_FAILED')
-  const sessionEtag = sessionResponse.headers().etag
-  if (!/^"rev-\d+"$/.test(sessionEtag ?? '')) throw new Error(`PACKAGE_UPLOAD_ETAG_INVALID:${sessionEtag ?? 'missing'}`)
-  const target = session.uploadTargets.find((item) => item.path === 'README.md')
-  if (!target) throw new Error('PACKAGE_UPLOAD_TARGET_MISSING:README.md')
-  const uploadResponse = await request.put(target.uploadUrl, { headers: target.requiredHeaders, data: content })
-  if (!uploadResponse.ok()) throw new Error(`PACKAGE_OBJECT_UPLOAD_FAILED:${uploadResponse.status()} ${(await uploadResponse.text()).slice(0, 2000)}`)
-  const completeResponse = await request.post(`/api/v1/projects/${projectId}/problem-package-uploads/${session.id}/complete`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7(), 'If-Match': sessionEtag }),
-    data: {},
-  })
-  return await expectJson(completeResponse, 'PACKAGE_UPLOAD_COMPLETE_FAILED')
+  await expect(trigger.locator('.trigger-primary')).toHaveText(project.name)
 }
 
 export async function pollJson(request, path, predicate, label, timeout = 180_000) {

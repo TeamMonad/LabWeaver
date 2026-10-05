@@ -4,12 +4,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import {
-  AUTH_STATE, configureProjectPolicyByUi, createProjectByUi, csrfHeaders,
-  expectJson, pollJson, selectProjectByUi, uuidv7,
+  AUTH_STATE, configureProjectPolicyByUi, createProjectByUi,
+  expectJson, navigateFromHomeByUi, pollJson, selectProjectByUi, uuidv7,
 } from '../support/live.mjs'
 import {
-  addProjectStudentByUi, readActorId, snapshotProjectResourceRequestIds,
-  startExperimentRunByUi, uploadPackageDirectoryByUi, waitForEnvironment,
+  addProjectStudentByUi, cancelAgentRunByUi, readActorId, snapshotProjectResourceRequestIds,
+  startExperimentRunByUi, uploadPackageDirectoryByUi,
   waitForFrozenSubmission, waitForProjectEvaluationResultWithResourceApproval,
 } from '../support/real-experiment.mjs'
 import {
@@ -19,6 +19,7 @@ import { createRealWorkSshIdentity, runPinnedSsh } from '../support/real-work-ss
 import {
   addSshPublicKeyByUi, deleteSshPublicKeyByUi, issueEnvironmentSshAccessGrantByUi,
 } from '../support/ssh-access.mjs'
+import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../examples/linux-config-probe')
 const TASK_PROVIDER = process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
@@ -122,7 +123,8 @@ async function authorAndPublish(page, adminPage, project, environmentSpec, evalu
 }
 
 async function startStudentEnvironment(page, adminPage, projectId, releaseId, actorId, providerBinding, onAccepted) {
-  await page.goto(`/student/labs?projectId=${projectId}`, { waitUntil: 'domcontentloaded' })
+  if (page.url() === 'about:blank') await navigateFromHomeByUi(page, '我的实验')
+  else await page.goto(`/student/labs?projectId=${projectId}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, projectId)
   await page.getByRole('button', { name: /创建项目环境/ }).first().click()
   const dialog = page.getByRole('dialog', { name: '创建项目环境', exact: true })
@@ -231,37 +233,12 @@ async function cleanupEnvironment(page, projectId, environmentId) {
       await cancelProjectResourceRequestByUi(page, { projectId, requestKey: request.requestKey })
     }
   }
-  const response = await page.request.get(`/api/v1/environments/${environmentId}`)
-  if (response.status() === 404) return
-  let environment = await expectJson(response, 'CONFIG_PROBE_CLEANUP_ENVIRONMENT_READ_FAILED')
-  expect(environment).toMatchObject({ id: environmentId, projectId })
-  if (environment.observedState === 'deleted') return
-  if (owned.some((request) => ['active', 'expiring'].includes(request.state))) {
-    await waitForEnvironment(page.request, environmentId, 'deleted')
-    return
-  }
-  if (environment.observedState === 'ready') {
-    const stop = await expectJson(await page.request.post(`/api/v1/environments/${environmentId}/stop`, {
-      headers: await csrfHeaders(page.request, new URL(page.url()).origin, {
-        'Idempotency-Key': uuidv7(), 'If-Match': `"rev-${environment.revision}"`,
-      }),
-    }), 'CONFIG_PROBE_CLEANUP_STOP_FAILED')
-    const operation = await pollJson(page.request, stop.statusUrl,
-      (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state), 'CONFIG_PROBE_CLEANUP_STOP_STATUS_FAILED', 240_000)
-    expect(operation.state).toBe('succeeded')
-  }
-  environment = await pollJson(page.request, `/api/v1/environments/${environmentId}`,
-    (value) => !['stopping', 'expiring', 'deleting'].includes(value.observedState), 'CONFIG_PROBE_CLEANUP_ENVIRONMENT_SETTLE_FAILED', 240_000)
-  if (environment.observedState === 'deleted') return
-  const deletion = await expectJson(await page.request.delete(`/api/v1/environments/${environmentId}`, {
-    headers: await csrfHeaders(page.request, new URL(page.url()).origin, {
-      'Idempotency-Key': uuidv7(), 'If-Match': `"rev-${environment.revision}"`,
-    }),
-  }), 'CONFIG_PROBE_CLEANUP_DELETE_FAILED')
-  const operation = await pollJson(page.request, deletion.statusUrl,
-    (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state), 'CONFIG_PROBE_CLEANUP_DELETE_STATUS_FAILED', 240_000)
-  expect(operation.state).toBe('succeeded')
-  await waitForEnvironment(page.request, environmentId, 'deleted')
+  await deleteEnvironmentByUi(page, {
+    routePrefix: 'student',
+    projectId,
+    environmentId,
+    label: 'CONFIG_PROBE_CLEANUP_DELETE',
+  })
 }
 
 test('teacher publishes a configuration experiment and student repairs live VM facts', async ({ page, browser, baseURL }) => {
@@ -319,14 +296,13 @@ test('teacher publishes a configuration experiment and student repairs live VM f
       try {
         const current = await expectJson(await page.request.get(`/api/v1/projects/${project.id}/agent-runs/${run.id}`), 'CONFIG_PROBE_CLEANUP_RUN_READ_FAILED')
         if (!TERMINAL_STATES.includes(current.state)) {
-          const cancelled = await page.request.post(`/api/v1/projects/${project.id}/agent-runs/${run.id}/cancel`, {
-            headers: await csrfHeaders(page.request, baseURL, { 'Idempotency-Key': uuidv7(), 'If-Match': `"rev-${current.revision}"` }),
+          await cancelAgentRunByUi(page, {
+            projectId: project.id,
+            runId: run.id,
+            route: '/teacher/materials',
+            buttonName: '取消',
+            label: 'CONFIG_PROBE_CLEANUP_RUN_CANCEL',
           })
-          await expectJson(cancelled, 'CONFIG_PROBE_CLEANUP_RUN_CANCEL_FAILED')
-          await pollJson(page.request, `/api/v1/projects/${project.id}/agent-runs/${run.id}`,
-            (value) => TERMINAL_STATES.includes(value.state)
-              && !value.tracks.some((track) => track.attempts?.some((attempt) => ACTIVE_ATTEMPTS.includes(attempt.state))),
-            'CONFIG_PROBE_CLEANUP_RUN_CANCEL_STATUS_FAILED', 240_000)
         }
       } catch (error) { cleanupFailures.push(error) }
     }

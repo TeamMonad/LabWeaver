@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { expectJson } from './live.mjs'
+import { expectJson, navigateFromHomeByUi } from './live.mjs'
 
 /** The Work capacity provider binding the platform configures for real Work runs. */
 // See real-experiment.mjs: the shipped default targets the local development
@@ -85,12 +85,16 @@ async function waitForRenderedState(page, { label, reload, read, expected, timeo
  * Open the researcher resource page for one project. The project identity
  * travels in the query so a later reload keeps the same scope.
  */
-async function openResourcePage(page, { projectName, projectId }) {
+async function openResourcePage(page, { projectName, projectId, fromHome = false }) {
+  if (fromHome) await navigateFromHomeByUi(page, '资源申请')
   const target = projectId ?? null
-  await page.goto(
-    target ? `/researcher/resources?projectId=${encodeURIComponent(target)}` : '/researcher/resources',
-    { waitUntil: 'domcontentloaded' },
-  )
+  let selectedProjectId = target
+  if (!fromHome) {
+    await page.goto(
+      target ? `/researcher/resources?projectId=${encodeURIComponent(target)}` : '/researcher/resources',
+      { waitUntil: 'domcontentloaded' },
+    )
+  }
   await expect(page.getByRole('heading', { name: '资源申请', exact: true, level: 2 }))
     .toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   const select = page.locator('.project-strip select')
@@ -107,8 +111,9 @@ async function openResourcePage(page, { projectName, projectId }) {
     const value = await option.getAttribute('value')
     if (!value) throw new Error(`LW_ACCEPTANCE_RESOURCE_PROJECT_OPTION_INVALID:${projectName}`)
     await select.selectOption(value)
+    selectedProjectId = value
   }
-  return target
+  return selectedProjectId
 }
 
 /**
@@ -210,7 +215,11 @@ export async function requestProjectResourceByUi(page, {
     || (releaseId !== null && (typeof releaseId !== 'string' || releaseId === '' || !Number.isInteger(releaseVersion) || releaseVersion < 1))) {
     throw new Error('LW_ACCEPTANCE_RESOURCE_RELEASE_IDENTITY_INVALID')
   }
-  const selectedProjectId = await openResourcePage(page, { projectName, projectId })
+  const selectedProjectId = await openResourcePage(page, {
+    projectName,
+    projectId,
+    fromHome: page.url() === 'about:blank',
+  })
   await waitForResourceLists(page)
   const scope = projectName ?? selectedProjectId ?? 'unscoped'
 
@@ -423,7 +432,8 @@ export async function approveResourceRequestByUi(page, {
   }
   const scope = projectName ?? projectId ?? requestKey
 
-  await page.goto('/admin/resource-approval', { waitUntil: 'domcontentloaded' })
+  if (page.url() === 'about:blank') await navigateFromHomeByUi(page, '资源审批')
+  else await page.goto('/admin/resource-approval', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: '资源审批与资源使用授权管理', exact: true }))
     .toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   const row = adminRequestRows(page).filter({ hasText: requestKey })
@@ -559,7 +569,18 @@ export async function releaseProjectLeaseByUi(page, { projectName, projectId = n
   if (candidates.length > 1) {
     throw new Error(`LW_ACCEPTANCE_LEASE_AMBIGUOUS:${candidates.map((item) => item.leaseId).join(',')}`)
   }
-  const matched = candidates[0]
+  let matched = candidates[0]
+  if (matched.state === RESEARCHER_LEASE_STATE.allocating) {
+    matched = await waitForRenderedState(page, {
+      label: `LW_ACCEPTANCE_LEASE_RELEASE_READY:${matched.leaseId}`,
+      reload: () => openResourcePage(page, { projectName, projectId }),
+      read: async () => {
+        const listsAfter = await readResourceLists(page)
+        return listsAfter.leases.find((item) => item.leaseId === matched.leaseId) ?? null
+      },
+      expected: (value) => value.state !== RESEARCHER_LEASE_STATE.allocating,
+    })
+  }
   if (RESEARCHER_LEASE_RELEASED_STATES.includes(matched.state)) return { ...matched, released: false }
 
   const row = researcherLeaseRows(page).filter({ hasText: matched.leaseId })

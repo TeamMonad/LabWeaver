@@ -8,7 +8,6 @@ import type {
   ProblemPackageSchema,
   ProblemPackageUploadSessionSchema,
 } from '@/generated/contracts'
-import { sha256File } from '@/utils/crypto'
 import { formatBytes, idempotencyKey, ifMatch } from '@/utils/format'
 import { putFileWithProgress } from '@/utils/upload'
 import { extractProblemDetails, makeDiagnostic } from '@/types/async'
@@ -18,8 +17,6 @@ export type UploadFile = {
   path: string
   sizeBytes: number
   mediaType: string
-  /** Local diagnostic hash shown to the teacher; the upload contract binds object metadata server-side. */
-  sha256: string
   status: 'pending' | 'uploading' | 'done' | 'error'
   progress: number
   error?: string
@@ -29,7 +26,6 @@ export type UploadFile = {
 export type PackageUploadState =
   | { kind: 'idle' }
   | { kind: 'loading'; message?: string }
-  | { kind: 'hashing' }
   | { kind: 'ready' }
   | { kind: 'creating' }
   | { kind: 'uploading' }
@@ -50,6 +46,8 @@ export function useProjectProblemPackageUpload(
 
   async function addDirectoryItems(items: DataTransferItemList | null) {
     if (!items) return
+    const generation = ++loadGeneration
+    const id = projectId.value
     const entries: FileSystemEntry[] = []
     for (let index = 0; index < items.length; index += 1) {
       const entry = items[index].webkitGetAsEntry()
@@ -57,7 +55,8 @@ export function useProjectProblemPackageUpload(
     }
     const collected: File[] = []
     await Promise.all(entries.map((entry) => collectFiles(entry, '', collected)))
-    await addFiles(collected)
+    if (generation !== loadGeneration || projectId.value !== id) return
+    addFiles(collected)
   }
 
   async function collectFiles(entry: FileSystemEntry, prefix: string, out: File[]): Promise<void> {
@@ -97,33 +96,21 @@ export function useProjectProblemPackageUpload(
     return path.startsWith(prefix) ? path.slice(prefix.length) : path
   }
 
-  async function addFiles(selected: File[]) {
-    const generation = ++loadGeneration
-    const id = projectId.value
+  function addFiles(selected: File[]) {
+    ++loadGeneration
     const directoryPrefix = commonDirectoryPrefix(selected.map(rawPackagePathOf))
     const ordered = [...selected].sort((left, right) => packagePathOf(left, directoryPrefix).localeCompare(packagePathOf(right, directoryPrefix)))
-    state.value = { kind: 'hashing' }
-    try {
-      const preparedFiles = await Promise.all(ordered.map(async (file) => ({
-        file,
-        path: packagePathOf(file, directoryPrefix),
-        sizeBytes: file.size,
-        mediaType: file.type || 'application/octet-stream',
-        sha256: await sha256File(file),
-        status: 'pending' as const,
-        progress: 0,
-      })))
-      if (generation !== loadGeneration || projectId.value !== id) return
-      files.value = preparedFiles
-      session.value = null
-      state.value = { kind: 'ready' }
-    } catch (error) {
-      if (generation !== loadGeneration || projectId.value !== id) return
-      state.value = {
-        kind: 'error',
-        diagnostic: makeDiagnostic('FILE_HASH_FAILED', `计算文件哈希失败：${error instanceof Error ? error.message : String(error)}`, false),
-      }
-    }
+    const preparedFiles = ordered.map((file) => ({
+      file,
+      path: packagePathOf(file, directoryPrefix),
+      sizeBytes: file.size,
+      mediaType: file.type || 'application/octet-stream',
+      status: 'pending' as const,
+      progress: 0,
+    }))
+    files.value = preparedFiles
+    session.value = null
+    state.value = preparedFiles.length > 0 ? { kind: 'ready' } : { kind: 'idle' }
   }
 
   function removeFile(path: string) {

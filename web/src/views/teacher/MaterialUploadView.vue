@@ -203,18 +203,6 @@
             </button>
           </template>
         </DataTable>
-        <details class="technical-details file-integrity-details">
-          <summary>查看文件完整性详情</summary>
-          <ul class="file-integrity-list">
-            <li
-              v-for="row in upload.files"
-              :key="row.path"
-            >
-              <span>{{ row.path }}</span>
-              <code :title="row.sha256">{{ row.sha256 }}</code>
-            </li>
-          </ul>
-        </details>
       </div>
 
       <div
@@ -244,10 +232,7 @@
           :disabled="!canUpload"
           @click="upload.createSession"
         >
-          <template v-if="upload.state.kind === 'hashing'">
-            计算哈希中…
-          </template>
-          <template v-else-if="upload.state.kind === 'loading'">
+          <template v-if="upload.state.kind === 'loading'">
             读取已归档材料包…
           </template>
           <template v-else-if="upload.state.kind === 'creating'">
@@ -1042,30 +1027,6 @@ onUnmounted(() => {
 
 .file-list {
   margin-top: 16px;
-}
-
-.file-integrity-details {
-  margin-top: 12px;
-}
-
-.file-integrity-list {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
-  color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-body-small);
-}
-
-.file-integrity-list li {
-  display: grid;
-  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr);
-  gap: 12px;
-}
-
-.file-integrity-list code {
-  overflow-wrap: anywhere;
 }
 
 .file-path {

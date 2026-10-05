@@ -47,11 +47,10 @@
               >
                 <span class="project-item__main">
                   <strong>{{ project.name }}</strong>
-                  <small>{{ project.id }}</small>
                 </span>
                 <span class="project-item__meta">
                   <span class="state-chip" :class="`state-chip--${project.state}`">{{ project.state === 'active' ? '运行中' : '已归档' }}</span>
-                  <small>{{ project.courseId ? `课程 ${project.courseId}` : '独立项目' }}</small>
+                  <small>{{ project.courseId ? '课程项目' : '独立项目' }}</small>
                 </span>
               </button>
             </div>
@@ -87,8 +86,16 @@
               <textarea v-model="editDescription" class="text-input" rows="3" maxlength="2000" />
             </label>
             <div class="readonly-meta">
-              <span>课程关联</span><code>{{ selectedProject.courseId ?? '独立项目' }}</code>
+              <span>课程关联</span><span>{{ selectedProject.courseId ? '课程项目' : '独立项目' }}</span>
+              <details v-if="selectedProject.courseId" class="advanced-details">
+                <summary>查看课程标识</summary>
+                <code>{{ selectedProject.courseId }}</code>
+              </details>
             </div>
+            <details class="advanced-details">
+              <summary>查看项目标识</summary>
+              <code>{{ selectedProject.id }}</code>
+            </details>
             <div class="form-actions">
               <button type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
@@ -204,8 +211,11 @@
                   <li v-for="environment in data" :key="environment.id" class="work-row">
                     <div class="work-row__main">
                       <strong>{{ environment.displayLabel }}</strong>
-                      <small>{{ environment.id }}</small>
                       <small>{{ environment.runtimeKind === 'container' ? '容器' : '虚拟机' }} · 更新于 {{ formatTimestamp(environment.updatedAt) }}</small>
+                      <details class="advanced-details">
+                        <summary>查看环境标识</summary>
+                        <code>{{ environment.id }}</code>
+                      </details>
                     </div>
                     <div class="work-row__actions">
                       <span class="state-chip" :class="`state-chip--${environment.observedState}`">{{ environmentStateLabel(environment.observedState) }}</span>
@@ -474,6 +484,9 @@ textarea.text-input { resize: vertical; }
 .work-row__main { display: grid; gap: 4px; min-width: 0; }
 .work-row__main strong { overflow-wrap: anywhere; }
 .work-row__main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.advanced-details { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.advanced-details summary { cursor: pointer; }
+.advanced-details code { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 .member-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .member-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 11px 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
 .member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; gap: 10px; align-items: end; }

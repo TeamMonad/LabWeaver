@@ -6,7 +6,6 @@ import {
   AUTH_STATE,
   createProjectByUi,
   configureProjectPolicyByUi,
-  csrfHeaders,
   expectJson,
   pollEnvironmentCandidate,
   pollJson,
@@ -44,6 +43,7 @@ import {
   addSshPublicKeyByUi as addStudentSshKeyByUi,
   deleteSshPublicKeyByUi as deleteStudentSshKeyByUi,
   issueEnvironmentSshAccessGrantByUi as issueWorkAccessGrantByUi,
+  issueEnvironmentAccessGrantByUi,
   waitForActiveAccessGrant,
 } from '../support/ssh-access.mjs'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
@@ -409,39 +409,14 @@ async function verifyCrossProjectEnvironmentDenied(browser, baseURL, projectId, 
   }
 }
 
-async function requestNewConnectionAfterLeaseRevoke(request, baseURL, projectId, environment, endpointIds) {
-  const response = await request.post(`/api/v1/environments/${environment.id}/access-grants`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-    data: {
-      projectId,
-      courseId: null,
-      environmentId: environment.id,
-      environmentRevision: environment.revision,
-      endpointIds,
-    },
+async function assertConnectionBlockedAfterLeaseRevoke(page, projectId, environment) {
+  await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environment.id)}`, {
+    waitUntil: 'domcontentloaded',
   })
-  const accepted = await expectJson(response, 'POST_REVOKE_NEW_CONNECTION_REQUEST_FAILED')
-  expect(accepted).toMatchObject({
-    id: expect.any(String),
-    projectId,
-    environmentId: environment.id,
-    environmentRevision: environment.revision,
-    state: 'requested',
-  })
-  const settled = await pollJson(
-    request,
-    `/api/v1/access-grants/${accepted.id}`,
-    (value) => ['denied', 'active', 'expired', 'revoked'].includes(value.state),
-    'POST_REVOKE_NEW_CONNECTION_STATUS_FAILED',
-    120_000,
-  )
-  if (settled.state !== 'denied') {
-    throw new Error(`POST_REVOKE_NEW_CONNECTION_NOT_DENIED:${settled.state}:${settled.reasonCode ?? 'reason missing'}`)
-  }
-  if (settled.reasonCode !== 'LW_ACCESS_ENDPOINT_ELIGIBILITY_DENIED') {
-    throw new Error(`POST_REVOKE_NEW_CONNECTION_WRONG_REASON:${settled.reasonCode ?? 'reason missing'}`)
-  }
-  return settled
+  await expect(page.getByRole('heading', { name: '项目环境控制台', exact: true })).toBeVisible({ timeout: 120_000 })
+  await expect(page.getByText('环境已停止，启动后才能签发访问授权。', { exact: true })).toBeVisible({ timeout: 120_000 })
+  const createButton = page.getByRole('button', { name: '签发访问授权', exact: true })
+  if (await createButton.count() > 0) await expect(createButton).toBeDisabled()
 }
 
 async function approveResourceRequest(browser, baseURL, requestBody) {
@@ -506,33 +481,10 @@ function realContainerArtifact(candidate) {
   return artifact
 }
 
-async function issueWorkAccessGrant(request, baseURL, projectId, environment) {
-  const endpoints = await expectJson(
-    await request.get(`/api/v1/environments/${environment.id}/endpoints`),
-    'REAL_WORK_ENDPOINTS_READ_FAILED',
-  )
-  if (!Array.isArray(endpoints.items) || endpoints.items.length === 0) throw new Error('REAL_WORK_ENDPOINTS_MISSING')
-  const endpointIds = endpoints.items.map((endpoint) => endpoint.id)
-  const accepted = await expectJson(
-    await request.post(`/api/v1/environments/${environment.id}/access-grants`, {
-      headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-      data: {
-        projectId,
-        courseId: null,
-        environmentId: environment.id,
-        environmentRevision: environment.revision,
-        endpointIds,
-      },
-    }),
-    'REAL_WORK_ACCESS_GRANT_CREATE_FAILED',
-  )
-  const grant = await waitForActiveAccessGrant(request, accepted.id)
-  const httpGrant = grant.endpointGrants.find(
-    (endpointGrant) => (endpointGrant.protocol === 'http' || endpointGrant.protocol === 'https')
-      && typeof endpointGrant.connectUrl === 'string',
-  )
-  if (!httpGrant?.connectUrl) throw new Error('REAL_WORK_ACCESS_GRANT_HTTP_CONNECTION_MISSING')
-  return { grant, httpGrant }
+async function issueWorkAccessGrant(page, projectId, environment) {
+  const issued = await issueEnvironmentAccessGrantByUi(page, projectId, environment, 'http')
+  if (!issued.endpointGrant.connectUrl) throw new Error('REAL_WORK_ACCESS_GRANT_HTTP_CONNECTION_MISSING')
+  return { ...issued, httpGrant: issued.endpointGrant }
 }
 
 async function readWorkEndpoint(request, connectUrl, label) {
@@ -956,7 +908,7 @@ test('student provisions a Work environment, configures it, and releases its cap
         if (existingGrant.state === 'active' && existingGrant.environmentRevision === configuredEnvironment.revision) {
           configuredConnection = { grant: existingGrant, httpGrant: httpEndpointGrant(existingGrant) }
         } else {
-          configuredConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, configuredEnvironment)
+          configuredConnection = await issueWorkAccessGrant(page, project.id, configuredEnvironment)
           revocationTargetGrant = configuredConnection.grant
         }
         const configuredBody = await readWorkEndpoint(
@@ -1027,7 +979,7 @@ test('student provisions a Work environment, configures it, and releases its cap
         const restartedCudaResult = await runRealWorkVmCudaProbe(restartedConnection.endpointGrant, vmSshIdentity)
         expect(restartedCudaResult).toEqual({ count: 256, sum: 32640, max: 255 })
       } else {
-        const restartedConnection = await issueWorkAccessGrant(page.request, baseURL, project.id, restartedEnvironment)
+        const restartedConnection = await issueWorkAccessGrant(page, project.id, restartedEnvironment)
         revocationTargetGrant = restartedConnection.grant
         const restartedSeedBody = await readWorkFile(
           page.request,
@@ -1181,22 +1133,12 @@ test('student provisions a Work environment, configures it, and releases its cap
       assertRealWorkCharges(finance.charges, REAL_WORK_GPU)
       await inspectRealWorkFinanceByUi(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
     }
-    const deniedConnection = await requestNewConnectionAfterLeaseRevoke(
-      page.request,
-      baseURL,
-      project.id,
-      stoppedEnvironment,
-      endpointIds,
-    )
-    expect(deniedConnection).toMatchObject({
-      state: 'denied',
-      reasonCode: 'LW_ACCESS_ENDPOINT_ELIGIBILITY_DENIED',
-    })
+    await assertConnectionBlockedAfterLeaseRevoke(page, project.id, stoppedEnvironment)
   } catch (error) {
     primaryFailure = error
     if (REAL_WORK_MODE) {
       try {
-        await cleanupWorkResources(page.request, baseURL, project.id, trackedEnvironmentId, trackedLeaseId, trackedRequestId)
+        await cleanupWorkResources(page.request, baseURL, project.id, trackedEnvironmentId, trackedLeaseId, trackedRequestId, page)
       } catch (cleanupError) {
         const primaryMessage = error instanceof Error ? error.message : String(error)
         const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)

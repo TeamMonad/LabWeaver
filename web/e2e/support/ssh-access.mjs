@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { expectJson, pollJson } from './live.mjs'
+import { expectJson, navigateFromHomeByUi, pollJson } from './live.mjs'
 
 export async function waitForActiveAccessGrant(request, grantId) {
   const grant = await pollJson(
@@ -16,7 +16,8 @@ export async function waitForActiveAccessGrant(request, grantId) {
 }
 
 export async function addSshPublicKeyByUi(page, identity, onAccepted = () => {}) {
-  await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
+  if (page.url() === 'about:blank') await navigateFromHomeByUi(page, 'SSH 公钥')
+  else await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: 'SSH 公钥', exact: true })).toBeVisible()
   await page.getByLabel('OpenSSH 公钥', { exact: true }).fill(identity.publicKeyOpenssh)
   const createResponsePromise = page.waitForResponse((response) => {
@@ -58,7 +59,8 @@ export async function deleteSshPublicKeyByUi(page, key) {
   await expect(fingerprintCell).toHaveCount(0, { timeout: 30_000 })
 }
 
-export async function issueEnvironmentSshAccessGrantByUi(page, projectId, environment) {
+export async function issueEnvironmentAccessGrantByUi(page, projectId, environment, protocol = 'ssh') {
+  if (!['ssh', 'http', 'https'].includes(protocol)) throw new Error(`WORK_ACCESS_GRANT_PROTOCOL_UNSUPPORTED:${protocol}`)
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environment.id)}`, {
     waitUntil: 'domcontentloaded',
   })
@@ -108,10 +110,52 @@ export async function issueEnvironmentSshAccessGrantByUi(page, projectId, enviro
     state: 'active',
     endpointGrants: expect.any(Array),
   })
-  const sshGrants = grant.endpointGrants.filter((item) => item.protocol === 'ssh' && item.health === 'healthy')
-  if (sshGrants.length !== 1) throw new Error('WORK_SSH_ACCESS_GRANT_ENDPOINT_INVALID')
-  await expect(page.locator('.ssh-command__text')).toContainText(sshGrants[0].alias, { timeout: 30_000 })
-  await expect(page.locator('.ssh-meta')).toContainText(sshGrants[0].sshGatewayHostKeyFingerprint)
-  return { grant, endpointGrant: sshGrants[0] }
+  const endpointGrants = grant.endpointGrants.filter((item) => {
+    const protocolMatches = protocol === 'http'
+      ? item.protocol === 'http' || item.protocol === 'https'
+      : item.protocol === protocol
+    return protocolMatches && item.health === 'healthy'
+  })
+  if (endpointGrants.length !== 1) throw new Error(`WORK_ACCESS_GRANT_ENDPOINT_INVALID:${protocol}`)
+  await expect(page.locator('.grant-card')).toContainText(grant.id, { timeout: 30_000 })
+  if (protocol === 'ssh') {
+    await expect(page.locator('.ssh-command__text')).toContainText(endpointGrants[0].alias, { timeout: 30_000 })
+    await expect(page.locator('.ssh-meta')).toContainText(endpointGrants[0].sshGatewayHostKeyFingerprint)
+  }
+  return { grant, endpointGrant: endpointGrants[0] }
+}
+
+export async function issueEnvironmentSshAccessGrantByUi(page, projectId, environment) {
+  return await issueEnvironmentAccessGrantByUi(page, projectId, environment, 'ssh')
+}
+
+/** Revoke the currently rendered access grant through the environment page. */
+export async function revokeEnvironmentAccessGrantByUi(page, projectId, environmentId, grantId) {
+  await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  await expect(page.getByRole('heading', { name: '项目环境控制台', exact: true })).toBeVisible({ timeout: 120_000 })
+  const card = page.locator('.grant-card')
+  await expect(card).toBeVisible({ timeout: 120_000 })
+  await expect(card).toContainText(grantId, { timeout: 30_000 })
+  const revokeButton = page.getByRole('button', { name: '撤销授权', exact: true })
+  await expect(revokeButton).toBeEnabled({ timeout: 30_000 })
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === `/api/v1/access-grants/${grantId}/revoke`
+  })
+  await revokeButton.click()
+  const accepted = await expectJson(await responsePromise, 'WORK_ACCESS_GRANT_REVOKE_FAILED')
+  expect(accepted).toMatchObject({ id: grantId })
+  const settled = await pollJson(
+    page.request,
+    `/api/v1/access-grants/${encodeURIComponent(grantId)}`,
+    (value) => ['revoked', 'denied', 'expired'].includes(value.state),
+    'WORK_ACCESS_GRANT_REVOKE_STATUS_FAILED',
+    120_000,
+  )
+  if (settled.state !== 'revoked') throw new Error(`WORK_ACCESS_GRANT_NOT_REVOKED:${settled.state}`)
+  return settled
 }
 

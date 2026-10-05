@@ -135,15 +135,19 @@ export async function uploadPackageDirectoryByUi(page, directory, expectedPath =
   const fileInput = page.locator('input[type=file][webkitdirectory]')
   await fileInput.setInputFiles(directory)
   const fileRegion = page.getByRole('region', { name: '待上传材料文件', exact: true })
-  await expect(fileRegion).toContainText(expectedPath)
+  if (expectedPath) await expect(fileRegion).toContainText(expectedPath)
   const visiblePaths = new Set(await fileRegion.locator('.file-path').allTextContents())
-  const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
-  const expectedPaths = [
-    'manifest.json',
-    ...(manifest.spec?.files ?? []).map((entry) => entry.path),
-  ]
-  for (const expectedPath of expectedPaths) {
-    expect(visiblePaths, `directory upload omitted ${expectedPath}`).toContain(expectedPath)
+  let manifest = null
+  try {
+    manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  const expectedPaths = manifest
+    ? ['manifest.json', ...(manifest.spec?.files ?? []).map((entry) => entry.path)]
+    : []
+  for (const path of expectedPaths) {
+    expect(visiblePaths, `directory upload omitted ${path}`).toContain(path)
   }
   const directoryPrefix = `${basename(directory)}/`
   expect([...visiblePaths].some((path) => path.startsWith(directoryPrefix))).toBe(false)
@@ -174,6 +178,49 @@ export async function startExperimentRunByUi(page, projectId) {
     purpose: { kind: 'authoring', environmentClass: 'experiment' },
   })
   return run
+}
+
+/** Cancel an in-flight AgentRun by using the current role's visible action. */
+export async function cancelAgentRunByUi(page, {
+  projectId,
+  runId,
+  route = '/teacher/materials',
+  buttonName = '取消',
+  label = 'AGENT_RUN_CANCEL',
+} = {}) {
+  const currentResponse = await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/agent-runs/${encodeURIComponent(runId)}`)
+  const current = await expectJson(currentResponse, `${label}_READ_FAILED`)
+  const terminal = ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(current.state)
+  if (terminal && !current.tracks?.some((track) => track.attempts?.some((attempt) => ['pending', 'running', 'repairing', 'awaiting_approval'].includes(attempt.state)))) return current
+
+  await page.goto(`${route}?projectId=${encodeURIComponent(projectId)}&runId=${encodeURIComponent(runId)}`, { waitUntil: 'domcontentloaded' })
+  const section = page.locator('section[aria-labelledby="run-heading"]')
+  await expect(section).toBeVisible({ timeout: 120_000 })
+  await expect(section.locator('code').filter({ hasText: runId })).toHaveCount(1, { timeout: 120_000 })
+  const cancelButton = section.getByRole('button', { name: buttonName, exact: true })
+  if (await cancelButton.count() === 0) {
+    const latestResponse = await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/agent-runs/${encodeURIComponent(runId)}`)
+    const latest = await expectJson(latestResponse, `${label}_LATEST_READ_FAILED`)
+    if (['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(latest.state)
+      && !latest.tracks?.some((track) => track.attempts?.some((attempt) => ['pending', 'running', 'repairing', 'awaiting_approval'].includes(attempt.state)))) return latest
+    throw new Error(`${label}_CONTROL_MISSING`)
+  }
+  await expect(cancelButton).toBeEnabled({ timeout: 120_000 })
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === `/api/v1/projects/${projectId}/agent-runs/${runId}/cancel`
+  })
+  await cancelButton.click()
+  await expectJson(await responsePromise, `${label}_ACCEPT_FAILED`)
+  return await pollJson(
+    page.request,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/agent-runs/${encodeURIComponent(runId)}`,
+    (value) => ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value.state)
+      && !value.tracks?.some((track) => track.attempts?.some((attempt) => ['pending', 'running', 'repairing', 'awaiting_approval'].includes(attempt.state))),
+    `${label}_STATUS_FAILED`,
+    240_000,
+  )
 }
 
 export async function readActorId(request) {

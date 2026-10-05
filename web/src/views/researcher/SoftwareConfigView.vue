@@ -12,12 +12,16 @@
       <label>
         <span>项目</span>
         <select v-model="selectedProjectId" class="text-input" :disabled="projects.projects.kind !== 'success'">
-          <option v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }} · {{ project.id }}</option>
+          <option v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }}</option>
         </select>
       </label>
       <div v-if="selectedProject" class="project-summary">
         <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
-        <span>{{ selectedProject.courseId ? `课程 ${selectedProject.courseId}` : '独立科研项目' }}</span>
+        <span>{{ selectedProject.courseId ? '课程项目' : '独立科研项目' }}</span>
+        <details class="advanced-details">
+          <summary>查看项目标识</summary>
+          <small>项目 ID：{{ selectedProject.id }}<template v-if="selectedProject.courseId"> · 课程 ID：{{ selectedProject.courseId }}</template></small>
+        </details>
       </div>
     </section>
 
@@ -79,10 +83,13 @@
         <AsyncStateView :state="policy" empty-text="当前项目没有已激活的项目 AI 设置。请先完成配置。" @retry="reloadPolicy">
           <template #success="{ data }">
             <div class="policy-summary">
+              <div><span>AI 设置</span><span>已启用</span></div>
               <div><span>模型</span><code>{{ data.binding.model }}</code></div>
-              <div><span>Claude Code</span><code>{{ data.binding.claudeCodeVersion }}</code></div>
-              <div><span>策略</span><code>rev-{{ data.revision }}</code></div>
-              <div><span>预算</span><code>{{ data.budget.maxRequests }} requests / {{ data.budget.maxInputTokens }} input tokens</code></div>
+              <details class="advanced-details">
+                <summary>查看 AI 设置详情</summary>
+                <small>执行版本：{{ data.binding.claudeCodeVersion }} · 策略版本：{{ data.revision }}</small>
+                <small>任务额度：{{ data.budget.maxRequests }} 次调用，输入上限 {{ data.budget.maxInputTokens }} tokens</small>
+              </details>
             </div>
           </template>
           <template #empty>
@@ -98,25 +105,72 @@
           </template>
         </AsyncStateView>
 
+        <section class="package-upload" aria-labelledby="package-upload-heading">
+          <div class="section-heading section-heading--compact">
+            <div>
+              <h4 id="package-upload-heading">上传软件需求材料</h4>
+              <p>选择一个材料文件夹，归档完成后会自动绑定材料包版本。</p>
+            </div>
+          </div>
+          <input
+            ref="packageInput"
+            type="file"
+            webkitdirectory
+            directory
+            multiple
+            class="file-input"
+            data-testid="software-package-file-input"
+            @change="onPackageInput"
+          >
+          <button type="button" class="outlined-button" @click="packageInput?.click()">
+            选择材料文件夹
+          </button>
+          <ul v-if="packageUpload.files.length > 0" class="package-file-list" aria-label="待上传材料文件">
+            <li v-for="file in packageUpload.files" :key="file.path">
+              <span>{{ file.path }}</span>
+              <span>{{ packageUpload.formatBytes(file.sizeBytes) }}</span>
+              <span>{{ file.status === 'pending' ? '待上传' : file.status === 'uploading' ? `上传中 ${file.progress}%` : file.status === 'done' ? '完成' : '失败' }}</span>
+              <button type="button" class="text-button" @click="packageUpload.removeFile(file.path)">移除</button>
+            </li>
+          </ul>
+          <DiagnosticBanner
+            v-if="packageUpload.state.kind === 'error'"
+            :code="packageUpload.state.diagnostic.code"
+            :message="packageUpload.state.diagnostic.message"
+            :retryable="packageUpload.state.diagnostic.retryable"
+            severity="error"
+            @retry="packageUpload.retry"
+          />
+          <div class="package-upload-actions">
+            <button type="button" class="filled-button" :disabled="!canUploadPackage" @click="packageUpload.createSession">
+              {{ packageUploadButtonLabel }}
+            </button>
+            <button v-if="packageDone" type="button" class="text-button" @click="packageUpload.clear">清除材料</button>
+          </div>
+          <div v-if="packageDone && uploadedPackage" class="package-upload-success" role="status">
+            材料包已准备：{{ uploadedPackage.files.length }} 个文件。
+            <details class="advanced-details">
+              <summary>查看材料版本</summary>
+              <small>材料包版本：{{ uploadedPackage.revision }} · 材料包 ID：{{ uploadedPackage.id }}</small>
+            </details>
+          </div>
+        </section>
+
         <form class="config-form" @submit.prevent="startRun">
-          <label>
-            <span>材料包 ID</span>
-            <input ref="packageInput" v-model="packageId" class="text-input" required placeholder="已归档 ProblemPackage ID" />
-          </label>
-          <label>
-            <span>材料包 Revision</span>
-            <input v-model.number="packageRevision" class="text-input" type="number" min="1" required />
-          </label>
           <label>
             <span>Work 环境</span>
             <select v-model="selectedEnvironmentId" class="text-input" :disabled="workEnvironments.environments.kind !== 'success'" required>
               <option value="" disabled>选择现有 Work 环境</option>
-              <option v-for="environment in workEnvironments.environments.kind === 'success' ? workEnvironments.environments.data : []" :key="environment.id" :value="environment.id">{{ environment.displayLabel }} · rev-{{ environment.revision }}</option>
+              <option v-for="environment in workEnvironments.environments.kind === 'success' ? workEnvironments.environments.data : []" :key="environment.id" :value="environment.id">{{ environment.displayLabel }} · {{ environmentStateLabel(environment.observedState) }}</option>
             </select>
           </label>
           <div v-if="selectedEnvironment" class="readonly-meta">
-            <span>Work 环境 Revision</span><code>rev-{{ selectedEnvironment.revision }}</code>
-            <span>当前状态</span><span>{{ selectedEnvironment.observedState }}</span>
+            <span>Work 环境</span><span>{{ selectedEnvironment.displayLabel }}</span>
+            <span>当前状态</span><span>{{ environmentStateLabel(selectedEnvironment.observedState) }}</span>
+            <details class="advanced-details">
+              <summary>查看环境版本</summary>
+              <code>Revision {{ selectedEnvironment.revision }}</code>
+            </details>
           </div>
           <label class="authorization-field">
             <input v-model="impactAcknowledged" type="checkbox" />
@@ -131,29 +185,38 @@
       <section class="run-card md-card" aria-labelledby="run-heading">
         <div class="section-heading">
           <div>
-            <h3 id="run-heading">AgentRun</h3>
-            <p>运行和候选状态由 Agent / Control 返回。</p>
+            <h3 id="run-heading">配置任务</h3>
+            <p>查看配置任务进度、等待原因和下一步操作。</p>
           </div>
-          <button v-if="agent.run.kind === 'success'" type="button" class="icon-button" aria-label="刷新 AgentRun" @click="agent.load(agent.run.data.id)"><SvgIcon name="refresh" size="sm" aria-hidden="true" /></button>
+          <button v-if="agent.run.kind === 'success'" type="button" class="icon-button" aria-label="刷新配置任务" @click="agent.load(agent.run.data.id)"><SvgIcon name="refresh" size="sm" aria-hidden="true" /></button>
         </div>
-        <AsyncStateView :state="agent.run" empty-text="提交软件需求后，这里会显示 AgentRun。" @retry="reloadRun">
+        <AsyncStateView :state="agent.run" empty-text="提交软件需求后，这里会显示任务状态。" @retry="reloadRun">
           <template #success="{ data }">
             <div class="run-overview">
-              <div><span>Run</span><code>{{ data.id }}</code></div>
+              <div><span>任务</span><span>Work 配置任务</span></div>
               <div><span>状态</span><span class="state-chip" :class="`state-chip--${data.state}`">{{ runStateLabel(data.state) }}</span></div>
-              <div><span>Revision</span><code>rev-{{ data.revision }}</code></div>
+              <details class="advanced-details">
+                <summary>查看任务标识</summary>
+                <small>Run ID：{{ data.id }} · Revision：{{ data.revision }}</small>
+              </details>
             </div>
             <div class="track-list">
               <article v-for="track in data.tracks" :key="track.kind" class="track-item">
                 <div class="track-heading">
                   <strong>{{ track.kind === 'work_configuration' ? 'Work 配置' : track.kind === 'environment' ? 'Environment 候选' : 'Evaluation 候选' }}</strong>
-                  <code v-if="track.candidateId">{{ track.candidateId }}</code>
+                  <details v-if="track.candidateId" class="advanced-details">
+                    <summary>查看候选标识</summary>
+                    <code>{{ track.candidateId }}</code>
+                  </details>
                 </div>
                 <ul>
                   <li v-for="attempt in track.attempts" :key="attempt.number">
                     <span>尝试 {{ attempt.number }}</span>
-                    <span>{{ attempt.state }}</span>
-                    <code v-if="attempt.diagnosticCode">{{ attempt.diagnosticCode }}</code>
+                    <span>{{ trackStateLabel(attempt.state) }}</span>
+                    <details v-if="attempt.diagnosticCode" class="advanced-details">
+                      <summary>查看诊断</summary>
+                      <code>{{ attempt.diagnosticCode }}</code>
+                    </details>
                   </li>
                 </ul>
                 <button v-if="track.kind === 'work_configuration' && trackCanRetry(data, 'work_configuration') && !data.plan" type="button" class="text-button" :disabled="agent.acting !== null" @click="agent.retryTrack('work_configuration')">重试 Work 配置</button>
@@ -166,7 +229,7 @@
               <button type="button" class="outlined-button" @click="prepareNewTask">开始新的 Work 配置任务</button>
             </section>
             <div class="run-actions">
-              <button v-if="data.state === 'requested' || data.state === 'running' || data.state === 'awaiting_approval'" type="button" class="outlined-button danger-button" :disabled="agent.acting !== null" @click="agent.cancel">取消 AgentRun</button>
+              <button v-if="data.state === 'requested' || data.state === 'running' || data.state === 'awaiting_approval'" type="button" class="outlined-button danger-button" :disabled="agent.acting !== null" @click="agent.cancel">取消配置任务</button>
             </div>
           </template>
         </AsyncStateView>
@@ -182,10 +245,13 @@
                 <span class="state-chip state-chip--awaiting_approval">等待批准</span>
               </div>
               <div class="plan-meta">
-                <div><span>Target Work</span><code>{{ data.plan.environmentId }}</code></div>
-                <div><span>Environment Revision</span><code>rev-{{ data.plan.environmentRevision }}</code></div>
-                <div><span>Plan</span><code>{{ data.plan.id }} / rev-{{ data.plan.revision }}</code></div>
-                <div><span>Summary</span><span>{{ data.plan.summary }}</span></div>
+                <div><span>目标环境</span><span>{{ selectedEnvironment?.displayLabel ?? '当前 Work 环境' }}</span></div>
+                <div><span>重启影响</span><span>{{ data.plan.requiresRestart ? '需要重启' : '无需重启' }}</span></div>
+                <div><span>变更说明</span><span>{{ data.plan.summary }}</span></div>
+                <details class="advanced-details">
+                  <summary>查看计划标识</summary>
+                  <small>环境 ID：{{ data.plan.environmentId }} · 环境版本：{{ data.plan.environmentRevision }} · 计划 ID：{{ data.plan.id }} / 版本：{{ data.plan.revision }}</small>
+                </details>
               </div>
               <p v-if="data.plan.requiresRestart" class="restart-warning" role="alert">此计划需要重启 Work 环境，执行期间连接会暂时中断。</p>
               <p v-else class="section-note">此计划不需要重启 Work 环境。</p>
@@ -240,11 +306,13 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import WorkTemplateAuthoringView from '@/views/researcher/WorkTemplateAuthoringView.vue'
 import { approveProjectWorkConfigurationRun, getActiveProjectLlmPolicy, getProjectWorkConfigurationPlan } from '@/generated/contracts'
-import type { AgentRunSchema, ProjectLlmEgressPolicySchema, WorkConfigurationPlanViewSchema } from '@/generated/contracts'
+import type { AgentRunSchema, ProblemPackageSchema, ProjectLlmEgressPolicySchema, WorkConfigurationPlanViewSchema } from '@/generated/contracts'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
+import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjects } from '@/composables/useProjects'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
+import { environmentStateLabel } from '@/utils/stateLabels'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
 const projects = useProjects()
@@ -270,14 +338,32 @@ const agent = useProjectAgentRun(projectIdRef)
 const mode = ref<'configuration' | 'template'>(route?.query.mode === 'template' ? 'template' : 'configuration')
 
 const policy = ref<AsyncState<ProjectLlmEgressPolicySchema>>({ kind: 'idle' })
+const policyRevision = computed(() => policy.value.kind === 'success' ? policy.value.data.revision : undefined)
+const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
+const packageUpload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef)
 const workEnvironments = useProjectWorkEnvironments(projectIdRef)
 const selectedEnvironmentId = ref('')
 const selectedEnvironment = computed(() => workEnvironments.environments.kind === 'success' ? workEnvironments.environments.data.find((environment) => environment.id === selectedEnvironmentId.value) ?? null : null)
 const plan = ref<AsyncState<WorkConfigurationPlanViewSchema>>({ kind: 'idle' })
 const planApprovalOutcome = ref<DiagnosticViewModel | null>(null)
-const packageId = ref('')
-const packageRevision = ref(1)
 const packageInput = ref<HTMLInputElement | null>(null)
+const uploadedPackage = computed<ProblemPackageSchema | null>(() => packageUpload.state.kind === 'done' ? packageUpload.state.package : null)
+const packageDone = computed(() => uploadedPackage.value !== null)
+const packageId = computed(() => uploadedPackage.value?.id ?? '')
+const packageRevision = computed(() => uploadedPackage.value?.revision ?? 0)
+const canUploadPackage = computed(() => {
+  const ready = packageUpload.state.kind === 'ready' || packageUpload.state.kind === 'error'
+  return Boolean(selectedProject.value && ready && packageUpload.files.length > 0 && policyRevision.value !== undefined)
+})
+const packageUploadButtonLabel = computed(() => {
+  switch (packageUpload.state.kind) {
+    case 'creating': return '创建上传会话…'
+    case 'uploading': return '上传中…'
+    case 'completing': return '确认归档…'
+    case 'loading': return '读取已归档材料包…'
+    default: return '上传材料包'
+  }
+})
 const impactAcknowledged = ref(false)
 const approvalReason = ref('')
 const restartConfirmed = ref(false)
@@ -505,6 +591,12 @@ function workConfigurationNeedsNewTask(data: AgentRunSchema) {
     && (data.state === 'failed' || data.state === 'partially_succeeded' || data.state === 'cancelled')
 }
 
+function onPackageInput(event: Event) {
+  const target = event.target as HTMLInputElement
+  if (target.files && target.files.length > 0) packageUpload.addFiles(Array.from(target.files))
+  target.value = ''
+}
+
 function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][number]['kind']): boolean {
   if (data.state !== 'failed' && data.state !== 'partially_succeeded' && data.state !== 'cancelled') return false
   const track = data.tracks.find((item) => item.kind === kind)
@@ -513,8 +605,7 @@ function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][numb
 }
 
 function prepareNewTask() {
-  packageId.value = ''
-  packageRevision.value = 1
+  packageUpload.clear()
   selectedEnvironmentId.value = ''
   impactAcknowledged.value = false
   plan.value = { kind: 'idle' }
@@ -523,7 +614,11 @@ function prepareNewTask() {
 }
 
 function runStateLabel(state: string) {
-  return ({ requested: 'Submitted', running: 'Running', awaiting_approval: 'Awaiting approval', partially_succeeded: 'Partially succeeded', succeeded: 'Succeeded', failed: 'Failed', cancelling: 'Cancelling', cancelled: 'Cancelled' } as Record<string, string>)[state] ?? state
+  return ({ requested: '已提交', running: '运行中', awaiting_approval: '等待审批', partially_succeeded: '部分完成', succeeded: '已完成', failed: '失败', cancelling: '取消中', cancelled: '已取消' } as Record<string, string>)[state] ?? state
+}
+
+function trackStateLabel(state: string) {
+  return ({ pending: '等待处理', requested: '已提交', running: '运行中', succeeded: '已完成', failed: '失败', cancelled: '已取消', skipped: '已跳过' } as Record<string, string>)[state] ?? state
 }
 
 </script>
@@ -543,13 +638,24 @@ function runStateLabel(state: string) {
 .project-strip label, .config-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .project-strip label { flex: 1; max-width: 560px; }
 .project-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 9px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.project-summary .advanced-details { flex-basis: 100%; }
 .config-layout { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(0, 1.3fr); gap: 20px; align-items: start; }
 .config-card, .run-card { padding: 20px; }
 .policy-missing { display: grid; justify-items: start; gap: 10px; margin: 18px 0; padding: 13px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); }
 .policy-missing p { margin: 0; }
+.package-upload { display: grid; gap: 12px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--md-sys-color-outline-variant); }
+.package-upload h4 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-small); }
+.file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.package-file-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.package-file-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.package-file-list li > span:first-child { overflow-wrap: anywhere; color: var(--md-sys-color-on-surface); }
+.package-upload-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.package-upload-success { margin: 0; color: var(--md-sys-color-tertiary); font: var(--md-sys-body-small); }
+.package-upload-success .advanced-details { margin-top: 6px; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 .policy-summary, .run-overview, .plan-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; margin: 18px 0; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); font: var(--md-sys-body-small); }
 .policy-summary span, .run-overview span, .plan-meta > div > span:first-child { color: var(--md-sys-color-on-surface-variant); }
+.policy-summary .advanced-details, .run-overview .advanced-details, .plan-meta > .advanced-details { grid-column: 1 / -1; }
 .policy-summary code, .run-overview code, .plan-meta code { overflow-wrap: anywhere; color: var(--md-sys-color-on-surface); }
 .config-form { display: grid; gap: 14px; margin-top: 20px; }
 .authorization-field { display: flex !important; grid-template-columns: auto 1fr; align-items: flex-start; gap: 9px !important; line-height: 1.45; }

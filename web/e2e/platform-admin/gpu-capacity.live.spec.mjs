@@ -380,7 +380,7 @@ async function cleanupOwnedResources(studentPage, baseURL, requests, knownLeases
   for (const owned of requests) {
     const lease = knownLeases.find((item) => item.requestId === owned.requestId)
     try {
-      await cleanupWorkResources(studentPage.request, baseURL, INPUT.projectId, owned.environmentId, lease?.leaseId ?? null, owned.requestId)
+      await cleanupWorkResources(studentPage.request, baseURL, INPUT.projectId, owned.environmentId, lease?.leaseId ?? null, owned.requestId, studentPage)
     } catch (error) {
       failures.push(error)
     }
@@ -465,7 +465,7 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     const releasedRequest = baselineRequests[0]
     const releasedLease = ownedLeases.find((lease) => lease.requestId === releasedRequest.requestId)
     if (!releasedLease) throw new Error(`LW_GPU_CAPACITY_RELEASE_LEASE_MISSING:${releasedRequest.requestId}`)
-    await cleanupWorkResources(studentPage.request, baseURL, INPUT.projectId, releasedRequest.environmentId, releasedLease.leaseId, releasedRequest.requestId)
+    await cleanupWorkResources(studentPage.request, baseURL, INPUT.projectId, releasedRequest.environmentId, releasedLease.leaseId, releasedRequest.requestId, studentPage)
     await Promise.all([
       waitForEnvironmentDeleted(studentPage.request, releasedRequest.environmentId),
       waitForReleasedResource(studentPage.request, releasedRequest, releasedLease),

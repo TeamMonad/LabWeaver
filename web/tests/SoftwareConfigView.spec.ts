@@ -29,6 +29,40 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   }
 })
 
+const packageUploadMock = vi.hoisted(() => {
+  const packageView = (id: string) => ({
+    id,
+    projectId: 'project-1',
+    courseId: null,
+    revision: 1,
+    files: [],
+    retention: {},
+    completedAt: '2026-09-08T00:00:00.000Z',
+  })
+  return {
+    files: [] as Array<{ path: string; sizeBytes: number; status: string; progress: number }>,
+    state: { kind: 'done', package: packageView('package-1') } as { kind: string; package: ReturnType<typeof packageView> },
+    addFiles: vi.fn(),
+    addDirectoryItems: vi.fn(),
+    removeFile: vi.fn(),
+    clear: vi.fn(function (this: { files: unknown[]; state: unknown }) {
+      this.files = []
+      this.state = { kind: 'idle' }
+    }),
+    createSession: vi.fn(),
+    retry: vi.fn(),
+    formatBytes: (size: number) => `${size} B`,
+    setPackage(id: string) {
+      this.state = { kind: 'done', package: packageView(id) }
+    },
+  }
+})
+
+vi.mock('@/composables/useProjectProblemPackageUpload', async () => {
+  const { reactive } = await import('vue')
+  return { useProjectProblemPackageUpload: () => reactive(packageUploadMock) }
+})
+
 const project = {
   id: 'project-1',
   name: 'Work project',
@@ -133,6 +167,14 @@ describe('SoftwareConfigView', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-08T12:00:00.000Z'))
     vi.resetAllMocks()
+    packageUploadMock.files = []
+    packageUploadMock.state = {
+      kind: 'done',
+      package: {
+        id: 'package-1', projectId: 'project-1', courseId: null, revision: 1,
+        files: [], retention: {}, completedAt: '2026-09-08T00:00:00.000Z',
+      },
+    }
     vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({
       data: { items: [environment], nextCursor: null } as never,
@@ -154,7 +196,6 @@ describe('SoftwareConfigView', () => {
     })
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('Research Work'))
-    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-1')
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')
@@ -191,7 +232,6 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-1')
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')
@@ -239,18 +279,17 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-1')
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('重试 Work 配置'))
-    await wrapper.get('button.text-button').trigger('click')
+    await wrapper.findAll('button.text-button').find((button) => button.text() === '重试 Work 配置')!.trigger('click')
 
     expect(retryProjectAgentRunTrack).toHaveBeenCalledWith(expect.objectContaining({
       path: { projectId: 'project-1', runId: 'run-1', track: 'work_configuration' },
       headers: expect.objectContaining({ 'If-Match': '"rev-1"' }),
     }))
-    await vi.waitFor(() => expect(wrapper.text()).toContain('Submitted'))
+    await vi.waitFor(() => expect(wrapper.text()).toContain('已提交'))
   })
 
   it('only exposes retry actions for tracks whose latest attempt failed', async () => {
@@ -269,7 +308,6 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-1')
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')
@@ -292,20 +330,19 @@ describe('SoftwareConfigView', () => {
       global: { stubs: { RouterLink: true } },
     })
 
-    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-1')
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(wrapper.text()).toContain('开始新的 Work 配置任务'))
     expect(wrapper.text()).not.toContain('重试 Work 配置')
-    await wrapper.get('button.outlined-button').trigger('click')
+    await wrapper.findAll('button.outlined-button').find((button) => button.text() === '开始新的 Work 配置任务')!.trigger('click')
 
-    expect((wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').element as HTMLInputElement).value).toBe('')
-    expect((wrapper.find('input[type="number"]').element as HTMLInputElement).value).toBe('1')
+    expect(packageUploadMock.clear).toHaveBeenCalled()
     expect((wrapper.find('select[required]').element as HTMLSelectElement).value).toBe('')
     expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
 
-    await wrapper.find('input[placeholder="已归档 ProblemPackage ID"]').setValue('package-2')
+    ;(wrapper.vm as unknown as { packageUpload: typeof packageUploadMock }).packageUpload.setPackage('package-2')
+    await wrapper.vm.$nextTick()
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')

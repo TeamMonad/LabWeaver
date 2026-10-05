@@ -40,7 +40,11 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     timeout: 120_000,
     snapshotPathTemplate: `{testDir}/{testFileDir}/{testFileName}-snapshots/{arg}-{projectName}{ext}`,
     forbidOnly: ci,
-    retries: ci ? 2 : 0,
+    // A public acceptance run owns real projects, environments and charges;
+    // replaying the whole journey after an ambiguous failure can duplicate
+    // those business mutations. Keep ordinary CI fixture retries unchanged,
+    // but make every configured public run a single attempt.
+    retries: process.env.LABWEAVER_BASE_URL ? 0 : (ci ? 2 : 0),
     workers: ci ? 1 : undefined,
     // Acceptance output is intentionally console-only. Browser state and any
     // runner output live under the temporary directory supplied by the harness.

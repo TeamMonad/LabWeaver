@@ -12,7 +12,6 @@
       <SvgIcon name="folder_open" size="sm" class="trigger-icon" aria-hidden="true" />
       <span class="trigger-label">
         <span class="trigger-primary">{{ activeProject?.name ?? '选择项目' }}</span>
-        <span v-if="activeProject" class="trigger-secondary">{{ activeProject.id }}</span>
       </span>
       <SvgIcon name="expand_more" size="sm" class="trigger-arrow" aria-hidden="true" />
     </button>
@@ -24,13 +23,13 @@
       </div>
       <div class="menu-search">
         <SvgIcon name="search" size="sm" class="search-icon" aria-hidden="true" />
-        <input ref="searchInputRef" v-model="searchQuery" type="search" class="search-input" placeholder="搜索项目名称或 ID…" aria-label="搜索项目" />
+        <input ref="searchInputRef" v-model="searchQuery" type="search" class="search-input" placeholder="搜索项目名称…" aria-label="搜索项目" />
       </div>
       <AsyncStateView :state="projects.projects" empty-text="没有可访问的项目。请先创建项目或联系项目 Owner。" @retry="projects.load">
         <template #success="{ data }">
           <div class="menu-body" role="listbox" aria-label="项目列表">
             <button v-for="project in filteredProjects(data)" :key="project.id" type="button" class="project-item" :class="{ 'project-item--selected': project.id === projects.selectedProjectId }" role="option" :aria-selected="project.id === projects.selectedProjectId" @click="selectProject(project.id)">
-              <span class="project-info"><strong>{{ project.name }}</strong><small>{{ project.id }}</small></span>
+              <span class="project-info"><strong>{{ project.name }}</strong></span>
               <span class="project-state">{{ project.state === 'active' ? '运行中' : '已归档' }}</span>
             </button>
             <p v-if="filteredProjects(data).length === 0" class="empty-results">未找到匹配项目</p>
@@ -92,7 +91,6 @@ onScopeDispose(() => {
 .trigger-icon { flex-shrink: 0; color: var(--md-sys-color-primary); }
 .trigger-label { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; text-align: left; line-height: 1.2; }
 .trigger-primary { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--md-sys-label-medium); }
-.trigger-secondary { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); font-family: monospace; }
 .trigger-arrow { flex-shrink: 0; color: var(--md-sys-color-on-surface-variant); }
 .selector-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 1300; display: flex; width: 360px; max-width: calc(100vw - 24px); flex-direction: column; overflow: hidden; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); background: var(--md-sys-color-surface); box-shadow: var(--md-sys-elevation-3); }
 .menu-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 8px; border-bottom: 1px solid var(--md-sys-color-outline-variant); }
@@ -106,7 +104,7 @@ onScopeDispose(() => {
 .project-item:hover, .project-item--selected { background: var(--md-sys-color-primary-container); }
 .project-info { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .project-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--md-sys-body-medium); }
-.project-info small, .project-state, .empty-results { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.project-state, .empty-results { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .project-state { flex-shrink: 0; }
 .empty-results { padding: 22px; text-align: center; }
 </style>

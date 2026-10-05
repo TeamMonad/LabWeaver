@@ -74,7 +74,7 @@ function environment(id: string, overrides: Record<string, unknown> = {}) {
   }
 }
 
-async function mountAt(projectId: string) {
+async function mountAt(projectId: string, props: Record<string, unknown> = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -84,7 +84,7 @@ async function mountAt(projectId: string) {
   })
   await router.push({ path: '/student/labs', query: { projectId } })
   await router.isReady()
-  const wrapper = mount(MyLabsView, { global: { plugins: [router] } })
+  const wrapper = mount(MyLabsView, { props, global: { plugins: [router] } })
   return { wrapper, router }
 }
 
@@ -185,5 +185,44 @@ describe('MyLabsView', () => {
     projectsState.selectedProject = projectTwo
     await vi.waitFor(() => expect(vi.mocked(listEnvironments)).toHaveBeenCalledWith({ query: { projectId: 'project-2' } }))
     expect(wrapper.text()).toContain('Work 项目环境')
+  })
+
+  it('lets teachers inspect every environment in the project and opens the shared teacher console', async () => {
+    vi.mocked(listEnvironments)
+      .mockResolvedValueOnce({
+        data: {
+          items: [environment('experiment-env', { displayLabel: '实验环境' })],
+          nextCursor: 'next-page',
+        } as never,
+        error: undefined as never,
+      })
+      .mockResolvedValueOnce({
+        data: {
+          items: [environment('work-env', {
+            class: 'work',
+            courseId: null,
+            displayLabel: 'Work 环境',
+          })],
+          nextCursor: null,
+        } as never,
+        error: undefined as never,
+      })
+
+    const { wrapper, router } = await mountAt('project-1', {
+      teacherMode: true,
+      environmentPath: '/teacher/environments',
+    })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('实验环境'))
+
+    expect(vi.mocked(listEnvironments)).toHaveBeenCalledWith({ query: { projectId: 'project-1' } })
+    expect(vi.mocked(listEnvironments)).toHaveBeenCalledWith({ query: { projectId: 'project-1', cursor: 'next-page' } })
+    expect(wrapper.text()).toContain('课程实验环境')
+    expect(wrapper.text()).toContain('Work 环境')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('创建项目环境'))).toBe(false)
+
+    const consoleButton = wrapper.find('button[aria-label="打开控制台"]')
+    await consoleButton.trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/teacher/environments'))
+    expect(router.currentRoute.value.query).toEqual({ environmentId: 'experiment-env', projectId: 'project-1' })
   })
 })

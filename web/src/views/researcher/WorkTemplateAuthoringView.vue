@@ -90,8 +90,7 @@
 
       <div class="form-actions">
         <button type="button" class="filled-button" :disabled="!canUpload" @click="upload.createSession">
-          <template v-if="upload.state.kind === 'hashing'">计算哈希中…</template>
-          <template v-else-if="upload.state.kind === 'creating'">创建上传会话…</template>
+          <template v-if="upload.state.kind === 'creating'">创建上传会话…</template>
           <template v-else-if="upload.state.kind === 'uploading'">上传中…</template>
           <template v-else-if="upload.state.kind === 'completing'">确认归档…</template>
           <template v-else>上传材料包</template>
