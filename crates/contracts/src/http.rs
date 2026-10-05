@@ -1939,7 +1939,7 @@ impl PageQuery {
         let offset = page
             .checked_sub(1)
             .and_then(|value| value.checked_mul(u32::from(page_size)))
-            .filter(|value| *value <= i32::MAX as u32)
+            .filter(|value| i32::try_from(*value).is_ok())
             .ok_or(HttpContractError::InvalidCursorPage)?;
         Ok((page, page_size, offset))
     }
@@ -4155,7 +4155,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_page_rejects_zero_and_unrepresentable_offsets() {
+    fn offset_page_rejects_zero_and_unrepresentable_offsets() -> Result<(), HttpContractError> {
         assert!(matches!(
             PageQuery {
                 page: Some(0),
@@ -4177,25 +4177,19 @@ mod tests {
                 page: Some(2),
                 page_size: Some(25),
             }
-            .normalized()
-            .expect("valid offset page"),
+            .normalized()?,
             (2, 25, 25)
         );
+        Ok(())
     }
 
     #[test]
-    fn page_query_defaults_when_fields_are_missing() {
-        let query: PageQuery = serde_json::from_str("{}").expect("missing page fields default");
-        assert_eq!(
-            query.normalized().expect("default page is valid"),
-            (1, 25, 0)
-        );
-        let query: PageQuery =
-            serde_json::from_str(r#"{"page":2,"pageSize":10}"#).expect("numeric page");
-        assert_eq!(
-            query.normalized().expect("explicit page is valid"),
-            (2, 10, 10)
-        );
+    fn page_query_defaults_when_fields_are_missing() -> Result<(), Box<dyn std::error::Error>> {
+        let query: PageQuery = serde_json::from_str("{}")?;
+        assert_eq!(query.normalized()?, (1, 25, 0));
+        let query: PageQuery = serde_json::from_str(r#"{"page":2,"pageSize":10}"#)?;
+        assert_eq!(query.normalized()?, (2, 10, 10));
+        Ok(())
     }
 
     #[test]

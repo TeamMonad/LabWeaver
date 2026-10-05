@@ -82,6 +82,7 @@ export async function runProcess(program, args, {
     child.once('close', (code, signal) => {
       resolve({
         code,
+        signal,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
         timedOut: signal === 'SIGKILL' && !outputExceeded && exitedAt !== null && exitedAt - startedAt >= timeoutMs,

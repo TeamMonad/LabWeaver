@@ -105,7 +105,9 @@ GPU 00000000:01:00.0
       { timeoutMs: 5000, outputCode: 'PROCESS_TEST', outputLimitBytes: 1024 },
     )
 
-    expect(result).toMatchObject({ code: null, timedOut: false, outputExceeded: false })
+    expect(result).toMatchObject({ timedOut: false, outputExceeded: false })
+    expect(result.signal === 'SIGKILL'
+      || (process.platform === 'win32' && Number.isInteger(result.code) && result.code !== 0)).toBe(true)
   })
 
   it('terminates a process and reports output beyond the configured cap', async () => {
