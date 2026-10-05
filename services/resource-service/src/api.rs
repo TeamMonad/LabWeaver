@@ -14,17 +14,18 @@ use contracts::environment::{
 };
 use contracts::http::{
     AcknowledgeTaskResourceRequest, ApproveResourceRequest, CreateResourceAdjustmentRequest,
-    CreateResourceRateRequest, CreateResourceRequest, InternalCreateTaskResourceRequest,
-    RecordResourceUsageRequest, ReleaseTaskResourceRequest, RenewResourceLease,
-    ResourceOperationAccepted, StrongEtag, TaskResourceStatus, UpsertResourceBudgetRequest,
+    CreateResourceRateRequest, CreateResourceRequest, EndResourceRateRequest,
+    InternalCreateTaskResourceRequest, RecordResourceUsageRequest, ReleaseTaskResourceRequest,
+    RenewResourceLease, ResourceOperationAccepted, StrongEtag, TaskResourceStatus,
+    UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     GpuCatalogEntry, ResourceCharge, ResourceRate, ResourceRequest, ResourceRequestState,
     ResourceUsageRecord,
 };
 use contracts::{
-    ActorId, ChargeId, DiagnosticCode, LeaseId, ProblemDetails, ProjectId, ResourceRequestId,
-    Revision, TaskRunId, UtcTimestamp,
+    ActorId, ChargeId, DiagnosticCode, LeaseId, ProblemDetails, ProjectId, RateId,
+    ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -147,6 +148,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         )
         .route("/api/v1/resource/usage", post(record_usage))
         .route("/api/v1/resource/rates", get(list_rates).post(create_rate))
+        .route("/api/v1/resource/rates/{rate_id}/end", post(end_rate))
         .route(
             "/api/v1/resource/gpu-catalog",
             get(list_gpu_catalog).post(create_gpu_catalog_entry),
@@ -982,6 +984,23 @@ async fn create_rate(
     Ok(response)
 }
 
+async fn end_rate(
+    State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
+    Path(rate_id): Path<RateId>,
+    headers: HeaderMap,
+    Json(input): Json<EndResourceRateRequest>,
+) -> Result<Response, ResourceApiError> {
+    authorize(&principal);
+    require_admin(&principal)?;
+    let idempotency_key = required_header(&headers, "idempotency-key")?;
+    let rate = state
+        .store
+        .end_rate(rate_id, &idempotency_key, &input)
+        .await?;
+    Ok(Json(rate).into_response())
+}
+
 async fn list_gpu_catalog(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
@@ -1391,7 +1410,9 @@ impl IntoResponse for ResourceApiError {
         let status = match &self {
             Self::CallerDenied | Self::IdentityInvalid | Self::ScopeDenied => StatusCode::FORBIDDEN,
             Self::ServiceConfiguration => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Invalid => StatusCode::BAD_REQUEST,
+            Self::Invalid | Self::Store(ResourceStoreError::RateEndInvalid) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::RevisionConflict => StatusCode::PRECONDITION_FAILED,
             Self::Store(
                 ResourceStoreError::NotFound
@@ -1408,10 +1429,20 @@ impl IntoResponse for ResourceApiError {
         let context = telemetry::current_request_context()
             .unwrap_or_else(telemetry::RequestContext::generate);
         let request_id = context.request_id().to_owned();
-        let detail = if matches!(self, Self::Store(ResourceStoreError::GpuCapacityExhausted)) {
-            "GPU 容量不足，请等待资源释放或回收已有环境后重试。"
-        } else {
-            "资源请求未通过，请根据诊断信息检查权限、参数或当前资源状态。"
+        let detail = match &self {
+            Self::Store(ResourceStoreError::GpuCapacityExhausted) => {
+                "GPU 容量不足，请等待资源释放或回收已有环境后重试。"
+            }
+            Self::Store(ResourceStoreError::RateEndInvalid) => {
+                "费率结束时间必须晚于生效时间且晚于当前时间。"
+            }
+            Self::Store(ResourceStoreError::RateAlreadyEnded) => {
+                "费率已经安排结束，不能再次修改结束时间。"
+            }
+            Self::Store(ResourceStoreError::RateSettledConflict) => {
+                "已有历史用量在该时间点之后结算，不能修改费率边界。"
+            }
+            _ => "资源请求未通过，请根据诊断信息检查权限、参数或当前资源状态。",
         };
         let problem = ProblemDetails {
             problem_type: format!(
@@ -1585,6 +1616,16 @@ mod tests {
                 ResourceApiError::Store(ResourceStoreError::NotFound),
                 StatusCode::NOT_FOUND,
                 "LW_RESOURCE_NOT_FOUND",
+            ),
+            (
+                ResourceApiError::Store(ResourceStoreError::RateEndInvalid),
+                StatusCode::BAD_REQUEST,
+                "LW_RESOURCE_RATE_END_INVALID",
+            ),
+            (
+                ResourceApiError::Store(ResourceStoreError::RateAlreadyEnded),
+                StatusCode::CONFLICT,
+                "LW_RESOURCE_RATE_ALREADY_ENDED",
             ),
         ] {
             let response = error.into_response();

@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   reclaim: vi.fn(),
   renew: vi.fn(),
   load: vi.fn(),
+  create: vi.fn(),
+  gpuRateSelection: vi.fn(() => ({ rate: null, ambiguous: false })),
 }))
 
 const authState = vi.hoisted(() => ({
@@ -62,7 +64,7 @@ vi.mock('@/composables/useProjectResources', async () => {
       acting: null,
       outcome: null,
       load: mocks.load,
-      create: vi.fn(),
+      create: mocks.create,
       cancel: mocks.cancel,
       renew: mocks.renew,
       reclaim: mocks.reclaim,
@@ -78,7 +80,7 @@ vi.mock('@/composables/useProjectResourceOptions', async () => {
       releases: mocks.releases,
       catalog: mocks.catalog,
       rates: mocks.rates,
-      gpuRateSelection: () => ({ rate: null, ambiguous: false }),
+      gpuRateSelection: mocks.gpuRateSelection,
       load: mocks.load,
     }),
   }
@@ -128,6 +130,10 @@ describe('ResourceRequestView', () => {
     mocks.reclaim.mockReset()
     mocks.renew.mockReset()
     mocks.load.mockReset()
+    mocks.create.mockReset()
+    mocks.create.mockResolvedValue(true)
+    mocks.gpuRateSelection.mockReset()
+    mocks.gpuRateSelection.mockReturnValue({ rate: null, ambiguous: false })
     authState.user.value = null
     projectsState.selectedProjectId = projectOne.id
     projectsState.selectedProject = projectOne
@@ -190,7 +196,7 @@ describe('ResourceRequestView', () => {
     expect(wrapper.find('a[href^="/teacher/materials"]').exists()).toBe(false)
   })
 
-  it('only offers GPU modes supported by the selected release runtime', async () => {
+  it('only offers GPU modes supported by the selected release runtime without requiring a rate', async () => {
     mocks.releases = {
       kind: 'success',
       data: [
@@ -216,11 +222,160 @@ describe('ResourceRequestView', () => {
     await flushPromises()
     expect(gpuSelect!.findAll('option').map((option) => option.element.value)).toEqual(['', 'gpu-vm'])
     await gpuSelect!.setValue('gpu-vm')
-    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(false)
 
     await releaseSelect!.setValue('release-container:1')
     await flushPromises()
-    expect((gpuSelect!.element as HTMLSelectElement).value).toBe('')
+    expect((gpuSelect!.element as HTMLSelectElement).value).toBe('gpu-vm')
+    expect(wrapper.text()).toContain('先前选择的 GPU 目录项当前不可用')
+    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('submits without a GPU rate and keeps invalid resource input blocked', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [{ id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' }],
+    }
+    mocks.catalog = {
+      kind: 'success',
+      data: [{ id: 'gpu-container', class: 'nvidia-cuda', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }],
+    }
+    const wrapper = await mountView()
+    const gpuSelect = wrapper.findAll('label').find((label) => label.text().includes('GPU 目录项'))?.get('select')
+    await gpuSelect!.setValue('gpu-container')
+    const submit = wrapper.get('form.request-form button[type="submit"]')
+
+    expect(wrapper.text()).toContain('当前未配置计价')
+    expect((submit.element as HTMLButtonElement).disabled).toBe(false)
+    await wrapper.get('form.request-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+
+    const cpuInput = wrapper.findAll('label').find((label) => label.text().includes('CPU（m）'))!.get('input')
+    await cpuInput.setValue('0')
+    expect((submit.element as HTMLButtonElement).disabled).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('submits with an ambiguous or unreadable GPU rate without presenting it as free', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [{ id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' }],
+    }
+    mocks.catalog = {
+      kind: 'success',
+      data: [{ id: 'gpu-container', class: 'nvidia-cuda', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }],
+    }
+    mocks.rates = { kind: 'success', data: [] }
+    mocks.gpuRateSelection.mockReturnValue({ rate: null, ambiguous: true })
+    const ambiguousWrapper = await mountView()
+    const ambiguousGpuSelect = ambiguousWrapper.findAll('label').find((label) => label.text().includes('GPU 目录项'))!.get('select')
+    await ambiguousGpuSelect.setValue('gpu-container')
+    const ambiguousSubmit = ambiguousWrapper.get('form.request-form button[type="submit"]')
+    expect(ambiguousWrapper.text()).toContain('当前有效费率存在冲突')
+    expect(ambiguousWrapper.text()).not.toContain('费用：免费')
+    expect((ambiguousSubmit.element as HTMLButtonElement).disabled).toBe(false)
+    await ambiguousWrapper.get('form.request-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+    ambiguousWrapper.unmount()
+
+    mocks.create.mockClear()
+    mocks.rates = { kind: 'error', diagnostic: { code: 'RESOURCE_RATES_LOAD_FAILED', message: '费率暂时无法读取', retryable: true } }
+    mocks.gpuRateSelection.mockReturnValue({ rate: null, ambiguous: false })
+    const errorWrapper = await mountView()
+    const errorGpuSelect = errorWrapper.findAll('label').find((label) => label.text().includes('GPU 目录项'))!.get('select')
+    await errorGpuSelect.setValue('gpu-container')
+    const errorSubmit = errorWrapper.get('form.request-form button[type="submit"]')
+    expect(errorWrapper.text()).toContain('费率暂时无法读取')
+    expect(errorWrapper.text()).not.toContain('费用：免费')
+    expect((errorSubmit.element as HTMLButtonElement).disabled).toBe(false)
+    await errorWrapper.get('form.request-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+    errorWrapper.unmount()
+  })
+
+  it('keeps a GPU intent through catalog failure or disappearance until no GPU is selected explicitly', async () => {
+    mocks.releases = {
+      kind: 'success',
+      data: [{ id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' }],
+    }
+    const catalogState = reactive({
+      kind: 'success' as 'success' | 'error',
+      data: [{ id: 'gpu-container', class: 'nvidia-cuda', mode: 'exclusive', capacityUnits: 1, revision: 1, active: true }],
+      diagnostic: undefined as unknown,
+    })
+    mocks.catalog = catalogState
+    const wrapper = await mountView()
+    const gpuSelect = wrapper.findAll('label').find((label) => label.text().includes('GPU 目录项'))!.get('select')
+    await gpuSelect.setValue('gpu-container')
+    const submit = wrapper.get('form.request-form button[type="submit"]')
+    expect((submit.element as HTMLButtonElement).disabled).toBe(false)
+
+    catalogState.kind = 'error'
+    catalogState.data = []
+    catalogState.diagnostic = { code: 'GPU_CATALOG_LOAD_FAILED', message: 'GPU 目录暂时无法读取', retryable: true }
+    await flushPromises()
+    expect(wrapper.text()).toContain('GPU 目录暂时无法读取')
+    expect(wrapper.text()).toContain('已保留先前选择')
+    expect(gpuSelect.findAll('option').map((option) => option.text())).toContain('先前选择的 GPU（当前不可用）')
+    expect((submit.element as HTMLButtonElement).disabled).toBe(true)
+
+    catalogState.kind = 'success'
+    catalogState.data = []
+    await flushPromises()
+    expect(wrapper.text()).toContain('先前选择的 GPU 目录项当前不可用')
+    expect((submit.element as HTMLButtonElement).disabled).toBe(true)
+
+    await gpuSelect.setValue('')
+    expect((submit.element as HTMLButtonElement).disabled).toBe(false)
+    await wrapper.get('form.request-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+    expect(mocks.create.mock.calls[0][0].resources).not.toHaveProperty('gpu')
+    wrapper.unmount()
+  })
+
+  it('keeps a selected release and an uncertain request identity through a release refresh failure', async () => {
+    const release = { id: 'release-container', version: 1, runtimeKind: 'container', label: 'Container release', source: 'control' } as const
+    const releaseState = reactive({
+      kind: 'success' as 'success' | 'error',
+      data: [release],
+      diagnostic: undefined as unknown,
+    })
+    mocks.releases = releaseState
+    mocks.create.mockResolvedValue(false)
+    const wrapper = await mountView()
+    const releaseSelect = wrapper.findAll('label').find((label) => label.text().includes('已发布版本'))!.get('select')
+    const form = wrapper.get('form.request-form')
+    await form.trigger('submit')
+    await flushPromises()
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+    const firstBody = mocks.create.mock.calls[0][0]
+    const firstOptions = mocks.create.mock.calls[0][1]
+
+    releaseState.kind = 'error'
+    releaseState.data = []
+    releaseState.diagnostic = { code: 'PROJECT_RELEASES_LOAD_FAILED', message: '版本暂时无法读取', retryable: true }
+    await flushPromises()
+    expect(releaseSelect.findAll('option').map((option) => option.text())).toContain('先前选择的版本（当前不可用）')
+    expect(wrapper.text()).toContain('版本暂时无法读取，已保留先前选择')
+    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+
+    releaseState.kind = 'success'
+    releaseState.data = [release]
+    await flushPromises()
+    expect((releaseSelect.element as HTMLSelectElement).value).toBe('release-container:1')
+    expect((wrapper.get('form.request-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(false)
+    mocks.create.mockResolvedValue(true)
+    await form.trigger('submit')
+    await flushPromises()
+    expect(mocks.create).toHaveBeenCalledTimes(2)
+    expect(mocks.create.mock.calls[1][0]).toEqual(firstBody)
+    expect(mocks.create.mock.calls[1][1]).toEqual(firstOptions)
+    wrapper.unmount()
   })
 
   it('requires confirmation for cancellation and reclaim, then clears a target on project switch', async () => {

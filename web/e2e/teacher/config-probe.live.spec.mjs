@@ -10,6 +10,7 @@ import {
 import {
   addProjectStudentByUi, cancelAgentRunByUi, readActorId, snapshotProjectResourceRequestIds,
   startExperimentRunByUi, uploadPackageDirectoryByUi,
+  waitForAuthoringRunWithResourceApproval,
   waitForFrozenSubmission, waitForProjectEvaluationResultWithResourceApproval,
 } from '../support/real-experiment.mjs'
 import {
@@ -25,39 +26,8 @@ const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../exa
 const TASK_PROVIDER = process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim() || 'container-primary-v1'
 const TERMINAL_STATES = ['succeeded', 'partially_succeeded', 'failed', 'cancelled']
-const ACTIVE_ATTEMPTS = ['pending', 'running', 'repairing', 'awaiting_approval']
 test.describe.configure({ timeout: 3_600_000, retries: 0 })
 test.skip(process.env.LABWEAVER_E2E_CONFIG_PROBE !== '1', 'Opt in to the real VM configuration experiment.')
-
-async function approveAuthoringRequests(adminPage, run, requesterId) {
-  const requests = await expectJson(
-    await adminPage.request.get(`/api/v1/projects/${run.projectId}/resource-requests`),
-    'CONFIG_PROBE_AUTHORING_REQUESTS_READ_FAILED',
-  )
-  const compactRun = run.id.replaceAll('-', '').toLowerCase()
-  for (const request of requests.filter((item) => (
-    item.projectId === run.projectId && item.requesterId === requesterId
-    && item.target?.kind === 'task' && item.state === 'reviewing'
-    && item.requestKey?.startsWith(`authoring-${compactRun}-`)
-  ))) {
-    const key = request.requestKey.match(/^authoring-([0-9a-f]{32})-(environment|evaluation)-([1-9][0-9]*)-([0-9a-f]{32})$/i)
-    const track = run.tracks.find((item) => item.kind === key?.[2])
-    const active = track?.attempts?.filter((item) => ACTIVE_ATTEMPTS.includes(item.state)) ?? []
-    if (key?.[1] !== compactRun || active.length !== 1 || active[0].number !== 1
-      || Number(key[3]) !== active[0].number
-      || request.target.taskRunId?.replaceAll('-', '').toLowerCase() !== key[4]?.toLowerCase()
-      || !['cpuMillicores', 'memoryBytes', 'storageBytes'].every((field) =>
-        Number.isSafeInteger(request.requestedResources?.[field]) && request.requestedResources[field] > 0)
-      || request.requestedResources?.gpu != null
-      || !Number.isSafeInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
-      throw new Error('CONFIG_PROBE_AUTHORING_REQUEST_SCOPE_INVALID')
-    }
-    await approveResourceRequestByUi(adminPage, {
-      projectId: run.projectId, requestId: request.id, requestKey: request.requestKey,
-      requesterId, durationSeconds: request.requestedDurationSeconds, providerBinding: TASK_PROVIDER,
-    })
-  }
-}
 
 async function authorAndPublish(page, adminPage, project, environmentSpec, evaluationSpec, teacherActorId, onRun) {
   await configureProjectPolicyByUi(page, project.id, { maxTransientRetries: 0 })
@@ -66,14 +36,21 @@ async function authorAndPublish(page, adminPage, project, environmentSpec, evalu
   const packageData = await uploadPackageDirectoryByUi(page, PACKAGE_ROOT, 'materials/application.conf')
   const accepted = await startExperimentRunByUi(page, project.id)
   onRun(accepted)
-  const run = await pollJson(page.request, `/api/v1/projects/${project.id}/agent-runs/${accepted.id}`, async (current) => {
-    const active = current.tracks.some((track) => track.attempts?.some((attempt) => ACTIVE_ATTEMPTS.includes(attempt.state)))
-    if (!TERMINAL_STATES.includes(current.state) || active) {
-      await approveAuthoringRequests(adminPage, current, teacherActorId)
-      return false
-    }
-    return true
-  }, 'CONFIG_PROBE_AUTHORING_STATUS_FAILED', 1_800_000)
+  const run = await waitForAuthoringRunWithResourceApproval({
+    request: page.request,
+    adminPage,
+    projectId: project.id,
+    runId: accepted.id,
+    requesterId: teacherActorId,
+    providerBinding: TASK_PROVIDER,
+    timeout: 1_800_000,
+    validateRun: (current) => {
+      if (current.packageId !== packageData.id || current.purpose?.kind !== 'authoring'
+        || current.purpose.environmentClass !== 'experiment') {
+        throw new Error('CONFIG_PROBE_AUTHORING_RUN_SCOPE_INVALID')
+      }
+    },
+  })
   if (run.state !== 'succeeded' || run.packageId !== packageData.id) {
     throw new Error(`CONFIG_PROBE_AUTHORING_FAILED:${run.state}`)
   }

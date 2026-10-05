@@ -813,6 +813,22 @@ async fn authorize_resource_request(
             }
             _ => return Err(ApiError::bad_request("LW_AUTH_RESOURCE_PATH_REJECTED")),
         },
+        ["", "api", "v1", "resource", "rates", rate_id, "end"] if *method == Method::POST => {
+            let _rate_id = rate_id
+                .parse::<contracts::RateId>()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let _input =
+                contracts::parse_strict_json::<contracts::http::EndResourceRateRequest>(body)
+                    .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Global,
+                "endResourceRate",
+            )
+            .await?;
+            return Ok("endResourceRate");
+        }
         ["", "api", "v1", "resource", "usage"] if *method == Method::POST => {
             let usage =
                 contracts::parse_strict_json::<contracts::http::RecordResourceUsageRequest>(body)
@@ -1922,6 +1938,9 @@ fn valid_resource_path(path: &str) -> bool {
             if matches!(*action, "renew" | "revoke")
     ) || matches!(
         segments.as_slice(),
+        ["", "api", "v1", "resource", "rates", _, "end"]
+    ) || matches!(
+        segments.as_slice(),
         ["", "api", "v1", "projects", _, "charges", _, "adjustments"]
     )
 }
@@ -2193,6 +2212,9 @@ mod tests {
         ));
         assert!(valid_resource_path("/api/v1/resource/gpu-catalog"));
         assert!(valid_resource_path("/api/v1/resource/rates"));
+        assert!(valid_resource_path(
+            "/api/v1/resource/rates/01900000-0000-7000-8000-000000000001/end"
+        ));
         assert!(valid_resource_path("/api/v1/resource/usage"));
         assert!(valid_resource_path(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-budget"

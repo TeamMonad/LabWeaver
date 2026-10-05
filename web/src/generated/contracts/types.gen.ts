@@ -3854,6 +3854,20 @@ export type DisablePlatformImageRequestSchema = {
 };
 
 /**
+ * EndResourceRateRequest
+ *
+ * Closes one open immutable rate version at a future timestamp.
+ */
+export type EndResourceRateRequestSchema = {
+    effectiveUntil: EndResourceRateRequestSchemaUtcTimestamp;
+};
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EndResourceRateRequestSchemaUtcTimestamp = string;
+
+/**
  * SnapshotPage
  *
  * Cursor page bound to one consistent REST/SSE snapshot.
@@ -17386,6 +17400,78 @@ export type CreateResourceRateResponses = {
 };
 
 export type CreateResourceRateResponse = CreateResourceRateResponses[keyof CreateResourceRateResponses];
+
+export type EndResourceRateData = {
+    body: EndResourceRateRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+        Origin: string;
+        'X-CSRF-Token': string;
+    };
+    path: {
+        rateId: string;
+    };
+    query?: never;
+    url: '/api/v1/resource/rates/{rateId}/end';
+};
+
+export type EndResourceRateErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type EndResourceRateError = EndResourceRateErrors[keyof EndResourceRateErrors];
+
+export type EndResourceRateResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceRateSchema;
+};
+
+export type EndResourceRateResponse = EndResourceRateResponses[keyof EndResourceRateResponses];
 
 export type RecordResourceUsageData = {
     body: RecordResourceUsageRequestSchema;

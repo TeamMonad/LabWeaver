@@ -33,6 +33,91 @@ const VM_BINDING = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/
 const VM_SOURCE_REGISTRY_DIGEST = /^docker:\/\/[^\s@]+@sha256:[0-9a-f]{64}$/i
 const VM_DISK_FORMATS = Object.freeze(['qcow2', 'raw'])
 const GIB = 1024 ** 3
+const FIXED_DECIMAL_SCALE = 1_000_000n
+const WORK_COMPUTE_UNITS = new Set(['cpu_millicore_second', 'memory_byte_second', 'gpu_unit_second'])
+
+function fixedDecimalScaled(value, diagnostic) {
+  if (typeof value !== 'string' || !FIXED_DECIMAL.test(value)) {
+    throw new Error(`${diagnostic}:AMOUNT_INVALID`)
+  }
+  const [whole, fraction] = value.split('.')
+  return BigInt(whole) * FIXED_DECIMAL_SCALE + BigInt(fraction)
+}
+
+function usageHasPositiveQuantity(usage) {
+  if (usage.measurement?.state !== 'known') return false
+  const quantities = usage.measurement.quantities
+  if (!quantities || typeof quantities !== 'object') return false
+  if (usage.kind === 'compute') {
+    return [quantities.cpuMillicoreSeconds, quantities.memoryByteSeconds, quantities.gpuUnitSeconds]
+      .some((value) => Number.isSafeInteger(value) && value > 0)
+  }
+  if (usage.kind === 'storage') return Number.isSafeInteger(quantities.storageByteSeconds) && quantities.storageByteSeconds > 0
+  return false
+}
+
+function chargeHasPositiveUnit(charge, kind) {
+  const allowedUnits = kind === 'compute' ? WORK_COMPUTE_UNITS : new Set(['storage_byte_second'])
+  return (charge.lines ?? []).some((line) => (
+    allowedUnits.has(line.unit)
+    && Number.isSafeInteger(line.quantity)
+    && line.quantity > 0
+    && fixedDecimalScaled(line.amount?.amount, 'LW_WORK_USAGE_CHARGE') > 0n
+  ))
+}
+
+/**
+ * Match authoritative usage records to their immutable charges for one Work lease.
+ * A project charge without the exact request/lease usage identity is never accepted.
+ * Returns null while either compute or storage usage is unknown, unsettled, or missing.
+ */
+export function selectSettledWorkUsageChargesForLease({
+  usageRecords,
+  charges,
+  projectId,
+  requestId,
+  leaseId,
+  baselineChargeIds = new Set(),
+}) {
+  if (!Array.isArray(usageRecords) || !Array.isArray(charges)) throw new Error('LW_WORK_USAGE_READ_INVALID')
+  if (!baselineChargeIds || typeof baselineChargeIds.has !== 'function') throw new Error('LW_WORK_USAGE_BASELINE_INVALID')
+  if ([projectId, requestId, leaseId].some((value) => typeof value !== 'string' || value === '')) {
+    throw new Error('LW_WORK_USAGE_SCOPE_INVALID')
+  }
+
+  const scopedUsage = usageRecords.filter((usage) => (
+    usage?.projectId === projectId
+    && usage.requestId === requestId
+    && usage.leaseId === leaseId
+  ))
+  const readyUsage = scopedUsage.filter((usage) => {
+    if (usage.measurement?.state === 'unknown' || usage.settlement !== 'settled') return false
+    if (usage.measurement?.state !== 'known') throw new Error('LW_WORK_USAGE_MEASUREMENT_INVALID')
+    if (!['compute', 'storage'].includes(usage.kind)) throw new Error('LW_WORK_USAGE_KIND_INVALID')
+    if (typeof usage.id !== 'string' || usage.id === '') throw new Error('LW_WORK_USAGE_ID_INVALID')
+    return usageHasPositiveQuantity(usage)
+  })
+  if (!readyUsage.some((usage) => usage.kind === 'compute') || !readyUsage.some((usage) => usage.kind === 'storage')) return null
+
+  const matches = []
+  for (const usage of readyUsage) {
+    const charge = charges.find((candidate) => (
+      candidate?.projectId === projectId
+      && candidate.usageRecordId === usage.id
+      && candidate.adjustmentOf == null
+      && !baselineChargeIds.has(candidate.id)
+    ))
+    if (!charge || charge.settlement !== 'settled') continue
+    if (typeof charge.id !== 'string' || charge.id === '' || typeof charge.usageRecordId !== 'string') {
+      throw new Error('LW_WORK_USAGE_CHARGE_ID_INVALID')
+    }
+    if (fixedDecimalScaled(charge.total?.amount, 'LW_WORK_USAGE_CHARGE') <= 0n) continue
+    if (!chargeHasPositiveUnit(charge, usage.kind)) continue
+    matches.push({ usage, charge })
+  }
+  if (!matches.some(({ usage }) => usage.kind === 'compute') || !matches.some(({ usage }) => usage.kind === 'storage')) return null
+  return matches
+}
 
 export function selectPendingWorkTaskResourceRequest(requests, {
   projectId,

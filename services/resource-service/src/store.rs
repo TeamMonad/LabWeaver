@@ -13,8 +13,8 @@ use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ResourceLeaseChanged, ResourceRequestChanged, subjects,
 };
 use contracts::http::{
-    CreateResourceRateRequest, IdempotencyKey, RecordResourceUsageRequest, TaskResourceStatus,
-    UpsertResourceBudgetRequest,
+    CreateResourceRateRequest, EndResourceRateRequest, IdempotencyKey, RecordResourceUsageRequest,
+    TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, GpuAllocation, GpuAllocationMode,
@@ -760,6 +760,12 @@ impl PgResourceStore {
         usage_id: UsageRecordId,
     ) -> Result<Option<ResourceCharge>, ResourceStoreError> {
         let mut transaction = self.pool.begin().await?;
+        // Rate publication and closure take the exclusive form of this lock before
+        // touching a rate row.  Acquire the shared form before the usage row lock so
+        // settlement cannot deadlock with either rate mutation.
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended('resource_rates', 0))")
+            .execute(&mut *transaction)
+            .await?;
         let row = sqlx::query(
             "SELECT contract FROM resource.resource_usage_records
              WHERE usage_record_id=$1 FOR UPDATE",
@@ -998,6 +1004,104 @@ impl PgResourceStore {
                     &mut transaction,
                     Domain::Resource,
                     "create_resource_rate",
+                    idempotency_key,
+                    &value,
+                )
+                .await?;
+                rate
+            }
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    /// Ends one open rate at a future boundary without changing its price revision.
+    /// The idempotency hash includes the path rate ID so one key cannot be replayed for
+    /// another rate, and completed requests replay before validating the current time.
+    pub async fn end_rate(
+        &self,
+        rate_id: RateId,
+        idempotency_key: &str,
+        input: &EndResourceRateRequest,
+    ) -> Result<ResourceRate, ResourceStoreError> {
+        IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        let hash =
+            Sha256Digest::of_canonical(&(rate_id, input)).map_err(|_| ResourceStoreError::Wire)?;
+        let mut transaction = self.pool.begin().await?;
+        let result = match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Resource,
+            "end_resource_rate",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => decode_rate(value)?,
+            IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => {
+                return Err(ResourceStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('resource_rates', 0))")
+                    .execute(&mut *transaction)
+                    .await?;
+                let row = sqlx::query(
+                    "SELECT contract FROM resource.resource_rates
+                     WHERE rate_id=$1 FOR UPDATE",
+                )
+                .bind(rate_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ResourceStoreError::NotFound)?;
+                let mut rate = decode_rate(row.try_get("contract")?)?;
+                if rate.effective_until.is_some() {
+                    return Err(ResourceStoreError::RateAlreadyEnded);
+                }
+                let now = database_now(&mut transaction).await?;
+                if input.effective_until <= rate.effective_from || input.effective_until <= now {
+                    return Err(ResourceStoreError::RateEndInvalid);
+                }
+                let settled_after_boundary: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM resource.resource_usage_records u
+                         JOIN resource.resource_charges c
+                           ON c.usage_record_id=u.usage_record_id
+                          AND c.adjustment_of IS NULL
+                         WHERE u.settlement='settled'
+                           AND u.measured_until > $1
+                           AND EXISTS (
+                               SELECT 1
+                               FROM jsonb_array_elements(c.lines) line
+                               WHERE line->>'rateId'=$2
+                           )
+                     )",
+                )
+                .bind(input.effective_until.get())
+                .bind(rate.id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+                if settled_after_boundary {
+                    return Err(ResourceStoreError::RateSettledConflict);
+                }
+                rate.effective_until = Some(input.effective_until);
+                rate.validate().map_err(ResourceStoreError::Contract)?;
+                sqlx::query(
+                    "UPDATE resource.resource_rates
+                     SET effective_until=$2, contract=$3
+                     WHERE rate_id=$1 AND effective_until IS NULL",
+                )
+                .bind(rate.id.as_uuid())
+                .bind(input.effective_until.get())
+                .bind(serde_json::to_value(&rate)?)
+                .execute(&mut *transaction)
+                .await?;
+                let value = serde_json::to_value(&rate)?;
+                IdempotencyStore::complete(
+                    &mut transaction,
+                    Domain::Resource,
+                    "end_resource_rate",
                     idempotency_key,
                     &value,
                 )
@@ -4637,6 +4741,10 @@ pub enum ResourceStoreError {
     UsageOverlap,
     #[error("LW_RESOURCE_RATE_DIMENSION_INVALID")]
     RateDimensionInvalid,
+    #[error("LW_RESOURCE_RATE_END_INVALID")]
+    RateEndInvalid,
+    #[error("LW_RESOURCE_RATE_ALREADY_ENDED")]
+    RateAlreadyEnded,
     #[error("LW_RESOURCE_RATE_OVERLAP")]
     RateOverlap,
     #[error("LW_RESOURCE_RATE_SETTLED_CONFLICT")]

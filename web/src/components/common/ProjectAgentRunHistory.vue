@@ -28,7 +28,7 @@
     >
       <template #success="{ data }">
         <div v-if="filteredItems.length === 0" class="history-empty" role="status">
-          {{ emptyText }}
+          {{ filteredEmptyText }}
         </div>
         <ul v-else class="run-history-list">
           <li v-for="item in filteredItems" :key="item.id" class="run-history-item">
@@ -99,6 +99,13 @@ const headingId = computed(() => `project-agent-run-history-${props.scope}`)
 const emptyText = computed(() => props.scope === 'work'
   ? '当前项目还没有可恢复的 Work 任务。'
   : '当前项目还没有可恢复的实验任务。')
+const filteredEmptyText = computed(() => {
+  if (history.value.kind === 'success' && (history.value.data.page > 1 || history.value.data.hasMore)) {
+    const taskText = props.scope === 'work' ? '本页没有可恢复的 Work 任务' : '本页没有可恢复的实验任务'
+    return `${taskText}${history.value.data.hasMore ? '，可查看下一页' : ''}。`
+  }
+  return emptyText.value
+})
 const filteredItems = computed(() => history.value.kind === 'success'
   ? history.value.data.items.filter(isInScope)
   : [])

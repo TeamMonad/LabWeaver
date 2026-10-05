@@ -95,6 +95,14 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     );
     let replay = store.create("create-key-0001", &instance).await?;
     assert_eq!(accepted, replay);
+    let mut retry_context = instance.clone();
+    retry_context.operation.trace_id = "trace-create-retry".to_owned();
+    retry_context.operation.accepted_at = timestamp("2026-07-14T00:00:01.000Z");
+    retry_context.operation.deadline_at = timestamp("2027-01-14T00:00:01.000Z");
+    assert_eq!(
+        store.create("create-key-0001", &retry_context).await?,
+        accepted
+    );
 
     sqlx::query(
         "UPDATE environment.environment_instances \
@@ -133,6 +141,19 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     conflicting.release_version += 1;
     assert!(matches!(
         store.create("create-key-0001", &conflicting).await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    let mut conflicting_label = instance.clone();
+    conflicting_label.display_label = "different-label".to_owned();
+    assert!(matches!(
+        store.create("create-key-0001", &conflicting_label).await,
+        Err(EnvironmentStoreError::IdempotencyConflict)
+    ));
+    let mut conflicting_actor = instance.clone();
+    conflicting_actor.owner_id = ActorId::new();
+    conflicting_actor.operation.actor_id = conflicting_actor.owner_id;
+    assert!(matches!(
+        store.create("create-key-0001", &conflicting_actor).await,
         Err(EnvironmentStoreError::IdempotencyConflict)
     ));
     let outbox_count: i64 =
@@ -403,12 +424,14 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .checked_add(time::Duration::minutes(1))
             .ok_or("deadline overflow")?,
     )?;
-    assert!(matches!(
+    assert_eq!(
         store
             .accept_command("delete-key-command-identity", &changed_deadline)
-            .await,
-        Err(EnvironmentStoreError::IdempotencyConflict)
-    ));
+            .await?,
+        store
+            .accept_command("delete-key-command-identity", &identity_command)
+            .await?
+    );
     let mut changed_retry_limit = identity_command;
     changed_retry_limit.max_attempts = 4;
     assert!(matches!(

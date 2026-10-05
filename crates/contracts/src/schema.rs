@@ -660,6 +660,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::CreateResourceRateRequest
     );
     document!(
+        "schemas/contracts/v1/http/end-resource-rate-request.schema.json",
+        crate::http::EndResourceRateRequest
+    );
+    document!(
         "schemas/contracts/v1/http/upsert-resource-budget-request.schema.json",
         crate::http::UpsertResourceBudgetRequest
     );
@@ -1595,6 +1599,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createResourceRequest" | "createProjectResourceRequest" => "http/create-resource-request",
         "createResourceGpuCatalogEntry" => "gpu-catalog-entry",
         "createResourceRate" => "http/create-resource-rate-request",
+        "endResourceRate" => "http/end-resource-rate-request",
         "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
         "createProjectResourceChargeAdjustment" => "http/create-resource-adjustment-request",
         "recordResourceUsage" | "recordInternalResourceUsage" => {
@@ -1733,7 +1738,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listResourceRates" => {
             json!({"type":"array","items":contract_ref("resource-rate")})
         }
-        "createResourceRate" => contract_ref("resource-rate"),
+        "createResourceRate" | "endResourceRate" => contract_ref("resource-rate"),
         "getProjectResourceBudget" | "upsertProjectResourceBudget" => {
             contract_ref("resource-budget")
         }
@@ -1856,7 +1861,11 @@ fn operation_responses(
     response_schema: Option<Value>,
 ) -> Value {
     let mut responses = serde_json::Map::new();
-    let mut success = json!({"description":"Successful response","headers":{"ETag":{"schema":{"type":"string","pattern":"^\\\"rev-[1-9][0-9]*\\\"$"}}}});
+    let mut success = json!({"description":"Successful response"});
+    if operation_id != "endResourceRate" {
+        success["headers"] =
+            json!({"ETag":{"schema":{"type":"string","pattern":"^\\\"rev-[1-9][0-9]*\\\"$"}}});
+    }
     if operation_id == "issueConsoleCapability" {
         success["headers"]["Set-Cookie"] = json!({
             "description": "Exactly one __Secure-labweaver_console_handoff cookie. It MUST be Secure, HttpOnly, SameSite=Strict, have Max-Age=30, and use the returned connectionLocator as its exact Path. Its value is the one-time secret and is never present in a response body, URL, SDK, or log.",

@@ -22,6 +22,7 @@ import {
   readResumablePublishedExperiment,
   realProviderConfig,
   realExperimentResumeConfig,
+  waitForAuthoringRunWithResourceApproval,
   startExperimentRunByUi,
   uploadPackageDirectoryByUi,
   waitForEnvironment,
@@ -38,10 +39,6 @@ const resume = realExperimentResumeConfig()
 
 test.describe.configure({ timeout: REAL_CHAIN_TIMEOUT_MS, retries: 0 })
 
-function terminalRunState(value) {
-  return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value)
-}
-
 function diagnosticCodes(run) {
   return run.tracks
     .flatMap((track) => track.attempts ?? [])
@@ -56,14 +53,19 @@ function shellOctal(value) {
     .join('')
 }
 
-async function waitForExperimentRun(request, projectId, runId) {
-  const run = await pollJson(
+async function waitForExperimentRun(request, projectId, runId, adminPage, requesterId) {
+  const run = await waitForAuthoringRunWithResourceApproval({
     request,
-    `/api/v1/projects/${projectId}/agent-runs/${runId}`,
-    (value) => terminalRunState(value.state),
-    'REAL_EXPERIMENT_AGENT_RUN_STATUS_FAILED',
-    600_000,
-  )
+    adminPage,
+    projectId,
+    runId,
+    requesterId,
+    validateRun: (value) => {
+      if (value.purpose?.kind !== 'authoring' || value.purpose.environmentClass !== 'experiment') {
+        throw new Error('REAL_EXPERIMENT_AGENT_RUN_PURPOSE_INVALID')
+      }
+    },
+  })
   if (run.state !== 'succeeded') throw new Error(`REAL_EXPERIMENT_AGENT_RUN_FAILED:${run.state}:${diagnosticCodes(run)}`)
   const environment = run.tracks.find((track) => track.kind === 'environment')
   const evaluation = run.tracks.find((track) => track.kind === 'evaluation')
@@ -424,6 +426,9 @@ test('teacher publishes a real security experiment and student repairs it throug
   }
 
   const packageCopy = await createSecurityControlledPackage(config.goldenBaseImage)
+  const teacherActorId = await readActorId(request)
+  const adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  const adminPage = await adminContext.newPage()
   try {
     const project = await createProjectByUi(page, `real-security-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
@@ -437,7 +442,7 @@ test('teacher publishes a real security experiment and student repairs it throug
     await expect(page).toHaveURL(new RegExp(`[?&]runId=${encodeURIComponent(run.id)}(?:&|$)`), { timeout: 30_000 })
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: '生成实验候选', exact: true })).toBeVisible()
-    const completed = await waitForExperimentRun(request, project.id, run.id)
+    const completed = await waitForExperimentRun(request, project.id, run.id, adminPage, teacherActorId)
     const built = await waitForBuiltCandidate(request, project.id, completed.environmentCandidateId)
     const published = await approveAndPublish(
       page,
@@ -456,6 +461,7 @@ test('teacher publishes a real security experiment and student repairs it throug
       publication: published.publication,
     })
   } finally {
+    await adminContext.close()
     await packageCopy.cleanup()
   }
 })

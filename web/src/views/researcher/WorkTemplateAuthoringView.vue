@@ -85,7 +85,7 @@
         :message="upload.state.diagnostic.message"
         :retryable="upload.state.diagnostic.retryable"
         severity="error"
-        @retry="upload.retry"
+        @retry="retryPackageLoad"
       />
 
       <div class="form-actions">
@@ -93,6 +93,7 @@
           <template v-if="upload.state.kind === 'creating'">创建上传会话…</template>
           <template v-else-if="upload.state.kind === 'uploading'">上传中…</template>
           <template v-else-if="upload.state.kind === 'completing'">确认归档…</template>
+          <template v-else-if="upload.state.kind === 'loading'">读取已归档材料包…</template>
           <template v-else>上传材料包</template>
         </button>
         <button v-if="packageDone" type="button" class="text-button" @click="upload.clear">清除材料</button>
@@ -104,7 +105,7 @@
       </p>
     </section>
 
-    <section v-if="packageDone" class="template-card md-card" aria-labelledby="run-heading">
+    <section v-if="packageDone || runIdRef" class="template-card md-card" aria-labelledby="run-heading">
       <div class="section-heading section-heading--compact">
         <div>
           <h4 id="run-heading">生成可重复使用的 Work 模板</h4>
@@ -377,6 +378,8 @@ const CANDIDATE_NOT_FOUND_MAX_RETRIES = 100
 let candidateNotFoundRetryId: string | null = null
 let candidateNotFoundRetryCount = 0
 let loadedRouteRunId: string | null = null
+let loadedRouteProjectId: string | null = null
+let routeRestoreGeneration = 0
 let releaseGeneration = 0
 let approvalRequestKey: string | null = null
 let releaseRequestKey: string | null = null
@@ -440,11 +443,16 @@ watch(
 watch(
   [projectIdRef, runIdRef],
   ([projectId, runId]) => {
+    const generation = ++routeRestoreGeneration
+    const previousProjectId = loadedRouteProjectId
+    const previousRunId = loadedRouteRunId
     if (!projectId || !runId) {
       loadedRouteRunId = null
+      loadedRouteProjectId = null
+      if (previousProjectId || previousRunId) upload.clear()
       return
     }
-    if (runId === loadedRouteRunId) return
+    if (runId === loadedRouteRunId && projectId === loadedRouteProjectId) return
     candidateGeneration += 1
     candidateKey = ''
     environmentCandidate.value = { kind: 'idle' }
@@ -455,8 +463,10 @@ watch(
     release.value = { kind: 'idle' }
     releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     stopCandidatePolling()
+    if (previousProjectId || previousRunId) upload.clear()
     loadedRouteRunId = runId
-    void agent.load(runId)
+    loadedRouteProjectId = projectId
+    void restoreRouteRun(projectId, runId, generation)
   },
   { immediate: true },
 )
@@ -541,6 +551,17 @@ async function loadCandidate(id: string, silent = false) {
   approvalRequestKey = null
   releaseRequestKey = null
   scheduleCandidatePoll(result.data)
+}
+
+async function restoreRouteRun(projectId: string, runId: string, generation: number) {
+  const loaded = await agent.load(runId)
+  if (!loaded || generation !== routeRestoreGeneration || props.projectId !== projectId || runIdRef.value !== runId) return
+  const restoredRun = agent.run.kind === 'success' ? agent.run.data : null
+  if (!restoredRun || restoredRun.id !== runId || restoredRun.projectId !== projectId || restoredRun.purpose.kind !== 'authoring' || restoredRun.purpose.environmentClass !== 'work') return
+  const packageId = restoredRun.packageId?.trim()
+  if (!packageId) return
+  if (upload.state.kind === 'done' && upload.state.package.id === packageId) return
+  await upload.loadPackage(packageId)
 }
 
 function candidateArtifactIsReady(data: EnvironmentCandidateViewSchema): boolean {
@@ -641,12 +662,29 @@ async function startRun() {
   })
   if (started && agent.run.kind === 'success') {
     loadedRouteRunId = agent.run.data.id
+    loadedRouteProjectId = projectId
     emit('run-created', agent.run.data.id)
   }
 }
 
 function reloadRun() {
-  if (agent.run.kind === 'success') void agent.load(agent.run.data.id)
+  const projectId = props.projectId
+  const runId = runIdRef.value ?? (agent.run.kind === 'success' ? agent.run.data.id : null)
+  if (projectId && runId) {
+    const generation = ++routeRestoreGeneration
+    void restoreRouteRun(projectId, runId, generation)
+  } else if (agent.run.kind === 'success') {
+    void agent.load(agent.run.data.id)
+  }
+}
+
+function retryPackageLoad() {
+  const restoredRun = agent.run.kind === 'success' ? agent.run.data : null
+  if (runIdRef.value && restoredRun?.id === runIdRef.value && restoredRun.projectId === props.projectId && restoredRun.packageId) {
+    void upload.loadPackage(restoredRun.packageId)
+    return
+  }
+  void upload.retry()
 }
 
 async function approveCandidate() {

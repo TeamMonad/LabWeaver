@@ -696,3 +696,4 @@ export async function listResourceGpuCatalog(): Promise<FixtureResult<GpuCatalog
 export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<ResourceRateSchema[]>> { return unsupportedResponse('读取资源费率') }
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
 export async function createResourceRate() { return unsupportedResponse('创建资源费率') }
+export async function endResourceRate() { return unsupportedResponse('结束资源费率') }

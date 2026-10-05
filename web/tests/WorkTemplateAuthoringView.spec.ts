@@ -149,25 +149,48 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   }
 })
 
-vi.mock('@/composables/useProjectProblemPackageUpload', () => ({
-  useProjectProblemPackageUpload: () => ({
+const packageUploadMock = vi.hoisted(() => ({
+  loadPackage: vi.fn(),
+  initialPackage: {
+    id: 'package-1',
+    projectId: 'project-1',
+    courseId: 'course-1',
+    revision: 4,
     files: [],
-    state: { kind: 'done', package: packageData },
+    retention: {},
+    completedAt: '2026-09-08T00:00:00.000Z',
+  },
+  instance: null as { state: { kind: string; package?: { id: string } } } | null,
+}))
+
+vi.mock('@/composables/useProjectProblemPackageUpload', async () => {
+  const { reactive } = await import('vue')
+  const upload = reactive({
+    files: [],
+    state: { kind: 'done', package: packageUploadMock.initialPackage },
     addFiles: vi.fn(),
     addDirectoryItems: vi.fn(),
     removeFile: vi.fn(),
     clear: vi.fn(),
     createSession: vi.fn(),
     retry: vi.fn(),
+    loadPackage: packageUploadMock.loadPackage,
     formatBytes: (size: number) => `${size} B`,
-  }),
-}))
+  })
+  packageUploadMock.instance = upload
+  return { useProjectProblemPackageUpload: () => upload }
+})
 
 describe('WorkTemplateAuthoringView', () => {
   let candidate: ReturnType<typeof makeCandidate>
 
   beforeEach(() => {
     vi.resetAllMocks()
+    if (packageUploadMock.instance) packageUploadMock.instance.state = { kind: 'done', package: packageData }
+    packageUploadMock.loadPackage.mockImplementation(async () => {
+      if (packageUploadMock.instance) packageUploadMock.instance.state = { kind: 'done', package: packageData }
+      return true
+    })
     candidate = makeCandidate()
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: policy as never, error: undefined as never })
     vi.mocked(createProjectAgentRun).mockResolvedValue({ data: run as never, error: undefined as never })
@@ -409,6 +432,112 @@ describe('WorkTemplateAuthoringView', () => {
     expect(wrapper.find('[data-testid="work-template-release"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="work-template-release-button"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('release-1')
+    wrapper.unmount()
+  })
+
+  it('restores the archived package for a failed route run and keeps its track retry available', async () => {
+    const failedRun = {
+      ...run,
+      state: 'failed',
+      tracks: [
+        { kind: 'environment', candidateId: null, attempts: [{ number: 1, state: 'failed', diagnosticCode: 'WORK_TEMPLATE_FAILED' }] },
+        { kind: 'evaluation', candidateId: null, attempts: [] },
+      ],
+    }
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: failedRun as never, error: undefined as never })
+    packageUploadMock.instance!.state = { kind: 'idle' }
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledWith('package-1'))
+    expect(wrapper.text()).toContain('重试环境候选生成')
+
+    await wrapper.get('button[aria-label="刷新生成任务"]').trigger('click')
+    await vi.waitFor(() => expect(getProjectAgentRun).toHaveBeenCalledTimes(2))
+    expect(packageUploadMock.loadPackage).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('keeps a route restore error visible and retries the same run before loading its package', async () => {
+    const failedRun = {
+      ...run,
+      state: 'failed',
+      tracks: [
+        { kind: 'environment', candidateId: null, attempts: [{ number: 1, state: 'failed', diagnosticCode: 'WORK_TEMPLATE_FAILED' }] },
+        { kind: 'evaluation', candidateId: null, attempts: [] },
+      ],
+    }
+    vi.mocked(getProjectAgentRun)
+      .mockResolvedValueOnce({ data: undefined as never, error: { diagnosticCode: 'PROJECT_RUN_LOAD_FAILED', detail: '任务读取暂时失败', retryable: true } as never })
+      .mockResolvedValueOnce({ data: failedRun as never, error: undefined as never })
+    packageUploadMock.instance!.state = { kind: 'idle' }
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('任务读取暂时失败'))
+    expect(wrapper.find('section[aria-labelledby="run-heading"]').exists()).toBe(true)
+    const retryButton = wrapper.findAll('section[aria-labelledby="run-heading"] .diagnostic-banner button').find((button) => button.text() === '重试')
+    expect(retryButton).toBeDefined()
+    await retryButton!.trigger('click')
+    await vi.waitFor(() => expect(getProjectAgentRun).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledWith('package-1'))
+    expect(wrapper.text()).toContain('重试环境候选生成')
+    expect(createProjectAgentRun).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('retries loading the archived package for the same route run', async () => {
+    const failedRun = {
+      ...run,
+      state: 'failed',
+      tracks: [
+        { kind: 'environment', candidateId: null, attempts: [{ number: 1, state: 'failed' }] },
+        { kind: 'evaluation', candidateId: null, attempts: [] },
+      ],
+    }
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: failedRun as never, error: undefined as never })
+    packageUploadMock.instance!.state = { kind: 'idle' }
+    packageUploadMock.loadPackage
+      .mockImplementationOnce(async () => {
+        if (packageUploadMock.instance) packageUploadMock.instance.state = {
+          kind: 'error',
+          diagnostic: { code: 'UPLOAD_PACKAGE_LOAD_FAILED', message: '归档材料包暂时不可用。', retryable: true },
+        } as never
+        return false
+      })
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('归档材料包暂时不可用'))
+    const retryButton = wrapper.findAll('.diagnostic-banner button').find((button) => button.text() === '重试')
+    expect(retryButton).toBeDefined()
+    await retryButton!.trigger('click')
+    await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledTimes(2))
+    expect(wrapper.text()).toContain('重试环境候选生成')
+    wrapper.unmount()
+  })
+
+  it('rejects a route run returned for another project without loading its package', async () => {
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: { ...run, projectId: 'project-1' } as never, error: undefined as never })
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-2', courseId: 'course-1', runId: 'run-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(getProjectAgentRun).toHaveBeenCalledWith({ path: { projectId: 'project-2', runId: 'run-1' } }))
+    await Promise.resolve()
+    expect(packageUploadMock.loadPackage).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('生成任务返回的项目引用已变化')
     wrapper.unmount()
   })
 })

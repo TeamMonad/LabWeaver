@@ -33,5 +33,6 @@ export function rateVersionState(rate: ResourceRateSchema, now: number): string 
   const until = rate.effectiveUntil ? Date.parse(rate.effectiveUntil) : null
   if (!Number.isFinite(from) || (until !== null && !Number.isFinite(until))) return '时间无效'
   if (until !== null && until <= now) return '已结束'
-  return from > now ? '未来生效' : '现行'
+  if (from > now) return '未来生效'
+  return until !== null ? '已安排结束' : '现行'
 }

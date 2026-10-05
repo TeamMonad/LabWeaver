@@ -9,6 +9,7 @@ import {
   pollJson,
   selectProjectByUi,
 } from './live.mjs'
+import { approveResourceRequestByUi } from './real-resource.mjs'
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../examples/security-controlled')
 // The live cluster registers its own container provider binding; the value baked
@@ -18,7 +19,13 @@ const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../exa
 const EVALUATION_RESOURCE_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_PROVIDER_BINDING ?? 'kubernetes-work-local-hostpath'
 const EVALUATION_RESOURCE_APPROVAL_REASON = 'teacher real experiment task resource approval'
+const AUTHORING_RESOURCE_PROVIDER_BINDING =
+  process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
+  || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
+  || 'container-primary-v1'
 const RESOURCE_REQUEST_TERMINAL_STATES = new Set(['expired', 'rejected', 'cancelled'])
+const AUTHORING_ACTIVE_ATTEMPT_STATES = new Set(['pending', 'running', 'repairing', 'awaiting_approval'])
+const AUTHORING_REQUEST_KEY = /^authoring-([0-9a-f]{32})-(environment|evaluation)-([1-9][0-9]*)-([0-9a-f]{32})$/i
 const RESOURCE_APPROVAL_POLL_INTERVAL_MS = 1000
 
 /**
@@ -178,6 +185,109 @@ export async function startExperimentRunByUi(page, projectId) {
     purpose: { kind: 'authoring', environmentClass: 'experiment' },
   })
   return run
+}
+
+export function authoringRunIsFullyTerminal(run) {
+  return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(run?.state)
+    && Array.isArray(run?.tracks)
+    && !run.tracks.some((track) => (track.attempts ?? []).some((attempt) => AUTHORING_ACTIVE_ATTEMPT_STATES.has(attempt.state)))
+}
+
+/**
+ * Approve only the requests belonging to the run's current track attempts.
+ * The request key and taskRunId are both checked against the authoritative run
+ * projection before the administrator UI is used, so a stale retry request
+ * cannot be approved for a different attempt.
+ */
+export async function approveAuthoringResourceRequestsByUi(
+  adminPage,
+  run,
+  requesterId,
+  providerBinding = AUTHORING_RESOURCE_PROVIDER_BINDING,
+) {
+  if (!adminPage?.request || typeof run?.id !== 'string' || typeof run?.projectId !== 'string') {
+    throw new Error('REAL_EXPERIMENT_AUTHORING_RESOURCE_APPROVAL_CONTEXT_INVALID')
+  }
+  if (typeof requesterId !== 'string' || requesterId.trim() === '') {
+    throw new Error('REAL_EXPERIMENT_AUTHORING_RESOURCE_REQUESTER_INVALID')
+  }
+  const authoritativeRun = await expectJson(
+    await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(run.projectId)}/agent-runs/${encodeURIComponent(run.id)}`),
+    'REAL_EXPERIMENT_AUTHORING_RUN_READ_FAILED',
+  )
+  if (authoritativeRun.id !== run.id || authoritativeRun.projectId !== run.projectId) {
+    throw new Error('REAL_EXPERIMENT_AUTHORING_RUN_SCOPE_INVALID')
+  }
+  const requests = await readResourceRequests(adminPage.request)
+  const compactRunId = run.id.replaceAll('-', '').toLowerCase()
+  const prefix = `authoring-${compactRunId}-`
+  for (const request of requests.filter((item) => item?.requestKey?.startsWith(prefix))) {
+    const key = request.requestKey.match(AUTHORING_REQUEST_KEY)
+    if (!key) throw new Error(`REAL_EXPERIMENT_AUTHORING_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
+    if (RESOURCE_REQUEST_TERMINAL_STATES.has(request.state)) continue
+    if (request.state !== 'reviewing') continue
+    const trackKind = key[2].toLowerCase()
+    const attemptNumber = Number(key[3])
+    const taskRunId = request.target?.taskRunId
+    const track = authoritativeRun.tracks?.find((item) => item.kind === trackKind)
+    const attempt = track?.attempts?.find((item) => item.number === attemptNumber)
+    const resources = request.requestedResources
+    if (
+      key[1].toLowerCase() !== compactRunId
+      || request.projectId !== authoritativeRun.projectId
+      || request.requesterId !== requesterId
+      || request.target?.kind !== 'task'
+      || typeof taskRunId !== 'string'
+      || taskRunId.replaceAll('-', '').toLowerCase() !== key[4].toLowerCase()
+      || !attempt
+      || !AUTHORING_ACTIVE_ATTEMPT_STATES.has(attempt.state)
+      || !Number.isSafeInteger(resources?.cpuMillicores) || resources.cpuMillicores <= 0
+      || !Number.isSafeInteger(resources?.memoryBytes) || resources.memoryBytes <= 0
+      || !Number.isSafeInteger(resources?.storageBytes) || resources.storageBytes <= 0
+    ) {
+      throw new Error(`REAL_EXPERIMENT_AUTHORING_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
+    }
+    if (!Number.isInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
+      throw new Error(`REAL_EXPERIMENT_AUTHORING_RESOURCE_DURATION_INVALID:${request.id ?? 'missing'}`)
+    }
+    await approveResourceRequestByUi(adminPage, {
+      requestKey: request.requestKey,
+      projectId: run.projectId,
+      requestId: request.id,
+      requesterId,
+      durationSeconds: request.requestedDurationSeconds,
+      providerBinding,
+    })
+  }
+}
+
+export async function waitForAuthoringRunWithResourceApproval({
+  request,
+  adminPage,
+  projectId,
+  runId,
+  requesterId,
+  timeout = 600_000,
+  validateRun = null,
+  providerBinding = AUTHORING_RESOURCE_PROVIDER_BINDING,
+}) {
+  let latest
+  await expect.poll(async () => {
+    latest = await expectJson(
+      await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/agent-runs/${encodeURIComponent(runId)}`),
+      'REAL_EXPERIMENT_AGENT_RUN_STATUS_FAILED',
+    )
+    if (latest.id !== runId || latest.projectId !== projectId) {
+      throw new Error('REAL_EXPERIMENT_AGENT_RUN_SCOPE_INVALID')
+    }
+    validateRun?.(latest)
+    if (!authoringRunIsFullyTerminal(latest)) {
+      await approveAuthoringResourceRequestsByUi(adminPage, latest, requesterId, providerBinding)
+      return false
+    }
+    return true
+  }, { timeout, intervals: [1000, 2000, 3000] }).toBe(true)
+  return latest
 }
 
 /** Cancel an in-flight AgentRun by using the current role's visible action. */

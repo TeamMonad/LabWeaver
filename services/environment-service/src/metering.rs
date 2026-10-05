@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
 use contracts::environment::{
     EnvironmentInstance, EnvironmentLeaseAuthorization, ObservedEnvironmentState,
@@ -1019,6 +1020,26 @@ pub(crate) struct ResourceUsageClient {
     token_client: ServiceTokenClient,
 }
 
+/// Resource boundary used by Environment to reserve and release Experiment GPU capacity.
+///
+/// The production implementation is [`ResourceUsageClient`]. Keeping the external Resource
+/// call behind this boundary also lets API integration tests use a deterministic Resource fake
+/// while retaining the real `PostgreSQL` and NATS paths around it.
+#[async_trait]
+pub trait ExperimentGpuAllocator: Send + Sync {
+    /// Resolves and reserves a Resource-authoritative GPU allocation.
+    async fn resolve_gpu_allocation(
+        &self,
+        request: &ResolveEnvironmentGpuAllocationRequest,
+    ) -> Result<GpuAllocation, ResourceUsageClientError>;
+
+    /// Releases a previously reserved GPU allocation.
+    async fn release_gpu_allocation(
+        &self,
+        request: &ReleaseEnvironmentGpuAllocationRequest,
+    ) -> Result<bool, ResourceUsageClientError>;
+}
+
 impl ResourceUsageClient {
     pub(crate) async fn from_env() -> Result<Self, ResourceUsageClientError> {
         let base_uri = parse_base_uri(&required(RESOURCE_USAGE_BASE_URI)?)?;
@@ -1184,6 +1205,23 @@ impl ResourceUsageClient {
     }
 }
 
+#[async_trait]
+impl ExperimentGpuAllocator for ResourceUsageClient {
+    async fn resolve_gpu_allocation(
+        &self,
+        request: &ResolveEnvironmentGpuAllocationRequest,
+    ) -> Result<GpuAllocation, ResourceUsageClientError> {
+        Self::resolve_gpu_allocation(self, request).await
+    }
+
+    async fn release_gpu_allocation(
+        &self,
+        request: &ReleaseEnvironmentGpuAllocationRequest,
+    ) -> Result<bool, ResourceUsageClientError> {
+        Self::release_gpu_allocation(self, request).await
+    }
+}
+
 pub(crate) async fn delivery_loop(
     store: PgEnvironmentStore,
     client: ResourceUsageClient,
@@ -1267,8 +1305,9 @@ fn parse_scopes(value: &str) -> Result<BTreeSet<String>, ResourceUsageClientErro
     Ok(scopes)
 }
 
+/// Failure returned by the Environment to Resource boundary.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ResourceUsageClientError {
+pub enum ResourceUsageClientError {
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_CONFIGURATION_INVALID")]
     Configuration,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_DISCOVERY_FAILED")]

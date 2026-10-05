@@ -32,8 +32,8 @@ use contracts::environment::{
     ReleaseEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationRequest,
 };
 use contracts::http::{
-    CreateResourceRateRequest, InternalCreateTaskResourceRequest, RecordResourceUsageRequest,
-    UpsertResourceBudgetRequest,
+    CreateResourceRateRequest, EndResourceRateRequest, InternalCreateTaskResourceRequest,
+    RecordResourceUsageRequest, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, FixedDecimal, GpuAllocationMode, GpuCatalogEntry, GpuRequest, Money,
@@ -50,7 +50,7 @@ use resource_service::capacity::{
     CapacityProviderError, GpuCatalogSeed, ResourceCapacityConfiguration,
 };
 use resource_service::outbox::{ResourceOutboxDispatcher, ResourceOutboxOutcome};
-use resource_service::store::{PendingAllocation, PgResourceStore};
+use resource_service::store::{PendingAllocation, PgResourceStore, ResourceStoreError};
 use testcontainers::GenericImage;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 
@@ -2056,6 +2056,330 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     .fetch_one(&pool)
     .await?;
     assert_eq!(adjustment_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let cutoff = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(5))?;
+    let project_id = ProjectId::new();
+    let actor_id = ActorId::new();
+
+    store
+        .upsert_budget(
+            "rate-end-budget",
+            &UpsertResourceBudgetRequest {
+                project_id,
+                course_id: None,
+                limit: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("100.000000")?,
+                },
+                warning_at: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("50.000000")?,
+                },
+            },
+            now,
+        )
+        .await?;
+
+    let rate_input = |unit, price| CreateResourceRateRequest {
+        unit,
+        unit_quantity: 1,
+        gpu_class: None,
+        gpu_mode: None,
+        unit_price: Money {
+            currency: "USD".to_owned(),
+            amount: FixedDecimal::parse(price).expect("fixed test price"),
+        },
+        effective_from: now,
+        effective_until: None,
+    };
+    let cpu_rate = store
+        .create_rate(
+            "rate-end-cpu",
+            &rate_input(ResourceBillingUnit::CpuMillicoreSecond, "0.100000"),
+        )
+        .await?;
+    let memory_rate = store
+        .create_rate(
+            "rate-end-memory",
+            &rate_input(ResourceBillingUnit::MemoryByteSecond, "0.010000"),
+        )
+        .await?;
+    let storage_rate = store
+        .create_rate(
+            "rate-end-storage",
+            &rate_input(ResourceBillingUnit::StorageByteSecond, "0.020000"),
+        )
+        .await?;
+    let replay_rate = store
+        .create_rate(
+            "rate-end-replay",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::GpuUnitSecond,
+                unit_quantity: 1,
+                gpu_class: Some("replay-gpu".to_owned()),
+                gpu_mode: Some(GpuAllocationMode::ContainerTimeSlice),
+                unit_price: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("0.030000")?,
+                },
+                effective_from: now,
+                effective_until: None,
+            },
+        )
+        .await?;
+
+    let end = EndResourceRateRequest {
+        effective_until: cutoff,
+    };
+    let ended = store
+        .end_rate(cpu_rate.id, "rate-end-cpu-close", &end)
+        .await?;
+    assert_eq!(ended.id, cpu_rate.id);
+    assert_eq!(ended.revision, cpu_rate.revision);
+    assert_eq!(ended.effective_until, Some(cutoff));
+    assert_eq!(
+        store
+            .end_rate(cpu_rate.id, "rate-end-cpu-close", &end)
+            .await?,
+        ended
+    );
+    assert!(matches!(
+        store
+            .end_rate(cpu_rate.id, "rate-end-cpu-other", &end)
+            .await,
+        Err(ResourceStoreError::RateAlreadyEnded)
+    ));
+
+    let replay_cutoff = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(2))?;
+    let replay_input = EndResourceRateRequest {
+        effective_until: replay_cutoff,
+    };
+    let replayed = store
+        .end_rate(replay_rate.id, "rate-end-after-cutoff", &replay_input)
+        .await?;
+    let mut after_cutoff = false;
+    for _ in 0..50 {
+        if store.current_time().await? > replay_cutoff {
+            after_cutoff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(after_cutoff, "database clock did not pass the test cutoff");
+    assert_eq!(
+        store
+            .end_rate(replay_rate.id, "rate-end-after-cutoff", &replay_input)
+            .await?,
+        replayed
+    );
+
+    // A key is bound to the path rate ID as well as the body.  Reusing it for
+    // another rate is a conflict even when the cutoff is identical.
+    store
+        .end_rate(storage_rate.id, "rate-end-path", &end)
+        .await?;
+    assert!(matches!(
+        store.end_rate(memory_rate.id, "rate-end-path", &end).await,
+        Err(ResourceStoreError::IdempotencyConflict)
+    ));
+
+    let (request, lease) =
+        create_active_request(&store, now, project_id, actor_id, "rate-end-workload").await?;
+    let usage_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(2))?;
+    let usage = store
+        .record_usage(
+            &RecordResourceUsageRequest {
+                project_id,
+                course_id: None,
+                kind: ResourceUsageKind::Compute,
+                request_id: request.id,
+                lease_id: Some(lease.id),
+                source_event_id: contracts::EventId::new(),
+                measured_from: now,
+                measured_until: usage_until,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        cpu_millicore_seconds: 0,
+                        memory_byte_seconds: 2,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            usage_until,
+        )
+        .await?;
+    let charge = store
+        .settle_usage(usage.id)
+        .await?
+        .ok_or("known usage did not produce a charge")?;
+    assert_eq!(charge.lines[0].rate_id, memory_rate.id);
+    assert_eq!(charge.total.amount.as_str(), "0.020000");
+
+    let crossing_cutoff = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
+    assert!(matches!(
+        store
+            .end_rate(
+                memory_rate.id,
+                "rate-end-settled",
+                &EndResourceRateRequest {
+                    effective_until: crossing_cutoff,
+                },
+            )
+            .await,
+        Err(ResourceStoreError::RateSettledConflict)
+    ));
+    assert_eq!(store.list_charges(project_id).await?.len(), 1);
+    assert!(matches!(
+        store
+            .end_rate(
+                memory_rate.id,
+                "rate-end-past",
+                &EndResourceRateRequest {
+                    effective_until: UtcTimestamp::from_utc(
+                        now.get() - time::Duration::seconds(1),
+                    )?,
+                },
+            )
+            .await,
+        Err(ResourceStoreError::RateEndInvalid)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool.clone());
+    let project_id = ProjectId::new();
+    let actor_id = ActorId::new();
+    let now = store.current_time().await?;
+
+    store
+        .upsert_budget(
+            "rate-concurrent-budget",
+            &UpsertResourceBudgetRequest {
+                project_id,
+                course_id: None,
+                limit: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("100.000000")?,
+                },
+                warning_at: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("50.000000")?,
+                },
+            },
+            now,
+        )
+        .await?;
+    let rate = store
+        .create_rate(
+            "rate-concurrent-create",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::MemoryByteSecond,
+                unit_quantity: 1,
+                gpu_class: None,
+                gpu_mode: None,
+                unit_price: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("0.010000")?,
+                },
+                effective_from: now,
+                effective_until: None,
+            },
+        )
+        .await?;
+    let (request, lease) = create_active_request(
+        &store,
+        now,
+        project_id,
+        actor_id,
+        "rate-concurrent-workload",
+    )
+    .await?;
+    let measured_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(2))?;
+    let usage = store
+        .record_usage(
+            &RecordResourceUsageRequest {
+                project_id,
+                course_id: None,
+                kind: ResourceUsageKind::Compute,
+                request_id: request.id,
+                lease_id: Some(lease.id),
+                source_event_id: contracts::EventId::new(),
+                measured_from: now,
+                measured_until,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        cpu_millicore_seconds: 0,
+                        memory_byte_seconds: 2,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            measured_until,
+        )
+        .await?;
+    let cutoff = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
+    let end_input = EndResourceRateRequest {
+        effective_until: cutoff,
+    };
+    let end_store = store.clone();
+    let settle_store = store.clone();
+    let (end_result, settle_result) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            end_store.end_rate(rate.id, "rate-concurrent-end", &end_input),
+            settle_store.settle_usage(usage.id),
+        )
+    })
+    .await
+    .map_err(|_| "concurrent rate end and settlement exceeded 10 seconds")?;
+
+    match (end_result, settle_result) {
+        (Ok(ended), Err(ResourceStoreError::RateUnconfigured)) => {
+            assert_eq!(ended.effective_until, Some(cutoff));
+            let settlement: String = sqlx::query_scalar(
+                "SELECT settlement FROM resource.resource_usage_records
+                 WHERE usage_record_id=$1",
+            )
+            .bind(usage.id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(settlement, "pending");
+            let charge_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM resource.resource_charges
+                 WHERE usage_record_id=$1 AND adjustment_of IS NULL",
+            )
+            .bind(usage.id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(charge_count, 0);
+        }
+        (Err(ResourceStoreError::RateSettledConflict), Ok(Some(charge))) => {
+            assert_eq!(charge.lines[0].rate_id, rate.id);
+            assert_eq!(charge.total.amount.as_str(), "0.020000");
+            assert_eq!(store.list_charges(project_id).await?.len(), 1);
+            let current_rate = store
+                .list_rates()
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.id == rate.id)
+                .ok_or("concurrent rate disappeared")?;
+            assert_eq!(current_rate.effective_until, None);
+        }
+        other => return Err(format!("unexpected concurrent rate outcome: {other:?}").into()),
+    }
     Ok(())
 }
 

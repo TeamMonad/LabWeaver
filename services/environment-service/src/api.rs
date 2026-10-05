@@ -38,7 +38,8 @@ use crate::{
     ContainerReleaseResolver, ContainerWorkExecutionService, EnvironmentInventoryFilter,
     EnvironmentStoreError, FreezeBindingError, FreezeBindingService, NatsAccessRevoker,
     NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
-    ReleaseProjectionError, WorkExecutionError, work_execution::validate_work_environment,
+    ReleaseProjectionError, WorkExecutionError, metering::ExperimentGpuAllocator,
+    work_execution::validate_work_environment,
 };
 
 const ACCESS_PERMISSION: &str = "access.environment.forward";
@@ -61,7 +62,7 @@ pub struct EnvironmentApiState {
     lease_verifier: NatsResourceLeaseVerifier,
     freeze_bindings: FreezeBindingService,
     pub(crate) work_executions: Option<ContainerWorkExecutionService>,
-    gpu_allocations: Option<crate::metering::ResourceUsageClient>,
+    gpu_allocations: Option<Arc<dyn ExperimentGpuAllocator>>,
 }
 
 impl EnvironmentApiState {
@@ -91,13 +92,13 @@ impl EnvironmentApiState {
         self
     }
 
-    /// Installs the Resource GPU allocation client used to reserve Experiment GPU capacity.
+    /// Installs the Resource GPU allocation boundary used to reserve Experiment GPU capacity.
     #[must_use]
-    pub(crate) fn with_gpu_allocations(
-        mut self,
-        client: crate::metering::ResourceUsageClient,
-    ) -> Self {
-        self.gpu_allocations = Some(client);
+    pub fn with_gpu_allocations<T>(mut self, client: T) -> Self
+    where
+        T: ExperimentGpuAllocator + 'static,
+    {
+        self.gpu_allocations = Some(Arc::new(client));
         self
     }
 }
@@ -767,6 +768,13 @@ async fn create_environment(
     request
         .validate()
         .map_err(|_| EnvironmentApiError::RequestInvalid)?;
+    let request_hash = state
+        .store
+        .lookup_api_create_replay(key.as_str(), &request, actor_id)
+        .await?;
+    if let Some(accepted) = request_hash {
+        return Ok((StatusCode::ACCEPTED, Json(accepted)));
+    }
     let release = state
         .releases
         .resolve(request.release_id, request.release_version)
@@ -833,13 +841,13 @@ async fn create_environment(
     };
     let accepted = match state
         .store
-        .accept_api_command(
+        .accept_api_create_command(
             key.as_str(),
             &command,
-            Some(&create),
-            None,
+            &create,
             request.project_id,
             request.course_id,
+            state.store.create_api_request_hash(&request, actor_id)?,
         )
         .await
     {
@@ -1182,8 +1190,25 @@ async fn accept_lifecycle(
     reset_target: Option<EnvironmentResetTarget>,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_session(headers)?;
-    let instance = load_owned(state, environment_id, actor(headers)?).await?;
+    let actor_id = actor(headers)?;
+    let key = idempotency_key(headers)?;
+    let instance = load_owned(state, environment_id, actor_id).await?;
     let expected_revision = if_match(headers)?;
+    if let Some(accepted) = state
+        .store
+        .lookup_api_lifecycle_replay(
+            key.as_str(),
+            environment_id,
+            kind,
+            expected_revision,
+            actor_id,
+            preserve_mutable_disk,
+            reset_target.as_ref(),
+        )
+        .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(accepted)));
+    }
     if expected_revision != instance.revision {
         return Err(EnvironmentApiError::RevisionConflict);
     }
@@ -1214,7 +1239,7 @@ async fn accept_lifecycle(
     let accepted = state
         .store
         .accept_api_command(
-            idempotency_key(headers)?.as_str(),
+            key.as_str(),
             &command,
             None,
             None,

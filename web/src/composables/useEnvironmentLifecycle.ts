@@ -44,14 +44,27 @@ export function useEnvironmentLifecycle(
         diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false),
       }
     }
-    const result = await createEnvironment({
-      headers: { 'Idempotency-Key': intentKey ?? idempotencyKey() },
-      body: {
-        ...request,
-        projectId: id,
-        ...(courseId.value ? { courseId: courseId.value } : {}),
-      },
-    })
+    let result
+    try {
+      result = await createEnvironment({
+        headers: { 'Idempotency-Key': intentKey ?? idempotencyKey() },
+        body: {
+          ...request,
+          projectId: id,
+          ...(courseId.value ? { courseId: courseId.value } : {}),
+        },
+      })
+    } catch (error) {
+      const problem = extractProblemDetails(error)
+      return {
+        ok: false,
+        diagnostic: makeDiagnostic(
+          problem?.diagnosticCode ?? 'ENVIRONMENT_CREATE_FAILED',
+          problem?.detail ?? '创建环境失败，结果可能尚未确认。',
+          problem?.retryable ?? true,
+        ),
+      }
+    }
     if (result.error) {
       const problem = extractProblemDetails(result.error)
       return {

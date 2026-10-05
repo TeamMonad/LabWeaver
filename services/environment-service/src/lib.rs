@@ -74,6 +74,7 @@ pub use messaging::{
     JetStreamReleaseConsumer, LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider,
     NatsMessagingError, NatsResourceLeaseVerifier, connect_nats_mtls,
 };
+pub use metering::{ExperimentGpuAllocator, ResourceUsageClientError};
 pub use outbox::{
     EnvironmentEventPublisher, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     PublishFailure,

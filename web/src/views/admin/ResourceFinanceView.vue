@@ -74,7 +74,7 @@
       :message="rates.outcome.diagnostic.message"
       :retryable="rates.outcome.diagnostic.retryable"
       :severity="rates.outcome.kind === 'error' ? 'error' : 'info'"
-      @retry="rates.outcome?.kind === 'error' ? rates.retryCreate() : rates.load()"
+      @retry="rates.outcome?.operation === 'end' ? rates.retryEnd() : rates.outcome?.kind === 'error' ? rates.retryCreate() : rates.load()"
     />
 
     <section
@@ -117,14 +117,71 @@
               :key="`${rate.id}-${rate.revision}`"
               class="rate-row"
             >
-              <div class="rate-main">
-                <strong>{{ rateLabel(rate) }}</strong>
-                <small>{{ rate.unitQuantity }} 基础单位 · {{ rate.unitPrice.amount }} {{ rate.unitPrice.currency }} · {{ formatTimestamp(rate.effectiveFrom) }} 起</small>
-                <small>基础单位：{{ rateDisplayUnits[rate.unit]?.base ?? '未知计费单位' }}</small>
-                <small>{{ equivalentRatePrice(rate.unit, rate.unitQuantity, rate.unitPrice.amount, rate.unitPrice.currency) ?? '金额或基础单位数量无效，无法换算。' }}</small>
-                <small v-if="rate.effectiveUntil">至 {{ formatTimestamp(rate.effectiveUntil) }}</small>
+              <div class="rate-row-main">
+                <div class="rate-main">
+                  <strong>{{ rateLabel(rate) }}</strong>
+                  <small>{{ rate.unitQuantity }} 基础单位 · {{ rate.unitPrice.amount }} {{ rate.unitPrice.currency }} · {{ formatTimestamp(rate.effectiveFrom) }} 起</small>
+                  <small>基础单位：{{ rateDisplayUnits[rate.unit]?.base ?? '未知计费单位' }}</small>
+                  <small>{{ equivalentRatePrice(rate.unit, rate.unitQuantity, rate.unitPrice.amount, rate.unitPrice.currency) ?? '金额或基础单位数量无效，无法换算。' }}</small>
+                  <small v-if="rate.effectiveUntil">截止于 {{ formatTimestamp(rate.effectiveUntil) }}</small>
+                </div>
+                <div class="rate-actions">
+                  <span class="state-chip">{{ rateVersionState(rate, now) }} · 版本 {{ rate.revision }}</span>
+                  <button
+                    v-if="!rate.effectiveUntil"
+                    type="button"
+                    class="outlined-button small"
+                    :data-testid="`end-rate-${rate.id}`"
+                    :disabled="rates.acting !== null"
+                    @click="beginEndRate(rate)"
+                  >
+                    安排结束
+                  </button>
+                </div>
               </div>
-              <span class="state-chip">{{ rateVersionState(rate, now) }} · 版本 {{ rate.revision }}</span>
+              <div
+                v-if="endingRateId === rate.id"
+                class="rate-end-editor"
+                data-testid="resource-rate-end-form"
+              >
+                <label>
+                  <span>截止时间</span>
+                  <input
+                    v-model="endingEffectiveUntil"
+                    class="text-input"
+                    type="datetime-local"
+                    aria-label="费率截止时间"
+                  >
+                </label>
+                <p class="rate-equivalent">
+                  只结束这一费率版本。截止后不再用于新的用量核算，历史账单快照保留，现有环境不会被强制停止。
+                </p>
+                <p
+                  v-if="endDateError"
+                  class="rate-equivalent warning-text"
+                  role="alert"
+                >
+                  {{ endDateError }}
+                </p>
+                <div class="rate-end-actions">
+                  <button
+                    type="button"
+                    class="filled-button"
+                    :disabled="!canSubmitEndRate || rates.acting !== null"
+                    @click="openEndConfirmation(rate)"
+                  >
+                    继续
+                  </button>
+                  <button
+                    type="button"
+                    class="text-button"
+                    :disabled="rates.acting !== null"
+                    @click="cancelEndRate"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
             </li>
           </ul>
         </template>
@@ -466,6 +523,16 @@
         </form>
       </section>
     </div>
+    <ConfirmDialog
+      :open="endConfirmation !== null"
+      title="安排结束全平台费率？"
+      :description="endConfirmationDescription"
+      confirm-text="确认安排结束"
+      cancel-text="返回修改"
+      severity="warning"
+      @confirm="confirmEndRate"
+      @cancel="endConfirmation = null"
+    />
   </div>
 </template>
 
@@ -473,6 +540,7 @@
 import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResourceFinance, type ResourceCharge } from '@/composables/useProjectResourceFinance'
@@ -528,6 +596,9 @@ const rateEffectiveUntil = ref('')
 const now = ref(Date.now())
 const clock = setInterval(() => { now.value = Date.now() }, 30_000)
 onScopeDispose(() => clearInterval(clock))
+const endingRateId = ref<string | null>(null)
+const endingEffectiveUntil = ref('')
+const endConfirmation = ref<{ rateId: string; effectiveUntil: string; label: string } | null>(null)
 const catalog = ref<AsyncState<GpuCatalogEntrySchema[]>>({ kind: 'idle' })
 const gpuOptions = computed(() => catalog.value.kind === 'success' ? catalog.value.data : [])
 function gpuOptionKey(entry: GpuCatalogEntrySchema) { return `${entry.class}:${entry.mode}` }
@@ -578,6 +649,26 @@ const canSubmitRate = computed(() => Boolean(
   && (rateUnit.value !== 'gpu_unit_second' || selectedGpu.value)
   && !rateDateError.value,
 ))
+const endingRate = computed(() => {
+  if (!endingRateId.value || rates.rates.kind !== 'success') return null
+  return rates.rates.data.find((rate) => rate.id === endingRateId.value) ?? null
+})
+const endDateError = computed(() => {
+  if (!endingRate.value) return '请选择仍在使用中的费率版本。'
+  if (endingRate.value.effectiveUntil) return '该费率已经安排结束，不能重复操作。'
+  const until = Date.parse(endingEffectiveUntil.value)
+  if (!Number.isFinite(until)) return '请输入有效截止时间。'
+  if (until <= now.value) return '截止时间须在未来。'
+  const from = Date.parse(endingRate.value.effectiveFrom)
+  if (Number.isFinite(from) && until <= from) return '截止时间须晚于费率生效时间。'
+  return null
+})
+const canSubmitEndRate = computed(() => Boolean(endingRate.value && !endDateError.value && rates.acting === null))
+const endConfirmationDescription = computed(() => {
+  const confirmation = endConfirmation.value
+  if (!confirmation) return ''
+  return `将把 ${confirmation.label} 安排在 ${formatTimestamp(confirmation.effectiveUntil)} 截止。截止后不再用于新的用量核算，历史账单快照会保留，现有环境不会被强制停止。请先核对在用资源、未结算用量或接替费率；此操作不可恢复，如需恢复只能创建新的费率版本。`
+})
 
 watch(selectedProjectId, () => {
   budgetCurrency.value = 'USD'
@@ -662,6 +753,34 @@ function rateModeLabel(mode: GpuAllocationMode | null | undefined) {
   return ({ exclusive: '独占', container_time_slice: '容器时间片', vm_vgpu: 'VM vGPU' } as Record<GpuAllocationMode, string>)[mode ?? 'exclusive']
 }
 
+function beginEndRate(rate: ResourceRateSchema) {
+  if (rate.effectiveUntil || rates.acting !== null) return
+  endingRateId.value = rate.id
+  endingEffectiveUntil.value = localDateTimeValue(new Date(Date.now() + 5 * 60_000))
+  endConfirmation.value = null
+}
+
+function cancelEndRate() {
+  endingRateId.value = null
+  endingEffectiveUntil.value = ''
+  endConfirmation.value = null
+}
+
+function openEndConfirmation(rate: ResourceRateSchema) {
+  if (rate.id !== endingRateId.value || !canSubmitEndRate.value) return
+  const effectiveUntil = toUtcTimestamp(endingEffectiveUntil.value)
+  if (!effectiveUntil) return
+  endConfirmation.value = { rateId: rate.id, effectiveUntil, label: rateLabel(rate) }
+}
+
+async function confirmEndRate() {
+  const confirmation = endConfirmation.value
+  if (!confirmation || rates.acting !== null) return
+  const completed = await rates.end(confirmation.rateId, { effectiveUntil: confirmation.effectiveUntil })
+  endConfirmation.value = null
+  if (completed) cancelEndRate()
+}
+
 async function submitRate() {
   if (!canSubmitRate.value) return
   const effectiveFrom = toUtcTimestamp(rateEffectiveFrom.value)
@@ -700,10 +819,15 @@ onMounted(() => { void rates.load(); void loadCatalog() })
 .project-context-action { justify-self: start; }
 .rates-card { display: grid; gap: 18px; padding: 20px; }
 .rate-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.rate-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.rate-row { display: grid; gap: 10px; padding: 14px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.rate-row-main { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .rate-main { display: grid; gap: 4px; min-width: 0; }
 .rate-main strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
 .rate-main small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.rate-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.rate-end-editor { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--md-sys-color-outline-variant); }
+.rate-end-editor label { display: grid; gap: 6px; max-width: 320px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.rate-end-actions { display: flex; align-items: center; gap: 8px; }
 .rate-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); align-items: end; }
 .rate-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .rate-form button { justify-self: start; }
@@ -743,5 +867,5 @@ textarea.text-input { resize: vertical; }
 .filled-button:disabled, .outlined-button:disabled, .text-button:disabled { opacity: .5; cursor: not-allowed; }
 .icon-button { display: inline-grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 50%; background: transparent; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
 @media (max-width: 850px) { .finance-layout { grid-template-columns: 1fr; } .project-strip { align-items: stretch; flex-direction: column; } .project-strip label { max-width: none; } .project-scope { padding-bottom: 0; } }
-@media (max-width: 620px) { .budget-summary, .two-columns { grid-template-columns: 1fr; } .rate-row, .charge-row { align-items: flex-start; flex-direction: column; } .charge-actions { justify-content: flex-start; } .charge-line { grid-template-columns: 1fr auto; } .charge-line > small { grid-column: 1 / -1; } }
+@media (max-width: 620px) { .budget-summary, .two-columns { grid-template-columns: 1fr; } .rate-row-main, .charge-row { align-items: flex-start; flex-direction: column; } .rate-actions, .charge-actions { justify-content: flex-start; } .charge-line { grid-template-columns: 1fr auto; } .charge-line > small { grid-column: 1 / -1; } }
 </style>

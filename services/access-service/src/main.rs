@@ -274,6 +274,10 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
             "/api/v1/resource/rates",
             get(proxy::forward_resource).post(proxy::forward_resource),
         )
+        .route(
+            "/api/v1/resource/rates/{rate_id}/end",
+            post(proxy::forward_resource),
+        )
         .route("/api/v1/resource/usage", post(proxy::forward_resource))
         .route(
             "/api/v1/projects/{project_id}/resource-budget",

@@ -378,6 +378,12 @@ const inspectedEnv = ref<EnvironmentSummary | null>(null)
 const showCreateModal = ref(false)
 const createDiagnostic = ref<DiagnosticViewModel | null>(null)
 const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
+const createIntentKey = ref<string | null>(null)
+const createIntentReleaseId = ref<string | null>(null)
+const createIntentReleaseVersion = ref<number | null>(null)
+const createIntentProjectId = ref<string | null>(null)
+const createIntentCourseId = ref<string | null>(null)
+let createIntentSequence = 0
 
 const filterSearch = ref('')
 const activeFilterChips = ref<FilterChip[]>([])
@@ -485,21 +491,56 @@ function openCreateDrawer() {
 }
 
 async function handleCreate(rel: EnvironmentTemplateReleaseViewSchema) {
+  const targetProjectId = projectId.value
+  if (!targetProjectId) {
+    createDiagnostic.value = makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false)
+    return
+  }
+  const operationId = `create:${rel.id}`
+  if (lifecycle.operating.has(operationId)) return
+
+  const targetCourseId = courseId.value ?? null
+  const targetChanged = createIntentReleaseId.value !== rel.id
+    || createIntentReleaseVersion.value !== rel.version
+    || createIntentProjectId.value !== targetProjectId
+    || createIntentCourseId.value !== targetCourseId
+  if (targetChanged || !createIntentKey.value) {
+    createIntentKey.value = idempotencyKey()
+    createIntentReleaseId.value = rel.id
+    createIntentReleaseVersion.value = rel.version
+    createIntentProjectId.value = targetProjectId
+    createIntentCourseId.value = targetCourseId
+    createIntentSequence += 1
+  }
+  const requestSequence = createIntentSequence
+  const intentKey = createIntentKey.value
+  if (!intentKey) return
   createDiagnostic.value = null
   pendingRelease.value = rel
-  const result = await lifecycle.create(
-    {
-      releaseId: rel.id,
-      releaseVersion: rel.version,
-    },
-    idempotencyKey(),
-  )
-  if (result.ok) {
-    pendingRelease.value = null
-    showCreateModal.value = false
-    await load()
-  } else {
-    createDiagnostic.value = result.diagnostic
+  lifecycle.operating.add(operationId)
+  try {
+    const result = await lifecycle.create(
+      {
+        releaseId: rel.id,
+        releaseVersion: rel.version,
+      },
+      intentKey,
+    )
+    if (requestSequence !== createIntentSequence || projectId.value !== targetProjectId) return
+    if (result.ok) {
+      createIntentKey.value = null
+      createIntentReleaseId.value = null
+      createIntentReleaseVersion.value = null
+      createIntentProjectId.value = null
+      createIntentCourseId.value = null
+      pendingRelease.value = null
+      showCreateModal.value = false
+      await load()
+    } else {
+      createDiagnostic.value = result.diagnostic
+    }
+  } finally {
+    lifecycle.operating.delete(operationId)
   }
 }
 
@@ -584,6 +625,17 @@ watch(
     void router.replace({ query: { ...route.query, projectId } })
   },
 )
+
+watch(projectId, () => {
+  createIntentSequence += 1
+  createIntentKey.value = null
+  createIntentReleaseId.value = null
+  createIntentReleaseVersion.value = null
+  createIntentProjectId.value = null
+  createIntentCourseId.value = null
+  pendingRelease.value = null
+  createDiagnostic.value = null
+})
 
 watch(projectId, load, { immediate: true })
 watch(autoRefreshEnabled, (enabled) => {

@@ -174,6 +174,13 @@ pub struct CreateResourceRateRequest {
     pub effective_until: Option<UtcTimestamp>,
 }
 
+/// Closes one open immutable rate version at a future timestamp.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndResourceRateRequest {
+    pub effective_until: UtcTimestamp,
+}
+
 /// Project budget mutation. Amounts are decimal strings with six fractional digits.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2995,6 +3002,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         BffSession,
         IdempotentCreate,
         201,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Post,
+        "/api/v1/resource/rates/{rateId}/end",
+        "endResourceRate",
+        "resource_rate:write",
+        BffSession,
+        IdempotentCreate,
+        200,
         false,
         true,
         PLATFORM_ADMIN,

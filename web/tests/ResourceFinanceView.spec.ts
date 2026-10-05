@@ -3,13 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { canonicalRateAmount, equivalentRatePrice, rateVersionState } from '@/utils/resourceRates'
 import { navigationGroupsForRoles, navigationTarget } from '@/utils/navigation'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
-import { createResourceRate, listResourceRates, listResourceGpuCatalog } from '@/generated/contracts'
+import { createResourceRate, endResourceRate, listResourceRates, listResourceGpuCatalog } from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
   return {
     ...actual,
     createResourceRate: vi.fn(),
+    endResourceRate: vi.fn(),
     listResourceRates: vi.fn(),
     listResourceGpuCatalog: vi.fn(),
   }
@@ -102,6 +103,9 @@ const gpuCatalog = [
 const existingRate = { id: 'rate-vgpu', revision: 1, unit: 'gpu_unit_second', unitQuantity: 1,
   gpuClass: 'nvidia-v100-2q', gpuMode: 'vm_vgpu', unitPrice: { currency: 'USD', amount: '0.250000' },
   effectiveFrom: '2026-01-01T00:00:00Z', effectiveUntil: null }
+const otherOpenRate = { id: 'rate-memory', revision: 1, unit: 'memory_byte_second', unitQuantity: 1_000_000_000,
+  gpuClass: null, gpuMode: null, unitPrice: { currency: 'USD', amount: '0.100000' },
+  effectiveFrom: '2026-01-01T00:00:00Z', effectiveUntil: null }
 
 async function fillGpuForm(wrapper: ReturnType<typeof mountView>, selection = 'nvidia-v100-2q:vm_vgpu') {
   const form = wrapper.get('[data-testid="resource-rate-form"]')
@@ -111,11 +115,27 @@ async function fillGpuForm(wrapper: ReturnType<typeof mountView>, selection = 'n
   return form
 }
 
+async function openEndEditor(wrapper: ReturnType<typeof mountView>, rateId = 'rate-vgpu') {
+  await wrapper.get(`[data-testid="end-rate-${rateId}"]`).trigger('click')
+  return wrapper.get('[data-testid="resource-rate-end-form"]')
+}
+
+async function confirmEnd(wrapper: ReturnType<typeof mountView>, cutoff = '2030-01-01T00:00', rateId = 'rate-vgpu') {
+  const editor = await openEndEditor(wrapper, rateId)
+  await editor.get('input[aria-label="费率截止时间"]').setValue(cutoff)
+  await editor.get('button.filled-button').trigger('click')
+  const button = document.body.querySelector<HTMLButtonElement>('.confirm-dialog .filled-button')
+  expect(button).not.toBeNull()
+  button!.click()
+  await flushPromises()
+}
+
 describe('ResourceFinanceView', () => {
   afterEach(() => { for (const wrapper of mountedViews.splice(0)) wrapper.unmount() })
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(createResourceRate).mockReset()
+    vi.mocked(endResourceRate).mockReset()
     vi.mocked(listResourceRates).mockReset()
     vi.mocked(listResourceGpuCatalog).mockReset()
     vi.mocked(listResourceRates).mockResolvedValue({ data: [] as never, error: undefined as never })
@@ -259,6 +279,211 @@ describe('ResourceFinanceView', () => {
     for (const label of ['现行', '未来生效', '已结束']) expect(wrapper.get('.rate-list').text()).toContain(label)
     expect(wrapper.get('input[aria-label="费率单价"]').element).toHaveProperty('value', '')
     expect(createResourceRate).not.toHaveBeenCalled()
+  })
+
+  it('offers ending only for open rates and validates a future cutoff', async () => {
+    const rates = [
+      existingRate,
+      { ...existingRate, id: 'scheduled', effectiveUntil: '2030-01-01T00:00:00.000Z' },
+      { ...existingRate, id: 'ended', effectiveUntil: '2020-01-01T00:00:00.000Z' },
+    ]
+    vi.mocked(listResourceRates).mockResolvedValue({ data: rates as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="end-rate-rate-vgpu"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="end-rate-scheduled"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="end-rate-ended"]').exists()).toBe(false)
+    expect(wrapper.get('.rate-list').text()).toContain('已安排结束')
+
+    const editor = await openEndEditor(wrapper)
+    await editor.get('input[aria-label="费率截止时间"]').setValue('2020-01-01T00:00')
+    expect(editor.text()).toContain('截止时间须在未来')
+    expect(editor.get('button.filled-button').attributes('disabled')).toBeDefined()
+    await editor.get('input[aria-label="费率截止时间"]').setValue('2030-01-01T00:00')
+    expect(editor.get('button.filled-button').attributes('disabled')).toBeUndefined()
+    await editor.get('button.text-button').trigger('click')
+  })
+
+  it('ends an open rate with the exact cutoff request and leaves project charges unchanged', async () => {
+    const ended = { ...existingRate, effectiveUntil: '2030-01-01T00:00:00.000Z' }
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockResolvedValueOnce({ data: [ended] as never, error: undefined as never })
+    vi.mocked(endResourceRate).mockResolvedValue({ data: ended as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    expect(endResourceRate).toHaveBeenCalledWith({
+      path: { rateId: 'rate-vgpu' },
+      headers: { 'Idempotency-Key': expect.any(String) },
+      body: { effectiveUntil: new Date('2030-01-01T00:00').toISOString() },
+    })
+    expect(endResourceRate.mock.calls[0][0].headers).not.toHaveProperty('If-Match')
+    expect(wrapper.text()).toContain('资源费率已安排结束')
+    expect(wrapper.find('.charges-card').exists()).toBe(true)
+    expect(api.post).not.toHaveBeenCalled()
+    expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it('does not submit twice when the end request is still pending', async () => {
+    let resolveEnd: ((value: unknown) => void) | undefined
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate).mockImplementation(() => new Promise((resolve) => { resolveEnd = resolve }))
+    const wrapper = mountView()
+    await flushPromises()
+    const editor = await openEndEditor(wrapper)
+    await editor.get('input[aria-label="费率截止时间"]').setValue('2030-01-01T00:00')
+    await editor.get('button.filled-button').trigger('click')
+    const button = document.body.querySelector<HTMLButtonElement>('.confirm-dialog .filled-button')
+    expect(button).not.toBeNull()
+    button!.click()
+    button!.click()
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    resolveEnd!({ data: existingRate, error: undefined })
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+  })
+
+  it('confirms an uncertain end from the authoritative list without replaying the POST', async () => {
+    const ended = { ...existingRate, effectiveUntil: '2030-01-01T00:00:00.000Z' }
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockResolvedValueOnce({ data: [ended] as never, error: undefined as never })
+    vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    await wrapper.get('.diagnostic-banner button').trigger('click')
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('已确认截止时间')
+  })
+
+  it('retries an uncertain open end with the original body and idempotency key', async () => {
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate)
+      .mockRejectedValueOnce(new Error('request timed out'))
+      .mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    const first = endResourceRate.mock.calls[0][0]
+    await wrapper.get('.diagnostic-banner button').trigger('click')
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(2)
+    expect(endResourceRate.mock.calls[1][0]).toEqual(first)
+  })
+
+  it('only retries the authoritative read when that read also fails', async () => {
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockRejectedValueOnce(new Error('list unavailable'))
+    vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    await wrapper.get('.diagnostic-banner button').trigger('click')
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('无法确认费率是否已结束')
+  })
+
+  it('does not replay an accepted end when list refresh failed', async () => {
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+      .mockRejectedValueOnce(new Error('refresh unavailable'))
+      .mockResolvedValueOnce({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate).mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    expect(wrapper.text()).toContain('列表刷新失败')
+    await wrapper.get('.diagnostic-banner button').trigger('click')
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    expect(listResourceRates).toHaveBeenCalledTimes(3)
+  })
+
+  it('requires an authoritative read before a changed cutoff can follow an uncertain result', async () => {
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper, '2030-01-01T00:00')
+    const editor = await openEndEditor(wrapper)
+    await editor.get('input[aria-label="费率截止时间"]').setValue('2031-01-01T00:00')
+    await editor.get('button.filled-button').trigger('click')
+    const button = document.body.querySelector<HTMLButtonElement>('.confirm-dialog .filled-button')
+    expect(button).not.toBeNull()
+    button!.click()
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('修改截止时间不会直接再次提交')
+  })
+
+  it('preserves an uncertain original intent when another rate is selected', async () => {
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate)
+      .mockRejectedValueOnce(new Error('request timed out'))
+      .mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    const first = endResourceRate.mock.calls[0][0]
+    await confirmEnd(wrapper, '2030-01-01T00:00', 'rate-memory')
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('GPU nvidia-v100-2q')
+    await wrapper.get('.diagnostic-banner button').trigger('click')
+    await flushPromises()
+    expect(endResourceRate).toHaveBeenCalledTimes(2)
+    expect(endResourceRate.mock.calls[1][0]).toEqual(first)
+  })
+
+  it('blocks another rate when confirming the original end result fails to read', async () => {
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+      .mockRejectedValueOnce(new Error('rate list unavailable'))
+    vi.mocked(endResourceRate).mockRejectedValueOnce(new Error('request timed out'))
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    await confirmEnd(wrapper, '2030-01-01T00:00', 'rate-memory')
+    expect(endResourceRate).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('无法确认费率是否已结束')
+    expect(wrapper.text()).toContain('GPU nvidia-v100-2q')
+  })
+
+  it('clears an already ended original intent before creating a different rate intent', async () => {
+    const ended = { ...existingRate, effectiveUntil: '2030-01-01T00:00:00.000Z' }
+    vi.mocked(listResourceRates)
+      .mockResolvedValueOnce({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+      .mockResolvedValueOnce({ data: [ended, otherOpenRate] as never, error: undefined as never })
+      .mockResolvedValueOnce({ data: [ended, otherOpenRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate)
+      .mockRejectedValueOnce(new Error('request timed out'))
+      .mockResolvedValueOnce({ data: otherOpenRate as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    await confirmEnd(wrapper, '2030-01-01T00:00', 'rate-memory')
+    expect(endResourceRate).toHaveBeenCalledTimes(2)
+    expect(endResourceRate.mock.calls[1][0].path).toEqual({ rateId: 'rate-memory' })
+    expect(endResourceRate.mock.calls[1][0].headers['Idempotency-Key']).not.toBe(endResourceRate.mock.calls[0][0].headers['Idempotency-Key'])
+  })
+
+  it('allows a new rate intent after an explicit non-retryable end rejection', async () => {
+    vi.mocked(listResourceRates).mockResolvedValue({ data: [existingRate, otherOpenRate] as never, error: undefined as never })
+    vi.mocked(endResourceRate)
+      .mockResolvedValueOnce({ data: undefined as never, error: { diagnosticCode: 'RATE_END_INVALID', detail: '截止时间无效', retryable: false } as never })
+      .mockResolvedValueOnce({ data: otherOpenRate as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    await confirmEnd(wrapper)
+    await confirmEnd(wrapper, '2030-01-01T00:00', 'rate-memory')
+    expect(endResourceRate).toHaveBeenCalledTimes(2)
+    expect(endResourceRate.mock.calls[1][0].path).toEqual({ rateId: 'rate-memory' })
   })
 
   it.each(['empty', 'error'])('makes an unavailable catalog %s explicit without inventing classes', async (state) => {

@@ -1,0 +1,21 @@
+{
+  "$defs": {
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closes one open immutable rate version at a future timestamp.",
+  "properties": {
+    "effectiveUntil": {
+      "$ref": "#/$defs/UtcTimestamp"
+    }
+  },
+  "required": [
+    "effectiveUntil"
+  ],
+  "title": "EndResourceRateRequest",
+  "type": "object"
+}

@@ -29,6 +29,7 @@ import {
   realWorkVmConfig,
   readResumablePublishedWork,
   selectPendingWorkTaskResourceRequest,
+  selectSettledWorkUsageChargesForLease,
   waitForActiveRateReadback,
 } from '../e2e/support/real-work.mjs'
 
@@ -110,6 +111,90 @@ describe('Work authoring resource approval selection', () => {
   it('rejects malformed identity under the current run prefix', () => {
     const request = taskRequest({ requestKey: `authoring-${runId.replaceAll('-', '')}-environment-bad` })
     expect(() => selectPendingWorkTaskResourceRequest([request], scope)).toThrow('WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID')
+  })
+})
+
+describe('Work usage and charge association', () => {
+  const scope = { projectId: 'project', requestId: 'request', leaseId: 'lease' }
+  const usage = (kind, overrides = {}) => ({
+    id: `usage-${kind}`,
+    ...scope,
+    kind,
+    settlement: 'settled',
+    measurement: {
+      state: 'known',
+      quantities: kind === 'compute'
+        ? { cpuMillicoreSeconds: 10, memoryByteSeconds: 20, gpuUnitSeconds: 0, storageByteSeconds: 0 }
+        : { cpuMillicoreSeconds: 0, memoryByteSeconds: 0, gpuUnitSeconds: 0, storageByteSeconds: 30 },
+    },
+    ...overrides,
+  })
+  const charge = (usageRecordId, kind, overrides = {}) => ({
+    id: `charge-${kind}`,
+    projectId: scope.projectId,
+    usageRecordId,
+    adjustmentOf: null,
+    settlement: 'settled',
+    total: { amount: '0.000001', currency: 'USD' },
+    lines: [{
+      unit: kind === 'compute' ? 'cpu_millicore_second' : 'storage_byte_second',
+      quantity: 1,
+      unitQuantity: 1,
+      amount: { amount: '0.000001', currency: 'USD' },
+    }],
+    ...overrides,
+  })
+
+  it('requires this lease usage instead of accepting an older positive project charge', () => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage')],
+      charges: [
+        charge('usage-compute', 'compute', { id: 'charge-old-compute' }),
+        charge('usage-storage', 'storage', { id: 'charge-old-storage' }),
+      ],
+      baselineChargeIds: new Set(['charge-old-compute', 'charge-old-storage']),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('matches known settled compute and storage records by request and lease', () => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage')],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result?.map(({ usage: item, charge: itemCharge }) => [item.kind, itemCharge.usageRecordId])).toEqual([
+      ['compute', 'usage-compute'],
+      ['storage', 'usage-storage'],
+    ])
+  })
+
+  it.each([
+    { settlement: 'pending' },
+    { measurement: { state: 'unknown', reason: 'meter unavailable' } },
+  ])('does not complete while usage is not known and settled: %o', (overrides) => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute', overrides), usage('storage')],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('does not match usage or charges from another request or lease', () => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [
+        usage('compute', { requestId: 'other-request' }),
+        usage('storage', { leaseId: 'other-lease' }),
+      ],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
   })
 })
 

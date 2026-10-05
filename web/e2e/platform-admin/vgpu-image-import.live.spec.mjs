@@ -47,6 +47,67 @@ function configuredInput() {
 }
 
 const INPUT = configuredInput()
+const RUN_LIFECYCLE = process.env.LABWEAVER_E2E_VGPU_IMAGE_LIFECYCLE === '1'
+
+function derivedInput(input, suffix) {
+  const binding = `${input.binding}-${suffix}`
+  if (binding.length > 128) inputError(`${suffix}-binding-invalid`)
+  return Object.freeze({ ...input, binding })
+}
+
+async function assertArchiveReadable(input) {
+  let archiveMetadata
+  try {
+    archiveMetadata = await stat(input.archivePath)
+  } catch {
+    throw new Error('LW_VGPU_IMAGE_ARCHIVE_NOT_READABLE')
+  }
+  if (!archiveMetadata.isFile() || archiveMetadata.size < 1) {
+    throw new Error('LW_VGPU_IMAGE_ARCHIVE_NOT_READABLE')
+  }
+}
+
+async function fillVmUploadForm(page, input, reason) {
+  const uploadCard = page.locator('section.upload-card')
+  await uploadCard.getByLabel('类型', { exact: true }).selectOption('virtual_machine')
+  await uploadCard.getByLabel('binding', { exact: true }).fill(input.binding)
+  await uploadCard.getByLabel('目标引用（host/repo:tag）', { exact: true }).fill(input.targetReference)
+  await uploadCard.getByLabel('信任版本', { exact: true }).fill(String(TRUST_REVISION))
+  await uploadCard.getByLabel('磁盘格式', { exact: true }).selectOption(DISK_FORMAT)
+  await uploadCard.getByLabel('容量（字节）', { exact: true }).fill(String(input.capacityBytes))
+  await uploadCard.getByLabel('归档内磁盘路径', { exact: true }).fill(input.diskPath)
+  await uploadCard.getByLabel('原因', { exact: true }).fill(reason)
+  await uploadCard.locator('input[type="file"]').setInputFiles(input.archivePath)
+  return uploadCard
+}
+
+async function waitForUploadSession(page, input) {
+  const sessionResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === '/api/v1/admin/images/uploads'
+  })
+  const uploadCard = await fillVmUploadForm(page, input, '导入已评审的 vGPU guest image。')
+  const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
+  await expect(importButton).toBeEnabled()
+  await importButton.click()
+  const sessionResponse = await sessionResponsePromise
+  const session = await expectJson(sessionResponse, 'LW_VGPU_IMAGE_UPLOAD_SESSION_READ_FAILED')
+  if (typeof session.uploadId !== 'string' || session.uploadId.length === 0) {
+    throw new Error('LW_VGPU_IMAGE_UPLOAD_SESSION_INVALID')
+  }
+  return { uploadCard, importButton, session }
+}
+
+async function waitForUploadStatus(page, uploadId, state) {
+  await expect.poll(async () => {
+    const status = await expectJson(
+      await page.request.get(`/api/v1/admin/images/uploads/${encodeURIComponent(uploadId)}`),
+      'LW_VGPU_IMAGE_UPLOAD_STATUS_READ_FAILED',
+    )
+    return status.state === state
+  }, { timeout: 120_000, intervals: [500, 1000, 2000] }).toBe(true)
+}
 
 function readDiagnosticCode(alert) {
   return alert.locator('.diagnostic-code').textContent().then((value) => value?.trim() || 'diagnostic-missing')
@@ -117,19 +178,131 @@ async function assertImportedUpload(page, input, completion) {
 
 test.skip(INPUT === null, 'set the five LABWEAVER_E2E_VGPU_IMAGE_* variables to run this scenario')
 
+test('platform administrator refreshes a real VM upload and cancels it through the UI', async ({ page }) => {
+  test.setTimeout(1_200_000)
+  test.skip(!RUN_LIFECYCLE, 'set LABWEAVER_E2E_VGPU_IMAGE_LIFECYCLE=1 for the real upload lifecycle scenarios')
+  if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
+  await assertArchiveReadable(INPUT)
+
+  const input = derivedInput(INPUT, 'cancel')
+  await navigateFromHomeByUi(page, '平台镜像')
+  await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
+  await waitForCatalogSettled(page, 'LOAD')
+  if ((await readRowsForBinding(page, input.binding)).length > 0) {
+    throw new Error('LW_VGPU_IMAGE_CANCEL_BINDING_ALREADY_EXISTS')
+  }
+
+  const { session } = await waitForUploadSession(page, input)
+  const completionResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
+  }, { timeout: 1_200_000 })
+  const completionResponse = await completionResponsePromise
+  const completion = {
+    status: completionResponse.status(),
+    body: await completionResponse.json().catch(() => null),
+  }
+  assertAcceptedVgpuImageCompletion(completion)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
+  await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
+  const cancelButton = page.locator('.upload-status').getByRole('button', { name: '取消上传', exact: true })
+  if (await cancelButton.count() === 0) {
+    const status = await expectJson(
+      await page.request.get(`/api/v1/admin/images/uploads/${session.uploadId}`),
+      'LW_VGPU_IMAGE_CANCEL_STATUS_READ_FAILED',
+    )
+    throw new Error(`LW_VGPU_IMAGE_IMPORT_FINISHED_BEFORE_CANCEL:${status.state}`)
+  }
+  await expect(cancelButton).toBeVisible({ timeout: 120_000 })
+  await expect(cancelButton).toBeEnabled()
+  await cancelButton.click()
+  await expect(page.locator('.upload-status')).toContainText('镜像导入：已取消', { timeout: 120_000 })
+  await waitForUploadStatus(page, session.uploadId, 'cancelled')
+  await waitForCatalogSettled(page, 'CANCEL_READBACK')
+  if ((await readRowsForBinding(page, input.binding)).length !== 0) {
+    throw new Error('LW_VGPU_IMAGE_CANCELLED_BINDING_PUBLISHED')
+  }
+  test.info().annotations.push({
+    type: 'image-import-lifecycle',
+    description: JSON.stringify({ result: 'refreshed-and-cancelled', binding: input.binding }),
+  })
+})
+
+test('platform administrator retries a real VM import after a network failure through the UI', async ({ page }) => {
+  test.setTimeout(1_200_000)
+  test.skip(!RUN_LIFECYCLE, 'set LABWEAVER_E2E_VGPU_IMAGE_LIFECYCLE=1 for the real upload lifecycle scenarios')
+  if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
+  await assertArchiveReadable(INPUT)
+
+  await navigateFromHomeByUi(page, '平台镜像')
+  await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
+  await waitForCatalogSettled(page, 'LOAD')
+  const existingRows = await readRowsForBinding(page, INPUT.binding)
+  if (existingRows.length > 1) throw new Error('LW_VGPU_IMAGE_READBACK_DUPLICATE_BINDING')
+  if (existingRows.length === 1) {
+    if (!matchesVgpuImageCatalogRow(existingRows[0], INPUT)) throw new Error('LW_VGPU_IMAGE_BINDING_CONFLICT')
+    test.info().annotations.push({
+      type: 'image-import-lifecycle',
+      description: JSON.stringify({ result: 'reused-existing-after-retry', binding: INPUT.binding }),
+    })
+    return
+  }
+
+  // Simulate the user's network dropping exactly when the UI submits completion;
+  // the archive is still the real operator-supplied OCI/VM input and the retry
+  // below uses the same session and idempotency key through the normal UI.
+  let abortFirstCompletion = true
+  await page.route('**/api/v1/admin/images/uploads/*/complete', async (route) => {
+    if (!abortFirstCompletion) return route.continue()
+    abortFirstCompletion = false
+    await page.context().setOffline(true)
+    await route.abort('failed')
+  })
+  try {
+    const { session } = await waitForUploadSession(page, INPUT)
+    await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
+    await expect(page.locator('.upload-status')).toContainText('镜像导入：需要操作', { timeout: 120_000 })
+    await page.context().setOffline(false)
+    await page.unroute('**/api/v1/admin/images/uploads/*/complete')
+
+    const retryButton = page.locator('.upload-status').getByRole('button', { name: '重试导入', exact: true })
+    await expect(retryButton).toBeVisible({ timeout: 120_000 })
+    await expect(retryButton).toBeEnabled()
+    const completionResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'POST'
+        && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
+    }, { timeout: 120_000 })
+    await retryButton.click()
+    const completionResponse = await completionResponsePromise
+    const completion = {
+      status: completionResponse.status(),
+      body: await completionResponse.json().catch(() => null),
+    }
+    const imported = await assertImportedUpload(page, INPUT, completion)
+    await waitForImportReadback(page, INPUT)
+    await expect(page.locator('.upload-status')).toContainText('镜像导入：已导入', { timeout: 60_000 })
+    const uiRows = await readRowsForBinding(page, INPUT.binding)
+    if (uiRows.length !== 1 || !matchesVgpuImageCatalogRow(uiRows[0], INPUT)) {
+      throw new Error(`LW_VGPU_IMAGE_UI_CATALOG_IDENTITY_MISMATCH:${imported.catalogId}`)
+    }
+    test.info().annotations.push({
+      type: 'image-import-lifecycle',
+      description: JSON.stringify({ result: 'network-failure-retry', binding: INPUT.binding }),
+    })
+  } finally {
+    await page.context().setOffline(false)
+    await page.unroute('**/api/v1/admin/images/uploads/*/complete')
+  }
+})
+
 test('platform administrator imports one requested vGPU guest image through the UI', async ({ page }) => {
   test.setTimeout(1_200_000)
   if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
 
-  let archiveMetadata
-  try {
-    archiveMetadata = await stat(INPUT.archivePath)
-  } catch {
-    throw new Error('LW_VGPU_IMAGE_ARCHIVE_NOT_READABLE')
-  }
-  if (!archiveMetadata.isFile() || archiveMetadata.size < 1) {
-    throw new Error('LW_VGPU_IMAGE_ARCHIVE_NOT_READABLE')
-  }
+  await assertArchiveReadable(INPUT)
 
   // The platform-admin project supplies the existing Keycloak storage state from auth.setup.mjs.
   await navigateFromHomeByUi(page, '平台镜像')
