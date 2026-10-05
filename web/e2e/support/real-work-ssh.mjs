@@ -58,10 +58,13 @@ export async function runProcess(program, args, {
     let outputExceeded = false
     let exitedAt = null
     let deadlineReached = false
-    let deadlineTimer
-    const clearDeadlineTimer = () => {
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+    const deadlineSignal = AbortSignal.timeout(timeoutMs)
+    const onDeadline = () => {
+      if (exitedAt !== null || outputExceeded) return
+      deadlineReached = true
+      child.kill('SIGKILL')
     }
+    const clearDeadlineListener = () => deadlineSignal.removeEventListener('abort', onDeadline)
 
     const collect = (chunks) => (chunk) => {
       if (outputExceeded) return
@@ -76,14 +79,14 @@ export async function runProcess(program, args, {
     child.stdout.on('data', collect(stdout))
     child.stderr.on('data', collect(stderr))
     child.once('error', () => {
-      clearDeadlineTimer()
+      clearDeadlineListener()
       reject(new Error(`${outputCode}_START_FAILED`))
     })
     child.once('exit', () => {
       exitedAt = performance.now()
     })
     child.once('close', (code, signal) => {
-      clearDeadlineTimer()
+      clearDeadlineListener()
       resolve({
         code,
         signal,
@@ -93,11 +96,7 @@ export async function runProcess(program, args, {
         outputExceeded,
       })
     })
-    deadlineTimer = setTimeout(() => {
-      if (exitedAt !== null || outputExceeded) return
-      deadlineReached = true
-      child.kill('SIGKILL')
-    }, timeoutMs)
+    deadlineSignal.addEventListener('abort', onDeadline, { once: true })
     if (input === undefined) child.stdin.end()
     else child.stdin.end(input)
   })
