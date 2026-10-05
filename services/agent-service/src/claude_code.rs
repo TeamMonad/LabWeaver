@@ -1161,6 +1161,9 @@ pub enum ClaudeCodeProcessError {
     /// The authoritative caller cancelled the invocation.
     #[error("Claude Code worker was cancelled")]
     Cancelled,
+    /// Resource approval did not complete before the bounded wait expired.
+    #[error("Claude Code worker resource approval timed out")]
+    ResourceApprovalTimeout,
     /// The invocation exceeded its complete wall-clock budget.
     #[error("Claude Code worker timed out")]
     TimedOut,
@@ -1745,6 +1748,9 @@ impl ClaudeCodeRuntime {
                     }
                     ClaudeCodeProcessError::TimedOut => ClaudeCodeRuntimeError::TimedOut,
                     ClaudeCodeProcessError::Cancelled => ClaudeCodeRuntimeError::Cancelled,
+                    ClaudeCodeProcessError::ResourceApprovalTimeout => {
+                        ClaudeCodeRuntimeError::ResourceApprovalTimeout
+                    }
                     ClaudeCodeProcessError::OutputLimitExceeded => {
                         ClaudeCodeRuntimeError::OutputLimitExceeded
                     }
@@ -1999,6 +2005,10 @@ impl ClaudeCodeRuntime {
                     ClaudeCodeProcessError::Cancelled => {
                         review_failure(ClaudeCodeRuntimeError::Cancelled, usage_option(total_usage))
                     }
+                    ClaudeCodeProcessError::ResourceApprovalTimeout => review_failure(
+                        ClaudeCodeRuntimeError::ResourceApprovalTimeout,
+                        usage_option(total_usage),
+                    ),
                     ClaudeCodeProcessError::OutputLimitExceeded => review_failure(
                         ClaudeCodeRuntimeError::OutputLimitExceeded,
                         usage_option(total_usage),
@@ -2607,6 +2617,9 @@ impl ClaudeCodeRuntime {
                         ClaudeCodeRuntimeError::RuntimeUnavailable
                     }
                     ClaudeCodeProcessError::TimedOut => ClaudeCodeRuntimeError::TimedOut,
+                    ClaudeCodeProcessError::ResourceApprovalTimeout => {
+                        ClaudeCodeRuntimeError::ResourceApprovalTimeout
+                    }
                     ClaudeCodeProcessError::Cancelled
                     | ClaudeCodeProcessError::Io
                     | ClaudeCodeProcessError::OutputLimitExceeded => {
@@ -3490,6 +3503,9 @@ pub enum ClaudeCodeRuntimeError {
     /// Authoritative caller cancelled the invocation.
     #[error("LW_LLM_CANCELLED: Claude Code invocation was cancelled")]
     Cancelled,
+    /// Resource approval did not complete before the bounded wait expired.
+    #[error("LW_TASK_RESOURCE_APPROVAL_TIMEOUT: resource approval did not complete")]
+    ResourceApprovalTimeout,
     /// Claude Code reported provider throttling after its own bounded retries.
     #[error("LW_LLM_RATE_LIMITED: Claude Code provider rate limit exhausted")]
     RateLimited,
@@ -3521,6 +3537,7 @@ impl ClaudeCodeRuntimeError {
             Self::ProtectedField => diagnostic::ACCESS_DENIED,
             Self::TimedOut => diagnostic::PROVIDER_TIMEOUT,
             Self::Cancelled => diagnostic::CONFLICT,
+            Self::ResourceApprovalTimeout => "LW_TASK_RESOURCE_APPROVAL_TIMEOUT",
             Self::RateLimited => diagnostic::RATE_LIMITED,
             Self::Refused => diagnostic::PROVIDER_REJECTED,
         }
@@ -3580,6 +3597,18 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn resource_approval_timeout_is_not_reported_as_provider_outage() {
+        assert_eq!(
+            ClaudeCodeRuntimeError::ResourceApprovalTimeout.diagnostic_code(),
+            "LW_TASK_RESOURCE_APPROVAL_TIMEOUT"
+        );
+        assert_ne!(
+            ClaudeCodeRuntimeError::ResourceApprovalTimeout.diagnostic_code(),
+            ClaudeCodeRuntimeError::UpstreamUnavailable.diagnostic_code()
+        );
     }
 
     #[test]

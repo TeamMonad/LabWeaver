@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { reactive } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
 import SoftwareConfigView from '@/views/researcher/SoftwareConfigView.vue'
 import {
@@ -10,6 +11,7 @@ import {
   getProjectAgentRun,
   getProjectWorkConfigurationPlan,
   listEnvironments,
+  listProjectAgentRuns,
   listProjects,
   retryProjectAgentRunTrack,
 } from '@/generated/contracts'
@@ -24,6 +26,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     getProjectWorkConfigurationPlan: vi.fn(),
     getProjectAgentRun: vi.fn(),
     listEnvironments: vi.fn(),
+    listProjectAgentRuns: vi.fn(),
     listProjects: vi.fn(),
     retryProjectAgentRunTrack: vi.fn(),
   }
@@ -149,6 +152,33 @@ const run = {
   ],
 }
 
+const historyTemplate = {
+  id: 'history-template-1',
+  projectId: 'project-1',
+  purpose: { kind: 'authoring', environmentClass: 'work' },
+  state: 'failed',
+  createdAt: '2026-09-08T10:00:00.000Z',
+  updatedAt: '2026-09-08T10:05:00.000Z',
+}
+
+const historyConfiguration = {
+  id: 'history-config-1',
+  projectId: 'project-1',
+  purpose: { kind: 'work_configuration', actorId: 'actor-1', environmentId: 'environment-1', environmentRevision: 4, runtimeKind: 'container' },
+  state: 'awaiting_approval',
+  createdAt: '2026-09-08T11:00:00.000Z',
+  updatedAt: '2026-09-08T11:05:00.000Z',
+}
+
+const historyExperiment = {
+  id: 'history-experiment-1',
+  projectId: 'project-1',
+  purpose: { kind: 'authoring', environmentClass: 'experiment' },
+  state: 'succeeded',
+  createdAt: '2026-09-08T09:00:00.000Z',
+  updatedAt: '2026-09-08T09:05:00.000Z',
+}
+
 const planView = {
   plan: run.plan,
   scriptContent: 'sudo apt-get update',
@@ -176,6 +206,7 @@ describe('SoftwareConfigView', () => {
       },
     }
     vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
+    vi.mocked(listProjectAgentRuns).mockResolvedValue({ data: { items: [], page: 1, pageSize: 25, hasMore: false } as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({
       data: { items: [environment], nextCursor: null } as never,
       error: undefined as never,
@@ -347,6 +378,236 @@ describe('SoftwareConfigView', () => {
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')
     await vi.waitFor(() => expect(createProjectWorkConfigurationRun).toHaveBeenCalledTimes(2))
+  })
+
+  it('restores the configuration run and approval plan from the route without creating a run', async () => {
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', runId: 'run-1' } },
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
+    expect(getProjectAgentRun).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-1' } })
+    expect(createProjectWorkConfigurationRun).not.toHaveBeenCalled()
+    expect((wrapper.find('select[required]').element as HTMLSelectElement).value).toBe('environment-1')
+    expect(replace.mock.calls.some(([location]) => location.query?.runId === 'run-1')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('persists the accepted configuration run ID in the route', async () => {
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1' } },
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await wrapper.find('select[required]').setValue('environment-1')
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.find('form.config-form').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
+
+    expect(replace.mock.calls.some(([location]) => location.query?.runId === 'run-1')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('rejects a route run with an authoring purpose instead of treating it as configuration', async () => {
+    const wrongPurposeRun = { ...run, purpose: { kind: 'authoring', environmentClass: 'work' } }
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: wrongPurposeRun as never, error: undefined as never })
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', runId: 'run-1' } },
+          [routerKey as symbol]: { replace: vi.fn() },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('当前任务不是 Work 配置任务'))
+    expect(wrapper.text()).not.toContain('Work 配置计划审核')
+    expect(createProjectWorkConfigurationRun).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('rejects a route run whose Work environment is outside the current project inventory', async () => {
+    const wrongEnvironmentRun = {
+      ...run,
+      purpose: { ...run.purpose, environmentId: 'environment-other' },
+    }
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: wrongEnvironmentRun as never, error: undefined as never })
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', runId: 'run-1' } },
+          [routerKey as symbol]: { replace: vi.fn() },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('绑定的 Work 环境不在当前项目中'))
+    expect(wrapper.text()).not.toContain('Work 配置计划审核')
+    expect(getProjectWorkConfigurationPlan).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not let a late approval plan response overwrite a switched project', async () => {
+    const project2 = { ...project, id: 'project-2', name: 'Second Work project' }
+    vi.mocked(listProjects).mockResolvedValue({ data: [project, project2] as never, error: undefined as never })
+    let resolvePlan!: (value: { data: typeof planView; error: never }) => void
+    vi.mocked(getProjectWorkConfigurationPlan).mockReturnValue(new Promise((resolve) => { resolvePlan = resolve }) as never)
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', runId: 'run-1' } },
+          [routerKey as symbol]: { replace: vi.fn() },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(getProjectWorkConfigurationPlan).toHaveBeenCalledTimes(1))
+    await wrapper.find('.project-strip select').setValue('project-2')
+    resolvePlan({ data: planView, error: undefined as never })
+    await Promise.resolve()
+
+    expect((wrapper.vm as unknown as { plan: { kind: string } }).plan.kind).toBe('idle')
+    expect(wrapper.text()).not.toContain('Work 配置计划审核')
+    wrapper.unmount()
+  })
+
+  it('does not let a late policy response overwrite the template mode', async () => {
+    let resolvePolicy!: (value: { data: typeof policy; error: never }) => void
+    vi.mocked(getActiveProjectLlmPolicy).mockReturnValueOnce(new Promise((resolve) => { resolvePolicy = resolve }) as never)
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: policy as never, error: undefined as never })
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: { stubs: { RouterLink: true } },
+    })
+
+    await vi.waitFor(() => expect(getActiveProjectLlmPolicy).toHaveBeenCalledTimes(1))
+    await wrapper.get('button.mode-switch__button:nth-of-type(2)').trigger('click')
+    resolvePolicy({ data: policy, error: undefined as never })
+    await Promise.resolve()
+
+    expect((wrapper.vm as unknown as { policy: { kind: string } }).policy.kind).toBe('idle')
+    wrapper.unmount()
+  })
+
+  it('lists project task history and opens a Work template run with its mode', async () => {
+    vi.mocked(listProjectAgentRuns).mockResolvedValue({
+      data: { items: [historyExperiment, historyTemplate, historyConfiguration], page: 1, pageSize: 25, hasMore: false } as never,
+      error: undefined as never,
+    })
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1' } },
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Work 模板生成'))
+    expect(wrapper.text()).toContain('生成失败')
+    expect(wrapper.text()).not.toContain('实验候选生成')
+    const openTemplate = wrapper.findAll('button').find((button) => button.text() === '打开任务')
+    expect(openTemplate).toBeDefined()
+    await openTemplate!.trigger('click')
+
+    expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      query: expect.objectContaining({ projectId: 'project-1', mode: 'template', runId: 'history-template-1', releaseId: undefined }),
+    }))
+    wrapper.unmount()
+  })
+
+  it('follows route mode changes and preserves the selected history run through back and forward navigation', async () => {
+    const routeState = reactive({ query: { projectId: 'project-1', runId: 'run-1' } as Record<string, string> })
+    const replace = vi.fn()
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: routeState,
+          [routerKey as symbol]: { replace },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Work 配置计划审核'))
+    routeState.query = { projectId: 'project-1', mode: 'template', runId: 'template-run-1' }
+    await vi.waitFor(() => expect(wrapper.get('button.mode-switch__button:nth-of-type(2)').attributes('aria-pressed')).toBe('true'))
+    expect((wrapper.vm as unknown as { templateRouteRunId: string | null }).templateRouteRunId).toBe('template-run-1')
+
+    routeState.query = { projectId: 'project-1', runId: 'run-1' }
+    await vi.waitFor(() => expect(wrapper.get('button.mode-switch__button:nth-of-type(1)').attributes('aria-pressed')).toBe('true'))
+    expect((wrapper.vm as unknown as { configurationRouteRunId: string | null }).configurationRouteRunId).toBe('run-1')
+    expect(replace).not.toHaveBeenCalledWith(expect.objectContaining({ query: expect.objectContaining({ runId: undefined }) }))
+    wrapper.unmount()
+  })
+
+  it('ignores a late history page after switching projects', async () => {
+    const project2 = { ...project, id: 'project-2', name: 'Second Work project' }
+    vi.mocked(listProjects).mockResolvedValue({ data: [project, project2] as never, error: undefined as never })
+    let resolveFirst!: (value: unknown) => void
+    vi.mocked(listProjectAgentRuns).mockImplementation((options) => {
+      const projectId = (options as { path: { projectId: string } }).path.projectId
+      if (projectId === 'project-1') return new Promise((resolve) => { resolveFirst = resolve }) as never
+      return Promise.resolve({ data: { items: [historyConfiguration], page: 1, pageSize: 25, hasMore: false }, error: undefined }) as never
+    })
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: { stubs: { RouterLink: true } },
+    })
+    await vi.waitFor(() => expect(listProjectAgentRuns).toHaveBeenCalledWith(expect.objectContaining({ path: { projectId: 'project-1' } })))
+    await wrapper.find('.project-strip select').setValue('project-2')
+    resolveFirst({ data: { items: [historyTemplate], page: 1, pageSize: 25, hasMore: false }, error: undefined })
+    await Promise.resolve()
+
+    expect(wrapper.text()).not.toContain('Work 模板生成')
+    wrapper.unmount()
+  })
+
+  it('ignores a late route-run response after the project changes', async () => {
+    const project2 = { ...project, id: 'project-2', name: 'Second Work project' }
+    vi.mocked(listProjects).mockResolvedValue({ data: [project, project2] as never, error: undefined as never })
+    let resolveRun!: (value: { data: typeof run; error: never }) => void
+    vi.mocked(getProjectAgentRun).mockReturnValue(new Promise((resolve) => { resolveRun = resolve }) as never)
+
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', runId: 'run-1' } },
+          [routerKey as symbol]: { replace: vi.fn() },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(getProjectAgentRun).toHaveBeenCalledTimes(1))
+    await wrapper.find('.project-strip select').setValue('project-2')
+    resolveRun({ data: run, error: undefined as never })
+    await Promise.resolve()
+
+    expect(getProjectAgentRun).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).not.toContain('Work 配置计划审核')
+    wrapper.unmount()
   })
 
   it('keeps a route project while the shared project list is loading', async () => {

@@ -6,6 +6,8 @@ export type ClientOptions = {
 
 export type AgentLlmReviewQuery = AgentLlmReviewQuerySchema;
 
+export type AgentRunHistoryPage = AgentRunHistoryPageSchema;
+
 export type AgentWorkExecutionIntentMetadata = AgentWorkExecutionIntentMetadataSchema;
 
 export type AgentWorkExecutionIntentQuery = AgentWorkExecutionIntentQuerySchema;
@@ -79,6 +81,10 @@ export type OperationAccepted = {
     revision: number;
     statusUrl: string;
 };
+
+export type OrganizationUser = OrganizationUserSchema;
+
+export type OrganizationUserPage = OrganizationUserPageSchema;
 
 export type PlatformImageCatalog = PlatformImageCatalogSchema;
 
@@ -234,21 +240,127 @@ export type Revision = number;
 export type UtcTimestamp = string;
 
 /**
+ * AgentRunHistoryPage
+ *
+ * Page of Agent-owned project run history.
+ */
+export type AgentRunHistoryPageSchema = {
+    hasMore: boolean;
+    items: Array<AgentRunHistoryItem>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type AgentRunHistoryPageSchemaActorId = string;
+
+/**
+ * Bounded project-scoped history item.  Full run details remain available
+ * through the existing `getProjectAgentRun` operation.
+ */
+export type AgentRunHistoryItem = {
+    /**
+     * Course association copied from the Agent-owned run row so Control can
+     * enforce the same project/course binding as the detail endpoint.
+     */
+    courseId?: AgentRunHistoryPageSchemaCourseId | null;
+    createdAt: AgentRunHistoryPageSchemaUtcTimestamp;
+    id: AgentRunId;
+    projectId: AgentRunHistoryPageSchemaProjectId;
+    purpose: AgentRunPurpose;
+    state: AgentRunState;
+    updatedAt: AgentRunHistoryPageSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `AgentRunId`.
+ */
+export type AgentRunId = string;
+
+/**
+ * Immutable purpose selected by Control for one Agent run.
+ *
+ * The purpose is authoritative: callers cannot substitute an environment class, target
+ * environment, actor, or runtime through an untyped request field. Experiment Authoring creates
+ * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
+ * WorkConfiguration targets one existing Work environment and produces one configuration plan.
+ */
+export type AgentRunPurpose = {
+    environmentClass: EnvironmentClass;
+    kind: 'authoring';
+} | {
+    actorId: AgentRunHistoryPageSchemaActorId;
+    environmentId: AgentRunHistoryPageSchemaEnvironmentId;
+    environmentRevision: AgentRunHistoryPageSchemaRevision;
+    kind: 'work_configuration';
+    /**
+     * Runtime selected by the authoritative Work environment.
+     *
+     * Control resolves this value from the environment instance before dispatching the
+     * run. Agent uses it as the immutable execution routing key, so a missing or altered
+     * runtime cannot silently select a different executor.
+     */
+    runtimeKind: RuntimeKind;
+};
+
+/**
+ * Aggregate AgentRun state derived from both tracks.
+ */
+export type AgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type AgentRunHistoryPageSchemaCourseId = string;
+
+/**
+ * Environment business class retained from the v2.1 architecture.
+ */
+export type EnvironmentClass = 'experiment' | 'work';
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type AgentRunHistoryPageSchemaEnvironmentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type AgentRunHistoryPageSchemaProjectId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type AgentRunHistoryPageSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type RuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type AgentRunHistoryPageSchemaUtcTimestamp = string;
+
+/**
  * AgentRun
  *
  * One idempotent, auditable dual-candidate Agent run.
  */
 export type AgentRunSchema = {
     courseId?: AgentRunSchemaCourseId | null;
-    id: AgentRunId;
+    id: AgentRunSchemaAgentRunId;
     packageId: ProblemPackageId;
     plan?: WorkConfigurationPlan | null;
     policyId: PolicyId;
     policyRevision: AgentRunSchemaRevision;
     projectId: AgentRunSchemaProjectId;
-    purpose: AgentRunPurpose;
+    purpose: AgentRunSchemaAgentRunPurpose;
     revision: AgentRunSchemaRevision;
-    state: AgentRunState;
+    state: AgentRunSchemaAgentRunState;
     tracks: Array<AgentTrack>;
 };
 
@@ -280,7 +392,7 @@ export type AgentAttemptState = 'pending' | 'running' | 'repairing' | 'awaiting_
 /**
  * Strongly typed UUIDv7 identifier for `AgentRunId`.
  */
-export type AgentRunId = string;
+export type AgentRunSchemaAgentRunId = string;
 
 /**
  * Immutable purpose selected by Control for one Agent run.
@@ -290,8 +402,8 @@ export type AgentRunId = string;
  * a new Environment/Evaluation package, Work Authoring creates one Environment candidate, while
  * WorkConfiguration targets one existing Work environment and produces one configuration plan.
  */
-export type AgentRunPurpose = {
-    environmentClass: EnvironmentClass;
+export type AgentRunSchemaAgentRunPurpose = {
+    environmentClass: AgentRunSchemaEnvironmentClass;
     kind: 'authoring';
 } | {
     actorId: AgentRunSchemaActorId;
@@ -305,13 +417,13 @@ export type AgentRunPurpose = {
      * run. Agent uses it as the immutable execution routing key, so a missing or altered
      * runtime cannot silently select a different executor.
      */
-    runtimeKind: RuntimeKind;
+    runtimeKind: AgentRunSchemaRuntimeKind;
 };
 
 /**
  * Aggregate AgentRun state derived from both tracks.
  */
-export type AgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
+export type AgentRunSchemaAgentRunState = 'requested' | 'running' | 'partially_succeeded' | 'succeeded' | 'awaiting_approval' | 'failed' | 'cancelling' | 'cancelled';
 
 /**
  * Independent track and its retained attempts.
@@ -371,7 +483,7 @@ export type AgentRunSchemaCourseId = string;
 /**
  * Environment business class retained from the v2.1 architecture.
  */
-export type EnvironmentClass = 'experiment' | 'work';
+export type AgentRunSchemaEnvironmentClass = 'experiment' | 'work';
 
 /**
  * Strongly typed UUIDv7 identifier for `EnvironmentId`.
@@ -411,7 +523,7 @@ export type AgentRunSchemaRevision = number;
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
-export type RuntimeKind = 'container' | 'virtual_machine';
+export type AgentRunSchemaRuntimeKind = 'container' | 'virtual_machine';
 
 /**
  * Immutable generated configuration plan for one existing Work environment.
@@ -2570,15 +2682,15 @@ export type GpuCatalogEntrySchemaRevision = number;
  * Access-owned membership grant for one Project actor.
  */
 export type AddProjectMembershipRequestSchema = {
-    actorId: AddProjectMembershipRequestSchemaActorId;
     expiresAt?: AddProjectMembershipRequestSchemaUtcTimestamp | null;
     role: AddProjectMembershipRequestSchemaPlatformRole;
+    /**
+     * Exact issuer username resolved by Access before the membership
+     * transaction.  Local actor identifiers are never accepted from a
+     * browser request.
+     */
+    username: string;
 };
-
-/**
- * Strongly typed UUIDv7 identifier for `ActorId`.
- */
-export type AddProjectMembershipRequestSchemaActorId = string;
 
 /**
  * Base role asserted by the configured OIDC issuer.
@@ -9109,6 +9221,58 @@ export type EnvironmentExecutionBindingSchemaRuntimeKind = 'container' | 'virtua
 export type EnvironmentExecutionBindingSchemaUtcTimestamp = string;
 
 /**
+ * OrganizationUserPage
+ *
+ * Bounded organization-directory search result.
+ */
+export type OrganizationUserPageSchema = {
+    hasMore: boolean;
+    items: Array<OrganizationUserPageSchemaOrganizationUser>;
+    page: number;
+    pageSize: number;
+};
+
+/**
+ * Identity metadata returned by the organization directory.  Provider
+ * subjects and local actor identifiers stay on the server side.
+ */
+export type OrganizationUserPageSchemaOrganizationUser = {
+    /**
+     * Human-readable name resolved from the issuer profile.
+     */
+    displayName: string;
+    /**
+     * Whether the issuer currently permits the account to authenticate.
+     */
+    enabled: boolean;
+    /**
+     * Current issuer username used for exact membership selection.
+     */
+    username: string;
+};
+
+/**
+ * OrganizationUser
+ *
+ * Identity metadata returned by the organization directory.  Provider
+ * subjects and local actor identifiers stay on the server side.
+ */
+export type OrganizationUserSchema = {
+    /**
+     * Human-readable name resolved from the issuer profile.
+     */
+    displayName: string;
+    /**
+     * Whether the issuer currently permits the account to authenticate.
+     */
+    enabled: boolean;
+    /**
+     * Current issuer username used for exact membership selection.
+     */
+    username: string;
+};
+
+/**
  * ProblemPackage
  *
  * Immutable, atomically completed teacher material package.
@@ -9367,6 +9531,10 @@ export type ProjectMembershipSchema = {
      */
     courseId?: ProjectMembershipSchemaCourseId | null;
     /**
+     * Human-readable issuer name, present on project membership views.
+     */
+    displayName?: string | null;
+    /**
      * Optional hard expiry.
      */
     expiresAt?: ProjectMembershipSchemaUtcTimestamp | null;
@@ -9386,6 +9554,11 @@ export type ProjectMembershipSchema = {
      * Current lifecycle state.
      */
     state: MembershipState;
+    /**
+     * Issuer username, present on project membership views when identity
+     * metadata is available.  Authorization snapshots leave this unset.
+     */
+    username?: string | null;
 };
 
 /**
@@ -11522,6 +11695,75 @@ export type GetActiveCourseLlmPolicyResponses = {
 
 export type GetActiveCourseLlmPolicyResponse = GetActiveCourseLlmPolicyResponses[keyof GetActiveCourseLlmPolicyResponses];
 
+export type ListOrganizationUsersData = {
+    body?: never;
+    path?: never;
+    query: {
+        query: string;
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/directory/users';
+};
+
+export type ListOrganizationUsersErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListOrganizationUsersError = ListOrganizationUsersErrors[keyof ListOrganizationUsersErrors];
+
+export type ListOrganizationUsersResponses = {
+    /**
+     * Successful response
+     */
+    200: OrganizationUserPageSchema;
+};
+
+export type ListOrganizationUsersResponse = ListOrganizationUsersResponses[keyof ListOrganizationUsersResponses];
+
 export type ListEnvironmentsData = {
     body?: never;
     path?: never;
@@ -13167,6 +13409,76 @@ export type UpdateProjectResponses = {
 };
 
 export type UpdateProjectResponse = UpdateProjectResponses[keyof UpdateProjectResponses];
+
+export type ListProjectAgentRunsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/agent-runs';
+};
+
+export type ListProjectAgentRunsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectAgentRunsError = ListProjectAgentRunsErrors[keyof ListProjectAgentRunsErrors];
+
+export type ListProjectAgentRunsResponses = {
+    /**
+     * Successful response
+     */
+    200: AgentRunHistoryPageSchema;
+};
+
+export type ListProjectAgentRunsResponse = ListProjectAgentRunsResponses[keyof ListProjectAgentRunsResponses];
 
 export type CreateProjectAgentRunData = {
     body: CreateAgentRunRequestSchema;

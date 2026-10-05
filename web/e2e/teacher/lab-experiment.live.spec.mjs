@@ -641,7 +641,7 @@ test('student completes a published lab experiment through the browser terminal'
     studentPage = await studentContext.newPage()
     const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
-    await addProjectStudentByUi(page, project.id, studentActorId)
+    await addProjectStudentByUi(page, project.id)
     environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
     const environment = await waitForStudentEnvironmentWithResourceApproval(
       studentContext.request,

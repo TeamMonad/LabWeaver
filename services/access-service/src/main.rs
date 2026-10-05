@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod browser_proxy_tests;
 mod console;
+mod directory;
 mod grants;
 #[path = "../../http_transport.rs"]
 mod http_transport;
@@ -17,7 +18,8 @@ use auth::{
     TransportSecurityMode, authorize, build_backchannel_logout_authorizer, build_bearer_authorizer,
     cleanup_expired_auth_state, consume_backchannel_logout, consume_oidc_transaction,
     create_bff_session, extract_platform_roles, load_bff_session, load_logout_hint,
-    load_membership_snapshot, no_redirect_http_client, revoke_bff_session, upsert_actor,
+    load_membership_snapshot, no_redirect_http_client, revoke_bff_session,
+    upsert_actor_with_metadata,
 };
 use axum::{
     Json, Router,
@@ -26,10 +28,11 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
 };
+use contracts::http::PageQuery;
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, Revision, UtcTimestamp,
-    environment::EnvironmentOwnerResolutionRequest, operation_contract,
+    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, OrganizationUserPage, Revision,
+    UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_contract,
 };
 use persistence_sqlx::Sha256Digest;
 
@@ -47,6 +50,7 @@ struct AppState {
     bearer_authorizer: Arc<jwt_authorizer::Authorizer<auth::BearerClaims>>,
     backchannel_logout_authorizer: Arc<jwt_authorizer::Authorizer<auth::BackchannelLogoutClaims>>,
     service_token_verifier: Arc<ServiceTokenVerifier>,
+    directory: directory::KeycloakDirectory,
     role_mappings: RoleMappings,
     pool: PgPool,
     key_ring: KeyRing,
@@ -125,6 +129,7 @@ fn browser_routes() -> Router<Arc<AppState>> {
         .route("/auth/logout", post(logout))
         .route("/api/v1/auth/session", get(session))
         .route("/api/v1/auth/csrf", get(csrf))
+        .route("/api/v1/directory/users", get(directory_users))
         .route(
             "/api/v1/me/ssh-public-keys",
             post(grants::create_ssh_key).get(grants::list_ssh_keys),
@@ -660,6 +665,12 @@ async fn build_app_state(
         access_target.scopes.clone(),
     )
     .await?;
+    let directory = directory::KeycloakDirectory::new(
+        &deployment.oidc.issuer,
+        oidc_http.clone(),
+        Arc::clone(&service_token_client),
+    )
+    .map_err(|_| StartupError::Config)?;
     let role_mappings = RoleMappings::parse(deployment.oidc.role_mappings.clone())?;
     let resolver_config = deployment.environment_owner_resolver.contract();
     let resolver_ca = resolver_secret(&deployment, &resolver_config.ca_certificate_locator)?;
@@ -730,6 +741,7 @@ async fn build_app_state(
         bearer_authorizer,
         backchannel_logout_authorizer,
         service_token_verifier,
+        directory,
         role_mappings,
         pool,
         key_ring,
@@ -940,9 +952,16 @@ async fn callback(
     .map_err(ApiError::from)?
     .into_iter()
     .collect::<Vec<_>>();
-    let actor = upsert_actor(&state.pool, state.config.issuer.as_str(), &identity.subject)
-        .await
-        .map_err(ApiError::from)?;
+    let metadata = identity_metadata(&identity.claims);
+    let actor = upsert_actor_with_metadata(
+        &state.pool,
+        state.config.issuer.as_str(),
+        &identity.subject,
+        metadata.username.as_deref(),
+        metadata.display_name.as_deref(),
+    )
+    .await
+    .map_err(ApiError::from)?;
     let expires_at = auth::configured_session_expiry(
         now,
         deployment_duration(state.config.session_ttl_seconds)?,
@@ -1222,6 +1241,58 @@ async fn session(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationUserQuery {
+    query: String,
+    #[serde(flatten)]
+    page: PageQuery,
+}
+
+async fn directory_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(request): Query<OrganizationUserQuery>,
+) -> Result<Json<OrganizationUserPage>, ApiError> {
+    let query = request.query.trim();
+    if query.is_empty() || query.chars().count() > 128 {
+        return Err(ApiError::bad_request("LW_ACCESS_DIRECTORY_QUERY_INVALID"));
+    }
+    let (page, page_size, first) = request
+        .page
+        .normalized()
+        .map_err(|_| ApiError::bad_request("LW_ACCESS_DIRECTORY_PAGE_INVALID"))?;
+    let identity = authenticated_identity(&state, &headers).await?;
+    let actor_id = Uuid::parse_str(&identity.actor.actor_id.to_string())
+        .map_err(|_| ApiError::internal("LW_AUTH_SESSION_REJECTED"))?;
+    let memberships = load_membership_snapshot(&state.pool, actor_id)
+        .await
+        .map_err(ApiError::from)?;
+    let policy = operation_contract("listOrganizationUsers")
+        .ok_or_else(|| ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))?;
+    authorize(
+        &AuthorizationContext {
+            actor: identity.actor,
+            course_memberships: memberships.course_memberships,
+            project_memberships: memberships.project_memberships,
+            now: OffsetDateTime::now_utc(),
+        },
+        AuthorizationScope::Global,
+        &policy
+            .allowed_roles
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+    )
+    .map_err(ApiError::from)?;
+    state
+        .directory
+        .search(query, page, page_size, first)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
 fn effective_session_scopes(
     actor: &AuthenticatedActor,
     memberships: auth::MembershipSnapshot,
@@ -1382,17 +1453,25 @@ async fn authenticated_identity(
         .claims;
     let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
         .map_err(|_| ApiError::unauthorized("LW_AUTH_TOKEN_INVALID"))?;
+    let claims_value = serde_json::Value::Object(claims.claims.clone());
     let roles = extract_platform_roles(
-        &serde_json::Value::Object(claims.claims),
+        &claims_value,
         &state.deployment.oidc.role_claim_path,
         &state.role_mappings,
     )
     .map_err(ApiError::from)?
     .into_iter()
     .collect();
-    let local_actor = upsert_actor(&state.pool, state.config.issuer.as_str(), &claims.sub)
-        .await
-        .map_err(ApiError::from)?;
+    let metadata = identity_metadata(&claims_value);
+    let local_actor = upsert_actor_with_metadata(
+        &state.pool,
+        state.config.issuer.as_str(),
+        &claims.sub,
+        metadata.username.as_deref(),
+        metadata.display_name.as_deref(),
+    )
+    .await
+    .map_err(ApiError::from)?;
     Ok(AuthenticatedIdentity {
         actor: AuthenticatedActor {
             actor_id: local_actor
@@ -1407,6 +1486,41 @@ async fn authenticated_identity(
             .map_err(|_| ApiError::internal("LW_AUTH_MEMBERSHIP_UNAVAILABLE"))?,
         expires_at: utc_timestamp(expires_at)?,
     })
+}
+
+#[derive(Default)]
+struct IdentityMetadata {
+    username: Option<String>,
+    display_name: Option<String>,
+}
+
+fn identity_metadata(claims: &serde_json::Value) -> IdentityMetadata {
+    let Some(object) = claims.as_object() else {
+        return IdentityMetadata::default();
+    };
+    let string_claim = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let username = string_claim("preferred_username");
+    let display_name = string_claim("name").or_else(|| {
+        let given = string_claim("given_name");
+        let family = string_claim("family_name");
+        match (given, family) {
+            (Some(given), Some(family)) => Some(format!("{given} {family}")),
+            (Some(given), None) => Some(given),
+            (None, Some(family)) => Some(family),
+            (None, None) => username.clone(),
+        }
+    });
+    IdentityMetadata {
+        username,
+        display_name,
+    }
 }
 
 fn actor_from_session(session: &BffSession) -> Result<AuthenticatedActor, ApiError> {
@@ -1648,6 +1762,22 @@ impl IntoResponse for ApiError {
             Json(serde_json::json!({"diagnosticCode": self.diagnostic})),
         )
             .into_response()
+    }
+}
+
+impl From<directory::DirectoryError> for ApiError {
+    fn from(error: directory::DirectoryError) -> Self {
+        match error {
+            directory::DirectoryError::Unavailable => {
+                Self::unavailable("LW_ACCESS_DIRECTORY_UNAVAILABLE")
+            }
+            directory::DirectoryError::UserNotFound => {
+                Self::not_found("LW_ACCESS_DIRECTORY_USER_NOT_FOUND")
+            }
+            directory::DirectoryError::UserDisabled => {
+                Self::conflict("LW_ACCESS_DIRECTORY_USER_DISABLED")
+            }
+        }
     }
 }
 

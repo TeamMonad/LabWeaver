@@ -12,7 +12,7 @@ const actors = Object.freeze([
     destination: path.join(authDir, 'teacher.json'),
     landingPath: '/teacher/materials',
     entryLabel: '创建与生成实验',
-    heading: '材料上传与 AgentRun',
+    heading: '材料上传与实验生成',
   }),
   Object.freeze({
     role: 'student',

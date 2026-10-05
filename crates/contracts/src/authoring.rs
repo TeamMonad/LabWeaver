@@ -882,6 +882,32 @@ pub struct AgentRun {
     pub plan: Option<WorkConfigurationPlan>,
 }
 
+/// Bounded project-scoped history item.  Full run details remain available
+/// through the existing `getProjectAgentRun` operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunHistoryItem {
+    pub id: AgentRunId,
+    pub project_id: ProjectId,
+    /// Course association copied from the Agent-owned run row so Control can
+    /// enforce the same project/course binding as the detail endpoint.
+    pub course_id: Option<CourseId>,
+    pub purpose: AgentRunPurpose,
+    pub state: AgentRunState,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+}
+
+/// Page of Agent-owned project run history.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunHistoryPage {
+    pub items: Vec<AgentRunHistoryItem>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
+}
+
 impl AgentRun {
     /// Validates the exact purpose-specific track shape and monotonically numbered attempts.
     pub fn validate(&self) -> Result<(), AuthoringError> {

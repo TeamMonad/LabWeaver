@@ -51,6 +51,7 @@ pub use repository::{
     consume_backchannel_logout, consume_oidc_transaction, create_bff_session,
     insert_project_owner_membership, load_bff_session, load_logout_hint, load_membership_snapshot,
     require_course_membership, revoke_bff_session, revoke_bff_sessions_by_sid, upsert_actor,
+    upsert_actor_with_metadata,
 };
 pub use resource_delegation::{
     ResourceDelegation, ResourceDelegationError, decode_resource_delegation,

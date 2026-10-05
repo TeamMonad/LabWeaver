@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { navigateFromHomeByUi } from '../support/live.mjs'
 
 const GPU_CATALOG_ENTRIES_ENV = 'LABWEAVER_E2E_GPU_CATALOG_ENTRIES'
 const SINGLE_ENTRY_ENV = Object.freeze({
@@ -208,7 +209,7 @@ test.skip(ENTRIES.length === 0, `set ${GPU_CATALOG_ENTRIES_ENV} or the five sing
 test('platform administrator configures explicitly requested GPU catalog entries through the UI', async ({ page }) => {
   test.setTimeout(120_000)
   // The platform-admin project supplies the existing Keycloak storage state from auth.setup.mjs.
-  await page.goto('/admin/gpu-catalog', { waitUntil: 'domcontentloaded' })
+  await navigateFromHomeByUi(page, 'GPU 目录')
   await expect(page.getByRole('heading', { name: 'GPU 目录', exact: true })).toBeVisible()
   await waitForCatalogSettled(page, 'LOAD')
 

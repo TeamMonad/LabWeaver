@@ -99,6 +99,17 @@
   loop_control:
     label: "{{ item.caller }} -> {{ item.target }}"
 
+- name: Validate service realm role assignments before provisioning
+  ansible.builtin.assert:
+    that:
+      - item.caller in (identity_service_clients | map(attribute='client_id') | list)
+      - item.roles | length > 0
+      - item.roles | select('match', '^[A-Za-z0-9_.:-]{1,128}$') | list | length == item.roles | length
+    fail_msg: IDENTITY_SERVICE_REALM_ROLE_ASSIGNMENT_INVALID
+  loop: "{{ identity_service_realm_role_assignments }}"
+  loop_control:
+    label: "{{ item.caller }} -> realm-management"
+
 - name: Read the adopted cluster identity
   ansible.builtin.command:
     argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", get, namespace, kube-system, -o, 'jsonpath={.metadata.uid}']

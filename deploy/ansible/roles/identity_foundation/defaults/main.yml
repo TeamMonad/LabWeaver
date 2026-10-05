@@ -129,6 +129,12 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
   - caller: labweaver-evaluation
     target: labweaver-evaluation
     roles: [evaluation.step.complete]
+# Keycloak Admin REST access is restricted to the two read-only realm-management
+# roles required by the organization directory.  These are realm client roles,
+# rather than LabWeaver service-to-service permissions.
+identity_service_realm_role_assignments: # noqa: var-naming[no-role-prefix]
+  - caller: labweaver-access
+    roles: [query-users, view-users]
 identity_secret_locator_sha256: sha256:REPLACE_IDENTITY_SECRET_LOCATOR_SHA256 # noqa: var-naming[no-role-prefix]
 identity_storage_class: local-path # noqa: var-naming[no-role-prefix]
 identity_postgres_storage: 20Gi # noqa: var-naming[no-role-prefix]

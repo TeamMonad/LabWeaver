@@ -37,6 +37,8 @@ fn private_work_release_operations_authorize_student_and_platform_admin_owners()
                 course_id: None,
                 project_id,
                 actor_id,
+                username: None,
+                display_name: None,
                 role,
                 state: MembershipState::Active,
                 revision: Revision::new(7)?,

@@ -1,6 +1,7 @@
 import { activeScene, fixtureProjectId } from './scenes'
 import type {
   AccessGrantSchema,
+  AgentRunHistoryPageSchema,
   ConsoleCapabilityAvailabilitySchema,
   EnvironmentAccessGrantPageSchema,
   EnvironmentEndpointSchema,
@@ -15,10 +16,12 @@ import type {
   EnvironmentTemplateReleaseViewSchema,
   ProjectMembershipSchema,
   ProjectSchema,
+  OrganizationUserPageSchema,
   PlatformImageCatalogViewSchema,
   ProblemDetails,
   ResourceLeaseSchema,
   ResourceLeaseState,
+  ResourceRateSchema,
   ResourceRequestSchema,
   ResourceRequestState,
   SshPublicKeySchema,
@@ -471,11 +474,23 @@ function notFoundResponse(resourceName: string, id: string | undefined): Promise
 
 interface FixtureOptions {
   path?: Record<string, string | undefined>
-  query?: Partial<ListEnvironmentsData['query']>
+  query?: Partial<ListEnvironmentsData['query']> & {
+    query?: string
+    page?: number
+    pageSize?: number
+  }
 }
 
 export async function listProjects(): Promise<FixtureResult<ProjectSchema[]>> {
   return fixtureResponse(projectsForScene())
+}
+
+export async function listOrganizationUsers(_options?: FixtureOptions): Promise<FixtureResult<OrganizationUserPageSchema>> {
+  return unsupportedResponse('组织账号目录搜索')
+}
+
+export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<FixtureResult<AgentRunHistoryPageSchema>> {
+  return unsupportedResponse('项目 AgentRun 历史')
 }
 
 export async function getProject(options?: FixtureOptions): Promise<FixtureResult<ProjectSchema>> {
@@ -673,7 +688,11 @@ export async function registerPlatformImage() { return unsupportedResponse('注�
 export async function repinPlatformImage() { return unsupportedResponse('重新固定平台镜像') }
 export async function disablePlatformImage() { return unsupportedResponse('停用平台镜像') }
 export async function createPlatformImageUpload() { return unsupportedResponse('创建平台镜像上传会话') }
+export async function getPlatformImageUpload() { return unsupportedResponse('读取平台镜像上传会话') }
+export async function cancelPlatformImageUpload() { return unsupportedResponse('取消平台镜像上传会话') }
 export async function completePlatformImageUpload() { return unsupportedResponse('完成平台镜像导入') }
 
 export async function listResourceGpuCatalog(): Promise<FixtureResult<GpuCatalogEntrySchema[]>> { return fixtureResponse(gpuCatalogFixture) }
+export async function listResourceRates(_options?: FixtureOptions): Promise<FixtureResult<ResourceRateSchema[]>> { return unsupportedResponse('读取资源费率') }
 export async function createResourceGpuCatalogEntry() { return unsupportedResponse('创建 GPU 目录项') }
+export async function createResourceRate() { return unsupportedResponse('创建资源费率') }

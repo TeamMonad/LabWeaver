@@ -14,7 +14,7 @@ use std::{
 
 use auth::ServiceTokenClient;
 
-use contracts::authoring::{AgentRun, AgentTrackKind};
+use contracts::authoring::{AgentRun, AgentRunHistoryPage, AgentTrackKind};
 use contracts::environment::{
     EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
 };
@@ -29,7 +29,7 @@ use contracts::http::{
     InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
     InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalPublishEvaluationReleaseRequest,
-    InternalWithdrawEvaluationReleaseRequest, PlatformImageCatalog, PlatformImageEntry,
+    InternalWithdrawEvaluationReleaseRequest, PageQuery, PlatformImageCatalog, PlatformImageEntry,
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
@@ -212,6 +212,29 @@ impl AgentClient {
             self.token_target,
         )
         .await
+    }
+
+    /// Reads the Agent-owned bounded history projection for one project.
+    pub async fn list_project_runs(
+        &self,
+        project_id: contracts::ProjectId,
+        query: &PageQuery,
+    ) -> Result<AgentRunHistoryPage, DownstreamError> {
+        let page: AgentRunHistoryPage = send_json(
+            self.client
+                .get(
+                    self.config
+                        .endpoint(&format!("internal/v1/projects/{project_id}/agent-runs"))?,
+                )
+                .query(query),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await?;
+        if page.items.iter().any(|item| item.project_id != project_id) {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        Ok(page)
     }
 
     pub async fn cancel(

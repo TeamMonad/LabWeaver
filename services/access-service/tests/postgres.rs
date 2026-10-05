@@ -341,3 +341,94 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
     assert_eq!(valid_loaded.session_id, valid_session.session_id);
     Ok(())
 }
+
+#[tokio::test]
+async fn actor_metadata_tracks_subject_changes_and_allows_username_reuse_without_revival()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_access_migrations(&pool).await?;
+    let issuer = "https://issuer.example.test";
+
+    let first = auth::upsert_actor_with_metadata(
+        &pool,
+        issuer,
+        "subject-before-rename",
+        Some("old-name"),
+        Some("Old Name"),
+    )
+    .await?;
+    let renamed = auth::upsert_actor_with_metadata(
+        &pool,
+        issuer,
+        "subject-before-rename",
+        Some("new-name"),
+        Some("New Name"),
+    )
+    .await?;
+    assert_eq!(first.actor_id, renamed.actor_id);
+
+    let reused = auth::upsert_actor_with_metadata(
+        &pool,
+        issuer,
+        "subject-after-reuse",
+        Some("new-name"),
+        Some("Another User"),
+    )
+    .await?;
+    assert_ne!(renamed.actor_id, reused.actor_id);
+    let long_display_name = format!("Researcher {}", "x".repeat(400));
+    let long_display_actor = auth::upsert_actor_with_metadata(
+        &pool,
+        issuer,
+        "subject-long-display",
+        Some("long-display"),
+        Some(&long_display_name),
+    )
+    .await?;
+    let long_display_length: i64 = sqlx::query_scalar(
+        "SELECT length(display_name)::bigint FROM access.actors WHERE actor_id=$1",
+    )
+    .bind(long_display_actor.actor_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(long_display_length, i64::try_from(long_display_name.len())?);
+    let metadata = sqlx::query_as::<_, (String, String)>(
+        "SELECT username,display_name FROM access.actors WHERE actor_id=$1",
+    )
+    .bind(reused.actor_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(metadata, ("new-name".to_owned(), "Another User".to_owned()));
+
+    sqlx::query("UPDATE access.actors SET disabled_at=now() WHERE actor_id=$1")
+        .bind(renamed.actor_id)
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        auth::upsert_actor_with_metadata(
+            &pool,
+            issuer,
+            "subject-before-rename",
+            Some("reused-again"),
+            Some("Reused Again"),
+        )
+        .await,
+        Err(auth::RepositoryError::ActorDisabled)
+    ));
+    let retained = sqlx::query_as::<_, (String, String)>(
+        "SELECT username,display_name FROM access.actors WHERE actor_id=$1",
+    )
+    .bind(renamed.actor_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, ("new-name".to_owned(), "New Name".to_owned()));
+    Ok(())
+}

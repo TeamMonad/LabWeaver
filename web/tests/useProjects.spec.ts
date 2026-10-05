@@ -1,12 +1,13 @@
 import { effectScope, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useProjectMemberships } from '@/composables/useProjects'
+import { useOrganizationDirectoryUsers, useProjectMemberships } from '@/composables/useProjects'
 
 const listProjectMemberships = vi.hoisted(() => vi.fn())
+const listOrganizationUsers = vi.hoisted(() => vi.fn())
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
-  return { ...actual, listProjectMemberships }
+  return { ...actual, listProjectMemberships, listOrganizationUsers }
 })
 
 function result(data: unknown[]) {
@@ -19,6 +20,7 @@ function membership(actorId: string) {
 
 afterEach(() => {
   listProjectMemberships.mockReset()
+  listOrganizationUsers.mockReset()
 })
 
 describe('useProjectMemberships', () => {
@@ -97,6 +99,57 @@ describe('useProjectMemberships', () => {
       kind: 'success',
       data: [membership('student-2')],
     })
+    scope.stop()
+  })
+})
+
+describe('useOrganizationDirectoryUsers', () => {
+  it('loads a bounded server page for the entered organization query', async () => {
+    const page = { items: [{ username: 'student-1', displayName: '学生一', enabled: true }], page: 1, pageSize: 25, hasMore: true }
+    listOrganizationUsers.mockResolvedValueOnce({ data: page, error: undefined })
+    const scope = effectScope()
+    let state!: ReturnType<typeof useOrganizationDirectoryUsers>
+    scope.run(() => { state = useOrganizationDirectoryUsers() })
+
+    await state.load('student', 1)
+    expect(listOrganizationUsers).toHaveBeenCalledWith({ query: { query: 'student', page: 1, pageSize: 25 } })
+    expect(state.users).toEqual({ kind: 'success', data: page })
+    scope.stop()
+  })
+
+  it('ignores a late result after a new query or clear', async () => {
+    let resolveFirst!: (value: unknown) => void
+    let resolveSecond!: (value: unknown) => void
+    listOrganizationUsers
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve }))
+
+    const scope = effectScope()
+    let state!: ReturnType<typeof useOrganizationDirectoryUsers>
+    scope.run(() => { state = useOrganizationDirectoryUsers() })
+    const first = state.load('old', 1)
+    const second = state.load('new', 1)
+    resolveSecond({ data: { items: [], page: 1, pageSize: 25, hasMore: false }, error: undefined })
+    await second
+    expect(state.users).toEqual({ kind: 'success', data: { items: [], page: 1, pageSize: 25, hasMore: false } })
+
+    state.clear()
+    resolveFirst({ data: { items: [{ username: 'old', displayName: '旧账号', enabled: true }], page: 1, pageSize: 25, hasMore: false }, error: undefined })
+    await first
+    expect(state.users).toEqual({ kind: 'idle' })
+    scope.stop()
+  })
+
+  it('does not query for an empty or overlong search', async () => {
+    const scope = effectScope()
+    let state!: ReturnType<typeof useOrganizationDirectoryUsers>
+    scope.run(() => { state = useOrganizationDirectoryUsers() })
+
+    await state.load('')
+    expect(listOrganizationUsers).not.toHaveBeenCalled()
+    await state.load('x'.repeat(129))
+    expect(listOrganizationUsers).not.toHaveBeenCalled()
+    expect(state.users).toMatchObject({ kind: 'error', diagnostic: { code: 'DIRECTORY_QUERY_TOO_LONG' } })
     scope.stop()
   })
 })

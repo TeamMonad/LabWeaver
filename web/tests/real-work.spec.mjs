@@ -25,9 +25,11 @@ import {
   DEFAULT_RATE_INPUTS,
   ensureRateByUi,
   realWorkConfig,
+  realWorkGpuConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
   selectPendingWorkTaskResourceRequest,
+  waitForActiveRateReadback,
 } from '../e2e/support/real-work.mjs'
 
 const GIB = 1024 ** 3
@@ -68,6 +70,14 @@ describe('Work authoring resource approval selection', () => {
 
   it.each(['expired', 'rejected', 'cancelled'])('does not select terminal history %s', (state) => {
     expect(selectPendingWorkTaskResourceRequest([taskRequest({ state })], scope)).toBeNull()
+  })
+
+  it('does not re-approve a task lease already approved in this run poll', () => {
+    const request = taskRequest()
+    expect(selectPendingWorkTaskResourceRequest([request], {
+      ...scope,
+      ignoredRequestIds: new Set([request.id]),
+    })).toBeNull()
   })
 
   it('does not approve another run, track, or attempt', () => {
@@ -144,6 +154,23 @@ describe('Work acceptance demonstration rates', () => {
     expect(page.getByTestId).not.toHaveBeenCalled()
   })
 
+  it('waits for a newly created future rate to become active before reading it back', async () => {
+    const target = DEFAULT_RATE_INPUTS[0]
+    const future = rate(target, { effectiveFrom: '2026-10-04T06:01:00Z' })
+    const active = rate(target, { id: 'active', effectiveFrom: '2026-10-04T06:00:00Z' })
+    let reads = 0
+    const context = {
+      request: {
+        get: vi.fn(async () => ({
+          ok: () => true,
+          text: async () => JSON.stringify(reads++ === 0 ? [future] : [active]),
+        })),
+      },
+    }
+    await expect(waitForActiveRateReadback(context, target)).resolves.toEqual(active)
+    expect(context.request.get).toHaveBeenCalledTimes(2)
+  })
+
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects a configured unsafe rate quantity %s before a create action', async (quantity) => {
     const target = DEFAULT_RATE_INPUTS[0]
     const page = { getByTestId: vi.fn() }
@@ -156,6 +183,34 @@ describe('Work acceptance demonstration rates', () => {
     const target = { unit: 'gpu_unit_second', unitQuantity: 1, amount: '0.000100', currency: 'USD', gpuClass: 'nvidia-cuda', gpuMode: 'exclusive' }
     await expect(ensureRateByUi({}, context([rate(target, { gpuClass: target.gpuClass, gpuMode: target.gpuMode })]), target))
       .rejects.toThrow('REAL_WORK_GPU_RATE_ACTIVE_CONFLICT:nvidia-cuda')
+  })
+
+  it('resolves a bounded container-time-slice trial rate for the current finance form', () => {
+    process.env.LABWEAVER_E2E_WORK_GPU_CLASS = 'nvidia-cuda'
+    process.env.LABWEAVER_E2E_WORK_GPU_MODE = 'container_time_slice'
+    process.env.LABWEAVER_E2E_WORK_GPU_RATE_AMOUNT = '0.000010'
+    process.env.LABWEAVER_E2E_WORK_GPU_RATE_CURRENCY = 'USD'
+    process.env.LABWEAVER_E2E_WORK_GPU_RATE_EFFECTIVE_UNTIL = '2026-10-04T07:00:00Z'
+
+    expect(realWorkGpuConfig()).toEqual({
+      class: 'nvidia-cuda',
+      mode: 'container_time_slice',
+      count: 1,
+      rate: {
+        unit: 'gpu_unit_second',
+        unitQuantity: 1,
+        amount: '0.000010',
+        currency: 'USD',
+        gpuClass: 'nvidia-cuda',
+        gpuMode: 'container_time_slice',
+        effectiveUntil: '2026-10-04T07:00:00Z',
+      },
+    })
+  })
+
+  it('rejects an end time without a complete GPU trial configuration', () => {
+    process.env.LABWEAVER_E2E_WORK_GPU_RATE_EFFECTIVE_UNTIL = '2026-10-04T07:00:00Z'
+    expect(() => realWorkGpuConfig()).toThrow('LABWEAVER_E2E_WORK_GPU_EFFECTIVE_UNTIL_WITHOUT_RATE')
   })
 })
 
@@ -216,7 +271,14 @@ describe('published Work resume retention', () => {
   })
 })
 const VM_ENVIRONMENT_KEYS = Object.keys(VM_ENVIRONMENT)
-const savedEnvironment = new Map(VM_ENVIRONMENT_KEYS.map((key) => [key, process.env[key]]))
+const GPU_ENVIRONMENT_KEYS = [
+  'LABWEAVER_E2E_WORK_GPU_CLASS',
+  'LABWEAVER_E2E_WORK_GPU_MODE',
+  'LABWEAVER_E2E_WORK_GPU_RATE_AMOUNT',
+  'LABWEAVER_E2E_WORK_GPU_RATE_CURRENCY',
+  'LABWEAVER_E2E_WORK_GPU_RATE_EFFECTIVE_UNTIL',
+]
+const savedEnvironment = new Map([...VM_ENVIRONMENT_KEYS, ...GPU_ENVIRONMENT_KEYS].map((key) => [key, process.env[key]]))
 const savedProviderOptIn = process.env.LABWEAVER_E2E_REAL_PROVIDER
 
 function setVmEnvironment(overrides = {}) {

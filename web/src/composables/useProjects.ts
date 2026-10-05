@@ -4,6 +4,7 @@ import {
   archiveProject,
   createProject,
   getProject,
+  listOrganizationUsers,
   listProjectMemberships,
   listProjects,
   removeProjectMembership,
@@ -11,6 +12,7 @@ import {
 } from '@/generated/contracts'
 import type {
   AddProjectMembershipRequestSchema,
+  OrganizationUserPage,
   ProjectMembershipSchema,
   ProjectSchema,
   UpdateProjectRequestSchema,
@@ -256,6 +258,52 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
   }
 
   return reactive({ memberships, acting, outcome, load, add, remove })
+}
+
+const ORGANIZATION_DIRECTORY_PAGE_SIZE = 25
+
+/**
+ * Search the issuer-backed organization directory for membership selection.
+ * The page is server-authoritative; local state only tracks the latest query
+ * and ignores responses for an older query or page.
+ */
+export function useOrganizationDirectoryUsers() {
+  const users = ref<AsyncState<OrganizationUserPage>>({ kind: 'idle' })
+  let loadGeneration = 0
+
+  async function load(search: string, page = 1) {
+    const generation = ++loadGeneration
+    const query = search.trim()
+    if (!query || query.length > 128 || !Number.isInteger(page) || page < 1) {
+      users.value = query.length > 128
+        ? { kind: 'error', diagnostic: makeDiagnostic('DIRECTORY_QUERY_TOO_LONG', '搜索内容不能超过 128 个字符。', false) }
+        : { kind: 'idle' }
+      return
+    }
+    users.value = { kind: 'loading', message: '查找组织账号…' }
+    const result = await listOrganizationUsers({
+      query: {
+        query,
+        page,
+        pageSize: ORGANIZATION_DIRECTORY_PAGE_SIZE,
+      },
+    })
+    if (generation !== loadGeneration) return
+    if (result.error) {
+      users.value = { kind: 'error', diagnostic: diagnostic(result.error, 'DIRECTORY_USERS_LIST_FAILED', '查找组织账号失败') }
+      return
+    }
+    users.value = { kind: 'success', data: result.data }
+  }
+
+  function clear() {
+    loadGeneration += 1
+    users.value = { kind: 'idle' }
+  }
+
+  onScopeDispose(() => { loadGeneration += 1 })
+
+  return reactive({ users, load, clear })
 }
 
 export async function loadProject(projectId: string) {

@@ -170,7 +170,7 @@ export async function startExperimentRunByUi(page, projectId) {
     return response.request().method() === 'POST'
       && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
   })
-  await page.getByRole('button', { name: '启动 AgentRun', exact: true }).click()
+  await page.getByRole('button', { name: '启动实验生成', exact: true }).click()
   const run = await expectJson(await responsePromise, 'REAL_EXPERIMENT_AGENT_RUN_CREATE_FAILED')
   expect(run).toMatchObject({
     id: expect.any(String),
@@ -230,13 +230,25 @@ export async function readActorId(request) {
   return actorId
 }
 
-export async function addProjectStudentByUi(page, projectId, actorId) {
+export async function addProjectStudentByUi(page, projectId, username = process.env.LABWEAVER_STUDENT_USERNAME?.trim() || 'platform-student') {
+  if (!username) throw new Error('REAL_EXPERIMENT_STUDENT_USERNAME_REQUIRED')
   await page.goto(`/researcher/workspaces?projectId=${encodeURIComponent(projectId)}`, { waitUntil: 'domcontentloaded' })
   await selectProjectByUi(page, projectId)
   await page.getByRole('heading', { name: '项目成员', exact: true }).waitFor()
   const memberForm = page.locator('form.member-form')
   await expect(memberForm).toBeVisible()
-  await memberForm.getByLabel('Actor ID', { exact: true }).fill(actorId)
+  const directoryPicker = memberForm.locator('.directory-picker')
+  if (await directoryPicker.count() > 0) {
+    await directoryPicker.getByLabel('查找组织账号').fill(username)
+    await directoryPicker.getByRole('button', { name: '搜索账号', exact: true }).click()
+    const result = directoryPicker.locator('.directory-result').filter({ hasText: username })
+    await expect(result).toHaveCount(1)
+    await expect(result).toBeEnabled()
+    await result.click()
+    await expect(directoryPicker.getByRole('status')).toContainText(username)
+  } else {
+    await memberForm.getByLabel('成员账号用户名', { exact: true }).fill(username)
+  }
   await memberForm.getByRole('combobox', { name: '角色', exact: true }).selectOption('student')
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
@@ -246,7 +258,7 @@ export async function addProjectStudentByUi(page, projectId, actorId) {
   await page.getByRole('button', { name: '添加成员', exact: true }).click()
   const response = await responsePromise
   const member = await expectJson(response, 'REAL_EXPERIMENT_STUDENT_MEMBERSHIP_FAILED')
-  expect(member).toMatchObject({ projectId, actorId, role: 'student', state: 'active' })
+  expect(member).toMatchObject({ projectId, username, role: 'student', state: 'active' })
   return member
 }
 

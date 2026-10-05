@@ -116,7 +116,7 @@
                 <h4 id="members-heading">项目成员</h4>
                 <p>成员可访问范围会随项目状态更新。</p>
               </div>
-              <button type="button" class="icon-button" aria-label="刷新成员" :disabled="members.acting !== null" @click="members.load">
+              <button type="button" class="icon-button" aria-label="刷新成员" :disabled="members.acting !== null" @click="refreshMembers">
                 <SvgIcon name="refresh" size="sm" aria-hidden="true" />
               </button>
             </div>
@@ -125,8 +125,12 @@
                 <ul class="member-list">
                   <li v-for="member in data" :key="member.actorId" class="member-row">
                     <span>
-                      <strong>{{ member.actorId }}</strong>
-                      <small>{{ member.role }} · {{ member.state }}</small>
+                      <strong>{{ memberDisplayName(member) }}</strong>
+                      <small>{{ member.username ? `账号：${member.username}` : '账号资料待同步' }} · {{ projectRoleLabel(member.role) }} · {{ membershipStateLabel(member.state) }}</small>
+                      <details class="advanced-details">
+                        <summary>查看高级详情</summary>
+                        <code>Actor ID：{{ member.actorId }}</code>
+                      </details>
                     </span>
                     <button v-if="member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
                   </li>
@@ -134,18 +138,61 @@
               </template>
             </AsyncStateView>
             <form v-if="selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
-              <label>
-                <span>Actor ID</span>
-                <input v-model="memberActorId" class="text-input" placeholder="OIDC actor id" required />
+              <div v-if="canSearchOrganizationDirectory" class="directory-picker">
+                <label>
+                  <span>查找组织账号</span>
+                  <input
+                    v-model="directoryQuery"
+                    class="text-input"
+                    minlength="1"
+                    maxlength="128"
+                    placeholder="输入姓名或用户名后搜索"
+                    @input="clearDirectorySelection"
+                    @keydown.enter.prevent="searchDirectory"
+                  />
+                </label>
+                <button type="button" class="outlined-button" :disabled="!directoryQuery.trim() || directory.users.kind === 'loading'" @click="searchDirectory">搜索账号</button>
+                <AsyncStateView :state="directory.users" loading-text="正在查找组织账号…" @retry="searchDirectory">
+                  <template #success="{ data }">
+                    <div v-if="data.items.length === 0" class="directory-empty" role="status">没有找到匹配的组织账号，请检查姓名或用户名。</div>
+                    <template v-else>
+                      <ul class="directory-results" aria-label="组织账号搜索结果">
+                        <li v-for="user in data.items" :key="user.username">
+                          <button
+                            type="button"
+                            class="directory-result"
+                            :class="{ 'directory-result--selected': selectedDirectoryUser?.username === user.username }"
+                            :disabled="!user.enabled"
+                            @click="selectDirectoryUser(user)"
+                          >
+                            <strong>{{ directoryUserDisplayName(user) }}</strong>
+                            <small>{{ user.username }} · {{ user.enabled ? '可用' : '已停用，不能添加' }}</small>
+                          </button>
+                        </li>
+                      </ul>
+                      <nav v-if="data.page > 1 || data.hasMore" class="directory-pagination" aria-label="组织账号分页">
+                        <button type="button" class="text-button" :disabled="data.page <= 1 || directory.users.kind === 'loading'" @click="loadDirectoryPage(data.page - 1)">上一页</button>
+                        <span>第 {{ data.page }} 页</span>
+                        <button type="button" class="text-button" :disabled="!data.hasMore || directory.users.kind === 'loading'" @click="loadDirectoryPage(data.page + 1)">下一页</button>
+                      </nav>
+                    </template>
+                  </template>
+                </AsyncStateView>
+                <p v-if="selectedDirectoryUser" class="directory-selection" role="status">已选择：{{ directoryUserDisplayName(selectedDirectoryUser) }}（{{ selectedDirectoryUser.username }}）</p>
+              </div>
+              <label v-else>
+                <span>成员账号用户名</span>
+                <input v-model="memberUsername" class="text-input" placeholder="输入完整用户名" required />
+                <small class="field-hint">个人 Work 仅支持输入已知用户名，平台不会枚举组织账号。</small>
               </label>
               <label>
                 <span>角色</span>
                 <select v-model="memberRole" class="text-input">
-                  <option value="student">student</option>
-                  <option value="teacher">teacher</option>
+                  <option value="student">学生</option>
+                  <option value="teacher">教师</option>
                 </select>
               </label>
-              <button type="submit" class="outlined-button" :disabled="!memberActorId.trim() || members.acting !== null">添加成员</button>
+              <button type="submit" class="outlined-button" :disabled="!canAddMember">添加成员</button>
             </form>
             <DiagnosticBanner
               v-if="members.outcome"
@@ -291,14 +338,19 @@ import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjectResources } from '@/composables/useProjectResources'
-import { useProjectMemberships, useProjects } from '@/composables/useProjects'
-import type { ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
+import { useAuth } from '@/composables/useAuth'
+import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
+import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
-import { environmentStateLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
+import { environmentStateLabel, membershipStateLabel, projectRoleLabel, resourceAllocationFailureMessage } from '@/utils/stateLabels'
+import { hasAnyRole, rolesFromProfile } from '@/utils/navigation'
 
 const route = useRoute()
 const router = useRouter()
 const projects = useProjects()
+const auth = useAuth()
+const currentRoles = computed(() => rolesFromProfile(auth.user.value?.profile))
+const canSearchOrganizationDirectory = computed(() => hasAnyRole(currentRoles.value, ['teacher', 'admin']))
 const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || null
@@ -316,6 +368,7 @@ const projectSelectionBlocked = computed(() => projects.projects.kind !== 'succe
 const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : projects.selectedProjectId)
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
 const members = useProjectMemberships(selectedProjectId)
+const directory = useOrganizationDirectoryUsers()
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
 const workResources = useProjectResources(selectedProjectId)
 const failedEnvironmentResourceRequests = computed(() => workResources.requests.kind === 'success'
@@ -336,9 +389,16 @@ const newDescription = ref('')
 const newCourseId = ref('')
 const editName = ref('')
 const editDescription = ref('')
-const memberActorId = ref('')
+const memberUsername = ref('')
+const directoryQuery = ref('')
+const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
 const canSave = computed(() => Boolean(selectedProject.value && editName.value.trim()))
+const canAddMember = computed(() => Boolean(
+  selectedProject.value?.state === 'active'
+  && members.acting === null
+  && (canSearchOrganizationDirectory.value ? selectedDirectoryUser.value?.enabled && memberUsername.value.trim() : memberUsername.value.trim()),
+))
 type WorkspaceConfirmation =
   | { kind: 'archive'; project: ProjectSchema }
   | { kind: 'remove'; member: ProjectMembershipSchema; projectId: string; projectName: string }
@@ -349,7 +409,7 @@ const confirmationDescription = computed(() => {
   if (!confirmation) return ''
   return confirmation.kind === 'archive'
     ? `确认归档项目“${confirmation.project.name}”？归档会停止新的项目操作，但会保留已有记录。`
-    : `确认从项目“${confirmation.projectName}”移除成员 ${confirmation.member.actorId}？移除后该成员将失去此项目的访问权限。`
+    : `确认从项目“${confirmation.projectName}”移除成员 ${memberDisplayName(confirmation.member)}？移除后该成员将失去此项目的访问权限。`
 })
 
 watch(
@@ -360,6 +420,16 @@ watch(
     editDescription.value = project?.description ?? ''
   },
   { immediate: true },
+)
+
+watch(
+  selectedProjectId,
+  () => {
+    directoryQuery.value = ''
+    memberUsername.value = ''
+    selectedDirectoryUser.value = null
+    directory.clear()
+  },
 )
 
 watch(
@@ -387,6 +457,38 @@ function selectProject(projectId: string) {
   }
 }
 
+function memberDisplayName(member: ProjectMembershipSchema): string {
+  return member.displayName?.trim() || '账号资料待同步'
+}
+
+function directoryUserDisplayName(user: OrganizationUser): string {
+  return user.displayName.trim() || '账号资料待同步'
+}
+
+function clearDirectorySelection() {
+  selectedDirectoryUser.value = null
+  memberUsername.value = ''
+  directory.clear()
+}
+
+function searchDirectory() {
+  selectedDirectoryUser.value = null
+  memberUsername.value = ''
+  void directory.load(directoryQuery.value, 1)
+}
+
+function loadDirectoryPage(page: number) {
+  selectedDirectoryUser.value = null
+  memberUsername.value = ''
+  void directory.load(directoryQuery.value, page)
+}
+
+function selectDirectoryUser(user: OrganizationUser) {
+  if (!user.enabled) return
+  selectedDirectoryUser.value = user
+  memberUsername.value = user.username
+}
+
 async function submitCreate() {
   const created = await projects.create(newName.value, newDescription.value, newCourseId.value)
   if (!created) return
@@ -408,9 +510,20 @@ function openArchiveConfirmation() {
   destructiveConfirmation.value = { kind: 'archive', project }
 }
 
+function refreshMembers() {
+  clearDirectorySelection()
+  void members.load()
+}
+
 async function addMember() {
-  const ok = await members.add({ actorId: memberActorId.value.trim(), role: memberRole.value })
-  if (ok) memberActorId.value = ''
+  const username = memberUsername.value.trim()
+  if (!canAddMember.value || !username) return
+  const ok = await members.add({ username, role: memberRole.value })
+  if (ok) {
+    memberUsername.value = ''
+    selectedDirectoryUser.value = null
+    directory.clear()
+  }
 }
 
 function openRemoveMemberConfirmation(member: ProjectMembershipSchema) {
@@ -462,6 +575,7 @@ async function confirmDestructiveAction() {
 .project-detail { min-height: 520px; }
 .project-form { display: grid; gap: 14px; margin-top: 20px; }
 .project-form label, .member-form label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.field-hint { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
 .text-input { box-sizing: border-box; width: 100%; min-height: 40px; padding: 9px 12px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }
 textarea.text-input { resize: vertical; }
 .readonly-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
@@ -490,6 +604,15 @@ textarea.text-input { resize: vertical; }
 .member-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .member-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 11px 12px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
 .member-form { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; gap: 10px; align-items: end; }
+.directory-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; grid-column: 1 / -1; align-items: end; }
+.directory-picker > .async-state-view, .directory-selection { grid-column: 1 / -1; }
+.directory-results { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.directory-result { display: grid; width: 100%; gap: 3px; padding: 10px 12px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); color: var(--md-sys-color-on-surface); text-align: left; cursor: pointer; }
+.directory-result:hover, .directory-result--selected { border-color: var(--md-sys-color-primary); background: var(--md-sys-color-primary-container); }
+.directory-result:disabled { opacity: .6; cursor: not-allowed; }
+.directory-result small, .directory-empty, .directory-pagination, .directory-selection { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.directory-empty { padding: 10px 12px; background: var(--md-sys-color-surface-container-low); }
+.directory-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .detail-empty { display: grid; place-items: center; align-content: center; min-height: 420px; gap: 10px; color: var(--md-sys-color-on-surface-variant); text-align: center; }
 .detail-empty h3 { margin: 0; color: var(--md-sys-color-on-surface); font: var(--md-sys-title-large); }
 .detail-empty p { max-width: 420px; margin: 0; font: var(--md-sys-body-medium); }
@@ -498,5 +621,5 @@ textarea.text-input { resize: vertical; }
 .icon-button { display: inline-grid; place-items: center; width: 40px; height: 40px; border: 0; border-radius: 50%; background: transparent; color: var(--md-sys-color-on-surface-variant); cursor: pointer; }
 .icon-button:hover { background: var(--md-sys-color-surface-container-high); }
 .icon-button:disabled { opacity: .5; cursor: not-allowed; }
-@media (max-width: 760px) { .workspace-layout { grid-template-columns: 1fr; } .project-detail { min-height: 0; } .member-form { grid-template-columns: 1fr; } .work-row { align-items: flex-start; flex-direction: column; } .work-row__actions { justify-content: flex-start; } .page-header { align-items: stretch; flex-direction: column; } .page-header > .filled-button { width: 100%; } }
+@media (max-width: 760px) { .workspace-layout { grid-template-columns: 1fr; } .project-detail { min-height: 0; } .member-form, .directory-picker { grid-template-columns: 1fr; } .directory-picker > .async-state-view, .directory-selection { grid-column: auto; } .work-row { align-items: flex-start; flex-direction: column; } .work-row__actions { justify-content: flex-start; } .page-header { align-items: stretch; flex-direction: column; } .page-header > .filled-button { width: 100%; } }
 </style>

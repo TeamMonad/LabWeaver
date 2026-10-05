@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { stat } from 'node:fs/promises'
-import { expectJson, pollJson } from '../support/live.mjs'
+import { expectJson, navigateFromHomeByUi, pollJson } from '../support/live.mjs'
 import {
   assertAcceptedVgpuImageCompletion,
   matchesVgpuImageCatalogRow,
@@ -132,7 +132,7 @@ test('platform administrator imports one requested vGPU guest image through the 
   }
 
   // The platform-admin project supplies the existing Keycloak storage state from auth.setup.mjs.
-  await page.goto('/admin/platform-images', { waitUntil: 'domcontentloaded' })
+  await navigateFromHomeByUi(page, '平台镜像')
   await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
   await waitForCatalogSettled(page, 'LOAD')
 

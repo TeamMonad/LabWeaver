@@ -47,7 +47,7 @@ const RESEARCHER_LEASE_RELEASED_STATES = Object.freeze([
 ])
 
 /** Request and lease states as the admin resource-approval page renders them. */
-export const ADMIN_REQUEST_STATE = Object.freeze({ reviewing: '待审批', allocating: '分配中', active: '使用中' })
+export const ADMIN_REQUEST_STATE = Object.freeze({ reviewing: '待审批', allocating: '分配中', active: '使用中', expired: '已到期' })
 export const ADMIN_LEASE_STATE = Object.freeze({ active: '使用中', expiring: '即将到期', expired: '已到期', revoked: '已撤销' })
 
 /** Parse the zh-CN short-date/medium-time label the UI renders for timestamps. */
@@ -73,7 +73,8 @@ async function waitForRenderedState(page, { label, reload, read, expected, timeo
     await expect.poll(async () => {
       await reload()
       latest = await read()
-      return latest !== null && expected(latest)
+      if (latest === null) return false
+      return await expected(latest)
     }, { timeout, intervals: [RESOURCE_POLL_INTERVAL_MS] }).toBe(true)
   } catch (error) {
     throw new Error(`${label}:LW_ACCEPTANCE_STATE_TIMEOUT:${JSON.stringify(latest)}`, { cause: error })
@@ -400,7 +401,17 @@ async function readAdminLeaseDetail(page, { requestId, leaseId }) {
   if (renderedLeaseId !== leaseId) throw new Error(`LW_ACCEPTANCE_ADMIN_LEASE_ID_MISMATCH:${renderedLeaseId || 'missing'}`)
   const state = (await adminDetailRow(page, detail, '状态').locator('.gcp-status-pill .status-label').textContent())?.trim() ?? ''
   const expiresAtLabel = (await adminDetailRow(page, detail, '到期时间').locator('.meta-value').textContent())?.trim() ?? ''
-  return { leaseId: renderedLeaseId, state, expiresAt: parseVisibleTimestamp(expiresAtLabel), expiresAtLabel }
+  const revokeReasonRow = detail.locator('.meta-row').filter({ hasText: '撤销原因码' })
+  const revokeReasonCode = (await revokeReasonRow.count()) > 0
+    ? (await revokeReasonRow.locator('.meta-value').textContent())?.trim() ?? null
+    : null
+  return {
+    leaseId: renderedLeaseId,
+    state,
+    expiresAt: parseVisibleTimestamp(expiresAtLabel),
+    expiresAtLabel,
+    revokeReasonCode,
+  }
 }
 
 /**
@@ -423,6 +434,7 @@ export async function approveResourceRequestByUi(page, {
   providerBinding = WORK_PROVIDER_BINDING,
   expectedFailureCode = null,
   onAccepted = null,
+  onTaskOwnerRelease = null,
 } = {}) {
   if (typeof requestKey !== 'string' || requestKey === '') {
     throw new Error('LW_ACCEPTANCE_RESOURCE_REQUEST_KEY_REQUIRED')
@@ -509,13 +521,29 @@ export async function approveResourceRequestByUi(page, {
       const current = adminRequestRows(page).filter({ hasText: requestKey })
       return (await current.count()) === 0 ? null : await readAdminRequestState(current)
     },
-    expected: (value) => value === ADMIN_REQUEST_STATE.active,
+    expected: (value) => value === ADMIN_REQUEST_STATE.active
+      || (value === ADMIN_REQUEST_STATE.expired && typeof onTaskOwnerRelease === 'function'),
   })
   const lease = await waitForRenderedState(page, {
     label: `LW_ACCEPTANCE_ADMIN_LEASE_STATE:${scope}`,
     reload: () => reloadAdminApprovalPage(page),
     read: () => readAdminLeaseDetail(page, { requestId: approval.requestId, leaseId: approval.leaseId }),
-    expected: (value) => value.state === ADMIN_LEASE_STATE.active && value.expiresAt !== null,
+    expected: async (value) => {
+      if (value.state === ADMIN_LEASE_STATE.active && value.expiresAt !== null) return true
+      if (
+        value.state === ADMIN_LEASE_STATE.revoked
+        && value.revokeReasonCode === 'task_owner_release'
+        && typeof onTaskOwnerRelease === 'function'
+      ) {
+        return await onTaskOwnerRelease({
+          requestKey,
+          requestId: approval.requestId,
+          leaseId: approval.leaseId,
+          lease: value,
+        })
+      }
+      return false
+    },
   })
 
   return {
@@ -615,7 +643,7 @@ export async function releaseProjectLeaseByUi(page, { projectName, projectId = n
  */
 export async function assertProjectChargesByUi(page, project) {
   await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: '预算与费用', exact: true })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
+  await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
   const projectSelect = page.locator('.project-strip select')
   await expect(projectSelect.locator(`option[value="${project.id}"]`)).toHaveCount(1, { timeout: RESOURCE_PAGE_TIMEOUT_MS })
   await projectSelect.selectOption(project.id)

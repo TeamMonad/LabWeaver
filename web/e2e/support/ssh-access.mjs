@@ -121,6 +121,17 @@ export async function issueEnvironmentAccessGrantByUi(page, projectId, environme
   if (protocol === 'ssh') {
     await expect(page.locator('.ssh-command__text')).toContainText(endpointGrants[0].alias, { timeout: 30_000 })
     await expect(page.locator('.ssh-meta')).toContainText(endpointGrants[0].sshGatewayHostKeyFingerprint)
+    const command = (await page.locator('.ssh-command__text').textContent())?.trim() || ''
+    if (!command) throw new Error('WORK_SSH_COMMAND_TEXT_MISSING')
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
+      origin: new URL(page.url()).origin,
+    })
+    const copyButton = page.getByRole('button', { name: '复制 SSH 命令', exact: true })
+    await expect(copyButton).toBeEnabled({ timeout: 30_000 })
+    await copyButton.click()
+    await expect(copyButton).toContainText('已复制', { timeout: 5_000 })
+    const copiedCommand = await page.evaluate(() => navigator.clipboard.readText())
+    if (copiedCommand !== command) throw new Error('WORK_SSH_COMMAND_CLIPBOARD_MISMATCH')
   }
   return { grant, endpointGrant: endpointGrants[0] }
 }

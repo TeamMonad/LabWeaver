@@ -229,6 +229,37 @@ describe('WorkTemplateAuthoringView', () => {
     wrapper.unmount()
   })
 
+  it('shows a readable resource approval timeout and keeps the diagnostic code advanced', async () => {
+    const failedRun = {
+      ...run,
+      state: 'failed',
+      tracks: [
+        {
+          kind: 'environment',
+          candidateId: null,
+          attempts: [{ number: 1, state: 'failed', diagnosticCode: 'LW_TASK_RESOURCE_APPROVAL_TIMEOUT' }],
+        },
+        { kind: 'evaluation', candidateId: null, attempts: [] },
+      ],
+    }
+    vi.mocked(createProjectAgentRun).mockResolvedValue({ data: failedRun as never, error: undefined as never })
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+    const runButton = wrapper.get('section[aria-labelledby="run-heading"] > button.filled-button')
+    await vi.waitFor(() => expect((runButton.element as HTMLButtonElement).disabled).toBe(false))
+    await runButton.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('资源申请未及时获批，请查看申请状态或联系资源管理员；确认失败后可重试原任务。'))
+
+    expect(wrapper.text()).toContain('临时资源回收不等于整体生成成功')
+    expect(wrapper.text()).toContain('重试环境候选生成')
+    expect(wrapper.text()).not.toContain('模型不可用')
+    expect(wrapper.get('details.technical-details').text()).toContain('LW_TASK_RESOURCE_APPROVAL_TIMEOUT')
+    wrapper.unmount()
+  })
+
   it('waits for the Environment candidate projection after a transient not-found response', async () => {
     vi.useFakeTimers()
     try {
@@ -237,7 +268,7 @@ describe('WorkTemplateAuthoringView', () => {
         .mockResolvedValueOnce({ data: candidate as never, error: undefined as never })
 
       const wrapper = await mountView()
-      expect(wrapper.text()).toContain('等待 Environment 候选同步')
+      expect(wrapper.text()).toContain('等待环境候选同步')
 
       await vi.advanceTimersByTimeAsync(3000)
       await vi.waitFor(() => expect(getProjectEnvironmentCandidate).toHaveBeenCalledTimes(2))

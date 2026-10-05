@@ -177,7 +177,8 @@ describe('MyLabsView', () => {
     projectsState.selectedProject = null
     const { wrapper } = await mountAt('project-2')
 
-    expect(wrapper.text()).toContain('项目上下文未绑定')
+    expect(wrapper.text()).toContain('正在同步项目上下文，请稍候')
+    expect(wrapper.text()).not.toContain('项目上下文未绑定')
     expect(vi.mocked(listEnvironments)).not.toHaveBeenCalled()
 
     projectsState.projects = { kind: 'success', data: [projectOne, projectTwo] }

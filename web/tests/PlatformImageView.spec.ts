@@ -150,7 +150,7 @@ describe('PlatformImageView', () => {
   it('renders the catalog rows with the Control release impact hint', async () => {
     const wrapper = await mountView()
 
-    expect(wrapper.text()).toContain('维护沙箱可用的容器与虚拟机基础镜像。digest 是权威身份，tag 仅作解析入口。')
+    expect(wrapper.text()).toContain('维护沙箱可用的容器与虚拟机基础镜像。digest 是权威身份，也是固定且不可变的镜像版本；tag 仅作解析入口。')
     expect(columnText(wrapper, 0, '类型')).toBe('容器')
     expect(columnText(wrapper, 0, 'binding')).toBe('ubuntu-24.04-v1')
     expect(columnText(wrapper, 0, 'digest')).toContain(entry.resolvedDigest.slice(0, 8))

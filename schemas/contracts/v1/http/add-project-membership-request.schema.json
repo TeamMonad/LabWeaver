@@ -1,9 +1,5 @@
 {
   "$defs": {
-    "ActorId": {
-      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
-      "type": "string"
-    },
     "PlatformRole": {
       "description": "Base role asserted by the configured OIDC issuer.",
       "oneOf": [
@@ -33,9 +29,6 @@
   "additionalProperties": false,
   "description": "Access-owned membership grant for one Project actor.",
   "properties": {
-    "actorId": {
-      "$ref": "#/$defs/ActorId"
-    },
     "expiresAt": {
       "anyOf": [
         {
@@ -48,10 +41,14 @@
     },
     "role": {
       "$ref": "#/$defs/PlatformRole"
+    },
+    "username": {
+      "description": "Exact issuer username resolved by Access before the membership\ntransaction.  Local actor identifiers are never accepted from a\nbrowser request.",
+      "type": "string"
     }
   },
   "required": [
-    "actorId",
+    "username",
     "role"
   ],
   "title": "AddProjectMembershipRequest",

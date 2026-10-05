@@ -2,15 +2,17 @@
 
 use std::{
     io,
+    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use auth::{
     ControlGatewayFileConfig, ResourceGatewayFileConfig, ServiceTokenClient, TransportSecurityMode,
+    upsert_actor_with_metadata,
 };
 use axum::{
-    body::{Body, Bytes},
+    body::{Body, Bytes, to_bytes},
     extract::{Query, State},
     http::{HeaderMap, Method, Uri, header},
     response::Response,
@@ -301,6 +303,15 @@ pub(super) async fn forward_control(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     authorize_evaluation_release_path(&state, &method, &uri, &headers).await?;
+    let body = if method == Method::POST {
+        if let Some(project_id) = project_membership_path(uri.path()) {
+            resolve_project_membership_request(&state, &headers, project_id, &body).await?
+        } else {
+            body
+        }
+    } else {
+        body
+    };
     forward(
         &state,
         &state.control_proxy,
@@ -315,6 +326,120 @@ pub(super) async fn forward_control(
         },
     )
     .await
+}
+
+fn project_membership_path(path: &str) -> Option<contracts::ProjectId> {
+    let segments = path.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["", "api", "v1", "projects", project_id, "members"] => {
+            contracts::ProjectId::from_str(project_id).ok()
+        }
+        _ => None,
+    }
+}
+
+async fn resolve_project_membership_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    project_id: contracts::ProjectId,
+    body: &Bytes,
+) -> Result<Bytes, ApiError> {
+    let request =
+        contracts::parse_strict_json::<contracts::http::AddProjectMembershipRequest>(body)
+            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+    let username = request.username.trim();
+    if username.is_empty() || username.chars().count() > 128 {
+        return Err(ApiError::bad_request(
+            "LW_ACCESS_DIRECTORY_USERNAME_INVALID",
+        ));
+    }
+    let session = authenticated_session(state, headers).await?;
+    require_browser_origin(state, headers)?;
+    let supplied = headers
+        .get(state.deployment.browser.csrf_header_name.as_str())
+        .and_then(|value| value.to_str().ok());
+    auth::verify_csrf_token(&session.csrf_token, supplied).map_err(ApiError::from)?;
+    authorize_project_membership_governance(state, headers, project_id, &session).await?;
+
+    let resolved = state
+        .directory
+        .resolve_username(username)
+        .await
+        .map_err(ApiError::from)?;
+    let local_actor = upsert_actor_with_metadata(
+        &state.pool,
+        state.config.issuer.as_str(),
+        &resolved.subject,
+        Some(&resolved.username),
+        Some(&resolved.display_name),
+    )
+    .await
+    .map_err(ApiError::from)?;
+    serde_json::to_vec(&contracts::http::ResolvedProjectMembershipRequest {
+        actor_id: local_actor
+            .actor_id
+            .to_string()
+            .parse()
+            .map_err(|_| ApiError::internal("LW_AUTH_ACTOR_INVALID"))?,
+        role: request.role,
+        expires_at: request.expires_at,
+    })
+    .map(Bytes::from)
+    .map_err(|_| ApiError::internal("LW_CONTRACT_SERIALIZATION_FAILED"))
+}
+
+/// Reuses Control's project read as the owner/admin preflight.  The project
+/// aggregate remains authoritative for ownership and lifecycle; Access only
+/// decides whether the already-authenticated caller may proceed to resolve the
+/// provider username.  This ordering prevents a non-owner from using the
+/// provider directory as an account-existence oracle.
+async fn authorize_project_membership_governance(
+    state: &AppState,
+    headers: &HeaderMap,
+    project_id: contracts::ProjectId,
+    session: &auth::BffSession,
+) -> Result<(), ApiError> {
+    let path = format!("/api/v1/projects/{project_id}");
+    let uri =
+        Uri::from_str(&path).map_err(|_| ApiError::internal("LW_AUTH_CONTROL_RESPONSE_INVALID"))?;
+    let response = forward(
+        state,
+        &state.control_proxy,
+        ForwardRequest {
+            method: Method::GET,
+            uri,
+            headers: headers.clone(),
+            body: Bytes::new(),
+            valid_path: valid_control_path,
+            scope: None,
+            gateway: GatewayAuthority::Control,
+        },
+    )
+    .await?;
+    if !response.status().is_success() {
+        return if response.status().is_server_error() {
+            Err(ApiError::unavailable("LW_AUTH_CONTROL_UNAVAILABLE"))
+        } else {
+            Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"))
+        };
+    }
+    let project = contracts::parse_strict_json::<contracts::Project>(
+        &to_bytes(response.into_body(), state.control_proxy.max_response_bytes)
+            .await
+            .map_err(|_| ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_INVALID"))?,
+    )
+    .map_err(|_| ApiError::unavailable("LW_AUTH_CONTROL_RESPONSE_INVALID"))?;
+    let actor = super::actor_from_session(session)?;
+    if project.id != project_id
+        || project.state == contracts::ProjectState::Archived
+        || (!actor
+            .roles
+            .contains(&contracts::PlatformRole::PlatformAdmin)
+            && project.owner_actor_id != actor.actor_id)
+    {
+        return Err(ApiError::forbidden("LW_AUTH_SCOPE_DENIED"));
+    }
+    Ok(())
 }
 
 async fn authorize_evaluation_release_path(
@@ -1870,6 +1995,8 @@ mod tests {
             course_id: None,
             project_id,
             actor_id,
+            username: None,
+            display_name: None,
             role,
             state: MembershipState::Active,
             revision: Revision::new(1)

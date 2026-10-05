@@ -3,7 +3,7 @@
     <header class="page-header">
       <div>
         <h2>平台镜像</h2>
-        <p class="page-subtitle">维护沙箱可用的容器与虚拟机基础镜像。digest 是权威身份，tag 仅作解析入口。</p>
+        <p class="page-subtitle">维护沙箱可用的容器与虚拟机基础镜像。digest 是权威身份，也是固定且不可变的镜像版本；tag 仅作解析入口。</p>
       </div>
       <button type="button" class="icon-button" aria-label="刷新平台镜像目录" :disabled="busy" @click="images.load">
         <SvgIcon name="refresh" size="sm" aria-hidden="true" />
@@ -97,6 +97,7 @@
         <label>
           <span>信任版本</span>
           <input v-model.number="registerForm.trustRevision" class="text-input" type="number" min="1" required />
+          <small class="field-hint">用于和平台当前认可的镜像版本匹配；版本不一致时，已发布内容可能无法引用该镜像。</small>
         </label>
         <label class="wide-field">
           <span>原因</span>
@@ -132,6 +133,7 @@
         <label>
           <span>信任版本</span>
           <input v-model.number="uploadForm.trustRevision" class="text-input" type="number" min="1" required />
+          <small class="field-hint">用于和平台当前认可的镜像版本匹配；版本不一致时，已发布内容可能无法引用该镜像。</small>
         </label>
         <template v-if="uploadForm.kind === 'virtual_machine'">
           <label>
@@ -140,6 +142,7 @@
               <option value="qcow2">qcow2</option>
               <option value="raw">raw</option>
             </select>
+            <small class="field-hint">必须与归档内磁盘的实际格式一致，否则虚拟机导入或启动可能失败。</small>
           </label>
           <label>
             <span>容量（字节）</span>
@@ -529,6 +532,7 @@ onMounted(async () => {
 .page-header h2 { font: var(--md-sys-headline-small); }
 .section-heading h3 { font: var(--md-sys-title-large); }
 .page-subtitle, .section-heading p, .operation-hint, .upload-progress, .upload-file, .upload-limit-hint, .upload-status p { margin: 6px 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
+.field-hint { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.4; }
 .catalog-card, .register-card, .upload-card { display: grid; gap: 16px; padding: 20px; }
 .admin-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
 .admin-form label, .operation-credentials label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }

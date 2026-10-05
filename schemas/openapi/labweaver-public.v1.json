@@ -16,6 +16,9 @@
       "AgentLlmReviewQuery": {
         "$ref": "../contracts/v1/http/agent-llm-review-query.schema.json"
       },
+      "AgentRunHistoryPage": {
+        "$ref": "../contracts/v1/agent-run-history-page.schema.json"
+      },
       "AgentWorkExecutionIntentMetadata": {
         "$ref": "../contracts/v1/http/agent-work-execution-intent-metadata.schema.json"
       },
@@ -140,6 +143,12 @@
           "statusUrl"
         ],
         "type": "object"
+      },
+      "OrganizationUser": {
+        "$ref": "../contracts/v1/organization-user.schema.json"
+      },
+      "OrganizationUserPage": {
+        "$ref": "../contracts/v1/organization-user-page.schema.json"
       },
       "PlatformImageCatalog": {
         "$ref": "../contracts/v1/http/platform-image-catalog.schema.json"
@@ -2583,6 +2592,122 @@
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/directory/users": {
+      "get": {
+        "description": "Permission: directory:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listOrganizationUsers",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/organization-user-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "directory:read"
+            ]
+          }
+        ],
+        "summary": "listOrganizationUsers",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_ACCESS_DIRECTORY_QUERY_INVALID",
+          "LW_ACCESS_DIRECTORY_PAGE_INVALID",
+          "LW_ACCESS_DIRECTORY_UNAVAILABLE"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "directory:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "global",
         "x-labweaver-timeout-ms": 30000
       }
     },
@@ -5356,6 +5481,120 @@
       }
     },
     "/api/v1/projects/{projectId}/agent-runs": {
+      "get": {
+        "description": "Permission: agent_run:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listProjectAgentRuns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/agent-run-history-page.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "agent_run:read"
+            ]
+          }
+        ],
+        "summary": "listProjectAgentRuns",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_AGENT_PERSISTENCE_FAILED"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "agent_run:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      },
       "post": {
         "description": "Permission: agent_run:write. Timeout: 30000 ms. Cancellable: true. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "createProjectAgentRun",
@@ -8828,6 +9067,10 @@
         "x-labweaver-errors": [
           "LW_CONTRACT_DOCUMENT_INVALID",
           "LW_ACCESS_DENIED",
+          "LW_ACCESS_DIRECTORY_USERNAME_INVALID",
+          "LW_ACCESS_DIRECTORY_UNAVAILABLE",
+          "LW_ACCESS_DIRECTORY_USER_NOT_FOUND",
+          "LW_ACCESS_DIRECTORY_USER_DISABLED",
           "LW_IDEMPOTENCY_CONFLICT",
           "LW_REVISION_CONFLICT"
         ],

@@ -17,12 +17,12 @@ use contracts::http::{
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
     InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
-    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
+    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest, PageQuery,
     PlatformImageCatalog,
 };
 use contracts::{
     AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, PlatformImageId, ProblemDetails,
-    UtcTimestamp,
+    ProjectId, UtcTimestamp,
 };
 use serde_json::Value;
 use sqlx::Row;
@@ -83,6 +83,10 @@ impl std::fmt::Debug for AgentApiState {
 pub fn router(state: Arc<AgentApiState>) -> Router {
     let router = Router::new()
         .route("/internal/v1/agent-runs", post(create_run))
+        .route(
+            "/internal/v1/projects/{project_id}/agent-runs",
+            get(list_project_runs),
+        )
         .route("/internal/v1/agent-runs/{run_id}", get(get_run))
         .route("/internal/v1/agent-runs/{run_id}/cancel", post(cancel_run))
         .route(
@@ -207,6 +211,25 @@ async fn get_run(
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
     Ok(Json(state.store.load(run_id).await?).into_response())
+}
+
+async fn list_project_runs(
+    State(state): State<Arc<AgentApiState>>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+    Path(project_id): Path<ProjectId>,
+    Query(query): Query<PageQuery>,
+) -> Result<Response, AgentApiError> {
+    require_control(caller)?;
+    let (page, page_size, offset) = query
+        .normalized()
+        .map_err(|_| AgentApiError::history_page_invalid())?;
+    Ok(Json(
+        state
+            .store
+            .list_project_runs(project_id, page, page_size, offset)
+            .await?,
+    )
+    .into_response())
 }
 
 async fn cancel_run(
@@ -647,6 +670,13 @@ impl AgentApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             diagnostic: "LW_CONTRACT_DOCUMENT_INVALID",
+            retryable: false,
+        }
+    }
+    fn history_page_invalid() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            diagnostic: "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
             retryable: false,
         }
     }

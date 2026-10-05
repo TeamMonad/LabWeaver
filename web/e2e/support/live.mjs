@@ -133,17 +133,26 @@ export async function configureProjectPolicyByUi(page, projectId, budgetOverride
   return await expectJson(await responsePromise, 'PROJECT_POLICY_UI_SAVE_FAILED')
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 /** Enter a role workbench through the public home task cards. */
 export async function navigateFromHomeByUi(page, taskLabel) {
   await page.goto('/', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: '欢迎进入 LabWeaver', exact: true })).toBeVisible({ timeout: 60_000 })
-  const task = page.locator('.task-grid').getByRole('link', { name: new RegExp(`^${escapeRegExp(taskLabel)}`) })
-  await expect(task).toHaveCount(1, { timeout: 60_000 })
-  await task.click()
+  const tasks = page.locator('.task-grid a.task-card')
+  const compact = (value) => String(value ?? '').replace(/\s+/g, '')
+  let matchingIndexes = []
+  await expect.poll(
+    async () => {
+      matchingIndexes = await tasks.evaluateAll((cards, expected) => cards.reduce((indexes, card, index) => {
+        const title = card.querySelector('.card-title')?.textContent ?? ''
+        if (title.replace(/\s+/g, '') === expected) indexes.push(index)
+        return indexes
+      }, []), compact(taskLabel))
+      return matchingIndexes.length
+    },
+    { timeout: 60_000, intervals: [250, 500, 1000] },
+  ).toBe(1)
+  if (matchingIndexes.length !== 1) throw new Error(`HOME_TASK_CARD_NOT_UNIQUE:${taskLabel}`)
+  await tasks.nth(matchingIndexes[0]).click()
 }
 
 export async function createProjectByUi(page, name) {

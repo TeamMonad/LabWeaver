@@ -269,7 +269,7 @@ test('teacher publishes a configuration experiment and student repairs live VM f
     const studentActorId = await readActorId(studentPage.request)
     project = await createProjectByUi(page, `config-probe-${Date.now()}-${uuidv7().slice(0, 8)}`)
     const publication = await authorAndPublish(page, adminPage, project, environmentSpec, evaluationSpec, teacherActorId, (accepted) => { run = accepted })
-    await addProjectStudentByUi(page, project.id, studentActorId)
+    await addProjectStudentByUi(page, project.id)
     identity = await createRealWorkSshIdentity()
     key = await addSshPublicKeyByUi(studentPage, identity, (accepted) => { key = accepted })
     const environment = await startStudentEnvironment(studentPage, adminPage, project.id,

@@ -51,6 +51,9 @@ domains:
       - id: 3
         file: access/0003_independent_project_memberships.sql
         sha256: 25e05e7390c6a8859889ce5f778ba153e2b8cee2a806dddf41a50f3aa1bbfa6b
+      - id: 4
+        file: access/0004_actor_identity_metadata.sql
+        sha256: 0c3b55c0426b48457075665f7fe4ffc19a13adbfdf1d0bfd5c8c6c1088009b6e
   - name: environment
     migrations:
       - id: 1

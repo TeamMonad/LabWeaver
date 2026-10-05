@@ -30,7 +30,7 @@ use contracts::events::{
     EVENT_CONTRACTS, ReleasePublished, ReleaseWithdrawn, SPEC_VERSION, subjects,
 };
 use contracts::http::{
-    AddProjectMembershipRequest, AgentWorkExecutionIntentMetadata, ApproveWorkConfigurationRequest,
+    AgentWorkExecutionIntentMetadata, ApproveWorkConfigurationRequest,
     AuthoringPublicationAdmissionBinding, AuthoringPublicationAdmissionQuery,
     CancelPlatformImageUploadRequest, CandidateBuildState, CandidateBuildView,
     CandidateDecisionRequest, CompleteAuthoringApprovalRequest,
@@ -41,8 +41,9 @@ use contracts::http::{
     PlatformImageEntry, PlatformImageKind, PlatformImageStatus, PlatformImageUploadSession,
     PlatformImageUploadState, PlatformImageUploadStatus, PlatformImageUploadTarget,
     ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
-    RemoveProjectMembershipRequest, WorkConfigurationAdmissionBinding,
-    WorkConfigurationAdmissionQuery, WorkConfigurationRecoveryIdentity,
+    RemoveProjectMembershipRequest, ResolvedProjectMembershipRequest,
+    WorkConfigurationAdmissionBinding, WorkConfigurationAdmissionQuery,
+    WorkConfigurationRecoveryIdentity,
 };
 use contracts::supply_chain::{
     BuildNetworkPolicy, BuildRequest, BuildSource, EnvironmentTemplateRelease,
@@ -801,8 +802,11 @@ impl ControlService {
         project_id: ProjectId,
     ) -> Result<Vec<ProjectMembership>, ControlError> {
         let rows = sqlx::query(
-            "SELECT course_id,project_id,actor_id,role,state,revision,expires_at \
-             FROM access.project_memberships WHERE project_id=$1 ORDER BY actor_id,role,revision DESC",
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.state,pm.revision,pm.expires_at, \
+                    a.username,a.display_name \
+             FROM access.project_memberships pm \
+             JOIN access.actors a ON a.actor_id=pm.actor_id \
+             WHERE pm.project_id=$1 ORDER BY pm.actor_id,pm.role,pm.revision DESC",
         )
         .bind(project_id.as_uuid())
         .fetch_all(&self.pool)
@@ -817,7 +821,7 @@ impl ControlService {
         project_id: ProjectId,
         actor_id: ActorId,
         platform_admin: bool,
-        request: &AddProjectMembershipRequest,
+        request: &ResolvedProjectMembershipRequest,
         idempotency_key: &IdempotencyKey,
         now: UtcTimestamp,
     ) -> Result<ProjectMembership, ControlError> {
@@ -862,7 +866,7 @@ impl ControlService {
         if project.state == ProjectState::Archived {
             return Err(ControlError::ProjectArchived);
         }
-        let row = sqlx::query(
+        sqlx::query(
             "INSERT INTO access.project_memberships \
              (course_id,project_id,actor_id,role,state,revision,expires_at,updated_at) \
              VALUES ($1,$2,$3,$4,'active',1,$5,$6) \
@@ -873,7 +877,7 @@ impl ControlService {
                  revision=access.project_memberships.revision+1, \
                  expires_at=EXCLUDED.expires_at, \
                  updated_at=EXCLUDED.updated_at \
-             RETURNING course_id,project_id,actor_id,role,state,revision,expires_at",
+             RETURNING project_id",
         )
         .bind(project.course_id.map(CourseId::as_uuid))
         .bind(project_id.as_uuid())
@@ -881,10 +885,22 @@ impl ControlService {
         .bind(platform_role_name(request.role))
         .bind(request.expires_at.map(UtcTimestamp::get))
         .bind(now.get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(db)?;
+        let membership_row = sqlx::query(
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.state,pm.revision,pm.expires_at, \
+                    a.username,a.display_name \
+             FROM access.project_memberships pm \
+             JOIN access.actors a ON a.actor_id=pm.actor_id \
+             WHERE pm.project_id=$1 AND pm.actor_id=$2",
+        )
+        .bind(project_id.as_uuid())
+        .bind(request.actor_id.as_uuid())
         .fetch_one(&mut *transaction)
         .await
         .map_err(db)?;
-        let membership = project_membership_from_row(&row)?;
+        let membership = project_membership_from_row(&membership_row)?;
         let contract =
             serde_json::to_value(&membership).map_err(|_| ControlError::ContractInvalid)?;
         IdempotencyStore::complete(
@@ -953,8 +969,11 @@ impl ControlService {
             return Err(ControlError::OwnerMembershipProtected);
         }
         let row = sqlx::query(
-            "SELECT course_id,project_id,actor_id,role,state,revision,expires_at \
-             FROM access.project_memberships WHERE project_id=$1 AND actor_id=$2 AND state='active' FOR UPDATE",
+            "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.state,pm.revision,pm.expires_at, \
+                    a.username,a.display_name \
+             FROM access.project_memberships pm \
+             JOIN access.actors a ON a.actor_id=pm.actor_id \
+             WHERE pm.project_id=$1 AND pm.actor_id=$2 AND pm.state='active' FOR UPDATE",
         )
         .bind(project_id.as_uuid())
         .bind(target_actor_id.as_uuid())
@@ -7486,6 +7505,8 @@ fn project_membership_from_row(
         course_id,
         project_id,
         actor_id,
+        username: row.try_get("username").map_err(db)?,
+        display_name: row.try_get("display_name").map_err(db)?,
         role,
         state,
         revision: revision_from_i64(row.try_get("revision").map_err(db)?)?,

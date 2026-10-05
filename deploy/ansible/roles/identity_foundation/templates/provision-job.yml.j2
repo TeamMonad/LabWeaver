@@ -123,6 +123,30 @@ spec:
               fi
               {% endfor %}
               {% endfor %}
+              {% for assignment in identity_service_realm_role_assignments %}
+              realm_management_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId=realm-management --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
+              test "$(printf '%s\n' "$realm_management_id" | wc -l)" -eq 1
+              test -n "$realm_management_id"
+              caller_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ assignment.caller }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
+              test "$(printf '%s\n' "$caller_id" | wc -l)" -eq 1
+              test -n "$caller_id"
+              {% for role in assignment.roles %}
+              role_id="$("${kcadm[@]}" get "clients/$realm_management_id/roles/{{ role }}" -r "{{ identity_realm }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
+              test "$(printf '%s\n' "$role_id" | wc -l)" -eq 1
+              test -n "$role_id"
+              "${kcadm[@]}" add-roles -r "{{ identity_realm }}" --uusername "service-account-{{ assignment.caller }}" --cclientid realm-management --rolename "{{ role }}"
+              scope_roles="$("${kcadm[@]}" get "clients/$caller_id/scope-mappings/clients/$realm_management_id" -r "{{ identity_realm }}" --fields name --format csv --noquotes)"
+              if ! printf '%s\n' "$scope_roles" | grep -Fx -- "{{ role }}" >/dev/null; then
+                printf '[{"id":"%s","name":"%s","clientRole":true}]\n' "$role_id" "{{ role }}" |
+                  "${kcadm[@]}" create "clients/$caller_id/scope-mappings/clients/$realm_management_id" -r "{{ identity_realm }}" -f -
+              fi
+              scope_roles_after="$("${kcadm[@]}" get "clients/$caller_id/scope-mappings/clients/$realm_management_id" -r "{{ identity_realm }}" --fields name --format csv --noquotes)"
+              if ! printf '%s\n' "$scope_roles_after" | grep -Fx -- "{{ role }}" >/dev/null; then
+                echo "IDENTITY_SERVICE_REALM_SCOPE_MAPPING_MISSING: {{ assignment.caller }} -> realm-management -> {{ role }}" >&2
+                exit 1
+              fi
+              {% endfor %}
+              {% endfor %}
           env:
             - name: ADMIN_USERNAME
               valueFrom: {secretKeyRef: {name: {{ identity_bootstrap_secret_name }}, key: username}}

@@ -16,6 +16,9 @@
       "AgentLlmReviewQuery": {
         "$ref": "../contracts/v1/http/agent-llm-review-query.schema.json"
       },
+      "AgentRunHistoryPage": {
+        "$ref": "../contracts/v1/agent-run-history-page.schema.json"
+      },
       "AgentWorkExecutionIntentMetadata": {
         "$ref": "../contracts/v1/http/agent-work-execution-intent-metadata.schema.json"
       },
@@ -140,6 +143,12 @@
           "statusUrl"
         ],
         "type": "object"
+      },
+      "OrganizationUser": {
+        "$ref": "../contracts/v1/organization-user.schema.json"
+      },
+      "OrganizationUserPage": {
+        "$ref": "../contracts/v1/organization-user-page.schema.json"
       },
       "PlatformImageCatalog": {
         "$ref": "../contracts/v1/http/platform-image-catalog.schema.json"

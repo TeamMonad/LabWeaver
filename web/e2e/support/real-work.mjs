@@ -5,6 +5,7 @@ import { expect } from '@playwright/test'
 import {
   AUTH_STATE,
   expectJson,
+  navigateFromHomeByUi,
   pollJson,
   uuidv7,
 } from './live.mjs'
@@ -39,8 +40,10 @@ export function selectPendingWorkTaskResourceRequest(requests, {
   trackKind,
   attemptNumber,
   studentActorId,
+  ignoredRequestIds = new Set(),
 }) {
   if (!Array.isArray(requests)) throw new Error('WORK_TASK_RESOURCE_REQUESTS_INVALID')
+  if (!(ignoredRequestIds instanceof Set)) throw new Error('WORK_TASK_RESOURCE_IGNORED_REQUEST_IDS_INVALID')
   const compactRunId = runId.replaceAll('-', '').toLowerCase()
   const requestPrefix = `authoring-${compactRunId}-`
   const pending = []
@@ -71,6 +74,7 @@ export function selectPendingWorkTaskResourceRequest(requests, {
     ) {
       throw new Error(`WORK_TASK_RESOURCE_REQUEST_SCOPE_INVALID:${request.id ?? 'missing'}`)
     }
+    if (ignoredRequestIds.has(request.id)) continue
     if (['expired', 'rejected', 'cancelled'].includes(request.state)) continue
     pending.push(request)
   }
@@ -146,8 +150,12 @@ export function realWorkGpuConfig() {
   const gpuMode = process.env.LABWEAVER_E2E_WORK_GPU_MODE?.trim() ?? ''
   const rateAmount = process.env.LABWEAVER_E2E_WORK_GPU_RATE_AMOUNT?.trim() ?? ''
   const rateCurrency = process.env.LABWEAVER_E2E_WORK_GPU_RATE_CURRENCY?.trim() ?? ''
+  const rateEffectiveUntil = process.env.LABWEAVER_E2E_WORK_GPU_RATE_EFFECTIVE_UNTIL?.trim() ?? ''
   const present = [gpuClass, gpuMode, rateAmount, rateCurrency].filter((value) => value !== '')
-  if (present.length === 0) return null
+  if (present.length === 0) {
+    if (rateEffectiveUntil) throw new Error('LABWEAVER_E2E_WORK_GPU_EFFECTIVE_UNTIL_WITHOUT_RATE')
+    return null
+  }
   if (present.length !== 4) throw new Error('LABWEAVER_E2E_WORK_GPU_FIELDS_INCOMPLETE')
   if (!GPU_CLASS.test(gpuClass)) throw new Error('LABWEAVER_E2E_WORK_GPU_CLASS_INVALID')
   if (!GPU_MODES.includes(gpuMode)) throw new Error('LABWEAVER_E2E_WORK_GPU_MODE_INVALID')
@@ -155,6 +163,12 @@ export function realWorkGpuConfig() {
     throw new Error('LABWEAVER_E2E_WORK_GPU_RATE_AMOUNT_INVALID')
   }
   if (!CURRENCY.test(rateCurrency)) throw new Error('LABWEAVER_E2E_WORK_GPU_RATE_CURRENCY_INVALID')
+  if (rateEffectiveUntil) {
+    const effectiveUntil = Date.parse(rateEffectiveUntil)
+    if (!Number.isFinite(effectiveUntil) || effectiveUntil <= Date.now()) {
+      throw new Error('LABWEAVER_E2E_WORK_GPU_RATE_EFFECTIVE_UNTIL_INVALID')
+    }
+  }
   return Object.freeze({
     class: gpuClass,
     mode: gpuMode,
@@ -166,6 +180,7 @@ export function realWorkGpuConfig() {
       currency: rateCurrency,
       gpuClass,
       gpuMode,
+      ...(rateEffectiveUntil ? { effectiveUntil: rateEffectiveUntil } : {}),
     }),
   })
 }
@@ -663,7 +678,14 @@ function currentRateDimension(rate, target, now = Date.now()) {
 }
 
 function rateMatchesInput(rate, target) {
-  return currentRateDimension(rate, target)
+  const boundaryMatches = target.effectiveUntil == null || (() => {
+    const expected = Date.parse(target.effectiveUntil)
+    const actual = Date.parse(rate?.effectiveUntil ?? '')
+    return Number.isFinite(expected) && Number.isFinite(actual)
+      && Math.floor(expected / 60_000) === Math.floor(actual / 60_000)
+  })()
+  return boundaryMatches
+    && currentRateDimension(rate, target)
     && rate.unitQuantity === target.unitQuantity
     && rate.unitPrice?.currency === target.currency
     && rate.unitPrice?.amount === target.amount
@@ -722,16 +744,33 @@ async function readRateRowsFromUi(page) {
 
 async function createRateByUi(page, target) {
   const form = page.getByTestId('resource-rate-form')
-  await form.locator('select').first().selectOption(target.unit)
+  await form.getByLabel('计费单位', { exact: true }).selectOption(target.unit)
   if (target.unit === 'gpu_unit_second') {
-    await form.getByLabel('GPU class', { exact: true }).fill(target.gpuClass)
-    await form.getByLabel('分配模式', { exact: true }).selectOption(target.gpuMode)
+    const gpuSelect = form.getByLabel('GPU 目录分配类型', { exact: true })
+    const gpuOption = `${target.gpuClass}:${target.gpuMode}`
+    await expect(gpuSelect.locator(`option[value="${gpuOption}"]`)).toHaveText(
+      `${target.gpuClass} · ${({ exclusive: '独占', container_time_slice: '容器时间片', vm_vgpu: 'VM vGPU' })[target.gpuMode]}`,
+    )
+    await gpuSelect.selectOption(gpuOption)
   }
-  await form.getByLabel('每次计费基础单位数', { exact: true }).fill(String(target.unitQuantity))
-  await form.getByLabel('单价', { exact: true }).fill(target.amount)
+  await form.getByLabel('费率单价', { exact: true }).fill(target.amount)
   await form.getByLabel('币种', { exact: true }).fill(target.currency)
-  await form.getByLabel('生效时间', { exact: true }).fill(localDateTimeValue(new Date(Date.now() - 120_000)))
-  await form.getByLabel('结束时间（可选）', { exact: true }).fill('')
+  const effectiveFromMs = Math.ceil((Date.now() + 10_000) / 60_000) * 60_000
+  const effectiveUntilMs = target.effectiveUntil == null ? null : Date.parse(target.effectiveUntil)
+  if (effectiveUntilMs !== null && (!Number.isFinite(effectiveUntilMs) || effectiveUntilMs <= effectiveFromMs)) {
+    throw new Error(`REAL_WORK_RATE_WINDOW_INVALID:${target.unit}`)
+  }
+  await form.getByLabel('生效时间', { exact: true }).fill(localDateTimeValue(new Date(effectiveFromMs)))
+  await form.getByLabel('结束时间（可选）', { exact: true }).fill(
+    effectiveUntilMs === null ? '' : localDateTimeValue(new Date(effectiveUntilMs)),
+  )
+  const baseUnit = ({
+    gpu_unit_second: 'GPU 分配单位秒',
+    cpu_millicore_second: 'CPU millicore 秒',
+    memory_byte_second: '内存字节秒',
+    storage_byte_second: '存储字节秒',
+  })[target.unit]
+  await expect(form.getByRole('status')).toContainText(`实际提交：${target.unitQuantity} ${baseUnit}`)
 
   const createButton = form.getByRole('button', { name: '创建费率版本', exact: true })
   await expect(createButton).toBeEnabled()
@@ -759,6 +798,19 @@ async function waitForRateUiReadback(page, target, revision) {
   }, { timeout: 120_000, intervals: [250, 500, 1000] }).toBe(true)
 }
 
+export async function waitForActiveRateReadback(context, target) {
+  let current = []
+  await expect.poll(
+    async () => {
+      const rates = await readResourceRates(context, 'REAL_WORK_RATES_READBACK_FAILED')
+      current = rates.filter((rate) => currentRateDimension(rate, target))
+      return current.length
+    },
+    { timeout: 120_000, intervals: [250, 500, 1000] },
+  ).toBe(1)
+  return current[0]
+}
+
 export async function ensureRateByUi(page, context, target) {
   let rates = await readResourceRates(context, 'REAL_WORK_RATES_LIST_FAILED')
   let current = rates.filter((rate) => currentRateDimension(rate, target))
@@ -780,9 +832,7 @@ export async function ensureRateByUi(page, context, target) {
   }
 
   await createRateByUi(page, target)
-  rates = await readResourceRates(context, 'REAL_WORK_RATES_READBACK_FAILED')
-  current = rates.filter((rate) => currentRateDimension(rate, target))
-  if (current.length !== 1) throw new Error(`REAL_WORK_RATE_ACTIVE_READBACK_INVALID:${target.unit}`)
+  current = [await waitForActiveRateReadback(context, target)]
   if (!rateMatchesInput(current[0], target)) {
     throw new Error(`REAL_WORK_RATE_ACTIVE_READBACK_MISMATCH:${target.unit}`)
   }
@@ -801,8 +851,8 @@ export async function ensureRealWorkRates(browser, baseURL, { gpu = null } = {})
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, '预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     await waitForRateListUi(page, 'resource')
     const targets = [...DEFAULT_RATE_INPUTS, ...(gpu ? [gpu.rate] : [])]
     const rates = []
@@ -817,8 +867,8 @@ export async function configureRealWorkBudgetByUi(browser, baseURL, projectId) {
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, '预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)
@@ -889,8 +939,8 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, { 
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
-    await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await navigateFromHomeByUi(page, '预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
     const projectSelect = page.locator('.project-strip select')
     await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await projectSelect.selectOption(projectId)

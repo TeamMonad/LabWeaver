@@ -35,7 +35,7 @@ import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } fro
  * authoring UI before the student submits anything.
  */
 const WORK_TEMPLATE_PACKAGE_CONTENT = '# LabWeaver live Work fixture\n\nUse the managed environment.\n'
-const WORK_TEMPLATE_APPROVAL_REASON = '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。'
+const WORK_TEMPLATE_APPROVAL_REASON = '已核对 Work 环境候选规格、容器 artifact 和项目安全约束。'
 const GPU_MODE = process.env.LABWEAVER_E2E_GPU_MODE?.trim() || null
 const GPU_CLASS = process.env.LABWEAVER_E2E_GPU_CLASS?.trim() || null
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
@@ -99,7 +99,7 @@ async function publishWorkTemplateByUi(teacherPage, adminPage, projectId, teache
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/projects/${projectId}/agent-runs`
     })
-    await teacherPage.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
+    await teacherPage.getByRole('button', { name: '启动 Work 模板生成', exact: true }).click()
     const acceptedRun = await expectJson(await runResponsePromise, 'LW_ACCEPTANCE_WORK_TEMPLATE_RUN_CREATE_FAILED')
     expect(acceptedRun).toMatchObject({
       id: expect.any(String),
@@ -257,8 +257,8 @@ async function publishWorkTemplateByUi(teacherPage, adminPage, projectId, teache
     await expect(candidateCard).toBeVisible({ timeout: SETTLE_TIMEOUT_MS })
     await expect(candidateCard).toContainText('构建完成', { timeout: SETTLE_TIMEOUT_MS })
     await candidateCard.getByTestId('work-template-candidate-confirmation').check()
-    await candidateCard.getByPlaceholder('说明为什么批准这个 Work Environment 候选').fill(WORK_TEMPLATE_APPROVAL_REASON)
-    const approveCandidateButton = candidateCard.getByRole('button', { name: '批准 Environment 候选', exact: true })
+    await candidateCard.getByPlaceholder('说明为什么批准这个 Work 环境候选').fill(WORK_TEMPLATE_APPROVAL_REASON)
+    const approveCandidateButton = candidateCard.getByRole('button', { name: '批准环境候选', exact: true })
     await expect(approveCandidateButton).toBeEnabled()
     const approvalResponsePromise = teacherPage.waitForResponse((response) => {
       const url = new URL(response.url())
@@ -318,7 +318,7 @@ test('platform administrator approves a real resource request and reads back its
     await configureProjectPolicyByUi(teacherPage, project.id)
     const teacherActorId = await readActorId(teacherPage.request)
     const studentActorId = await readActorId(studentContext.request)
-    await addProjectStudentByUi(teacherPage, project.id, studentActorId)
+    await addProjectStudentByUi(teacherPage, project.id)
     await publishWorkTemplateByUi(teacherPage, page, project.id, teacherActorId)
 
     resourceRequest = await requestProjectResourceByUi(studentPage, {

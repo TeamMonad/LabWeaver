@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::supply_chain::VirtualMachineDiskFormat;
 use crate::{
@@ -31,6 +31,20 @@ pub struct OperationAccepted {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddProjectMembershipRequest {
+    /// Exact issuer username resolved by Access before the membership
+    /// transaction.  Local actor identifiers are never accepted from a
+    /// browser request.
+    pub username: String,
+    pub role: PlatformRole,
+    pub expires_at: Option<UtcTimestamp>,
+}
+
+/// Access-to-Control request after the issuer username has been resolved to
+/// the durable local actor.  This is an internal gateway payload and is not a
+/// browser contract.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedProjectMembershipRequest {
     pub actor_id: ActorId,
     pub role: PlatformRole,
     pub expires_at: Option<UtcTimestamp>,
@@ -1862,6 +1876,75 @@ pub struct CursorPage<T> {
     pub next_cursor: Option<String>,
 }
 
+/// Page parameters for bounded offset-list endpoints.
+///
+/// Offset pagination is intentionally bounded to the range accepted by the
+/// public APIs.  Keeping the overflow check in the contract crate lets each
+/// service reject an invalid page before converting it to a provider or SQL
+/// offset.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageQuery {
+    #[serde(default, deserialize_with = "deserialize_query_u32")]
+    pub page: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_query_u16")]
+    pub page_size: Option<u16>,
+}
+
+fn deserialize_query_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_query_number(deserializer)
+}
+
+fn deserialize_query_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_query_number(deserializer)
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QueryNumber<T> {
+    Numeric(T),
+    Text(String),
+}
+
+fn deserialize_query_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    Option::<QueryNumber<T>>::deserialize(deserializer)?
+        .map(|value| match value {
+            QueryNumber::Numeric(value) => Ok(value),
+            QueryNumber::Text(value) => value.parse().map_err(|error: T::Err| {
+                serde::de::Error::custom(format!("invalid page number: {error}"))
+            }),
+        })
+        .transpose()
+}
+
+impl PageQuery {
+    /// Returns the canonical page, page size, and checked zero-based offset.
+    pub fn normalized(&self) -> Result<(u32, u16, u32), HttpContractError> {
+        let page = self.page.unwrap_or(1);
+        let page_size = self.page_size.unwrap_or(25);
+        if page == 0 || !(1..=100).contains(&page_size) {
+            return Err(HttpContractError::InvalidCursorPage);
+        }
+        let offset = page
+            .checked_sub(1)
+            .and_then(|value| value.checked_mul(u32::from(page_size)))
+            .filter(|value| *value <= i32::MAX as u32)
+            .ok_or(HttpContractError::InvalidCursorPage)?;
+        Ok((page, page_size, offset))
+    }
+}
+
 /// Cursor page bound to one consistent REST/SSE snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2164,6 +2247,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     op!(
         Public,
         Get,
+        "/api/v1/directory/users",
+        "listOrganizationUsers",
+        "directory:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        TEACHER_OR_ADMIN,
+        Global
+    ),
+    op!(
+        Public,
+        Get,
         "/api/v1/projects",
         "listProjects",
         "project:read",
@@ -2446,6 +2543,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Get,
         "/api/v1/projects/{projectId}/agent-runs/{runId}",
         "getProjectAgentRun",
+        "agent_run:read",
+        Oidc,
+        None,
+        200,
+        false,
+        true,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/agent-runs",
+        "listProjectAgentRuns",
         "agent_run:read",
         Oidc,
         None,
@@ -4042,6 +4153,51 @@ mod tests {
             Err(HttpContractError::WeakEtag)
         ));
     }
+
+    #[test]
+    fn offset_page_rejects_zero_and_unrepresentable_offsets() {
+        assert!(matches!(
+            PageQuery {
+                page: Some(0),
+                page_size: Some(25),
+            }
+            .normalized(),
+            Err(HttpContractError::InvalidCursorPage)
+        ));
+        assert!(matches!(
+            PageQuery {
+                page: Some(u32::MAX),
+                page_size: Some(100),
+            }
+            .normalized(),
+            Err(HttpContractError::InvalidCursorPage)
+        ));
+        assert_eq!(
+            PageQuery {
+                page: Some(2),
+                page_size: Some(25),
+            }
+            .normalized()
+            .expect("valid offset page"),
+            (2, 25, 25)
+        );
+    }
+
+    #[test]
+    fn page_query_defaults_when_fields_are_missing() {
+        let query: PageQuery = serde_json::from_str("{}").expect("missing page fields default");
+        assert_eq!(
+            query.normalized().expect("default page is valid"),
+            (1, 25, 0)
+        );
+        let query: PageQuery =
+            serde_json::from_str(r#"{"page":2,"pageSize":10}"#).expect("numeric page");
+        assert_eq!(
+            query.normalized().expect("explicit page is valid"),
+            (2, 10, 10)
+        );
+    }
+
     #[test]
     fn sse_cursor_sources_must_agree() {
         let above_javascript_safe_integer = StreamSequence(9_007_199_254_740_992);

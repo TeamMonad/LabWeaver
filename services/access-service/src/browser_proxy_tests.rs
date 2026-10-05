@@ -150,7 +150,48 @@ async fn control(
         "browserCsrf": headers.contains_key("x-csrf-token")
     });
     state.requests.lock().await.push(record);
+    if method == Method::GET && uri.path() == "/admin/realms/test/users" {
+        return (
+            StatusCode::OK,
+            Json(json!([
+                {
+                    "id": Uuid::now_v7(),
+                    "username": "alice",
+                    "firstName": "Alice",
+                    "lastName": "Researcher",
+                    "enabled": true
+                }
+            ])),
+        )
+            .into_response();
+    }
     if actor != Some(state.admin.to_string().as_str()) {
+        if method == Method::GET
+            && uri
+                .path()
+                .strip_prefix("/api/v1/projects/")
+                .is_some_and(|value| value.split('/').count() == 1)
+        {
+            let project_id = uri
+                .path()
+                .strip_prefix("/api/v1/projects/")
+                .unwrap_or_default();
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "id": project_id,
+                    "ownerActorId": state.admin,
+                    "name": "fixture project",
+                    "description": null,
+                    "courseId": null,
+                    "state": "active",
+                    "revision": 1,
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z"
+                })),
+            )
+                .into_response();
+        }
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"diagnosticCode": "LW_PLATFORM_ADMIN_REQUIRED"})),
@@ -278,6 +319,8 @@ async fn state(
             "/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/{target}/cancel",
             any(control),
         )
+        .route("/api/v1/projects/{project_id}", any(control))
+        .route("/admin/realms/test/users", any(control))
         .with_state(authority.clone());
     tasks.0.push(tokio::spawn(async move {
         let _ = http_transport::serve_tls(listener, router, server_config).await;
@@ -379,10 +422,13 @@ async fn state(
         ca.as_bytes(),
         &[7_u8; 32],
         TransportSecurityMode::Strict,
-        token_client,
+        Arc::clone(&token_client),
         target,
     )?;
     let runtime_proxy = proxy::RuntimeGatewayProxy::new(&deployment.environment_gateway)?;
+    let directory =
+        directory::KeycloakDirectory::new(&issuer, oidc_http.clone(), Arc::clone(&token_client))
+            .map_err(|_| std::io::Error::other("fixture directory configuration rejected"))?;
     let key_material = format!("fixture:{}", URL_SAFE_NO_PAD.encode([7_u8; 32]));
     let key_ring = KeyRing::parse("fixture".to_owned(), &key_material)?;
     let state = Arc::new(AppState {
@@ -394,6 +440,7 @@ async fn state(
         bearer_authorizer,
         backchannel_logout_authorizer,
         service_token_verifier,
+        directory,
         pool,
         key_ring,
         owner_resolver,
@@ -760,5 +807,199 @@ async fn candidate_build_status_and_cancel_reach_control_with_session_auth()
         assert_eq!(records[2]["body"]["expectedRevision"], 2);
         assert_eq!(records[3]["actor"], other.actor_id.to_string());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_owner_membership_add_is_rejected_before_directory_resolution()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let owner = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool, owner, &mut tasks)).await?;
+    let owner_session = session(
+        &state.pool,
+        &state.key_ring,
+        owner,
+        contracts::PlatformRole::Teacher,
+    )
+    .await?;
+    let member = Uuid::now_v7();
+    let member_session = session(
+        &state.pool,
+        &state.key_ring,
+        member,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let project_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO access.project_memberships \
+         (course_id,project_id,actor_id,role,state,revision) \
+         VALUES (NULL,$1,$2,'student','active',1)",
+    )
+    .bind(project_id)
+    .bind(member)
+    .execute(&state.pool)
+    .await?;
+    let actor_count_before: i64 = sqlx::query_scalar("SELECT count(*) FROM access.actors")
+        .fetch_one(&state.pool)
+        .await?;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, member_session.session_id
+    );
+    let response = client
+        .post(format!("{base}/api/v1/projects/{project_id}/members"))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header("x-csrf-token", member_session.csrf_token.expose())
+        .header("Idempotency-Key", Uuid::now_v7().to_string())
+        .json(&json!({"username": "target-user", "role": "student", "expiresAt": null}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json::<Value>().await?,
+        json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
+    );
+
+    let actor_count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM access.actors")
+        .fetch_one(&state.pool)
+        .await?;
+    assert_eq!(actor_count_after, actor_count_before);
+    let requests = requests.lock().await;
+    assert!(requests.iter().any(|request| {
+        request["method"] == "GET" && request["path"] == format!("/api/v1/projects/{project_id}")
+    }));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["path"] == "/admin/realms/test/users")
+            .count(),
+        0
+    );
+    assert!(owner_session.session_id != member_session.session_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn organization_directory_is_teacher_visible_and_student_denied_without_lookup()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let admin = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool, admin, &mut tasks)).await?;
+    let teacher_session = session(
+        &state.pool,
+        &state.key_ring,
+        Uuid::now_v7(),
+        contracts::PlatformRole::Teacher,
+    )
+    .await?;
+    let student_session = session(
+        &state.pool,
+        &state.key_ring,
+        Uuid::now_v7(),
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let actor_count_before: i64 = sqlx::query_scalar("SELECT count(*) FROM access.actors")
+        .fetch_one(&state.pool)
+        .await?;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let path = "/api/v1/directory/users?query=alice&page=1&pageSize=10";
+    let teacher_cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, teacher_session.session_id
+    );
+    let teacher_response = client
+        .get(format!("{base}{path}"))
+        .header(header::COOKIE, teacher_cookie)
+        .send()
+        .await?;
+    let teacher_status = teacher_response.status();
+    let teacher_body = teacher_response.text().await?;
+    assert_eq!(teacher_status, StatusCode::OK, "{teacher_body}");
+    let page = serde_json::from_str::<contracts::OrganizationUserPage>(&teacher_body)?;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].username, "alice");
+    assert_eq!(page.items[0].display_name, "Alice Researcher");
+    assert!(page.items[0].enabled);
+    let default_response = client
+        .get(format!("{base}/api/v1/directory/users?query=alice"))
+        .header(
+            header::COOKIE,
+            format!(
+                "{}={}",
+                state.deployment.browser.session_cookie_name, teacher_session.session_id
+            ),
+        )
+        .send()
+        .await?;
+    assert_eq!(default_response.status(), StatusCode::OK);
+    let default_page = default_response
+        .json::<contracts::OrganizationUserPage>()
+        .await?;
+    assert_eq!((default_page.page, default_page.page_size), (1, 25));
+
+    let student_cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, student_session.session_id
+    );
+    let student_response = client
+        .get(format!("{base}{path}"))
+        .header(header::COOKIE, student_cookie)
+        .send()
+        .await?;
+    assert_eq!(student_response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        student_response.json::<Value>().await?,
+        json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
+    );
+
+    let actor_count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM access.actors")
+        .fetch_one(&state.pool)
+        .await?;
+    assert_eq!(actor_count_after, actor_count_before);
+    let requests = requests.lock().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["path"] == "/admin/realms/test/users")
+            .count(),
+        2
+    );
     Ok(())
 }

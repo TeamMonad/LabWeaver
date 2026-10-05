@@ -16,6 +16,7 @@ const AGENT_RUN_STATE: Record<string, string> = {
   running: '运行中',
   partially_succeeded: '部分成功',
   succeeded: '已成功',
+  awaiting_approval: '等待批准',
   failed: '失败',
   cancelling: '取消中',
   cancelled: '已取消',
@@ -29,6 +30,7 @@ const AGENT_ATTEMPT_STATE: Record<string, string> = {
   pending: '等待中',
   running: '执行中',
   repairing: 'Agent 修复中',
+  awaiting_approval: '等待批准',
   succeeded: '成功',
   failed: '失败',
   cancelled: '已取消',
@@ -41,6 +43,7 @@ export function agentAttemptStateLabel(value: string | null | undefined): string
 const AGENT_TRACK_KIND: Record<string, string> = {
   environment: '环境轨道',
   evaluation: '评测轨道',
+  work_configuration: 'Work 配置轨道',
 }
 
 export function agentTrackKindLabel(value: string | null | undefined): string {
@@ -101,6 +104,26 @@ const RESOURCE_LEASE_STATE: Record<string, string> = {
 
 export function resourceLeaseStateLabel(value: string | null | undefined): string {
   return labelOf(RESOURCE_LEASE_STATE, value)
+}
+
+const PROJECT_ROLE: Record<string, string> = {
+  student: '学生',
+  teacher: '教师',
+  platform_admin: '平台管理员',
+}
+
+export function projectRoleLabel(value: string | null | undefined): string {
+  return labelOf(PROJECT_ROLE, value)
+}
+
+const MEMBERSHIP_STATE: Record<string, string> = {
+  active: '生效中',
+  suspended: '已暂停',
+  revoked: '已撤销',
+}
+
+export function membershipStateLabel(value: string | null | undefined): string {
+  return labelOf(MEMBERSHIP_STATE, value)
 }
 
 const ACCESS_GRANT_STATE: Record<string, string> = {

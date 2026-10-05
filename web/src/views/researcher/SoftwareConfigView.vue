@@ -55,13 +55,19 @@
       </button>
     </nav>
 
+    <ProjectAgentRunHistory
+      :project-id="selectedProjectId"
+      scope="work"
+      @open="restoreHistory"
+    />
+
     <WorkTemplateAuthoringView
       v-if="mode === 'template'"
       :key="selectedProjectId ?? 'no-project'"
       :project-id="selectedProject?.id ?? null"
       :course-id="selectedProject?.courseId ?? null"
-      :run-id="routeRunId"
-      :release-id="routeReleaseId"
+      :run-id="templateRouteRunId"
+      :release-id="templateRouteReleaseId"
       @run-created="persistTemplateRun"
       @release-created="persistTemplateRelease"
     />
@@ -304,9 +310,10 @@ import { RouterLink, routeLocationKey, routerKey } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
+import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import WorkTemplateAuthoringView from '@/views/researcher/WorkTemplateAuthoringView.vue'
 import { approveProjectWorkConfigurationRun, getActiveProjectLlmPolicy, getProjectWorkConfigurationPlan } from '@/generated/contracts'
-import type { AgentRunSchema, ProblemPackageSchema, ProjectLlmEgressPolicySchema, WorkConfigurationPlanViewSchema } from '@/generated/contracts'
+import type { AgentRunHistoryItem, AgentRunSchema, ProblemPackageSchema, ProjectLlmEgressPolicySchema, WorkConfigurationPlanViewSchema } from '@/generated/contracts'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironments'
@@ -330,19 +337,36 @@ const routeReleaseId = computed(() => {
   const id = typeof route?.query.releaseId === 'string' ? route.query.releaseId.trim() : ''
   return id || null
 })
+const routeMode = computed<'configuration' | 'template'>(() => route?.query.mode === 'template' ? 'template' : 'configuration')
+const mode = ref<'configuration' | 'template'>(routeMode.value)
 const selectedProjectId = ref<string | null>(routeProjectId.value)
 const selectedProject = computed(() => projects.projects.kind === 'success' ? projects.projects.data.find((project) => project.id === selectedProjectId.value) ?? null : null)
 const projectOptions = computed(() => projects.projects.kind === 'success' ? projects.projects.data : [])
 const projectIdRef = computed(() => selectedProjectId.value)
-const agent = useProjectAgentRun(projectIdRef)
-const mode = ref<'configuration' | 'template'>(route?.query.mode === 'template' ? 'template' : 'configuration')
+const selectedEnvironmentId = ref('')
+const agent = useProjectAgentRun(projectIdRef, { kind: 'work_configuration' })
+const routeRunMatchesProject = computed(() => Boolean(routeProjectId.value && routeProjectId.value === selectedProjectId.value))
+const configurationRouteRunId = computed(() => (
+  mode.value === 'configuration' && routeMode.value === 'configuration' && routeRunMatchesProject.value
+    ? routeRunId.value
+    : null
+))
+const templateRouteRunId = computed(() => (
+  mode.value === 'template' && routeMode.value === 'template' && routeRunMatchesProject.value
+    ? routeRunId.value
+    : null
+))
+const templateRouteReleaseId = computed(() => (
+  mode.value === 'template' && routeMode.value === 'template' && routeRunMatchesProject.value
+    ? routeReleaseId.value
+    : null
+))
 
 const policy = ref<AsyncState<ProjectLlmEgressPolicySchema>>({ kind: 'idle' })
 const policyRevision = computed(() => policy.value.kind === 'success' ? policy.value.data.revision : undefined)
 const courseIdRef = computed(() => selectedProject.value?.courseId ?? null)
 const packageUpload = useProjectProblemPackageUpload(projectIdRef, policyRevision, courseIdRef)
 const workEnvironments = useProjectWorkEnvironments(projectIdRef)
-const selectedEnvironmentId = ref('')
 const selectedEnvironment = computed(() => workEnvironments.environments.kind === 'success' ? workEnvironments.environments.data.find((environment) => environment.id === selectedEnvironmentId.value) ?? null : null)
 const plan = ref<AsyncState<WorkConfigurationPlanViewSchema>>({ kind: 'idle' })
 const planApprovalOutcome = ref<DiagnosticViewModel | null>(null)
@@ -415,7 +439,35 @@ watch(routeProjectId, (id) => {
   if (projects.selectedProjectId !== id) projects.select(id)
 })
 
+watch(routeMode, (nextMode) => {
+  if (mode.value !== nextMode) mode.value = nextMode
+}, { immediate: true })
+
 let planRunId: string | null = null
+let configurationRouteKey: string | null = null
+let policyGeneration = 0
+let planGeneration = 0
+let approvalOperationGeneration = 0
+function restoreHistory(item: AgentRunHistoryItem) {
+  if (!router || !selectedProjectId.value) return
+  const historyMode = item.purpose.kind === 'authoring' && item.purpose.environmentClass === 'work' ? 'template' : 'configuration'
+  void router.replace({
+    query: {
+      ...route?.query,
+      projectId: selectedProjectId.value,
+      mode: historyMode === 'template' ? 'template' : undefined,
+      runId: item.id,
+      releaseId: undefined,
+    },
+  })
+}
+
+function invalidatePlan() {
+  planGeneration += 1
+  planRunId = null
+  plan.value = { kind: 'idle' }
+  planApprovalOutcome.value = null
+}
 
 function syncSoftwareRoute(
   runId: string | null | undefined = routeRunId.value,
@@ -438,9 +490,9 @@ function syncSoftwareRoute(
 
 watch(selectedProjectId, (id, previousId) => {
   selectedEnvironmentId.value = ''
-  planRunId = null
-  plan.value = { kind: 'idle' }
-  planApprovalOutcome.value = null
+  invalidatePlan()
+  approvalOperationGeneration += 1
+  approving.value = false
   approvalReason.value = ''
   restartConfirmed.value = false
   approvalExpiresAt.value = defaultApprovalExpiry()
@@ -449,27 +501,108 @@ watch(selectedProjectId, (id, previousId) => {
     previousId && previousId !== id ? null : sameProject ? routeRunId.value : null,
     previousId && previousId !== id ? null : sameProject ? routeReleaseId.value : null,
   )
+  policyGeneration += 1
   void reloadPolicy()
 }, { immediate: true })
 
-watch(mode, () => syncSoftwareRoute())
+watch(mode, (nextMode, previousMode) => {
+  if (nextMode === previousMode) return
+  const routeRestoresNextMode = routeMode.value === nextMode
+    && routeRunId.value !== null
+    && routeProjectId.value === selectedProjectId.value
+  configurationRouteKey = null
+  invalidatePlan()
+  approvalOperationGeneration += 1
+  approving.value = false
+  policyGeneration += 1
+  agent.reset()
+  policy.value = { kind: 'idle' }
+  if (!routeRestoresNextMode) syncSoftwareRoute(null, null)
+  if (nextMode === 'configuration') void reloadPolicy()
+})
 
 function persistTemplateRun(runId: string) {
   syncSoftwareRoute(runId, null)
 }
 
 function persistTemplateRelease(releaseId: string) {
-  syncSoftwareRoute(routeRunId.value, releaseId)
+  syncSoftwareRoute(templateRouteRunId.value, releaseId)
 }
+
+function configurationEnvironmentDiagnostic(data: AgentRunSchema): DiagnosticViewModel | undefined {
+  if (data.purpose.kind !== 'work_configuration') return undefined
+  const environments = workEnvironments.environments
+  if (environments.kind === 'empty') {
+    return makeDiagnostic('PROJECT_RUN_ENVIRONMENT_MISMATCH', '当前任务绑定的 Work 环境已不在当前项目中，已停止恢复。', false)
+  }
+  if (environments.kind !== 'success') return undefined
+  const environmentId = data.purpose.kind === 'work_configuration' ? data.purpose.environmentId : null
+  const target = environments.data.find((environment) => environment.id === environmentId && environment.projectId === selectedProjectId.value)
+  return target
+    ? undefined
+    : makeDiagnostic('PROJECT_RUN_ENVIRONMENT_MISMATCH', '当前任务绑定的 Work 环境不在当前项目中，已停止恢复。', false)
+}
+
+type ConfigurationEnvironmentStatus = 'valid' | 'pending' | 'invalid'
+
+function reconcileConfigurationEnvironment(state: AsyncState<AgentRunSchema>): ConfigurationEnvironmentStatus {
+  if (mode.value !== 'configuration' || state.kind !== 'success' || state.data.purpose.kind !== 'work_configuration') return 'valid'
+  const diagnostic = configurationEnvironmentDiagnostic(state.data)
+  if (diagnostic) {
+    agent.invalidate(diagnostic)
+    return 'invalid'
+  }
+  if (workEnvironments.environments.kind !== 'success') return 'pending'
+  if (workEnvironments.environments.kind === 'success') selectedEnvironmentId.value = state.data.purpose.environmentId
+  return 'valid'
+}
+
+function syncPlanToCurrentRun() {
+  const state = agent.run
+  if (state.kind !== 'success' || state.data.state !== 'awaiting_approval') {
+    invalidatePlan()
+    return
+  }
+  const environmentStatus = reconcileConfigurationEnvironment(state)
+  if (environmentStatus !== 'valid') {
+    invalidatePlan()
+    return
+  }
+  if (planRunId !== state.data.id) {
+    planRunId = state.data.id
+    void reloadPlan(state.data.id)
+  }
+}
+
+watch(
+  [mode, selectedProjectId, configurationRouteRunId],
+  ([nextMode, projectId, runId]) => {
+    const nextKey = nextMode === 'configuration' && projectId && runId ? `${projectId}:${runId}` : null
+    if (nextKey === configurationRouteKey) return
+    configurationRouteKey = nextKey
+    invalidatePlan()
+    if (!nextKey || !runId) {
+      agent.reset()
+      return
+    }
+    void agent.load(runId)
+  },
+  { immediate: true },
+)
 
 watch(
   () => workEnvironments.environments,
   (state) => {
     if (state.kind === 'success') {
-      if (!state.data.some((environment) => environment.id === selectedEnvironmentId.value)) selectedEnvironmentId.value = state.data[0]?.id ?? ''
+      const restoredRun = agent.run.kind === 'success' ? agent.run.data : null
+      const restoredEnvironmentId = restoredRun?.purpose.kind === 'work_configuration' ? restoredRun.purpose.environmentId : null
+      if (restoredEnvironmentId && state.data.some((environment) => environment.id === restoredEnvironmentId)) selectedEnvironmentId.value = restoredEnvironmentId
+      else if (!state.data.some((environment) => environment.id === selectedEnvironmentId.value)) selectedEnvironmentId.value = state.data[0]?.id ?? ''
     } else if (state.kind === 'empty') {
       selectedEnvironmentId.value = ''
     }
+    if (reconcileConfigurationEnvironment(agent.run) === 'invalid') invalidatePlan()
+    syncPlanToCurrentRun()
   },
   { immediate: true },
 )
@@ -477,25 +610,22 @@ watch(
 watch(
   () => agent.run,
   (state) => {
-    if (state.kind !== 'success' || state.data.state !== 'awaiting_approval') {
-      plan.value = { kind: 'idle' }
-      return
-    }
-    if (planRunId !== state.data.id) {
-      planRunId = state.data.id
-      void reloadPlan(state.data.id)
-    }
+    if (reconcileConfigurationEnvironment(state) === 'invalid') invalidatePlan()
+    syncPlanToCurrentRun()
   },
 )
 
 async function reloadPolicy() {
   const id = selectedProjectId.value
+  const generation = ++policyGeneration
+  const requestedMode = mode.value
   if (!id) {
-    policy.value = { kind: 'idle' }
+    if (generation === policyGeneration) policy.value = { kind: 'idle' }
     return
   }
   policy.value = { kind: 'loading', message: '加载项目 LLM 策略…' }
   const result = await getActiveProjectLlmPolicy({ path: { projectId: id } })
+  if (generation !== policyGeneration || selectedProjectId.value !== id || mode.value !== requestedMode) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
     policy.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_POLICY_LOAD_FAILED', problem?.detail ?? '加载项目 LLM 策略失败', problem?.retryable ?? true) }
@@ -508,7 +638,7 @@ async function startRun() {
   if (!canStart.value || policy.value.kind !== 'success') return
   const environment = selectedEnvironment.value
   if (!environment) return
-  await agent.startWorkConfiguration({
+  const started = await agent.startWorkConfiguration({
     environmentId: environment.id,
     environmentRevision: environment.revision,
     packageId: packageId.value.trim(),
@@ -517,17 +647,32 @@ async function startRun() {
     policyRevision: policy.value.data.revision,
     ...(selectedProject.value?.courseId ? { courseId: selectedProject.value.courseId } : {}),
   })
+  if (started && agent.run.kind === 'success' && agent.run.data.purpose.kind === 'work_configuration') {
+    configurationRouteKey = selectedProjectId.value ? `${selectedProjectId.value}:${agent.run.data.id}` : null
+    syncSoftwareRoute(agent.run.data.id, null)
+  }
 }
 
 async function reloadPlan(runId?: string) {
   const id = selectedProjectId.value
   const resolvedRunId = runId ?? (agent.run.kind === 'success' && agent.run.data.state === 'awaiting_approval' ? agent.run.data.id : undefined)
   if (!id || !resolvedRunId) {
-    plan.value = { kind: 'idle' }
+    invalidatePlan()
     return
   }
+  const generation = ++planGeneration
+  const requestedMode = mode.value
   plan.value = { kind: 'loading', message: '加载 Work 配置计划…' }
   const result = await getProjectWorkConfigurationPlan({ path: { projectId: id, runId: resolvedRunId } })
+  const currentRun = agent.run.kind === 'success' ? agent.run.data : null
+  if (
+    generation !== planGeneration
+    || selectedProjectId.value !== id
+    || mode.value !== requestedMode
+    || !currentRun
+    || currentRun.id !== resolvedRunId
+    || currentRun.state !== 'awaiting_approval'
+  ) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
     plan.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_LOAD_FAILED', problem?.detail ?? '加载 Work 配置计划失败', problem?.retryable ?? true) }
@@ -539,38 +684,50 @@ async function reloadPlan(runId?: string) {
 
 async function approvePlan() {
   if (!canApprovePlan.value || plan.value.kind !== 'success' || agent.run.kind !== 'success' || !selectedProjectId.value) return
+  const projectId = selectedProjectId.value
+  const requestedMode = mode.value
+  const currentRun = agent.run.data
+  const currentRunId = currentRun.id
+  const operationGeneration = ++approvalOperationGeneration
   approving.value = true
   planApprovalOutcome.value = null
-  const currentRun = agent.run.data
   const currentPlan = plan.value.data.plan
-  const result = await approveProjectWorkConfigurationRun({
-    path: { projectId: selectedProjectId.value, runId: currentRun.id },
-    headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(currentRun.revision) },
-    body: {
-      expectedRunRevision: currentRun.revision,
-      expectedPlanRevision: currentPlan.revision,
-      environmentRevision: currentPlan.environmentRevision,
-      expiresAt: new Date(approvalExpiresAt.value).toISOString(),
-      reason: approvalReason.value.trim(),
-      restartConfirmed: restartConfirmed.value,
-    },
-  })
-  if (result.error) {
-    const problem = extractProblemDetails(result.error)
-    planApprovalOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_APPROVAL_FAILED', problem?.detail ?? '批准 Work 配置失败', problem?.retryable ?? true)
-    approving.value = false
-    return
+  try {
+    const result = await approveProjectWorkConfigurationRun({
+      path: { projectId, runId: currentRunId },
+      headers: { 'Idempotency-Key': idempotencyKey(), 'If-Match': ifMatch(currentRun.revision) },
+      body: {
+        expectedRunRevision: currentRun.revision,
+        expectedPlanRevision: currentPlan.revision,
+        environmentRevision: currentPlan.environmentRevision,
+        expiresAt: new Date(approvalExpiresAt.value).toISOString(),
+        reason: approvalReason.value.trim(),
+        restartConfirmed: restartConfirmed.value,
+      },
+    })
+    const current = () => operationGeneration === approvalOperationGeneration
+      && selectedProjectId.value === projectId
+      && mode.value === requestedMode
+      && agent.run.kind === 'success'
+      && agent.run.data.id === currentRunId
+    if (!current()) return
+    if (result.error) {
+      const problem = extractProblemDetails(result.error)
+      planApprovalOutcome.value = makeDiagnostic(problem?.diagnosticCode ?? 'PROJECT_WORK_PLAN_APPROVAL_FAILED', problem?.detail ?? '批准 Work 配置失败', problem?.retryable ?? true)
+      return
+    }
+    if (!result.data) {
+      planApprovalOutcome.value = makeDiagnostic('PROJECT_WORK_PLAN_APPROVAL_FAILED', '批准 Work 配置没有返回 AgentRun。', true)
+      return
+    }
+    planApprovalOutcome.value = makeDiagnostic('PROJECT_WORK_PLAN_APPROVED', 'Work 配置已批准，正在执行。', false)
+    approvalReason.value = ''
+    restartConfirmed.value = false
+    invalidatePlan()
+    await agent.load(result.data.id)
+  } finally {
+    if (operationGeneration === approvalOperationGeneration) approving.value = false
   }
-  if (!result.data) {
-    planApprovalOutcome.value = makeDiagnostic('PROJECT_WORK_PLAN_APPROVAL_FAILED', '批准 Work 配置没有返回 AgentRun。', true)
-    approving.value = false
-    return
-  }
-  planApprovalOutcome.value = makeDiagnostic('PROJECT_WORK_PLAN_APPROVED', 'Work 配置已批准，正在执行。', false)
-  approvalReason.value = ''
-  restartConfirmed.value = false
-  await agent.load(result.data.id)
-  approving.value = false
 }
 
 function defaultApprovalExpiry() {
@@ -580,6 +737,7 @@ function defaultApprovalExpiry() {
 }
 
 function reloadRun() {
+  if (configurationRouteRunId.value) return agent.load(configurationRouteRunId.value)
   if (agent.run.kind === 'success') return agent.load(agent.run.data.id)
   return undefined
 }
@@ -605,6 +763,12 @@ function trackCanRetry(data: AgentRunSchema, kind: AgentRunSchema['tracks'][numb
 }
 
 function prepareNewTask() {
+  configurationRouteKey = null
+  invalidatePlan()
+  approvalOperationGeneration += 1
+  approving.value = false
+  syncSoftwareRoute(null, null)
+  agent.reset()
   packageUpload.clear()
   selectedEnvironmentId.value = ''
   impactAcknowledged.value = false

@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "OrganizationUser": {
+      "additionalProperties": false,
+      "description": "Identity metadata returned by the organization directory.  Provider\nsubjects and local actor identifiers stay on the server side.",
+      "properties": {
+        "displayName": {
+          "description": "Human-readable name resolved from the issuer profile.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Whether the issuer currently permits the account to authenticate.",
+          "type": "boolean"
+        },
+        "username": {
+          "description": "Current issuer username used for exact membership selection.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "displayName",
+        "enabled"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded organization-directory search result.",
+  "properties": {
+    "hasMore": {
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/OrganizationUser"
+      },
+      "type": "array"
+    },
+    "page": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pageSize": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "items",
+    "page",
+    "pageSize",
+    "hasMore"
+  ],
+  "title": "OrganizationUserPage",
+  "type": "object"
+}

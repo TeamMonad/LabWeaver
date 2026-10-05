@@ -291,7 +291,7 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
     studentPage = await studentContext.newPage()
     const studentActorId = await readActorId(studentContext.request)
-    await addProjectStudentByUi(teacherPage, projectId, studentActorId)
+    await addProjectStudentByUi(teacherPage, projectId)
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     adminPage = await adminContext.newPage()
     await assertNoPendingEvaluationTaskResourceRequests(adminPage.request, projectId, studentActorId)
@@ -430,7 +430,7 @@ test('teacher publishes a real security experiment and student repairs it throug
     await configureProjectPolicyByUi(page, project.id, REAL_PROVIDER_BUDGET)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('heading', { name: '材料上传与 AgentRun', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '材料上传与实验生成', exact: true })).toBeVisible()
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy.directory)
 
     const run = await startExperimentRunByUi(page, project.id)

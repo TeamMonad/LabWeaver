@@ -6,10 +6,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use contracts::authoring::{
-    AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
-    AgentTrackKind, EnvironmentCandidate, EnvironmentClass, EvaluationCandidate, LlmUsage,
-    ProblemPackage, ProjectLlmEgressPolicy, WorkConfigurationPlan,
-    WorkConfigurationPreauthorization,
+    AgentAttempt, AgentAttemptState, AgentRun, AgentRunHistoryItem, AgentRunHistoryPage,
+    AgentRunPurpose, AgentRunState, AgentTrack, AgentTrackKind, EnvironmentCandidate,
+    EnvironmentClass, EvaluationCandidate, LlmUsage, ProblemPackage, ProjectLlmEgressPolicy,
+    WorkConfigurationPlan, WorkConfigurationPreauthorization,
 };
 use contracts::diagnostic;
 use contracts::events::{
@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
 use thiserror::Error;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::claude_code::{
@@ -1428,6 +1429,87 @@ impl PostgresAgentRunStore {
         .map_err(|_| AgentRunStoreError::PersistenceFailed)?
         .ok_or(AgentRunStoreError::RunNotFound)?;
         decode_run_row(&row)
+    }
+
+    /// Lists the bounded, project-scoped history projection from Agent-owned persistence.
+    ///
+    /// The full run contract is intentionally not returned here.  Callers use the existing
+    /// `load` path for a selected run, which keeps this listing small and prevents a stale
+    /// Control projection from becoming a second source of run state.
+    pub async fn list_project_runs(
+        &self,
+        project_id: ProjectId,
+        page: u32,
+        page_size: u16,
+        offset: u32,
+    ) -> Result<AgentRunHistoryPage, AgentRunStoreError> {
+        let limit = i64::from(page_size) + 1;
+        let rows = sqlx::query(
+            "SELECT run_id, project_id, course_id, purpose, state, created_at, updated_at \
+             FROM agent.agent_runs \
+             WHERE project_id = $1 \
+             ORDER BY created_at DESC, run_id DESC \
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(project_id.as_uuid())
+        .bind(limit)
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let has_more = rows.len() > usize::from(page_size);
+        let items = rows
+            .into_iter()
+            .take(usize::from(page_size))
+            .map(|row| {
+                let run_id = row
+                    .try_get::<Uuid, _>("run_id")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let row_project_id = row
+                    .try_get::<Uuid, _>("project_id")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let id = AgentRunId::from_str(&run_id.to_string())
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let row_project_id = ProjectId::from_str(&row_project_id.to_string())
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let course_id = row
+                    .try_get::<Option<Uuid>, _>("course_id")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?
+                    .map(|value| CourseId::from_str(&value.to_string()))
+                    .transpose()
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let purpose = serde_json::from_value::<AgentRunPurpose>(
+                    row.try_get::<Value, _>("purpose")
+                        .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                )
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let state = serde_json::from_value::<AgentRunState>(Value::String(
+                    row.try_get::<String, _>("state")
+                        .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                ))
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let created_at = persisted_timestamp(&row, "created_at")?;
+                let updated_at = persisted_timestamp(&row, "updated_at")?;
+                if row_project_id != project_id {
+                    return Err(AgentRunStoreError::InvalidContract);
+                }
+                Ok(AgentRunHistoryItem {
+                    id,
+                    project_id: row_project_id,
+                    course_id,
+                    purpose,
+                    state,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .collect::<Result<Vec<_>, AgentRunStoreError>>()?;
+        Ok(AgentRunHistoryPage {
+            items,
+            page,
+            page_size,
+            has_more,
+        })
     }
 
     /// Applies one exact Control-issued Work preauthorization and queues the existing generated
@@ -3823,6 +3905,16 @@ fn decode_run_row(row: &PgRow) -> Result<AgentRun, AgentRunStoreError> {
         return Err(AgentRunStoreError::InvalidContract);
     }
     Ok(run)
+}
+
+fn persisted_timestamp(row: &PgRow, column: &str) -> Result<UtcTimestamp, AgentRunStoreError> {
+    let value = row
+        .try_get::<OffsetDateTime, _>(column)
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    let value = value
+        .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
+        .map_err(|_| AgentRunStoreError::InvalidContract)?;
+    UtcTimestamp::from_utc(value).map_err(|_| AgentRunStoreError::InvalidContract)
 }
 
 async fn update_run(

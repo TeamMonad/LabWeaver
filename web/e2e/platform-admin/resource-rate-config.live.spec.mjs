@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { navigateFromHomeByUi } from '../support/live.mjs'
 
 const INPUT_ENV = Object.freeze({
   gpuClass: 'LABWEAVER_E2E_RESOURCE_RATE_GPU_CLASS',
@@ -189,7 +190,7 @@ test('platform administrator configures one explicitly requested GPU rate throug
   test.setTimeout(120_000)
   if (!INPUT) throw new Error('LW_RESOURCE_RATE_INPUT_REQUIRED')
 
-  await page.goto('/admin/resource-finance', { waitUntil: 'domcontentloaded' })
+  await navigateFromHomeByUi(page, '预算与费用')
   await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible()
   await waitForRateListSettled(page, 'LOAD')
 

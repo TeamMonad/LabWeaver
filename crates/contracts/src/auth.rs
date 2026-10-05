@@ -34,6 +34,29 @@ pub struct AuthenticatedActor {
     pub expires_at: UtcTimestamp,
 }
 
+/// Identity metadata returned by the organization directory.  Provider
+/// subjects and local actor identifiers stay on the server side.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrganizationUser {
+    /// Current issuer username used for exact membership selection.
+    pub username: String,
+    /// Human-readable name resolved from the issuer profile.
+    pub display_name: String,
+    /// Whether the issuer currently permits the account to authenticate.
+    pub enabled: bool,
+}
+
+/// Bounded organization-directory search result.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrganizationUserPage {
+    pub items: Vec<OrganizationUser>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
+}
+
 /// Safe browser-session representation. OIDC subjects, tokens, and provider
 /// session identifiers are intentionally excluded from this public DTO.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -99,6 +122,13 @@ pub struct ProjectMembership {
     pub project_id: ProjectId,
     /// Actor scope.
     pub actor_id: ActorId,
+    /// Issuer username, present on project membership views when identity
+    /// metadata is available.  Authorization snapshots leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Human-readable issuer name, present on project membership views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Role permitted by this project.
     pub role: PlatformRole,
     /// Current lifecycle state.

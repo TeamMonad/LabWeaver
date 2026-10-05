@@ -42,6 +42,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::AgentRun
     );
     document!(
+        "schemas/contracts/v1/agent-run-history-page.schema.json",
+        crate::authoring::AgentRunHistoryPage
+    );
+    document!(
         "schemas/contracts/v1/environment-candidate.schema.json",
         crate::authoring::EnvironmentCandidate
     );
@@ -370,6 +374,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
     document!(
         "schemas/contracts/v1/authenticated-actor.schema.json",
         crate::auth::AuthenticatedActor
+    );
+    document!(
+        "schemas/contracts/v1/organization-user.schema.json",
+        crate::auth::OrganizationUser
+    );
+    document!(
+        "schemas/contracts/v1/organization-user-page.schema.json",
+        crate::auth::OrganizationUserPage
     );
     document!(
         "schemas/contracts/v1/auth-session.schema.json",
@@ -1029,6 +1041,19 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         ) {
             parameters.push(json!({"name":"courseId","in":"query","required":false,"schema":{"type":"string","format":"uuid"}}));
         }
+        if operation.operation_id == "listOrganizationUsers" {
+            parameters.extend([
+                json!({"name":"query","in":"query","required":true,"schema":{"type":"string","minLength":1,"maxLength":128}}),
+                json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
+                json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
+            ]);
+        }
+        if operation.operation_id == "listProjectAgentRuns" {
+            parameters.extend([
+                json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
+                json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
+            ]);
+        }
         if operation.operation_id == "getInternalAuthoringPublicationAdmission" {
             parameters.extend([
                 json!({"name":"projectId","in":"query","required":true,"schema":{"type":"string","format":"uuid"}}),
@@ -1128,6 +1153,32 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_ENV_OWNER_CLOCK_INVALID"
             ]);
         }
+        if operation.operation_id == "listOrganizationUsers" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_ACCESS_DIRECTORY_QUERY_INVALID",
+                "LW_ACCESS_DIRECTORY_PAGE_INVALID",
+                "LW_ACCESS_DIRECTORY_UNAVAILABLE",
+            ]);
+        }
+        if operation.operation_id == "listProjectAgentRuns" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_AGENT_RUN_HISTORY_PAGE_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_AGENT_PERSISTENCE_FAILED",
+            ]);
+        }
+        if operation.operation_id == "addProjectMembership" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_ACCESS_DENIED",
+                "LW_ACCESS_DIRECTORY_USERNAME_INVALID",
+                "LW_ACCESS_DIRECTORY_UNAVAILABLE",
+                "LW_ACCESS_DIRECTORY_USER_NOT_FOUND",
+                "LW_ACCESS_DIRECTORY_USER_DISABLED",
+                "LW_IDEMPOTENCY_CONFLICT",
+                "LW_REVISION_CONFLICT",
+            ]);
+        }
         if matches!(
             operation.operation_id,
             "appendProjectEnvironmentCandidateDecision"
@@ -1202,6 +1253,9 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 },
                 "OperationAccepted": {"type":"object","additionalProperties":false,"required":["operationId","revision","statusUrl"],"properties":{"operationId":{"type":"string","format":"uuid"},"revision":{"type":"integer","minimum":1},"statusUrl":{"type":"string","format":"uri-reference"}}}
                 ,"AuthSession": contract_ref("auth-session")
+                 ,"OrganizationUser": contract_ref("organization-user")
+                 ,"OrganizationUserPage": contract_ref("organization-user-page")
+                 ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
@@ -1599,6 +1653,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "type":"array",
             "items":contract_ref("project-membership")
         }),
+        "listOrganizationUsers" => contract_ref("organization-user-page"),
+        "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
         "addProjectMembership" | "removeProjectMembership" => contract_ref("project-membership"),
         "createProjectProblemPackageUpload" => contract_ref("http/problem-package-upload-session"),
         "getProjectProblemPackage" | "completeProjectProblemPackageUpload" => {

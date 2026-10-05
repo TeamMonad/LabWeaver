@@ -23,7 +23,7 @@ use contracts::authoring::{
     ProjectLlmEgressPolicy, RuntimeKind,
 };
 use contracts::http::{
-    AddProjectMembershipRequest, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
+    AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
     AuthoringPublicationAdmissionQuery, CancelCandidateBuildRequest,
     CancelPlatformImageUploadRequest, CandidateBuildTarget, CandidateDecisionRequest,
     CompleteAuthoringApprovalRequest, CompletePlatformImageUploadRequest,
@@ -36,10 +36,11 @@ use contracts::http::{
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalPlatformImageDisableRequest, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
-    PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
+    PageQuery, PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
     RegisterPlatformImageRequest, RemoveProjectMembershipRequest, RepinPlatformImageRequest,
-    StrongEtag, WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
-    WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
+    ResolvedProjectMembershipRequest, StrongEtag, WithdrawEnvironmentTemplateReleaseRequest,
+    WithdrawEvaluationReleaseRequest, WorkConfigurationAdmissionQuery, WorkConfigurationPlanView,
+    resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
@@ -131,7 +132,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route(
             "/api/v1/projects/{project_id}/agent-runs",
-            post(create_project_agent_run),
+            get(list_project_agent_runs).post(create_project_agent_run),
         )
         .route(
             "/api/v1/projects/{project_id}/work-configuration-runs",
@@ -523,7 +524,7 @@ async fn add_project_membership(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(project_id): Path<ProjectId>,
     headers: HeaderMap,
-    Json(request): Json<AddProjectMembershipRequest>,
+    Json(request): Json<ResolvedProjectMembershipRequest>,
 ) -> Result<Response, ApiError> {
     let decision = authorize_project(
         &state,
@@ -929,6 +930,49 @@ async fn get_project_agent_run(
     .await?;
     let run = current_project_agent_run(&state, project_id, run_id).await?;
     Ok(with_etag(StatusCode::OK, &run, run.revision))
+}
+
+async fn list_project_agent_runs(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Result<Response, ApiError> {
+    authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "listProjectAgentRuns",
+        project_id,
+    )
+    .await?;
+    // Keep the project lookup at the same gateway boundary as the detail route.  This binds the
+    // optional course association before the Agent-owned history is returned.
+    let project = state.control.project(project_id).await?;
+    let (page, page_size, _) = query
+        .normalized()
+        .map_err(|_| ApiError::bad_request("LW_AGENT_RUN_HISTORY_PAGE_INVALID"))?;
+    let history = state
+        .agent
+        .list_project_runs(
+            project_id,
+            &PageQuery {
+                page: Some(page),
+                page_size: Some(page_size),
+            },
+        )
+        .await?;
+    if history.page != page
+        || history.page_size != page_size
+        || history
+            .items
+            .iter()
+            .any(|item| item.project_id != project_id || item.course_id != project.course_id)
+    {
+        return Err(DownstreamError::IdentityMismatch.into());
+    }
+    Ok(Json(history).into_response())
 }
 
 async fn get_project_work_configuration_plan(

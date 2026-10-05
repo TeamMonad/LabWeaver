@@ -103,6 +103,7 @@ async function approvePendingAgentTaskResourceByUi(adminPage, {
   environmentClass = null,
   environmentId = null,
   environmentRevision = null,
+  approvedRequestIds = new Set(),
 }) {
   if (
     run.id !== runId
@@ -141,6 +142,7 @@ async function approvePendingAgentTaskResourceByUi(adminPage, {
     trackKind,
     attemptNumber: activeAttempt.number,
     studentActorId,
+    ignoredRequestIds: approvedRequestIds,
   })
   if (request?.state === 'reviewing') {
     if (!Number.isInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
@@ -153,13 +155,27 @@ async function approvePendingAgentTaskResourceByUi(adminPage, {
       requesterId: studentActorId,
       durationSeconds: request.requestedDurationSeconds,
       providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
+      onTaskOwnerRelease: async ({ requestId, leaseId }) => {
+        // A task-owned lease is intentionally short-lived: the task worker
+        // releases it before the same run advances to its next attempt. The
+        // request selector above already fenced this approval to the current
+        // run, track, attempt, requester, and taskRunId. Requiring the lease
+        // to remain active here would deadlock schema-repair/resource chains;
+        // the caller's run poll remains the authority for task success/failure.
+        if (requestId !== request.id || leaseId === '') {
+          throw new Error('WORK_TASK_RESOURCE_LEASE_SCOPE_INVALID')
+        }
+        return true
+      },
     })
+    approvedRequestIds.add(request.id)
   }
 }
 
 async function publishWorkTemplate(page, project, packageCopy = null, { adminPage, studentActorId }) {
   const packageDirectory = packageCopy?.directory ?? await mkdtemp(join(tmpdir(), 'labweaver-work-package-'))
   const ownsPackageDirectory = !packageCopy
+  const approvedTaskResourceRequestIds = new Set()
   try {
     await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, {
       waitUntil: 'domcontentloaded',
@@ -189,7 +205,7 @@ async function publishWorkTemplate(page, project, packageCopy = null, { adminPag
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/projects/${project.id}/agent-runs`
     })
-    await page.getByRole('button', { name: '启动 Work AgentRun', exact: true }).click()
+    await page.getByRole('button', { name: '启动 Work 模板生成', exact: true }).click()
     const runResponse = await runResponsePromise
     const acceptedRun = await expectJson(runResponse, 'WORK_TEMPLATE_RUN_CREATE_FAILED')
     expect(acceptedRun).toMatchObject({
@@ -217,6 +233,7 @@ async function publishWorkTemplate(page, project, packageCopy = null, { adminPag
             trackKind: 'environment',
             purposeKind: 'authoring',
             environmentClass: 'work',
+            approvedRequestIds: approvedTaskResourceRequestIds,
           })
         }
         return terminalRunState(value.state)
@@ -285,12 +302,12 @@ async function publishWorkTemplate(page, project, packageCopy = null, { adminPag
       await expect(candidateCard).toContainText('构建完成', { timeout: 120_000 })
     }
     await candidateCard.getByTestId('work-template-candidate-confirmation').check()
-    await candidateCard.getByPlaceholder('说明为什么批准这个 Work Environment 候选').fill(
+    await candidateCard.getByPlaceholder('说明为什么批准这个 Work 环境候选').fill(
       REAL_WORK_VM
-        ? '已核对 Work EnvironmentSpec、虚拟机基础镜像和项目安全约束。'
-        : '已核对 Work EnvironmentSpec、容器 artifact 和项目安全约束。',
+        ? '已核对 Work 环境候选规格、虚拟机基础镜像和项目安全约束。'
+        : '已核对 Work 环境候选规格、容器 artifact 和项目安全约束。',
     )
-    const approveButton = candidateCard.getByRole('button', { name: '批准 Environment 候选', exact: true })
+    const approveButton = candidateCard.getByRole('button', { name: '批准环境候选', exact: true })
     await expect(approveButton).toBeEnabled()
     const approvalResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
@@ -820,6 +837,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     ) {
       throw new Error('WORK_CONFIGURATION_REQUEST_SCOPE_INVALID')
     }
+    const approvedConfigurationResourceRequestIds = new Set()
     const configurationRunStatus = await pollJson(
       page.request,
       `/api/v1/projects/${project.id}/agent-runs/${configurationRun.id}`,
@@ -836,6 +854,7 @@ test('student provisions a Work environment, configures it, and releases its cap
           purposeKind: 'work_configuration',
           environmentId: configurationRequestBody.environmentId,
           environmentRevision: configurationRequestBody.environmentRevision,
+          approvedRequestIds: approvedConfigurationResourceRequestIds,
         })
         return value.state === 'awaiting_approval' || terminalRunState(value.state)
       },

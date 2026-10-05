@@ -157,6 +157,20 @@ describe('ResourceRequestView', () => {
     wrapper.unmount()
   })
 
+  it('explains task-owner cleanup without exposing an internal reason code as a failure', async () => {
+    mocks.requests = {
+      kind: 'success',
+      data: [{ ...pendingRequest(), target: { kind: 'task', taskRunId: 'task-run-1' }, state: 'active' }],
+    }
+    mocks.leases = { kind: 'success', data: [{ ...activeLease(), state: 'revoked', revokeReasonCode: 'task_owner_release' }] }
+    const wrapper = await mountView()
+
+    expect(wrapper.text()).toContain('临时任务资源已回收，请查看任务结果')
+    expect(wrapper.text()).toContain('这不代表用户 Work 环境已释放')
+    expect(wrapper.text()).not.toContain('task_owner_release')
+    wrapper.unmount()
+  })
+
   it('explains user units and gives an honest empty-release next step', async () => {
     mocks.releases = { kind: 'empty' }
     const wrapper = await mountView()

@@ -1,11 +1,14 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import WorkspaceListView from '@/views/researcher/WorkspaceListView.vue'
 
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
+  add: vi.fn(),
+  directoryLoad: vi.fn(),
+  directoryClear: vi.fn(),
   remove: vi.fn(),
   requests: [] as Record<string, unknown>[],
   requestState: null as Record<string, unknown> | null,
@@ -45,20 +48,38 @@ const membersState = reactive({
   memberships: {
     kind: 'success' as const,
     data: [
-      { actorId: 'owner-1', role: 'teacher', state: 'active', revision: 1 },
-      { actorId: 'student-1', role: 'student', state: 'active', revision: 2 },
+      { actorId: 'owner-1', username: 'owner', displayName: '项目教师', role: 'teacher', state: 'active', revision: 1 },
+      { actorId: 'student-1', username: 'student-1', displayName: '学生一', role: 'student', state: 'active', revision: 2 },
     ],
   },
   acting: null as string | null,
   outcome: null,
   load: vi.fn(),
-  add: vi.fn(),
+  add: mocks.add,
   remove: mocks.remove,
 })
+
+const directoryState = reactive({
+  users: { kind: 'idle' as const } as Record<string, unknown>,
+  load: mocks.directoryLoad,
+  clear: mocks.directoryClear,
+})
+
+const authState = {
+  user: ref({
+    expired: false,
+    profile: { roles: ['teacher'] },
+  } as { expired: boolean; profile: { roles: string[] } } | null),
+}
 
 vi.mock('@/composables/useProjects', () => ({
   useProjects: () => projectsState,
   useProjectMemberships: () => membersState,
+  useOrganizationDirectoryUsers: () => directoryState,
+}))
+
+vi.mock('@/composables/useAuth', () => ({
+  useAuth: () => authState,
 }))
 
 vi.mock('@/composables/useProjectWorkEnvironments', () => ({
@@ -91,9 +112,22 @@ describe('WorkspaceListView', () => {
     mocks.requestState = null
     mocks.loadResources.mockReset()
     mocks.archive.mockReset()
+    mocks.add.mockReset()
+    mocks.add.mockResolvedValue(true)
+    mocks.directoryLoad.mockReset()
+    mocks.directoryClear.mockReset()
     mocks.remove.mockReset()
     projectsState.selectedProjectId = projectOne.id
     projectsState.selectedProject = projectOne
+    authState.user.value = { expired: false, profile: { roles: ['teacher'] } }
+    membersState.memberships = {
+      kind: 'success',
+      data: [
+        { actorId: 'owner-1', username: 'owner', displayName: '项目教师', role: 'teacher', state: 'active', revision: 1 },
+        { actorId: 'student-1', username: 'student-1', displayName: '学生一', role: 'student', state: 'active', revision: 2 },
+      ],
+    }
+    directoryState.users = { kind: 'idle' }
   })
 
   it('shows a blocked Work allocation without an environment and keeps recovery in its project', async () => {
@@ -139,10 +173,68 @@ describe('WorkspaceListView', () => {
     await wrapper.get('.member-row .text-button').trigger('click')
     await flushPromises()
     expect(mocks.remove).not.toHaveBeenCalled()
-    expect(document.body.querySelector('dialog')?.textContent).toContain('student-1')
+    expect(document.body.querySelector('dialog')?.textContent).toContain('学生一')
     document.body.querySelector<HTMLButtonElement>('dialog .filled-button')?.click()
     await flushPromises()
     expect(mocks.remove).toHaveBeenCalledWith('student-1', expect.objectContaining({ actorId: 'student-1' }))
+  })
+
+  it('lets teachers search and select an enabled organization account before adding it', async () => {
+    directoryState.users = {
+      kind: 'success',
+      data: {
+        items: [
+          { username: 'student-2', displayName: '学生二', enabled: true },
+          { username: 'disabled-1', displayName: '已停用账号', enabled: false },
+        ],
+        page: 1,
+        pageSize: 25,
+        hasMore: true,
+      },
+    }
+    const { wrapper } = await mountView()
+    const search = wrapper.get('.directory-picker input')
+    await search.setValue('student')
+    await wrapper.get('.directory-picker .outlined-button').trigger('click')
+    expect(mocks.directoryLoad).toHaveBeenCalledWith('student', 1)
+    expect(wrapper.findAll('.directory-result')).toHaveLength(2)
+    expect(wrapper.findAll('.directory-result')[1].attributes('disabled')).toBeDefined()
+    await wrapper.get('.directory-pagination .text-button:last-child').trigger('click')
+    expect(mocks.directoryLoad).toHaveBeenCalledWith('student', 2)
+
+    await wrapper.find('.directory-result').trigger('click')
+    expect(wrapper.text()).toContain('已选择：学生二（student-2）')
+    await search.setValue('student-2')
+    expect(wrapper.find('.directory-selection').exists()).toBe(false)
+    expect(mocks.directoryClear).toHaveBeenCalled()
+    await wrapper.find('.directory-result').trigger('click')
+    await wrapper.get('.member-form').trigger('submit')
+    await flushPromises()
+    expect(mocks.add).toHaveBeenCalledWith({ username: 'student-2', role: 'student' })
+    expect(mocks.directoryClear).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps the student owner input exact and does not expose directory search', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'] } }
+    const { wrapper } = await mountView()
+    expect(wrapper.find('.directory-picker').exists()).toBe(false)
+    expect(wrapper.get('input[placeholder="输入完整用户名"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('平台不会枚举组织账号')
+    wrapper.unmount()
+  })
+
+  it('keeps a membership with unsynchronized metadata readable without promoting its actor id', async () => {
+    membersState.memberships = {
+      kind: 'success',
+      data: [{ actorId: 'legacy-1', role: 'student', state: 'active', revision: 3 }],
+    }
+    const { wrapper } = await mountView()
+    const member = wrapper.get('.member-row')
+    expect(member.get('strong').text()).toBe('账号资料待同步')
+    expect(member.text()).toContain('账号资料待同步')
+    expect(member.get('details code').text()).toContain('legacy-1')
+    wrapper.unmount()
   })
 
   it('clears a confirmation when switching projects and keeps the URL project authoritative', async () => {

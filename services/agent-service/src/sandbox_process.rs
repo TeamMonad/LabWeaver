@@ -1801,6 +1801,9 @@ fn bridge_cancellation(cancellation: &RunCancellation) -> (CancellationToken, Ca
 fn map_task_resource(error: &TaskResourceError) -> ClaudeCodeProcessError {
     match error {
         TaskResourceError::Cancelled => ClaudeCodeProcessError::Cancelled,
+        TaskResourceError::ResourceApprovalTimeout => {
+            ClaudeCodeProcessError::ResourceApprovalTimeout
+        }
         _ => ClaudeCodeProcessError::Io,
     }
 }
@@ -1825,10 +1828,10 @@ fn attempt_ownership_from_parts(
 }
 
 fn sandbox_failure(diagnostic: &str) -> ClaudeCodeProcessError {
-    if diagnostic == "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED" {
-        ClaudeCodeProcessError::TimedOut
-    } else {
-        ClaudeCodeProcessError::Io
+    match diagnostic {
+        "LW_AGENT_SANDBOX_DEADLINE_EXCEEDED" => ClaudeCodeProcessError::TimedOut,
+        "LW_TASK_RESOURCE_APPROVAL_TIMEOUT" => ClaudeCodeProcessError::ResourceApprovalTimeout,
+        _ => ClaudeCodeProcessError::Io,
     }
 }
 
@@ -1977,13 +1980,38 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxReceipt, SandboxReceiptError, attempt_environment, parse_receipt};
+    use super::{
+        SandboxReceipt, SandboxReceiptError, attempt_environment, map_task_resource, parse_receipt,
+        sandbox_failure,
+    };
+    use crate::claude_code::ClaudeCodeProcessError;
     use persistence_sqlx::Sha256Digest;
     use std::collections::BTreeMap;
+    use task_execution::resource::TaskResourceError;
 
     use crate::claude_code::AuthoringAttemptScope;
     use contracts::authoring::AgentTrackKind;
     use contracts::{ActorId, AgentRunId, CourseId, ProjectId};
+
+    #[test]
+    fn resource_approval_timeout_keeps_its_resource_diagnostic() {
+        assert_eq!(
+            map_task_resource(&TaskResourceError::ResourceApprovalTimeout),
+            ClaudeCodeProcessError::ResourceApprovalTimeout
+        );
+        assert_eq!(
+            sandbox_failure("LW_TASK_RESOURCE_APPROVAL_TIMEOUT"),
+            ClaudeCodeProcessError::ResourceApprovalTimeout
+        );
+        assert_eq!(
+            map_task_resource(&TaskResourceError::Cancelled),
+            ClaudeCodeProcessError::Cancelled
+        );
+        assert_eq!(
+            map_task_resource(&TaskResourceError::ResourceTerminal),
+            ClaudeCodeProcessError::Io
+        );
+    }
 
     #[test]
     fn attempt_environment_always_carries_the_reviewed_provider_environment() {

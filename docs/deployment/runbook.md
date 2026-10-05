@@ -1,2204 +1,355 @@
-# LabWeaver v1 部署运行手册
+# LabWeaver 部署与运维手册
 
-本手册是 Issue #127 简化部署路径的操作入口，面向 `deploy/ansible/inventories/v1/` 这套真实集群（维护者控制器为本工作站，SSH 用户 `labweaver-deploy`）。所有 `cargo xtask` 子命令与 playbook 均以当前树为准；本轮不再包含 TestFlight 报告、InfrastructureDeploymentManifest/HarborPolicyManifest/BackupEvidence 哈希链、foundation clean-redeploy/finalize、rotation-verify、NATS authority rotation、`xtask backup`/`xtask rollback` 或 credential-registry。
+本手册描述当前仓库对应的 v1 集群入口。它覆盖首次安装、应用增量部署、配置恢复、GPU 节点维护、故障排查和用户操作。命令名以 `xtask/src/main.rs`、`deploy/ansible/playbooks/` 和对应 Ansible role 为准；私有清单、证书、令牌、口令和用户内容只放在受保护的私有目录，不复制到仓库或普通日志。
 
-> 警告：本轮没有备份与回滚工具。删除数据卷、数据库或共享基础组件后无法从本仓恢复。执行前必须确认变更窗口、受影响用户和数据保留需求。应用层 Helm 升级使用 `--atomic`，失败时只回退到上一 Helm revision，不等于数据库回滚。
+应用层由 Control、Access、Environment、Agent、Evaluation、Resource、Web 和 OpenSSH Gateway 组成。Environment 管环境对象，Resource 管申请、租约、容量和费用，Evaluation 管评测任务；部署操作不能绕过这些业务边界。
 
-## 1. 前提
+> 应用 Helm 升级使用 `--atomic`，失败时只回到上一应用 revision。迁移是前向操作，应用回退不能恢复数据库。删除数据库、共享存储、基础服务或用户环境前，必须先确认对象归属、数据保留和变更窗口；本手册不提供批量删除或节点重启来制造故障的步骤。
 
-### 1.1 控制器与仓库
+## 1. 前提与私有输入
 
-控制器是本工作站，仓库根目录为 `LabWeaver`。先安装锁定工具（版本见 `deploy/ansible/controller.lock.yml` 与 `deploy/versions.lock.yml`）：
+### 1.1 控制器和工具
+
+在批准的 Linux 控制器上从仓库根目录执行基础设施命令。Rust、Helm、kubectl、Ansible、BuildKit 和 `virtctl` 的版本以 `deploy/versions.lock.yml`、`deploy/ansible/controller.lock.yml` 为准。需要手工运行 Ansible 时先安装仓库声明的 collection：
 
 ```sh
-cargo --version                 # rust_toolchain 见 deploy/versions.lock.yml
-docker-buildx version           # buildx v0.35.0
-helm version --short            # v3.21.3
-kubectl version --client
-ansible --version               # 仅手工 ansible-playbook 时需要 ansible-core 2.18.6
-virtctl version                 # 验证阶段在控制平面 PATH 上必需
+ansible-galaxy collection install \
+  -p deploy/ansible/collections \
+  -r deploy/ansible/requirements.yml
 ```
 
-按需安装 Ansible collections（xtask 内置 ansible-rs 也读取同一 collections/roles 路径）：
+基础设施命令由 `cargo xtask` 读取 `deploy/ansible/ansible.cfg`、清单、vault 文件和当前环境变量。控制器不是 Linux 时，`preflight --infra`、应用基础设施部署等入口应在批准的 Linux 控制器执行。
+
+### 1.2 清单、运行标识和 kubeconfig
+
+将示例清单复制到被 gitignore 的私有清单位置，并填写真实节点、维护用户、密钥和分组；不要把私有拓扑写回 `hosts.yml.example`。必须存在真实 inventory 和 vault password file：
 
 ```sh
-ansible-galaxy collection install -p deploy/ansible/collections -r deploy/ansible/requirements.yml
-```
-
-`xtask` 通过 `set_system_envs` 继承当前 shell 环境，因此下面导出的变量会传入 playbook。若控制器把 collections 放在仓库之外，设置 `LABWEAVER_ANSIBLE_DEPENDENCY_ROOT` 指向包含 `collections/`（或 `deploy/ansible/`）的目录。
-
-### 1.2 私有清单、SSH 与 kubeconfig
-
-真实清单与 vault 口令在仓库中被 gitignore，必须存在：
-
-```sh
-ls -l deploy/ansible/inventories/v1/hosts.yml deploy/ansible/inventories/v1/.vault-password
-```
-
-- `hosts.yml`：节点、`ansible_user`、私钥路径、`group_vars` 变量。模板见 `deploy/ansible/inventories/v1/hosts.yml.example`。
-- `.vault-password`：xtask 以 `ANSIBLE_VAULT_PASSWORD_FILE` 注入。
-- 集群管理员 kubeconfig：本工作站常用 `.private/kubeconfig-v1-admin.conf`；xtask 的 connected 校验与产品部署读取 `LABWEAVER_KUBECONFIG`。角色默认在目标机使用 `/etc/kubernetes/admin.conf`。
-
-```sh
-export LABWEAVER_RUN_ID="infra-redeploy-1"        # 小写 8-96 字符或 UUIDv7；identity 需 ^infra-
-export LABWEAVER_PLATFORM_REGISTRY="harbor.lab.lan" # 裸主机名，不带 scheme/路径
+test -f deploy/ansible/inventories/v1/hosts.yml
+test -f deploy/ansible/inventories/v1/.vault-password
+export LABWEAVER_RUN_ID="<lowercase-run-id-or-uuidv7>"
 export LABWEAVER_KUBECONFIG="$PWD/.private/kubeconfig-v1-admin.conf"
+export LABWEAVER_PLATFORM_REGISTRY="<registry-host>"
+export ANSIBLE_VAULT_PASSWORD_FILE="$PWD/deploy/ansible/inventories/v1/.vault-password"
 ```
 
-`LABWEAVER_RUN_ID` 是 xtask 的强制运行标识，用于隔离验证命名空间与部署工作目录。
+`LABWEAVER_RUN_ID` 用于隔离部署工作目录和验证资源，应用部署、基础层 reconcile、验证和身份 foundation 均应使用本次唯一标识。身份 foundation 的运行标识还必须满足 `infra-` 前缀要求。
 
-### 1.3 Harbor 凭据与公共入口
+清单至少应声明 `routers`、一个 `control_plane`、至少两个 `workers` 和一个 `nfs_servers`。`00-preflight.yml` 会检查占位符、操作系统、SELinux、KVM、NFS 和路由器条件；GPU 驱动、设备插件和 KubeVirt mediated device 另按第 5 节检查。
 
-- 内部 Registry：`harbor.lab.lan`，项目 `labweaver-system`（`platform_harbor_route` 强制 `harbor_project_name == 'labweaver-system'`，项目为 private、auto_scan、prevent_vul=false）。
-- 机器人凭据文件：`.private/harbor-robot-user`、`.private/harbor-robot-pass`；Harbor 公共 CA 由 `platform_harbor_route` 发布到 `/var/lib/labweaver/.private/harbor-public/registry-ca.crt`。
-- 公共入口由 `deploy/ansible/roles/public_ingress` 声明（当前树默认值）：
-  - `https://labweaver.2018wzh.top`、`https://portal.labweaver.2018wzh.top` → `labweaver-system/web:8080`
-  - `https://keycloak.labweaver.2018wzh.top` → `keycloak-system/labweaver-keycloak-http:8080`
-  - `https://harbor.labweaver.2018wzh.top` → `harbor/harbor:80`
-  - `labweaver.2018wzh.top:2222` → OpenSSH Gateway 的独立 VIP（`public_ingress_ssh_gateway_vip`），供 Access 签发的 SSH 命令使用。
-- 内部门户路由在私有 values 中可覆盖（例如当前 `.private/helm-values-current.yaml` 使用 `portal.labweaver.internal`）。以私有清单和实时 HTTPRoute 为准。
+### 1.3 公共入口和模型服务
 
-### 1.4 节点事实（preflight 强制项）
+公网域名由 `deploy/ansible/roles/public_ingress` 的 `public_ingress_routes` 管理。Web、Keycloak、Harbor 和 OpenSSH Gateway 使用各自声明的 HTTPS/SSH 入口；用户从 HTTPS 首页开始，登录回调必须返回同一公共入口。浏览器验收保持证书校验开启，不使用内部端口、HTTP 绕过或 `LABWEAVER_IGNORE_HTTPS_ERRORS=1`。
 
-`cargo xtask preflight` 运行 `00-preflight.yml`，强制：
+Agent 的模型输入在 platform bundle 的 `agent-service-config/anthropic-base-url` 和 `anthropic-model` 中配置。当前候选部署固定使用集群内 Ollama Service 直连和 `qwen3.6:35b`，不经过旧代理，也不回退云模型。修改模型时重新渲染 bundle 并按第 4 节部署，不能只改 Pod 环境变量。
 
-- 清单分组：`routers` 恰好 1、`control_plane` 恰好 1、`workers` ≥ 2、`nfs_servers` 恰好 1。
-- 无未解析的 `REPLACE_`/空清单变量。
-- OS 为 Rocky/RHEL 10+ 或 Ubuntu 22.04+；RedHat 需 SELinux `Enforcing`。
-- worker 必须有字符设备 `/dev/kvm` 且 CPU 暴露 `vmx`/`svm`。
-- NFS 服务 active、导出存在、集群节点可达 2049。
-- 路由器 WAN/LAN 接口存在（未设置 `labweaver_skip_router_services` 时）。
+## 2. 首次安装和基础层
 
-preflight **不检查 GPU**。启用 GPU 前需人工确认：NVIDIA 驱动、`nvidia-container-toolkit`、设备插件，以及 KubeVirt mediated device 所需的内核与节点配置（见第 6 节）。
+### 2.1 预检
 
-### 1.5 运行预检
+使用 `xtask` 运行仓库实际的 preflight 入口：
 
 ```sh
 cargo xtask preflight --env v1 --infra
 ```
 
-手工等价命令（在 `deploy/ansible` 下执行，`ansible.cfg` 生效）：
+只读检查结果后再进行任何节点变更。手工 Ansible 入口是 `deploy/ansible/playbooks/00-preflight.yml`；需要额外指定范围时使用现有 playbook 支持的变量，不自行添加新的校验脚本。
+
+### 2.2 新集群基础安装
+
+仅在目标集群尚未安装 Kubernetes、网络、存储、KubeVirt、sandbox runtime 和 public ingress 时执行完整站点 playbook。该入口依次导入 `00-preflight.yml`、节点准备、Kubernetes、网络、存储、KubeVirt、`75-sandbox-runtime.yml`、addons 和 `82-public-ingress.yml`：
 
 ```sh
-ansible-playbook -i inventories/v1/hosts.yml playbooks/00-preflight.yml \
-  --vault-password-file inventories/v1/.vault-password \
-  -e labweaver_preflight_scope=cluster
-```
-
-### 1.6 单独维护 Cilium
-
-已有集群仅维护 Cilium 时，获得网络维护许可后使用 `50-install-network.yml --tags cilium`。
-该选择只加载并校验版本锁、检查 Helm、注册已有 Helm repositories 和维护 Cilium release；
-不应用 Gateway API CRD、节点 host policy、MetalLB release 或地址池。repository 注册仍包含
-MetalLB，但不安装或升级 MetalLB。未指定 tag 的完整 playbook 行为保持不变。
-
-先核对源码是批准的 commit 且工作树干净，并审核 `deploy/versions.lock.yml` 中的 chart 与镜像。
-`KUBERNETES_API_ADVERTISE_ADDRESS` 应来自现有 Cilium Helm values 的 `k8sServiceHost`，并与
-kube-apiserver 的 advertise address 或受管 inventory 事实交叉核对；不能猜测地址。
-`ANSIBLE_PYTHON_INTERPRETER` 使用控制器已批准、包含 Kubernetes SDK 的解释器。
-
-```sh
-test "$(git rev-parse HEAD)" = "$APPROVED_SOURCE_REVISION"
-test -z "$(git status --porcelain)"
 ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
-ansible-playbook -i deploy/ansible/inventories/v1/hosts.yml \
+ansible-playbook \
+  -i deploy/ansible/inventories/v1/hosts.yml \
   --vault-password-file deploy/ansible/inventories/v1/.vault-password \
-  deploy/ansible/playbooks/50-install-network.yml --tags cilium \
-  -e "kubernetes_api_advertise_address=$KUBERNETES_API_ADVERTISE_ADDRESS" \
-  -e "ansible_python_interpreter=$ANSIBLE_PYTHON_INTERPRETER"
+  deploy/ansible/playbooks/site.yml
 ```
 
-Cilium 及其 chart 管理的组件会滚动更新，可能中断环境网络和 Gateway 长连接；该 tag
-不排空业务或改变节点内核。执行前安排维护窗口，保留上一份批准的版本锁和 Helm revision，
-并按 `docs/deployment/ansible.md` 核对升级后状态和回滚条件。
+已有集群的应用升级不要重复执行整站 playbook；使用第 4 节的 profile 入口。`cargo xtask deploy --env v1 --infra --yes` 对应 `95-harbor.yml`，只用于 Harbor 安装或维护，不是完整集群安装入口。
 
-## 2. 构建与发布镜像
+### 2.3 持久化服务、BuildKit、Harbor 和身份
 
-打包在干净的源码树上进行（脏树会被 `LW_PACKAGE_INPUT_DIRTY` 拒绝），并锁 Rust 工具链与摘要固定的基础镜像。
+在已有 Kubernetes 上首次接入应用时按依赖顺序执行幂等 reconcile：
 
 ```sh
-export LABWEAVER_PLATFORM_REGISTRY=harbor.lab.lan
-cargo xtask package --env v1 --release platform-1 --profile platform --yes
-cargo xtask package --env v1 --release resource-1 --profile resource --yes
+cargo xtask platform-foundation --env v1 --infra --yes
+cargo xtask platform-buildkit --env v1 --infra --yes
+cargo xtask platform-harbor-route --env v1 --infra --yes
 ```
 
-- `platform` profile 构建除 `resource-service` 外的组件；`resource` profile 只构建 `resource-service`。
-- 输出：`artifacts/package/pkg-v1-<release>-<commit12>/PlatformImagePackageManifest.json`（JCS 规范化，记录 commit、组件锁哈希、builder 版本、digest 引用）。
-- 基础镜像镜像化预期：每个基础镜像必须已按摘要镜像到 `<registry>/labweaver-system/base-<name>@sha256:<digest>`（如 `base-rust-builder`、`base-web-runtime`）。构建参数只使用这些私有镜像；缺失或可变 tag 会失败。
-- BuildKit 身份：本地 `docker-buildx inspect --bootstrap` 必须匹配锁定的 `platform_images.buildkit`；若本地不是该 BuildKit 镜像，则通过 `LABWEAVER_KUBECONFIG` 读取 `labweaver-build/buildkit` Deployment 校验镜像、配置注解与就绪副本。
+这些入口分别对应 `92-platform-foundation.yml`、`92-platform-buildkit.yml` 和 `92-platform-harbor-route.yml`。Harbor 本身不存在时才使用 `cargo xtask deploy --env v1 --infra --yes`。
 
-校验：
+Keycloak foundation 使用受保护的 root-only locator；locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
 
 ```sh
-cargo xtask package-validate \
-  --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json \
-  --mode static
-
-cargo xtask package-validate \
-  --manifest artifacts/package/<run-id>/PlatformImagePackageManifest.json \
-  --mode connected --env v1
-```
-
-`connected` 会重新校验组件锁哈希、工具身份，并逐个 `docker-buildx imagetools inspect` 确认 Harbor 当前摘要与清单一致。
-
-### 2.9 迁移目录与在线 ledger 的前缀校验（部署前必做）
-
-`migrations/catalog.yaml` 是迁移的唯一真源，而每个域在数据库里都有 `schema_migrations`
-（`migration_id` + `sha256` + `outcome`）。发布前必须确认**在线 ledger 是目录的有序前缀**，否则
-服务启动会以 `DB_SCHEMA_CHECKSUM_MISMATCH`/`DB_SCHEMA_UNKNOWN` 失败关闭：
-
-```sh
-kubectl -n labweaver-data exec postgres-0 -- env PGPASSWORD="$(kubectl -n labweaver-data get secret postgres-secrets -o jsonpath='{.data.postgres-password}' | base64 -d)" \
-  psql -U postgres -d labweaver -tAF'|' -c "select 'control',migration_id,sha256,outcome from control.schema_migrations union all select 'access',migration_id,sha256,outcome from access.schema_migrations union all select 'environment',migration_id,sha256,outcome from environment.schema_migrations union all select 'agent',migration_id,sha256,outcome from agent.schema_migrations union all select 'evaluation',migration_id,sha256,outcome from evaluation.schema_migrations union all select 'resource',migration_id,sha256,outcome from resource.schema_migrations order by 1,2"
-```
-
-逐域比对（id 与 `sha256` 都要相等），新增迁移只能追加在末尾。`#127` 的 rebase 正是按这条规则把
-develop 的新迁移顺延编号，保持在线 ledger 不变。
-
-## 3. 平台层干净重部署
-
-当前树**没有** foundation clean-redeploy 专用 playbook（`94-foundation-clean-redeploy.yml`、`platform_reset`、`foundation_clean_redeploy*` 已删除）。以下步骤用明确的 `helm`/`kubectl`/`ansible-playbook` 手工完成；每一步先记录、再删除，且删除范围必须精确。
-
-### 3.1 冻结并记录现状
-
-```sh
-export KUBECONFIG="$LABWEAVER_KUBECONFIG"
-helm -n labweaver-system list
-helm -n labweaver-data list
-kubectl get ns
-kubectl get pv    # 记录 Released 且 claimRef 指向应用命名空间的 PV
-kubectl get vmi,vm -A
-kubectl get ns -l labweaver.io/environment=true
-```
-
-停止用户环境、VM 与评测 Job 后再继续。停止请求不代表资源已释放或免费；未确认释放的用量保持待核实。
-
-### 3.2 删除应用层（精确范围）
-
-应用层 Helm release 与命名空间：
-
-```sh
-helm -n labweaver-system uninstall labweaver-resource || true
-helm -n labweaver-system uninstall labweaver || true
-kubectl delete namespace labweaver-system labweaver-evaluation --ignore-not-found --wait=true
-```
-
-> 删除 `labweaver-system` 会连带删除该命名空间内的 PVC/DataVolume（包括平台 VM base `ubuntu-lab-base-v1-seed`，重部署时会从 CDI 重新导入）。`labweaver-data`（PostgreSQL/NATS/MinIO）与 `keycloak-system` 属于基础层，**不受**上述命令影响。
-
-只有确认要重建基础层时，才在单独确认后删除其 PVC/PV（`labweaver-data` 的 `data-postgres-0`/`data-nats-0`/`data-minio-0`、`labweaver-build` 的 BuildKit 卷）。这一步不可恢复。
-
-删除已释放的应用层 PV（逐个精确名称，不要用 label/通配批量删除）：
-
-```sh
-kubectl get pv -o custom-columns=NAME:.metadata.name,CLAIM_NS:.spec.claimRef.namespace,STATUS:.status.phase
-kubectl delete pv <exact-pv-name> --wait=true
-```
-
-### 3.3 清理残留
-
-应用残留清理见第 8 节。节点级旧集群残留属于另一条路径（`15b-v1-residue-cleanup.yml`，需 `-e labweaver_v1_cleanup_old_cluster=true`），不是应用残留清理工具。
-
-### 3.4 重装基础层
-
-按顺序执行（幂等 reconcile，均需 `--infra --yes`）：
-
-```sh
-cargo xtask platform-foundation --env v1 --infra --yes   # labweaver-data: postgres/nats/minio
-cargo xtask platform-buildkit   --env v1 --infra --yes   # labweaver-build: rootless BuildKit
-cargo xtask platform-harbor-route --env v1 --infra --yes # 采用既有 Harbor，仅路由与信任
-```
-
-若 Harbor 本身需要安装或重建（会先用 `95-harbor.yml`）：
-
-```sh
-cargo xtask deploy --env v1 --infra --yes
-```
-
-若身份基础层（Keycloak）需要重装或校验：
-
-```sh
-export LABWEAVER_IDENTITY_SECRET_LOCATOR="<root-only identity bootstrap locator>"
+export LABWEAVER_IDENTITY_SECRET_LOCATOR="<private-identity-bootstrap-locator>"
 cargo xtask identity-foundation --env v1 --infra --yes --action deploy
 cargo xtask identity-foundation --env v1 --infra --yes --action verify
 ```
 
-`identity-foundation` 要求 `LABWEAVER_RUN_ID` 匹配 `^infra-`，且控制器持有 root-only、`0600`、SHA-256 与清单 `identity_secret_locator_sha256` 一致的 bootstrap 文件。
+身份基础层只 reconcile 需要的 realm、client、角色和用户，不删除已有身份。账号开通、角色授予和回收通过管理流程完成；普通用户从公共首页登录。
 
-### 3.5 应用配置包
+## 3. 配置 bundle、镜像和迁移
 
-平台配置包由公开清单约束的私有输入渲染，渲染脚本拒绝覆盖已有输出，且只在 `.private` 目录内读写：
+### 3.1 渲染配置
+
+`deploy/config/platform-bundle-manifest.json` 和 `resource-bundle-manifest.json` 是 bundle 的唯一字段清单。输入目录必须位于受保护的 `.private` 目录；渲染器拒绝缺文件、额外文件、符号链接、过大文件以及明文输出到仓库：
 
 ```sh
 python tools/render_platform_bundle.py \
-  --input /var/lib/labweaver/.private/v1/platform-application/render-input \
-  --output /var/lib/labweaver/.private/v1/platform-application/configuration-bundle.yml
+  --input "$PWD/.private/v1/platform-application/render-input" \
+  --output "$PWD/.private/v1/platform-application/configuration-bundle.yml"
 
 python tools/render_resource_bundle.py \
-  --input <resource-private-render-input> \
-  --output /var/lib/labweaver/.private/v1/resource-application/configuration-bundle.yml
+  --input "$PWD/.private/v1/resource-application/render-input" \
+  --output "$PWD/.private/v1/resource-application/configuration-bundle.yml"
 ```
 
-角色读取的实际 locator 由环境变量与 `application-vars.yml` 提供（`platform_application` 的 env 默认项均可在树中核对）。部署前确认私有目录内已存在：`configuration-bundle.yml`、`application-vars.yml`、`access-seed.json`、Keycloak 用户口令、Anthropic token 及渲染输入。
+平台输入必须包括 manifest 所列的 ConfigMap/Secret 文件；Resource 输入必须包括 `capacity.json`、`http.yaml` 和 Resource 服务所需 Secret。首次 bootstrap bundle 中的 `capacity.json` GPU seed 必须与 `deploy/versions.lock.yml` 的 `platform_gpu_classes` 逐字段一致；运行时目录以 Resource catalog 和管理员 UI 的业务记录为权威，lock 文件不是动态目录的第二真源。`environmentHandoff.systemActorId` 只从部署生成的 `environment-service-secrets/system-actor-id` 读取，不能复制示例 UUID 或在命令行临时改写。
 
-### 3.6 部署 platform profile
+渲染器使用独占创建，不覆盖已有输出；配置变更应使用新的、受保护的 bundle 文件名，并在 profile 部署后删除不再引用的临时副本。
+
+### 3.2 打包和校验
+
+打包要求源码树干净，并使用锁定的工具和 digest 镜像：
 
 ```sh
-export LABWEAVER_APPLICATION_VARS_FILE=/var/lib/labweaver/.private/v1/platform-application/application-vars.yml
-export LABWEAVER_POSTGRES_SERVICE=platform-admin
-export LABWEAVER_POSTGRES_SERVICE_FILE=<platform-admin.service>
-export LABWEAVER_POSTGRES_CLIENT_CERTIFICATE_FILE=<postgres client cert>
-export LABWEAVER_POSTGRES_CLIENT_PRIVATE_KEY_FILE=<postgres client key>
+cargo xtask package --env v1 --release <platform-release> --profile platform --yes
+cargo xtask package --env v1 --release <resource-release> --profile resource --yes
+
+cargo xtask package-validate \
+  --manifest <platform-package-manifest> --mode static
+cargo xtask package-validate \
+  --manifest <platform-package-manifest> --mode connected --env v1
+cargo xtask package-validate \
+  --manifest <resource-package-manifest> --mode static
+cargo xtask package-validate \
+  --manifest <resource-package-manifest> --mode connected --env v1
+```
+
+`platform` profile 包含除 Resource 外的服务；`resource` profile 只包含 Resource。不要使用可变 tag 代替 manifest 中的 digest，也不要用本地构建结果跳过 connected 校验。
+
+### 3.3 迁移边界
+
+`migrations/catalog.yaml` 是迁移目录唯一真源。每个业务 schema 的在线 migration ledger 必须是该目录的有序前缀，新增迁移只能追加。部署失败时先读取服务诊断和 ledger，不能删表、清空 schema 或手工改 migration 状态来绕过校验。数据库迁移前向执行；需要数据恢复时使用经批准的数据库恢复方案，不把 Helm 回滚当作数据库回滚。
+
+## 4. 增量部署和回滚
+
+### 4.1 Platform profile
+
+`93-platform-application.yml` 是 platform profile 的唯一应用入口。它会检查现有服务、配置 bundle、Harbor/Keycloak/MinIO/NATS、迁移和 Access seed，然后以 `helm upgrade --install ... --atomic --wait` 更新应用。执行前设置对应的私有 locator：
+
+```sh
+export LABWEAVER_APPLICATION_VARS_FILE="$PWD/.private/v1/platform-application/application-vars.yml"
+export LABWEAVER_POSTGRES_SERVICE_FILE="$PWD/.private/v1/platform-application/postgres-service.conf"
+export LABWEAVER_POSTGRES_CLIENT_CERTIFICATE_FILE="$PWD/.private/v1/platform-application/postgres-client.crt"
+export LABWEAVER_POSTGRES_CLIENT_PRIVATE_KEY_FILE="$PWD/.private/v1/platform-application/postgres-client.key"
 
 cargo xtask platform-application --env v1 --infra --yes \
-  --package-manifest artifacts/package/<platform-run-id>/PlatformImagePackageManifest.json
+  --package-manifest <platform-package-manifest>
 ```
 
-playbook `93-platform-application.yml` 在 `localhost`（控制器）执行，读取上述 locator、`application-vars.yml` 指向的配置包、Harbor/Keycloak/MinIO/NATS 端点，执行迁移基线、Access seed、JetStream stream/consumer、bucket versioning、Keycloak realm reconcile，最后以 `helm upgrade --install labweaver ... --atomic --wait` 部署并二次应用同一 profile。
+### 4.2 Resource profile
 
-### 3.7 部署 resource profile
+`94-resource-application.yml` 只管理 Resource workload、容量配置和它的 Kubernetes API egress；它显式关闭 platform profile 的共享 identity proxy，不使用 `--take-ownership`：
 
 ```sh
-export LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE=/var/lib/labweaver/.private/v1/resource-application/configuration-bundle.yml
-export LABWEAVER_ACCESS_SEED_FILE=/var/lib/labweaver/.private/v1/platform-application/access-seed.json
-export LABWEAVER_RESOURCE_VALUES_FILE=<resource helm values>
-export LABWEAVER_POSTGRES_SERVICE_FILE=<platform-admin.service>
+export LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE="$PWD/.private/v1/resource-application/configuration-bundle.yml"
+export LABWEAVER_ACCESS_SEED_FILE="$PWD/.private/v1/platform-application/access-seed.json"
+export LABWEAVER_RESOURCE_VALUES_FILE="$PWD/.private/v1/resource-application/values.yml"
+export LABWEAVER_POSTGRES_SERVICE="platform-admin"
+export LABWEAVER_POSTGRES_SERVICE_FILE="$PWD/.private/v1/platform-application/postgres-client.conf"
 
 cargo xtask resource-application --env v1 --infra --yes \
-  --package-manifest artifacts/package/<resource-run-id>/PlatformImagePackageManifest.json
+  --package-manifest <resource-package-manifest>
 ```
 
-playbook `94-resource-application.yml` 只启用 `resource-service`，显式关闭其他 workload，并应用 `resource-service-config`/`resource-service-secrets`。
+两个 profile 都要求 `LABWEAVER_RUN_ID`，并会检查输入文件存在、namespace、ConfigMap/Secret 键和 digest。按 profile reconcile 的操作约定，重复施加同一 manifest 应保持幂等；状态不明时先查询 Helm、Pod、Service 和业务页面，不要创建第二个 release 或第二个 migration run。
 
-v1 实测补充（三项都会让 resource profile 失败关闭）：
+### 4.3 发布后检查
 
-- `LABWEAVER_POSTGRES_SERVICE_FILE` 必须指向**控制器端口转发**的 service 文件（`hostaddr=127.0.0.1`、
-  `port=15432`、`host=postgres.labweaver-data.svc`）。私有源文件里的 `hostaddr` 是集群内地址，控制器不可路由，
-  直接用会以 `RESOURCE_APPLICATION_ACCESS_SEED_APPLY_FAILED` 失败。
-- Access seed 是**精确**的：它会校验课程成员数。issuer 改为公网名后，旧 issuer 生成的那批 actor
-  成员仍在库里，必须按 actor id 精确删除，否则以
-  `LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_MEMBERSHIP_CONFLICT` 失败。
-- `resource-service-config/capacity.json` 必须带 `gpuCatalogSeed`，且与 `deploy/versions.lock.yml` 的
-  `platform_gpu_classes` 逐字段一致（`class`/`mode`/`providerBinding`/`capacityUnits`/`allocationBinding`），
-  否则以 `PLATFORM_APPLICATION_GPU_CLASS_CATALOG_MISMATCH` 失败。目录项只创建一次、不回写；没有对应
-  `gpuObservers` 时该项保持不可用（失败关闭，不得降级为 Mock 或普通容器）。
-- `resource-service-secrets` 必须与 bundle 的 `data` **逐键相同**（模块只应用 ConfigMap，Secret 视为
-  operator 拥有的不可变材料），否则以 `RESOURCE_APPLICATION_SECRET_OWNERSHIP_CONFLICT` 失败。
-  `platform_application` 会统一平台 mTLS 信任根，因此 issuer/信任根迁移后该 Secret 的 `mtls-ca.pem`
-  需要由操作者按 bundle 显式接管（`kubectl apply --server-side --force-conflicts`），其余键必须保持一致。
-
-## 4. 简化验证
+应用 profile 完成后使用仓库验证入口：
 
 ```sh
 cargo xtask verify --env v1 --infra --yes
+cargo xtask contracts check
 ```
 
-`verify` 运行 `90-verify.yml` 的真实探针，并在 `always` 中清理临时资源：
+验证资源使用自己的运行标识并在结束时清理。另行确认公网 HTTPS、Keycloak 回调、Web 上传、浏览器终端、VM 控制台、OpenSSH Gateway、六个服务的就绪状态，以及当前 bundle 中的 model、provider binding、GPU catalog 和费率版本。
 
-- 精确节点集合与 `verify_expected_kubernetes_nodes` 比较；所有节点 `Ready`。
-- 在隔离命名空间 `labweaver-verify-<run_id>` 创建 RWO（local-path）与 RWX（nfs-rwx）PVC 及 writer/reader Pod，分别读回 `rwo-ok`、`rwx-ok`。
-- 在 `labweaver-demo` 创建探针 backend + HTTPRoute，经 `gateway_vip` 以 `verify_gateway_hostname` 主机头读回 `gateway-ok`。
-- KubeVirt：`virtctl start kvm-probe`，等待 VMI `Running`，`virtctl version`，`virtctl console` 连接（rc 0 或 124），停止并确认 VMI 删除。
-- Cilium DaemonSet `desiredNumberScheduled == numberReady`。
-- 无论成败都删除 `app.kubernetes.io/part-of=labweaver-verify` 带 `labweaver.io/verify-run` 的精确资源与隔离命名空间；清理失败报 `VERIFY_CLEANUP_FAILED`。
+### 4.4 回滚和停止边界
 
-该阶段不重新校验 Harness 供应链证明，也不要求固定镜像数量。
+- 查看应用 revision：`helm -n labweaver-system history labweaver` 和 `helm -n labweaver-system history labweaver-resource`。
+- 经负责人确认后可以使用 `helm rollback` 回到兼容的应用 revision；回滚前恢复对应的源码、镜像 manifest 和配置 bundle。
+- 数据库迁移、对象存储版本、业务账目和已发布实验不会因 Helm 回滚而回退。迁移不兼容时停止发布并安排数据处理。
+- 不使用不存在的 `xtask backup`、`xtask rollback` 或“清空后重装”作为日常恢复手段。删除 PVC/PV、数据库、NATS、MinIO、Keycloak 或共享 NFS 需要单独的负责人确认。
+- 应用升级不重启节点、不切换共享存储、不删除仍被租约或环境记录引用的资源。
 
-## 5. GPU 启用
+## 5. GPU 目录、观测和节点切换
 
-当前树通过 `80-install-addons.yml` 的 `gpu_device_plugin` 角色提供显式、默认关闭的设备插件配置，并通过 `70-install-kubevirt.yml --tags kubevirt-mdev` 提供只配置 CR 的 mediated-device patch。Resource 侧只从 GPU 目录与只读容量观测解析，不接受调用者篡改模式。完整变量和受控命令见 `docs/deployment/ansible.md`。
+### 5.1 模式和真实资源名
 
-### 5.1 模式与资源名（互不混淆）
+GPU 目录中的模式、provider binding 和 allocation binding 必须来自实际部署：
 
-- `exclusive`：整卡独占；目录 `allocationBinding` 绑定设备插件暴露的独占扩展资源名（例如 `nvidia.com/gpu`）。
-- `container_time_slice`：容器时间片，每个工作负载一个共享份额，**不代表独占显存或比例算力**；必须绑定与独占项不同的扩展资源名（例如设备插件时间片配置暴露的 `nvidia.com/gpu.shared`），且 `count` 固定为 1（契约强制）。
-- `vm_vgpu`：KubeVirt mediated device（mdev）规格；`allocationBinding` 对应已配置的 KubeVirt 设备规格，依赖节点 mdev 与驱动。
+| 模式 | 运行时 | 资源/设备绑定 | 语义 |
+| --- | --- | --- | --- |
+| `exclusive` | 容器 | 设备插件的 `nvidia.com/gpu` | 一份申请独占整卡资源 |
+| `container_time_slice` | 容器 | 设备插件的 `nvidia.com/gpu.shared` | 一个共享时间片，不能表示独占显存或固定比例算力 |
+| `vm_vgpu` | KubeVirt VM | 已配置的 mediated device resource name | 依赖实际 mdev、驱动和许可证 |
 
-### 5.2 运维步骤
+当前配置中的容器 provider binding 是 `container-primary-v1`，VM provider binding 是 `kubevirt-primary-v1`；以当前 platform bundle 为准。真实 observer 的 key 就是 `gpuObservers[].providerBinding`，必须与对应 GPU catalog entry 完全一致，否则 Resource 只读观测不会被用于准入。观测器的实际 Kubernetes API server、ServiceAccount token 文件和 CA 文件来自私有 bundle，不在文档中固定地址或凭据。
+
+`deploy/versions.lock.yml` 当前只提供 reviewed 的 `nvidia-cuda` 独占 bootstrap seed（`container-primary-v1`、`nvidia.com/gpu`），它不是运行时 GPU catalog 的第二真源。新增时间片或 VM vGPU class 前，先在设备插件/KubeVirt 和 Resource 观测中配置真实容量，再由管理员 UI 创建目录项和费率；缺失费率时报告缺失项，不覆盖现有活动费率 revision，也不把未观测容量当作可用。
+
+### 5.2 设备插件和 mediated device
+
+设备插件角色默认关闭，启用时必须给出互不重叠的节点集合。角色入口和变量名如下：
 
 ```sh
-# 1) 确认设备插件/驱动实际暴露的扩展资源名
-kubectl get nodes -o json | grep -o '"nvidia.com/gpu[^"]*"' | sort -u
-kubectl -n kube-system get daemonset | grep -i nvidia
-
-# 2) vGPU：确认 KubeVirt mediated devices 配置与节点 mdev
-kubectl -n kubevirt get kv kubevirt -o jsonpath='{.spec.configuration.mediatedDevicesConfiguration}'
-ls /sys/bus/pci/devices/*/mdev_supported_types 2>/dev/null
+ansible-playbook \
+  -i deploy/ansible/inventories/v1/hosts.yml \
+  --vault-password-file deploy/ansible/inventories/v1/.vault-password \
+  deploy/ansible/playbooks/80-install-addons.yml \
+  --tags gpu-device-plugin \
+  -e gpu_device_plugin_enabled=true \
+  -e 'gpu_device_plugin_exclusive_nodes=["<exclusive-node>"]' \
+  -e 'gpu_device_plugin_shared_nodes=["<shared-node>"]' \
+  -e gpu_device_plugin_shared_replicas=10
 ```
 
-独占与时间片必须使用不同扩展资源名，仅给工作负载加模式标签不能区分真实调度。
-
-### 5.3 登记 GPU 目录
-
-Resource 管理接口 `POST /api/v1/resource/gpu-catalog`（需管理员 principal 与 `Idempotency-Key`）写入 `GpuCatalogEntry`：
-
-```json
-{
-  "id": "<uuidv7>",
-  "class": "gpu-exclusive",
-  "mode": "exclusive",
-  "providerBinding": "<resource provider binding>",
-  "capacityUnits": 1,
-  "allocationBinding": "nvidia.com/gpu",
-  "revision": 1,
-  "active": true
-}
-```
-
-时间片项用 `"mode": "container_time_slice"` 且 `allocationBinding` 取另一个扩展资源名；vGPU 项用 `"mode": "vm_vgpu"`。同一 Provider 的独占与时间片绑定同名会在创建时被拒绝（`InvalidGpuCatalog`）。
-
-### 5.4 容量观测
-
-`resource-service-config/capacity.json` 需要为每个 `providerBinding` 配置只读观测，否则该 provider 的 GPU 目录项保持不可用：
-
-```json
-{
-  "pollIntervalMilliseconds": 1000,
-  "environmentHandoff": {
-    "baseUri": "https://environment-service:9446/",
-    "caFile": "/etc/labweaver/secrets/mtls-ca.pem",
-    "timeoutMilliseconds": 5000,
-    "systemActorId": "00000000-0000-7000-8000-000000000001"
-  },
-  "gpuObservers": [
-    {
-      "providerBinding": "<resource provider binding>",
-      "apiServer": "https://<kube-apiserver>:6443",
-      "bearerTokenFile": "/etc/labweaver/secrets/gpu-observer-token",
-      "clusterCaFile": "/etc/labweaver/secrets/cluster-ca.crt",
-      "requestTimeoutMilliseconds": 5000,
-      "observationTtlSeconds": 60,
-      "maxNodes": 100,
-      "maxPods": 10000
-    }
-  ]
-}
-```
-
-### 5.5 失败必须关闭
-
-设备缺失、观测缺失/过期、数据不完整或释放未确认时，分配必须明确失败并保留原始诊断；不得回退到 Mock、普通容器或其他 GPU 模式，也不得把未知容量当作零继续准入。
-
-## 6. 沙箱运行时（gVisor on containerd）
-
-平台的一次性负载（Agent authoring attempt、OJ run、Ansible probe）都以
-`runtimeClassName: labweaver-sandbox` 运行，隔离边界是 gVisor。`#127` 在 v1 集群上实测得到两条
-结论，二者都决定了本节的部署形态：
-
-- **CRI-O 不能提供按 Pod 的沙箱运行时**：CRI-O 1.35 会用节点默认运行时创建 Pod 的 sandbox
-  （pause）容器，并在日志里记为 `Ran pod sandbox … with infra container`，但该容器没有任何
-  runtime 进程、conmon 或 state 文件；于是 gVisor 的应用容器全部以
-  `cannot load sandbox: open /run/…/<id>_sandbox:<id>.state: no such file or directory` 失败。
-  （复核方式：把默认运行时换成"拒绝 create"的包装脚本，sandbox 仍然"成功"。）
-- **gVisor 读取 CRI 标准注解**：`runsc` 依据 `io.kubernetes.cri.container-type`、
-  `io.kubernetes.cri.sandbox-id` 等注解区分 sandbox 容器与普通容器，而 CRI-O 只写
-  `io.kubernetes.cri-o.*`；containerd 写标准名，所以换到 containerd 后无需任何注解翻译层。
-
-因此 sandbox 能力的节点运行 **containerd**（控制平面节点保留原 CRI）。`deploy/ansible/roles/sandbox_runtime`
-是唯一入口，playbook `75-sandbox-runtime.yml` 在 `site.yml` 中于 KubeVirt 之后、addons 之前对
-`workers` 执行，并从控制平面发布 `RuntimeClass`。角色做四件事：
-
-1. 安装锁定版 containerd 与 runc（`deploy/versions.lock.yml` 的 `containerd.*`）到 `/usr/local/bin`，
-   以及 `containerd.service` 与 `/etc/systemd/system/containerd.service.d/99-proxy.conf`（校园网代理）。
-2. 安装锁定版 gVisor 整树到 `/usr/local/bin`（`runsc`、`containerd-shim-runsc-v1` 与同级
-   `gvisor-bin/` sentry；`runsc` 依赖同级 sentry 树，containerd 按名字在 `PATH` 上找 shim）。
-3. 写 `/etc/containerd/config.toml`：默认运行时 `runc`（`SystemdCgroup = true`）、
-   `labweaver-sandbox` → `io.containerd.runsc.v1`、每个运行时 `sandboxer = podsandbox`、
-   pin 的 Pod sandbox 镜像、GPU 节点保留 `nvidia` 设备运行时、CNI 目录
-   `/etc/cni/net.d` + `/opt/cni/bin`，并把 `image_pull_progress_timeout` 提到 30m
-   （校园网代理下默认 5 分钟会中断大镜像）。
-4. 把 kubelet 的 `containerRuntimeEndpoint` 指向 `unix:///run/containerd/containerd.sock`、
-   保留评审过的 `podPidsLimit`、停用并禁用旧 CRI（`crio`）、删除其沙箱 drop-in，然后逐项回读。
-
-施加（需 root，私有 inventory 见 §1.2）：
+变量默认值固定为 `nvidia.com/gpu`、`nvidia.com/gpu.shared`，共享副本数至少为 2；同一节点不能同时出现在 exclusive 和 shared 列表。切换到 VM vGPU 前，使用 `70-install-kubevirt.yml --tags kubevirt-mdev` 和受保护的 mdev 变量文件；该 tag 只更新明确的 KubeVirt CR 配置，不提供软件模拟：
 
 ```sh
-cd /home/wzh/LabWeaver/deploy/ansible
-sudo env ANSIBLE_COLLECTIONS_PATH=/home/wzh/LabWeaver/deploy/ansible/collections \
-  ansible-playbook -i /var/lib/labweaver/v1-controller/deploy/ansible/inventories/v1/hosts.yml \
-  playbooks/75-sandbox-runtime.yml
+ansible-playbook \
+  -i deploy/ansible/inventories/v1/hosts.yml \
+  --vault-password-file deploy/ansible/inventories/v1/.vault-password \
+  deploy/ansible/playbooks/70-install-kubevirt.yml \
+  --tags kubevirt-mdev \
+  -e @deploy/ansible/inventories/v1/gpu-mdev-private.yml
 ```
 
-切换运行时会让节点上所有容器重建，应先 `kubectl drain`，完成后再 `uncordon`。重启节点后
-`containerd`/`kubelet` 必须自动 active、`crio` inactive（v1 两台 worker 已实测）。
+### 5.3 从 exclusive 切换 shared 或恢复
 
-逐节点回读：
+节点模式切换是维护操作，不能用某个节点名作为永久配置。每次切换前：
+
+1. 在管理员资源页面确认对应 provider binding 没有 `active` lease、待批准申请或仍在释放的租约；停止请求只有在业务记录确认释放后才算完成。
+2. 只读检查所有工作负载的 GPU 扩展资源请求，确保 exclusive、shared、VM vGPU 的运行 Pod 都已结束。Environment Pod 本身不以 GPU 模式标签区分，不能只检查设备插件 DaemonSet：
+
+   ```sh
+   kubectl get pods -A -o json | python -c '
+   import json, sys
+   for pod in json.load(sys.stdin).get("items", []):
+       resources = set()
+       for container in pod.get("spec", {}).get("containers", []):
+           for field in ("requests", "limits"):
+               resources.update(container.get("resources", {}).get(field, {}))
+       if any(key.startswith("nvidia.com/") for key in resources):
+           print(pod["metadata"].get("namespace"), pod["metadata"].get("name"), pod.get("status", {}).get("phase"))
+   '
+   ```
+
+3. 保存当前 inventory/变量文件中的 exclusive/shared 列表以及当前 `gpuCatalog`、费率 revision 和 observer 配置。确认没有活动 lease 和 GPU Pod 后，才用第 5.2 节 playbook 施加新的互斥节点集合。
+4. 只读确认节点标签、设备插件 DaemonSet、扩展资源名和 observer 状态，再由管理员 UI 开放对应目录。没有通过 readback 前，Resource 必须保持不可用。
+5. 测试结束后使用保存的原始列表重新施加 playbook，恢复原节点标签、插件配置、catalog active 状态和 observer 设置；再次确认没有活动 lease、没有遗留 GPU Pod，最后从 UI 恢复用户申请。
+
+切换过程不重启节点、不清空共享卷。时间片只提供调度份额，不能承诺显存隔离；GPU 运行必须由用户实际执行 CUDA 数值计算确认，设备名称或 Pod `Running` 不足以宣称可用。
+
+### 5.4 容量 observer 和失败关闭
+
+`resource-service-config/capacity.json` 为每个真实 provider binding 配置 `gpuObservers`，每项必须使用 HTTPS API server、绝对的受保护 token/CA 文件、有限的 timeout、TTL（不超过 300 秒）和 node/pod 上限。Resource 只读 Node 状态、Pod 调度和自身 reservation，不创建、修改或删除 Kubernetes 对象。
+
+缺少 observer、观测过期、GPU Pod 归属不匹配、释放未确认或实际容量小于目录声明时，申请应保持等待或明确失败并显示诊断；不能换成普通容器、Mock、另一种 GPU 模式或把未知容量当作零。重复或乱序用量事件不能重复计费。
+
+## 6. Sandbox、评测和 VM
+
+### 6.1 Sandbox 的适用范围
+
+`75-sandbox-runtime.yml` 和 `sandbox_runtime` role 提供 `labweaver-sandbox` RuntimeClass，供 Agent authoring attempt 和 Ansible configuration probe 使用。它由 containerd + gVisor `runsc` 实现；CRI-O 不能提供该按 Pod RuntimeClass 边界。启用后只读确认：
 
 ```sh
-containerd --version
-runc --version
-/usr/local/bin/runsc --version
-systemctl is-active containerd kubelet crio
-containerd config dump | grep -A3 "runtimes.labweaver-sandbox"
-grep -n containerRuntimeEndpoint /var/lib/kubelet/config.yaml
 kubectl get runtimeclass labweaver-sandbox -o jsonpath='{.handler}'
+kubectl get nodes -o wide
 ```
 
-最小沙箱探针（一次运行、用完即删；安全上下文必须满足命名空间的 restricted 策略）：
+OJ 程序评测使用节点默认 OCI runtime、`hostUsers: false`、用户命名空间和 Landlock；OJ 不应被描述为 gVisor 运行。若 OJ 需要用户命名空间、idmap mount、`/dev/null` 或运行时能力，按 `docs/deployment/ansible.md` 和评测服务配置排查，不能通过切换到 gVisor 绕过失败。
+
+### 6.2 KubeVirt、VM base 和大镜像
+
+KubeVirt 使用 `70-install-kubevirt.yml`，必须关闭软件模拟并满足 `/dev/kvm`、CPU 虚拟化、mdev 和 CDI 前置条件。平台 bundle 中的 VM provider 当前为 `kubevirt-primary-v1`，base catalog 由 `deploy/versions.lock.yml` 与 platform bundle 一起校验：
 
 ```sh
-kubectl -n labweaver-evaluation apply -f - <<'YAML'
-apiVersion: batch/v1
-kind: Job
-metadata: {name: sandbox-probe, namespace: labweaver-evaluation}
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      runtimeClassName: labweaver-sandbox
-      restartPolicy: Never
-      automountServiceAccountToken: false
-      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
-      containers:
-        - name: probe
-          image: docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
-          command: ["sh", "-c", "cat /proc/version; uname -r"]
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 65534
-            capabilities: {drop: ["ALL"]}
-          resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {cpu: 500m, memory: 128Mi}}
-YAML
-kubectl -n labweaver-evaluation wait --for=condition=complete job/sandbox-probe --timeout=300s
-kubectl -n labweaver-evaluation logs job/sandbox-probe   # 必须包含 4.19.0-gvisor
-kubectl -n labweaver-evaluation delete job sandbox-probe --wait=true
+kubectl -n labweaver-system get dv,datasource
+kubectl -n kubevirt get kv kubevirt
 ```
 
-handler 不可用或 `runsc` 缺失时必须失败关闭：不要把沙箱降级为节点默认运行时，也不要放宽
-seccomp、no-new-privileges、drop caps 或只读 rootfs。
+大 VM 镜像导入、查询进度和取消都从管理员公共首页的镜像任务入口完成。取消后继续查看原任务，直到页面显示已取消和清理完成；状态不明时刷新原记录，不重复导入。VM vGPU 还要在用户环境中检查驱动、设备和许可证，许可证缺失时保持失败关闭。
 
-### 6.1 本轮复验（2026-09-24，A2 判据）
+## 7. 公共用户验收
 
-在两条 worker 上各跑一次 `runtimeClassName: labweaver-sandbox` 的探针 Job（镜像用 manifest 里 pin 的
-`base-rust-builder@sha256:14bc9c59…`，并带 `imagePullSecrets: harbor-labweaver-system-pull`，否则 worker
-拉不动 Harbor 私有仓库）：
+验收从公共 HTTPS 首页开始，每个角色使用独立会话。首次进入角色工作台应点击首页展示的任务卡；刷新或恢复已有任务时可以返回原任务链接。验收不关闭 TLS 检查、不直接写 API/数据库补齐用户无法完成的步骤，不保留截图、trace、video 或单独结果文件。
 
-```sh
-kubectl --kubeconfig .private/kubeconfig-v1-admin.conf apply -f - <<'YAML'
-apiVersion: batch/v1
-kind: Job
-metadata: { name: sandbox-probe-a2 }
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      runtimeClassName: labweaver-sandbox
-      restartPolicy: Never
-      imagePullSecrets: [{ name: harbor-labweaver-system-pull }]
-      containers:
-        - name: probe
-          image: harbor.lab.lan/labweaver-system/base-rust-builder@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
-          command: ["/bin/sh","-c","cat /proc/version"]
-YAML
-```
+### 7.1 验收入口
 
-实测结果：`v1-worker-158` 与 `v1-worker-97`（后者用 `nodeName` 固定）都 `succeeded=1`，日志均为
-`Linux version 4.19.0-gvisor #1 SMP …`；`kubectl get runtimeclass` 只剩 `labweaver-sandbox` 与 `nvidia`，
-被取代的 `labweaver-oj` 已不存在。探针 Job 用完即删。
-
-## 7. KubeVirt / VM 验证与 linux-nginx 材料链
-
-KubeVirt 由 `70-install-kubevirt.yml`/`kubevirt` 角色安装，且显式 `useEmulation: false`（禁止软件模拟回退）；CDI scratch 绑定 local-path。KVM 能力由 preflight 的 `/dev/kvm` 与 `vmx`/`svm` 检查保证。
-
-第 4 节 `verify` 已覆盖 KubeVirt 起停与控制台连接。平台 VM base 由 `platform_application` 以 CDI DataVolume 从锁定镜像导入：
+`tools/user_acceptance.py` 只在受保护凭据目录存在且公共入口可达时运行。模型必须显式选择：
 
 ```sh
-kubectl -n labweaver-system get dv ubuntu-lab-base-v1-seed
-kubectl -n labweaver-system get datasource ubuntu-lab-base-v1
-```
-
-linux-nginx 教材材料链：
-
-```sh
-python examples/linux-nginx/verify_material_contract.py --self-test
-cargo test -p contracts --locked
-```
-
-- 运行链是 Ubuntu 24.04 VM + 只读 Probe profile（`deploy/versions.lock.yml` 的 `ansible_probe.playbook_profile` 为 `linux-nginx-probe-v1/playbook.yml`）。
-- `material-manifest.json` 中受控 VM/Probe 条目为 `unbound`/`blocked-*`，其 `private://` locator 指向受控存储。只有在 Git 之外把批准版本与 SHA-256 绑定到同一 EvaluationRun 后该材料才可用。
-- 负例必须显式失败并保留原始诊断：Nginx 停止/未监听、站点或页面不匹配、Probe 能力缺失、缺少镜像绑定、访问失败、超时、畸形事实。不得用模拟结果或更弱断言替代。
-
-## 8. 残留与陈旧用户环境清理
-
-统一规则：先枚举、再核对归属、只按精确命名空间/名称删除；禁止 `--all`、禁止无标签通配删除、禁止删除无法确认归属的对象。
-
-用户环境（Environment 拥有，命名 `lw-env-*`）：
-
-```sh
-kubectl get ns -l labweaver.io/environment=true -o name
-kubectl -n lw-env-<environmentId> get vmi,pod,svc,pvc
-kubectl delete namespace lw-env-<environmentId> --wait=true
-```
-
-只删除已确认无在用工作负载、且与 Resource/Environment 记录一致的命名空间；命名空间删除会删除其 PVC。
-
-node-debugger 残留（`kubectl debug node/...` 留下的 Pod）：
-
-```sh
-kubectl get pods -A -o name | grep 'node-debugger'
-kubectl -n <namespace> delete pod <exact-node-debugger-pod> --wait=true
-```
-
-重复 Gateway：当前权威集合为 `labweaver-demo/public-gateway`（内部）、`labweaver-system/labweaver-public`（公网入口）、`keycloak-system/identity-gateway`、`harbor/harbor-gateway`。枚举后只删除带 LabWeaver 标签、且不属于以上四者、并确认无引用者：
-
-```sh
-kubectl get gateway -A
-kubectl -n <namespace> get gateway <exact-name> -o jsonpath='{.metadata.labels}'
-kubectl -n <namespace> delete gateway <exact-name> --wait=true
-```
-
-其他残留：已结束的 Job/Pod、孤儿 PVC/PV、失败/重复 Helm release secret。
-
-```sh
-kubectl get jobs -A
-kubectl get pvc -A
-kubectl get pv -o custom-columns=NAME:.metadata.name,CLAIM_NS:.spec.claimRef.namespace,STATUS:.status.phase
-helm -n labweaver-system history labweaver
-```
-
-## 9. 故障排查
-
-| 现象 | 可能原因 | 稳定诊断/检查 |
-|---|---|---|
-| 预检失败 | 清单分组/占位符/OS/SELinux/KVM/NFS 不符 | `PREFLIGHT_SCOPE_INVALID`、`IDENTITY_INVENTORY_SCOPE_INVALID`、"inventory must declare..."、`/dev/kvm` 缺失 |
-| 打包被拒 | 脏树、profile 不符、工具身份不符、摘要缺失 | `LW_PACKAGE_INPUT_DIRTY`、`LW_PACKAGE_PROFILE_MISMATCH`、`LW_PACKAGE_TOOL_IDENTITY_MISMATCH`、`LW_PACKAGE_DIGEST_MISSING`、`LW_PACKAGE_MANIFEST_INVALID` |
-| 打包缺配置 | 未导出 registry 或 tool 不在 PATH | `LW_PACKAGE_CONFIGURATION_MISSING`、`LW_PACKAGE_RUST_TOOLCHAIN_IDENTITY_MISMATCH` |
-| 未带 `--infra`/`--yes` | xtask 拒绝危险或非显式操作 | `XTASK_INFRASTRUCTURE_REQUIRED`、`XTASK_CONFIRMATION_REQUIRED` |
-| 非 Linux 控制器 | xtask 基础层操作仅限 Linux | `XTASK_INFRA_UNSUPPORTED_PLATFORM` |
-| 身份基础层失败 | locator 路径/权限/哈希不符或 run id 非 `infra-` | `IDENTITY_CONFIGURATION_INVALID`、`IDENTITY_SECRET_LOCATOR_INVALID`、`IDENTITY_BOOTSTRAP_SECRET_INVALID` |
-| 基础层 rollout 未就绪 | pod 卡在旧失败 revision 或镜像不符 | `PLATFORM_FOUNDATION_READBACK_INVALID`、`PLATFORM_FOUNDATION_INPUT_INVALID` |
-| BuildKit 配置/VIP/CA 不符 | bundle、Harbor CA、DNS、Gateway 漂移 | `PLATFORM_BUILDKIT_CONFIGURATION_INVALID`、`PLATFORM_BUILDKIT_HARBOR_CA_MISMATCH`、`PLATFORM_BUILDKIT_READBACK_INVALID`、`PLATFORM_BUILDKIT_EGRESS_MODE_INVALID` |
-| 应用部署失败 | 配置包键/边界、Harbor 项目、Keycloak、stream/bucket 冲突 | `PLATFORM_APPLICATION_CONFIGURATION_INVALID`、`..._KEYS_INVALID`、`..._HARBOR_PROJECT_INVALID`、`..._STREAM_CONFLICT`、`..._CONSUMER_CONFLICT`、`..._REQUIRED_PATH_MISSING` |
-| Resource 部署失败 | 包 profile/镜像边界不符 | `LW_PACKAGE_PROFILE_MISMATCH`、`RESOURCE_APPLICATION_CONFIGURATION_INVALID`、`RESOURCE_APPLICATION_INPUT_INVALID` |
-| 验证失败 | 节点集合/存储/Gateway/KubeVirt/Cilium 异常 | `NODE_SET_UNEXPECTED`、`VERIFY_EXECUTION_INPUT_INVALID`、`VERIFY_CLEANUP_FAILED` |
-| OJ 无法调度 | RuntimeClass/handler/CRI-O/PID 上限缺失 | `OJ_RUNTIME_RUNTIMECLASS_INVALID`、`OJ_RUNTIME_HANDLER_CONFIG_INVALID`、`OJ_RUNTIME_RUNC_MISSING`、`OJ_RUNTIME_CGROUP_MANAGER_INVALID`、`OJ_RUNTIME_CRIO_INACTIVE` |
-| 契约漂移 | 生成物与检出不符 | `LW_CONTRACT_DRIFT`（`cargo xtask contracts check`） |
-
-## 10. 本轮无回滚、无备份与安全停止
-
-- 本轮**没有**备份与回滚：`xtask backup`、`xtask rollback`、备份/清理 playbook 均已移除。不要指望任何命令恢复已删除数据。
-- Helm 应用升级带 `--atomic`，失败只会回到上一 Helm revision；数据库迁移是前向的，应用回滚不等于数据库回滚。可用 `helm history`/`helm rollback <release> <revision>` 做应用层恢复，但不恢复数据。
-- 共享基础组件（`labweaver-data`、`harbor`、`keycloak-system`）不随应用升级隐式清理；清理必须单独确认对象、归属和恢复路径。
-- 安全停止：优先停止用户环境/VM 并等待执行后端确认释放。停止请求不等于已释放；未确认停止的计费保持待核实，不得标记为免费。
-- 长时间或不可逆操作（删除基础层 PVC/PV、重建 Harbor/Keycloak、数据库清理）必须提前说明影响范围，并在变更窗口内由对应负责人确认后再执行。
-
-## 11. v1 控制器实测补充（Issue #127）
-
-以下为在 v1 共享集群控制器（本机 `v1-cp-63`）实际执行后必须遵循的环境事实。
-
-### 11.1 控制器与私有输入
-
-- 控制器的私有 Ansible 根目录是 `/var/lib/labweaver/v1-controller`（root-only），包含真实的
-  `deploy/ansible/inventories/v1/hosts.yml`、`group_vars/all/{main,vault}.yml` 与
-  `deploy/ansible/collections`。通过 `LABWEAVER_ANSIBLE_DEPENDENCY_ROOT=/var/lib/labweaver/v1-controller`
-  让 xtask 使用私有 inventory，而 playbook/roles 仍来自当前检出。
-- 固定控制插件在 `/opt/labweaver/venv`（ansible-core 2.18.6、kubernetes 34.1.0）。执行时必须把它加入 `PATH`；
-  vault 口令文件位于 `deploy/ansible/inventories/v1/.vault-password`。
-- 节点 SSH 使用 `labweaver-deploy` 用户与 `.private/v1-deploy-controller-key`；仓库内
-  `inventories/v1/hosts.yml` 若仍指向 `root`/`/root/.ssh/id_rsa` 需要修正。
-- 以 root 在 wzh 检出中运行 xtask 前，先执行
-  `git config --global --add safe.directory /home/wzh/LabWeaver`，否则 `cargo xtask package` 读取
-  Git 身份会失败。
-
-### 11.2 镜像打包必须使用集群内 BuildKit
-
-- `cargo xtask package` 会校验 BuildKit 版本与锁定值（`v0.31.1`）。本机 Docker 自带 v0.33.0，不满足。
-  正确做法是把集群内 rootless BuildKit 端口转发到本地并建立 remote builder：
-
-  ```sh
-  kubectl -n labweaver-build port-forward svc/buildkit 1234:1234   # 需要在整个打包期间保持
-  CERTS=/var/lib/labweaver/.private/v1/platform-buildkit/build-executor-client
-  docker buildx create --name bk-local --driver remote \
-    --driver-opt "cacert=$CERTS/ca.crt,cert=$CERTS/tls.crt,key=$CERTS/tls.key,servername=buildkit.labweaver-build.svc" \
-    tcp://127.0.0.1:1234
-  docker buildx use bk-local
-  ```
-
-- 打包需要 `LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf`、`LABWEAVER_PLATFORM_REGISTRY=harbor.lab.lan`，
-  且源码树干净（含 untracked）。
-- **必须传 `LABWEAVER_BUILD_PROXY=http://49.52.27.95:7897`**：构建步骤（例如 agent-service 的
-  `npm pack @anthropic-ai/claude-code-linux-x64`）在 BuildKit 的 Pod 内出网，只有该变量会把它作为
-  `HTTP_PROXY/HTTPS_PROXY` 构建参数注入；缺省时步骤无代理，构建会以
-  `BuildKit platform image build failed … npm pack` 失败（Pod 本身能到代理，但构建步骤拿不到）。
-  另外 `npm pack` 产物必须与 `deploy/versions.lock.yml` 的 `claude_code_linux_x64_sha512` 一致。
-- **编译器缓存 wrapper 会让打包整体失败（已实测更正）**：本机在 `/home/wzh/.cargo/config.toml` 里把
-  `build.rustc-wrapper` 指向 `/home/wzh/.cargo/bin/sccache`。cargo 会**按目录向上**读配置，所以在
-  `/home/wzh/LabWeaver` 下的任何一次构建（**包括以 root 运行的 `xtask package`**）都会命中它；
-  该 sccache 服务端一旦不可达，cargo 连探测 `rustc -vV` 都失败，打包在 0.2 秒内以
-  `process didn't exit successfully: …/sccache … rustc -vV (exit status: 2)` +
-  `sccache: Failed to read response header` 结束。
-  实测**无效**的绕过：`RUSTC_WRAPPER= SCCACHE_DISABLE=1`（cargo 把空值当未设置，仍回落到目录配置）、
-  以 root 重启 sccache（用 `sudo -i -u root bash -lc 'sccache --start-server'` 起的服务端会随该 shell 退出，
-  下一次调用仍是 `Failed to read response header`）、或删掉 `/root/.cargo/config.toml`（该文件本就不存在）。
-  实测**有效**的做法：打包期间把那行注释掉，结束再还原——
-  ```sh
-  CFG=/home/wzh/.cargo/config.toml; cp "$CFG" /tmp/cargo-config-wzh.bak
-  python3 - "$CFG" <<'PY'
-  import sys; p=sys.argv[1]; t=open(p).read()
-  open(p,'w').write(t.replace('rustc-wrapper = "/home/wzh/.cargo/bin/sccache"',
-                              '# rustc-wrapper disabled for this packaging run'))
-  PY
-  # …运行 cargo xtask package…；随后 cp /tmp/cargo-config-wzh.bak "$CFG" 还原
-  ```
-  验证方式（与 cargo 的探测完全一致）：
-  `sudo -i -u root env PATH=/usr/local/bin:/usr/bin:/bin bash -lc 'cd /home/wzh/LabWeaver && cargo check -p task-execution'`
-  ——关掉 wrapper 后应在数十秒内 `Finished … profile`。
-- 本机 `docker buildx create --driver remote` 的 endpoint 需要独占本地端口；若默认 1234 已被残留
-  port-forward 占用，换端口（如 1235）重建 builder，`inspect` 显示 `inactive` 属正常（首次构建才探测）。
-- Harbor 的基础镜像必须按 `deploy/versions.lock.yml` 的原 digest 存在；若某个 `base-*` 仓库的 digest 漂移，
-  用 `docker buildx imagetools create` 经校园代理重新镜像（保留原 digest），例如：
-
-  ```sh
-  HTTPS_PROXY=http://49.52.27.95:7897 HTTP_PROXY=http://49.52.27.95:7897 \
-  NO_PROXY=harbor.lab.lan,localhost,127.0.0.1 \
-  docker buildx imagetools create \
-    --tag harbor.lab.lan/labweaver-system/base-rust-builder:1.97.1 \
-    docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
-  ```
-
-- `platform_application` 还会校验 `platform_container_images` 里每个基础镜像的**原 digest** 已在 Harbor
-  项目内（Agent 的 seed 目录不能声称项目里不存在的镜像）。部署本身不做镜像复制，操作者必须先按
-  `platform_container_images` 的 `name:tag` 建仓并镜像同一 digest，例如：
-
-  ```sh
-  HTTPS_PROXY=http://49.52.27.95:7897 HTTP_PROXY=http://49.52.27.95:7897 \
-  NO_PROXY=harbor.lab.lan,localhost,127.0.0.1 \
-  docker buildx imagetools create \
-    --tag harbor.lab.lan/labweaver-system/rust:1.97.1-bookworm \
-    docker.io/library/rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3
-  docker buildx imagetools create \
-    --tag harbor.lab.lan/labweaver-system/distroless-cc:nonroot \
-    gcr.io/distroless/cc-debian12:nonroot@sha256:66aa873a4a14fb164aa01296058efd8253744606d72715e45acface073359faa
-  ```
-
-  缺失时部署以 `PLATFORM_APPLICATION_CONTAINER_IMAGE_DIGEST_ABSENT` 失败，不会留下只有名字可用的 seed 目录。
-
-### 11.3 BuildKit 出网
-
-- 新模板默认 `platform_buildkit_egress_mode: open`。若 `92-platform-buildkit` 因集群 CoreDNS 已存在
-  非本 role 写入的 `harbor.lab.lan` 记录而报 `PLATFORM_BUILDKIT_CLUSTER_DNS_AMBIGUOUS`，可直接把
-  `labweaver-build` 命名空间内的 `NetworkPolicy/buildkit` 与 `CiliumNetworkPolicy/buildkit-dependency-egress`
-  的 egress 收敛为开放形态（DNS + 全部出网），与 `open` 模板一致。
-
-### 11.4 沙箱运行时与 GPU
-
-- sandbox 能力的节点必须运行 containerd（见 §6）；CRI-O 上 `RuntimeClass` 只会让应用容器进入
-  gVisor，Pod sandbox 仍留在节点默认运行时，因此一次性负载必然以 `cannot load sandbox` 失败。
-- 切换运行时后节点上会残留旧 CRI 的容器进程（systemd `crio-*.scope`）。它们会占住 hostPath 上的
-  socket/端口（例如 `cilium-envoy` 的 `/var/run/cilium/envoy/sockets/*.sock` 导致新 Pod
-  `unable to bind domain socket … errno=98`）。清理方式：`systemctl list-units --type=scope --all |
-  grep -o 'crio-[a-f0-9]*\.scope' | xargs -r systemctl stop`，随后重启对应 DaemonSet 的 Pod。
-- 切换运行时后若出现跨节点 Pod 流量中断（同节点与节点间 ICMP 正常、`cilium-dbg status` 报
-  `Cluster health: … reachable` 下降），按顺序处理：`kubectl -n kube-system rollout restart ds/cilium`、
-  重新施加 `playbooks/50-install-network.yml`、必要时先 `drain` 再重启该节点；恢复后
-  `cilium-dbg bpf ipcache list` 中远端 Pod IP 必须带 `tunnelendpoint=<节点 IP>`。
-- NVIDIA device plugin 需要通过 `runtimeClassName: nvidia` 运行才能看到设备，集群需要
-  `RuntimeClass/nvidia`（handler `nvidia`）；containerd 侧由 `sandbox_runtime` 在存在
-  `/usr/bin/nvidia-container-runtime` 的节点上生成同名 runtime 表。
-- 仅 worker-97 的 V100 会以独占 `nvidia.com/gpu` 上报；time-slice 本轮不验证；worker-158 的 P40
-  驱动/库版本不匹配，修复需要重载模块或重启节点，且会中断其 NFS 服务，因此必须排在镜像推送之后。
-
-### 11.5 每实验评估 runner 镜像
-
-- 控制器 `containerBuild.runnerDockerfilePath=evaluation/Dockerfile`；build-executor 配置
-  `executor.serviceImage` 必须指向平台 evaluation-service 镜像（含 `/usr/local/bin/labweaver-service`），
-  由打包产物 digest 填充。实验 `evaluation/Dockerfile` 使用
-  `FROM ${LABWEAVER_SERVICE_IMAGE} AS labweaver-service` 再 `COPY --from=labweaver-service`。
-
-### 11.6 公网域名（唯一用户入口）
-
-- 公网入口是 `https://portal.labweaver.2018wzh.top`（`public_ingress` role，`portal-public` 路由
-  `/api`、`/auth`、`/connect` → access-service，`/` → web；apex 由 `portal-apex-redirect` 301 到 portal）。
-- 身份栈使用公网名 `keycloak.labweaver.2018wzh.top`：`identity_hostname` 是单一真源，证书 SAN、
-  内部 Gateway、dnsmasq 记录都由它派生；`identity_public_address` 打开后 role 会额外经公网入口校验
-  issuer。access-service 的 `oidc.issuer`/`redirect_uri`/`allowed_origins` 与 realm client 的
-  `redirectUris`/`webOrigins` 必须同步为公网 origin，否则登录会在回调处失败。
-- 集群内 Pod 通过 values 的 `hostAliases`（公网 Keycloak 名 → `keycloak-internal` Service ClusterIP，
-  即 `internalIdentityProxy`）访问公网 issuer；`internalIdentityProxy.hostname` 也必须改为公网名，
-  否则 Pod 侧 TLS 校验会失败。
-- 改 issuer 后必须用 `tools/prepare_platform_access_seed.py --issuer <公网 issuer>` 重新生成 access
-  seed（`access.actors` 以 issuer 为键），否则所有 actor 都无法解析。
-- 控制器的 Keycloak 管理面走**公网入口**：`identity-gateway` 的 listener 仍只声明
-  `keycloak.labweaver.internal`，其 `labweaver-keycloak-tls` 证书的 SAN 只有公网名，因此经内部 VIP
-  校验必然失败；公网入口（`--resolve <公网名>:443:<公网 IP>`）由 public Gateway 提供 Let's Encrypt
-  证书。`platform_application` 只导入**单张**证书到 kcadm 的隔离 truststore（`keytool -importcert`），
-  所以 `platform_application_keycloak_ca_file` 必须指向 LE 根（`ISRG Root X1`，控制器上为
-  `/etc/ssl/certs/ISRG_Root_X1.pem`），`platform_application_keycloak_server`/`keycloak_hostname`
-  用公网名、`keycloak_endpoint_address` 用公网 IP；否则在
-  `Authenticate retained Keycloak administration` 处失败。
-- **对象存储的上传 URL 也必须用公网 origin**：`control-service` 的 `object_store.endpoint` 同时决定
-  服务端读取和**浏览器直传的 presigned URL**。用内部名（`https://portal.labweaver.internal/`）时浏览器
-  解析不到该主机，包上传会以 `UPLOAD_OBJECT_FAILED` 失败（页面上逐文件"失败"）。改为
-  `https://portal.labweaver.2018wzh.top/`（path-style 下 bucket 就是 `/labweaver-artifacts` 这个
-  nginx 代理前缀，`proxy_set_header Host $http_host` 保留签名用的 Host），并把该主机的
-  `hostAliases` 指向公网入口 Gateway VIP（`10.99.0.140`）、`portal-ca.pem` 换成 LE 根
-  （公网入口用 `labweaver-public-wildcard` 证书）。
-
-### 11.7 模型服务可达性（authoring 与 Work 模板生成的前提）
-
-- v1 的模型服务是宿主机上的 Ollama（`labweaver-llm` 命名空间的 `ollama` Service 用手工
-  Endpoints 指向 `49.52.27.63:11434`）。Agent 配置必须使用
-  `http://ollama.labweaver-llm.svc.cluster.local:11434`，模型固定为部署输入中的
-  `qwen3.6:35b`；不通过 `ollama-proxy`，也不使用云端回退。
-- `platform-model-egress` 和 `authoring-platform-egress` 由 Ansible 管理，只在 11434 端口
-  允许 `host`/`remote-node`、`labweaver-llm` 命名空间端点及已审阅的 FQDN。由于节点地址是
-  Cilium 的 `host` entity，不能用 per-attempt `NetworkPolicy` 的 `ipBlock` 代替这两条策略。
-  每次尝试仍只在 `sandbox.allowed_egress` 中声明对象存储的精确 CIDR 和端口；不要把整个
-  `10.0.0.0/8` 或旧的 `ollama-proxy` 地址加入其中。
-- 这条路径必须显式配置，不得把模型缺失降级为 Mock 或更弱的生成目标。
-- **预算必须按「一次 authoring 会话」而不是「一次请求」来设**。authoring 的 provider 调用由
-  `AUTHORING_MAX_TURNS = 60` 限次（`services/agent-service/src/claude_code.rs:2933`），每回合都会
-  重发审阅过的提示词，`enforce_budget` 用**单次会话累计用量**比对项目策略的四个上限
-  （`max_input_tokens`/`max_output_tokens`/`max_requests`/`max_cost_microusd`，`claude_code.rs:2839-2860`），
-  任一越界即 `BudgetExceeded` → `LW_RESOURCE_EXHAUSTED`（CLI 本身仍以 `exit 0` 结束，沙箱尝试
-  记录为 `terminal|exit_code=0`，因此**必须看 worker 事件而不是沙箱退出码**）。实测：早期
-  `maxRequests=8/24`、`maxInputTokens=200_000` 的验收策略在本机 27B 模型下会在 2–3 分钟内被
-  `BudgetExceeded` 打断。
-  验收预算现在只有一处定义：`web/e2e/support/live.mjs` 的 `policyFor` 默认
-  `maxInputTokens=20000000`、`maxOutputTokens=5000000`、`maxRequests=200`、
-  `maxCostMicrousd=500000000`、`timeoutMilliseconds=900000`，全部可用
-  `LABWEAVER_E2E_LLM_MAX_INPUT_TOKENS` / `_MAX_OUTPUT_TOKENS` / `_MAX_REQUESTS` /
-  `_MAX_COST_MICROUSD` / `LABWEAVER_E2E_LLM_TIMEOUT_MS` 覆盖；`tools/user_acceptance.py` 不再重复
-  定义这些默认值，直接透传调用方环境。`real-experiment` spec 只保留 `maxTransientRetries=0`
-  这一条刻意的覆盖（真实链路必须证明单次未重试的尝试）。
-- **实测用量（据此定上限，不要凭感觉调）**：从对象存储读回沙箱的 `result.json`
-  （`labweaver-artifacts` 桶，`problem-packages/authoring-sandbox/<attempt-id>/result.json`，
-  内容是按行分隔的 stream-json，取最后一条 `type=result` 的 envelope；TLS 用
-  `agent-service-secrets/minio-ca.pem` 校验、把 `minio.labweaver-data.svc` 指到 port-forward
-  的 127.0.0.1 即可在宿主机读），两次真实 authoring 尝试为：
-  | attempt | CLI subtype | turns | input tokens | output tokens | cost USD |
-  |---|---|---|---|---|---|
-  | `01a0d2ebf7…`（environment） | `success` | 2 | 211,022 | 2,754 | 1.12 |
-  | `01a0d2ee-c215…`（evaluation） | `success` | 7 | 756,663 | 3,915 | 3.88 |
-  即**单回合输入约 10 万 token**（materials 整体进提示词），所以 `maxInputTokens=200_000`
-  在第二回合就会被打穿（这正是「CLI `exit 0` 但 runtime 报 `BudgetExceeded`」的成因）；
-  `maxRequests`/`maxOutputTokens`/`maxCostMicrousd` 从来不是瓶颈（turns ≤ 7、output ≤ 4k、
-  cost ≤ 4 USD）。真正的边界是 CLI 的 `--max-turns 60` 与墙上时间，因此上限设成
-  60 回合也吃不完的量级（20M / 5M / 200 / 500 USD）。
-- **诊断缺口（待补）**：`enforce_budget` 只返回 `BudgetExceeded`，不记录是哪一个维度越界
-  （`services/agent-service/src/claude_code.rs:2839`），日志里也没有 usage；本轮只能靠从对象存储
-  读回 `result.json` 才能定性。建议后续在该分支补上越界维度与「观测值/上限」两个字段。
-- **已修（部署态缺陷）：集群里的 NATS 用户凭据比权威权限表旧，导致 evaluation-service 无法发布 release 事件**。
-  证据链：lab 旅程走到「发布」时报 `LAB_EXPERIMENT_PUBLICATION_FAILED:LW_EVALUATION_RELEASE_PUBLISH_UNAVAILABLE`
-  （`control-service/src/messaging.rs:1017` 的 `evaluation.publish → DownstreamError::Unavailable`）；
-  `evaluation-service` Pod 处于 `CrashLoopBackOff`，其启动期 outbox 反复报
-  `Error: Process(Outbox(PublishRejected { subject: "labweaver.evaluation.release.published.v1",
-  reason: "timeout", stage: "publish_ack" }))`，同时 NATS 服务端对同一 subject 记录
-  **`Publish Violation`**（权限拒绝，而非网络问题）。解码集群里的
-  `labweaver-system/evaluation-service-secrets/nats.creds` 得到 `pub.allow` 只有
-  `{$JS.ACK.>, $JS.API.>, submission.freeze_requested.v1, submission.frozen.v1}`，
-  而权威表 `tools/prepare_platform_foundation.py` 的 `NATS_USERS["evaluation-service"]` 有 9 个 subject
-  （含 `labweaver.evaluation.release.published.v1`）；`nsc describe user` 显示**私钥库里的用户 JWT 是对的**
-  （发布者与 subject 完全一致），说明**只有下发到集群的那份 creds 是旧的**。同一类问题还有
-  `access-service` 缺 `labweaver.environment.instance.state_changed.v1` 订阅等。
-  处置（已执行，逐服务）：用**权威 nsc store**（`/var/lib/labweaver/.private/v1/platform-foundation/nsc`）
-  `nsc --all-dirs <store> generate creds --account WORKLOADS --name <svc> --output-file <tmp>` 重新生成，
-  把内容写回 `labweaver-system/<svc>-secrets` 的 `nats.creds` 键与私有
-  `platform-application/render-input/secrets/<svc>-secrets/nats.creds`，再 `kubectl rollout restart` 该 Deployment；
-  `evaluation-service` 随即 `1/1 Running`（未再出现 Publish Violation）。
-  操作注意：`nsc` 生成的 creds 是 `0600 root`，非 root 直接 `base64` 会读到空内容——必须用 `sudo base64`（本轮曾因此把 9 个
-  `nats.creds` 键写空后立即用同一流程修复，最终校验每个键 1520–2300 字符且 JWT 段可解析）。
-  根因（部署态）：NATS 用户凭据只在最初建基础时生成一次，之后权限表新增 subject 不会再刷新；
-  重新建立基础需要重跑 `prepare_platform_foundation.py`（输出目录 create-once），因此这类「权限表新增 subject」
-  必须显式刷新凭据并滚动服务，否则会出现「服务启动即崩、且只有权限违规日志」的隐性故障。
-- **产品含义（成本/时延，非阻塞）**：单回合约 10 万输入 token 意味着 materials 是整体进提示词的，
-  按真实云端模型计费时一次 authoring（数十回合）会显著计费并拖长首字时延。本轮验收用本机模型
-  不受影响；若后续要用真实 provider，应把「按对象引用 materials」而不是整体内联作为优化项
-  （属产品/性能范围，本轮不擅自改动提示词结构）。
-
-### 11.8 已知阻塞
-- **服务身份缺 scope-mapping（已定位并临时修复，角色本身有缺陷）**：authoring 的失败链最终落到
-  `agent.authoring.sandbox.stage_failed`（`failure_stage: sandbox.resource.create`）与
-  `auth.service_token.failed`（`failure_stage: token_audience_validation`、
-  `error_kind: Client(Token(TokenAudienceRejected))`）：agent-service 换到的服务令牌 `aud` 只有
-  `labweaver-environment`、`scope` 只有 `profile email`，因此 resource-service 调用被拒。
-  根因是 `identity_foundation` 的 provisioning Job **渲染失败**：
-  `Provision the LabWeaver service OIDC clients and roles` 以
-  `yaml.parser.ParserError … line 1315/1317` 失败，所以 `identity_service_role_assignments`
-  的 client scope-mapping 从未写入 Keycloak（service account 只有 `default-roles-workloads`）。
-  临时修复：按角色的 `identity_service_role_assignments` 逐条补齐
-  `/clients/{caller}/scope-mappings/clients/{target}`（46 条 user mapping + 7 条 scope mapping），
-  修复后 agent 令牌变为 `aud: [labweaver-resource, labweaver-environment]`。角色模板仍需 owner 修。
-- **authoring sandbox 的资源申请需要人工/管理员批准**：沙箱尝试会先 POST 一条 `task` 资源申请
-  （`resource.resource_requests`，`state=reviewing`），随后 `claim_after_approval` 最长等待
-  `sandbox.wall_time_seconds`（3600s）。平台当前**不会**自动批准该内部申请，
-  `lab` 旅程因此会长时间停在等待；批准入口是 BFF `POST /api/v1/resource-requests/{id}/approve`
-  （需要管理员会话 + `X-CSRF-Token` + `Origin`，body 需 `expectedRevision`/`providerBinding`/`resources`/`durationSeconds`/`reason`）。
-  这是产品决策点：要么给内部 authoring 任务预授权，要么旅程显式批准。
-- **会话 TTL 必须覆盖验收旅程时长**：`access-service` 的 `browser.session_ttl_seconds`/`session_idle_ttl_seconds`
-  默认 1800（30 分钟），而 `lab` 旅程（上传 + 两次 authoring + 候选构建 + VM/控制台）实测超过 30 分钟，
-  中途所有 API 轮询开始返回 `401 {"diagnosticCode":"LW_AUTH_SESSION_REJECTED"}`，旅程以
-  `LAB_EXPERIMENT_AGENT_RUN_STATUS_FAILED:401` 失败。v1 私有配置已把两者提到 14400（4 小时）；
-  更长的旅程需要同步调大，或由前端实现会话续期。
-- **本地模型的候选 JSON 是本轮最后的阻塞**：沙箱内 CLI 能以 `exit_code=0` 完成
-  （`terminal_reason: completed`，`result.json` 135–382 KiB），但 runtime 报
-  `agent.llm.candidate_parse_failed`，其完整字段为
-  `diagnostic_code=LW_EVIDENCE_INVALID`、**`error_kind=SchemaInvalid`**、`retryable=true`：
-  即**模型输出的候选 JSON 不满足所审阅的 schema**（不是提取失败）。契约把 `max_schema_repairs`
-  限制为 **≤ 2**（`crates/contracts/src/authoring.rs:172`），不能靠加大修复次数解决；已实测
-  `qwen3.6:27b`、`qwen3.6:35b`、`glm-4.7-flash:latest` 三种本地模型均为同一形态。
-  处置方向：强化候选提示/放宽 schema，或接入满足该 schema 的模型——属于产品决策，
-  不得用 Mock 或放宽断言替代。实测取到的最新一代模型输出（CLI `result.subtype=success`、
-  `is_error=false`，即 CLI 成功）是：
-
-  ```json
-  {"evaluation":{"apiVersion":"evaluation.labweaver.io/v1","kind":"EvaluationSpec","metadata":{}},"runnerBuildRecipe":{"mode":"package"}}
-  ```
-
-  即模型给出的是**结构合理但字段不全**的候选（缺必填字段/空 metadata），因此是提示与 schema
-  严格度的问题，而不是链路或权限问题。已实测的模型矩阵（同一旅程、同一 schema）：
-
-  | 模型 | sandbox CLI | runtime 结果 |
-  |---|---|---|
-  | `qwen3.6:27b`（部署原值） | `exit 0`，`result.json` 135–382 KiB | `SchemaInvalid` → `LW_EVIDENCE_INVALID` |
-  | `qwen3.6:35b` | `exit 0` | 同上 |
-  | `glm-4.7-flash:latest` | `exit 0`，`subtype=success` | 同上（候选字段不全） |
-  | `ornith:35b` | `exit 1` | `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE` |
-
-  实验后已把 `anthropic-model` 恢复为部署原值 `qwen3.6:27b`。
-- **`ToolDenied` 的精确原因：`--bare` 把内置工具集收敛到 3 个**。runtime 传给 CLI 的是
-  `AUTHORING_TOOLS = "Bash,Edit,Glob,Grep,Read,Write"`（canonical policy
-  `AUTHORING_TOOL_POLICY_CANONICAL_JSON` 也是这 6 个），但沙箱内 CLI 的 init 事件只列出
-  `["Bash","Edit","Read"]`。在沙箱镜像内直接对照（同一 `--tools` 取值，仅切换 `--bare`）：
-
-  ```sh
-  claude --print --output-format stream-json --tools "Bash,Edit,Glob,Grep,Read,Write" ...
-  # -> "tools":["Bash","Edit","Glob","Grep","Read","Write"]     6 个
-
-  claude --bare --print --output-format stream-json --tools "default" ...
-  # -> "tools":["Bash","Edit","Read"]                          3 个
-  ```
-
-  即 **`--bare`（内部置 `CLAUDE_CODE_SIMPLE=1`）会把内置工具集收敛为 3 个**，与 `--tools`
-  取值无关；模型按提示去写文件时调用 `Write`/`Glob`/`Grep` 即被拒，
-  `error_kind=ToolDenied`（`retryable=false`），最终落在 `LW_PROVIDER_UNAVAILABLE`。
-  **已修复**：authoring 调用不再传 `--bare`（非 authoring 候选不调用任何工具，仍保持最小
-  `--bare` 模式），`AUTHORING_TOOL_POLICY_CANONICAL_JSON` 同步记录 `"bare":false`；在沙箱镜像内
-  实测同一环境下去掉 `--bare` 后 init 列出全部 6 个工具且 `--model $ANTHROPIC_MODEL` 正常解析
-  （`qwen3.6:27b`），因此 6 工具策略与 CLI 能力重新一致。附带代价：去掉 `--bare` 会重新启用
-  hooks/LSP/插件/CLAUDE.md 自动发现——沙箱 `/workspace` 为空且出网仅限 Harbor，实测无额外副作用。
-- **`ToolDenied` 的第二条、也是真正的阻塞原因：流解析器把任何 `tool_use` 块判为拒绝**。
-  `parse_stream_output` 在 assistant 消息里遇到 `tool_use` 直接返回
-  `ClaudeCodeRuntimeError::ToolDenied`，而 authoring 提示词恰好要求模型读 `/materials`、写
-  `/workspace`、用 Bash 跑命令——于是**只要模型真的用了工具，整次 authoring 就以
-  `LW_PROVIDER_UNAVAILABLE` 失败**（这与工具是否可用无关，`--bare` 只是让它更早触发）。
-  **已修复**：`tool_use` 块改为跳过（候选只取 assistant 的 `text` 块），真正被策略拒绝的工具
-  仍通过 envelope 的 `permission_denials` 失败；新增回归测试
-  `tool_use_turns_do_not_discard_the_final_candidate`（改前失败、改后通过）。
-- **同一解析器的第三个拒绝点：工具结果回合**。CLI 在每次工具调用后回灌一个
-  `type=user` + `content=[{"type":"tool_result",...}]` 的回合，而 `valid_synthetic_user_event`
-  要求 `isSynthetic=true` 且内容全是 `text`，于是该回合被判 `ProtocolInvalid`
-  → `LW_EVIDENCE_INVALID`（实测：`ToolDenied` 修掉之后紧接着出现的就是它）。
-  **已修复**：新增 `valid_tool_result_user_event`，只接受**全部为 `tool_result` 块**的 user
-  回合（真实用户消息带 `text` 块，仍被拒绝，注入防护不变）；同时让非 schema 的解析失败也
-  记录同样的有界 `stdout_preview`，便于定位协议类拒绝。回归测试覆盖
-  `tool_use` + `tool_result` 循环。
-- **Work 环境失败的真实原因：候选里的 `provider_binding` 不是集群注册的那个**。模型只能
-  从提示词里得知可用的 provider binding，而提示词此前**没有**任何 binding 列表，于是候选写的是
-  示例包里的开发值 `kubernetes-work-local-hostpath`；环境服务只注册 `container-primary-v1`
-  （`environment-service-config/providers.json`），`ProviderRegistry::resolve` 直接返回
-  `LW_ENVIRONMENT_PROVIDER_UNAVAILABLE`（reconcile 第 1 步、`duration_ms: 0`）。
-  **已修复**：`DeploymentFile.authoring_provider_bindings`（可选，默认空）经
-  `ClaudeCodeRuntime::with_provider_bindings` 进入 authoring 提示词的
-  `PLATFORM PROVIDER BINDINGS (authoritative)` 段，候选只能复用可用的 binding 名；v1 私有
-  bundle 里设为 `[container-primary-v1]`。同时验收侧不再硬编码开发值：
-  `tools/user_acceptance.py` 从 `environment-service-config/providers.json` 读出容器 provider 的
-  `binding` 并以 `LABWEAVER_E2E_PROVIDER_BINDING` 注入旅程，`real-experiment.mjs` 还会把该值写回
-  上传的示例包 manifest（示例包本身仍保留开发默认值）。
-- **私有 render-input 与仓库里的 bundle manifest 不同步**：`deploy/config/platform-bundle-manifest.json`
-  列出的 configmap/secret 比 `render-input/` 实际内容多，直接用它渲染会得到
-  `LW_PLATFORM_BUNDLE_INPUT_INCOMPLETE`；按 render-input 目录结构生成 manifest
-  （`configMaps`/`secrets` → 名称 → 键列表，namespace `labweaver-system`）后渲染正常
-  （20 个对象）。改私有 bundle 输入后必须重新渲染并让 vars 文件指向新文件名。
-- **更正（重要）：上面的「Pod DNS 全域失效」是探针假象，不是平台故障**。用 `busybox` 裸 Pod 直接
-  探 `kube-dns` ClusterIP 与 CoreDNS Pod IP（`10.0.0.9`、`10.0.1.40`）都超时，是因为
-  `labweaver-system` 等命名空间带默认拒绝的出口策略，裸探针不在放行集内；**同一时刻平台自身的
-  集群内调用全部正常**：`agent.platform_image.seed_existing`、`artifact_store` 客户端初始化、
-  authoring 沙箱拉取 Harbor 镜像并完成、`agent.agent_track_work_items.heartbeat_at` 持续刷新。
-  结论：agent-service 所在 worker-97 的 Cilium 与 DNS 都健康；worker 卡在「claim 之后无事件」
-  的真实原因是**每次运行耗时远长于验收轮询上限**（worker 一次只跑一个 reserved dispatch，
-  `created_at` 先到先处理，队列里还有更早的 run），而不是网络或 datapath 故障。
-  排查网络时应使用带平台标签的探针或直接观察平台自身的成功事件，不要用裸 Pod 判断。
-- **历史记录（已被上面的更正取代）：控制平面节点的 Cilium datapath 卡住、Pod 内 DNS 全部超时**。
-  证据链（本轮实测）：
-  - 集群内探针（`labweaver-system` 与 `labweaver-authoring` 两个命名空间）里 `nslookup`/`wget` 对
-    `kube-dns` 的 `10.96.0.10:53` 一律 `connection timed out; no servers could be reached`，
-    对 `keycloak-internal.keycloak-system.svc` 也拿不到地址；同一时刻从宿主访问公网入口正常
-    （`portal=200`、`/auth/login` 307），说明 Keycloak 本身健康、**故障在集群内网络**。
-  - `kubectl -n kube-system get pods -l k8s-app=cilium`：`v1-cp-63`（控制平面）上的 agent 报
-    `error in controller endpoint-938-regeneration-recovery: regeneration recovery failed`；
-    `cilium-dbg endpoint list` 显示 **938 就是该控制平面节点的 host endpoint**，状态 `Disabled`、
-    阶段 `regenerating`。重启该 agent 后仍是同一端点卡住（换 pod 名后错误依旧）。
-  - CoreDNS 也因此受影响：曾有一个副本 `0/1 Running, 227 restarts`（日志
-    `plugin/kubernetes: Failed to watch`），删掉重建后两副本 `1/1`，但**Pod 内 DNS 仍然超时**，
-    证明问题在 datapath 而不在 CoreDNS 进程。
-  影响：任何 in-cluster 服务调用（agent-service → Keycloak 的 service token/JWKS、worker 的
-  对象存储与后续步骤）在 DNS 超时后长时间挂起，表现为「`agent.dispatch.claimed` 之后再无事件」。
-  需要节点级恢复（控制平面节点重启或 Cilium datapath 重放），属于基础设施操作，本轮未执行。
-  已尝试的非破坏性恢复（均未成功）：删除并重建崩溃的 CoreDNS 副本（两副本恢复 1/1，但 Pod 内 DNS
-  仍超时）、重启该节点上的 Cilium agent（换 pod 名后同一端点仍报错）、
-  `cilium-dbg endpoint regenerate 938`（状态在 `regenerating → not-ready → waiting-to-regenerate`
-  之间循环，DNS 始终超时）。因此该端点需要节点级恢复才能回到 `ready`。
-- **排查线索：受控 OIDC HTTP 客户端没有超时**。`auth::no_redirect_http_client`
-  （`crates/auth/src/provider.rs:266`）只设置 `no_proxy`/`redirect(none)`/TLS 信任，**没有 `timeout`**；
-  凡是用它发起的 OIDC 调用（service token 刷新、JWKS 刷新）在被网络黑洞吞掉时会**永久挂起**，与
-  「claim 之后没有任何后续事件」的现象一致。已确认启动期 discovery 是成功的（Pod Ready），
-  因此这只是候选原因，尚未定位到具体调用点。
-- **未解决（当前阻塞）：dispatch 被 claim 之后 worker 不再前进**。已修掉前置缺陷（seed 解析、工具策略、
-  provider binding、凭据）后，重启 agent-service 可见 `agent.platform_image.seed_existing`（两个 seed 已在
-  目录中）与 `agent.dispatch.claimed`，随后**没有任何后续事件**：没有 `agent.track.started`、
-  没有沙箱 Pod、没有新的 `agent.build_commands`、`environment-service` 日志无调用、
-  `pg_stat_activity` 无阻塞查询、track 一直停在 `requested`（旧 run 则停在 `running` 且租约已过期）。
-  即卡点在 claim 与 track 启动之间（dispatch 绑定/egress 输入物化一带），该段目前没有可区分阶段的日志。
-  重启 worker 只能让它再 claim 一次并再次停住；`tools/user_acceptance.py preflight` 的
-  `authoring_queue` 会以 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY` 报出积压。
-- **历史记录：authoring 成功后 worker 停在该 track 上**。证据链：authoring 沙箱
-  尝试正常结束（`agent.authoring_sandbox_attempts` 的 `environment|terminal|exit_code=0`），
-  但 `agent.agent_track_work_items` 的该 track 长期停在 `running`：`heartbeat_at` 只在 claim 后
-  ~2 分钟更新过一次（`07:21:17` / `07:27:42`），`lease_expires_at` 随后过期且不再续租；同时
-  ① 没有新的 `agent.build_commands` 行（构建命令从未发出）、② `environment-service` 日志自部署后
-  无任何调用、③ 无沙箱 Pod、④ `pg_stat_activity` 无阻塞查询、⑤ agent-service 的最后一个
-  `artifact_store` 事件与 claim 同一秒（`endpoint` 已 redaction）。
-  重启 `deploy/agent-service` 只能让 worker 重新 claim 一次，随后再次停住；因此队列会稳定积压
-  （`agent_run_dispatches` 的 `pending`），`tools/user_acceptance.py preflight` 的
-  `authoring_queue` 检查会以 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY` 报出。
-  推断卡点在 authoring 之后、构建命令之前（候选物化/对象存储调用），尚未定位到具体代码行；
-  需要 agent-service 侧更细的诊断（当前该步没有可区分阶段的日志）。
-- **平台镜像 seed 解析失败的真实原因：accept 头不含 OCI index 类型**。`agent-service` 启动时
-  解析 `platform_registry.seed_images`，`OciRegistryPublisher::resolve_tag` 只声明
-  `application/vnd.oci.image.manifest.v1+json` 与 `application/vnd.docker.distribution.manifest.v2+json`；
-  Harbor 对这类镜像返回 **OCI index**，accept 不支持 index 时直接以 404
-  `MANIFEST_UNKNOWN: OCI index found, but accept header does not support OCI indexes` 拒绝，于是
-  `rust-builder-v1`、`distroless-runtime-v1` 两个 seed 都失败（`LW_PLATFORM_IMAGE_SEED_FAILED`），
-  目录里没有固定基础镜像，后续 authoring 无法解析基础镜像。对照实验：
-  ```sh
-  curl -sk -u "$ROBOT:$SECRET" -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-    https://harbor.lab.lan/v2/labweaver-system/rust/manifests/1.97.1-bookworm
-  # 404 MANIFEST_UNKNOWN: OCI index found, but accept header does not support OCI indexes
-  ```
-  **已修复**：accept 头补上 index/manifest-list 类型，tag 解析到 index 时**跟随一次**到
-  `linux/amd64` 条目（保持 pin 的是单平台镜像），并新增 `index_platform_digest` 的选择/拒绝回归测试。
-- **另一处易混点**：seed 失败的日志只带稳定诊断码，`cause` 字段不会出现在 JSON 日志里；已在
-  `resolve` 失败分支补记 `error_kind`，便于区分凭据被拒、注册表不可达与媒体类型不支持。
-- **A2 复核（当前实机状态）**：`kubectl get runtimeclass` 只有 `labweaver-sandbox`（handler
-  `labweaver-sandbox`）与 `nvidia`，`labweaver-oj` 已不存在；两台 worker 各跑一次
-  `runtimeClassName: labweaver-sandbox` + `nodeSelector` 的探针 Job（`busybox`，`cat /proc/version`），
-  两者都输出 `Linux version 4.19.0-gvisor` 并在数秒内完成，证明 gVisor 运行时在 worker-97 与
-  worker-158 上仍然可用；探针 Job 用完即删。
-- **A3 复核（当前实机状态，rev 74）**：`helm -n labweaver-system status labweaver` = `deployed`
-  （revision 74）；`deploy -l app.kubernetes.io/instance=labweaver` 的 **11/11** 个 workload 都带
-  `labweaver.io/configuration-bundle-sha256` 注解，且取值唯一，等于本地 bundle
-  `configuration-bundle-public-20260923s.yml` 的 `sha256sum`
-  （`sha256:e3c5a25efdcc81edb81db6ad2561ecb827639e4a7bda5894e678c20277579e7f`；本轮验收目录里的
-  `deployment-readback.txt` 记录了逐 workload 的镜像 digest 与本地校验和命令）；带 digest 的 workload
-  镜像与平台包 manifest（`pkg-v1-issue127-public-12-299d2216e2b8`，commit `299d2216e2b8`）逐组件一致
-  （`build-executor`/`container-executor`/`kubevirt-*` 复用 agent/environment 镜像，`resource-service`
-  来自 resource 包，属预期）。补一条更正：早先记的 12 个 workload 含一个非 Deployment 负载，
-  以 `-l app.kubernetes.io/instance=labweaver` 的 Deployment 口径为准。
-- **本轮部署身份（current，含围栏修复与刷新凭据）**：平台包 `pkg-v1-issue127-public-13-e17f8d966d3d`
-  （release `issue127-public-13`，commit `e17f8d966d3d`，8 个组件）；`package-validate` 的 static 与
-  connected 均通过，`platform-application` 退出码 0。部署后实机为：`helm status` = `deployed`
-  **rev 76**；11/11 Deployment 就绪，`labweaver.io/configuration-bundle-sha256` 取值唯一 =
-  `sha256:36e3edba7443df8467b5e2eb6f6373c92a9b2f79ec22d8d6e0c2ed48244d91d2`（即新渲染的
-  `configuration-bundle-public-20260924b.yml`，含刷新后的 NATS 凭据）；`agent-service` 镜像 digest
-  由 `sha256:0f210313…` 变为 **`sha256:c4d46c121aae3530…`**（含 `normalize_candidate` 围栏修复）。
-- **部署后仅追加了格式归一化提交**：在线包 `pkg-v1-issue127-public-13-e17f8d966d3d` 的 `source_commit` 是
-  `e17f8d966d3d`；此后为通过 `cargo fmt --all -- --check` 提交了 `d043ada`（3 个文件，逐行核对为 rustfmt
-  自身的换行/导入折行，`git diff -w` 对 `main.rs` 为空、对其余两处仅剩 rustfmt 归一化），**语义未变**，
-  因此实机镜像与验证结论仍然成立；后续若再打包，注意以新的 `source_commit` 重新记录一次部署身份。
-- **A4 复核（当前实机状态）**：`https://keycloak.labweaver.2018wzh.top/realms/workloads/.well-known/openid-configuration`
-  的 `issuer`、`authorization_endpoint`、`token_endpoint` 全部是公网主机名；`/auth/login` 返回 307 且
-  `Location` 指向公网 Keycloak；`/api/v1/auth/csrf` 在无会话时返回 401（`preflight` 的 portal-csrf 即按此断言）。
-  Pod 侧解析走 chart 的 `hostAliases`：`agent-service` 的 Pod 模板把 `keycloak.labweaver.2018wzh.top`
-  映射到集群内 identity proxy `10.106.242.177`、`portal.labweaver.2018wzh.top` 映射到公网 Gateway VIP
-  `10.99.0.140`，因此 Pod 用公网 issuer 完成 OIDC 发现与令牌交换。
-- **修复生效的首个证据**：取消占用 worker 的陈旧 run 后，work 旅程的
-  agent run（08:58 创建）在**首次尝试**即从 `requested` 走到 `environment:succeeded`（09:26 领取、
-  09:30 成功），说明「工具策略 / `--bare` / provider binding / 平台镜像 seed / Harbor 凭据」这几处
-  修复合起来已经让 authoring 真正跑通；随后 lab 旅程的 run 立即被领取并进入 authoring。
-- **provider binding 修复的端到端验证**：work 旅程随后的环境实例
-  （`01a0d2c0-a89c-7fb2-8b8b-7d7475b0e1bb`）带 `provider_binding = container-primary-v1`（即环境服务
-  真正注册的那个）并走到 `desired_state=running / observed_state=ready`；与之对照，本轮之前的环境实例
-  都是 `kubernetes-work-local-hostpath` + `failed/expiring` + `LW_ENVIRONMENT_PROVIDER_UNAVAILABLE`。
-  说明「候选只能使用平台实际注册的 binding」这一改动在真实链路上生效。
-- **已修（验收脚本缺陷）**：work 旅程等待资源标题时用 `exact: true` 匹配裸环境 id，而控制台把 Work
-  环境命名为 `work-<环境 id>`，因此页面渲染正确也会超时。改为按包含匹配（`.resource-title-row`
-  范围内），提交 `4acf1c5`。
-- **已知易用性项（有证据，未修）**：失败快照显示环境已 `运行中`、端点表也已出现「健康」，但同一页面
-  仍有 `status: 当前正在创建环境，请在操作完成后继续。` 的残留提示；即运行状态与提示文案短暂不一致。
-  它不阻断旅程（`assertNoStuckProgress` 只看加载指示器与虚构百分比），作为已知项记录，附截图与本次
-  证据（`web/test-results/student-sprint2-flow.live--3dbb6-t-and-releases-its-capacity-student/`）。
-- **lab 旅程的双轨迹首次全部成功**：xv6 实验包的 authoring run（09:29 领取、09:38 结束）以
-  `succeeded` 收尾，两条轨迹都是 `environment:succeeded, evaluation:succeeded` —— 说明「模型只能
-  使用已注册 provider binding」「平台镜像 seed 解析」「`--bare`/工具策略」「沙箱流解析」四处修复
-  合起来让 environment 与 evaluation 两侧都能产出被接受的候选（本轮之前两侧都停在候选生成）。
-  同一时段 work 旅程的 authoring run 紧接着被领取并进入 `environment:running`，worker 吞吐正常。
-- **lab 旅程的学生环境已真正就绪**：实验包发布与审批之后，学生环境实例
-  （`01a0d2c7-c42c-7d02-90d7-b53dac0a69a5`）以 `provider_binding=container-primary-v1` 从
-  `provisioning` 走到 **`observed_state=ready`**，说明「发布包 → 候选 → 环境实例 → 就绪」整段在
-  真实集群上可用；同一时段 work 旅程的 authoring 也在并行推进。
-- **Work 模板（environment/evaluation 之外的第三条 authoring 轨迹）仍会拿到 schema 不适配的候选**：
-  work 旅程的 run `01a0d2c3-7877-7a10-96b1-acba622c1894` 的沙箱尝试为 `environment|released|exit_code=0`
-  （CLI 正常退出），但 worker 侧记录到 `SchemaInvalid` → `LW_EVIDENCE_INVALID`，另有一次
-  `ExecutionFailed` → `LW_PROVIDER_UNAVAILABLE`；同一时段 **lab 包的 environment + evaluation 两条轨迹
-  双双 succeeded**。即：同一模型在「实验包」两条 schema 上已能产出被接受的候选，而「Work 模板」这条
-  仍未通过，属提示/模型能力边界，不是链路或权限问题；work 旅程会重试，失败时按此诊断记录。
-- **materials 声明的环境面现在由平台补齐（已修，需重新打包部署 agent-service）**：提示词早已要求
-  「逐字保留 materials 的 `terminal`/`entries`/`service_port`」，但本机模型会漏抄（run 53 的 experiment
-  候选 `runtime` 段就没有 `terminal`，实验室因此打不开控制台）。现在 `agent-service` 在 **Environment 轨**
-  物化候选时，从受验证信封里取出 materials 声明的 `EnvironmentSpec`，把候选**漏掉**的面（`runtime.terminal`、
-  `runtime.service_port`、`entries`）按声明值补回：候选显式给了值就以候选为准，运行时变体不同则一概不继承，
-  并记 `agent.candidate_materialization.declared_surfaces_restored` 事件。这样 Web 控制台与终端绑定的解析
-  不再依赖模型是否照抄，且不引入静默降级——补的是教师已批准素材里的声明值。
-- **lab 旅程下一步的真实缺口：experiment 候选没有带 terminal/entry（已定位到「模型漏抄」这一步）**。
-  **决定性对照（本轮 run 56 实测）**：示例包 `examples/xv6-lab/environment.yaml` **明确声明**了
-  `runtime.terminal: {executable: /bin/sh, args: [], workingDirectory: /workspace}` 与
-  `entries: [{name: public-files, protocol: http, servicePort: 8080}]`；而同一包生成的候选所落成的学生环境
-  （project `01a0d341-ff64-71e0-b9c2-43083c12e319`）合同里 `entries` 只有那个 http 端点、
-  `runtime` 段**没有 `terminal`**。即**素材里有、模型漏抄**——提示词已要求「逐字保留 materials 声明的每个面」，
-  27B 本地模型仍会丢字段。后果：控制台能连上（`/connect/console/` 有请求）但 `.xterm-host` 不挂载，
-  lab 旅程在终端编辑步骤失败（与 11.8 里同一条目一致）。
-  处置（产品决策）：强化提示词/在 schema 层强制容器实验环境必须带 `terminal`，或换满足该要求的上游模型；
-  **不得**放宽旅程断言或改写素材来掩盖。
-  因果链（run 56，24.4 分钟失败）：候选不带 `terminal` → 控制台虽有 `/connect/console/` 请求但
-  `.xterm-host` 不挂载 → 终端编辑（改写 `student/auth.c`）无法完成 → evaluation-service 侧记录
-  `LW_COLLECT_SUBMISSION_NOT_FOUND`（收集不到学生提交内容）→ 冻结/结果等待以
-  `expect.poll(...).toBe(true)` 的 **300s 超时**告终。因此 lab 旅程的失败是**单一根因**（候选丢 terminal），
-  其余现象都是它的下游表现。
-  历史佐证（同一现象的早期观测）：spec 已点「打开终端」并等待 `.xterm-host`，页面状态栏显示
-  `环境已就绪，可以打开终端；重启会中断当前运行。`，但终端始终未挂载；对应环境实例
-  （class `experiment`）的 contract 亦为 `"endpoints": []`/无 terminal。作为归因记录；同批 work 候选
-  （`01a0d2cc`）声明了 `http` 端点且观测为 `healthy`。
-- **提示词修复已在部署产物中核实**：从运行的 agent-service 镜像
-  （`sha256:17e5e5ce…`，`docker create` + `docker cp` 取出 `/usr/local/bin/labweaver-service`）中
-  grep 到 `terminal object`（环境提示词新增的“逐字保留 materials 声明的每个面”）与
-  `Generate exactly one WorkConfigurationDraft`；`verificationScriptContent` 出现 3 次（提示词与 schema）。
-  即 `issue127-public-12` 部署后，两条提示词修复确实在集群里生效，而不是只落在源码里。
-- KubeVirt 控制面（virt-api/virt-controller/virt-operator）长期 CrashLoop（报
-  `dial tcp 10.96.0.1:443: i/o timeout`），因此 linux-nginx VM+Probe 验收需要先修复 KubeVirt 控制面。
-- worker-158 的 P40 驱动与库版本不匹配，需要重载模块或重启节点后才能作为 GPU 提供方。
-- **上线阻塞（需产品决定）：项目 LLM 出站策略没有任何应用内建立入口**。证据：
-  - 权威读取只认项目行：`services/control-service/src/lib.rs:1963` 的 `active_project_policy`
-    是 `WHERE project_id=$1 AND superseded_at IS NULL`，**没有课程级或平台级回退**；
-    在线库里 `control.project_llm_policies` 共 198 行，`project_id IS NULL` 的行为 0，即不存在课程策略。
-  - 唯一的建立路径是 `POST /api/v1/projects/{id}/llm-egress-policies`
-    （`services/control-service/src/api.rs:631`）。前端 SDK 里有 `createProjectLlmPolicy`
-    但**没有任何页面调用它**；`web/src/views/teacher/MaterialUploadView.vue` 只读展示
-    「项目 AI 设置」（无策略时 `AsyncStateView` 只给重试），`web/src/views/admin/PolicyListView.vue`
-    仍是 `PlaceholderPane`（「策略管理」占位）。
-  - 项目创建不会自动建立策略（`api.rs:403` 的 `create_project` 只建项目）；文档、`tools/`、`xtask`
-    里也没有任何建立策略的运维步骤（全仓 grep `llm-egress-policies` 只命中服务端路由、契约、
-    生成 SDK 与 `web/e2e/**` 的验收 spec）。
-  - 结论：`web/e2e/**` 的各条旅程用 API 预先建立策略，**替代了一个尚不存在的产品能力**。
-    真实教师在一手新项目上会停在「材料上传与 AgentRun」页的错误态，无法启动 AgentRun。
-  - 处置（需产品决定，本轮不擅自选定默认策略的 `deniedDataClasses`/`studentContentMode`/预算）：
-    ①由平台在项目创建时写入一份审阅过的默认策略（模型/版本/运行时绑定来自部署配置），
-    教师只做确认与预算调整；或 ②提供教师/管理员表单（需要先有暴露平台模型与绑定的接口，
-    当前 web 无任何平台模型来源）。二者都需要改契约与前端，属产品范围。
-- **lab 旅程最后一步的真实阻塞（需产品决定）：学生评测 run 需要资源审批，平台不自动批准**。实测（本轮 run 54）：
-  authoring 双轨迹 succeeded、候选 `validated`、构建 succeeded、批准与发布成功（学生环境
-  `01a0d330-a006` 达到 `running|ready`），随后学生的评测 run `01a0d331-1f65-74d3-98fb-304eaf1f65f3`
-  以 **`LW_EVALUATION_RESOURCE_APPROVAL_TIMEOUT`** 失败（`evaluation.evaluation_runs`，11:33:27；
-  同日 2026-09-19 05:26 也有同样一条，属长期行为）。即评测任务会先申请资源（`task` 资源申请，
-  与 authoring 沙箱同类），平台**不会**自动批准内部申请，等待超时即判失败。
-  两条路径（产品决策，本轮不擅自选定）：
-  ①**平台预授权**平台自有的内部任务（authoring 沙箱 + 学生评测）在一份已审阅的额度内自动批准；
-  ②**显式审批**：由管理员/课程负责人（或验收旅程）按真实流程批准该申请（`admin` 旅程的
-  `POST /api/v1/resource-requests/{id}/approve` 即此路径）。
-  验收侧可重复的做法是把 ② 写进 lab 旅程的学生结果阶段（等价于真实部署里管理员批准学生评测），
-  但**不得**用 Mock 或放宽断言替代。
-- **本轮实测复现：worker 的 claim 循环会静默停住（需 owner 修）**。run 55 的 lab dispatch
-  （`run_id=01a0d33b-7f65-7542-810f-f0178ace8163`，创建 11:44:47）在 `agent.agent_run_dispatches`
-  里保持 `pending` 超过 2 分钟，而 agent-service（`sha256:c4d46c12…`，本次部署的新镜像）近 20 分钟
-  **只打出一条非 HTTP 事件**（`agent.outbox.published`），没有任何 `agent.dispatch.claimed`；
-  `kubectl rollout restart deploy/agent-service` 之后立刻出现 `agent.dispatch.worker_started`（×2）与
-  **`agent.dispatch.claimed`（×2）**，dispatch 随即被取走。与 §11.8 早先记录的「重启只能让它再 claim
-  一次」一致：**claim 循环会在若干次运行后停住且不留日志**，长跑验收会因此空等。处置：需要 agent-service
-  owner 给该循环补上「停住即失败/重启」的可观测性与自恢复；验收期间的可重复缓解是发现 dispatch 超过
-  ~2 分钟仍为 `pending` 时重启该 Deployment（本轮即如此）。
-- **同一卡点的更强证据（run 56）**：重启后 worker 的事件序列恰好是
-  `artifact_store.s3_client_ready` → `agent.dispatch.worker_started` → `agent.platform_image.seed_existing`×2 →
-  **`agent.dispatch.claimed`**，**之后再无任何事件**（无 `agent.track.started`、无沙箱 Job、无
-  `preparation_failed`、无 ERROR 行）；同一 dispatch 在 `agent_run_dispatches` 里于 `prepared` 与 `pending`
-  之间来回、`agent_runs.state` 始终 `requested`（`environment:requested,evaluation:requested`）。
-  即卡点稳定落在 `claimed` 之后的「绑定/执行」段，且该段**没有可观测输出**——这是本轮验收中
-  最需要 owner 处理的产品缺陷；验收侧只能靠周期性重启争取一次成功执行（run 54 的两次 authoring 即
-  在重启后正常执行过，说明该路径可用但不可靠）。
-- **更正（同轮更晚的实测，重要）**：上面这条「停住」有相当一部分其实是**串行 worker 正被更早的 run 占用**：
-  同一时刻 `agent_track_work_items` 里 4 条 `running` 轨迹分别属于 11:39 与 11:44 两个**已被 kill 的验收
-  spec 留下的平台 run**，且 `heartbeat_at` 仍在刷新（11:55–11:56），说明它们在正常推进、并非卡死；
-  run 56 的 dispatch 只是按 `created_at` 排在它们之后。因此：**杀掉验收进程不会杀掉平台 run**，
-  它们会继续占用 worker 直到跑完；新一轮验收会因此排队。排查时应先看 `agent.agent_track_work_items`
-  的 `running` 轨迹归属与心跳，再判断是否真的停住；**不要**在 worker 忙碌时重启它（会中断在跑的 run）。
-- **每个旅程都有上限，卡死的浏览器不再拖死整轮**：`tools/user_acceptance.py` 以
-  `JOURNEY_TIMEOUT_SECONDS=2700`（45 分钟）为单个 Playwright 旅程设上限，超时即终止并以
-  `LW_ACCEPTANCE_JOURNEY_TIMEOUT`（`<key>:LW_ACCEPTANCE_JOURNEY_TIMEOUT`）落入证据汇总；此前
-  `subprocess.run` 无超时，Playwright 卡在收尾时整轮会无限等待。单测覆盖「超时返回 124」与
-  「超时旅程的诊断码」两条。
-- **验收证据里的 Playwright 报告改为按旅程写盘（已修）**：平台内置的 HTML/JSON reporter 把配置里的
-  相对输出路径解析到**运行目录**上，验收工具原先只从 `web/playwright-report` 拷贝，可能拷到上一次无关
-  调用的旧报告。现在每次旅程都用 `PLAYWRIGHT_HTML_REPORT` / `PLAYWRIGHT_JSON_OUTPUT_NAME` 把报告
-  **绝对路径**指到 `artifacts/acceptance/<run-id>/<journey>/{index.html,report.json}`，`test-results/`
-  仍在旅程结束后拷贝；证据因此自包含，不再依赖仓库里的共享报告目录。
-- **lab 旅程的冻结提交等待器写死了另一实验的路径（已修）**：`waitForFrozenSubmission` 在 API 层轮询
-  `/frozen-submissions/{id}` 时硬编码要求文件 `student/auth.c`（那是 `real-experiment` 密码实验的路径），
-  而 `lab-experiment` 的 xv6 实验冻结的是 `student/student.c`，因此该断言永远不可能满足——run 59 的 lab 段
-  在 UI 冻结成功后仍以 `expect(...).toBe(true)` 超时 300s 收场。现在该参数的期望路径由调用方传入
-  （`real-experiment` 传 `student/auth.c`，`lab-experiment` 传自己的 `LAB.frozenPath`）。
-- **看护的目标判别字段写错了（已修 `30334c3` 之后）**：`/api/v1/resource-requests` 的列表与详情里，
-  目标类型在 **`target.kind`**（值 `task`/`environment`），**没有** `targetKind` 这个字段。`561d6a9`
-  当初按 `targetKind` 过滤，导致看护把**所有**申请都跳过（`None != 'task'`），平台任务租约因此长期停在
-  `reviewing`，authoring 派发拿不到租约而不推进——这正是后续几轮「队列不消化」的直接原因。现在读
-  `target.kind`，单测夹具同步改为真实形状（35 passed）。
-- **自动审批看护曾与旅程自身的审批抢跑（已修）**：`tools/user_acceptance.py` 的后台看护会批准**所有**
-  `reviewing` 申请，包括旅程自己要在管理台手动批准的那一条——run 58 的 work 旅程因此报
-  `TimeoutError: locator.fill … 执行后端绑定`（申请已被看护批准，单条审批表单随 `selectedRequest.state`
-  变为非 `reviewing` 而消失）。现在看护只批准 `targetKind == 'task'` 的平台任务租约（内部 authoring/evaluation
-  任务），`targetKind == 'environment'` 的申请交回旅程自己在管理台批准。
-- **审批表单里同名输入框有两个（已修）**：`ResourceApprovalView.vue` 同时渲染批量审批的
-  `aria-label="批量审批执行后端绑定"` 与单条的 `aria-label="执行后端绑定"`，因此 `getByLabel(/执行后端绑定/)`
-  会命中 2 个元素触发 Playwright strict mode 违规（`REAL_WORK_PRIMARY_FAILURE:locator.fill: strict mode violation`）。
-  验收侧改为 `getByRole('textbox', { name: '执行后端绑定', exact: true })`（只命中单条表单那个）。
-  同时 `cancelProjectResourceRequestByUi` 的清理可能撞上「渲染后、点击取消前请求已被批准」，平台答 409
-  （`LW_RESOURCE_LIFECYCLE_FAILED`）；该 409 属正常的生命周期竞态，现已作为「已被取代」的清理结果返回，
-  不再判失败。
-- **管理员审批表单的字段标签带后缀，旧断言按 `exact` 匹配会超时（已修）**：`ResourceApprovalView.vue` 的单条审批
-  表单里 `<label for="provider-binding">执行后端绑定（CPU 必填）</label>` 与 `aria-label="执行后端绑定"` 并存，
-  Playwright 的 `getByLabel('执行后端绑定', { exact: true })` 因关联标签文本带 `（CPU 必填）` 而**匹配不到**，
-  work 旅程因此在 3.7 分钟处以 `TimeoutError: locator.fill` 失败（页面快照显示项目
-  `live-work-…-01a0d35f`，即已走到资源审批步骤）。验收侧已把匹配放宽为 `getByLabel(/执行后端绑定/)`；
-  该字段本身是真实的（CPU 类请求必填），产品无需改动。- **admin 旅程首跑失败于候选构建（也已定位到候选质量）**：run 56 的 admin 用例在 4.0 分钟处以
-  `LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:LW_AGENT_BUILD_PROVIDER_UNAVAILABLE` 失败；build-executor
-  的原始事件是 `agent.build_executor.buildkit_solve_failed`（`diagnostic_code=LW_AGENT_BUILD_SOLVE_FAILED`、
-  `error_kind=buildkit_solve_rejected`、`failure_stage=build.solve`、`retryable=false`），即 **BuildKit 拒绝了
-  该 Work 模板候选的构建配方**（同批另 4 条构建 succeeded，说明构建链路本身正常）。与 lab 的 terminal 缺口同源：
-  都是本地 27B 模型产出的候选质量边界，处置属产品决策（提示词/schema 收紧或换模型），不得放宽断言。
-- **验收入口现在会代管理员批准平台任务租约（可重复）**：`tools/user_acceptance.py run` 在旅程期间启动一个后台
-  审批线程，用 `web/.auth/platform-admin.json` 的会话每 5 秒查一次 `/api/v1/resource-requests`，对仍处于
-  `reviewing` 的内部任务租约按管理员流程调用
-  `POST /api/v1/resource-requests/{id}/approve`（`expectedRevision` / `providerBinding` / `resources` /
-  `durationSeconds` / `reason`，并带 `If-Match` 与 `X-CSRF-Token`），退出前停止。
-  这是对「平台不自动批准内部任务申请」这一产品决策点的验收侧对等动作（真实部署里就是管理员在
-  `/admin/resource-approval` 点批准）；单测覆盖「只批准 `reviewing`」与「无会话时不动作」两条边界。
-- **dispatch worker 是串行且按 `created_at` 先到先处理**：一次只跑一个 reserved dispatch
-  （`agent.dispatch.claimed` 后要等它完成），且 claim 的 `ORDER BY created_at` 决定顺序。被中断的旧
-  run 会留下 `pending`/`preparing` 的 dispatch，它们会**先**占用 worker，使新 run 长时间排队
-  （实测：三条陈旧 dispatch 各等待其沙箱审批，新 run 排队 20+ 分钟）。验收前应确认队列为空，
-  或先把陈旧 run 取消；不要靠改数据库绕过。
-- **CLI 的预算来自 run 的 policy 快照**：`--max-budget-usd` 取自 dispatch 里的 policy，而不是当前
-  项目策略，所以调大 `LABWEAVER_E2E_LLM_MAX_COST_MICROUSD` 后**旧的 pending dispatch 仍是旧预算**
-  （实测仍以 `error_max_budget_usd`、约 1.09 USD 结束）。新 run 才会带上新预算。
-- **authoring AgentRun 失败且无 sandbox Job（未解决，需 owner 判断）**：三条旅程都在“发布包”这一步以
-  `LW_PROVIDER_UNAVAILABLE` 失败，且每条 run 的两个 track 各报一次。已实测的边界：
-  - `agent.agent_run_dispatches` 有本次记录且状态为 `prepared`（`bind_prepared_dispatch` 由
-    `agent-service` 写入），说明 agent-service 已消费 dispatch、读过全部包对象并生成 egress envelope；
-  - `labweaver-authoring` 内 5 分钟 2 秒粒度 watch 捕获 **0 个 Pod**；全集群 60×2s watch 也没有任何本次
-    run 的 Job/Pod；`agent.authoring_sandbox_attempts` 无行；
-  - agent-service 日志里没有 `agent.dispatch.completed`、也没有 `preparation_failed`，Pod 重启数为 0，
-    即失败发生在 `bind_prepared_dispatch` 之后的 `execute_reserved_dispatch` 段，且该段**没有稳定诊断输出**
-    （这是需要一并修的可观测性缺口：worker 的 `Err` 直接经 `select!` 冒泡，既不落日志也不落事件）；
-  - 该段所需的 RBAC 已单独验证（补 `list/watch` 后重跑仍失败，随后还原）；
-  - 已排除的假设（都可复核）：agent-service 的 `minio-ca.pem` 与 MinIO 服务端 `ca.crt` 指纹一致、
-    与 control-service 的 `minio-access-key/secret-key` 指纹一致；`SandboxAuthoringProcess` 的
-    `verifies_identity_in_execution() == true`，所以不会走 `version()` 那条恒返回 `Unavailable` 的分支；
-    track work item 在创建后约 1 秒即 `failed`，`execution_request`/`execution_receipt` 均为空，说明失败在
-    尝试落地之前，且 `agent.agent_run_dispatches` 已是 `prepared`。
-  处置：按 §12「产品缺陷」改源码后重新打包部署，并补上该段的失败诊断；不得以 Mock 或降级断言绕过。
-
-### 11.9.0 佐证：lab 遗留 run 的终态
-
-killed 旅程留下的 lab run `01a0d2d3-003e-7930-9b9e-d0bf49e14e7b` 最终为 **`partially_succeeded`**，
-两条轨迹 `environment:failed, evaluation:succeeded`：evaluation 侧可被接受，environment 侧失败，
-与「experiment 候选丢掉了 materials 声明的 terminal/entry（contract 为 `"endpoints": []`）」的诊断
-一致；这也说明环境轨迹的失败**不是** provider、凭据或集群问题（同一 run 的另一条轨迹成功落地）。
-
-### 11.9.2 lab environment 轨迹失败的 kind
-
-worker 侧对该轨迹记录的是 `SchemaInvalid` → `LW_EVIDENCE_INVALID`（另有少量 `BudgetExceeded` →
-`LW_RESOURCE_EXHAUSTED`）。与环境实例的 contract（`"endpoints": []`）合起来看：候选既没通过 schema，
-声明里也缺 `entries`/`terminal`。因此 11.8 里「environment 提示词必须逐字保留 materials 声明的每个面」
-这条修复正是对应它的杠杆；确认修复是否生效以重新部署后的轨迹为准。
-
-**更新（已定位并修复其中一个真实缺陷：候选被 ``` 围栏包裹）**。从对象存储读回失败尝试的
-`result.json`（`problem-packages/authoring-sandbox/<attempt>/result.json`，取最后一条 `type=result`
-的 envelope）可见 CLI 侧是成功的（`subtype=success`、`is_error=false`、`turns` 仅 2），
-模型的最终文本是一条**带 ```json 围栏**的 `EnvironmentSpec`：
-字段基本齐全（`runtime.kind=container`、`provider_binding=container-primary-v1`、
-`terminal.executable=/bin/sh`、`entries[...]`），但 `runtime` 里混用了 `service_port` 这样的 snake_case。
-而 `parse_stream_output` 只是把 assistant 的 `text` 块**原样拼接**成候选，
-`serde_json::from_str` 遇到围栏必然失败，于是表现为 `SchemaInvalid`。
-**已修复**：新增 `normalize_candidate`，在校验前去掉**整体包裹**候选的那一层 Markdown 围栏
-（语言标签只允许 `[A-Za-z0-9_+-]*`）；JSON 解析、受保护字段、typed schema、物化等所有闸门仍在围栏内的
-文本上运行，因此不可能放进本该被拒的候选；围栏外的散文仍然判 `SchemaInvalid`（不去“搜 JSON”）。
-回归测试 `a_fenced_candidate_is_unwrapped_before_validation` 覆盖围栏/无围栏/前后空白/散文包裹四种输入，
-`cargo test -p agent-service --lib` 80 用例通过、`clippy -D warnings` 干净。提交 `2b9e726`，
-随 `issue127-public-13` 重新打包部署后生效。
-
-### 11.9.1 三条旅程的共同依赖
-
-`lab`、`work`、`admin` 三条旅程都包含「生成 Work 模板 → 候选 → 构建 → 批准」这一段（`admin` 的
-`resource-approval.live.spec.mjs` 用同一个 `publishWorkTemplate` 助手建项目与 Work 模板），因此
-**Work 模板候选的 schema 适配是三条旅程的共同前置**；`lab` 包另有 environment/evaluation 两条轨迹
-（已可双双成功）。修 Work 模板提示词（四个字段必填）后需重新打包部署，三条旅程才能一起转绿。
-
-## 11.9 已知项与未覆盖项
-
-- **未覆盖：GPU / CUDA 旅程**。验收默认只跑 `lab`（xv6）/`work`/`admin` 三条；`LABWEAVER_E2E_LAB=cuda`
-  未执行。原因：节点广播的是 `nvidia.com/gpu`（仅 `v1-worker-97`），而 `deploy/versions.lock.yml`
-  的 reviewed class 用 `allocation_binding: nvidia-cuda-primary-v1`，且 `resource-service-config/capacity.json`
-  未配置 GPU observer（只有 `container-primary-v1`）。条件不满足时不替换为 Mock、也不宣称成功，
-  按实记录为未覆盖。
-- **未覆盖：`authoring` 旅程的易用性检查点**。`tools/user_acceptance.py` 的旅程表里有 `authoring`
-  （教师独立出题），但它属可选旅程，`web/e2e/teacher/authoring.live.spec.mjs` 未接入
-  `usability.mjs` 的三个断言；默认三旅程（lab/work/admin）已全部接入。
-- **未覆盖：KubeVirt VM 与 linux-nginx 材料链**。virt-api/virt-controller/virt-operator 长期
-  CrashLoop（见 §7 与上面的说明），因此 VM 类实验与 Probe 链路未在本轮验收范围内。
-- **已知项：环境控制台的状态文案可能短暂滞后**。环境已 `运行中`、端点表已出现「健康」时，页面上
-  仍可能残留 `当前正在创建环境，请在操作完成后继续。`；不阻断旅程（`assertNoStuckProgress` 只检查
-  加载指示器与虚构百分比），附本次截图证据于 §12 的失败快照目录。
-- **已生效：lab 旅程的 terminal 补齐**（`f66a824`，2026-09-24 已随后续部署上线）。该修复把 materials
-  声明的 `terminal`/`entries`/`service_port` 按声明值补回候选；此后多轮验收里 lab 段都**越过了候选与终端
-  这一步**（失败点后移到评测/OJ，见 §12.2），因此不再需要在验收前额外确认候选字段。
-- **已知项（需产品决策）：environment 申请的审批窗口短于管理台人工审批的耗时**。run 59 的 work 段三次尝试
-  （附 run 60 复核：三次尝试的 `environment` 申请存活 **59.9s / 85.4s / 86.2s**；每次尝试本身持续 2–4 分钟，
-  申请**远早于**该次尝试的清理就离开 `reviewing`，因此窗口是平台侧行为，不是旅程清理造成的假象；
-  在 resource-service 的 Rust/SQL 里按 `reviewing`+过期/截止条件检索未找到该窗口的定义，触发者应在更上层策略，
-  定位留待产品/owner。另据 `services/resource-service/src/lib.rs:464` 的单测，旅程清理发出的取消会落到 `Cancelled` 而不是 `Expired`，因此观测到的 `expired` 不是清理造成的，确实来自平台侧过期。）
-  都在管理台审批步骤以 `TimeoutError: page.waitForResponse … POST /api/v1/resource-requests/{id}/approve`
-  收场。证据：`resource.resource_requests` 里该旅程创建的 `environment` 申请在创建后约 **86 秒**就由
-  `reviewing` 变为 `expiring` 并最终 `expired`（14:05:57→14:07:23、14:09:57→14:11:24、14:14:35→14:16:01
-  三次一致）；trace（`artifacts/acceptance/public-20260924-59-all/work/test-results/…-retry2/trace.zip`）
-  的网络记录里**只有一次** `resource-requests` 相关的 GET，**没有任何** `/approve` 请求；失败截图显示
-  该申请此刻已标为「即将到期」。也就是说：真实浏览器里「进页面→按 key 定位并展开行→填理由/执行后端
-  绑定/批准时长→点批准→在确认框点确认」这一串操作来不及在窗口内完成，POST 从未发出。处置属产品侧审批
-  窗口策略（放宽 environment 申请的人工审批窗口，或让审批入口更快/支持预填），本轮按证据记录、不放宽断言。
-- **已知项：并行验收要避开 worker 串行**。agent worker 一次只处理一个 reserved dispatch，验收前用
-  `run` 的默认队列等待；确需取消本次旧任务时，由 owner 核对精确 ID 后通过正常用户入口操作。
-  否则旅程会把轮询预算耗在排队上。
-
-### 11.10 本轮重新部署的读回证据（2026-09-24，terminal 补齐上线）
-
-terminal 补齐修复（`f66a824`）随新包上线，实测记录：
-
-- 打包：`cargo xtask package --env v1 --release issue127-sandbox-3 --profile platform --yes`，
-  环境变量为 root 侧 `LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf`、
-  `LABWEAVER_PLATFORM_REGISTRY=harbor.lab.lan`、
-  **`LABWEAVER_BUILD_PROXY=http://49.52.27.95:7897`**（漏传会命中 `agent-service` 镜像里
-  `npm pack @anthropic-ai/claude-code-linux-x64` 的构建步骤失败）、`RUSTC_WRAPPER=`（避免 root
-  下 sccache 连不上自己的 server）。产物
-  `artifacts/package/pkg-v1-issue127-sandbox-3-79173741bcf9/PlatformImagePackageManifest.json`，
-  `source_commit=79173741bcf9…`（`git merge-base --is-ancestor f66a824… <commit>` 为真）。
-- 校验：`package-validate --mode static` 与 `--mode connected --env v1` 均 **exit 0**。connected
-  会先 `docker buildx inspect --bootstrap` 核对 BuildKit 身份，因此本地 `docker buildx use` 选中的
-  builder 必须指向**真实在跑的**端口转发（本轮把失联的 `bk-local`（1236）换成指向 1234 的 `bk-local2`
-  后才通过）。
-- 部署：`cargo xtask platform-application --env v1 --infra --yes --package-manifest <新包>`，
-  复用 `application-vars-public-20260924.yml`；**exit 0**，helm `labweaver` 升到 revision 78 / deployed。
-- 读回：11 个 workload 的镜像 digest 与 manifest **逐项 MATCH**（`agent-service`/`build-executor`
-  由 `c4d46c12…` 换为 `3b8f99a3634b…`，`environment-service` 及其执行器为 `dc2e4ccd…`，
-  `web` 为 `e56fef48…`，`resource-service` 属 resource 包未变）；部署后 `preflight` exit 0。
-
-### 11.11 三条旅程的本轮结论（run 59，2026-09-24）
-
-run 59（`public-20260924-59-all`，`lab,work,admin`，公网域名、真实 Keycloak、真实模型）三段均为
-failed，逐段定性如下（每段证据都在 `artifacts/acceptance/public-20260924-59-all/<段>/`）：
-
-| 段 | 结果 | 根因 | 处置 |
-|---|---|---|---|
-| `lab` | failed（run 59 12.1m；run 60 同因） | 共享等待器把冻结提交的必需文件写死为 `student/auth.c`（属另一实验），xv6 实验冻结的是 `student/student.c`，断言永不满足 | **已修** `fc3a8ce`（路径由调用方传入，并与 `examples/xv6-lab/manifest.json` 交叉核对） |
-| `work` | failed（1.9m/3.9m/…） | 管理台人工审批来不及在 environment 申请的审批窗口内完成（实测窗口≈86s，trace 中无 `/approve`） | **留证，待产品决策**（§11.9 末条） |
-| `admin` | failed（provider 抖动，已加固） | Work 模板 authoring run 撞上模型服务的瞬时 provider 不可用（`LW_PROVIDER_UNAVAILABLE`，`duration_ms: 0`） | **已加固** `589dce0`（仅对该诊断重试一次，其它失败原样上报） |
-
-run 60（`lab,work`）复跑后两段的失败点也各前进了一步：`lab` 已越过冻结提交那段，改为 authoring run
-以 `partially_succeeded:LW_PROVIDER_UNAVAILABLE` 结束（模型服务瞬时抖动，`fc3a8ce` 的冻结路径修复本身已
-生效）；`work` 仍卡在审批填写（`执行后端绑定` 定位超时，说明申请已离开 `reviewing`），与上表一致。
-
-- **admin 旅程的候选构建同样受 provider 抖动影响（已加固）**：run 61 的 admin 段先越过 authoring（provider 重试生效），
-  随后的**候选构建**以 `LW_AGENT_BUILD_PROVIDER_UNAVAILABLE` 失败——同一类瞬时抖动发生在平台紧随其后的构建步骤上。
-  现在构建失败也纳入同一重试循环（仅限该诊断，重试时等「启动 Work AgentRun」重新可用），其它失败原样上报。
-另有两处更早定位并修复的旅程缺陷：审批表单同名输入框的定位歧义（`7ea6ba6`）、后台自动审批看护与
-旅程自身审批的抢跑（`561d6a9`）。修复后由 run 60（`lab,work`）与后续 run 验证；`environment` 申请
-的审批窗口竞态未在任何环节放宽断言。
-
-### 11.12 lab 旅程的新阻塞：OJ 评测沙箱（run 61，2026-09-24）
-
-run 61 的 lab 段已越过 authoring（provider 重试生效）与冻结提交，停在评测结果：
-`REAL_EXPERIMENT_EVALUATION_FAILED:failed`。证据链：
-
-- `evaluation.evaluation_runs` 最近四次均为 `failed` / `diagnostic_code=LW_OJ_SANDBOX_UNAVAILABLE` / `awarded_score=0`；
-- `evaluation.evaluation_step_attempts` 对**同一 runner 镜像**出现 `failed(LW_OJ_SANDBOX_UNAVAILABLE)`
-  与 `succeeded` 交替，说明 OJ 执行链路本身可用，失败是**部分步骤**；
-- `labweaver-evaluation` 里对应 Job（`lw-oj-01a0d40b…`）先是容器正常 Start（镜像来自 Harbor 的
-  项目实验镜像），随后以 `BackoffLimitExceeded` 结束——即容器**反复非零退出**；
-- 平台把「重试耗尽」统一映射为 `LW_OJ_SANDBOX_UNAVAILABLE`。
-
-独立探针已排除「镜像+gVisor 不可用」这一可能：用**同一个 runner 镜像**、`runtimeClassName: labweaver-sandbox`、
-符合 `labweaver-evaluation` 命名空间 `PodSecurity: restricted` 的 securityContext 提交探针 Job，**成功**执行
-（`/proc/version` = `Linux version 4.19.0-gvisor`，uid 1000，根文件系统正常）。因此失败落在
-`evaluation.yaml` 的 `compile` 门（`runner.kind=program`、`toolchainProfile: xv6-riscv64`、`phase: compile`、
-`input: student/student.c`）本身：编译阶段返回非零。注意该任务一开始把**所有非零退出**都映射成
-`LW_OJ_SANDBOX_UNAVAILABLE`，所以待查项是：OJ 容器在这份 xv6 实验镜像与 gVisor 运行时下为何非零退出，以及「测试未通过」与
-「沙箱不可用」是否被混为同一诊断码（后者会让用户看到误导性的不可用提示）。属执行/评测侧 owner 决策。
-
-### 11.13 admin 段的候选构建：BuildKit 拒绝 solve（run 62，2026-09-24）
-
-run 62 的 admin 段两次尝试都在候选构建处以
-`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:LW_AGENT_BUILD_PROVIDER_UNAVAILABLE` 结束。
-build-executor 日志（近 30 分钟）显示 12 次 `agent.build_executor.buildkit_solve_failed`，
-`error_kind=buildkit_solve_rejected`、`diagnostic_code=LW_AGENT_BUILD_SOLVE_FAILED`——即 **Work 模板候选的
-构建配方本身不可解**；旅程侧的 provider 重试（`979ed79`）确实执行过（run 62 用的就是带重试的 spec），
-两次都得到同一结果。这与 lab 的 terminal 缺口同源：本地 27B 模型产出的候选质量边界，处置属产品决策
-（收紧提示词/schema 或换模型），不放宽断言。证据：`artifacts/acceptance/public-20260924-62-all/admin/`。
-
-### 11.19 OJ 运行时修复的端到端验证（run 68，2026-09-24）
-
-修复部署后第一个真实 OJ 执行（evaluation run `01a0d49b-b8a0…`，18:09:31）得到**决定性证据**：
-
-- 抢到的 OJ Pod `lw-oj-01a0d49bb9e17f519916-sd47f`：**`runtimeClassName` 为空（默认 runc）**，
-  `program-runner` 容器状态 **`Completed`**——此前同一镜像下它是 `Error` + `OjWorker(SandboxUnavailable)`；
-- 评测结果随之从 `LW_OJ_SANDBOX_UNAVAILABLE` 变为 **`LW_OJ_COMPILE_ERROR`**（`compile` 门 `failed`，
-  `smoke-tests` 因依赖 `skipped`），即**平台层缺陷已消除**：OJ 现在能正常建立陆锁沙箱、跑完容器，
-  并把「编译失败」作为真实诊断报出来（而不是误报为沙箱不可用）。
-
-**编译失败的排查线索**：冻结提交 `01a0d49b-b0ab…` 的内容与
-`examples/xv6-lab/student/student.c` **完全一致（同为 114 字节）**，而独立探针证明该文件在同一 runner 镜像里
-`build-xv6.sh` 可 `BUILD_EXIT=0`。因此差异不在源码。已排除「素材包缺 supportFiles」这一可能：`examples/xv6-lab/manifest.json` 共 96 个文件，
-`xv6/xv6-source.tar.gz`（153 KB）与 `scripts/*` 都在其中，磁盘上也在。平台侧调用与探针的差异因此只剩
-**运行资源与路径契约**：runner 容器的限制是 `cpu: "1"`、`memory = 请求值 + 256MiB`（下限 512MiB）、
-`ephemeral-storage: 256Mi`，`build` 卷 `sizeLimit: 128Mi`，而 profile 用 `{evaluator_dir}`（= `/support`）。
-下一步应核对 `/support` 的落盘结果与 `compile` 的容器输出——后者目前仍未落盘（§11.14 的建议只完成了
-「换对诊断码」这一半）。
-
-**仍未覆盖**：失败切换成了编译本身——而独立探针证明 starter（`examples/xv6-lab/student/student.c`）
-在同一 runner 镜像里 `build-xv6.sh` 是 `BUILD_EXIT=0`。因此下一步是查**冻结后的提交内容**为何编译不过
-（实验材料/冻结语义），另外 `compile` 的容器输出目前仍未落入平台日志或尝试记录（§11.14 的建议只完成了
-「换对诊断码」这一半）。
-
-### 11.15 OJ `LW_OJ_SANDBOX_UNAVAILABLE` 的根因：Landlock 与 gVisor 不兼容（已修，待部署验证）
-
-**根因（已证实）**：评测服务的 OJ 程序沙箱用 **Landlock**（`services/evaluation-service/src/oj_worker.rs`
-的 `apply_compiler_filesystem_sandbox`：`CompatLevel::HardRequirement`，要求 `RulesetStatus::FullyEnforced`
-且 `no_new_privs`，否则返回 `SandboxUnavailable`）。而 develop 把一次性工作负载统一到了 gVisor 的
-`labweaver-sandbox` RuntimeClass，**gVisor 不实现 Landlock 系统调用**。
-
-**直接证据（同镜像、同 securityContext、只换 RuntimeClass 的对照探针）**：
-
-| RuntimeClass | `landlock_create_ruleset` 结果 |
-|---|---|
-| `labweaver-sandbox`（gVisor） | `-1` / `errno=38`（`Function not implemented`，ENOSYS） |
-| 默认（runc） | 进入真实内核（返回 `EFAULT`，说明系统调用存在） |
-
-同一探针也证明镜像里的 xv6 编译链路本身可用（`build-xv6.sh` 以正确契约跑出 `BUILD_EXIT=0`），
-即失败不在镜像、工具链或源码。
-
-**运行期直接证据**：在清理之前抢到的 OJ Pod 容器状态与日志为
-`init:materialize-input=Completed`、`main:program-runner=Error`，`program-runner` 的输出是
-**`Error: OjWorker(SandboxUnavailable)`**——即取件（init）已成功，失败精确落在 worker 自己的
-Landlock 步骤上，与代码位置和对照组探针结论一致。
-
-**修复**：`oj_job.rs` 不再给 OJ Job 设置 `runtimeClassName`（改用节点默认运行时），OJ 的隔离由它
-**自己**的 Landlock 规则集提供，而 authoring/probe 等仍留在 gVisor。测试
-`services/evaluation-service/tests/oj_job.rs` 相应改为断言该字段为空，并注明原因。
-
-**部署与读回**：`cargo xtask package --env v1 --release issue127-oj-1 --profile platform --yes`
-（root、带 `LABWEAVER_BUILD_PROXY` 与 `RUSTC_WRAPPER=`）产出
-`artifacts/package/pkg-v1-issue127-oj-1-a895dcb9d7a0/`，`source_commit=a895dcb9d7a0…`（即该修复提交）；
-`package-validate` 的 `static` 与 `connected --env v1` 均 **exit 0**；重新施加后 helm `labweaver` 到
-**revision 80 / deployed**，读回 `evaluation-service` 的 digest 与 manifest **MATCH**
-（`sha256:a9a149dfe902f9b…`）。随后以 run 65 复跑 lab 段做端到端验证。
-
-**注意**：这属于**隔离边界**的选择，涉及 `AGENTS.md` 中「核心权限与隔离由核心负责人评审」的约定，
-需 owner 复核；本轮按「当前配置下 OJ 完全无法执行」的事实修复，并在修复后重新打包部署、复跑 lab 旅程验证。
-
-### 11.14e run 70（验证收据修复的那一轮）的实际阻塞：模型候选质量
-
-收据修复部署后（helm rev 84）跑 run 70，其 authoring 出现 **`environment` 轨 failed、`evaluation` 轨
-succeeded**（run 终态 `partially_succeeded`），近期 agent-service 诊断只有 `LW_PROVIDER_UNAVAILABLE`×2
-与 **`LW_EVIDENCE_INVALID`×2**——即**候选没过受审 schema**，属模型/提示词质量边界（与 §11.13 的
-「构建配方被 BuildKit 拒绝」同类）。因此这一轮**没有走到 OJ**。
-
-**后续已触发（2026-09-24 20:33 起）**：收据修复随 `ojsig` 系列部署上线后，`evaluation.oj.compile_failed`
-实际打出了两条 `diagnostic_code=LW_OJ_COMPILE_ERROR` 事件——说明「编译失败」已从误导性的
-`LW_OJ_SANDBOX_UNAVAILABLE` 中分离出来（§11.19 的另一半由此闭环）。同一部署还补上了
-`exit_code`/`signal`/`timed_out` 三个字段，用于区分「脚本早退 64/65/66」「被信号杀死（如 OOM）」与
-「墙钟超时」；此后 lab 段的失败点已不再是编译，而是 §12.2 记录的 OJ 步骤误判。
-
-### 11.14d 为什么编译输出目前无法进入平台记录（架构性结论）
-
-尝试在证据里携带编译输出时确认了平台的既有设计：`OjEvidenceReceipt` 被明确注释为
-**payload-free**（只含身份、摘要、`evidence_sha256`/`evidence_size_bytes`、终态与分数），它经容器的
-**termination message** 回传给 evaluation-service；真正的载荷写在 Job 自己的 `/evidence/evidence.json`
-（`EVIDENCE_PATH`），而该卷**没有被平台回收**——`/evidence` 是 `emptyDir`，随 Pod 消失。
-所以「把编译输出写进 evidence」在当前架构下**不会**到达平台记录，而把 payload 塞进 receipt 又与该
-「payload-free receipt + 有界 termination message」的设计相悖。
-
-**已实现的最小方案（`4a17a1d`）**：把**编译退出码**放进 payload-free receipt（`compile_exit_code`），
-并在 evaluation-service 侧于失败时打 `evaluation.oj.compile_failed` 事件（含 exit code 与诊断码）。
-一个整数不破坏 receipt 的精简约定，却足以区分失败类别——`build-xv6.sh` 自己的早退是 64/65/66，
-其它码就是 `make` 的真实失败。载荷（完整 stdout/stderr）仍留在 §11.14 的容器日志路径上。
-
-**若要拿到完整输出，仍需在执行侧做一件事**（任一即可）：把失败 Job 保留一段时间（或失败时不删）以便读容器日志；
-或由 evaluation-service 在删除前读取容器日志/回收 `/evidence` 卷；或允许 receipt 携带**有界**诊断尾巴。
-本轮已把 §11.14/§11.14b/§11.14c 的现场证据与这条架构结论一并留给执行侧 owner。
-
-### 11.14c 编译失败的耗时只有约 2 秒（新证据，指向脚本早退）
-
-run 69 期间从 `labweaver-evaluation` 的事件里读到 OJ Job 的完整生命周期：
-`Pulled`(3m22s) → `Created` → `Container started`(3m21s) → **`Completed  job/lw-oj-…`(3m19s)**，
-即容器**从启动到结束只有约 2 秒**；而对照探针里同一 runner 镜像跑 `build-xv6.sh` 需要 **60–90 秒**
-（解包 + `make kernel/kernel fs.img user/_student`）。因此这**不是**编译耗时或超时（`wallTimeSeconds: 30`
-也没触发），而是脚本在**极早期就退出**——最可能是 `build-xv6.sh` 的前置校验分支：`exit 64`（参数个数）、
-`exit 65`（source/binary 路径契约）、`exit 66`（`$evaluator_dir/xv6/xv6-source.tar.gz` 缺失，或
-`$build_dir/xv6` 已存在）。平台侧路径来自 `OJ_SUBMISSION_ROOT=/input/submission`、
-`PROGRAM_BINARY_PATH=/work/build/program`、`SUPPORT_ROOT=/support`，与契约一致；素材包也确认含该 tar
-（153 KB）。**镜像与 profile 已核对无误**（就地探针读取当次 OJ 的 runner 镜像）：`/opt/labweaver/profiles/xv6-riscv64.json`
-的 `compileArgv`/`runArgv` 与示例一致，`supportFiles` 正是
-`scripts/{build,run}-xv6.sh`、`scripts/run-xv6.py`、`xv6/xv6-source.tar.gz`；`/opt/labweaver/xv6/xv6-source.tar.gz`
-**存在且为 153385 字节**，`/opt/labweaver/scripts/*` 四个脚本齐备。因此「素材缺失」这一支也被排除。
-
-**下一步应当直接看 `/support` 的落盘结果与容器 stderr**——这也再次说明「失败即删 Pod」
-（§11.14b）是当前唯一的取证障碍。
-
-，捕获窗口仍然极短
-
-`6b98326` 让编译失败把有界的 stdout/stderr 打进 `program-runner` 的容器日志。实测（run 69，
-evaluation run `01a0d4b7-d7d5…`，18:40:14）：OJ Pod 从创建到被平台清理**不到 50 秒**
-（`Init:0/1` → 运行 → 消失），因此「等容器写出日志再 `kubectl logs`」是一个**竞态**：
-1 秒轮询的观察器与直连检查都没能在窗口内取到 `oj compile` 输出，Pod 已 NotFound。
-
-**结论**：要让编译失败可回溯，平台侧需要**留下证据**而不是依赖运维抢时间——例如把失败 Job 的 Pod
-保留一段（`ttlSecondsAfterFinished` 或失败时不删），或由 evaluation-service 在 Job 结束前读取容器日志
-并写入尝试记录/事件。本轮已把「打印输出」这一半做完（§11.14），剩下这一半属执行侧 owner 决策。
-
-（**已部分修复**：编译输出现在进容器日志）
-
-**更新（`6b98326`）**：`persist_evidence` 只把 stdout/stderr 的**哈希与字节数**写进 `/evidence/evidence.json`，
-而该文件位于 Job 自己的卷里、随清理消失——所以编译失败曾**完全没有可回溯的输出**。现在编译失败时会把
-**有界的编译器 stdout/stderr（8 KiB，标注是否截断）**镜像到 `program-runner` 的容器日志，平台与
-`kubectl logs` 都能读到。诊断码的混淆也已随之消解（见 §11.19：失败从
-`LW_OJ_SANDBOX_UNAVAILABLE` 变为语义正确的 `LW_OJ_COMPILE_ERROR`）。
-
-（run 61/63 观察，2026-09-24）
-
-复核确认：**失败之后 OJ 的 Job/Pod 会立即消失**（`labweaver-evaluation` 里只剩历史探针 Job，`lw-oj-*`
-查不到、`kubectl logs` 无从取），平台也没有把容器 stderr 记进任何事件或 `evaluation_step_attempts`
-（该表只有 `diagnostic_code`）。因此 `LW_OJ_SANDBOX_UNAVAILABLE` 这类失败**没有任何可回溯的原始输出**，
-只能靠外部探针反推。
-
-另有一项更强的复现结论：把示例里的 starter（`examples/xv6-lab/student/student.c`）按 profile 的
-`compileArgv` 契约（source 在 submission 目录内、binary 在 `/work/build/` 下）喂给**同一个 runner 镜像**，
-在 `labweaver-sandbox` 下 `build-xv6.sh` **成功**（`BUILD_EXIT=0`，完整 make 日志显示 kernel、fs.img 与
-`user/_student` 均构建完成）。因此镜像、工具链、vendored xv6 源码与 starter 本身**都没有问题**，
-失败落在平台对 OJ 步骤的编排/取材环节。同时确认**运行环境本身完好**：用同一 runner 镜像 + `labweaver-sandbox` 起探针 Job，镜像里
-`/opt/labweaver/{scripts,profiles,xv6,hidden-tests}` 齐备（`build-xv6.sh`、`run-xv6.sh`、
-`profiles/xv6-riscv64.json`、`hidden-tests/xv6-riscv64/{smoke,filesystem}.{in,out}` 均在），探针可正常执行。
-即：问题不在镜像与沙箱，而在 compile 阶段本身**且其输出不可追溯**。
-
-按「保留正常诊断上下文、不能让故障无法诊断」的要求，建议执行/评测侧补齐：Job 失败时保留最后一次
-容器日志（事件或尝试记录），并把「测试未通过」与「沙箱不可用」分开诊断码。
-
-### 11.16 重新施加部署后 agent 派发循环会停摆（运维要点）
-
-本轮多次观察到：`cargo xtask platform-application` 重新施加后，`agent-service` 的派发循环有时**不再认领
-新的 AgentRun**——`agent.agent_runs` 里 run 长时间停在 `requested`（`environment:requested`），
-`agent-service` 只在正常应答 HTTP（前端轮询 200），日志里既没有 `agent.dispatch.worker_started` 也没有
-`agent.dispatch.claimed`，authoring 命名空间没有任何 Pod。
-
-**根因补充（后经证实）**：真正让队列不消化的不是派发循环本身，而是**看护的判别字段写错**
-（`target.kind` 被当成不存在的 `targetKind`，见 §11.18 上方与 `a0f7130`）与**容量同步把 task 租约喂给
-只处理 environment 的提供者**（`30334c3`）。两处修好并部署后，租约能获批、派发随即恢复；重启
-`agent-service` 只是当时的临时缓解。
-
-**处置（实测有效）**：`kubectl -n labweaver-system rollout restart deploy/agent-service`。重启后立刻出现
-`agent.dispatch.worker_started` 与 `agent.dispatch.claimed`，队列随即开始消化。因此遇到「旅程长时间卡在
-authoring、且集群里没有 authoring Pod」时，先确认派发循环是否在跑，再做重启，不要把它误判成产品缺陷。
-
-### 11.18 清理「认领后卡住」的旧 AgentRun（运维要点）
-
-楔死期间留下的 `requested` run 会让验收入口的队列等待一直不收敛，需要人工清理。两条实测细节：
-
-- **取消 AgentRun**：`POST /api/v1/projects/{projectId}/agent-runs/{runId}/cancel`，必须带 **`If-Match`**
-  （用详情响应的 `ETag`；只带 body 里的 `expectedRevision` 会得到 `412 lw_urn:if_match_required`）。
-  用 **teacher 会话**（项目所有者）即可，`admin` 对他人项目会 `LW_AUTH_SCOPE_DENIED`。成功返回 `202`。
-- **清理孤儿租约**：`POST /api/v1/resource-leases/{id}/revoke`，body 需 `expectedRevision`
-  （缺字段是 422），同样用有 scope 的会话。
-- 队列不收敛时也可给验收入口加 `--no-queue-wait` 直接开跑（该 flag 语义是「不等排队的 authoring 派发」）。
-
-### 11.17 孤儿 task 租约会永久拖住容量同步（本轮阻塞验收的集群状态问题）
-
-**现象**：run 61 之后集群的 authoring 队列不再消化——`agent.agent_runs` 多条停在 `requested`，
-`labweaver` 各命名空间没有 authoring Pod，`agent-service` 只在应答前端轮询；`resource-service` 日志持续
-以每秒数条刷 `resource.lease.sync_failed` + `diagnostic_code=LW_RESOURCE_TASK_OWNER_REQUIRED`。
-
-**证据**：日志里失败集中在两条**昨天遗留**的租约上（`01a0d012-e369-…` 与 `01a0d008-bdeb-…`，各自
-每分钟上百次），它们的 `task_run_id` 早已不存在（`resource_requests` 近 30 分钟无新行、也不再有
-`targetKind=task` 的新申请），而租约状态长期停在 `active`。用平台自己的 API 撤销后两租约进入
-`expiring`，但同步仍失败、计数不降（重启 `resource-service` 亦然）。
-
-**根因（已定位并修复）**：容量同步的取件 SQL `next_unsynced_active_lease` 只按
-`c.state='handed_off' AND l.state='active' AND c.lease_synced_revision < l.revision` 选租约，**没有**
-按 `r.target_kind` 过滤；而同文件的 `next_lease_cleanup` 等路径都带 `r.target_kind='environment'`。于是
-**task 目标的租约被送进了只处理 Environment 的容量提供者**，在 `capacity.rs` 的
-`let ResourceTarget::Environment {..} = .. else { TaskOwnerRequired }` 处必然报错，并且**永久重试**。
-修复：给该取件 SQL 补上 `r.target_kind='environment'`（与既有过滤一致）。`cargo test -p resource-service`
-的 17+4+22 个用例全过（含直接覆盖该取件的 postgres 用例）。
-
-**上线与实测效果**：`cargo xtask package --env v1 --release issue127-res-1 --profile resource` 产出
-`artifacts/package/pkg-v1-issue127-res-1-30334c3a4b83/`（`source_commit=30334c3a…`，单组件 `resource-service`），
-`package-validate` 的 `static`/`connected` 均通过。注意 **`resource-application` 角色读的是另一套环境变量**
-（`LABWEAVER_RESOURCE_CONFIGURATION_BUNDLE` / `LABWEAVER_RESOURCE_VALUES_FILE` /
-`LABWEAVER_ACCESS_SEED_FILE` / `LABWEAVER_POSTGRES_SERVICE(_FILE)`，见
-`deploy/ansible/roles/resource_application/defaults/main.yml`），与平台档的 `LABWEAVER_APPLICATION_VARS_FILE`
-不是一回事；本轮因未备该套变量，改用 `kubectl -n labweaver-system set image deploy/resource-service
-resource-service=<新包 digest>` 上线（rollout 成功）。**实测效果**：上线后 2 分钟内
-`LW_RESOURCE_TASK_OWNER_REQUIRED` 由约 190 条/2 分钟降为 **0 条**，`succeeded` 的 run 数上升，楔死解除。
-
-**与派发停摆的关系**：重启 `agent-service` 后只有 `agent.dispatch.worker_started` 与**一次**
-`agent.dispatch.claimed`（run `01a0d432-ffeb…`），此后再无任何派发事件、该 run 也没有任何 track 启动——
-即 §11.9 里曾记录过的「认领后不推进」形态，且它正好发生在容量模块被孤儿租约拖住期间，两者表现一致。
-
-**进一步确认**：两租约**连同它们的 request** 都已被平台推进到 `expiring`（`resource_requests.state=expiring`、
-`revision=4`），对该 request 再发 `cancel` 得到 409 `LW_RESOURCE_LIFECYCLE_FAILED`——即状态机已经走完它
-能走的部分，卡点在「release/同步需要 task owner」这一步。重启 `agent-service` 后派发只认领了一次
-（`agent.dispatch.claimed`），随后再次停摆，authoring 命名空间始终无任何 Pod。
-
-**判断**：这是资源域的一个健壮性缺口——**task 租约的 task owner 消失后，租约不会自行终结，容量同步
-因此永久失败**，并可阻塞后续派发。为验收放行我做了两件都在平台能力内的事：`rollout restart`
-`agent-service`（见 §11.16，可短暂恢复派发）与用 **teacher 会话**（admin 会话对该租约是
-`LW_AUTH_SCOPE_DENIED`）按契约调用 `POST /api/v1/resource-leases/{id}/revoke` + `expectedRevision`
-（返回 200）。修复「owner 消失即终结租约」属资源域 owner 决策，本轮按证据记录，不改数据库。
-
-## 12. 用户验收（模拟真实用户操作）
-
-验收入口是 `tools/user_acceptance.py`：`preflight` 检查集群、公网、身份、凭据、模型、浏览器和
-authoring 队列；`run` 按所选旅程执行真实浏览器操作，向控制台输出结果与失败诊断。
-
-运行者需有三个授权账户的私有口令文件 `teacher.password`、`student.password`、`admin.password`。
-凭据目录权限为 0700，文件为 0600；通过 `--credentials-dir` 指定运行者可读的目录，
-默认是项目相对路径 `.private/labweaver-acceptance/credentials`。临时目录需可写，不要求以 root
-运行浏览器，也不要求创建证据目录。
-
-从仓库根目录预检与运行；`run_id` 使用本次新生成的 UUID：
-
-```sh
-python3 tools/user_acceptance.py preflight \
-  --base-url https://portal.labweaver.2018wzh.top \
+python tools/user_acceptance.py preflight \
+  --base-url "$LABWEAVER_BASE_URL" \
+  --credentials-dir "$PWD/.private/labweaver-acceptance/credentials" \
+  --model qwen3.6:35b
+
+python tools/user_acceptance.py run \
+  --base-url "$LABWEAVER_BASE_URL" \
+  --run-id "<new-uuidv7>" \
+  --journeys work,admin \
+  --provider-binding container-primary-v1 \
   --model qwen3.6:35b \
-  --credentials-dir .private/labweaver-acceptance/credentials
-
-python3 tools/user_acceptance.py run \
-  --base-url https://portal.labweaver.2018wzh.top \
-  --run-id "$run_id" --journeys lab,work,admin --lab xv6 \
-  --model qwen3.6:35b \
-  --credentials-dir .private/labweaver-acceptance/credentials
+  --credentials-dir "$PWD/.private/labweaver-acceptance/credentials"
 ```
 
-旅程映射（与工具内写死的一致）：
+runner 会把口令、认证状态和 Playwright 临时输出放在临时目录并在退出时删除。公开入口配置固定 `retries=0`；本轮验收对明确失败的 Agent task 最多执行一次人工重试，传输结果不明时先查询而不是重复提交。
 
-| key | project | spec | `--grep` 标题 | 额外 env |
-|---|---|---|---|---|
-| `lab` | teacher | `web/e2e/teacher/lab-experiment.live.spec.mjs` | `student completes a published lab experiment through the browser terminal` | `LABWEAVER_E2E_LAB=<xv6|cuda>` |
-| `work` | student | `web/e2e/student/sprint2-flow.live.spec.mjs` | `student provisions a Work environment, configures it, and releases its capacity` | `LABWEAVER_E2E_REAL_PROVIDER=1`、`LABWEAVER_E2E_SECURITY_BASE_IMAGE=<digest>` |
-| `admin` | platform-admin | `web/e2e/platform-admin/resource-approval.live.spec.mjs` | `platform administrator approves a real resource request and reads back its lease and charges` | — |
-| `authoring` | teacher | `web/e2e/teacher/authoring.live.spec.mjs` | `teacher authors an independent project and publishes its complete experiment package` | — |
+### 7.2 需要逐项完成的界面流程
 
-**排队等待（重要）**：agent worker 一次只处理一个 reserved dispatch（`created_at` 先到先处理），
-单次运行实测 10-40 分钟，因此 `run` 默认先等待队列排空再启动旅程（每 30 秒查一次
-`agent_run_dispatches` 的 `pending/preparing/claimed`，上限 1 小时，深度变化时打印一行）。需要
-立刻开始时用 `--no-queue-wait` 跳过；`preflight` 的 `authoring_queue` 检查始终报告当前深度
-（非零时带 `LW_ACCEPTANCE_AUTHORING_QUEUE_BUSY`，仅告警不阻断）。旅程自身的轮询上限已按
-「数条排队运行 + 部署 15 分钟 LLM 界 + 镜像构建」放大（`FULL_CHAIN_TIMEOUT_MS` 4h、
-`AUTHORING_RUN_TIMEOUT_MS` 2.5h、`CANDIDATE_BUILD_TIMEOUT_MS` 1h）。
+- **管理员**：从首页进入配置工作台，配置模型选项、容器/VM 镜像、GPU 目录、费率和资源审批；从镜像任务页导入、查询并取消大镜像；在审批页查看项目、申请人、规格、lease、用量和费用。GPU catalog 和 rate 的 mutation 只通过管理员 UI。
+- **教师**：创建或选择项目，在项目 AI 设置选择当前允许的模型和预算；在材料页上传题面、源码、样例和环境要求；启动 Agent、构建候选并审核；在成员页用组织账号的显示名称或 `username` 搜索并加入学生，不从另一会话读取 actor ID；审批并发布版本。刷新后从任务历史继续同一任务。
+- **学生**：从项目进入已发布实验，申请并启动环境；在浏览器终端、VM 控制台或 SSH 中实际修改源码/guest 配置；冻结提交，查看确定性成绩和反馈；停止后区分“停止中”“释放中”“已释放”，最终从页面释放环境。
+- **个人 Work**：使用同一账号创建项目和模板，生成、审核并发布；申请容器或 VM，配置软件，执行实际任务；停止/重启后按模板和页面的数据保留说明检查工作区，需要保留的软件配置应写入模板声明的持久化路径，最后释放并查看费用。私人项目负责人通过受邀者的准确 username 管理已知成员，不需要切换管理员身份。
+- **GPU**：分别选择管理员已开放的独占、容器时间片和 VM vGPU class，运行真实 CUDA 数值计算；VM 同时检查驱动和许可证。容量不足时等待或明确拒绝，不能自动换模式。
+- **访问**：用户在 SSH 公钥页面登记公钥，环境授权后从环境页面复制完整 SSH 命令，实际连接、断开后重连，再从 UI 撤销授权并确认旧命令失效。测试脚本必须走复制页面命令这一步，不能只拼 API endpoint。
 
-**取消与回收**：验收旅程通过资源申请页、环境控制台和材料页的可见操作取消申请、回收租约、
-取消 AgentRun 或删除环境。脚本不提供绕过这些界面的资源变更命令；处理排队中的 AgentRun 时，
-需先核对其 owner 和精确 ID，再通过正常用户入口取消，不得清理其他用户或正在运行的旅程。
+### 7.3 成员、任务和生命周期语义
 
-`run` 在私有临时目录中创建 0700 的凭据、认证状态与 Playwright 输出目录，口令副本为 0600。
-旅程关闭其浏览器上下文；工具退出时删除临时目录及其中的会话、口令副本和 stdout/stderr 文件。
-失败输出经过敏感值遮盖和长度限制；需要详细诊断时，仅在运行期间按权限临时访问 stdout/stderr。
-当前 Playwright 配置关闭截图、trace 和视频，控制台采用 list reporter，不要求保留原始日志或证据包。
-临时文件清理不等于删除项目、失败草稿或计费事实；业务资源按各旅程的正常 owner 回收流程处理。
-失败按真实业务状态报告，不修改数据库或补发事件将失败改写为成功。
+界面应同时显示项目名称、任务名称、当前状态、下一步、审批对象、等待原因和处理人。内部 UUID、provider、revision 和详细诊断放在高级详情。长任务刷新后应保留任务历史、取消和可恢复失败草稿；重试同一任务应避免重复提交，实际新增用量仍可能产生费用，重复或乱序事件不得重复入账。停止请求不等于释放，释放中的用量仍待确认，已释放后才允许容量再次分配。
 
-失败分类与处置（不得放宽断言）：
+## 8. 故障排查和安全清理
 
-- 集群/沙箱/镜像/模型等前提缺失 → 回到 §6 与 §3 补齐后重跑。
-- 身份与路由配置错误（issuer、redirect、allowed_origins、realm client、hostAliases）→ 回到 §11.6 修正并重跑部署。
-- 产品缺陷（页面死路、错误不可读、假进度、刷新重试导致重复资源）→ 改源码与受影响测试，重新打包部署后重跑。
-- 已知但不阻塞的易用性打磨项 → 记入 Issue/PR，说明复现步骤与稳定诊断码。
+先在公共页面刷新原项目/任务，再按下面边界分类；只读 Kubernetes 查询用于诊断，业务 mutation 仍从正常 UI 完成：
 
-### 11.2.1 施加部署必须与打包一样以 root 运行（实测）
+| 现象 | 首先检查 | 处理边界 |
+| --- | --- | --- |
+| HTTPS 或登录回调失败 | 公共 Gateway、Certificate、Keycloak redirect 和浏览器证书 | 修正 ingress/identity 配置后重新部署；不关闭证书检查 |
+| 模型任务失败 | bundle 中 base URL/model、Ollama Service、Agent 任务状态和诊断 | 区分模型、任务执行、资源和平台问题；本轮验收只对明确失败任务人工重试一次 |
+| 资源一直等待 | Resource UI 的申请、active lease、容量观测 TTL 和 provider binding | 不把未知容量当作零，不创建重复申请 |
+| 容器/VM 未就绪 | Environment 状态、provider、Pod/VMI、PVC/DataVolume 和 release | 等待原对象或按页面取消；不手工创建第二个环境 |
+| 评测失败 | Evaluation run、OJ runtime 配置、收据和用户提交版本 | 保留确定性错误和反馈；不以固定分数或 Mock 替代 |
+| SSH 不能连接 | UI 授权状态、复制的 host/port/命令、host key 和 Gateway | 从 UI 重新授权或撤销；不共享私钥、不绕过 Gateway |
+| 费用异常 | Resource 用量事件、费率 revision、重复/乱序事件和调整记录 | 追加带原因的调整，不覆盖原账目；停止不自动记为释放 |
 
-`platform_application` 的第一个任务就是 `Load the reviewed private application variable locator`，
-它读取 `LABWEAVER_APPLICATION_VARS_FILE`（`/var/lib/labweaver/.private/v1/platform-application/application-vars-*.yml`，
-**root-only**）。若像打包那样只把 `cargo xtask package` 放进 root、而把
-`cargo xtask platform-application` 留在 `wzh` 下，该任务会以 `no_log: true` 的方式失败：
-`fatal: [localhost]: FAILED! => {"censored": "…'no_log: true'…"}`，`xtask` 只会打印
-`allowlisted infrastructure playbook failed`，而**工作负载镜像不会变更**（digest 与部署前一致）。
+测试资源清理遵循“先查业务记录，再查 namespace/Pod/PVC，最后由 UI 释放”。只有确认没有 active lease、运行 Pod、待处理任务和未结算用量后，才可以按精确名称清理临时 Kubernetes 对象；不得使用 `--all`、模糊 label 或删除共享数据卷。保留正常业务账目和必要诊断，清除已过期的临时认证、浏览器输出和本地凭据副本。
 
-正确形态（与打包同一层级的 root 身份，并把 venv 放进 PATH 以便解析 ansible）：
+### 8.1 常见部署诊断
 
-```sh
-sudo -i -u root env PATH=/opt/labweaver/venv/bin:/usr/local/bin:/usr/bin:/bin \
-  LABWEAVER_KUBECONFIG=/etc/kubernetes/admin.conf \
-  LABWEAVER_ANSIBLE_DEPENDENCY_ROOT=/var/lib/labweaver/v1-controller \
-  LABWEAVER_APPLICATION_VARS_FILE=/var/lib/labweaver/.private/v1/platform-application/application-vars-<run>.yml \
-  LABWEAVER_RUN_ID=<run> LABWEAVER_TESTFLIGHT_RUN_ID=<run> \
-  bash -lc 'cd /home/wzh/LabWeaver && cargo xtask platform-application --env v1 --infra --yes --package-manifest <manifest>'
-```
+以下诊断码来自当前 playbook/服务实现，可直接用于定位输入边界：
 
-判据一：结束后 `kubectl -n labweaver-system get deploy <component> -o jsonpath='{.spec.template.spec.containers[0].image}'`
-必须等于 manifest 里该组件的 digest（实测 `evaluation-service` 由 `…842dd6dda89da152` 变为 `…beaf9a2199b8bc3b7d7`）。
+- `XTASK_INFRASTRUCTURE_REQUIRED`、`XTASK_CONFIRMATION_REQUIRED`、`XTASK_INFRA_UNSUPPORTED_PLATFORM`：命令缺少 `--infra`、`--yes` 或不在批准的 Linux 控制器执行。
+- `LW_PACKAGE_INPUT_DIRTY`、`LW_PACKAGE_PROFILE_MISMATCH`、`LW_PACKAGE_MANIFEST_INVALID`：源码、profile 或 package manifest 不满足锁定约束。
+- `IDENTITY_CONFIGURATION_INVALID`、`IDENTITY_SECRET_LOCATOR_INVALID`、`IDENTITY_BOOTSTRAP_SECRET_INVALID`：身份私有输入、locator 或 `infra-` run id 不正确。
+- `PLATFORM_APPLICATION_CONFIGURATION_INVALID`、`PLATFORM_APPLICATION_CONFIGURATION_KEYS_INVALID`、`PLATFORM_APPLICATION_GPU_CLASS_CATALOG_MISMATCH`：platform bundle、Resource bundle 或 GPU seed 与当前 manifest/lock 不一致。
+- `RESOURCE_APPLICATION_INPUT_INVALID`、`RESOURCE_APPLICATION_REQUIRED_PATH_MISSING`：Resource profile 所需私有文件、values 或 PostgreSQL service file 缺失。
+- `VERIFY_EXECUTION_INPUT_INVALID`、`VERIFY_CLEANUP_FAILED`：验证输入或验证资源清理失败；先按运行标识查找精确资源。
+- `GpuObservationStale`：GPU observer 缺失、过期或未读到完整容量；保持失败关闭并修正真实 observer。
 
-判据二（更省事，一次 API 查询即可证明「跑的是哪个提交」）：Harbor 给每个构建产物打的 tag 就是
-`git-<source_commit 前 12 位>`，所以查**当前运行 digest 的 tag** 就能确认部署是否真的换成了本次提交：
-
-```sh
-D=$(kubectl -n labweaver-system get deploy evaluation-service \
-  -o jsonpath='{.spec.template.spec.containers[0].image}' | sed 's/.*@//')
-curl -sS -u "admin:$(cat /var/lib/labweaver/.private/v1/platform-application/harbor-admin-password)" \
-  "https://harbor.lab.lan/api/v2.0/projects/labweaver-system/repositories/evaluation-service/artifacts/$D" \
-  | python3 -c 'import json,sys; print([t["name"] for t in json.load(sys.stdin).get("tags") or []])'
-# 期望：['git-<本次 source_commit 前 12 位>']
-```
-
-实测（2026-09-24）：修复 `033f47c` 打包进行中时，运行中的 digest 仍带 tag `git-d8e202187fe4`，
-即修复**尚未上线**——这条判据把「打包成功」与「部署已生效」干净地区分开。
-
-### 12.0 日志字段名与「可诊断但不泄密」的边界（实测）
-
-`SafeJsonFormatter`(`crates/telemetry/src/lib.rs`)只**逐字保留** `safe_log_field` 认得的名字，把
-`sensitive_log_field` 里的名字写成 `redacted_unclassified`，**其余名字静默丢弃**。实测后果：
-`services/http_transport.rs` 的 TLS 失败日志用 `peer = %peer`，而受保护名单里写的是 `peer_address`，
-于是 evaluation-service 近 25 分钟出现 54 条 `http.tls.handshake_failed` 却**没有任何对端信息**
-（`error` 同样是 `redacted_unclassified`）。这是设计选择（对端 IP 属受保护上下文），但字段名不一致会让
-「日志存在却无法定位」。已加单元测试固定这层契约（`safe_log_field_separates_safe_sensitive_and_unknown_field_names`），
-新增日志字段时必须使用名单里已有的名字。
-
-### 12.2 lab 段当前的真实阻塞：OJ 步骤被判 `LW_OJ_JOB_MISSING`（平台缺陷，已定位未修）
-
-本轮（`public-20260924-3j-a1-9233`）lab 段的失败不再是编译，而是评测结果读取：
-`REAL_EXPERIMENT_EVALUATION_RESULTS_READ_FAILED:503 {"diagnosticCode":"LW_AUTH_EVALUATION_UNAVAILABLE"}`；
-随后用真实 student 会话直接读 `/api/v1/projects/{id}/me/evaluation-results` 得到 **200**，内容为
-`{"runId":"01a0d52c-89cb-7b52-b995-3731906ab643","diagnosticCode":"LW_OJ_JOB_MISSING","maxScore":100,"createdAt":"2026-09-24T20:47:40.997Z"}`。
-即：**503 是该次读取的瞬时抖动，评测本身以 `LW_OJ_JOB_MISSING` 终态失败**。
-
-证据链与代码位置：
-
-- `labweaver-evaluation` 里同一时间窗存在 `job/lw-oj-01a0d52c8a327030bb20`，事件链
-  `Pulled(3m) → Created → Started → Completed`，Job 名 = `lw-oj-<attempt_id 前 20 位>`
-  （`services/evaluation-service/src/oj_executor.rs:481`）；
-- `services/evaluation-service/src/kubernetes_runner.rs:1755` 把观察到的
-  `OjJobObservation::Missing` **直接判为终态失败** `LW_OJ_JOB_MISSING`；
-- 同一时刻 evaluation-service 侧出现 `evaluation.orphan.reconcile_failed`
-  （`LW_EVALUATION_ORPHAN_RECONCILE_FAILED`，3 次）与 54 条 `http.tls.handshake_failed`。
-
-结论：`Missing` 在正常路径上意味着「Job 已被清理」，但生命周期里存在一段
-「attempt 仍被 coordinator 视为在跑、其 Job 已被清理」的窗口，观察者一旦落进该窗口就把整个
-**评测步骤**判死（`examples/xv6-lab/evaluation.yaml` 的 compile 步 `failurePolicy: stop`，不重试）。
-Job 侧已设 `ttlSecondsAfterFinished: 300`（`oj_job.rs:215`），因此保留期不是原因，清理与观察的
-顺序才是。修法应在执行/评测侧 owner 决定（让 `Missing` 在应用后的一段有界窗口内可重观察，或让
-清理与 coordinator 的 attempt 终态严格串行），本轮按证据记录、不放宽旅程断言。
-
-### 11.6.1 apex 跳转目标带 `:443` 属良性（实测）
-
-`https://labweaver.2018wzh.top/` 返回 `301` 到 `https://portal.labweaver.2018wzh.top:443/`。查已施加的
-`portal-apex-redirect` 可见 `RequestRedirect` 只设了 `scheme/hostname/statusCode`，**没有 `port`**——
-`:443` 是 Cilium Gateway 生成 Location 时补上的。浏览器对 `https://host:443` 与 `https://host` 视为
-同一来源，因此不影响可用性与会话 cookie（`__Host-` 仅看主机名）。记录为已知项，不做模板改动。
-
-### 12.2.1 部署后 evaluation-service 崩溃循环会让所有评测结果读取 503（已修一处，附取证）
-
-现象与因果链（2026-09-24 22:15-22:21 实测）：
-
-1. `evaluation-service` 的 `round` 观察路径在 K8s 观察调用出错时返回
-   `ExecutionError::Backend("oj_observe_failed")`，而执行循环 `run()` 把它当作 durable control-plane
-   failure 上抛到 `main`，进程直接退出——日志末行即
-   `Error: Process(Execution(Backend("oj_observe_failed")))`，Pod 反复重启（`restartCount` 递增、`ready=false`）。
-2. 该服务不可用期间，access-service 对 `GET /api/v1/projects/{id}/me/evaluation-results` 一律 503
-   `LW_AUTH_EVALUATION_UNAVAILABLE`（**所有项目**都失败，而不是个别项目），lab/work/admin 三条旅程
-   因此全部卡在这一步。
-3. `kubectl set image` 回滚到上一版镜像后 Pod 变为 `ready=true`，同一读取立刻恢复（6/6 成功）——证明
-   503 的成因就是该服务崩溃循环，不是路由或证书问题。
-
-影响范围（实测）：崩溃是**间歇性**的，其余 12 个 Deployment 全程 1/1，门户 `/health/live` 200、
-`/api/v1/auth/csrf` 401 正常——只有「读评测结果」在崩溃窗口内 503，因此整机并未不可用，但三条验收旅程
-都会卡在这一个端点上。
-
-修复（已上线并实测）：`fa4042a` 让观察失败在**与「Job 缺失」相同的有界窗口**内重试，窗口耗尽后把该步骤
-判为稳定失败 `LW_OJ_OBSERVE_UNAVAILABLE`，**不再退出进程**（`daf0a90` 是它的前半步）。上线后实测：
-运行中的 `evaluation-service` 镜像 tag = `git-fa4042a82100`，Pod `ready=true`、`restartCount=0`，
-此后 15 分钟内 `oj_observe_failed` / `LW_OJ_OBSERVE_UNAVAILABLE` / `compile_failed` 计数为 0。
-
-**尚存的边界**：窗口耗尽后仍返回 `Backend` 的旧路径已不存在，但同一 `run()` 对其他 durable 失败仍会退出；
-结构性的「资源包缺失」仍然立即失败。**尚存的边界**：窗口耗尽后仍返回 `Backend`，而循环依旧把它当致命错误，
-所以彻底止血还需要让**步骤级**后端错误不再终止进程（属执行侧 owner 的下一步）。
-
-另有一条独立观察：最新一次评测（run `01a0d57c…`，22:15，已在跑宽限修复的镜像）结果仍为
-`LW_OJ_JOB_MISSING`，说明 Job 是**真的缺席超过了两分钟**，而不是观察与清理的短窗口竞态；同窗口
-`evaluation.orphan.reconcile_failed` 持续出现（`14ed6fe` 之后会带 `error_kind`，用于判定是否由它删除）。
-
-### 12.0.1 同一时刻只允许一个验收运行（外部执行入口协调）
-
-`tools/user_acceptance.py` 本身不取得独占锁。
-公网验收由外部执行 wrapper 在启动前以 `O_RDONLY` 打开已约定的现有锁文件，取得
-`flock(LOCK_EX | LOCK_NB)`；取得失败即停止，不启动浏览器或创建资源。wrapper 保持锁描述符
-直至完整旅程、正常业务回收以及 `finally` 中的认证状态、临时文件与上下文清理全部结束后再解锁。
-所有并发验收入口必须使用同一锁文件；单独调用工具不提供这一协调保证。
-
-外部锁只协调验收调用者，不取代 Resource 的容量与租约控制，也不自动取消排队任务。
-`run` 默认在启动旅程前等待 authoring 队列；旅程进行中不得另行取消其 AgentRun 或资源申请。
-需要中止时按精确归属使用正常取消与回收入口，等待清理结束后再开始下一次运行。
-
-### 12.2.2 evaluation rbacProfile 缺 `list jobs`：orphan 清理从未生效（已修）
-
-`deploy/helm/labweaver/templates/service-account.yaml` 的 `evaluation` 档位只给了
-`jobs: [get, create, patch, delete]`，而 orphan reconciler 需要**枚举**命名空间里的 Job 才能发现终态
-尝试的残留。实测判据（一次命令即可复核）：
-
-```sh
-kubectl auth can-i list jobs -n labweaver-evaluation \
-  --as=system:serviceaccount:labweaver-system:evaluation-service   # 修复前输出 no
-```
-
-后果：每轮 reconcile 都以 403 失败，日志为
-`LW_EVALUATION_ORPHAN_RECONCILE_FAILED` + `error_kind: kubernetes`（该判别字段由 `14ed6fe` 补上，
-正是它把「读不到」与「配置/控制面」区分开）。`edeb2d0` 在 jobs 动词里补上 `list`；施加方式与普通平台
-配置一致（下一次 `platform-application`），因此**不需要**重新打包镜像。注意该 reconciler 只能
-`get`/`delete` 具名对象，无法列举，所以它**不是** `LW_OJ_JOB_MISSING` 的删除者。
-
-### 12.2.3 评测恢复后 lab 段的失败点前移到「浏览器终端」
-
-修复评测读取与进程退出后，`public-20260924-3j-a1-2694` 的第一次尝试在 **30.1 分钟**结束，错误是
-spec 自己的 `Test timeout of 1800000ms exceeded`（不是断言失败），页面快照停在「终端」等待态；
-评测侧同一窗口**只有** `LW_EVALUATION_ORPHAN_RECONCILE_FAILED`，**没有任何 OJ/编译事件**——说明这一轮
-根本没走到评测。access-service 在该窗口的请求里也看不到 `/connect/console/...` 的升级记录。
-复现（`public-20260924-3j-a1-20472`，队列已清空、无操作者干预）：第 1 次尝试 3.7 分钟失败于
-`cancelled:LW_CONFLICT`，retry #1 则整整跑满 spec 的 30 分钟上限（`Test timeout of 1800000ms exceeded`），
-两次的页面快照都显示环境为「运行中」、发布为「已发布」，并带有「等待」态。即：lab 段当前的阻塞点是**环境控制台的终端交互**（与 §11.9 记录的「控制台状态文案滞后」相邻但不同：
-这次是等待本身耗尽了整段预算）。下一步应在终端桥/控制台可用性上取证，而不是继续调评测。
-
-**终端段的进一步定位（同一轮）**：`issueAccessGrantAndConnect` 走的是
-`/student/environments?...` → 签发授权 → 轮询 `access-grants`（120 s）→ 点「Web 控制台」→ 等 `.console-panel`。
-而 access-service 近 45 分钟里**没有任何 console 路由、也没有一条 `http_status:101`（WebSocket 升级）**，
-说明浏览器**从未发起控制台连接**——等待发生在面板出现之前的 UI 环节，而不是终端桥或授权服务。
-下一步应带 trace 逐帧确认是哪一次 `expect` 吃满了预算（spec 内多数 UI 等待是 120 s，能烧到 30 分钟说明
-落在未显式设超时的那一步）。
-
-### 12.2.4 lab 段 authoring run 被判 `cancelled:LW_CONFLICT`（平台侧，未定性）
-
-干净一轮（`public-20260924-3j-a1-20472`，队列已清空、无操作者干预）的第一次尝试在 **3.7 分钟**结束：
-
-```
-Error: LAB_EXPERIMENT_AGENT_RUN_FAILED:cancelled:LW_CONFLICT,LW_CONFLICT
-```
-
-判据与已知边界：
-
-- `LW_CONFLICT` 是**运行时对「调用被取消」的固定诊断码**（`services/agent-service/tests/claude_code_runtime.rs`
-  里 `FakeMode::Cancelled → "LW_CONFLICT"` 即是断言），因此这条 run 确实是被取消的，而不是模型失败。
-- 取消入口只有 agent-service 的 cancel API（`run_store.rs` 中 `CANCEL_OPERATION` 那条 UPDATE）；
-  旅程自身**不会**取消 agent run（spec/support 里只取消资源申请），我这次也没有在旅程中执行清理
-  （见 §12.0.1 的反例，时间线可区分）。
-- 沙箱墙钟是 3600 s、审批预算同值，远大于 3.7 分钟，所以不是超时；近 40 分钟内该库有 3 条 run 处于
-  `cancelled`，说明是**系统性**取消而非偶发。
-- 同一签名此前也出现在 admin 段（`LW_ACCEPTANCE_WORK_TEMPLATE_RUN_FAILED:cancelled:LW_CONFLICT`），
-  因此这是一个跨旅程的共同阻塞点，下一步应在「谁调用了 cancel API / 是否有平台侧自动取消」上取证。
-
-### 12.2.5 2026-09-25：验收三段同败的根因是看护线程 4 KiB 截断（已修 dc4053b）
-
-`public-20260924-3j-a1-20472`（attempt 1）：`lab`/`work`/`admin` 三段的失败签名都指向同一处——
-authoring/evaluation 的内部 task 资源申请从未被批准：
-
-- `lab`：`waitForExperimentRun` 轮询超时（authoring run 停在 `running`，重试 3 次共 1.1h）。
-- `work`：`WORK_TEMPLATE_RUN_FAILED:failed:LW_PROVIDER_UNAVAILABLE`（2.6h/1.1h/15.1m，均卡在 Work
-  模板 authoring run）。
-- `admin`：45 分钟谓词超时（`Expected: true / Received: false`，同样卡在其模板 authoring run）。
-
-数据库证据（`resource.resource_requests` + `resource_request_transitions`）：每次尝试都新建一条
-`authoring-…-<track>-1-…` 的 `reviewing` 申请，然后被 agent 在约 1 小时后自行
-`reviewing → cancelled`（`actor_id` 为 agent 身份，`LW_PROVIDER_UNAVAILABLE`）；自 2026-09-24 22:33 起
-没有任何 `reviewing → allocating`。22:09–22:33 那段成功的 authoring 对应的批准记录
-（`resource_approvals.reason = 'acceptance operator approving the internal authoring task lease'`）
-是**上一轮会话人工**以管理员身份点的（同一产物立即 `→ allocating → active`）。
-
-根因：`tools/user_acceptance.py` 的看护线程（`start_resource_approval_watchdog`，每 5s 轮询一次）从未
-生效——`_http` 只读 `response.read(4096)`，而管理员 `GET /api/v1/resource-requests` 的清单超过 4 KiB
-（每个历史申请一行），JSON 被截断后 `json.loads` 失败，函数静默返回 `[]`，看护全程零批准
-（`grep 'approved resource request' artifacts/acceptance` 无输出）。
-
-修复 `dc4053b`：`_http` 响应上限提到 8 MiB（附注释说明 4 KiB 截断如何让看护失效）。验证：
-`tests/ansible/test_user_acceptance.py` 35 passed；修复后看护立即批准了 5 条积压 `reviewing` 的 task
-申请；卡住 run 的沙箱 Job `lw-auth-01a0d8bf…` 由 Running→Completed，ollama 实际装载 `qwen3.6:27b`
-（真实生成，非 Mock）。
-
-运维要点（与 §11.8 末条呼应）：该部署下内部 authoring/evaluation task 租约仍需要「操作者」批准
-（产品决策未变），验收工具以管理员会话模拟操作者（BFF `/approve`）；work 旅程 environment 申请的
-~86s 窗口（§11.11 run 59 表）与此修复无关，需在批准链路恢复后复测。
-
-### 12.2.6 2026-09-25：候选构建失败 `LW_AGENT_BUILD_SOLVE_FAILED` —— 目录绑定未转回 Harbor 引用（已修 306df67）
-
-批准链路恢复后，admin 旅程的 Work 模板 authoring run 能走到 `succeeded`，但**随后**的候选镜像构建
-每次都失败（`01a0d8d1`/`01a0d8d7` 等 run succeeded 后紧跟
-`LW_ACCEPTANCE_WORK_TEMPLATE_CANDIDATE_BUILD_FAILED:LW_AGENT_BUILD_PROVIDER_UNAVAILABLE`，
-构建耗时 12s）。build-executor 侧为 `LW_AGENT_BUILD_SOLVE_FAILED`（`error_kind:
-buildkit_solve_rejected`），BuildKit 日志给出精确原因：
-
-```
-scope="repository:library/rust-builder-v1:pull"
-error="pull access denied, repository does not exist or may require authorization"
-= rust-builder-v1@sha256:e544a8ee…（docker.io/library 解析）
-```
-
-根因：`platform_image_prompt`（develop `e363dcc` 起）只把平台镜像目录以 **binding + digest** 呈现给模型
-（测试断言 `!prompt.contains(":24.04")`，不向模型暴露 registry 全名），模型按提示正确输出
-`FROM rust-builder-v1@sha256:e544…`——但服务端**没有任何地方**把 binding/digest 映射回评审过的
-`source_reference`（`harbor.lab.lan/labweaver-system/rust:1.97.1-bookworm@sha256:e544…`）。
-物化器原样打包 recipe，build-executor 原样交给 BuildKit，受限网络下只能按默认 registry 解析而被拒。
-22:29 之前的成功构建是因为当时模型正好输出过完整 Harbor 引用（同 digest 可被目录匹配）。
-
-修复 `306df67`（`build_executor.rs`）：solve 前用平台镜像目录重写 Dockerfile 的 `FROM` 引用——
-按 **binding**、按 **source_reference**、或按 **resolved_digest** 匹配（digest 存在时以 digest 为准，
-错误 digest 不得被 binding 静默改挂），重写为 `<source_reference>@<resolved_digest>`；`$ARG`、
-`scratch` 与未知镜像原样保留。两个单测覆盖 binding/digest/全名匹配、`--platform` 形态、`${ARG}` 与
-错误 digest 拒绝。
-
-验证：`cargo test -p agent-service` 12/12（build_executor 相关）、`cargo clippy -p agent-service
---all-targets -- -D warnings` 通过。部署包 `pkg-v1-issue127-buildfix-1` 上线后按 §11.10 读回，再复跑旅程。
-
-### 12.2.7 2026-09-25：镜像构建的离线化（已修 3fe71d4 / 82563eb / a68dd1f，包 `pkg-v1-issue127-buildfix-1` 上线）
-
-构建修复（`306df67`）重打包时，集群内 BuildKit 的出网被证明是**窄白名单**：
-
-- npmjs/npmmirror/deb.debian.org/dl-cdn 等常用源对构建 Pod 一律 403（代理 ACL），
-  直连被防火墙丢弃（20 s 超时）。同代理对少数域（storage.googleapis）放行，
-  且其 dl-cdn 缓存会在新旧索引状态间**翻转**，曾误导按错误索引修改 apk pin
-  （真源核对必须 `curl --noproxy '*' …/APKINDEX.tar.gz`，直连索引才是权威）。
-- 结论：镜像构建不再依赖任何远端软件源，全部离线化、校验锁定：
-  - **Claude Code CLI**（3fe71d4）：锁内 sha512 的 tarball 由打包机一次取回，
-    `containers/claude-code-linux-x64-<v>.tgz`（已 gitignore），镜像内 COPY+校验+解包。
-  - **Alpine 包**（82563eb 起）：`containers/alpine-3.21-pkgs/` 24 个 .apk
-    （openssh 系、musl-dev、coreutils/util-linux + 依赖），`apk add --no-network
-    --allow-untrusted`，逐文件 sha256 锁定；gateway 的 runtime 阶段曾漏掉自身
-    COPY（0fc92ee 补上），教训：每个使用 /vendor 的阶段都要自带 COPY。
-  - **Debian 包**（82563eb）：`containers/debian-bookworm-pkgs/` 45 个 .deb
-    （git/curl/python3/ca-certificates 及闭包，32 MiB），`apt-get install`
-    `Dir::Etc::sourcelist=/dev/null` 纯本地解析。
-  - **Web 前端**（a68dd1f）：构建 Pod 拿不到 pnpm/npm，dist 改为打包机用锁文件
-    构建后整体入仓（`containers/web-dist/`，12 MiB，gitignore）；web 镜像变成
-    纯 nginx 静态运行时不带 node；xtask 用 web/ 源码树+锁文件哈希钉住 dist，
-    过期即报 `LW_PACKAGE_INPUT_STALE`。
-- `cargo xtask package` 自动确保上述全部输入存在且校验通过（`LW_PACKAGE_INPUT_MISSING /
-  INVALID / STALE` 三段失败闭合）；打包机需能直连 dl-cdn.alpinelinux.org /
-  deb.debian.org（慢但可控）。本次包全部 9 个组件构建成功，`package-validate`
-  static+connected 通过，`platform-application --infra` 部署成功，集群读回镜像
-  digest 与 manifest 一致、配置 bundle 注解不变；新 build-executor（目录绑定转
-  Harbor 引用）上线。
-
-### 12.2.8 2026-09-25：评测轨 `LW_OJ_RECEIPT_INVALID` —— OJ worker 镜像与观察端镜像不同步
-
-lab 旅程的「编译」gate 持续失败 `LW_OJ_OBSERVE_UNAVAILABLE`（进阶诊断
-`LW_OJ_RECEIPT_INVALID`）。证据链（经三版诊断包 727cd99/3514ae7 的日志补全）：
-
-1. 观察端（当前 evaluation-service）的 `OjEvidenceReceipt` 为 16 字段（含
-   compileExitCode/compileSignal/compileTimedOut/compileOutputExceeded）；
-2. 实际 OJ Job 的 `program-runner` 容器（由 evaluationRuntime.runnerImage 决定）
-   产出的 /dev/termination-log 收据只有 13 字段（无以上 4 字段，即 OJ 收据加宽
-   之前的旧 schema）→ `serde_json::from_str` 因缺 `compileTimedOut`（非 Option）
-   直接解析失败；
-3. 控制面配置 `control-service-config` 的 `evaluationRuntime.runnerImage` 停在一个
-   更早的 evaluation-service digest（d87dd7b7…，且 ops baseline v5 也钉了
-   98defd89…），没有随每次部署更新；冻结工 `workerImage` 同理。
-
-修复：将 baseline 与在线 configmap 的 `evaluationRuntime.runnerImage`（及
-`runtimeArtifactSha256`、coordinator `workerImage`）更新为当前部署的
-evaluation-service digest（本日 e68330c1…= 包 `pkg-v1-issue127-ojdiag-2`），
-滚动 control-service；下一个 release 的运行时身份即绑定新镜像，编译 gate 恢复。
-运维要点：**OJ 的 runner 镜像身份必须与部署的 evaluation-service 镜像保持一致**——
-收据 schema 是双端契约（worker 写、observer 读），镜像错位时表现为观察端静默解析
-失败。排查脚本：用 watcher 抓 `lw-oj-*` pod 的 `state.terminated.message` 对账
-schema 字段数。
-
-**最终根因（2026-09-25 晚，包 `issue127-ojdiag-2` 的再诊断）**：上述第 2 条的
-「由 evaluationRuntime.runnerImage 决定」对容器环境不成立——`control-service` 的
-审批路径对 Container 运行时用**模型提交的 evaluation runner 工件**
-（`request.evaluation_runner_image_artifact`，由 authoring 的 runner 配方
-`evaluation/Dockerfile` 构建）作为运行时身份，控制面配置只在 VM 路径兜底。模型
-写作的 runner 配方经常钉一个旧 evaluation-service digest（例：本日失败波次里
-release 的 `runtimeIdentity.runnerImage` 为模型候选镜像
-`…/project-…-candidate@sha256:1d61e623…`，其基底是 6 天前的旧 worker），于是
-OJ Job 的 `program-runner` 永远跑旧 schema 的 worker，观察端（e68330c1…）读不懂
-13 字段收据，全部失败为 `LW_OJ_OBSERVE_UNAVAILABLE`。控制面把 `evaluationRuntime`
-配置钉到当前 digest 只能影响 VM 路径与评审展示，治不了容器路径。
-
-具体修复（两次修订后定稿）：runner 镜像=模型的工具链镜像（debian+riscv
-toolchain+`COPY --from` 进来的 `labweaver-service`），OJ 编译需要它里面的
-工具链，所以运行时身份**保持**为模型 runner 工件，不能改为裸 evaluation
-镜像。`a16ac7d`/`295df09`：agent 构建执行器把 `evaluation/Dockerfile` 中
-引用 evaluation-service 的 `FROM`（防御）与 `COPY --from=<digest>`（真正的
-漂移点）一律改写为 `${LABWEAVER_SERVICE_IMAGE}`；`build-executor-config` 的
-`executor.serviceImage` 指向当前部署的 evaluation-service digest（本次
-e68330c1…），worker 二进制永远取自部署中的服务镜像，收据 schema 与观察端
-（16 字段）强制一致。控制面身份在 VM 路径取配置、容器路径取模型工件，均
-不再把模型挑选的 worker digest 带进运行。
-
-运维要点（更新）：**OJ runner 的 worker 二进制版本由
-`executor.serviceImage`（build-executor-config）单向决定，不随模型候选漂移**；
-每次升级 evaluation-service 后需要同步三处：`evaluationRuntime.runnerImage` +
-`runtimeArtifactSha256` + 冻结工 `workerImage`（control-service-config）和
-`executor.serviceImage`（build-executor-config）。验证：release 的
-`runtimeIdentity.runnerImage` 应等于模型 runner 工件的 Harbor 引用；OJ Job 的
-termination message 应为 16 字段（LEN 约 700+）且 `schemaVersion` 为
-`oj-evidence-receipt/v1`。
-
-### 12.2.9 2026-09-25：OJ worker 二进制的部署级钉定（提交 56fa5cb，包 `pkg-v1-issue127-runnerpin2` 上线）
-
-承接 §12.2.8：runner 镜像由模型配方（工具链镜像）构建，worker 二进制通过
-`COPY --from=<evaluation-service digest>` 取入——该 digest 是模型挑选的，经常
-是旧 schema 时代的构建。修复（`a16ac7d` → `56fa5cb`）在 agent 构建执行器里把
-`evaluation/Dockerfile` 中所有引用 evaluation-service 的 `FROM`（防御）与
-`COPY --from`（真正漂移点）改写为 `${LABWEAVER_SERVICE_IMAGE}`；该构建参数由
-`build-executor-config` 的 `executor.serviceImage` 提供，钉定为当前部署的
-evaluation-service digest。临时把容器审批路径运行时身份改成配置身份的做法
-（842350a）会丢弃模型工具链（OJ 编译在镜像内跑 make，裸 evaluation 镜像没有
-riscv64 工具链），已回滚（295df09）。
-
-部署（21:0x，`oj-runnerpin-2`）：新包 validate static+connected 均过；
-platform-application 应用后三个服务 digest 与 manifest 一致（control
-`0cbe2404…`、agent `d46e127e…`、eval `4207b841…`）；build-executor-config
-`executor.serviceImage` 与 control-service-config `evaluationRuntime.runnerImage`
-同步到 `4207b841…`。本地复现证明：该 runner 镜像 + 真实 xv6 归档 + 114 字节
-starter 的 `build-xv6.sh` 完整编译通过（BUILD_EXIT=0），工具链/归档/布局均无问题。
-
-随后验收（attempt-1 `public-20260925-3j-a1-13004`、attempt-2 `-a2-9900`）：
-lab 段的 `LW_OJ_RECEIPT_INVALID` 消失（收据 16 字段可解析，`observe_oj` 打出
-`evaluation.oj.compile_failed: LW_OJ_COMPILE_ERROR`），但编译 gate 仍失败；
-work 段出现 `WORK_CONFIGURATION_RUN_FAILED`（agent run 的 work_configuration 轨
-`LW_AGENT_WORK_EXECUTION_FAILED`，模型生成的配置脚本执行失败）；admin 段的
-「已发布版本」下拉在 120s 内无非空 option（release 投影未按时发布，与 authoring
-draft 质量相关）。三段的共同下风仍是模型候选质量（qwen 生成失效 draft 的
-幸运值问题），按已记录 blocker 由循环重试吸收；编译 gate 的进一步定位依赖 OJ
-pod 的 terminated message / 容器日志抓取（watcher 已加强为 2s 轮询并采集 command
-configMap 与容器日志）。
-
-
-### 12.2.10 2026-09-26：编译 gate 铁败的最终根因 —— Landlock 把 `/dev/null` 只读化（提交 ed43625，包 `pkg-v1-issue127-devnull`）
-
-attempt-1..5 的 lab 段在 schema 修复后仍然每次都
-`LW_OJ_COMPILE_ERROR`（收据 16 字段、`compileExitCode=2`、`compileTimedOut=false`）。
-本地裸跑 `build-xv6.sh`（容器内直接执行、无 sandbox）能通过，因此工具链/归档/布局
-全部排除。最终用**手动 OJ 复刻 pod**（同一 runner 镜像 3b0bb954… 时代 + 真实
-material 文件 + 与 OJ Job 相同的 securityContext/Landlock/init 物化布局）在集群里
-复现出完全一致的失败，pod 容器日志给出决定性输出：
-
-```text
-/bin/sh: 1: cannot create /dev/null: Permission denied
-*** Error: Couldn't find a riscv64 version of GCC/binutils.
-cc1: error: bad value 'rv64gc' for '-march=' switch
-```
-
-根因：xv6 Makefile 用 `command -v … >/dev/null` 探测工具链。OJ 编译助手把
-`/dev/null` 列入 **read-only** 的编译读路径（`COMPILER_READ_PATHS` 包含
-`/dev/null` 与 `/dev/urandom`，Landlock 按只读加规则），重定向写入被 Landlock
-拒绝 → 探测恒失败 → make 报「找不到 riscv64 GCC」并以 exit 2 退出。容器镜像里
-工具链齐全（本地直接编译成功）与此不矛盾：失败是内核 sandbox 的权限问题，不是
-镜像内容问题。
-
-修复经历了两轮：第一版（ed43625）把 `/dev/null` 直接追加进
-`compile_program`/`run_case` 的 `HelperInvocation` 写路径，但
-`run_oj_compile_exec`/`run_oj_case_exec` 对写路径做**精确相等校验**
-（`write_paths != vec![BUILD_ROOT]`），追加后所有编译立刻变成
-`LW_OJ_COMMAND_INVALID`/`LW_OJ_SANDBOX_UNAVAILABLE`，越改越坏。第二版
-（38a2d6d，包 `pkg-v1-issue127-devnull2`）把写路径保持在声明根目录，改为在
-`apply_compiler_filesystem_sandbox`/`apply_submission_filesystem_sandbox` 的
-helper 侧规则集内恒追加 `/dev/null` 写规则（`/dev/null` 丢弃一切写入，加入可写
-集无安全后果；读集里的 `/dev/urandom` 不受影响）。验证：用同一 runner 基础镜像
-（df048e5b…，含工具链）叠加新 evaluation-service 的
-`/usr/local/bin/labweaver-service`（`ojx-repro-fixed:devnull2`）重建复刻 pod，
-同样真实材料下收据从 `LW_OJ_COMPILE_ERROR`（exit 2）变为
-**`LW_OJ_ACCEPTED`（exit 0，terminalStatus=accepted）**——编译 gate 证据链闭合。
-运维要点：OJ 编译/运行的 Landlock 写集合必须包含脚本所需的重定向目标；helper
-对写路径数组做精确校验，扩展写权限只能在 helper 侧规则集做；遇到「编译期
-toolchain not found + cannot create /dev/null」应第一时间想到这个权限维度，
-而不是镜像内容。
-
-### 12.2.11 2026-09-26（进行中）：score gate（smoke-tests）铁败的根因 —— 提交跑的 cgroup pids 检查与集群实际界不匹配
-
-devnull2 上线后 lab 的 compile gate 三连绿，但 score gate（`smoke-tests` step）
-恒报 `LW_OJ_SANDBOX_UNAVAILABLE`（25 字节收据）。strace 复刻 pod
-（`ojx-strace` 镜像 + `--mode oj-case-exec` 直接在集群内跑 case-helper）证明
-helper 死在 sandbox 之前：`require_submission_cgroup_process_limit` 读
-`/sys/fs/cgroup/pids.max` 得到 **192707**（pod 的 cgroupns 根；源为节点
-`kubepods.slice` 的 systemd TasksMax≈192707，`/proc/sys/kernel/pid_max` 为
-4194304），原检查窗口 `(2..=128)` 不满足 → `LW_OJ_LIMIT_APPLY_FAILED`
-（helper 侧 24 字节代码），coordinator 的 `consume_helper_ready` 把它统一映成
-`LW_OJ_SANDBOX_UNAVAILABLE`。compile-helper 没有这道检查 → 通过，因此两个
-gate 出现「编译全绿、跑分全灰」的假象。
-
-判断：这道检查的本意是「提交必须运行在一个真的会限制进程数的 cgroup 里」，而
-真正的单次运行配额是 RLIMIT_NPROC=64（`apply_submission_process_limit`）；
-cgroup 只须「有限且有 ≥2 余量」。集群把 kubelet `podPidsLimit` 配置为 16384
-（其后两 worker 均改 128 并持久化，kubelet 重启后生效），观测到的 192707 也是
-有效边界——检查不应以固定 128 上限拒绝它们。修复：
-
-1. `oj_worker.rs` 的 `require_submission_cgroup_process_limit` 改为接受任意
-   **有限** pids 界（filter `>= 2`，`parse_cgroup_pids_max` 对 `max` 哨兵返回
-   None 即视为无界拒绝），删除 `MAX_SUBMISSION_CGROUP_PROCESSES` 常量并存根因注释。
-2. 同文件 `execution_read_paths` 追加 `BUILD_ROOT`：case 程序（run-xv6.py）要读
-   `/work/build/{program,kernel/kernel,fs.img}`，原读集只有系统根 + `/support`，
-   编译产物不可读会在 sandbox 内 EACCES。
-3. v1-worker-97/v1-worker-158 的 `/var/lib/kubelet/config.yaml` 均持久化
-   `podPidsLimit: 128`（kubectl debug node + sed），下次 kubelet 重启生效；
-   **代码不再依赖该值是否已生效**。
-
-验证：evaluation-service 单包测试全绿（cgroup 解析相关单测未回归）+ 提交后重新
-打包部署，score gate 的真实 lab 跑分应 `succeeded`（待观察确认）。
-
-#### 12.2.11.1 同轮发现：work 配置脚本在 dash 下执行失败（提交 498117c）
-
-`public-20260926-3j-a1` 的 work 旅程在「批准并执行 Work 配置」后失败：收据
-`/tmp/labweaver-work-executions/…/primary.sh: 2: set: Illegal option -o pipefail`、
-exit 2。根因：`services/work-configuration-runner.sh` 用硬编码 `/bin/sh` 执行
-primary.sh/verification.sh，而工作镜像（Ubuntu/debian 系）的 `/bin/sh` 是
-dash；Agent 生成的脚本用 bash 专属的 `set -o pipefail` 直接死掉。修复：runner
-按脚本 shebang 派发（绝对路径解释器 + 至多一个可选参数原样透传，无 shebang 回退
-`/bin/sh`）。新增黑盒回归：`#!/bin/bash` + pipefail 脚本经真实 debian 容器跑通
-（修复前该用例失败）。`python3 services/environment-service/tests/work_configuration_runner.py`
-= 10 用例全绿。
-
-后续实跑补证（`public-20260926-3j-a1-9330`）：work 配置三连收据中两绿
-（exit 0）、一红仍为 `Illegal option -o pipefail`（exit 2）——该次脚本**没有
-shebang**，落入 `/bin/sh`（dash）回退路径。修复（提交 13085f6）：无 shebang
-时优先用 `/bin/bash`（POSIX 超集，平台镜像均带），无 bash 才回退 `/bin/sh`；
-新增同形态黑盒回归（11 用例全绿）。
-
-bashfb 部署后（包 `pkg-v1-issue127-bashfb-13085f69dcec`，env-service `bba22341…`）
-实跑验证：`public-20260926-3j-a2-2260` 的 work 配置收据一键即绿
-（`01a0dc22-9743…` exit 0 "OK: persistence marker verified"）。同一部署窗口内
-evaluation 五次全绿（03:47/04:06/04:52/05:02/05:09，步全部 source-present+compile+
-smoke-tests 三连绿）——cgroup 与 build-reads 修复的稳定复现证据。
-
-#### 12.2.11.2 同轮发现：work 类模板版本对项目成员不可见（提交将同包）
-
-`public-20260926-3j-a1` 的 admin 旅程三连败在 student 发起资源申请的「已发布版本」
-下拉（`web/e2e/support/real-resource.mjs:195` `option:not([value=""])` 永不复现）。
-DB 证据：该项目的 `control.environment_template_releases` 有 1 行、且
-`environment.release_projections` 有对应投影行——列表查询本身没问题。根因：
-`control-service` 的 `project_releases` SQL 对 work 类版本要求
-`projects.owner_actor_id=$5`（仅项目 owner 可见）；admin 旅程的项目由 teacher
-创建、由 student 成员发起资源申请 → student 的列表恒空。work 旅程不受影响是因为
-其项目由 student 自建（owner 即 requester），这解释了「work 能过、admin 不能过」。
-修复：work 类版本对「owner 或本项目 active 成员」均可见（同
-`access.project_memberships` 的既有可见性判定，含过期成员过滤）。
-
-部署（包 `pkg-v1-issue127-cgroup-7d116465cad8`，run-id `oj-cgroup20260926a`）：
-evaluation-service digest `5445bf8b…`。**部署后又发现并修复一处流水线回归**：本轮
-`platform-application --infra` 把 build-executor-config/control-service-config
-按 bundle 原样应用，而 bundle 里这两处仍钉着更早的 evaluation-service digest
-（`d87dd7b7…`，13 字段收据时代）——正是 12.2.8 记录的「OJ runner 镜像身份与
-部署镜像不一致」复发。修复：playbook 在包绑定阶段对这两个 CM 的
-`evaluationRuntime.runnerImage` / `executor.serviceImage` 也改绑当前包的
-evaluation-service reference（提交 cdff09a），线上三处 CM 已同步
-`5445bf8b…` 并滚动三部署。后续每次 `platform-application` 都应自动保持四方一致。
-
-**score gate 线上验证**（包 `pkg-v1-issue127-cgroup3-9ed5c6dffa9d`，run-id
-`oj-cgroup3b-20260926a`，evaluation-service `85223de8…`，含 9ed5c6d 括号修正后的
-control）：03:47 的真实 lab 评估 run `01a0dbd2-ee14…` 三连绿——
-`source-present ✓ compile ✓ smoke-tests ✓`（此前同步三处 run 均
-`smoke-tests ✗ LW_OJ_SANDBOX_UNAVAILABLE`）。cgroup 检查改为「任意有限界」+
-case 读集含 `/work/build` 后，真实 OJ 的 score step 恢复正常。
-
-同包还修复了 work 配置脚本 shebang 派发（提交 498117c）与 work 类版本对项目成员
-可见（提交 7d11646 + 9ed5c6d）。未验证项：跑分后的评估分数（0/100，正确性由后续
-验收判定）、work/admin 旅程端到端绿。
-
-**lab 旅程 30s 审批超时的根因（提交 d79df76）**：BFF 审批看门狗（
-`tools/user_acceptance.py approve_pending_resource_requests`）会把 `evaluation-…`
-task 租约（冻结提交评估与 authoring 自有评估轨）也批成 active，而这些正是 lab
-旅程自己通过管理台 UI 审批的对象。看门狗先赢的轮次里，UI 的确认框在
-`performRequestAction`（useResourceApproval.ts）读到 latest request 已非 reviewing
-后短路不发 POST，`real-experiment.mjs:383` 的 `waitForResponse` 空等 30s 超时——
-跨 3 个验收 run（a1-a3）十余次复现，后端 approve 本身恒 202（13–31ms）。修复：
-看门狗跳过 `requestKey` 含 `evaluation-` 的请求（与既有的“environment 目标留给旅程”
-同构）；authoring/work 等其余 task 租约仍由看门狗审批。此后 lab 为首次可判定的
-端到端轮次。
-
-#### 12.2.11.3 admin 旅程「已发布版本」下拉恒 404 的终局（提交 e274397）
-
-12.2.11.2 的 SQL 修复（member 可见）只改了一半：列表 SQL 已放行「owner 或 active
-成员」，但共享视图 `project_release_view` 对 work 类版本仍保留 owner-only 守卫
-（`owner_actor_id != actor_id → ControlError::NotFound`）——student 成员的行在
-SQL 层可见、在视图层被拒 → `GET /api/v1/projects/{id}/environment-template-releases`
-对 student 恒 404 `LW_CONTROL_NOT_FOUND`（teacher=owner 同请求 200 含 release）。
-已排除 access 授权（decision=permitted）、SQL 本身（直接 psql 同结构 1 行）、部署
-陈旧（三个全新构建逐一复现）。诊断链：在 handler 的
-`state.control.project_releases(...)` 调用外加 match 打印错误变体，
-`debug.release.error` 事件的 `error_kind=NotFound` 直接指向视图 7906 行守卫。
-修复：`project_release` 与 `project_releases` 两个 SQL 均投影
-`actor_can_view_work` 布尔（owner 或 `access.project_memberships` active 未过期
-成员，与列表 WHERE 同式），视图改校验该列；get-one 的 WHERE 保持 owner-only，
-访问面不变。部署 `98ee0e89…`（包 `pkg-v1-issue127-fix404-…`）后
-student/teacher 同请求均 200 且含同一 release。
-
-**端到端验证（run `public-20260926-3j-a4-3313`，09:10）：admin 旅程首个全绿**——
-teacher 发布 work 类模板、student 发起 CPU 资源申请（「已发布版本」下拉即所选
-release）、platform-admin 审批、lease 回读、费用页与 GPU 目录、lease 回收清理
-全部通过；journey 判定 `passed`（summary.json `status: "passed"`）。这是该修复
-的直接 e2e 证据（下拉与整个申请-审批-回收链路）。
-
-**work 旅程续期/回收点错租约（提交 3da4429）**：某次复现后 work 反复死于
-resources 页 30s 超时。根因：该页列出项目全部租约，config 沙箱的 task 租约排在
-前面，spec 用 `.first()` 定位续期/回收按钮，实际点到了 config 租约 →
-`/resource-leases/{id}/renew` 请求永不发出（原租约 id 的续期/回收也未发生）。
-修复：先定位含 `a[href*="/researcher/environments"]` 的 `li.resource-row`，再取
-其中的续期/回收按钮。配置本身全绿。
-
-**work 旅程回收未点确认框（提交 a369ddc）**：续期修复后 work 前进到回收
-（sprint2 spec ~1049），但 回收 按钮的确认框（`dialog` "回收资源使用授权"）未被
-点击 → `POST /resource-leases/{id}/revoke` 永不发出 → 30s `waitForResponse`
-超时（a5 三个尝试同一死法，失败时页面快照里确认框正处于打开状态）。修复：点击
-回收后先确认对话框（与 admin 释放助手同一选择器），再等待 revoke 响应。
-
-**端到端验证（run `public-20260926-3j-a6-23379`，12:30）：work 旅程首个全绿**
-——student 自建项目、work 类模板配置、环境启动、终端写盘/重启持久化、租约到期
-续期、回收租约（含确认框）、环境停止、真实费用记录全部通过；journey 判定
-`passed`（summary.json `status: "passed"`，retry1 通过，attempt1 因人工取消
-作废）。这是续期修复（3da4429）与回收确认框修复（a369ddc）的直接 e2e 证据。
-
-**同 run 的 admin 旅程也全绿（`public-20260926-3j-a6-23379`，13:00）**：teacher
-发布 work 模板、student 发起申请、「已发布版本」下拉选取、platform-admin 审批、
-lease 回读、费用页、GPU 目录与最终回收清理均通过；a6 的 summary.json 为
-`lab=failed / work=passed / admin=passed`——单轮两旅程全绿，仅剩 lab 受
-12.2.11.4 记录的 LLM 间歇卡顿阻塞。
-
-#### 12.2.11.4 同轮：`#!/bin/sh` + bash 语法仍死在 dash（提交 29fd7c5）与 lab 旅程的 LLM 间歇卡顿
-
-`public-20260926-3j-a4` 的 work 配置执行收据暴露残差：模型生成的 `primary.sh`
-写成 `#!/bin/sh` + `set -o pipefail`。12.2.11.1 的 shebang 派发会忠实执行
-`/bin/sh`（Debian 上为 dash），dash 拒绝 `set -o pipefail` → exit 2
-（`set: Illegal option -o pipefail`）。修复：basename 为 `sh` 的 shebang 视为
-POSIX 声明，存在 `/bin/bash`（POSIX 超集）时改用 bash；显式
-`/bin/dash`/`/bin/bash` 仍按原样执行。`services/environment-service/tests/
-work_configuration_runner.py` 11 项全绿，env-service 以 `6354f5df…` 滚动上线。
-
-模型服务使用 `labweaver-llm/ollama` 的直连 Service 和部署输入中的
-`qwen3.6:35b`。AgentRun 无法生成时，先检查该 Service 的 Endpoints、Agent
-ConfigMap 的 `anthropic-base-url`/`anthropic-model` 以及 `platform-model-egress`
-和 `authoring-platform-egress` 的 11434 端口策略；不要切换到旧代理或云端回退。
-
-### 12.1 控制台断言的边界：浏览器资源日志与应用错误分开
-
-`web/e2e/support/usability.mjs` 的 `installUsabilityGuards` 只把**应用侧**的两类失败计入断言：
-JS 的 `console.error` 与未捕获异常（`pageerror`）。Chromium 对任何失败的子资源/请求都会额外打一条
-`console` 类型为 `error` 的 **`Failed to load resource: …`**，即便应用已经处理（例：环境刚创建时控制台页
-轮询 `GET /api/v1/access-grants/{grant_id}/console-capabilities`，平台在环境就绪前返回 503，页面继续等待）。
-这类浏览器日志**不再**触发 `LW_ACCEPTANCE_CONSOLE_ERROR`，但仍然被收集为 `networkErrors`，并在每个检查点
-以 `console.warn` 打印出来，供证据留档；断言覆盖的仍然是「用户无法处理」的那两类。
-
-实测依据（run `public-20260924-3j-a1-5685` 的 work 段，2026-09-24）：目标用例在 3.2 分钟处失败，抛出
-`student-work-environment:LW_ACCEPTANCE_CONSOLE_ERROR:console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)`；
-`access-service` 同窗口的日志确认该 503 只出现在
-`route=/api/v1/access-grants/{grant_id}/console-capabilities`（2 次，其它服务 0 次），且页面在断言点
-已正常渲染控制台。即：应用侧无未处理错误，失败来自浏览器对该轮询的记录。
+不要把一次浏览器验收的运行编号、临时 Pod 名称或诊断复制成永久配置。产品状态、费用和用户反馈保留在正常业务记录以及对应 Issue/PR 中。

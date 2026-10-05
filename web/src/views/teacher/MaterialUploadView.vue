@@ -1,9 +1,9 @@
 <template>
   <div class="material-upload">
     <header class="page-header">
-      <h2>材料上传与 AgentRun</h2>
+      <h2>材料上传与实验生成</h2>
       <p class="page-subtitle">
-        上传题面、Starter 和样例，确认项目 LLM 出站策略后启动 AgentRun。
+        上传题面、Starter 和样例，确认项目 LLM 出站策略后启动实验生成任务。
       </p>
     </header>
 
@@ -30,6 +30,12 @@
     >
       建议：{{ diagnosticAction(restoreDiagnostic.code) }}
     </p>
+
+    <ProjectAgentRunHistory
+      :project-id="projectId"
+      scope="experiment"
+      @open="openHistoryRun"
+    />
 
     <section
       class="policy-section"
@@ -102,7 +108,7 @@
         </template>
         <template #empty>
           <div class="policy-missing" data-testid="material-policy-missing">
-            <p>当前项目没有已激活的项目 AI 设置。完成配置后才能上传材料并启动 AgentRun。</p>
+            <p>当前项目没有已激活的项目 AI 设置。完成配置后才能上传材料并启动实验生成任务。</p>
             <RouterLink
               class="outlined-button"
               :to="{ path: '/researcher/ai-policy', query: { projectId } }"
@@ -312,7 +318,7 @@
         :disabled="!canStartRun"
         @click="startRun"
       >
-        {{ agent.acting === 'start' ? '提交中…' : '启动 AgentRun' }}
+        {{ agent.acting === 'start' ? '提交中…' : '启动实验生成' }}
       </button>
       <p
         v-if="agent.run.kind === 'success' && runIsInFlight(agent.run.data.state)"
@@ -373,7 +379,7 @@
               v-else
               class="run-tracks-empty"
             >
-              AgentRun 尚未产生轨道尝试明细。
+              生成任务尚未产生轨道尝试明细。
             </p>
             <details class="technical-details run-technical-details">
               <summary>查看生成任务详情</summary>
@@ -502,11 +508,12 @@ import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import DataTable from '@/components/common/DataTable.vue'
+import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import type { AgentRunSchema } from '@/generated/contracts'
+import type { AgentRunHistoryItem, AgentRunSchema } from '@/generated/contracts'
 import type { UploadFile } from '@/composables/useProjectProblemPackageUpload'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
@@ -518,7 +525,7 @@ const courseId = computed(() => projects.selectedProject?.courseId ?? null)
 const policy = useActiveProjectLlmPolicy(projectId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
 const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
-const agent = useProjectAgentRun(projectId)
+const agent = useProjectAgentRun(projectId, { kind: 'authoring', environmentClass: 'experiment' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
@@ -583,7 +590,7 @@ function diagnosticAction(code: string): string | null {
     case 'LW_ACCESS_DENIED':
       return '请确认当前账号仍有该项目的教师权限，并从可访问项目重新开始。'
     case 'LW_CANDIDATE_NOT_FOUND':
-      return '候选可能仍在服务端同步，点击重试继续读取；超时后请重新打开该 AgentRun。'
+      return '候选可能仍在服务端同步，点击重试继续读取；超时后请重新打开该生成任务。'
     case 'PROJECT_APPROVAL_RUN_KIND_UNSUPPORTED':
       return '请从材料上传页启动实验候选生成，不要使用 Work 配置或其他用途的运行记录。'
     case 'PROJECT_RUN_STALE_CONTEXT':
@@ -604,6 +611,10 @@ function updateAuthoringRoute(next: { packageId?: string; runId?: string }) {
     runId: next.runId,
   }
   void router.replace({ query })
+}
+
+function openHistoryRun(item: AgentRunHistoryItem) {
+  updateAuthoringRoute({ runId: item.id })
 }
 
 function clearAuthoring() {
@@ -637,7 +648,16 @@ async function restoreAuthoringContext(generation = ++restoreGeneration) {
   if (runId) {
     await agent.load(runId)
     if (!isCurrent()) return
-    if (agent.run.kind !== 'success') return
+    if (agent.run.kind !== 'success') {
+      if (agent.run.kind === 'error' && agent.run.diagnostic.code === 'PROJECT_RUN_PURPOSE_MISMATCH') {
+        restoreDiagnostic.value = makeDiagnostic(
+          'PROJECT_APPROVAL_RUN_KIND_UNSUPPORTED',
+          '该运行记录不是实验包生成任务，已停止恢复。请从材料页启动实验候选生成。',
+          false,
+        )
+      }
+      return
+    }
     if (agent.run.data.id !== runId || agent.run.data.projectId !== id) {
       upload.clear()
       restoreDiagnostic.value = makeDiagnostic(
@@ -699,6 +719,13 @@ watch(
   },
   { immediate: true },
 )
+
+watch(routeProjectId, (id) => {
+  if (!id || projects.projects.kind !== 'success') return
+  if (projects.projects.data.some((project) => project.id === id) && projects.selectedProjectId !== id) {
+    projects.select(id)
+  }
+})
 
 watch([projectId, routePackageId, routeRunId], () => void restoreAuthoringContext(), { immediate: true })
 

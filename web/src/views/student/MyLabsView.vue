@@ -30,6 +30,15 @@
       severity="error"
     />
 
+    <div
+      v-else-if="isProjectContextLoading"
+      class="project-context-loading"
+      role="status"
+      aria-live="polite"
+    >
+      正在同步项目上下文，请稍候…
+    </div>
+
     <template v-else>
       <!-- GCP Action Bar -->
       <GcpActionBar
@@ -347,8 +356,14 @@ const projectContextBlocked = computed(() => projects.projects.kind !== 'success
 const projectId = computed(() => projectContextBlocked.value ? undefined : projects.selectedProjectId ?? undefined)
 const selectedProject = computed(() => projectContextBlocked.value ? null : projects.selectedProject)
 const courseId = computed(() => selectedProject.value?.courseId ?? undefined)
-const isContextMissing = computed(() => !projectId.value)
 const isInvalidProjectContext = computed(() => routeProjectInvalid.value)
+const isProjectContextLoading = computed(() => {
+  if (projects.projects.kind === 'idle' || projects.projects.kind === 'loading') return true
+  if (projects.projects.kind !== 'success') return false
+  if (routeProjectPending.value) return true
+  return projects.projects.data.length > 0 && !projects.selectedProjectId
+})
+const isContextMissing = computed(() => !isInvalidProjectContext.value && !isProjectContextLoading.value && !projectId.value)
 
 const router = useRouter()
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
@@ -357,6 +372,7 @@ const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 const state = ref<AsyncState<EnvironmentSummary[]>>({ kind: 'idle' })
 const autoRefreshEnabled = ref(true)
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let loadGeneration = 0
 
 const inspectedEnv = ref<EnvironmentSummary | null>(null)
 const showCreateModal = ref(false)
@@ -493,11 +509,14 @@ function retryCreate() {
 
 async function load() {
   const id = projectId.value
+  const generation = ++loadGeneration
   if (!id) {
-    state.value = {
-      kind: 'blocked',
-      diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法加载实验列表。', false),
-    }
+    state.value = isProjectContextLoading.value
+      ? { kind: 'loading', message: '正在同步项目上下文…' }
+      : {
+          kind: 'blocked',
+          diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法加载实验列表。', false),
+        }
     return
   }
   state.value = { kind: 'loading', message: '加载实验列表…' }
@@ -508,6 +527,7 @@ async function load() {
       ...(!props.teacherMode && courseId.value ? { courseId: courseId.value } : {}),
     })
   } catch (error) {
+    if (generation !== loadGeneration || projectId.value !== id) return
     const problem = extractProblemDetails(error)
     state.value = {
       kind: 'error',
@@ -519,6 +539,7 @@ async function load() {
     }
     return
   }
+  if (generation !== loadGeneration || projectId.value !== id) return
   state.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
   scheduleRefresh()
 }
@@ -620,6 +641,15 @@ function openEnvironment(environmentId: string) {
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
+}
+
+.project-context-loading {
+  padding: 20px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
 }
 
 .env-name-cell {
