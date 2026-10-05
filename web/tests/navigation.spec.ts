@@ -65,7 +65,7 @@ describe('navigation rules', () => {
     await router.isReady()
     const wrapper = mount(GcpSearchBar, { global: { plugins: [router] } })
 
-    const input = wrapper.find('input[aria-label="搜索任务或按环境 ID 直达"]')
+    const input = wrapper.find('input[aria-label="搜索平台功能或页面"]')
     await input.setValue('资源审批')
     await input.trigger('focus')
 
@@ -87,10 +87,10 @@ describe('navigation rules', () => {
     await router.isReady()
     const wrapper = mount(GcpSearchBar, { global: { plugins: [router] } })
 
-    const input = wrapper.find('input[aria-label="搜索任务或按环境 ID 直达"]')
-    await input.setValue('不存在的任务')
+    const input = wrapper.find('input[aria-label="搜索平台功能或页面"]')
+    await input.setValue('不存在的平台功能')
     await input.trigger('focus')
 
-    expect(wrapper.find('.search-empty').text()).toBe('没有匹配的任务。')
+    expect(wrapper.find('.search-empty').text()).toBe('没有匹配的平台功能或页面。')
   })
 })

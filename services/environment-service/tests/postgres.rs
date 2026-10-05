@@ -98,7 +98,9 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     let mut retry_context = instance.clone();
     retry_context.operation.trace_id = "trace-create-retry".to_owned();
     retry_context.operation.accepted_at = timestamp("2026-07-14T00:00:01.000Z");
+    retry_context.operation.next_attempt_at = retry_context.operation.accepted_at;
     retry_context.operation.deadline_at = timestamp("2027-01-14T00:00:01.000Z");
+    assert!(retry_context.validate().is_ok());
     assert_eq!(
         store.create("create-key-0001", &retry_context).await?,
         accepted

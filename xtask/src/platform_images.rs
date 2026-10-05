@@ -876,6 +876,11 @@ const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
         "https://deb.debian.org/debian/pool/main/g/git/git_2.39.5-0+deb12u3_amd64.deb",
     ),
     (
+        "git-man_2.39.5-0+deb12u3_all.deb",
+        "904dbd8dbc3db34c6780fb0abfe35816d4a90a490126ef0a055a77a0c5dcab82",
+        "https://deb.debian.org/debian/pool/main/g/git/git-man_2.39.5-0+deb12u3_all.deb",
+    ),
+    (
         "libbrotli1_1.0.9-2+b6_amd64.deb",
         "563b4caec1aa5e876bd3355b36e7a38e1484baf5a293b48d1e8bd22db786e4d7",
         "https://deb.debian.org/debian/pool/main/b/brotli/libbrotli1_1.0.9-2+b6_amd64.deb",
