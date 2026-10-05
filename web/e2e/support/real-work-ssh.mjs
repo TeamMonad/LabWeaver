@@ -42,14 +42,11 @@ export async function runProcess(program, args, {
   outputLimitBytes = MAX_PROCESS_OUTPUT_BYTES,
 }) {
   return await new Promise((resolve, reject) => {
-    const startedAt = performance.now()
     let child
     try {
       child = spawn(program, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
-        timeout: timeoutMs,
-        killSignal: 'SIGKILL',
       })
     } catch {
       reject(new Error(`${outputCode}_START_FAILED`))
@@ -60,6 +57,11 @@ export async function runProcess(program, args, {
     let outputBytes = 0
     let outputExceeded = false
     let exitedAt = null
+    let deadlineReached = false
+    let deadlineTimer
+    const clearDeadlineTimer = () => {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+    }
 
     const collect = (chunks) => (chunk) => {
       if (outputExceeded) return
@@ -74,21 +76,28 @@ export async function runProcess(program, args, {
     child.stdout.on('data', collect(stdout))
     child.stderr.on('data', collect(stderr))
     child.once('error', () => {
+      clearDeadlineTimer()
       reject(new Error(`${outputCode}_START_FAILED`))
     })
     child.once('exit', () => {
       exitedAt = performance.now()
     })
     child.once('close', (code, signal) => {
+      clearDeadlineTimer()
       resolve({
         code,
         signal,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
-        timedOut: signal === 'SIGKILL' && !outputExceeded && exitedAt !== null && exitedAt - startedAt >= timeoutMs,
+        timedOut: deadlineReached && !outputExceeded,
         outputExceeded,
       })
     })
+    deadlineTimer = setTimeout(() => {
+      if (exitedAt !== null || outputExceeded) return
+      deadlineReached = true
+      child.kill('SIGKILL')
+    }, timeoutMs)
     if (input === undefined) child.stdin.end()
     else child.stdin.end(input)
   })

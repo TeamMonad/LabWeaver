@@ -199,13 +199,12 @@ impl KeycloakDirectory {
 fn display_name(user: &KeycloakUser, username: &str) -> String {
     let given = user.first_name.as_deref().unwrap_or("").trim();
     let family = user.last_name.as_deref().unwrap_or("").trim();
-    let display_name = match (given.is_empty(), family.is_empty()) {
+    match (given.is_empty(), family.is_empty()) {
         (false, false) => format!("{given} {family}"),
         (false, true) => given.to_owned(),
         (true, false) => family.to_owned(),
         (true, true) => username.to_owned(),
-    };
-    display_name
+    }
 }
 
 fn select_exact_user(
@@ -251,9 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_username_resolution_accepts_case_insensitive_single_result() {
-        let result = select_exact_user(vec![user("Alice")], "alice")
-            .expect("one exact provider result should resolve");
+    fn exact_username_resolution_accepts_case_insensitive_single_result()
+    -> Result<(), DirectoryError> {
+        let result = select_exact_user(vec![user("Alice")], "alice")?;
         assert_eq!(result.username.as_deref(), Some("Alice"));
+        Ok(())
     }
 }

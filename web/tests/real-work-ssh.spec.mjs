@@ -98,6 +98,17 @@ GPU 00000000:01:00.0
     expect(result).toMatchObject({ code: null, timedOut: true, outputExceeded: false })
   })
 
+  it('marks an explicit deadline kill as a timeout on every platform', async () => {
+    const result = await runProcess(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)'],
+      { timeoutMs: 100, outputCode: 'PROCESS_TEST', outputLimitBytes: 1024 },
+    )
+
+    expect(result.timedOut).toBe(true)
+    expect(result.outputExceeded).toBe(false)
+  })
+
   it('does not report an early child SIGKILL as a timeout', async () => {
     const result = await runProcess(
       process.execPath,

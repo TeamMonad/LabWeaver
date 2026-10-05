@@ -112,6 +112,40 @@ async fn token(
     }
 }
 
+fn directory_users_response() -> Response {
+    (
+        StatusCode::OK,
+        Json(json!([
+            {
+                "id": Uuid::now_v7(),
+                "username": "alice",
+                "firstName": "Alice",
+                "lastName": "Researcher",
+                "enabled": true
+            }
+        ])),
+    )
+        .into_response()
+}
+
+fn control_request_record(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+    actor: Option<&str>,
+) -> Value {
+    json!({
+        "method": method.as_str(), "path": uri.path(), "actor": actor,
+        "session": headers.get("x-labweaver-session-id").and_then(|v| v.to_str().ok()),
+        "ifMatch": headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()),
+        "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
+        "body": serde_json::from_slice::<Value>(body).ok(),
+        "browserCookie": headers.contains_key(header::COOKIE),
+        "browserCsrf": headers.contains_key("x-csrf-token")
+    })
+}
+
 async fn control(
     State(state): State<Authority>,
     method: Method,
@@ -140,30 +174,10 @@ async fn control(
     let actor = headers
         .get("x-labweaver-actor-id")
         .and_then(|v| v.to_str().ok());
-    let record = json!({
-        "method": method.as_str(), "path": uri.path(), "actor": actor,
-        "session": headers.get("x-labweaver-session-id").and_then(|v| v.to_str().ok()),
-        "ifMatch": headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()),
-        "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
-        "body": serde_json::from_slice::<Value>(&body).ok(),
-        "browserCookie": headers.contains_key(header::COOKIE),
-        "browserCsrf": headers.contains_key("x-csrf-token")
-    });
+    let record = control_request_record(&method, &uri, &headers, &body, actor);
     state.requests.lock().await.push(record);
     if method == Method::GET && uri.path() == "/admin/realms/test/users" {
-        return (
-            StatusCode::OK,
-            Json(json!([
-                {
-                    "id": Uuid::now_v7(),
-                    "username": "alice",
-                    "firstName": "Alice",
-                    "lastName": "Researcher",
-                    "enabled": true
-                }
-            ])),
-        )
-            .into_response();
+        return directory_users_response();
     }
     if actor != Some(state.admin.to_string().as_str()) {
         if method == Method::GET
@@ -895,7 +909,7 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
             .count(),
         0
     );
-    assert!(owner_session.session_id != member_session.session_id);
+    assert_ne!(owner_session.session_id, member_session.session_id);
     Ok(())
 }
 
