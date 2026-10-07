@@ -1234,7 +1234,8 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     // database observation for the following Ready transition so this test
     // does not confuse its historical fixture timestamps with live boundaries.
     let restart_observed_at = store.current_time().await?;
-    let worker = success_worker_with_ready_observation(store.clone(), restart_observed_at)?;
+    let worker =
+        success_worker_with_restart_ready_observation(store.clone(), Some(restart_observed_at))?;
     store
         .accept_command(
             "legacy-meter-restart",
@@ -2640,15 +2641,17 @@ fn kubevirt_fence(
 fn success_worker(
     store: PgEnvironmentStore,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
-    success_worker_with_ready_observation(store, timestamp("2026-07-14T00:01:00.000Z"))
+    success_worker_with_restart_ready_observation(store, None)
 }
 
-fn success_worker_with_ready_observation(
+fn success_worker_with_restart_ready_observation(
     store: PgEnvironmentStore,
-    ready_observed_at: UtcTimestamp,
+    restart_ready_observed_at: Option<UtcTimestamp>,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
     let mut registry = ProviderRegistry::default();
-    registry.register(Arc::new(LifecycleSuccessProvider { ready_observed_at }))?;
+    registry.register(Arc::new(LifecycleSuccessProvider {
+        restart_ready_observed_at,
+    }))?;
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?,
@@ -2731,7 +2734,7 @@ impl EnvironmentProvider for BlockingProvider {
 struct CleanupFailureProvider;
 
 struct LifecycleSuccessProvider {
-    ready_observed_at: UtcTimestamp,
+    restart_ready_observed_at: Option<UtcTimestamp>,
 }
 
 #[derive(Default)]
@@ -2769,7 +2772,7 @@ impl EnvironmentProvider for IdempotentCrashProvider {
             self.side_effects.fetch_add(1, Ordering::SeqCst);
         }
         LifecycleSuccessProvider {
-            ready_observed_at: timestamp("2026-07-14T00:01:00.000Z"),
+            restart_ready_observed_at: None,
         }
         .execute(action, instance)
         .await
@@ -2817,18 +2820,27 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                 (
                     ReconcileAction::Provision | ReconcileAction::Restart,
                     ObservedEnvironmentState::Provisioning,
-                ) => ProviderObservation {
-                    next_state: ObservedEnvironmentState::Ready,
-                    endpoints: vec![EnvironmentEndpoint {
-                        id: EndpointId::new(),
-                        protocol: EndpointProtocol::Https,
-                        revision: next_revision,
-                        health: EndpointHealth::Healthy,
-                        observed_at: self.ready_observed_at,
-                    }],
-                    cleanup_evidence: None,
-                    operation_complete: true,
-                },
+                ) => {
+                    let ready_observed_at = match action {
+                        ReconcileAction::Provision => timestamp("2026-07-14T00:01:00.000Z"),
+                        ReconcileAction::Restart => self
+                            .restart_ready_observed_at
+                            .unwrap_or(timestamp("2026-07-14T00:03:00.000Z")),
+                        _ => unreachable!("ready observation action is constrained above"),
+                    };
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Ready,
+                        endpoints: vec![EnvironmentEndpoint {
+                            id: EndpointId::new(),
+                            protocol: EndpointProtocol::Https,
+                            revision: next_revision,
+                            health: EndpointHealth::Healthy,
+                            observed_at: ready_observed_at,
+                        }],
+                        cleanup_evidence: None,
+                        operation_complete: true,
+                    }
+                }
                 (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => {
                     ProviderObservation {
                         next_state: ObservedEnvironmentState::Stopped,

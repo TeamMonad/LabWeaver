@@ -729,8 +729,8 @@ impl PgResourceStore {
               measured_from,measured_until,measurement_state,cpu_millicore_seconds,
               memory_byte_seconds,storage_byte_seconds,gpu_unit_seconds,unknown_reason,
               settlement,observed_at,contract)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::numeric,$13::numeric,$14::numeric,
-                      $15::numeric,$16,$17,$18,$19)",
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric,$14::numeric,
+                      $15::numeric,$16::numeric,$17,$18,$19,$20)",
         )
         .bind(usage.id.as_uuid())
         .bind(usage.project_id.as_uuid())
