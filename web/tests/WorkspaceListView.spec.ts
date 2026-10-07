@@ -26,7 +26,7 @@ const projectOne = {
   createdAt: '2026-09-01T00:00:00.000Z',
   updatedAt: '2026-09-01T00:00:00.000Z',
 }
-const projectTwo = { ...projectOne, id: 'project-2', name: '另一个项目', courseId: null }
+const projectTwo = { ...projectOne, id: 'project-2', name: '另一个项目', courseId: null, state: 'archived' }
 
 const projectsState = reactive({
   projects: { kind: 'success' as const, data: [projectOne, projectTwo] },
@@ -142,6 +142,16 @@ describe('WorkspaceListView', () => {
     await flushPromises()
     expect(wrapper.findAll('[role="alert"]').filter((alert) => alert.text().includes('分配失败'))).toHaveLength(1)
     expect(wrapper.get('a[href^="/researcher/resources"]').attributes('href')).toContain('projectId=project-2')
+    wrapper.unmount()
+  })
+
+  it('labels project availability separately from running environment state', async () => {
+    const { wrapper } = await mountView()
+
+    expect(wrapper.get('[aria-label="项目列表"]').text()).toContain('可用')
+    expect(wrapper.get('[aria-label="项目列表"]').text()).toContain('已归档')
+    expect(wrapper.get('.project-detail .state-chip').text()).toBe('可用')
+    expect(wrapper.get('.project-list').text()).not.toContain('运行中')
     wrapper.unmount()
   })
 

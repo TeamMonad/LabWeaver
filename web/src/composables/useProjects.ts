@@ -25,6 +25,13 @@ function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: strin
   return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
 }
 
+function directoryDiagnostic(error: unknown): DiagnosticViewModel {
+  const result = diagnostic(error, 'DIRECTORY_USERS_LIST_FAILED', '查找组织账号失败')
+  return result.code === 'LW_ACCESS_DIRECTORY_UNAVAILABLE'
+    ? { ...result, message: '平台账号目录暂时不可用，请稍后重试。已创建的项目和材料会保留。' }
+    : result
+}
+
 export interface ProjectMutationResult {
   kind: 'success' | 'error'
   diagnostic: DiagnosticViewModel
@@ -290,7 +297,7 @@ export function useOrganizationDirectoryUsers() {
     })
     if (generation !== loadGeneration) return
     if (result.error) {
-      users.value = { kind: 'error', diagnostic: diagnostic(result.error, 'DIRECTORY_USERS_LIST_FAILED', '查找组织账号失败') }
+      users.value = { kind: 'error', diagnostic: directoryDiagnostic(result.error) }
       return
     }
     users.value = { kind: 'success', data: result.data }

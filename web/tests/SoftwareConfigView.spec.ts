@@ -227,6 +227,7 @@ describe('SoftwareConfigView', () => {
     })
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('Research Work'))
+    expect(wrapper.get('.project-summary .state-chip').text()).toBe('可用')
     await wrapper.find('select[required]').setValue('environment-1')
     await wrapper.find('input[type="checkbox"]').setValue(true)
     await wrapper.find('form.config-form').trigger('submit')

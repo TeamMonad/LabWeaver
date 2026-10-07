@@ -30,7 +30,7 @@
           <div class="menu-body" role="listbox" aria-label="项目列表">
             <button v-for="project in filteredProjects(data)" :key="project.id" type="button" class="project-item" :class="{ 'project-item--selected': project.id === projects.selectedProjectId }" role="option" :aria-selected="project.id === projects.selectedProjectId" @click="selectProject(project.id)">
               <span class="project-info"><strong>{{ project.name }}</strong></span>
-              <span class="project-state">{{ project.state === 'active' ? '运行中' : '已归档' }}</span>
+              <span class="project-state">{{ project.state === 'active' ? '可用' : '已归档' }}</span>
             </button>
             <p v-if="filteredProjects(data).length === 0" class="empty-results">未找到匹配项目</p>
           </div>

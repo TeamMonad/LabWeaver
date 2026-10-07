@@ -27,7 +27,7 @@ const projects = [
     description: 'Second project',
     ownerActorId: 'teacher-1',
     courseId: 'ai201-model-engineering',
-    state: 'active' as const,
+    state: 'archived' as const,
     revision: 1,
     createdAt: '2026-07-11T10:00:00.000Z',
     updatedAt: '2026-07-11T10:00:00.000Z',
@@ -170,6 +170,9 @@ describe('GCP Console Components', () => {
       expect(wrapper.text()).not.toContain('project-cs101')
       await wrapper.find('.selector-trigger').trigger('click')
       await vi.waitFor(() => expect(wrapper.find('.selector-menu').text()).toContain('AI201 Model Engineering'))
+      expect(wrapper.find('.selector-menu').text()).toContain('可用')
+      expect(wrapper.find('.selector-menu').text()).toContain('已归档')
+      expect(wrapper.find('.selector-menu').text()).not.toContain('运行中')
       expect(wrapper.find('.selector-menu').text()).not.toContain('project-cs101')
     })
 

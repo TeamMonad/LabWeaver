@@ -16,7 +16,7 @@
         </select>
       </label>
       <div v-if="selectedProject" class="project-summary">
-        <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+        <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '可用' : '已归档' }}</span>
         <span>{{ selectedProject.courseId ? '课程项目' : '独立科研项目' }}</span>
         <details class="advanced-details">
           <summary>查看项目标识</summary>

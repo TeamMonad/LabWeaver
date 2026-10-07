@@ -117,6 +117,33 @@ describe('useOrganizationDirectoryUsers', () => {
     scope.stop()
   })
 
+  it('explains directory unavailability while preserving the diagnostic and retry behavior', async () => {
+    const page = { items: [{ username: 'student-1', displayName: '学生一', enabled: true }], page: 1, pageSize: 25, hasMore: false }
+    listOrganizationUsers
+      .mockResolvedValueOnce({
+        data: undefined as never,
+        error: { diagnosticCode: 'LW_ACCESS_DIRECTORY_UNAVAILABLE', detail: 'directory offline', retryable: true } as never,
+      })
+      .mockResolvedValueOnce({ data: page, error: undefined as never })
+    const scope = effectScope()
+    let state!: ReturnType<typeof useOrganizationDirectoryUsers>
+    scope.run(() => { state = useOrganizationDirectoryUsers() })
+
+    await state.load('student', 1)
+    expect(state.users).toEqual({
+      kind: 'error',
+      diagnostic: {
+        code: 'LW_ACCESS_DIRECTORY_UNAVAILABLE',
+        message: '平台账号目录暂时不可用，请稍后重试。已创建的项目和材料会保留。',
+        retryable: true,
+      },
+    })
+
+    await state.load('student', 1)
+    expect(state.users).toEqual({ kind: 'success', data: page })
+    scope.stop()
+  })
+
   it('ignores a late result after a new query or clear', async () => {
     let resolveFirst!: (value: unknown) => void
     let resolveSecond!: (value: unknown) => void

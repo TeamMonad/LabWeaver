@@ -49,7 +49,7 @@
                   <strong>{{ project.name }}</strong>
                 </span>
                 <span class="project-item__meta">
-                  <span class="state-chip" :class="`state-chip--${project.state}`">{{ project.state === 'active' ? '运行中' : '已归档' }}</span>
+                  <span class="state-chip" :class="`state-chip--${project.state}`">{{ project.state === 'active' ? '可用' : '已归档' }}</span>
                   <small>{{ project.courseId ? '课程项目' : '独立项目' }}</small>
                 </span>
               </button>
@@ -72,7 +72,7 @@
             </div>
             <div class="project-detail-actions">
               <RouterLink class="outlined-button small" :to="{ path: '/researcher/ai-policy', query: { projectId: selectedProject.id } }">项目 AI 设置</RouterLink>
-              <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '运行中' : '已归档' }}</span>
+              <span class="state-chip" :class="`state-chip--${selectedProject.state}`">{{ selectedProject.state === 'active' ? '可用' : '已归档' }}</span>
             </div>
           </div>
 
