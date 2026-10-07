@@ -467,7 +467,9 @@ describe('PlatformImageView', () => {
 
     await fillVmUploadForm(wrapper, file, { capacity: '10737418240', diskFormat: 'raw' })
 
-    expect(wrapper.get('.upload-card input[type="file"]').attributes('accept')).toBe('.tar,.qcow2,.raw,.img')
+    expect(wrapper.get('.upload-card input[type="file"]').attributes('accept')).toBe('.tar,.tar.gz,.tgz')
+    expect(wrapper.get('.upload-card').text()).toContain('包含单个 qcow2 或 raw 磁盘文件的归档')
+    expect(wrapper.get('.upload-card').text()).toContain('不能直接上传裸磁盘文件或 OCI 布局')
 
     await wrapper.get('.upload-card .admin-form').trigger('submit')
     await flushPromises()

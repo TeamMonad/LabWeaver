@@ -1215,8 +1215,26 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     assert!(stopped_meter["computeUnknownStartedAt"].is_null());
     assert!(stopped_meter["storageStartedAt"].is_string());
     assert_eq!(stopped_meter["storageKnown"], false);
+    let stop_event_time: UtcTimestamp = serde_json::from_value(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT payload->'time' FROM environment.outbox_events \
+             WHERE aggregate_id=$1 AND subject=$2 \
+               AND payload->'data'->>'state'=$3 \
+             ORDER BY public_sequence DESC LIMIT 1",
+        )
+        .bind(migrated_ready.id.as_uuid())
+        .bind(subjects::ENVIRONMENT_STATE_CHANGED)
+        .bind("stopped")
+        .fetch_one(&pool)
+        .await?,
+    )?;
 
     let stopped = store.load(migrated_ready.id).await?;
+    // The store records the transition with PostgreSQL's database clock.  Use a
+    // database observation for the following Ready transition so this test
+    // does not confuse its historical fixture timestamps with live boundaries.
+    let restart_observed_at = store.current_time().await?;
+    let worker = success_worker_with_ready_observation(store.clone(), restart_observed_at)?;
     store
         .accept_command(
             "legacy-meter-restart",
@@ -1255,11 +1273,11 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     .await?;
     assert_eq!(
         restarted_meter["computeStartedAt"],
-        serde_json::json!("2026-07-14T00:03:00.000Z")
+        serde_json::to_value(restart_observed_at)?
     );
     assert_eq!(
         restarted_meter["storageStartedAt"],
-        serde_json::json!("2026-07-14T00:03:00.000Z")
+        serde_json::to_value(restart_observed_at)?
     );
     assert_eq!(restarted_meter["storageKnown"], true);
 
@@ -1304,6 +1322,19 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
     assert!(deleted_meter["computeUnknownStartedAt"].is_null());
     assert!(deleted_meter["storageStartedAt"].is_null());
     assert_eq!(deleted_meter["storageKnown"], false);
+    let delete_event_time: UtcTimestamp = serde_json::from_value(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT payload->'time' FROM environment.outbox_events \
+             WHERE aggregate_id=$1 AND subject=$2 \
+               AND payload->'data'->>'state'=$3 \
+             ORDER BY public_sequence DESC LIMIT 1",
+        )
+        .bind(migrated_ready.id.as_uuid())
+        .bind(subjects::ENVIRONMENT_STATE_CHANGED)
+        .bind("deleted")
+        .fetch_one(&pool)
+        .await?,
+    )?;
 
     let deliveries: Vec<Value> = sqlx::query_scalar(
         "SELECT request FROM environment.resource_meter_deliveries \
@@ -1324,51 +1355,61 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
                 if environment_id == migrated_ready.id
         ));
     }
-    let find_delivery = |kind: ResourceUsageKind, from: &str, until: &str| {
-        deliveries.iter().find(|request| {
-            request.kind == kind
-                && request.measured_from == timestamp(from)
-                && request.measured_until == timestamp(until)
+    let migration_start = timestamp("2026-07-14T00:00:00.000Z");
+    let unknown_compute = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Compute && request.measured_from == migration_start
         })
-    };
+        .ok_or("migrated unknown compute delivery missing")?;
     assert!(matches!(
-        find_delivery(
-            ResourceUsageKind::Compute,
-            "2026-07-14T00:00:00.000Z",
-            "2026-07-14T00:01:30.000Z"
-        )
-        .ok_or("migrated unknown compute delivery missing")?
-        .measurement,
+        &unknown_compute.measurement,
         UsageMeasurement::Unknown { .. }
     ));
+    let stop_boundary = unknown_compute.measured_until;
+    assert!(
+        stop_boundary <= restart_observed_at,
+        "unknown compute boundary crossed the Ready observation"
+    );
+    assert_eq!(stop_boundary, stop_event_time);
+
+    let unknown_storage = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Storage && request.measured_from == migration_start
+        })
+        .ok_or("migrated unknown storage delivery missing")?;
     assert!(matches!(
-        find_delivery(
-            ResourceUsageKind::Storage,
-            "2026-07-14T00:00:00.000Z",
-            "2026-07-14T00:03:00.000Z"
-        )
-        .ok_or("migrated unknown storage delivery missing")?
-        .measurement,
+        &unknown_storage.measurement,
         UsageMeasurement::Unknown { .. }
     ));
+    assert_eq!(unknown_storage.measured_until, restart_observed_at);
+
+    let known_compute = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Compute
+                && request.measured_from == restart_observed_at
+        })
+        .ok_or("migrated known compute delivery missing")?;
     assert!(matches!(
-        find_delivery(
-            ResourceUsageKind::Compute,
-            "2026-07-14T00:03:00.000Z",
-            "2026-07-14T00:04:30.000Z"
-        )
-        .ok_or("migrated known compute delivery missing")?
-        .measurement,
+        &known_compute.measurement,
         UsageMeasurement::Known { .. }
     ));
+    let delete_boundary = known_compute.measured_until;
+    assert!(delete_boundary >= restart_observed_at);
+    assert_eq!(delete_boundary, delete_event_time);
+
+    let known_storage = deliveries
+        .iter()
+        .find(|request| {
+            request.kind == ResourceUsageKind::Storage
+                && request.measured_from == restart_observed_at
+                && request.measured_until == delete_boundary
+        })
+        .ok_or("migrated known storage delivery missing")?;
     assert!(matches!(
-        find_delivery(
-            ResourceUsageKind::Storage,
-            "2026-07-14T00:03:00.000Z",
-            "2026-07-14T00:04:30.000Z"
-        )
-        .ok_or("migrated known storage delivery missing")?
-        .measurement,
+        &known_storage.measurement,
         UsageMeasurement::Known { .. }
     ));
     Ok(())
@@ -2599,8 +2640,15 @@ fn kubevirt_fence(
 fn success_worker(
     store: PgEnvironmentStore,
 ) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
+    success_worker_with_ready_observation(store, timestamp("2026-07-14T00:01:00.000Z"))
+}
+
+fn success_worker_with_ready_observation(
+    store: PgEnvironmentStore,
+    ready_observed_at: UtcTimestamp,
+) -> Result<ReconcileWorker, Box<dyn std::error::Error>> {
     let mut registry = ProviderRegistry::default();
-    registry.register(Arc::new(LifecycleSuccessProvider))?;
+    registry.register(Arc::new(LifecycleSuccessProvider { ready_observed_at }))?;
     Ok(ReconcileWorker::new(
         store,
         Reconciler::new(registry, Duration::from_millis(100))?,
@@ -2682,7 +2730,9 @@ impl EnvironmentProvider for BlockingProvider {
 
 struct CleanupFailureProvider;
 
-struct LifecycleSuccessProvider;
+struct LifecycleSuccessProvider {
+    ready_observed_at: UtcTimestamp,
+}
 
 #[derive(Default)]
 struct IdempotentCrashProvider {
@@ -2718,7 +2768,11 @@ impl EnvironmentProvider for IdempotentCrashProvider {
         {
             self.side_effects.fetch_add(1, Ordering::SeqCst);
         }
-        LifecycleSuccessProvider.execute(action, instance).await
+        LifecycleSuccessProvider {
+            ready_observed_at: timestamp("2026-07-14T00:01:00.000Z"),
+        }
+        .execute(action, instance)
+        .await
     }
 }
 
@@ -2760,38 +2814,25 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                         operation_complete: false,
                     }
                 }
-                (ReconcileAction::Provision, ObservedEnvironmentState::Provisioning) => {
-                    ProviderObservation {
-                        next_state: ObservedEnvironmentState::Ready,
-                        endpoints: vec![EnvironmentEndpoint {
-                            id: EndpointId::new(),
-                            protocol: EndpointProtocol::Https,
-                            revision: next_revision,
-                            health: EndpointHealth::Healthy,
-                            observed_at: timestamp("2026-07-14T00:01:00.000Z"),
-                        }],
-                        cleanup_evidence: None,
-                        operation_complete: true,
-                    }
-                }
+                (
+                    ReconcileAction::Provision | ReconcileAction::Restart,
+                    ObservedEnvironmentState::Provisioning,
+                ) => ProviderObservation {
+                    next_state: ObservedEnvironmentState::Ready,
+                    endpoints: vec![EnvironmentEndpoint {
+                        id: EndpointId::new(),
+                        protocol: EndpointProtocol::Https,
+                        revision: next_revision,
+                        health: EndpointHealth::Healthy,
+                        observed_at: self.ready_observed_at,
+                    }],
+                    cleanup_evidence: None,
+                    operation_complete: true,
+                },
                 (ReconcileAction::Stop, ObservedEnvironmentState::Stopping) => {
                     ProviderObservation {
                         next_state: ObservedEnvironmentState::Stopped,
                         endpoints: Vec::new(),
-                        cleanup_evidence: None,
-                        operation_complete: true,
-                    }
-                }
-                (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
-                    ProviderObservation {
-                        next_state: ObservedEnvironmentState::Ready,
-                        endpoints: vec![EnvironmentEndpoint {
-                            id: EndpointId::new(),
-                            protocol: EndpointProtocol::Https,
-                            revision: next_revision,
-                            health: EndpointHealth::Healthy,
-                            observed_at: timestamp("2026-07-14T00:03:00.000Z"),
-                        }],
                         cleanup_evidence: None,
                         operation_complete: true,
                     }

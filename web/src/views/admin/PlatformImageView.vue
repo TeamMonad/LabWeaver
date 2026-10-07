@@ -158,8 +158,9 @@
           <textarea v-model="uploadForm.reason" class="text-input" rows="2" maxlength="512" required />
         </label>
         <label class="wide-field">
-          <span>{{ uploadForm.kind === 'virtual_machine' ? '虚拟机模板归档（.tar/.qcow2/.raw/.img）' : 'OCI 归档（.tar）' }}</span>
+          <span>{{ uploadForm.kind === 'virtual_machine' ? '虚拟机模板归档（.tar、.tar.gz、.tgz）' : 'OCI 归档（.tar）' }}</span>
           <input ref="fileInput" class="text-input" type="file" :accept="uploadAccept" @change="selectFile" />
+          <small v-if="uploadForm.kind === 'virtual_machine'" class="field-hint">请上传包含单个 qcow2 或 raw 磁盘文件的归档；不能直接上传裸磁盘文件或 OCI 布局。</small>
         </label>
         <p class="upload-limit-hint">归档大小上限：5 GB（5,000,000,000 字节）。</p>
         <button type="submit" class="filled-button" :disabled="busy || !uploadFile">上传并导入</button>
@@ -339,8 +340,8 @@ const canRetryUpload = computed(() => (
   && images.state.diagnostic.retryable
 ))
 
-/** A virtual-machine archive may hold a raw disk image, so it accepts more than the OCI layout tar. */
-const uploadAccept = computed(() => (uploadForm.kind === 'virtual_machine' ? '.tar,.qcow2,.raw,.img' : '.tar'))
+/** The Agent importer reads VM disks from tar or gzip-compressed tar archives. */
+const uploadAccept = computed(() => (uploadForm.kind === 'virtual_machine' ? '.tar,.tar.gz,.tgz' : '.tar'))
 
 /** Client-side descriptor rejection recorded before any upload session is staged. */
 const uploadDescriptorFailure = ref<DiagnosticViewModel | null>(null)

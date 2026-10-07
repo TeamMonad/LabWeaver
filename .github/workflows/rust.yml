@@ -58,4 +58,4 @@ jobs:
         working-directory: ./web
         run: pnpm typecheck
       - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked --no-fail-fast
