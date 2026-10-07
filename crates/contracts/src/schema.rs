@@ -396,6 +396,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::auth::CsrfTokenResponse
     );
     document!(
+        "schemas/contracts/v1/logout-browser-session-response.schema.json",
+        crate::auth::LogoutBrowserSessionResponse
+    );
+    document!(
         "schemas/contracts/v1/course-membership.schema.json",
         crate::auth::CourseMembership
     );
@@ -1268,6 +1272,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                  ,"OrganizationUserPage": contract_ref("organization-user-page")
                  ,"AgentRunHistoryPage": contract_ref("agent-run-history-page")
                 ,"CsrfTokenResponse": contract_ref("csrf-token-response")
+                ,"LogoutBrowserSessionResponse": contract_ref("logout-browser-session-response")
                 ,"AuthorizationDecisionRequest": contract_ref("authorization-decision-request")
                 ,"AuthorizationDecision": contract_ref("authorization-decision")
                 ,"EnvironmentWorkConfigurationTarget": contract_ref("environment-work-configuration-target")
@@ -1335,7 +1340,7 @@ fn add_auth_paths(surface: ApiSurface, paths: &mut BTreeMap<String, Value>) {
             );
             paths.insert(
                 "/auth/logout".to_owned(),
-                json!({"post":{"operationId":"logoutBrowserSession","summary":"Revoke the BFF session and begin provider logout","security":[{"bffSession":[]}],"parameters":[{"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}},{"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}],"responses":{"302":{"description":"Session revoked and redirected to provider logout"},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
+                json!({"post":{"operationId":"logoutBrowserSession","summary":"Revoke the BFF session and return the provider logout URL","security":[{"bffSession":[]}],"parameters":[{"name":"Origin","in":"header","required":true,"schema":{"type":"string","format":"uri"}},{"name":"X-CSRF-Token","in":"header","required":true,"schema":{"type":"string","minLength":43,"maxLength":43}}],"responses":{"200":{"description":"Session revoked and provider logout URL returned for top-level navigation","content":{"application/json":{"schema":{"$ref":"#/components/schemas/LogoutBrowserSessionResponse"}}}},"403":{"$ref":"#/components/responses/Problem"},"503":{"$ref":"#/components/responses/Problem"}}}}),
             );
             paths.insert(
                 "/api/v1/auth/session".to_owned(),

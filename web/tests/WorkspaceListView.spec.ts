@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   directoryLoad: vi.fn(),
   directoryClear: vi.fn(),
   remove: vi.fn(),
+  update: vi.fn(),
   requests: [] as Record<string, unknown>[],
   requestState: null as Record<string, unknown> | null,
   loadResources: vi.fn(),
@@ -40,7 +41,7 @@ const projectsState = reactive({
     projectsState.selectedProject = projectsState.projects.data.find((project) => project.id === id) ?? null
   },
   create: vi.fn(),
-  update: vi.fn(),
+  update: mocks.update,
   archive: mocks.archive,
 })
 
@@ -65,11 +66,13 @@ const directoryState = reactive({
   clear: mocks.directoryClear,
 })
 
+type TestProfile = { roles: string[]; actor_id?: string; sub?: string }
+
 const authState = {
   user: ref({
     expired: false,
-    profile: { roles: ['teacher'] },
-  } as { expired: boolean; profile: { roles: string[] } } | null),
+    profile: { roles: ['teacher'], actor_id: 'owner-1' },
+  } as { expired: boolean; profile: TestProfile } | null),
 }
 
 vi.mock('@/composables/useProjects', () => ({
@@ -117,9 +120,10 @@ describe('WorkspaceListView', () => {
     mocks.directoryLoad.mockReset()
     mocks.directoryClear.mockReset()
     mocks.remove.mockReset()
+    mocks.update.mockReset()
     projectsState.selectedProjectId = projectOne.id
     projectsState.selectedProject = projectOne
-    authState.user.value = { expired: false, profile: { roles: ['teacher'] } }
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'owner-1' } }
     membersState.memberships = {
       kind: 'success',
       data: [
@@ -226,11 +230,68 @@ describe('WorkspaceListView', () => {
   })
 
   it('keeps the student owner input exact and does not expose directory search', async () => {
-    authState.user.value = { expired: false, profile: { roles: ['student'] } }
+    authState.user.value = { expired: false, profile: { roles: ['student'], sub: 'owner-1' } }
     const { wrapper } = await mountView()
     expect(wrapper.find('.directory-picker').exists()).toBe(false)
     expect(wrapper.get('input[placeholder="输入完整用户名"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('平台不会枚举组织账号')
+    expect(wrapper.get('button[type="submit"]').text()).toContain('保存项目')
+    expect(wrapper.get('button.danger-button').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps a student member read-only while preserving project and member visibility', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['student'], actor_id: 'student-1' } }
+    const { wrapper } = await mountView()
+
+    expect(wrapper.get('input.text-input').attributes('readonly')).toBeDefined()
+    expect(wrapper.get('textarea.text-input').attributes('readonly')).toBeDefined()
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.find('button.danger-button').exists()).toBe(false)
+    expect(wrapper.find('.member-form').exists()).toBe(false)
+    expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
+    expect(wrapper.text()).toContain('只有项目所有者或平台管理员可以编辑项目、归档项目和管理成员')
+    expect(wrapper.text()).toContain('项目成员')
+    wrapper.unmount()
+  })
+
+  it('lets a platform administrator manage a project they do not own', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['admin'], actor_id: 'admin-1' } }
+    directoryState.users = { kind: 'idle' }
+    const { wrapper } = await mountView()
+
+    expect(wrapper.find('input.text-input').attributes('readonly')).toBeUndefined()
+    expect(wrapper.get('button[type="submit"]').text()).toContain('保存项目')
+    expect(wrapper.find('button.danger-button').exists()).toBe(true)
+    expect(wrapper.find('.directory-picker').exists()).toBe(true)
+    expect(wrapper.find('.member-form').exists()).toBe(true)
+    expect(wrapper.findAll('.member-row .text-button')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('keeps a teacher who is not the owner under the same project restrictions', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['teacher'], actor_id: 'teacher-2' } }
+    const { wrapper } = await mountView()
+
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.find('button.danger-button').exists()).toBe(false)
+    expect(wrapper.find('.directory-picker').exists()).toBe(false)
+    expect(wrapper.find('.member-form').exists()).toBe(false)
+    expect(wrapper.findAll('.member-row .text-button')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('clears a pending destructive action when the signed-in actor changes', async () => {
+    const { wrapper } = await mountView()
+
+    await wrapper.get('button.outlined-button.danger-button').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('dialog')).not.toBeNull()
+
+    authState.user.value = { expired: false, profile: { roles: ['student'], actor_id: 'student-1' } }
+    await flushPromises()
+    expect(document.body.querySelector('dialog')).toBeNull()
+    expect(mocks.archive).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

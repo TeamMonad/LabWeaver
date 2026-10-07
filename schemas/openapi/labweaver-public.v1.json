@@ -121,6 +121,9 @@
       "InternalWithdrawEvaluationReleaseRequest": {
         "$ref": "../contracts/v1/http/internal-withdraw-evaluation-release-request.schema.json"
       },
+      "LogoutBrowserSessionResponse": {
+        "$ref": "../contracts/v1/logout-browser-session-response.schema.json"
+      },
       "OperationAccepted": {
         "additionalProperties": false,
         "properties": {
@@ -12444,8 +12447,15 @@
           }
         ],
         "responses": {
-          "302": {
-            "description": "Session revoked and redirected to provider logout"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutBrowserSessionResponse"
+                }
+              }
+            },
+            "description": "Session revoked and provider logout URL returned for top-level navigation"
           },
           "403": {
             "$ref": "#/components/responses/Problem"
@@ -12459,7 +12469,7 @@
             "bffSession": []
           }
         ],
-        "summary": "Revoke the BFF session and begin provider logout"
+        "summary": "Revoke the BFF session and return the provider logout URL"
       }
     }
   },

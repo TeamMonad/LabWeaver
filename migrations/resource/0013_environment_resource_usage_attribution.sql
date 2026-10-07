@@ -26,16 +26,19 @@ BEGIN
             WITH sources AS (
                 SELECT
                     instance.environment_id,
-                    CASE
-                        WHEN jsonb_typeof(instance.contract -> 'approvedResources') = 'object'
-                            THEN instance.contract -> 'approvedResources'
-                        ELSE jsonb_build_object(
-                            'cpuMillicores', projection.contract #> '{environmentSpec,resources,cpuMillicores}',
-                            'memoryBytes', projection.contract #> '{environmentSpec,resources,memoryBytes}',
-                            'storageBytes', projection.contract #> '{environmentSpec,resources,storageBytes}',
-                            'gpu', projection.contract #> '{environmentSpec,resources,gpu}'
-                        )
-                    END AS approved_resources
+                    -- Match WorkloadResources serialization: an absent optional GPU is canonical.
+                    jsonb_strip_nulls(
+                        CASE
+                            WHEN jsonb_typeof(instance.contract -> 'approvedResources') = 'object'
+                                THEN instance.contract -> 'approvedResources'
+                            ELSE jsonb_build_object(
+                                'cpuMillicores', projection.contract #> '{environmentSpec,resources,cpuMillicores}',
+                                'memoryBytes', projection.contract #> '{environmentSpec,resources,memoryBytes}',
+                                'storageBytes', projection.contract #> '{environmentSpec,resources,storageBytes}',
+                                'gpu', projection.contract #> '{environmentSpec,resources,gpu}'
+                            )
+                        END
+                    ) AS approved_resources
                 FROM environment.environment_instances AS instance
                 LEFT JOIN environment.release_projections AS projection
                     ON projection.release_id = instance.release_id
@@ -65,16 +68,18 @@ BEGIN
                     instance.course_id,
                     instance.owner_actor_id,
                     instance.provider_binding,
-                    CASE
-                        WHEN jsonb_typeof(instance.contract -> 'approvedResources') = 'object'
-                            THEN instance.contract -> 'approvedResources'
-                        ELSE jsonb_build_object(
-                            'cpuMillicores', projection.contract #> '{environmentSpec,resources,cpuMillicores}',
-                            'memoryBytes', projection.contract #> '{environmentSpec,resources,memoryBytes}',
-                            'storageBytes', projection.contract #> '{environmentSpec,resources,storageBytes}',
-                            'gpu', projection.contract #> '{environmentSpec,resources,gpu}'
-                        )
-                    END AS approved_resources,
+                    jsonb_strip_nulls(
+                        CASE
+                            WHEN jsonb_typeof(instance.contract -> 'approvedResources') = 'object'
+                                THEN instance.contract -> 'approvedResources'
+                            ELSE jsonb_build_object(
+                                'cpuMillicores', projection.contract #> '{environmentSpec,resources,cpuMillicores}',
+                                'memoryBytes', projection.contract #> '{environmentSpec,resources,memoryBytes}',
+                                'storageBytes', projection.contract #> '{environmentSpec,resources,storageBytes}',
+                                'gpu', projection.contract #> '{environmentSpec,resources,gpu}'
+                            )
+                        END
+                    ) AS approved_resources,
                     CASE
                         WHEN jsonb_typeof(instance.contract -> 'gpuAllocation') = 'object'
                             THEN instance.contract -> 'gpuAllocation'

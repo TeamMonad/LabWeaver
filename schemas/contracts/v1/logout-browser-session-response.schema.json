@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact provider RP-Initiated Logout URL for top-level browser navigation.",
+  "properties": {
+    "logoutUrl": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "logoutUrl"
+  ],
+  "title": "LogoutBrowserSessionResponse",
+  "type": "object"
+}

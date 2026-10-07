@@ -76,6 +76,8 @@ export type InternalPublishEvaluationReleaseRequest = InternalPublishEvaluationR
 
 export type InternalWithdrawEvaluationReleaseRequest = InternalWithdrawEvaluationReleaseRequestSchema;
 
+export type LogoutBrowserSessionResponse = LogoutBrowserSessionResponseSchema;
+
 export type OperationAccepted = {
     operationId: string;
     revision: number;
@@ -9163,6 +9165,15 @@ export type EnvironmentExecutionBindingSchemaRuntimeKind = 'container' | 'virtua
 export type EnvironmentExecutionBindingSchemaUtcTimestamp = string;
 
 /**
+ * LogoutBrowserSessionResponse
+ *
+ * Exact provider RP-Initiated Logout URL for top-level browser navigation.
+ */
+export type LogoutBrowserSessionResponseSchema = {
+    logoutUrl: string;
+};
+
+/**
  * OrganizationUserPage
  *
  * Bounded organization-directory search result.
@@ -17599,3 +17610,12 @@ export type LogoutBrowserSessionErrors = {
 };
 
 export type LogoutBrowserSessionError = LogoutBrowserSessionErrors[keyof LogoutBrowserSessionErrors];
+
+export type LogoutBrowserSessionResponses = {
+    /**
+     * Session revoked and provider logout URL returned for top-level navigation
+     */
+    200: LogoutBrowserSessionResponseSchema;
+};
+
+export type LogoutBrowserSessionResponse2 = LogoutBrowserSessionResponses[keyof LogoutBrowserSessionResponses];

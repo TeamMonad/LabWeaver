@@ -82,6 +82,13 @@ pub struct CsrfTokenResponse {
     pub expires_at: UtcTimestamp,
 }
 
+/// Exact provider RP-Initiated Logout URL for top-level browser navigation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LogoutBrowserSessionResponse {
+    pub logout_url: String,
+}
+
 /// Authoritative membership state owned by Access Service.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

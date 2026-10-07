@@ -79,11 +79,11 @@
           <form class="project-form" @submit.prevent="saveProject">
             <label>
               <span>项目名称</span>
-              <input v-model="editName" class="text-input" required maxlength="160" />
+              <input v-model="editName" class="text-input" :readonly="!canManageProject" required maxlength="160" />
             </label>
             <label>
               <span>描述</span>
-              <textarea v-model="editDescription" class="text-input" rows="3" maxlength="2000" />
+              <textarea v-model="editDescription" class="text-input" :readonly="!canManageProject" rows="3" maxlength="2000" />
             </label>
             <div class="readonly-meta">
               <span>课程关联</span><span>{{ selectedProject.courseId ? '课程项目' : '独立项目' }}</span>
@@ -96,10 +96,11 @@
               <summary>查看项目标识</summary>
               <code>{{ selectedProject.id }}</code>
             </details>
+            <p v-if="!canManageProject" class="readonly-hint" role="note">当前账号可以查看项目和成员，但只有项目所有者或平台管理员可以编辑项目、归档项目和管理成员。</p>
             <div class="form-actions">
-              <button type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
+              <button v-if="canManageProject" type="submit" class="filled-button" :disabled="!canSave || projects.acting !== null">保存项目</button>
               <button
-                v-if="selectedProject.state === 'active'"
+                v-if="canManageProject && selectedProject.state === 'active'"
                 type="button"
                 class="outlined-button danger-button"
                 :disabled="projects.acting !== null"
@@ -132,12 +133,12 @@
                         <code>Actor ID：{{ member.actorId }}</code>
                       </details>
                     </span>
-                    <button v-if="member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
+                    <button v-if="canManageProject && member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
                   </li>
                 </ul>
               </template>
             </AsyncStateView>
-            <form v-if="selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
+            <form v-if="canManageProject && selectedProject.state === 'active'" class="member-form" @submit.prevent="addMember">
               <div v-if="canSearchOrganizationDirectory" class="directory-picker">
                 <label>
                   <span>查找组织账号</span>
@@ -350,7 +351,18 @@ const router = useRouter()
 const projects = useProjects()
 const auth = useAuth()
 const currentRoles = computed(() => rolesFromProfile(auth.user.value?.profile))
-const canSearchOrganizationDirectory = computed(() => hasAnyRole(currentRoles.value, ['teacher', 'admin']))
+
+function actorIdFromProfile(profile: unknown): string | null {
+  if (!profile || typeof profile !== 'object') return null
+  const claims = profile as Record<string, unknown>
+  for (const key of ['actor_id', 'actorId', 'sub']) {
+    const value = claims[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+const currentActorId = computed(() => actorIdFromProfile(auth.user.value?.profile))
 const routeProjectId = computed(() => {
   const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || null
@@ -367,6 +379,11 @@ const routeProjectPending = computed(() => Boolean(
 const projectSelectionBlocked = computed(() => projects.projects.kind !== 'success' || routeProjectInvalid.value || routeProjectPending.value)
 const selectedProjectId = computed(() => projectSelectionBlocked.value ? null : projects.selectedProjectId)
 const selectedProject = computed(() => projectSelectionBlocked.value ? null : projects.selectedProject)
+const canManageProject = computed(() => {
+  const project = selectedProject.value
+  return Boolean(project && (currentRoles.value.includes('admin') || currentActorId.value === project.ownerActorId))
+})
+const canSearchOrganizationDirectory = computed(() => canManageProject.value && hasAnyRole(currentRoles.value, ['teacher', 'admin']))
 const members = useProjectMemberships(selectedProjectId)
 const directory = useOrganizationDirectoryUsers()
 const workEnvironments = useProjectWorkEnvironments(selectedProjectId)
@@ -393,9 +410,10 @@ const memberUsername = ref('')
 const directoryQuery = ref('')
 const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
-const canSave = computed(() => Boolean(selectedProject.value && editName.value.trim()))
+const canSave = computed(() => Boolean(canManageProject.value && editName.value.trim()))
 const canAddMember = computed(() => Boolean(
-  selectedProject.value?.state === 'active'
+  canManageProject.value
+  && selectedProject.value?.state === 'active'
   && members.acting === null
   && (canSearchOrganizationDirectory.value ? selectedDirectoryUser.value?.enabled && memberUsername.value.trim() : memberUsername.value.trim()),
 ))
@@ -415,11 +433,18 @@ const confirmationDescription = computed(() => {
 watch(
   () => selectedProject.value,
   (project, previousProject) => {
-    if (project?.id !== previousProject?.id) destructiveConfirmation.value = null
+    if (project !== previousProject) destructiveConfirmation.value = null
     editName.value = project?.name ?? ''
     editDescription.value = project?.description ?? ''
   },
   { immediate: true },
+)
+
+watch(
+  [currentActorId, () => currentRoles.value.join(',')],
+  ([actorId, roleKey], [previousActorId, previousRoleKey]) => {
+    if (actorId !== previousActorId || roleKey !== previousRoleKey) destructiveConfirmation.value = null
+  },
 )
 
 watch(
@@ -499,12 +524,14 @@ async function submitCreate() {
 }
 
 async function saveProject() {
+  if (!canManageProject.value) return
   const project = projects.selectedProject
   if (!project) return
   await projects.update(project, { name: editName.value.trim(), description: editDescription.value.trim() || null })
 }
 
 function openArchiveConfirmation() {
+  if (!canManageProject.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = { kind: 'archive', project }
@@ -516,6 +543,7 @@ function refreshMembers() {
 }
 
 async function addMember() {
+  if (!canManageProject.value) return
   const username = memberUsername.value.trim()
   if (!canAddMember.value || !username) return
   const ok = await members.add({ username, role: memberRole.value })
@@ -527,6 +555,7 @@ async function addMember() {
 }
 
 function openRemoveMemberConfirmation(member: ProjectMembershipSchema) {
+  if (!canManageProject.value) return
   const project = projects.selectedProject
   if (!project) return
   destructiveConfirmation.value = {
@@ -541,8 +570,9 @@ async function confirmDestructiveAction() {
   const confirmation = destructiveConfirmation.value
   destructiveConfirmation.value = null
   if (!confirmation) return
+  if (!canManageProject.value) return
   if (confirmation.kind === 'archive') {
-    await projects.archive(confirmation.project)
+    if (projects.selectedProjectId === confirmation.project.id) await projects.archive(confirmation.project)
   } else if (projects.selectedProjectId === confirmation.projectId) {
     await members.remove(confirmation.member.actorId, confirmation.member)
   }
@@ -568,6 +598,7 @@ async function confirmDestructiveAction() {
 .project-item__main, .project-item__meta, .member-row > span { display: grid; gap: 4px; min-width: 0; }
 .project-item__main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-item small, .member-row small { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.readonly-hint { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .project-item__meta { justify-items: end; text-align: right; }
 .state-chip { display: inline-flex; align-items: center; width: fit-content; padding: 3px 8px; border-radius: var(--md-sys-shape-full); font: var(--md-sys-label-small); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); }
 .state-chip--active { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }

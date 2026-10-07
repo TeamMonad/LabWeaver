@@ -31,6 +31,8 @@ logout-token validation and RP session clearing follow
 
 ## 浏览器与 SSH
 
+浏览器退出先向 BFF 提交带 Origin 和 CSRF 的请求。Access 撤销本地会话及控制台连接、清理会话 Cookie，并返回身份提供方的完整退出地址；浏览器随后进行顶层导航完成 [OIDC RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)。跨源退出不能用后台 fetch 跟随重定向代替。退出响应不允许缓存，页面在会话失效时清除本地登录状态并提示重新登录。
+
 Web Terminal、noVNC 和 SSH/SFTP 共享 AccessGrant 的范围、到期和撤销规则。浏览器保留会话、Origin、CSRF 和一次性 ConsoleCapability 检查；Environment 提供真实端点与运行状态，客户端不能选择任意目标地址。
 
 连接时重新检查授权与环境代次；到期或撤销后禁止新连接，已有连接由服务端撤销流程终止。缓存和页面状态不能延长授权。资源不存在、身份服务或授权存储不可用时拒绝访问，并返回可排查错误。

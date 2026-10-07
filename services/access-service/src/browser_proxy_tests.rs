@@ -27,6 +27,7 @@ use tokio::{
     net::TcpListener,
     sync::Mutex,
 };
+use url::Url;
 
 use super::*;
 
@@ -266,11 +267,15 @@ async fn session(
             expires_at: now + Duration::minutes(10),
             idle_ttl: Duration::minutes(5),
             oidc_sid: None,
-            logout_hint: "fixture-logout".to_owned(),
+            logout_hint: fixture_logout_hint(),
         },
         now,
     )
     .await?)
+}
+
+fn fixture_logout_hint() -> String {
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2ZpeHR1cmUuZXhhbXBsZS5pbnZhbGlkIiwiYXVkIjoibGFid2VhdmVyLXdlYiIsInN1YiI6ImZpeHR1cmUtdXNlciIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.c2lnbmF0dXJl".to_owned()
 }
 
 async fn nats_boundary(tasks: &mut Tasks) -> Result<async_nats::Client, Box<dyn Error>> {
@@ -473,6 +478,137 @@ async fn state(
         nats: nats_boundary(tasks).await?,
     });
     Ok((state, authority.requests))
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn browser_logout_rejects_csrf_and_returns_exact_provider_url_after_revocation()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let actor = Uuid::now_v7();
+    let (state, _requests) = Box::pin(state(pool, actor, &mut tasks)).await?;
+    let browser_session = session(
+        &state.pool,
+        &state.key_ring,
+        actor,
+        contracts::PlatformRole::Teacher,
+    )
+    .await?;
+    let cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, browser_session.session_id
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let logout_endpoint = format!("{base}/auth/logout");
+
+    for (origin, csrf) in [
+        (
+            "https://attacker.example.invalid",
+            browser_session.csrf_token.expose(),
+        ),
+        (ORIGIN, "wrong"),
+    ] {
+        let response = client
+            .post(&logout_endpoint)
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, origin)
+            .header("x-csrf-token", csrf)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.json::<Value>().await?,
+            json!({"diagnosticCode": "LW_AUTH_CSRF_REJECTED"})
+        );
+    }
+    let still_active: bool = sqlx::query_scalar(
+        "SELECT revoked_at IS NULL FROM access.bff_sessions WHERE session_id=$1",
+    )
+    .bind(browser_session.session_id)
+    .fetch_one(&state.pool)
+    .await?;
+    assert!(still_active);
+
+    let response = client
+        .post(&logout_endpoint)
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header("x-csrf-token", browser_session.csrf_token.expose())
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next()),
+        Some("application/json")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or("logout did not clear the BFF cookie")?
+        .to_owned();
+    let body = response
+        .json::<contracts::LogoutBrowserSessionResponse>()
+        .await?;
+    let provider_url = Url::parse(&body.logout_url)?;
+    assert_eq!(provider_url.path(), "/realms/test/logout");
+    let query = provider_url
+        .query_pairs()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(
+        query
+            .get("client_id")
+            .is_some_and(|value| *value == state.deployment.oidc.client_id)
+    );
+    let expected_logout_hint = fixture_logout_hint();
+    assert!(
+        query
+            .get("id_token_hint")
+            .is_some_and(|value| *value == expected_logout_hint)
+    );
+    assert!(
+        query
+            .get("post_logout_redirect_uri")
+            .is_some_and(|value| *value == state.config.post_logout_redirect_uri.as_str())
+    );
+    assert!(set_cookie.contains("Max-Age=0"));
+    let revoked: bool = sqlx::query_scalar(
+        "SELECT revoked_at IS NOT NULL FROM access.bff_sessions WHERE session_id=$1",
+    )
+    .bind(browser_session.session_id)
+    .fetch_one(&state.pool)
+    .await?;
+    assert!(revoked);
+    Ok(())
 }
 
 #[tokio::test]

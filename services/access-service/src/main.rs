@@ -31,8 +31,9 @@ use axum::{
 use contracts::http::PageQuery;
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CsrfTokenResponse, OperationScopeKind, OrganizationUserPage, Revision,
-    UtcTimestamp, environment::EnvironmentOwnerResolutionRequest, operation_contract,
+    AuthorizationScope, CsrfTokenResponse, LogoutBrowserSessionResponse, OperationScopeKind,
+    OrganizationUserPage, Revision, UtcTimestamp, environment::EnvironmentOwnerResolutionRequest,
+    operation_contract,
 };
 use persistence_sqlx::Sha256Digest;
 
@@ -1385,10 +1386,19 @@ async fn logout(
     .await
     .map_err(ApiError::from)?;
     console::terminate_bff_sessions(&state, session_id, "LW_AUTH_SESSION_REVOKED").await?;
-    let mut response = Redirect::to(logout_url.as_str()).into_response();
+    let mut response = (
+        StatusCode::OK,
+        Json(LogoutBrowserSessionResponse {
+            logout_url: logout_url.to_string(),
+        }),
+    )
+        .into_response();
     response
         .headers_mut()
         .insert(header::SET_COOKIE, clear_session_cookie(&state)?);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     metrics::counter!("labweaver_auth_sessions", "event" => "logout").increment(1);
     Ok(response)
 }

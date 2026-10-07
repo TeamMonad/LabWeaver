@@ -4,7 +4,7 @@ identity_foundation_verify_only: false
 # Apply only the reviewed organization-directory reader mapping to the
 # existing Keycloak realm. This mode deliberately skips realm, client,
 # credential, workload, gateway, DNS, and manifest reconciliation.
-identity_realm_roles_only: false
+identity_foundation_realm_roles_only: false
 identity_namespace: keycloak-system # noqa: var-naming[no-role-prefix]
 identity_name: labweaver-keycloak # noqa: var-naming[no-role-prefix]
 identity_hostname: keycloak.labweaver.internal # noqa: var-naming[no-role-prefix]

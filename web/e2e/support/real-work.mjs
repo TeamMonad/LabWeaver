@@ -231,7 +231,7 @@ export function selectSettledWorkUsageChargesForLease({
     if (typeof charge.id !== 'string' || charge.id === '' || typeof charge.usageRecordId !== 'string') {
       throw new Error('LW_WORK_USAGE_CHARGE_ID_INVALID')
     }
-    if (fixedDecimalScaled(charge.total?.amount, 'LW_WORK_USAGE_CHARGE') <= 0n) continue
+    if (fixedDecimalScaled(charge.total?.amount, 'LW_WORK_USAGE_CHARGE') < 0n) continue
     if (!chargeMatchesUsageQuantities(charge, usage, gpu)) continue
     matches.push({ usage, charge })
   }

@@ -5,22 +5,25 @@
 WITH candidates AS (
     SELECT
         instance.environment_id,
-        CASE
-            WHEN instance.contract ->> 'class' = 'work' THEN COALESCE(
-                CASE
-                    WHEN jsonb_typeof(meter.contract -> 'approvedResources') = 'object'
-                        THEN meter.contract -> 'approvedResources'
-                    ELSE NULL
-                END,
-                instance.contract #> '{operation,leaseAuthorization,approvedResources}'
-            )
-            ELSE jsonb_build_object(
-                'cpuMillicores', projection.contract #> '{environmentSpec,resources,cpuMillicores}',
-                'memoryBytes', projection.contract #> '{environmentSpec,resources,memoryBytes}',
-                'storageBytes', projection.contract #> '{environmentSpec,resources,storageBytes}',
-                'gpu', projection.contract #> '{environmentSpec,resources,gpu}'
-            )
-        END AS approved_resources
+        -- Match WorkloadResources serialization: an absent optional GPU is canonical.
+        jsonb_strip_nulls(
+            CASE
+                WHEN instance.contract ->> 'class' = 'work' THEN COALESCE(
+                    CASE
+                        WHEN jsonb_typeof(meter.contract -> 'approvedResources') = 'object'
+                            THEN meter.contract -> 'approvedResources'
+                        ELSE NULL
+                    END,
+                    instance.contract #> '{operation,leaseAuthorization,approvedResources}'
+                )
+                ELSE jsonb_build_object(
+                    'cpuMillicores', projection.contract #> '{environmentSpec,resources,cpuMillicores}',
+                    'memoryBytes', projection.contract #> '{environmentSpec,resources,memoryBytes}',
+                    'storageBytes', projection.contract #> '{environmentSpec,resources,storageBytes}',
+                    'gpu', projection.contract #> '{environmentSpec,resources,gpu}'
+                )
+            END
+        ) AS approved_resources
     FROM environment.environment_instances AS instance
     LEFT JOIN environment.resource_metering_state AS meter
         ON meter.environment_id = instance.environment_id

@@ -35,8 +35,8 @@ pub mod supply_chain;
 
 pub use auth::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
-    AuthorizationScope, CourseMembership, CsrfTokenResponse, MembershipState, OrganizationUser,
-    OrganizationUserPage, PlatformRole, ProjectMembership,
+    AuthorizationScope, CourseMembership, CsrfTokenResponse, LogoutBrowserSessionResponse,
+    MembershipState, OrganizationUser, OrganizationUserPage, PlatformRole, ProjectMembership,
 };
 pub use authoring::{AgentRunHistoryItem, AgentRunHistoryPage};
 pub use diagnostic::{DiagnosticCode, ProblemDetails, Violation};

@@ -194,6 +194,27 @@ describe('Work usage and charge association', () => {
     ])
   })
 
+  it('accepts a settled zero-total charge when usage quantities match', () => {
+    const zeroCharge = (usageRecordId, kind) => {
+      const item = charge(usageRecordId, kind)
+      return {
+        ...item,
+        total: { amount: '0.000000', currency: 'USD' },
+        lines: item.lines.map((line) => ({
+          ...line,
+          amount: { ...line.amount, amount: '0.000000' },
+        })),
+      }
+    }
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage')],
+      charges: [zeroCharge('usage-compute', 'compute'), zeroCharge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result?.map(({ usage: item }) => item.kind)).toEqual(['compute', 'storage'])
+  })
+
   it.each([
     { settlement: 'pending' },
     { measurement: { state: 'unknown', reason: 'meter unavailable' } },
