@@ -73,7 +73,7 @@ domains:
         sha256: acebef74ad5ec342abbc1eff5d1eb915de78f666b54c28c35fda512cdc1f5a1f
       - id: 6
         file: environment/0006_unified_environment_metering.sql
-        sha256: 0751928ac75d8b410c41d2f42c281989f246be04f616cf54d90d22823a3e24ab
+        sha256: 976cddc501d0521d2e79b25f37612d77e427b8617c540be606465b6323cecd37
   - name: agent
     migrations:
       - id: 1
@@ -208,4 +208,4 @@ domains:
         sha256: 931a5c2f5b3364aa31703fafaeb30c70f41f6dc8c9c5b54f890b1cbbd704fef0
       - id: 13
         file: resource/0013_environment_resource_usage_attribution.sql
-        sha256: e681f92b7dc8452c2167141646e85e37bf12159566888642909591731a47a220
+        sha256: ed51aed7cfb084577cb52528b6e29e848669844712fa32e1969a70ea24bc0a0d
