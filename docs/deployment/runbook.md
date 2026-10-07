@@ -4,7 +4,7 @@
 
 应用层由 Control、Access、Environment、Agent、Evaluation、Resource、Web 和 OpenSSH Gateway 组成。Environment 管环境对象，Resource 管申请、租约、容量和费用，Evaluation 管评测任务；部署操作不能绕过这些业务边界。
 
-> 应用 Helm 升级使用 `--atomic`，失败时只回到上一应用 revision。迁移是前向操作，应用回退不能恢复数据库。删除数据库、共享存储、基础服务或用户环境前，必须先确认对象归属、数据保留和变更窗口；本手册不提供批量删除或节点重启来制造故障的步骤。
+> 应用 Helm 升级使用 `--wait` 和配置的超时，并保留失败后的 release 状态供运维修复和重新 apply；升级不自动回退。迁移是前向操作，应用回退不能恢复数据库。只有操作者明确选择与当前数据库契约相容的版本时，才允许手动 `helm rollback`。删除数据库、共享存储、基础服务或用户环境前，必须先确认对象归属、数据保留和变更窗口；本手册不提供批量删除或节点重启来制造故障的步骤。
 
 ## 1. 前提与私有输入
 
@@ -141,7 +141,7 @@ cargo xtask package-validate \
 
 ### 4.1 Platform profile
 
-`93-platform-application.yml` 是 platform profile 的唯一应用入口。它会检查现有服务、配置 bundle、Harbor/Keycloak/MinIO/NATS、迁移和 Access seed，然后以 `helm upgrade --install ... --atomic --wait` 更新应用。执行前设置对应的私有 locator：
+`93-platform-application.yml` 是 platform profile 的唯一应用入口。它会检查现有服务、配置 bundle、Harbor/Keycloak/MinIO/NATS、迁移和 Access seed，然后以 `helm upgrade --install ... --wait` 更新应用。就绪检查或超时失败后，保留 Helm release 和集群状态；先读取 Helm、Pod、Service 及服务诊断，完成修复后重新 apply，不把旧应用自动回退当作数据库迁移的恢复方案。执行前设置对应的私有 locator：
 
 ```sh
 export LABWEAVER_APPLICATION_VARS_FILE="$PWD/.private/v1/platform-application/application-vars.yml"
@@ -184,7 +184,7 @@ cargo xtask contracts check
 ### 4.4 回滚和停止边界
 
 - 查看应用 revision：`helm -n labweaver-system history labweaver` 和 `helm -n labweaver-system history labweaver-resource`。
-- 经负责人确认后可以使用 `helm rollback` 回到兼容的应用 revision；回滚前恢复对应的源码、镜像 manifest 和配置 bundle。
+- 升级失败不会自动回退；先保留失败状态并完成诊断、修复和重新 apply。只有操作者明确选择与当前数据库契约相容的应用 revision 时，才可以经负责人确认使用 `helm rollback`；回滚前恢复对应的源码、镜像 manifest 和配置 bundle。
 - 数据库迁移、对象存储版本、业务账目和已发布实验不会因 Helm 回滚而回退。迁移不兼容时停止发布并安排数据处理。
 - 不使用不存在的 `xtask backup`、`xtask rollback` 或“清空后重装”作为日常恢复手段。删除 PVC/PV、数据库、NATS、MinIO、Keycloak 或共享 NFS 需要单独的负责人确认。
 - 应用升级不重启节点、不切换共享存储、不删除仍被租约或环境记录引用的资源。

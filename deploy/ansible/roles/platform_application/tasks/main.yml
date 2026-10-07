@@ -3455,13 +3455,13 @@
       {%- endif -%}
       {{ values }}
 
-- name: Atomically deploy the immutable configured platform profile
+- name: Deploy the immutable configured platform profile
   ansible.builtin.command:
     argv: >-
       {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
           'upgrade', '--install', platform_application_release_name,
           platform_application_work_root + '/' + platform_application_run_id + '/chart',
-          '--namespace', platform_application_namespace, '--take-ownership', '--atomic', '--wait',
+          '--namespace', platform_application_namespace, '--take-ownership', '--wait',
           '--timeout', platform_application_rollout_timeout]
           + platform_application_values_argv + platform_application_image_argv
           + platform_application_route_argv }}
@@ -3473,7 +3473,7 @@
       {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
           'upgrade', '--install', platform_application_release_name,
           platform_application_work_root + '/' + platform_application_run_id + '/chart',
-          '--namespace', platform_application_namespace, '--take-ownership', '--atomic', '--wait',
+          '--namespace', platform_application_namespace, '--take-ownership', '--wait',
           '--timeout', platform_application_rollout_timeout]
           + platform_application_values_argv + platform_application_image_argv
           + platform_application_route_argv }}

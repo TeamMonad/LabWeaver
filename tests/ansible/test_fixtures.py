@@ -582,7 +582,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("PLATFORM_APPLICATION_CONFIGURATION_BINDING_INVALID", tasks)
         self.assertLess(
             tasks.index("Require reviewed configuration bindings before any cluster mutation"),
-            tasks.index("Atomically deploy the immutable configured platform profile"),
+            tasks.index("Deploy the immutable configured platform profile"),
         )
 
     def test_platform_application_preinstalls_evaluation_runner_default_deny(
@@ -1221,7 +1221,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("meta.helm.sh/release-name", tasks)
         self.assertLess(
             tasks.index("Reconcile the exact CDI clone source network policy"),
-            tasks.index("Atomically deploy the immutable configured platform profile"),
+            tasks.index("Deploy the immutable configured platform profile"),
         )
         self.assertEqual(tasks.count("'--take-ownership'"), 2)
 
