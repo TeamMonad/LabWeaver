@@ -43,6 +43,22 @@ function fixedDecimalScaled(value, diagnostic) {
   return BigInt(whole) * FIXED_DECIMAL_SCALE + BigInt(fraction)
 }
 
+function roundedScaledAmount(unitPrice, quantity, unitQuantity, diagnostic) {
+  if (!Number.isSafeInteger(quantity) || quantity < 0 || !Number.isSafeInteger(unitQuantity) || unitQuantity < 1) {
+    throw new Error(`${diagnostic}:QUANTITY_INVALID`)
+  }
+  const product = fixedDecimalScaled(unitPrice, diagnostic) * BigInt(quantity)
+  const negative = product < 0n
+  const magnitude = product < 0n ? -product : product
+  const denominator = BigInt(unitQuantity)
+  const quotient = magnitude / denominator
+  const remainder = magnitude % denominator
+  const roundUp = remainder * 2n > denominator
+    || (remainder * 2n === denominator && quotient % 2n === 1n)
+  const rounded = quotient + (roundUp ? 1n : 0n)
+  return negative ? -rounded : rounded
+}
+
 function usageHasPositiveQuantity(usage) {
   if (usage.measurement?.state !== 'known') return false
   const quantities = usage.measurement.quantities
@@ -119,19 +135,70 @@ function sumMatchingLineQuantities(lines, matches) {
   return total
 }
 
-function lineHasGpuRate(line, gpu) {
-  const rate = assertGpuRateExpectation(gpu)
+function lineHasGpuRate(line, gpu, rates = null) {
+  const rate = gpu.rate
+    ? assertGpuRateExpectation(gpu)
+    : rates?.find((candidate) => candidate?.id === line.rateId && candidate.revision === line.rateRevision)
+  if (!rate) return false
   return (
     line.unit === 'gpu_unit_second'
-    && line.rateId === rate.id
-    && line.rateRevision === rate.revision
+    && (!gpu.rate || (line.rateId === rate.id && line.rateRevision === rate.revision))
     && line.unitQuantity === rate.unitQuantity
     && line.unitPrice?.currency === rate.unitPrice?.currency
     && line.unitPrice?.amount === rate.unitPrice?.amount
+    && rate.gpuClass === gpu.class
+    && rate.gpuMode === gpu.mode
   )
 }
 
-function chargeMatchesUsageQuantities(charge, usage, gpu) {
+function rateLineMatchesUsage(line, usage, rates) {
+  if (rates == null) return true
+  const rate = rates.find((candidate) => (
+    candidate?.id === line.rateId
+    && candidate.revision === line.rateRevision
+  ))
+  if (!rate) return false
+  const usageFrom = Date.parse(usage.measuredFrom)
+  const usageUntil = Date.parse(usage.measuredUntil)
+  const effectiveFrom = Date.parse(rate.effectiveFrom)
+  const effectiveUntil = rate.effectiveUntil == null ? null : Date.parse(rate.effectiveUntil)
+  return (
+    rate.unit === line.unit
+    && rate.unitQuantity === line.unitQuantity
+    && rate.unitPrice?.currency === line.unitPrice?.currency
+    && rate.unitPrice?.amount === line.unitPrice?.amount
+    && Number.isFinite(effectiveFrom)
+    && effectiveFrom < usageUntil
+    && (effectiveUntil === null || (Number.isFinite(effectiveUntil) && effectiveUntil > usageFrom))
+  )
+}
+
+function ratesCoverUsageWindow(lines, usage, unit, rates) {
+  if (rates == null) return true
+  const usageFrom = Date.parse(usage.measuredFrom)
+  const usageUntil = Date.parse(usage.measuredUntil)
+  const intervals = lines
+    .filter((line) => line.unit === unit && line.quantity > 0)
+    .map((line) => rates.find((candidate) => (
+      candidate?.id === line.rateId
+      && candidate.revision === line.rateRevision
+    )))
+    .filter(Boolean)
+    .map((rate) => ({
+      from: Math.max(usageFrom, Date.parse(rate.effectiveFrom)),
+      until: Math.min(usageUntil, rate.effectiveUntil == null ? usageUntil : Date.parse(rate.effectiveUntil)),
+    }))
+    .filter(({ from, until }) => Number.isFinite(from) && Number.isFinite(until) && until > from)
+    .sort((left, right) => left.from - right.from || left.until - right.until)
+  let cursor = usageFrom
+  for (const interval of intervals) {
+    if (interval.from > cursor) return false
+    if (interval.until > cursor) cursor = interval.until
+  }
+  return cursor === usageUntil
+}
+
+function chargeMatchesUsageQuantities(charge, usage, gpu, rates = null) {
   const quantities = usage.measurement.quantities
   const lines = Array.isArray(charge.lines) ? charge.lines : []
   const requirements = []
@@ -149,11 +216,11 @@ function chargeMatchesUsageQuantities(charge, usage, gpu) {
       })
     }
     if (quantities.gpuUnitSeconds > 0) {
-      if (gpu) assertGpuRateExpectation(gpu)
+      if (gpu?.rate) assertGpuRateExpectation(gpu)
       requirements.push({
         unit: 'gpu_unit_second',
         quantity: quantities.gpuUnitSeconds,
-        matches: gpu ? (line) => lineHasGpuRate(line, gpu) : undefined,
+        matches: gpu ? (line) => lineHasGpuRate(line, gpu, rates) : undefined,
       })
     }
   } else if (usage.kind === 'storage' && quantities.storageByteSeconds > 0) {
@@ -164,13 +231,29 @@ function chargeMatchesUsageQuantities(charge, usage, gpu) {
   }
   if (requirements.length === 0) return false
   const expectedUnits = new Set(requirements.map(({ unit }) => unit))
+  let lineTotal = 0n
   for (const line of lines) {
     if (!Number.isSafeInteger(line.quantity) || line.quantity < 0) return false
-    lineHasValidAmount(line)
+    if (
+      line.amount?.currency !== line.unitPrice?.currency
+      || charge.total?.currency !== line.amount?.currency
+      || !lineHasValidAmount(line)
+      || !rateLineMatchesUsage(line, usage, rates)
+    ) return false
+    const actualAmount = fixedDecimalScaled(line.amount?.amount, 'LW_WORK_USAGE_CHARGE_LINE')
+    if (actualAmount !== roundedScaledAmount(
+      line.unitPrice?.amount,
+      line.quantity,
+      line.unitQuantity,
+      'LW_WORK_USAGE_CHARGE_LINE',
+    )) return false
+    lineTotal += actualAmount
     if (line.quantity === 0) continue
     if (!expectedUnits.has(line.unit)) return false
-    if (line.unit === 'gpu_unit_second' && gpu && !lineHasGpuRate(line, gpu)) return false
+    if (line.unit === 'gpu_unit_second' && gpu && !lineHasGpuRate(line, gpu, rates)) return false
   }
+  if (fixedDecimalScaled(charge.total?.amount, 'LW_WORK_USAGE_CHARGE') !== lineTotal) return false
+  if (rates != null && requirements.some(({ unit }) => !ratesCoverUsageWindow(lines, usage, unit, rates))) return false
   return requirements.every((requirement) => {
     const total = sumMatchingLineQuantities(lines, (line) => (
       line.unit === requirement.unit
@@ -236,6 +319,96 @@ export function selectSettledWorkUsageChargesForLease({
     matches.push({ usage, charge })
   }
   if (!matches.some(({ usage }) => usage.kind === 'compute') || !matches.some(({ usage }) => usage.kind === 'storage')) return null
+  return matches
+}
+
+function experimentUsageHasPositiveQuantities(usage, gpu) {
+  if (!usageHasPositiveQuantity(usage)) return false
+  const quantities = usage.measurement.quantities
+  if (usage.kind === 'compute') {
+    return quantities.cpuMillicoreSeconds > 0
+      && quantities.memoryByteSeconds > 0
+      && (gpu ? quantities.gpuUnitSeconds > 0 : quantities.gpuUnitSeconds === 0)
+  }
+  return usage.kind === 'storage' && quantities.storageByteSeconds > 0
+}
+
+function describeExperimentUsageState(usageRecords, projectId, environmentId) {
+  const scoped = usageRecords.filter((usage) => (
+    usage?.projectId === projectId
+    && usage.target?.kind === 'experiment_environment'
+    && usage.target.environmentId === environmentId
+  ))
+  if (scoped.length === 0) return 'missing'
+  return scoped.map((usage) => (
+    `${usage.id ?? 'missing'}:${usage.measurement?.state ?? 'missing'}:${usage.settlement ?? 'missing'}`
+  )).join(',')
+}
+
+/**
+ * Match settled teaching-environment usage to its exact immutable charges.
+ * Teaching meters point at the environment itself; Work meters continue to
+ * use selectSettledWorkUsageChargesForLease and request/lease identity.
+ */
+export function selectSettledExperimentUsageCharges({
+  usageRecords,
+  charges,
+  projectId,
+  environmentId,
+  baselineChargeIds = new Set(),
+  gpu = null,
+  rates = null,
+}) {
+  if (!Array.isArray(usageRecords) || !Array.isArray(charges)) throw new Error('LW_EXPERIMENT_USAGE_READ_INVALID')
+  if (!baselineChargeIds || typeof baselineChargeIds.has !== 'function') throw new Error('LW_EXPERIMENT_USAGE_BASELINE_INVALID')
+  if ([projectId, environmentId].some((value) => typeof value !== 'string' || value === '')) {
+    throw new Error('LW_EXPERIMENT_USAGE_SCOPE_INVALID')
+  }
+  if (rates != null && !Array.isArray(rates)) throw new Error('LW_EXPERIMENT_USAGE_RATES_INVALID')
+
+  const scopedUsage = usageRecords.filter((usage) => (
+    usage?.projectId === projectId
+    && usage.target?.kind === 'experiment_environment'
+    && usage.target.environmentId === environmentId
+  ))
+  if (
+    scopedUsage.length === 0
+    || scopedUsage.some((usage) => !usageHasValidInterval(usage))
+    || scopedUsage.some((usage) => usage.measurement?.state !== 'known' || usage.settlement !== 'settled')
+  ) return null
+
+  const usageIds = new Set()
+  for (const usage of scopedUsage) {
+    if (usage.measurement?.state !== 'known') throw new Error('LW_EXPERIMENT_USAGE_MEASUREMENT_INVALID')
+    if (!['compute', 'storage'].includes(usage.kind)) throw new Error('LW_EXPERIMENT_USAGE_KIND_INVALID')
+    if (typeof usage.id !== 'string' || usage.id === '') throw new Error('LW_EXPERIMENT_USAGE_ID_INVALID')
+    if (usageIds.has(usage.id)) throw new Error('LW_EXPERIMENT_USAGE_DUPLICATE')
+    usageIds.add(usage.id)
+    if (!experimentUsageHasPositiveQuantities(usage, gpu)) return null
+  }
+  if (!scopedUsage.some((usage) => usage.kind === 'compute') || !scopedUsage.some((usage) => usage.kind === 'storage')) return null
+
+  const matches = []
+  const chargeIds = new Set()
+  for (const usage of scopedUsage) {
+    const candidates = charges.filter((candidate) => (
+      candidate?.projectId === projectId
+      && candidate.usageRecordId === usage.id
+      && candidate.adjustmentOf == null
+      && !baselineChargeIds.has(candidate.id)
+    ))
+    if (candidates.length > 1) throw new Error(`LW_EXPERIMENT_USAGE_CHARGE_DUPLICATE:${usage.id}`)
+    const charge = candidates[0]
+    if (!charge || charge.settlement !== 'settled') return null
+    if (typeof charge.id !== 'string' || charge.id === '' || typeof charge.usageRecordId !== 'string') {
+      throw new Error('LW_EXPERIMENT_USAGE_CHARGE_ID_INVALID')
+    }
+    if (chargeIds.has(charge.id)) throw new Error('LW_EXPERIMENT_USAGE_CHARGE_DUPLICATE')
+    chargeIds.add(charge.id)
+    if (fixedDecimalScaled(charge.total?.amount, 'LW_EXPERIMENT_USAGE_CHARGE') < 0n) return null
+    if (!chargeMatchesUsageQuantities(charge, usage, gpu, rates)) return null
+    matches.push({ usage, charge })
+  }
   return matches
 }
 
@@ -334,6 +507,73 @@ export async function waitForSettledWorkUsageCharges(browser, baseURL, {
       charges: latestCharges,
       matches: latestMatches.flat(),
     }
+  } finally {
+    await context.close()
+  }
+}
+
+export async function waitForSettledExperimentUsageCharges(browser, baseURL, {
+  projectId,
+  environmentId,
+  baselineChargeIds = new Set(),
+  gpu = null,
+  rates = null,
+} = {}) {
+  if (
+    typeof projectId !== 'string'
+    || projectId === ''
+    || typeof environmentId !== 'string'
+    || environmentId === ''
+  ) {
+    throw new Error('LW_EXPERIMENT_USAGE_SCOPE_INVALID')
+  }
+  const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  let latestUsage = null
+  let latestCharges = null
+  let latestMatches = null
+  let selectionError = null
+  try {
+    const effectiveRates = rates ?? await readResourceRates(context, 'LW_EXPERIMENT_RATES_READ_FAILED')
+    await expect.poll(
+      async () => {
+        latestUsage = await readProjectUsage(context.request, projectId)
+        latestCharges = await expectJson(
+          await context.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
+          'LW_EXPERIMENT_CHARGES_READ_FAILED',
+        )
+        if (!Array.isArray(latestCharges)) throw new Error('LW_EXPERIMENT_CHARGES_RESPONSE_INVALID')
+        try {
+          latestMatches = selectSettledExperimentUsageCharges({
+            usageRecords: latestUsage,
+            charges: latestCharges,
+            projectId,
+            environmentId,
+            baselineChargeIds,
+            gpu,
+            rates: effectiveRates,
+          })
+        } catch (error) {
+          selectionError = error
+          throw error
+        }
+        return latestMatches != null
+      },
+      { timeout: 300_000, intervals: [1000, 2000, 5000] },
+    ).toBe(true)
+    return {
+      usageRecords: latestUsage,
+      charges: latestCharges,
+      matches: latestMatches,
+    }
+  } catch (error) {
+    if (selectionError) throw selectionError
+    if (latestUsage) {
+      throw new Error(
+        `LW_EXPERIMENT_USAGE_SETTLEMENT_TIMEOUT:${describeExperimentUsageState(latestUsage, projectId, environmentId)}`,
+        { cause: error },
+      )
+    }
+    throw error
   } finally {
     await context.close()
   }
@@ -1244,6 +1484,7 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
   gpu = null,
   usageRecordIds = [],
   expectedCharges = [],
+  requireBudget = true,
 } = {}) {
   if (!Array.isArray(usageRecordIds) || usageRecordIds.some((id) => typeof id !== 'string' || id === '')) {
     throw new Error('REAL_WORK_FINANCE_USAGE_IDS_INVALID')
@@ -1262,17 +1503,27 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
       .locator('.budget-summary > div')
       .filter({ hasText: '已花费' })
       .locator('strong')
-    await expect(spent).toHaveCount(1, { timeout: 120_000 })
-    await expect.poll(
-      async () => {
-        const text = (await spent.textContent())?.trim() ?? ''
-        const [amount, currency] = text.split(/\s+/)
-        return currency === 'USD'
-          && /^\d+\.\d{6}$/.test(amount ?? '')
-          && /[1-9]/.test((amount ?? '').replace('.', ''))
-      },
-      { timeout: 120_000, intervals: [500, 1000, 2000] },
-    ).toBe(true)
+    if (requireBudget) {
+      await expect(spent).toHaveCount(1, { timeout: 120_000 })
+    } else {
+      await expect.poll(
+        async () => (await spent.count()) === 1
+          || (await page.getByText('该项目还没有预算记录。', { exact: true }).count()) === 1,
+        { timeout: 120_000, intervals: [500, 1000, 2000] },
+      ).toBe(true)
+    }
+    if (await spent.count() === 1) {
+      await expect.poll(
+        async () => {
+          const text = (await spent.textContent())?.trim() ?? ''
+          const [amount, currency] = text.split(/\s+/)
+          return currency === 'USD'
+            && /^\d+\.\d{6}$/.test(amount ?? '')
+            && /[1-9]/.test((amount ?? '').replace('.', ''))
+        },
+        { timeout: 120_000, intervals: [500, 1000, 2000] },
+      ).toBe(true)
+    }
     if (gpu) {
       const gpuLine = page.locator('.charge-line').filter({ hasText: 'GPU' })
       await expect(gpuLine.first()).toBeVisible({ timeout: 120_000 })

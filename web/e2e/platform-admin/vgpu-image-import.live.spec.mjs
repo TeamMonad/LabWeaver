@@ -176,6 +176,45 @@ async function assertImportedUpload(page, input, completion) {
   return validateVgpuImageImport({ completion, status, entries, input })
 }
 
+async function cleanupCancelledUploadThroughUi(page, input, uploadId) {
+  const status = await expectJson(
+    await page.request.get(`/api/v1/admin/images/uploads/${encodeURIComponent(uploadId)}`),
+    'LW_VGPU_IMAGE_CANCEL_CLEANUP_STATUS_READ_FAILED',
+  )
+  if (status.uploadId !== uploadId) throw new Error('LW_VGPU_IMAGE_CANCEL_CLEANUP_UPLOAD_ID_MISMATCH')
+
+  if (status.state === 'imported' || status.state === 'failed') {
+    throw new Error(`LW_VGPU_IMAGE_CANCEL_CLEANUP_UNSAFE_STATE:${status.state}`)
+  }
+  if (!['pending', 'queued', 'freezing', 'importing', 'cancelling', 'cancelled'].includes(status.state)) {
+    throw new Error(`LW_VGPU_IMAGE_CANCEL_CLEANUP_UNKNOWN_STATE:${String(status.state)}`)
+  }
+  if (status.state !== 'cancelled' && status.state !== 'cancelling') {
+    const cancelButton = page.locator('.upload-status').getByRole('button', { name: '取消上传', exact: true })
+    await expect(cancelButton).toBeVisible({ timeout: 120_000 })
+    await expect(cancelButton).toBeEnabled()
+    await cancelButton.click()
+    await expect(page.locator('.upload-status')).toContainText('镜像导入：已取消', { timeout: 120_000 })
+  }
+
+  if (status.state !== 'cancelled') {
+    const settled = await pollJson(
+      page.request,
+      `/api/v1/admin/images/uploads/${encodeURIComponent(uploadId)}`,
+      (value) => ['cancelled', 'failed', 'imported'].includes(value.state),
+      'LW_VGPU_IMAGE_CANCEL_CLEANUP_STATUS_READ_FAILED',
+      120_000,
+    )
+    if (settled.uploadId !== uploadId) throw new Error('LW_VGPU_IMAGE_CANCEL_CLEANUP_UPLOAD_ID_MISMATCH')
+    if (settled.state !== 'cancelled') throw new Error(`LW_VGPU_IMAGE_CANCEL_CLEANUP_UNSAFE_STATE:${settled.state}`)
+  }
+
+  await waitForCatalogSettled(page, 'CANCEL_CLEANUP_READBACK')
+  if ((await readRowsForBinding(page, input.binding)).length !== 0) {
+    throw new Error('LW_VGPU_IMAGE_CANCEL_CLEANUP_BINDING_PUBLISHED')
+  }
+}
+
 test.skip(INPUT === null, 'set the five LABWEAVER_E2E_VGPU_IMAGE_* variables to run this scenario')
 
 test('platform administrator refreshes a real VM upload and cancels it through the UI', async ({ page }) => {
@@ -192,38 +231,62 @@ test('platform administrator refreshes a real VM upload and cancels it through t
     throw new Error('LW_VGPU_IMAGE_CANCEL_BINDING_ALREADY_EXISTS')
   }
 
-  const { session } = await waitForUploadSession(page, input)
-  const completionResponsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url())
-    return response.request().method() === 'POST'
-      && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
-  }, { timeout: 1_200_000 })
-  const completionResponse = await completionResponsePromise
-  const completion = {
-    status: completionResponse.status(),
-    body: await completionResponse.json().catch(() => null),
+  let session
+  let primaryError
+  let cleanupError
+  try {
+    ({ session } = await waitForUploadSession(page, input))
+    const completionResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'POST'
+        && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
+    }, { timeout: 1_200_000 })
+    const completionResponse = await completionResponsePromise
+    const completion = {
+      status: completionResponse.status(),
+      body: await completionResponse.json().catch(() => null),
+    }
+    assertAcceptedVgpuImageCompletion(completion)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
+    await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
+    const cancelButton = page.locator('.upload-status').getByRole('button', { name: '取消上传', exact: true })
+    if (await cancelButton.count() === 0) {
+      const status = await expectJson(
+        await page.request.get(`/api/v1/admin/images/uploads/${session.uploadId}`),
+        'LW_VGPU_IMAGE_CANCEL_STATUS_READ_FAILED',
+      )
+      throw new Error(`LW_VGPU_IMAGE_IMPORT_FINISHED_BEFORE_CANCEL:${status.state}`)
+    }
+    await expect(cancelButton).toBeVisible({ timeout: 120_000 })
+    await expect(cancelButton).toBeEnabled()
+    await cancelButton.click()
+    await expect(page.locator('.upload-status')).toContainText('镜像导入：已取消', { timeout: 120_000 })
+    await waitForUploadStatus(page, session.uploadId, 'cancelled')
+    await waitForCatalogSettled(page, 'CANCEL_READBACK')
+    if ((await readRowsForBinding(page, input.binding)).length !== 0) {
+      throw new Error('LW_VGPU_IMAGE_CANCELLED_BINDING_PUBLISHED')
+    }
+  } catch (error) {
+    primaryError = error
+  } finally {
+    if (session?.uploadId) {
+      try {
+        await cleanupCancelledUploadThroughUi(page, input, session.uploadId)
+      } catch (error) {
+        cleanupError = error
+      }
+    }
   }
-  assertAcceptedVgpuImageCompletion(completion)
-  await page.reload({ waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
-  await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
-  const cancelButton = page.locator('.upload-status').getByRole('button', { name: '取消上传', exact: true })
-  if (await cancelButton.count() === 0) {
-    const status = await expectJson(
-      await page.request.get(`/api/v1/admin/images/uploads/${session.uploadId}`),
-      'LW_VGPU_IMAGE_CANCEL_STATUS_READ_FAILED',
-    )
-    throw new Error(`LW_VGPU_IMAGE_IMPORT_FINISHED_BEFORE_CANCEL:${status.state}`)
+  if (primaryError && cleanupError) {
+    const primaryReason = primaryError instanceof Error ? primaryError.message : String(primaryError)
+    const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+    const combinedError = new Error(`${primaryReason}; upload-cancel-cleanup-failed:${cleanupReason}`)
+    combinedError.cause = primaryError
+    throw combinedError
   }
-  await expect(cancelButton).toBeVisible({ timeout: 120_000 })
-  await expect(cancelButton).toBeEnabled()
-  await cancelButton.click()
-  await expect(page.locator('.upload-status')).toContainText('镜像导入：已取消', { timeout: 120_000 })
-  await waitForUploadStatus(page, session.uploadId, 'cancelled')
-  await waitForCatalogSettled(page, 'CANCEL_READBACK')
-  if ((await readRowsForBinding(page, input.binding)).length !== 0) {
-    throw new Error('LW_VGPU_IMAGE_CANCELLED_BINDING_PUBLISHED')
-  }
+  if (primaryError) throw primaryError
+  if (cleanupError) throw cleanupError
   test.info().annotations.push({
     type: 'image-import-lifecycle',
     description: JSON.stringify({ result: 'refreshed-and-cancelled', binding: input.binding }),

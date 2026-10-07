@@ -131,6 +131,55 @@
   changed_when: false
   register: identity_gateways_raw
 
+- name: Select the adopted identity Gateway allocation
+  ansible.builtin.set_fact:
+    identity_gateway_candidates: >-
+      {{
+        (identity_gateways_raw.stdout | from_json)['items']
+        | selectattr('metadata.name', 'equalto', 'identity-gateway')
+        | selectattr('metadata.namespace', 'equalto', identity_namespace)
+        | list
+      }}
+  when:
+    - labweaver_preflight_identity_adopted | default(false) | bool
+    - not (identity_foundation_realm_roles_only | bool)
+
+- name: Read the adopted identity Gateway addresses
+  ansible.builtin.set_fact:
+    identity_gateway_allocated_addresses: >-
+      {{
+        (
+          identity_gateway_candidates
+          | map(attribute='status.addresses', default=[])
+          | first
+          | default([])
+        )
+        | map(attribute='value', default='')
+        | reject('equalto', '')
+        | list
+      }}
+  when:
+    - labweaver_preflight_identity_adopted | default(false) | bool
+    - not (identity_foundation_realm_roles_only | bool)
+
+- name: Reject an adopted identity Gateway VIP change
+  ansible.builtin.assert:
+    that:
+      - identity_gateway_candidates | length <= 1
+      - >-
+        identity_gateway_candidates | length == 0
+        or identity_gateway_allocated_addresses | length == 0
+        or (
+          identity_gateway_allocated_addresses | length == 1
+          and identity_gateway_allocated_addresses[0] == identity_gateway_vip
+        )
+    fail_msg: >-
+      IDENTITY_GATEWAY_ADOPTED_VIP_MISMATCH: verify the existing identity-gateway
+      allocation and configure identity_gateway_vip to that address before reconcile
+  when:
+    - labweaver_preflight_identity_adopted | default(false) | bool
+    - not (identity_foundation_realm_roles_only | bool)
+
 - name: Reject a conflicting Gateway VIP
   ansible.builtin.assert:
     that:

@@ -29,6 +29,7 @@ import {
   realWorkVmConfig,
   readProjectUsage,
   readResumablePublishedWork,
+  selectSettledExperimentUsageCharges,
   selectPendingWorkTaskResourceRequest,
   selectSettledWorkUsageChargesForLease,
   waitForActiveRateReadback,
@@ -117,6 +118,21 @@ describe('Work authoring resource approval selection', () => {
 
 describe('Work usage and charge association', () => {
   const scope = { projectId: 'project', requestId: 'request', leaseId: 'lease' }
+  const rates = Object.freeze({
+    cpu: Object.freeze({ id: 'cpu-rate', revision: 1, unit: 'cpu_millicore_second', unitQuantity: 1, unitPrice: { amount: '0.000001', currency: 'USD' }, effectiveFrom: '2026-10-04T00:00:00.000Z', effectiveUntil: null }),
+    memory: Object.freeze({ id: 'memory-rate', revision: 1, unit: 'memory_byte_second', unitQuantity: 1, unitPrice: { amount: '0.000001', currency: 'USD' }, effectiveFrom: '2026-10-04T00:00:00.000Z', effectiveUntil: null }),
+    storage: Object.freeze({ id: 'storage-rate', revision: 1, unit: 'storage_byte_second', unitQuantity: 1, unitPrice: { amount: '0.000001', currency: 'USD' }, effectiveFrom: '2026-10-04T00:00:00.000Z', effectiveUntil: null }),
+    gpu: Object.freeze({ id: 'gpu-rate', revision: 1, unit: 'gpu_unit_second', unitQuantity: 1, gpuClass: 'nvidia-a100', gpuMode: 'exclusive', unitPrice: { amount: '0.010000', currency: 'USD' }, effectiveFrom: '2026-10-04T00:00:00.000Z', effectiveUntil: null }),
+  })
+  const chargeLine = (rate, quantity, amount) => ({
+    rateId: rate.id,
+    rateRevision: rate.revision,
+    unit: rate.unit,
+    quantity,
+    unitQuantity: rate.unitQuantity,
+    unitPrice: rate.unitPrice,
+    amount: { amount, currency: rate.unitPrice.currency },
+  })
   const usage = (kind, overrides = {}) => ({
     id: `usage-${kind}`,
     projectId: scope.projectId,
@@ -143,29 +159,45 @@ describe('Work usage and charge association', () => {
     usageRecordId,
     adjustmentOf: null,
     settlement: 'settled',
-    total: { amount: '0.000001', currency: 'USD' },
+    total: { amount: '0.000030', currency: 'USD' },
     lines: kind === 'compute'
       ? [
-          {
-            unit: 'cpu_millicore_second',
-            quantity: 10,
-            unitQuantity: 1,
-            amount: { amount: '0.000001', currency: 'USD' },
-          },
-          {
-            unit: 'memory_byte_second',
-            quantity: 20,
-            unitQuantity: 1,
-            amount: { amount: '0.000001', currency: 'USD' },
-          },
+          chargeLine(rates.cpu, 10, '0.000010'),
+          chargeLine(rates.memory, 20, '0.000020'),
         ]
-      : [{
-          unit: 'storage_byte_second',
-          quantity: 30,
-          unitQuantity: 1,
-          amount: { amount: '0.000001', currency: 'USD' },
-        }],
+      : [chargeLine(rates.storage, 30, '0.000030')],
     ...overrides,
+  })
+  const experimentUsage = (kind, { gpu = false, ...overrides } = {}) => ({
+    id: `experiment-usage-${kind}`,
+    projectId: scope.projectId,
+    target: { kind: 'experiment_environment', environmentId: 'environment' },
+    measuredFrom: '2026-10-04T05:00:00.000Z',
+    measuredUntil: '2026-10-04T05:01:00.000Z',
+    kind,
+    settlement: 'settled',
+    measurement: {
+      state: 'known',
+      quantities: kind === 'compute'
+        ? { cpuMillicoreSeconds: 10, memoryByteSeconds: 20, gpuUnitSeconds: gpu ? 10 : 0, storageByteSeconds: 0 }
+        : { cpuMillicoreSeconds: 0, memoryByteSeconds: 0, gpuUnitSeconds: 0, storageByteSeconds: 30 },
+    },
+    ...overrides,
+  })
+  const experimentCharge = (usageRecordId, kind, gpu = false) => ({
+    id: `experiment-charge-${kind}`,
+    projectId: scope.projectId,
+    usageRecordId,
+    adjustmentOf: null,
+    settlement: 'settled',
+    total: { amount: gpu ? '0.100030' : '0.000030', currency: 'USD' },
+    lines: kind === 'compute'
+      ? [
+          chargeLine(rates.cpu, 10, '0.000010'),
+          chargeLine(rates.memory, 20, '0.000020'),
+          ...(gpu ? [chargeLine(rates.gpu, 10, '0.100000')] : []),
+        ]
+      : [chargeLine(rates.storage, 30, '0.000030')],
   })
 
   it('requires this lease usage instead of accepting an older positive project charge', () => {
@@ -194,7 +226,7 @@ describe('Work usage and charge association', () => {
     ])
   })
 
-  it('accepts a settled zero-total charge when usage quantities match', () => {
+  it('accepts a settled zero-total charge when a zero-priced rate matches the usage', () => {
     const zeroCharge = (usageRecordId, kind) => {
       const item = charge(usageRecordId, kind)
       return {
@@ -202,6 +234,9 @@ describe('Work usage and charge association', () => {
         total: { amount: '0.000000', currency: 'USD' },
         lines: item.lines.map((line) => ({
           ...line,
+          rateId: `${line.rateId}-zero`,
+          rateRevision: line.rateRevision + 1,
+          unitPrice: { ...line.unitPrice, amount: '0.000000' },
           amount: { ...line.amount, amount: '0.000000' },
         })),
       }
@@ -256,12 +291,8 @@ describe('Work usage and charge association', () => {
 
   it('requires every positive compute dimension to have matching charge quantity', () => {
     const computeCharge = charge('usage-compute', 'compute', {
-      lines: [{
-        unit: 'cpu_millicore_second',
-        quantity: 10,
-        unitQuantity: 1,
-        amount: { amount: '0.000001', currency: 'USD' },
-      }],
+      total: { amount: '0.000010', currency: 'USD' },
+      lines: [chargeLine(rates.cpu, 10, '0.000010')],
     })
     const result = selectSettledWorkUsageChargesForLease({
       ...scope,
@@ -293,17 +324,19 @@ describe('Work usage and charge association', () => {
   it('sums segmented charge lines for every positive usage dimension', () => {
     const computeCharge = charge('usage-compute', 'compute', {
       lines: [
-        { unit: 'cpu_millicore_second', quantity: 4, unitQuantity: 1, amount: { amount: '0.000000', currency: 'USD' } },
-        { unit: 'cpu_millicore_second', quantity: 6, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
-        { unit: 'memory_byte_second', quantity: 10, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
-        { unit: 'memory_byte_second', quantity: 10, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+        chargeLine(rates.cpu, 4, '0.000004'),
+        chargeLine(rates.cpu, 6, '0.000006'),
+        chargeLine(rates.memory, 10, '0.000010'),
+        chargeLine(rates.memory, 10, '0.000010'),
       ],
+      total: { amount: '0.000030', currency: 'USD' },
     })
     const storageCharge = charge('usage-storage', 'storage', {
       lines: [
-        { unit: 'storage_byte_second', quantity: 10, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
-        { unit: 'storage_byte_second', quantity: 20, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+        chargeLine(rates.storage, 10, '0.000010'),
+        chargeLine(rates.storage, 20, '0.000020'),
       ],
+      total: { amount: '0.000030', currency: 'USD' },
     })
     const result = selectSettledWorkUsageChargesForLease({
       ...scope,
@@ -315,25 +348,19 @@ describe('Work usage and charge association', () => {
   })
 
   it.each([
-    ['storage', {
-      unit: 'storage_byte_second',
-      quantity: 1,
-      unitQuantity: 1,
-      amount: { amount: '0.000001', currency: 'USD' },
-    }],
-    ['zero-gpu', {
-      unit: 'gpu_unit_second',
-      quantity: 1,
-      unitQuantity: 1,
-      amount: { amount: '0.000001', currency: 'USD' },
-    }],
+    ['storage', chargeLine(rates.storage, 1, '0.000001')],
+    ['zero-gpu', chargeLine(rates.gpu, 1, '0.010000')],
   ])('rejects an extra positive %s charge line outside the usage dimensions', (_kind, extraLine) => {
     const baseComputeCharge = charge('usage-compute', 'compute')
     const result = selectSettledWorkUsageChargesForLease({
       ...scope,
       usageRecords: [usage('compute'), usage('storage')],
       charges: [
-        { ...baseComputeCharge, lines: [...baseComputeCharge.lines, extraLine] },
+        {
+          ...baseComputeCharge,
+          total: { amount: extraLine.unit === 'gpu_unit_second' ? '0.010030' : '0.000031', currency: 'USD' },
+          lines: [...baseComputeCharge.lines, extraLine],
+        },
         charge('usage-storage', 'storage'),
       ],
       baselineChargeIds: new Set(),
@@ -400,15 +427,7 @@ describe('Work usage and charge association', () => {
   })
 
   it('requires the settled GPU line to use the requested class, mode, revision and unit price', () => {
-    const gpuRate = {
-      id: 'gpu-rate',
-      revision: 3,
-      unit: 'gpu_unit_second',
-      unitQuantity: 1,
-      gpuClass: 'nvidia-a100',
-      gpuMode: 'exclusive',
-      unitPrice: { amount: '0.010000', currency: 'USD' },
-    }
+    const gpuRate = { ...rates.gpu, revision: 3 }
     const gpuUsage = usage('compute', {
       measurement: {
         state: 'known',
@@ -416,6 +435,7 @@ describe('Work usage and charge association', () => {
       },
     })
     const gpuCharge = charge('usage-compute', 'compute', {
+      total: { amount: '0.100000', currency: 'USD' },
       lines: [{
         rateId: gpuRate.id,
         rateRevision: gpuRate.revision,
@@ -445,6 +465,61 @@ describe('Work usage and charge association', () => {
       baselineChargeIds: new Set(),
       gpu: { class: gpuRate.gpuClass, mode: gpuRate.gpuMode, rate: gpuRate },
     })).toBeNull()
+  })
+
+  it('matches experiment environment usage by target and exact rate-window charges', () => {
+    const result = selectSettledExperimentUsageCharges({
+      ...scope,
+      environmentId: 'environment',
+      usageRecords: [experimentUsage('storage'), experimentUsage('compute', { gpu: true })],
+      charges: [experimentCharge('experiment-usage-compute', 'compute', true), experimentCharge('experiment-usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+      gpu: { class: rates.gpu.gpuClass, mode: rates.gpu.gpuMode },
+      rates: Object.values(rates),
+    })
+    expect(result?.map(({ usage: item }) => item.kind)).toEqual(['storage', 'compute'])
+  })
+
+  it('does not accept another environment or a baseline charge for this environment', () => {
+    const usageRecords = [
+      experimentUsage('compute', { target: { kind: 'experiment_environment', environmentId: 'other-environment' } }),
+      experimentUsage('storage'),
+    ]
+    expect(selectSettledExperimentUsageCharges({
+      ...scope,
+      environmentId: 'environment',
+      usageRecords,
+      charges: [experimentCharge('experiment-usage-compute', 'compute'), experimentCharge('experiment-usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+      rates: Object.values(rates),
+    })).toBeNull()
+    expect(selectSettledExperimentUsageCharges({
+      ...scope,
+      environmentId: 'environment',
+      usageRecords: [experimentUsage('compute'), experimentUsage('storage')],
+      charges: [experimentCharge('experiment-usage-compute', 'compute'), experimentCharge('experiment-usage-storage', 'storage')],
+      baselineChargeIds: new Set(['experiment-charge-compute']),
+      rates: Object.values(rates),
+    })).toBeNull()
+  })
+
+  it('does not complete while teaching usage is pending or duplicated', () => {
+    expect(selectSettledExperimentUsageCharges({
+      ...scope,
+      environmentId: 'environment',
+      usageRecords: [experimentUsage('compute', { settlement: 'pending' }), experimentUsage('storage')],
+      charges: [experimentCharge('experiment-usage-compute', 'compute'), experimentCharge('experiment-usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+      rates: Object.values(rates),
+    })).toBeNull()
+    expect(() => selectSettledExperimentUsageCharges({
+      ...scope,
+      environmentId: 'environment',
+      usageRecords: [experimentUsage('compute'), experimentUsage('compute'), experimentUsage('storage')],
+      charges: [experimentCharge('experiment-usage-compute', 'compute'), experimentCharge('experiment-usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+      rates: Object.values(rates),
+    })).toThrow('LW_EXPERIMENT_USAGE_DUPLICATE')
   })
 })
 

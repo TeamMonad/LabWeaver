@@ -1874,6 +1874,114 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertNotIn("resources: [secrets", operator_rbac)
         self.assertNotIn(":latest", workloads)
 
+    def test_identity_adopted_gateway_vip_guard_handles_existing_and_new_clusters(self) -> None:
+        tasks = yaml.safe_load(
+            (ROOT / "deploy/ansible/roles/identity_foundation/tasks/main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        candidate_selection = next(
+            task
+            for task in tasks
+            if task.get("name") == "Select the adopted identity Gateway allocation"
+        )
+        address_selection = next(
+            task
+            for task in tasks
+            if task.get("name") == "Read the adopted identity Gateway addresses"
+        )
+        guard = next(
+            task
+            for task in tasks
+            if task.get("name") == "Reject an adopted identity Gateway VIP change"
+        )
+        task_names = [task.get("name") for task in tasks]
+        self.assertLess(
+            task_names.index("Select the adopted identity Gateway allocation"),
+            task_names.index("Read the adopted identity Gateway addresses"),
+        )
+        self.assertLess(
+            task_names.index("Read the adopted identity Gateway addresses"),
+            task_names.index("Reject an adopted identity Gateway VIP change"),
+        )
+        self.assertEqual(candidate_selection["when"], address_selection["when"])
+        self.assertLess(
+            task_names.index("Reject an adopted identity Gateway VIP change"),
+            task_names.index("Require an existing healthy identity foundation in verify-only mode"),
+        )
+        self.assertLess(
+            task_names.index("Reject an adopted identity Gateway VIP change"),
+            task_names.index("Reconcile identity foundation"),
+        )
+        environment = Environment(undefined=StrictUndefined)
+        environment.filters["from_json"] = json.loads
+        environment.filters["bool"] = bool
+
+        def evaluate(items: list[dict[str, object]], vip: str, *, role_only: bool = False) -> tuple[bool, bool]:
+            context: dict[str, object] = {
+                "identity_gateways_raw": {"stdout": json.dumps({"items": items})},
+                "identity_namespace": "keycloak-system",
+            }
+            def expression(value: str):
+                return environment.compile_expression(value.strip()[2:-2].strip())
+
+            candidate_fact = candidate_selection["ansible.builtin.set_fact"]
+            context["identity_gateway_candidates"] = expression(
+                candidate_fact["identity_gateway_candidates"]
+            )(**context)
+            address_fact = address_selection["ansible.builtin.set_fact"]
+            context["identity_gateway_allocated_addresses"] = expression(
+                address_fact["identity_gateway_allocated_addresses"]
+            )(**context)
+            context.update(
+                {
+                    "identity_gateway_vip": vip,
+                    "labweaver_preflight_identity_adopted": True,
+                    "identity_foundation_realm_roles_only": role_only,
+                }
+            )
+            applies = all(
+                environment.compile_expression(condition)(**context)
+                for condition in guard["when"]
+            )
+            predicates_hold = all(
+                environment.compile_expression(predicate)(**context)
+                for predicate in guard["ansible.builtin.assert"]["that"]
+            )
+            return applies, predicates_hold
+
+        allocated_gateway = [
+            {
+                "metadata": {"name": "identity-gateway", "namespace": "keycloak-system"},
+                "status": {"addresses": [{"type": "IPAddress", "value": "10.99.0.120"}]},
+            }
+        ]
+        applies, predicates_hold = evaluate(allocated_gateway, "10.20.0.222")
+        self.assertTrue(applies)
+        self.assertFalse(predicates_hold)
+
+        applies, predicates_hold = evaluate(allocated_gateway, "10.99.0.120")
+        self.assertTrue(applies)
+        self.assertTrue(predicates_hold)
+
+        applies, predicates_hold = evaluate([], "10.20.0.222")
+        self.assertTrue(applies)
+        self.assertTrue(predicates_hold)
+
+        applies, predicates_hold = evaluate(allocated_gateway, "10.20.0.222", role_only=True)
+        self.assertFalse(applies)
+        self.assertFalse(predicates_hold)
+
+        same_name_other_namespace = [
+            {
+                **allocated_gateway[0],
+                "metadata": {"name": "identity-gateway", "namespace": "other-system"},
+            }
+        ]
+        applies, predicates_hold = evaluate(same_name_other_namespace, "10.20.0.222")
+        self.assertTrue(applies)
+        self.assertTrue(predicates_hold)
+
     def test_identity_client_secrets_use_a_parsed_per_client_task(self) -> None:
         task_path = ROOT / "deploy/ansible/roles/identity_foundation/tasks/main.yml"
         defaults_path = ROOT / "deploy/ansible/roles/identity_foundation/defaults/main.yml"

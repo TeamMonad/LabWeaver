@@ -36,6 +36,8 @@ kubectl -n keycloak-system describe job identity-provision-<run-suffix>
 
 如果 Job 进入 `Failed` 或 `DeadlineExceeded`，先从 `describe` 和 `logs` 确认失败原因，再按原部署入口使用新的唯一 `LABWEAVER_RUN_ID`（保留 `infra-` 前缀）修复配置后重跑；不要手工创建同名 Job 或修改其 deadline。
 
+采用已有集群运行 identity foundation 时，私有 inventory 需显式设置 `labweaver_preflight_identity_adopted: true`。角色会在任何 Gateway、Job 或其他 reconcile 修改前读取 `identity_namespace` 中现有 `identity-gateway` 的分配地址；已有分配时，`identity_gateway_vip` 必须与该地址一致，否则直接失败并要求先核实拓扑。首次安装或 Gateway 尚未分配地址可以继续；`identity_foundation_realm_roles_only` 模式不执行这项检查。verify-only 也会在后续健康检查前报告该不一致。
+
 ## GPU 设备插件与 vGPU
 
 `80-install-addons.yml` 的 `gpu_device_plugin` 角色默认关闭，启用时必须显式给出互不重叠的节点集合。独占节点暴露 `nvidia.com/gpu`；共享节点使用 NVIDIA time-slicing，并在 `renameByDefault` 下暴露 `nvidia.com/gpu.shared`。角色使用 `runtimeClassName: nvidia`、只读 `/dev` 与 PCI sysfs，并把 termination log 写入 Pod 可写的 `emptyDir`，因此不会因 `/dev/termination-log` 的只读 hostPath 失败。CDI 模式同时把节点驱动根只读挂载到 `/driver-root`，并把 `/var/run/cdi` 作为可写 hostPath；宿主机直接安装驱动时设置 `gpu_device_plugin_driver_root=/`，driver-container 布局使用 `/run/nvidia/driver`。不要把同一节点放进两个集合。

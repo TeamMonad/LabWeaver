@@ -26,6 +26,11 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
+import {
+  inspectRealWorkFinanceByUi,
+  readResourceRates,
+  waitForSettledExperimentUsageCharges,
+} from '../support/real-work.mjs'
 import { issueAccessGrantAndConnect, hasTerminalLine, typeTerminalCommand } from '../support/real-gpu.mjs'
 import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
@@ -512,6 +517,8 @@ test('student completes a published lab experiment through the browser terminal'
   let adminContext
   let primaryFailure
   let primaryFailed = false
+  let environmentReleased = false
+  let baselineChargeIds = new Set()
   const cleanupErrors = []
   const frames = []
   const terminalSockets = new Map()
@@ -588,6 +595,13 @@ test('student completes a published lab experiment through the browser terminal'
         const starterSource = source.replace('xv6-student: hello', LAB.starterOutput)
         if (starterSource === source) throw new Error('LAB_EXPERIMENT_XV6_STARTER_OUTPUT_NOT_FOUND')
         await writeFile(sourcePath, starterSource, 'utf8')
+
+        const manifestPath = join(packageCopy, 'manifest.json')
+        const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+        const manifestFile = manifest.spec?.files?.find((file) => file.path === LAB.frozenPath)
+        if (!manifestFile) throw new Error('LAB_EXPERIMENT_XV6_MANIFEST_ENTRY_MISSING')
+        manifestFile.sha256 = createHash('sha256').update(starterSource).digest('hex')
+        await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
       }
       project = await createProjectByUi(page, `real-${process.env.LABWEAVER_E2E_LAB}-${Date.now()}-${uuidv7().slice(0, 8)}`)
       projectId = project.id
@@ -642,6 +656,14 @@ test('student completes a published lab experiment through the browser terminal'
     const studentGuards = installUsabilityGuards(studentPage)
     const studentActorId = await readActorId(studentContext.request)
     await addProjectStudentByUi(page, project.id)
+    const baselineCharges = await expectJson(
+      await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(project.id)}/charges`),
+      'LAB_EXPERIMENT_BASELINE_CHARGES_READ_FAILED',
+    )
+    if (!Array.isArray(baselineCharges)) throw new Error('LAB_EXPERIMENT_BASELINE_CHARGES_INVALID')
+    baselineChargeIds = new Set(baselineCharges
+      .map((charge) => charge.id)
+      .filter((id) => typeof id === 'string' && id !== ''))
     environmentId = await createEnvironmentByStudentUi(studentPage, project.id, published.publication.environmentReleaseId)
     const environment = await waitForStudentEnvironmentWithResourceApproval(
       studentContext.request,
@@ -717,6 +739,27 @@ test('student completes a published lab experiment through the browser terminal'
     await assertNoStuckProgress(studentPage, 'student-results')
     await auditAccessibility(studentPage, 'student-results', testInfo)
     studentGuards.assertCleanConsole('student-results')
+
+    await closeExperimentEnvironment(studentPage, project.id, environmentId)
+    environmentReleased = true
+    const financeRates = await readResourceRates(adminPage, 'LAB_EXPERIMENT_RATES_READ_FAILED')
+    const finance = await waitForSettledExperimentUsageCharges(browser, baseURL, {
+      projectId: project.id,
+      environmentId,
+      baselineChargeIds,
+      gpu: LAB.gpuMode
+        ? { class: environment.gpuAllocation.class, mode: environment.gpuAllocation.mode }
+        : null,
+      rates: financeRates,
+    })
+    await inspectRealWorkFinanceByUi(browser, baseURL, project.id, {
+      gpu: LAB.gpuMode
+        ? { class: environment.gpuAllocation.class, mode: environment.gpuAllocation.mode }
+        : null,
+      requireBudget: false,
+      usageRecordIds: finance.matches.map(({ usage }) => usage.id),
+      expectedCharges: finance.matches.map(({ charge }) => charge),
+    })
   } catch (error) {
     primaryFailure = error
     primaryFailed = true
@@ -731,7 +774,7 @@ test('student completes a published lab experiment through the browser terminal'
       terminalSockets.clear()
     }
     try {
-      if (environmentId) {
+      if (environmentId && !environmentReleased) {
         if (!studentContext) studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
         const cleanupPage = await studentContext.newPage()
         if (!projectId) cleanupErrors.push(new Error('LAB_EXPERIMENT_CLEANUP_PROJECT_ID_MISSING'))
