@@ -162,15 +162,23 @@ function mockEnvironmentInstance(overrides: Record<string, unknown> = {}) {
   vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never })
 }
 
-async function mountAt(query: Record<string, string> = {}, withProjectSelector = false, teacherMode = false) {
+async function mountAt(
+  query: Record<string, string> = {},
+  withProjectSelector = false,
+  teacherMode = false,
+  entryPath: '/student/environments' | '/researcher/environments' | '/teacher/environments' = teacherMode
+    ? '/teacher/environments'
+    : '/student/environments',
+) {
   const router = createRouter({
     history: createWebHistory(),
     routes: [
       { path: '/student/environments', name: 'student-environments', component: EnvironmentEntryView },
+      { path: '/researcher/environments', name: 'researcher-environments', component: EnvironmentEntryView },
       { path: '/teacher/environments', name: 'teacher-environments', component: EnvironmentEntryView, props: { teacherMode } },
     ],
   })
-  await router.push({ path: teacherMode ? '/teacher/environments' : '/student/environments', query })
+  await router.push({ path: entryPath, query })
   await router.isReady()
   const component = defineComponent({
     setup: () => () => h('div', [
@@ -211,6 +219,21 @@ describe('EnvironmentEntryView', () => {
     })
     const { wrapper } = await mountAt()
     await vi.waitFor(() => expect(wrapper.text()).toContain('PROJECT_CONTEXT_MISSING'))
+  })
+
+  it('offers the project Work environment list before the advanced ID input', async () => {
+    const { wrapper } = await mountAt(
+      { projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('选择已有 Work 环境'))
+    const listLink = wrapper.get('a[href="/researcher/workspaces?projectId=project-1"]')
+    expect(listLink.text()).toContain('选择已有 Work 环境')
+    expect(wrapper.get('.environment-id-input-details').attributes('open')).toBeUndefined()
+    expect(wrapper.get('.environment-id-input-details summary').text()).toContain('高级')
   })
 
   it('loads environment template releases for the selected project', async () => {
@@ -346,6 +369,9 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.find('.title-with-pill h2').text()).not.toContain('env-1')
     expect(wrapper.find('.breadcrumb-current').text()).not.toContain('env-1')
     expect(wrapper.get('.environment-id-details').text()).toContain('env-1')
+    expect(wrapper.get('.environment-id-details code').text()).toBe('env-1')
+    expect(wrapper.get('.environment-id-details').text()).toContain('rev-11')
+    expect(wrapper.get('.env-meta-grid').text()).not.toContain('修订版本')
     expect(wrapper.findAll('.resource-title-row > button')).toHaveLength(1)
 
     const toolsToggle = wrapper.find('.resource-title-row > button')

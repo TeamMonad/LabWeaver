@@ -258,9 +258,32 @@ async function approveCandidateAndPublishByUi(page, projectId, candidateId) {
 }
 
 async function restartEnvironmentByUi(page, projectId, environmentId) {
-  await page.goto(`/researcher/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
-    waitUntil: 'domcontentloaded',
-  })
+  await navigateFromHomeByUi(page, '项目与工作空间')
+  await expect(page.getByRole('heading', { name: '项目与工作空间', exact: true })).toBeVisible({ timeout: 120_000 })
+  await selectProjectByUi(page, projectId)
+  const environmentLinks = page.locator('.work-list .work-row a').filter({ hasText: '打开' })
+  let targetIndex = -1
+  await expect.poll(async () => {
+    targetIndex = await environmentLinks.evaluateAll((links, expected) => links.findIndex((link) => {
+      const href = link.getAttribute('href')
+      if (!href) return false
+      const url = new URL(href, window.location.origin)
+      return url.pathname === '/researcher/environments'
+        && url.searchParams.get('projectId') === expected.projectId
+        && url.searchParams.get('environmentId') === expected.environmentId
+    }), { projectId, environmentId })
+    return targetIndex
+  }, { timeout: 120_000, intervals: [500, 1000, 2000] }).toBeGreaterThanOrEqual(0)
+  const targetRow = page.locator('.work-list .work-row').nth(targetIndex)
+  await expect(targetRow.locator('strong')).toBeVisible()
+  await expect(targetRow.locator('strong')).not.toHaveText('')
+  await environmentLinks.nth(targetIndex).click()
+  await expect.poll(async () => {
+    const url = new URL(page.url())
+    return url.pathname === '/researcher/environments'
+      && url.searchParams.get('projectId') === projectId
+      && url.searchParams.get('environmentId') === environmentId
+  }, { timeout: 120_000 }).toBe(true)
   await expect(page.getByRole('heading', { name: '项目环境控制台', exact: true })).toBeVisible({ timeout: 120_000 })
   const restartButton = page.getByRole('button', { name: '重启', exact: true })
   await expect(restartButton).toBeEnabled({ timeout: 120_000 })

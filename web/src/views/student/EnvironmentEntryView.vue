@@ -110,26 +110,31 @@
         环境控制台
       </h3>
 
-      <div
+      <details
         v-if="!isEnvironmentLoaded || environmentToolsOpen"
-        class="environment-selector"
+        class="environment-id-input-details"
+        :open="environmentToolsOpen"
+        @toggle="syncEnvironmentToolsOpen"
       >
-        <label for="env-id-input">环境 ID</label>
-        <input
-          id="env-id-input"
-          v-model="environmentIdInput"
-          type="text"
-          class="text-input"
-          placeholder="输入环境 ID 或从创建请求获取"
-        >
-        <button
-          type="button"
-          class="filled-button"
-          @click="applyEnvironmentId"
-        >
-          加载
-        </button>
-      </div>
+        <summary>高级：输入已有环境 ID</summary>
+        <div class="environment-selector">
+          <label for="env-id-input">环境 ID</label>
+          <input
+            id="env-id-input"
+            v-model="environmentIdInput"
+            type="text"
+            class="text-input"
+            placeholder="输入环境 ID 或从创建请求获取"
+          >
+          <button
+            type="button"
+            class="filled-button"
+            @click="applyEnvironmentId"
+          >
+            加载
+          </button>
+        </div>
+      </details>
 
       <div
         v-if="!selectedEnvironmentId"
@@ -140,7 +145,13 @@
           size="lg"
           aria-hidden="true"
         />
-        <p>选择版本创建环境，或输入已有环境 ID 开始管理。</p>
+        <p>{{ environmentEmptyHint }}</p>
+        <RouterLink
+          class="filled-button"
+          :to="{ path: environmentListPath, query: projectId ? { projectId } : undefined }"
+        >
+          {{ environmentListActionLabel }}
+        </RouterLink>
       </div>
 
       <template v-else>
@@ -352,17 +363,15 @@
                       <span class="meta-item__value">{{ desiredEnvironmentStateLabel(data.desiredState) }}</span>
                     </div>
                     <div class="meta-item">
-                      <span class="meta-item__label">修订版本</span>
-                      <span class="meta-item__value">rev-{{ data.revision }}</span>
-                    </div>
-                    <div class="meta-item">
                       <span class="meta-item__label">过期时间</span>
                       <span class="meta-item__value">{{ formatTimestamp(data.eligibilityExpiresAt) }}</span>
                     </div>
                   </div>
                   <details class="environment-id-details">
-                    <summary>查看环境 ID</summary>
+                    <summary>查看高级详情</summary>
+                    <span>环境 ID</span>
                     <code>{{ data.id }}</code>
+                    <span>内部修订版本：rev-{{ data.revision }}</span>
                   </details>
                 </div>
 
@@ -1126,6 +1135,14 @@ const isWorkConnection = computed(() => route.path.startsWith('/researcher/') ||
 const environmentListPath = computed(() => props.teacherMode
   ? '/teacher/environments'
   : isWorkConnection.value ? '/researcher/workspaces' : '/student/labs')
+const environmentListActionLabel = computed(() => props.teacherMode
+  ? '查看项目环境'
+  : isWorkConnection.value ? '选择已有 Work 环境' : '选择已有实验环境')
+const environmentEmptyHint = computed(() => props.teacherMode
+  ? '请从教师项目环境列表选择已有环境，或从上方创建环境。'
+  : isWorkConnection.value
+    ? '请从项目工作空间选择已有 Work 环境，或在资源申请中创建新的 Work 环境。'
+    : '请从课程实验列表选择已有环境，或从上方已发布模板创建环境。')
 const breadcrumbLabel = computed(() => props.teacherMode
   ? '教师项目环境'
   : isWorkConnection.value ? 'Work 项目环境' : '课程实验环境')
@@ -1285,6 +1302,12 @@ function clearEnvironmentSelection() {
   selectedEnvironmentId.value = undefined
   environmentIdInput.value = ''
   environmentToolsOpen.value = true
+}
+
+function syncEnvironmentToolsOpen(event: Event) {
+  if (event.currentTarget instanceof HTMLDetailsElement) {
+    environmentToolsOpen.value = event.currentTarget.open
+  }
 }
 
 watch(
@@ -2106,13 +2129,15 @@ async function revokeAccessGrant() {
   color: var(--md-sys-color-on-surface);
 }
 
-.environment-id-details {
+.environment-id-details,
+.environment-id-input-details {
   margin: 0 16px 16px;
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
 }
 
-.environment-id-details summary {
+.environment-id-details summary,
+.environment-id-input-details summary {
   cursor: pointer;
 }
 
@@ -2121,6 +2146,11 @@ async function revokeAccessGrant() {
   margin-top: 6px;
   overflow-wrap: anywhere;
   color: var(--md-sys-color-on-surface);
+}
+
+.environment-id-details span {
+  display: block;
+  margin-top: 6px;
 }
 
 .console-unauthorized-pane {
