@@ -1807,6 +1807,11 @@ class AnsibleFixtureTests(unittest.TestCase):
         provision_job = (
             ROOT / "deploy/ansible/roles/identity_foundation/templates/provision-job.yml.j2"
         ).read_text(encoding="utf-8")
+        identity_defaults = yaml.safe_load(
+            (ROOT / "deploy/ansible/roles/identity_foundation/defaults/main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
         operator_rbac = (
             ROOT / "deploy/ansible/roles/identity_foundation/templates/operator-rbac.yml.j2"
         ).read_text(encoding="utf-8")
@@ -1839,6 +1844,17 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("included.custom.audience", provision_job)
         self.assertIn("scope-mappings/clients", provision_job)
         self.assertIn("fullScopeAllowed=false", provision_job)
+        self.assertEqual(identity_defaults["identity_provision_job_active_deadline_seconds"], 1800)
+        self.assertIn(
+            "activeDeadlineSeconds: {{ identity_provision_job_active_deadline_seconds }}",
+            provision_job,
+        )
+        self.assertEqual(
+            tasks.count(
+                '"--timeout={{ (identity_provision_job_active_deadline_seconds | int) + 300 }}s"'
+            ),
+            2,
+        )
         self.assertIn("metallb.io/loadBalancerIPs", (
             ROOT / "deploy/ansible/roles/identity_foundation/templates/gateway.yml.j2"
         ).read_text(encoding="utf-8"))

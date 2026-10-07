@@ -254,14 +254,32 @@ test('platform administrator retries a real VM import after a network failure th
   // the archive is still the real operator-supplied OCI/VM input and the retry
   // below uses the same session and idempotency key through the normal UI.
   let abortFirstCompletion = true
+  let firstCompletionFaultResolve
+  let firstCompletionFaultReject
+  const firstCompletionFault = new Promise((resolve, reject) => {
+    firstCompletionFaultResolve = resolve
+    firstCompletionFaultReject = reject
+  })
   await page.route('**/api/v1/admin/images/uploads/*/complete', async (route) => {
     if (!abortFirstCompletion) return route.continue()
     abortFirstCompletion = false
-    await page.context().setOffline(true)
-    await route.abort('failed')
+    try {
+      await page.context().setOffline(true)
+      await route.abort('failed')
+      firstCompletionFaultResolve(new URL(route.request().url()))
+    } catch (error) {
+      firstCompletionFaultReject(error)
+      throw error
+    }
   })
+  let primaryError
+  let cleanupError
   try {
     const { session } = await waitForUploadSession(page, INPUT)
+    const firstCompletionUrl = await firstCompletionFault
+    if (firstCompletionUrl.pathname !== `/api/v1/admin/images/uploads/${session.uploadId}/complete`) {
+      throw new Error('LW_VGPU_IMAGE_COMPLETION_UPLOAD_ID_MISMATCH')
+    }
     await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.upload-status')).toContainText('镜像导入：需要操作', { timeout: 120_000 })
     await page.context().setOffline(false)
@@ -292,10 +310,44 @@ test('platform administrator retries a real VM import after a network failure th
       type: 'image-import-lifecycle',
       description: JSON.stringify({ result: 'network-failure-retry', binding: INPUT.binding }),
     })
+  } catch (error) {
+    primaryError = error
   } finally {
-    await page.context().setOffline(false)
-    await page.unroute('**/api/v1/admin/images/uploads/*/complete')
+    try {
+      await page.context().setOffline(false)
+    } catch (error) {
+      cleanupError = error
+    }
+    try {
+      await page.unroute('**/api/v1/admin/images/uploads/*/complete')
+    } catch (error) {
+      cleanupError ??= error
+    }
+    try {
+      const cancelButton = page.locator('.upload-status').getByRole('button', { name: '取消上传', exact: true })
+      if (await cancelButton.count() > 0 && await cancelButton.first().isVisible()) {
+        await cancelButton.first().click()
+        await expect(page.locator('.upload-status')).toContainText('镜像导入：已取消', { timeout: 120_000 })
+      }
+    } catch (error) {
+      cleanupError ??= error
+    }
+    if (cleanupError) {
+      test.info().annotations.push({
+        type: 'image-import-cleanup',
+        description: `upload-cancel-cleanup-failed:${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      })
+    }
   }
+  if (primaryError && cleanupError) {
+    const primaryReason = primaryError instanceof Error ? primaryError.message : String(primaryError)
+    const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+    const combinedError = new Error(`${primaryReason}; upload-cancel-cleanup-failed:${cleanupReason}`)
+    combinedError.cause = primaryError
+    throw combinedError
+  }
+  if (primaryError) throw primaryError
+  if (cleanupError) throw cleanupError
 })
 
 test('platform administrator imports one requested vGPU guest image through the UI', async ({ page }) => {

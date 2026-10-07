@@ -22,6 +22,20 @@ OJ 程序评测使用默认 OCI 运行时、Landlock ABI 3 和 `hostUsers: false
 
 GPU 需要已有设备插件或 KubeVirt mediated device 配置。目录声明的模式和实际资源名称必须匹配；容器时间片申请一个共享份额，不能视为整卡。VM vGPU 必须使用已配置规格。无匹配设备、容量信息过期或设备释放未确认时，不自动降级或归还可分配容量。
 
+## Identity foundation reconcile
+
+`91-identity-foundation.yml` 会创建一个幂等的 `identity-provision-*` Kubernetes Job，完整的 Keycloak 客户端和角色 reconcile 最长运行 30 分钟；Ansible 的等待命令保留额外 5 分钟观察余量。部署期间可从 Job 列表取得本次生成的准确名称，再查询状态、日志和事件：
+
+```sh
+kubectl -n keycloak-system get jobs \
+  -l app.kubernetes.io/part-of=labweaver-identity -o wide
+kubectl -n keycloak-system get job identity-provision-<run-suffix> -o yaml
+kubectl -n keycloak-system logs job/identity-provision-<run-suffix> -c provision --follow
+kubectl -n keycloak-system describe job identity-provision-<run-suffix>
+```
+
+如果 Job 进入 `Failed` 或 `DeadlineExceeded`，先从 `describe` 和 `logs` 确认失败原因，再按原部署入口使用新的唯一 `LABWEAVER_RUN_ID`（保留 `infra-` 前缀）修复配置后重跑；不要手工创建同名 Job 或修改其 deadline。
+
 ## GPU 设备插件与 vGPU
 
 `80-install-addons.yml` 的 `gpu_device_plugin` 角色默认关闭，启用时必须显式给出互不重叠的节点集合。独占节点暴露 `nvidia.com/gpu`；共享节点使用 NVIDIA time-slicing，并在 `renameByDefault` 下暴露 `nvidia.com/gpu.shared`。角色使用 `runtimeClassName: nvidia`、只读 `/dev` 与 PCI sysfs，并把 termination log 写入 Pod 可写的 `emptyDir`，因此不会因 `/dev/termination-log` 的只读 hostPath 失败。CDI 模式同时把节点驱动根只读挂载到 `/driver-root`，并把 `/var/run/cdi` 作为可写 hostPath；宿主机直接安装驱动时设置 `gpu_device_plugin_driver_root=/`，driver-container 布局使用 `/run/nvidia/driver`。不要把同一节点放进两个集合。
