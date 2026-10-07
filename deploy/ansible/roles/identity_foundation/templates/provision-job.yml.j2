@@ -101,10 +101,10 @@ spec:
               target_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ assignment.target }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
               test "$(printf '%s\n' "$target_id" | wc -l)" -eq 1
               test -n "$target_id"
-{% for role in assignment.roles %}
               caller_id="$("${kcadm[@]}" get clients -r "{{ identity_realm }}" -q clientId="{{ assignment.caller }}" --fields id --format csv --noquotes | sed '/^[[:space:]]*$/d')"
               test "$(printf '%s\n' "$caller_id" | wc -l)" -eq 1
               test -n "$caller_id"
+{% for role in assignment.roles %}
               if ! "${kcadm[@]}" get "clients/$target_id/roles/{{ role }}" -r "{{ identity_realm }}" >/dev/null 2>&1; then
                 "${kcadm[@]}" create "clients/$target_id/roles" -r "{{ identity_realm }}" -s name={{ role }} -s clientRole=true -s composite=false
               fi
@@ -160,5 +160,5 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ client.secret_name }}, key: client-secret}}
 {% endfor %}
 {% endif %}
-          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+          resources: {requests: {cpu: 250m, memory: 128Mi}, limits: {cpu: "2", memory: 512Mi}}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
