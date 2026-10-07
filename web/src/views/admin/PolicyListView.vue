@@ -430,7 +430,7 @@ watch(() => projects.selectedProjectId, (projectId) => {
 
 watch(selectedProjectId, () => {
   void loadPolicyContext()
-})
+}, { immediate: true })
 </script>
 
 <style scoped>

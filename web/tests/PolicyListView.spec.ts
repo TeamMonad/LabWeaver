@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { defineComponent, onMounted } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import PolicyListView from '@/views/admin/PolicyListView.vue'
+import { useProjects } from '@/composables/useProjects'
 import {
   createProjectLlmPolicy,
   getActiveProjectLlmPolicy,
@@ -59,7 +61,7 @@ describe('PolicyListView', () => {
     vi.mocked(getProjectLlmPolicyOptions).mockResolvedValue({ data: options as never, error: undefined as never })
   })
 
-  async function mountView() {
+  async function mountView(path = '/researcher/ai-policy?projectId=project-1') {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -67,10 +69,29 @@ describe('PolicyListView', () => {
         { path: '/admin/policies', component: PolicyListView },
       ],
     })
-    await router.push('/researcher/ai-policy?projectId=project-1')
+    await router.push(path)
     await router.isReady()
     const wrapper = mount(PolicyListView, { global: { plugins: [router] } })
     return { router, wrapper }
+  }
+
+  async function preloadProjectContext() {
+    let resolveLoaded!: () => void
+    let projectStore!: ReturnType<typeof useProjects>
+    const loaded = new Promise<void>((resolve) => { resolveLoaded = resolve })
+    const loader = mount(defineComponent({
+      setup() {
+        projectStore = useProjects()
+        onMounted(async () => {
+          await projectStore.load()
+          resolveLoaded()
+        })
+        return () => null
+      },
+    }))
+    await loaded
+    loader.unmount()
+    return projectStore
   }
 
   it('explains the missing policy and saves a first policy with an idempotency key', async () => {
@@ -111,5 +132,25 @@ describe('PolicyListView', () => {
     })
     await wrapper.find('button[aria-label="刷新项目 AI 设置"]').trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('当前账号没有修改这个项目 AI 设置的权限'))
+  })
+
+  it('loads the selected private work on the admin route and keeps its policy scope denied', async () => {
+    const privateWorkProject = { ...project, id: 'private-work', name: 'Private Work' }
+    vi.mocked(listProjects).mockResolvedValue({ data: [privateWorkProject] as never, error: undefined as never })
+    vi.mocked(getProjectLlmPolicyOptions).mockResolvedValue({
+      data: undefined as never,
+      error: { diagnosticCode: 'LW_AUTH_SCOPE_DENIED', detail: 'denied', retryable: false } as never,
+    })
+
+    const projectStore = await preloadProjectContext()
+    expect(projectStore.projects).toMatchObject({ kind: 'success', data: [privateWorkProject] })
+    expect(projectStore.selectedProjectId).toBe('private-work')
+
+    const { wrapper } = await mountView('/admin/policies')
+    await vi.waitFor(() => expect(getProjectLlmPolicyOptions).toHaveBeenCalledWith({ path: { projectId: 'private-work' } }))
+
+    expect(wrapper.text()).toContain('当前账号没有修改这个项目 AI 设置的权限')
+    expect(wrapper.find('[data-testid="policy-form"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('选择一个项目')
   })
 })
