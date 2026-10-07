@@ -4,7 +4,11 @@ import {
   approveResourceRequestByUi,
   requestProjectResourceByUi,
 } from '../support/real-resource.mjs'
-import { cleanupWorkResources } from '../support/real-work.mjs'
+import {
+  cleanupWorkResources,
+  readResourceRates,
+  waitForSettledWorkUsageCharges,
+} from '../support/real-work.mjs'
 import { createRealWorkSshIdentity, readRealWorkVmLicenseStatus, runRealWorkVmCudaProbe } from '../support/real-work-ssh.mjs'
 import { addSshPublicKeyByUi, deleteSshPublicKeyByUi, issueEnvironmentSshAccessGrantByUi } from '../support/ssh-access.mjs'
 import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
@@ -394,18 +398,6 @@ async function readProjectCharges(request) {
   return charges
 }
 
-async function assertPositiveGpuCharge(request, priorChargeIds) {
-  // Public charges expose usageRecordId but no Lease identity. This assertion
-  // verifies a new positive project charge, not its attribution to a Lease.
-  await expect.poll(async () => {
-    const charges = await readProjectCharges(request)
-    return charges.some((charge) => !priorChargeIds.has(charge.id) && charge.projectId === INPUT.projectId
-      && charge.settlement === 'settled' && Number(charge.total?.amount) > 0
-      && charge.lines?.some((line) => line.unit === 'gpu_unit_second'
-        && line.quantity > 0 && Number(line.amount?.amount) > 0))
-  }, { timeout: 300_000, intervals: [1000, 2000, 5000] }).toBe(true)
-}
-
 test('platform administrator enforces GPU capacity and admits the waiting request after release', async ({ page, browser, baseURL }) => {
   test.setTimeout(1_800_000)
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
@@ -419,9 +411,12 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
   let sshIdentity = null
   let sshKey = null
   let priorChargeIds = new Set()
+  let gpuRate = null
+  let selectedGpuEntry = null
   try {
     const ownerId = await readActorId(studentPage.request)
     const { entry, entries } = await readActiveGpuCatalogEntry(studentPage.request, INPUT.class)
+    selectedGpuEntry = entry
     const release = await readCompatibleWorkRelease(studentPage.request, entry)
     if (release.runtimeKind === 'virtual_machine') {
       sshIdentity = await createRealWorkSshIdentity()
@@ -430,6 +425,23 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
     const globalState = await readGlobalResourceState(page.request)
     assertAllocationBindingIdle(globalState, entries, entry)
     priorChargeIds = new Set((await readProjectCharges(page.request)).map((charge) => charge.id))
+    const now = Date.now()
+    const activeGpuRates = (await readResourceRates(page, 'LW_GPU_CAPACITY_RATES_READ_FAILED')).filter((rate) => {
+      const effectiveFrom = Date.parse(rate?.effectiveFrom)
+      const effectiveUntil = rate?.effectiveUntil == null ? null : Date.parse(rate.effectiveUntil)
+      return rate?.unit === 'gpu_unit_second'
+        && rate.gpuClass === entry.class
+        && rate.gpuMode === entry.mode
+        && Number.isSafeInteger(rate.unitQuantity)
+        && rate.unitQuantity > 0
+        && Number.isFinite(effectiveFrom)
+        && effectiveFrom <= now
+        && (effectiveUntil === null || (Number.isFinite(effectiveUntil) && effectiveUntil > now))
+    })
+    if (activeGpuRates.length !== 1) {
+      throw new Error(`LW_GPU_CAPACITY_ACTIVE_RATE_AMBIGUOUS:${entry.class}:${entry.mode}:${activeGpuRates.length}`)
+    }
+    gpuRate = activeGpuRates[0]
 
     if (entry.capacityUnits > MAX_APPROVED_REQUESTS) {
       throw new Error(`LW_GPU_CAPACITY_SCENARIO_REQUEST_LIMIT_EXCEEDED:${entry.class}:${entry.capacityUnits}:${MAX_APPROVED_REQUESTS}`)
@@ -495,7 +507,12 @@ test('platform administrator enforces GPU capacity and admits the waiting reques
   }
   if (!primaryError && !cleanupError) {
     try {
-      await assertPositiveGpuCharge(page.request, priorChargeIds)
+      await waitForSettledWorkUsageCharges(browser, baseURL, {
+        projectId: INPUT.projectId,
+        leases: ownedLeases,
+        baselineChargeIds: priorChargeIds,
+        gpu: { class: selectedGpuEntry.class, mode: selectedGpuEntry.mode, rate: gpuRate },
+      })
     } catch (error) {
       primaryError = error
     }

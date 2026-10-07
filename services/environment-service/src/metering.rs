@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
 use contracts::environment::{
     EnvironmentInstance, EnvironmentLeaseAuthorization, ObservedEnvironmentState,
-    ReleaseEnvironmentGpuAllocationRequest, ReleaseEnvironmentGpuAllocationResponse,
-    ResolveEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationResponse,
+    ReleaseEnvironmentResourceReservationRequest, ReleaseEnvironmentResourceReservationResponse,
+    ResolveEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationResponse,
 };
 use contracts::http::RecordResourceUsageRequest;
 use contracts::resource::{
@@ -65,12 +65,19 @@ struct MeteringState {
     project_id: contracts::ProjectId,
     course_id: Option<contracts::CourseId>,
     owner_actor_id: contracts::ActorId,
-    request_id: ResourceRequestId,
-    lease_id: contracts::LeaseId,
-    lease_revision: contracts::Revision,
-    capacity_binding: String,
+    target: contracts::resource::ResourceUsageTarget,
+    #[serde(default)]
+    request_id: Option<ResourceRequestId>,
+    #[serde(default)]
+    lease_id: Option<contracts::LeaseId>,
+    #[serde(default)]
+    lease_revision: Option<contracts::Revision>,
+    #[serde(default)]
+    capacity_binding: Option<String>,
     approved_resources: contracts::resource::WorkloadResources,
+    #[serde(default)]
     gpu_allocation: Option<contracts::resource::GpuAllocation>,
+    #[serde(default)]
     compute_started_at: Option<UtcTimestamp>,
     /// Start of a compute interval whose end is unknown after a failed stop or cleanup.
     ///
@@ -79,10 +86,12 @@ struct MeteringState {
     /// rows written before this field existed.
     #[serde(default)]
     compute_unknown_started_at: Option<UtcTimestamp>,
+    #[serde(default)]
     storage_started_at: Option<UtcTimestamp>,
     /// Whether the active storage interval has been confirmed by a successful provider
     /// observation. An interval created while cleanup is uncertain remains explicitly unknown
     /// until a later Ready observation confirms a new storage boundary.
+    #[serde(default)]
     storage_known: bool,
 }
 
@@ -107,12 +116,48 @@ impl MeteringState {
             project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
-            request_id: authorization.resource_request_id,
-            lease_id,
-            lease_revision: authorization.lease_revision,
-            capacity_binding,
+            target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id: authorization.resource_request_id,
+                lease_id: Some(lease_id),
+            },
+            request_id: Some(authorization.resource_request_id),
+            lease_id: Some(lease_id),
+            lease_revision: Some(authorization.lease_revision),
+            capacity_binding: Some(capacity_binding),
             approved_resources: authorization.approved_resources.clone(),
             gpu_allocation: authorization.gpu_allocation.clone(),
+            compute_started_at: None,
+            compute_unknown_started_at: None,
+            storage_started_at: None,
+            storage_known: false,
+        })
+    }
+
+    fn from_experiment(instance: &EnvironmentInstance) -> Result<Self, EnvironmentStoreError> {
+        instance
+            .approved_resources
+            .validate()
+            .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        if let Some(allocation) = &instance.gpu_allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        }
+        Ok(Self {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            target: contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                environment_id: instance.id,
+            },
+            request_id: None,
+            lease_id: None,
+            lease_revision: None,
+            capacity_binding: None,
+            approved_resources: instance.approved_resources.clone(),
+            gpu_allocation: instance.gpu_allocation.clone(),
             compute_started_at: None,
             compute_unknown_started_at: None,
             storage_started_at: None,
@@ -129,13 +174,10 @@ impl MeteringState {
             || self.project_id != instance.project_id
             || self.course_id != instance.course_id
             || self.owner_actor_id != instance.owner_id
-            || self.lease_id
-                != instance
-                    .lease_id
-                    .ok_or(EnvironmentStoreError::MeteringInvalid)?
-            || Some(self.capacity_binding.as_str()) != instance.capacity_binding.as_deref()
-            || self.lease_revision.get() == 0
-            || self.capacity_binding.trim().is_empty()
+            || self.lease_id != instance.lease_id
+            || self.capacity_binding.as_deref() != instance.capacity_binding.as_deref()
+            || self.lease_revision.is_some_and(|value| value.get() == 0)
+            || self.capacity_binding.as_deref().is_some_and(str::is_empty)
             || self.storage_started_at.is_none() && self.compute_started_at.is_some()
             || self.compute_started_at.is_some() && self.compute_unknown_started_at.is_some()
             || self.storage_known && self.storage_started_at.is_none()
@@ -146,9 +188,46 @@ impl MeteringState {
         {
             return Err(EnvironmentStoreError::MeteringInvalid);
         }
+        match instance.class {
+            contracts::authoring::EnvironmentClass::Work => {
+                let authorization = instance
+                    .operation
+                    .lease_authorization
+                    .as_ref()
+                    .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
+                if !matches!(
+                    &self.target,
+                    contracts::resource::ResourceUsageTarget::ResourceRequest {
+                        request_id,
+                        lease_id: Some(target_lease_id),
+                    } if *request_id == authorization.resource_request_id
+                        && Some(*target_lease_id) == self.lease_id
+                        && Some(*target_lease_id) == instance.lease_id
+                ) {
+                    return Err(EnvironmentStoreError::MeteringInvalid);
+                }
+            }
+            contracts::authoring::EnvironmentClass::Experiment => {
+                if self.lease_id.is_some()
+                    || self.lease_revision.is_some()
+                    || self.capacity_binding.is_some()
+                    || !matches!(
+                        &self.target,
+                        contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                            environment_id,
+                        } if *environment_id == instance.id
+                    )
+                {
+                    return Err(EnvironmentStoreError::MeteringInvalid);
+                }
+            }
+        }
         self.approved_resources
             .validate()
             .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        if self.approved_resources != instance.approved_resources {
+            return Err(EnvironmentStoreError::MeteringInvalid);
+        }
         if let Some(allocation) = &self.gpu_allocation {
             allocation
                 .validate()
@@ -179,119 +258,6 @@ fn validate_authorization(
         .map_err(|_| EnvironmentStoreError::LeaseAuthorizationInvalid)
 }
 
-/// Durable Experiment GPU meter carried in the Environment schema.
-///
-/// Experiment environments own no Resource request or Lease, so the Work settlement path cannot
-/// deliver their usage. This meter still records real GPU unit seconds from actual Ready and
-/// stop/delete observations and retains them as pending. It never fabricates a zero while a GPU
-/// is attached, and it never reports settlement success. The billing-separation assessment owns
-/// the final Experiment settlement path.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ExperimentGpuMeteringState {
-    version: u8,
-    environment_id: contracts::EnvironmentId,
-    project_id: contracts::ProjectId,
-    course_id: Option<contracts::CourseId>,
-    owner_actor_id: contracts::ActorId,
-    gpu_allocation: GpuAllocation,
-    compute_started_at: Option<UtcTimestamp>,
-    /// Real GPU unit seconds observed for this environment and not yet settled.
-    pending_gpu_unit_seconds: u64,
-    /// Explicitly unsettled: no Resource claim exists to settle against.
-    #[serde(default)]
-    settlement_pending: bool,
-}
-
-impl ExperimentGpuMeteringState {
-    fn from_instance(instance: &EnvironmentInstance) -> Result<Self, EnvironmentStoreError> {
-        let allocation = instance
-            .gpu_allocation
-            .clone()
-            .ok_or(EnvironmentStoreError::MeteringInvalid)?;
-        allocation
-            .validate()
-            .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
-        Ok(Self {
-            version: 1,
-            environment_id: instance.id,
-            project_id: instance.project_id,
-            course_id: instance.course_id,
-            owner_actor_id: instance.owner_id,
-            gpu_allocation: allocation,
-            compute_started_at: None,
-            pending_gpu_unit_seconds: 0,
-            settlement_pending: true,
-        })
-    }
-
-    fn validate_against(
-        &self,
-        instance: &EnvironmentInstance,
-    ) -> Result<(), EnvironmentStoreError> {
-        if self.version != 1
-            || self.environment_id != instance.id
-            || self.project_id != instance.project_id
-            || self.course_id != instance.course_id
-            || self.owner_actor_id != instance.owner_id
-            || !self.settlement_pending
-            || instance
-                .gpu_allocation
-                .as_ref()
-                .is_some_and(|allocation| allocation != &self.gpu_allocation)
-        {
-            return Err(EnvironmentStoreError::MeteringInvalid);
-        }
-        self.gpu_allocation
-            .validate()
-            .map_err(|_| EnvironmentStoreError::MeteringInvalid)
-    }
-
-    fn accumulate(&mut self, occurred_at: UtcTimestamp) -> Result<(), EnvironmentStoreError> {
-        let Some(started_at) = self.compute_started_at.take() else {
-            return Ok(());
-        };
-        if occurred_at <= started_at {
-            return Err(EnvironmentStoreError::MeteringInvalid);
-        }
-        let milliseconds = elapsed_milliseconds(started_at, occurred_at)?;
-        let seconds = multiply_milliseconds(u64::from(self.gpu_allocation.count), milliseconds)?;
-        self.pending_gpu_unit_seconds = self.pending_gpu_unit_seconds.checked_add(seconds).ok_or(
-            EnvironmentStoreError::NumericOverflow("experiment gpu usage quantity"),
-        )?;
-        Ok(())
-    }
-}
-
-/// Applies actual Experiment GPU meter boundaries without touching the database.
-fn apply_experiment_gpu_transition(
-    state: &mut ExperimentGpuMeteringState,
-    previous: &EnvironmentInstance,
-    updated: &EnvironmentInstance,
-    occurred_at: UtcTimestamp,
-) -> Result<(), EnvironmentStoreError> {
-    state.validate_against(previous)?;
-    state.validate_against(updated)?;
-    let previous_state = previous.observed_state;
-    let updated_state = updated.observed_state;
-    if previous_state != ObservedEnvironmentState::Ready
-        && updated_state == ObservedEnvironmentState::Ready
-    {
-        state.compute_started_at = Some(ready_observation_at(previous, updated, occurred_at)?);
-    }
-    let closed = matches!(
-        updated_state,
-        ObservedEnvironmentState::Stopped | ObservedEnvironmentState::Deleted
-    );
-    // A Failed observation proves only that the stop boundary is uncertain. The GPU remains
-    // attached until a later Ready or a real Stopped/Deleted boundary, so no seconds are lost and
-    // none are invented.
-    if closed && previous_state != updated_state {
-        state.accumulate(occurred_at)?;
-    }
-    Ok(())
-}
-
 /// Creates the durable meter state in the same transaction as the aggregate.
 pub(crate) async fn initialize(
     transaction: &mut Transaction<'_, Postgres>,
@@ -302,10 +268,7 @@ pub(crate) async fn initialize(
             serde_json::to_value(MeteringState::from_authorization(instance)?)?
         }
         contracts::authoring::EnvironmentClass::Experiment => {
-            if instance.gpu_allocation.is_none() {
-                return Ok(());
-            }
-            serde_json::to_value(ExperimentGpuMeteringState::from_instance(instance)?)?
+            serde_json::to_value(MeteringState::from_experiment(instance)?)?
         }
     };
     sqlx::query(
@@ -319,47 +282,7 @@ pub(crate) async fn initialize(
     Ok(())
 }
 
-/// Records an Experiment GPU boundary and retains the real pending seconds.
-async fn record_experiment_gpu_transition(
-    transaction: &mut Transaction<'_, Postgres>,
-    previous: &EnvironmentInstance,
-    updated: &EnvironmentInstance,
-    occurred_at: UtcTimestamp,
-) -> Result<(), EnvironmentStoreError> {
-    let row = sqlx::query(
-        "SELECT contract FROM environment.resource_metering_state \
-         WHERE environment_id=$1 FOR UPDATE",
-    )
-    .bind(updated.id.as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    let Some(row) = row else {
-        return Ok(());
-    };
-    let mut state: ExperimentGpuMeteringState = serde_json::from_value(row.try_get("contract")?)?;
-    let before = state.pending_gpu_unit_seconds;
-    apply_experiment_gpu_transition(&mut state, previous, updated, occurred_at)?;
-    if state.pending_gpu_unit_seconds != before {
-        tracing::warn!(
-            event = "environment.experiment_gpu_meter.pending",
-            environment_id = %updated.id,
-            gpu_unit_seconds = state.pending_gpu_unit_seconds,
-            diagnostic_code = "LW_ENVIRONMENT_EXPERIMENT_GPU_SETTLEMENT_PENDING",
-            error_kind = "billing_separation",
-            retryable = false,
-        );
-    }
-    sqlx::query(
-        "UPDATE environment.resource_metering_state SET contract=$2 \
-         WHERE environment_id=$1",
-    )
-    .bind(updated.id.as_uuid())
-    .bind(serde_json::to_value(state)?)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
+/// Records Experiment CPU, memory, storage, and optional GPU boundaries.
 /// Records actual lifecycle observations and appends pending usage deliveries atomically with
 /// the Environment aggregate update.
 #[allow(
@@ -372,12 +295,6 @@ pub(crate) async fn record_transition(
     updated: &EnvironmentInstance,
     occurred_at: UtcTimestamp,
 ) -> Result<(), EnvironmentStoreError> {
-    if updated.class == contracts::authoring::EnvironmentClass::Experiment {
-        return record_experiment_gpu_transition(transaction, previous, updated, occurred_at).await;
-    }
-    if updated.class != contracts::authoring::EnvironmentClass::Work {
-        return Ok(());
-    }
     let row = sqlx::query(
         "SELECT contract FROM environment.resource_metering_state \
          WHERE environment_id=$1 FOR UPDATE",
@@ -452,6 +369,21 @@ pub(crate) async fn record_transition(
             },
         )?;
         enqueue_delivery(transaction, updated.id, request, occurred_at).await?;
+    }
+    if previous.observed_state != ObservedEnvironmentState::Stopped
+        && updated.observed_state == ObservedEnvironmentState::Stopped
+        && let Some((measured_from, measured_until)) =
+            compute_unknown_until(&mut state, occurred_at)
+    {
+        enqueue_compute_unknown(
+            transaction,
+            updated.id,
+            &state,
+            measured_from,
+            measured_until,
+            "environment stop closed an uncertain compute interval",
+        )
+        .await?;
     }
 
     // A failed cleanup is represented by the authoritative Failed observation. A later Deleted
@@ -785,12 +717,10 @@ fn usage_request(
     if measured_until <= measured_from {
         return Err(EnvironmentStoreError::MeteringInvalid);
     }
+    let target = state.target.clone();
     let request = RecordResourceUsageRequest {
-        project_id: state.project_id,
-        course_id: state.course_id,
         kind,
-        request_id: state.request_id,
-        lease_id: Some(state.lease_id),
+        target,
         source_event_id: EventId::new(),
         measured_from,
         measured_until,
@@ -1026,17 +956,17 @@ pub(crate) struct ResourceUsageClient {
 /// call behind this boundary also lets API integration tests use a deterministic Resource fake
 /// while retaining the real `PostgreSQL` and NATS paths around it.
 #[async_trait]
-pub trait ExperimentGpuAllocator: Send + Sync {
-    /// Resolves and reserves a Resource-authoritative GPU allocation.
-    async fn resolve_gpu_allocation(
+pub trait ExperimentResourceAllocator: Send + Sync {
+    /// Resolves and reserves a Resource-authoritative Environment resource reservation.
+    async fn resolve_resource_reservation(
         &self,
-        request: &ResolveEnvironmentGpuAllocationRequest,
-    ) -> Result<GpuAllocation, ResourceUsageClientError>;
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError>;
 
-    /// Releases a previously reserved GPU allocation.
-    async fn release_gpu_allocation(
+    /// Releases a previously reserved Environment resource reservation.
+    async fn release_resource_reservation(
         &self,
-        request: &ReleaseEnvironmentGpuAllocationRequest,
+        request: &ReleaseEnvironmentResourceReservationRequest,
     ) -> Result<bool, ResourceUsageClientError>;
 }
 
@@ -1068,7 +998,14 @@ impl ResourceUsageClient {
                 .map_err(|_| ResourceUsageClientError::Configuration)?;
         let audience = required(SERVICE_AUDIENCE)?;
         let scopes = parse_scopes(&required(SERVICE_SCOPES)?)?;
-        if !scopes.contains("resource.usage.record") {
+        if ![
+            "resource.usage.record",
+            "resource.environment.resolve",
+            "resource.environment.release",
+        ]
+        .iter()
+        .all(|scope| scopes.contains(*scope))
+        {
             return Err(ResourceUsageClientError::Configuration);
         }
         let token_config = ServiceTokenClientConfig::new(
@@ -1123,10 +1060,7 @@ impl ResourceUsageClient {
             .validate()
             .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
         if record.source_event_id != request.source_event_id
-            || record.project_id != request.project_id
-            || record.course_id != request.course_id
-            || record.request_id != request.request_id
-            || record.lease_id != request.lease_id
+            || record.target != request.target
             || record.kind != request.kind
             || record.measured_from != request.measured_from
             || record.measured_until != request.measured_until
@@ -1137,19 +1071,19 @@ impl ResourceUsageClient {
         Ok(())
     }
 
-    /// Resolves and reserves one Experiment GPU allocation through the Resource authority.
+    /// Resolves and reserves one Experiment resource reservation through the Resource authority.
     ///
     /// Resource selects the exact allocation binding, mode, and provider binding from its active
     /// catalog and current capacity observation. An unknown class, exhausted pool, or stale
     /// observation is surfaced as a rejection so the environment never renders a GPU it does not own.
-    pub(crate) async fn resolve_gpu_allocation(
+    pub(crate) async fn resolve_resource_reservation(
         &self,
-        request: &ResolveEnvironmentGpuAllocationRequest,
-    ) -> Result<GpuAllocation, ResourceUsageClientError> {
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
         let response = self
-            .post_json("internal/v1/environment-gpu-allocations", request)
+            .post_json("internal/v1/environment-resource-reservations", request)
             .await?;
-        let body: ResolveEnvironmentGpuAllocationResponse = response
+        let body: ResolveEnvironmentResourceReservationResponse = response
             .json()
             .await
             .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
@@ -1158,15 +1092,18 @@ impl ResourceUsageClient {
         Ok(body.allocation)
     }
 
-    /// Releases the durable Experiment GPU reservation through the Resource authority.
-    pub(crate) async fn release_gpu_allocation(
+    /// Releases the durable Experiment resource reservation through the Resource authority.
+    pub(crate) async fn release_resource_reservation(
         &self,
-        request: &ReleaseEnvironmentGpuAllocationRequest,
+        request: &ReleaseEnvironmentResourceReservationRequest,
     ) -> Result<bool, ResourceUsageClientError> {
         let response = self
-            .post_json("internal/v1/environment-gpu-allocations/release", request)
+            .post_json(
+                "internal/v1/environment-resource-reservations/release",
+                request,
+            )
             .await?;
-        let body: ReleaseEnvironmentGpuAllocationResponse = response
+        let body: ReleaseEnvironmentResourceReservationResponse = response
             .json()
             .await
             .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
@@ -1206,19 +1143,19 @@ impl ResourceUsageClient {
 }
 
 #[async_trait]
-impl ExperimentGpuAllocator for ResourceUsageClient {
-    async fn resolve_gpu_allocation(
+impl ExperimentResourceAllocator for ResourceUsageClient {
+    async fn resolve_resource_reservation(
         &self,
-        request: &ResolveEnvironmentGpuAllocationRequest,
-    ) -> Result<GpuAllocation, ResourceUsageClientError> {
-        Self::resolve_gpu_allocation(self, request).await
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
+        Self::resolve_resource_reservation(self, request).await
     }
 
-    async fn release_gpu_allocation(
+    async fn release_resource_reservation(
         &self,
-        request: &ReleaseEnvironmentGpuAllocationRequest,
+        request: &ReleaseEnvironmentResourceReservationRequest,
     ) -> Result<bool, ResourceUsageClientError> {
-        Self::release_gpu_allocation(self, request).await
+        Self::release_resource_reservation(self, request).await
     }
 }
 
@@ -1342,9 +1279,9 @@ impl ResourceUsageClientError {
 )]
 mod tests {
     use super::{
-        ExperimentGpuMeteringState, MeteringState, compute_unknown_boundary,
-        compute_unknown_recovery_boundary, compute_unknown_until, quantities, storage_quantities,
-        storage_ready_boundary, storage_unknown_segment,
+        MeteringState, compute_unknown_boundary, compute_unknown_recovery_boundary,
+        compute_unknown_until, quantities, storage_quantities, storage_ready_boundary,
+        storage_unknown_segment,
     };
     use contracts::resource::{GpuAllocation, GpuAllocationMode, WorkloadResources};
     use contracts::{
@@ -1373,10 +1310,14 @@ mod tests {
             project_id: ProjectId::new(),
             course_id: None,
             owner_actor_id: ActorId::new(),
-            request_id: ResourceRequestId::new(),
-            lease_id: LeaseId::new(),
-            lease_revision: Revision::new(1).expect("fixed revision"),
-            capacity_binding: "workspace".to_owned(),
+            target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id: ResourceRequestId::new(),
+                lease_id: Some(LeaseId::new()),
+            },
+            request_id: Some(ResourceRequestId::new()),
+            lease_id: Some(LeaseId::new()),
+            lease_revision: Some(Revision::new(1).expect("fixed revision")),
+            capacity_binding: Some("workspace".to_owned()),
             approved_resources: WorkloadResources {
                 cpu_millicores: 1,
                 memory_bytes: 1,
@@ -1532,38 +1473,6 @@ mod tests {
 
         let storage = storage_quantities(&state.approved_resources, ready, deletion)?;
         assert_eq!(storage.storage_byte_seconds, 20);
-        Ok(())
-    }
-
-    #[test]
-    fn experiment_gpu_meter_accumulates_real_seconds_and_stays_pending()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = ExperimentGpuMeteringState {
-            version: 1,
-            environment_id: EnvironmentId::new(),
-            project_id: ProjectId::new(),
-            course_id: None,
-            owner_actor_id: ActorId::new(),
-            gpu_allocation: GpuAllocation {
-                entry_id: GpuCatalogEntryId::new(),
-                class: "gpu".to_owned(),
-                count: 2,
-                mode: GpuAllocationMode::Exclusive,
-                provider_binding: "provider".to_owned(),
-                allocation_binding: "allocation".to_owned(),
-                catalog_revision: Revision::new(1)?,
-            },
-            compute_started_at: Some(timestamp_millis(0)),
-            pending_gpu_unit_seconds: 0,
-            settlement_pending: true,
-        };
-        state.accumulate(timestamp_millis(1_500))?;
-        assert_eq!(state.pending_gpu_unit_seconds, 3);
-        assert!(state.settlement_pending);
-        assert!(state.compute_started_at.is_none());
-        // A second close with no open interval must not invent or duplicate seconds.
-        state.accumulate(timestamp_millis(2_000))?;
-        assert_eq!(state.pending_gpu_unit_seconds, 3);
         Ok(())
     }
 

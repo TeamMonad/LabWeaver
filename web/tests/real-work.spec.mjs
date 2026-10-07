@@ -27,6 +27,7 @@ import {
   realWorkConfig,
   realWorkGpuConfig,
   realWorkVmConfig,
+  readProjectUsage,
   readResumablePublishedWork,
   selectPendingWorkTaskResourceRequest,
   selectSettledWorkUsageChargesForLease,
@@ -118,7 +119,14 @@ describe('Work usage and charge association', () => {
   const scope = { projectId: 'project', requestId: 'request', leaseId: 'lease' }
   const usage = (kind, overrides = {}) => ({
     id: `usage-${kind}`,
-    ...scope,
+    projectId: scope.projectId,
+    target: {
+      kind: 'resource_request',
+      requestId: scope.requestId,
+      leaseId: scope.leaseId,
+    },
+    measuredFrom: '2026-10-04T05:00:00.000Z',
+    measuredUntil: '2026-10-04T05:01:00.000Z',
     kind,
     settlement: 'settled',
     measurement: {
@@ -136,12 +144,27 @@ describe('Work usage and charge association', () => {
     adjustmentOf: null,
     settlement: 'settled',
     total: { amount: '0.000001', currency: 'USD' },
-    lines: [{
-      unit: kind === 'compute' ? 'cpu_millicore_second' : 'storage_byte_second',
-      quantity: 1,
-      unitQuantity: 1,
-      amount: { amount: '0.000001', currency: 'USD' },
-    }],
+    lines: kind === 'compute'
+      ? [
+          {
+            unit: 'cpu_millicore_second',
+            quantity: 10,
+            unitQuantity: 1,
+            amount: { amount: '0.000001', currency: 'USD' },
+          },
+          {
+            unit: 'memory_byte_second',
+            quantity: 20,
+            unitQuantity: 1,
+            amount: { amount: '0.000001', currency: 'USD' },
+          },
+        ]
+      : [{
+          unit: 'storage_byte_second',
+          quantity: 30,
+          unitQuantity: 1,
+          amount: { amount: '0.000001', currency: 'USD' },
+        }],
     ...overrides,
   })
 
@@ -184,17 +207,223 @@ describe('Work usage and charge association', () => {
     expect(result).toBeNull()
   })
 
-  it('does not match usage or charges from another request or lease', () => {
+  it.each([
+    ['unknown', { id: 'usage-extra-unknown', measurement: { state: 'unknown', reason: 'meter unavailable' } }],
+    ['pending', { id: 'usage-extra-pending', settlement: 'pending' }],
+  ])('blocks an extra same-lease %s usage record', (_state, overrides) => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage'), usage('compute', overrides)],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('blocks a usage record with a missing measured interval', () => {
     const result = selectSettledWorkUsageChargesForLease({
       ...scope,
       usageRecords: [
-        usage('compute', { requestId: 'other-request' }),
-        usage('storage', { leaseId: 'other-lease' }),
+        usage('compute', { measuredUntil: undefined }),
+        usage('storage'),
       ],
       charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
       baselineChargeIds: new Set(),
     })
     expect(result).toBeNull()
+  })
+
+  it('requires every positive compute dimension to have matching charge quantity', () => {
+    const computeCharge = charge('usage-compute', 'compute', {
+      lines: [{
+        unit: 'cpu_millicore_second',
+        quantity: 10,
+        unitQuantity: 1,
+        amount: { amount: '0.000001', currency: 'USD' },
+      }],
+    })
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage')],
+      charges: [computeCharge, charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('blocks a known usage with a missing memory quantity', () => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [
+        usage('compute', {
+          measurement: {
+            state: 'known',
+            quantities: { cpuMillicoreSeconds: 10, storageByteSeconds: 0, gpuUnitSeconds: 0 },
+          },
+        }),
+        usage('storage'),
+      ],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('sums segmented charge lines for every positive usage dimension', () => {
+    const computeCharge = charge('usage-compute', 'compute', {
+      lines: [
+        { unit: 'cpu_millicore_second', quantity: 4, unitQuantity: 1, amount: { amount: '0.000000', currency: 'USD' } },
+        { unit: 'cpu_millicore_second', quantity: 6, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+        { unit: 'memory_byte_second', quantity: 10, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+        { unit: 'memory_byte_second', quantity: 10, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+      ],
+    })
+    const storageCharge = charge('usage-storage', 'storage', {
+      lines: [
+        { unit: 'storage_byte_second', quantity: 10, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+        { unit: 'storage_byte_second', quantity: 20, unitQuantity: 1, amount: { amount: '0.000001', currency: 'USD' } },
+      ],
+    })
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage')],
+      charges: [computeCharge, storageCharge],
+      baselineChargeIds: new Set(),
+    })
+    expect(result?.map(({ usage: item }) => item.kind)).toEqual(['compute', 'storage'])
+  })
+
+  it.each([
+    ['storage', {
+      unit: 'storage_byte_second',
+      quantity: 1,
+      unitQuantity: 1,
+      amount: { amount: '0.000001', currency: 'USD' },
+    }],
+    ['zero-gpu', {
+      unit: 'gpu_unit_second',
+      quantity: 1,
+      unitQuantity: 1,
+      amount: { amount: '0.000001', currency: 'USD' },
+    }],
+  ])('rejects an extra positive %s charge line outside the usage dimensions', (_kind, extraLine) => {
+    const baseComputeCharge = charge('usage-compute', 'compute')
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [usage('compute'), usage('storage')],
+      charges: [
+        { ...baseComputeCharge, lines: [...baseComputeCharge.lines, extraLine] },
+        charge('usage-storage', 'storage'),
+      ],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('does not match usage or charges from another request or lease', () => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [
+        usage('compute', { target: { kind: 'resource_request', requestId: 'other-request', leaseId: scope.leaseId } }),
+        usage('storage', { target: { kind: 'resource_request', requestId: scope.requestId, leaseId: 'other-lease' } }),
+      ],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('requires the resource request target instead of legacy top-level identities or experiment targets', () => {
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [
+        {
+          ...usage('compute'),
+          target: undefined,
+          requestId: scope.requestId,
+          leaseId: scope.leaseId,
+        },
+        usage('storage', { target: { kind: 'experiment_environment', environmentId: 'environment-1' } }),
+      ],
+      charges: [charge('usage-compute', 'compute'), charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+    })
+    expect(result).toBeNull()
+  })
+
+  it('reads every project usage page before matching a lease', async () => {
+    const pages = new Map([
+      [1, { items: [{ id: 'usage-1' }], page: 1, pageSize: 2, hasMore: true }],
+      [2, { items: [{ id: 'usage-2' }], page: 2, pageSize: 2, hasMore: false }],
+    ])
+    const paths = []
+    const request = {
+      get: vi.fn(async (path) => {
+        paths.push(path)
+        const page = Number(new URL(`https://portal.invalid${path}`).searchParams.get('page'))
+        return {
+          ok: () => true,
+          status: () => 200,
+          text: async () => JSON.stringify(pages.get(page)),
+        }
+      }),
+    }
+    await expect(readProjectUsage(request, 'project', { pageSize: 2 })).resolves.toEqual([
+      { id: 'usage-1' },
+      { id: 'usage-2' },
+    ])
+    expect(paths).toEqual([
+      '/api/v1/projects/project/usage?page=1&pageSize=2',
+      '/api/v1/projects/project/usage?page=2&pageSize=2',
+    ])
+  })
+
+  it('requires the settled GPU line to use the requested class, mode, revision and unit price', () => {
+    const gpuRate = {
+      id: 'gpu-rate',
+      revision: 3,
+      unit: 'gpu_unit_second',
+      unitQuantity: 1,
+      gpuClass: 'nvidia-a100',
+      gpuMode: 'exclusive',
+      unitPrice: { amount: '0.010000', currency: 'USD' },
+    }
+    const gpuUsage = usage('compute', {
+      measurement: {
+        state: 'known',
+        quantities: { cpuMillicoreSeconds: 0, memoryByteSeconds: 0, gpuUnitSeconds: 10, storageByteSeconds: 0 },
+      },
+    })
+    const gpuCharge = charge('usage-compute', 'compute', {
+      lines: [{
+        rateId: gpuRate.id,
+        rateRevision: gpuRate.revision,
+        unit: 'gpu_unit_second',
+        quantity: 10,
+        unitQuantity: gpuRate.unitQuantity,
+        unitPrice: gpuRate.unitPrice,
+        amount: { amount: '0.100000', currency: 'USD' },
+      }],
+    })
+    const result = selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [gpuUsage, usage('storage')],
+      charges: [gpuCharge, charge('usage-storage', 'storage')],
+      baselineChargeIds: new Set(),
+      gpu: { class: gpuRate.gpuClass, mode: gpuRate.gpuMode, rate: gpuRate },
+    })
+    expect(result?.map(({ usage: item }) => item.kind)).toEqual(['compute', 'storage'])
+
+    expect(selectSettledWorkUsageChargesForLease({
+      ...scope,
+      usageRecords: [gpuUsage, usage('storage')],
+      charges: [
+        { ...gpuCharge, lines: [{ ...gpuCharge.lines[0], rateRevision: 2 }] },
+        charge('usage-storage', 'storage'),
+      ],
+      baselineChargeIds: new Set(),
+      gpu: { class: gpuRate.gpuClass, mode: gpuRate.gpuMode, rate: gpuRate },
+    })).toBeNull()
   })
 })
 

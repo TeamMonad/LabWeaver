@@ -12,8 +12,9 @@ use contracts::authoring::{PackageFile, ProblemPackage, RuntimeKind};
 use contracts::{
     ActorId, AgentRunId, ApprovalId, ArtifactId, ArtifactRef, CandidateId, CourseId,
     DiagnosticCode, EnvironmentId, EvaluationRunId, EvaluationStepRunId, EventId,
-    FrozenSubmissionId, PolicyId, ProblemPackageId, ProjectId, ReleaseId, ResourceRequestId,
-    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, TaskRunId, UtcTimestamp,
+    FrozenSubmissionId, LeaseId, PolicyId, ProblemPackageId, ProjectId, ReleaseId,
+    ResourceRequestId, RetentionClass, RetentionDisposition, RetentionSnapshot, Revision,
+    TaskRunId, UtcTimestamp,
     evaluation::{
         EvaluationExecutionBinding, EvaluationRelease, EvaluationRunIdentity, EvaluationRunState,
         EvaluationRuntimeIdentity, EvaluationSpec, EvaluationStepCompletion, EvaluationStepRole,
@@ -24,7 +25,7 @@ use contracts::{
         InternalEvaluationRunMutationRequest, InternalPublishEvaluationReleaseRequest,
         InternalWithdrawEvaluationReleaseRequest, RecordResourceUsageRequest,
     },
-    resource::{ResourceUsageKind, UsageMeasurement},
+    resource::{ResourceUsageKind, ResourceUsageTarget, UsageMeasurement},
     submission::{FrozenEnvironmentIdentity, FrozenFile, FrozenSubmission},
 };
 use evaluation_service::{
@@ -835,6 +836,143 @@ async fn resource_meter_delivery_requires_exact_step_attempt_identity()
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "keep the old-shape migration and pending/delivered replay in one PostgreSQL case"
+)]
+async fn legacy_resource_delivery_requests_migrate_for_pending_and_delivered_replay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let _run = fixture
+        .create_seeded_run("trace-resource-meter-migration")
+        .await?;
+    let lease = fixture
+        .store
+        .claim_next_step("worker-resource-meter-migration", Duration::from_secs(30))
+        .await?
+        .ok_or("step must be claimable")?;
+    let now = fixture.now().await?.get();
+    let measured_from = now - time::Duration::minutes(1);
+    let pending = RecordResourceUsageRequest {
+        kind: ResourceUsageKind::Compute,
+        target: ResourceUsageTarget::ResourceRequest {
+            request_id: ResourceRequestId::new(),
+            lease_id: Some(LeaseId::new()),
+        },
+        source_event_id: EventId::new(),
+        measured_from: UtcTimestamp::from_utc(measured_from)?,
+        measured_until: UtcTimestamp::from_utc(now)?,
+        measurement: UsageMeasurement::Unknown {
+            reason: "legacy pending delivery".to_owned(),
+        },
+    };
+    let delivered = RecordResourceUsageRequest {
+        kind: ResourceUsageKind::Storage,
+        target: ResourceUsageTarget::ResourceRequest {
+            request_id: ResourceRequestId::new(),
+            lease_id: Some(LeaseId::new()),
+        },
+        source_event_id: EventId::new(),
+        measured_from: UtcTimestamp::from_utc(measured_from)?,
+        measured_until: UtcTimestamp::from_utc(now)?,
+        measurement: UsageMeasurement::Unknown {
+            reason: "legacy delivered delivery".to_owned(),
+        },
+    };
+
+    let legacy_request = |request: &RecordResourceUsageRequest| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(request)?;
+        let target = value
+            .as_object_mut()
+            .and_then(|object| object.remove("target"))
+            .ok_or("usage target missing")?;
+        let object = value.as_object_mut().ok_or("usage request is not an object")?;
+        object.insert("projectId".to_owned(), serde_json::json!(fixture.project_id));
+        object.insert("courseId".to_owned(), serde_json::json!(fixture.course_id));
+        object.insert("requestId".to_owned(), target["requestId"].clone());
+        object.insert("leaseId".to_owned(), target["leaseId"].clone());
+        Ok(value)
+    };
+    let legacy_pending = legacy_request(&pending)?;
+    let legacy_delivered = legacy_request(&delivered)?;
+    for (delivery_id, request, state, delivered_at) in [
+        (uuid::Uuid::now_v7(), legacy_pending, "pending", None),
+        (
+            uuid::Uuid::now_v7(),
+            legacy_delivered,
+            "delivered",
+            Some(now),
+        ),
+    ] {
+        let (source_event_id, kind) = if state == "pending" {
+            (pending.source_event_id, "compute")
+        } else {
+            (delivered.source_event_id, "storage")
+        };
+        sqlx::query(
+            "INSERT INTO evaluation.resource_meter_deliveries
+             (delivery_id,step_run_id,attempt,task_run_id,source_event_id,kind,
+              measured_from,measured_until,request,state,next_attempt_at,delivered_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$8,$11)",
+        )
+        .bind(delivery_id)
+        .bind(lease.step_run_id.as_uuid())
+        .bind(i32::try_from(lease.attempt)?)
+        .bind(lease.task_run_id.as_uuid())
+        .bind(source_event_id.as_uuid())
+        .bind(kind)
+        .bind(measured_from)
+        .bind(now)
+        .bind(request)
+        .bind(state)
+        .bind(delivered_at)
+        .execute(&fixture.pool)
+        .await?;
+    }
+
+    let migration =
+        include_str!("../../../migrations/evaluation/0010_unified_usage_request_target.sql");
+    sqlx::raw_sql(migration).execute(&fixture.pool).await?;
+    sqlx::raw_sql(migration).execute(&fixture.pool).await?;
+
+    let claimed = fixture
+        .store
+        .claim_resource_meter_delivery()
+        .await?
+        .ok_or("migrated pending delivery was not claimable")?;
+    assert_eq!(claimed.source_event_id, pending.source_event_id);
+    assert_eq!(claimed.request, pending);
+    fixture
+        .store
+        .mark_resource_meter_delivery_delivered(claimed.delivery_id, claimed.source_event_id)
+        .await?;
+
+    let persisted: serde_json::Value = sqlx::query_scalar(
+        "SELECT request FROM evaluation.resource_meter_deliveries WHERE source_event_id=$1",
+    )
+    .bind(delivered.source_event_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        serde_json::from_value::<RecordResourceUsageRequest>(persisted)?,
+        delivered
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM evaluation.resource_meter_deliveries
+         WHERE source_event_id IN ($1,$2)",
+    )
+    .bind(pending.source_event_id.as_uuid())
+    .bind(delivered.source_event_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        rows, 2,
+        "replaying the same source events must not duplicate rows"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "the integration case exercises all advisory checkpoint timing boundaries"
 )]
 async fn llm_review_checkpoint_accepts_equal_or_prestart_terminal_time_and_rejects_reverse()
@@ -955,11 +1093,11 @@ async fn llm_review_checkpoint_accepts_equal_or_prestart_terminal_time_and_rejec
         EvaluationControlStoreError::ContractInvalid
     ));
     let usage = RecordResourceUsageRequest {
-        project_id: fixture.project_id,
-        course_id: Some(fixture.course_id),
         kind: ResourceUsageKind::Compute,
-        request_id: ResourceRequestId::new(),
-        lease_id: None,
+        target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+            request_id: ResourceRequestId::new(),
+            lease_id: None,
+        },
         source_event_id: EventId::new(),
         measured_from: UtcTimestamp::from_utc(finished.get() - time::Duration::milliseconds(1))?,
         measured_until: finished,

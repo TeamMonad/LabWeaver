@@ -276,8 +276,31 @@ describe('EnvironmentEntryView', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
     expect(wrapper.text()).toContain('运行中')
     expect(wrapper.text()).toContain('启动')
+    expect(wrapper.get('#lifecycle-action-hint').text()).toContain('重启会中断当前运行')
     await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
     expect(wrapper.text()).toContain('ssh')
+  })
+
+  it('explains retained storage and resource reservations while stopped', async () => {
+    mockEnvironmentInstance({
+      desiredState: 'stopped',
+      observedState: 'stopped',
+      operation: { ...mockOperation('succeeded', { kind: 'stop' }) },
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
+    const hint = wrapper.get('#lifecycle-action-hint').text()
+    expect(hint).toContain('计算用量已停止计量')
+    expect(hint).toContain('工作目录和磁盘仍保留并继续按存储费率核算')
+    expect(hint).toContain('GPU 预留和 Work 资源租约会保留')
+    expect(hint).toContain('删除环境并完成回收后才归还容量')
+
+    await wrapper.find('button[aria-label="删除"]').trigger('click')
+    const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
+    expect(dialog.props('description')).toContain('工作目录及关联容器存储或虚拟机磁盘')
+    expect(dialog.props('description')).toContain('操作不可恢复')
+    expect(dialog.props('description')).toContain('项目材料、已冻结提交和评测记录不在本环境删除范围内')
   })
 
   it('keeps teacher console navigation in the teacher workbench and omits student submission controls', async () => {
@@ -371,6 +394,7 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.findAll('button').some((button) => button.text() === '重试失败的操作')).toBe(false)
     for (const action of ['启动', '重启']) expect((wrapper.find(`button[aria-label="${action}"]`).element as HTMLButtonElement).disabled).toBe(true)
     await reclaim.trigger('click')
+    expect(wrapper.findComponent({ name: 'ConfirmDialog' }).props('description')).toContain('删除仍存在的工作目录及关联容器存储或虚拟机磁盘')
     wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
     await vi.waitFor(() => expect(deleteEnvironment).toHaveBeenCalledTimes(1))
     expect(deleteEnvironment).toHaveBeenCalledWith({

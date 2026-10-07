@@ -35,13 +35,21 @@
             v-for="project in projectOptions"
             :key="project.id"
             :value="project.id"
-          >{{ project.name }} · {{ project.id }}</option>
+          >{{ project.name }}</option>
         </select>
       </label>
       <span
         v-if="selectedProject"
         class="project-scope"
-      >{{ selectedProject.courseId ? `课程 ${selectedProject.courseId}` : '独立科研项目' }}</span>
+      >{{ selectedProject.courseId ? '课程项目' : '独立科研项目' }}</span>
+      <details
+        v-if="selectedProject"
+        class="advanced-details project-id-details"
+      >
+        <summary>查看项目内部标识</summary>
+        <small>项目 ID：{{ selectedProject.id }}</small>
+        <small v-if="selectedProject.courseId">课程 ID：{{ selectedProject.courseId }}</small>
+      </details>
     </section>
 
     <DiagnosticBanner
@@ -104,7 +112,7 @@
       </div>
       <AsyncStateView
         :state="rates.rates"
-        empty-text="还没有资源费率。创建费率后，匹配的 GPU 目录项才能用于资源申请。"
+        empty-text="还没有资源费率。未配置费率的用量会保留待计价状态；资源申请仍按目录、容量和审批规则处理。"
         @retry="rates.load"
       >
         <template #success="{ data }">
@@ -324,6 +332,112 @@
       class="finance-layout"
     >
       <section
+        class="usage-card md-card"
+        aria-labelledby="usage-heading"
+      >
+        <div class="section-heading">
+          <div>
+            <h3 id="usage-heading">
+              项目用量
+            </h3>
+            <p>按环境和资源申请显示计算、存储区间及服务端实际测量结果。待结算或无法测量的记录会保留原状态，不按零费用处理。</p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="刷新项目用量"
+            :disabled="finance.acting !== null"
+            @click="finance.loadUsagePage(finance.usagePage)"
+          >
+            <SvgIcon
+              name="refresh"
+              size="sm"
+              aria-hidden="true"
+            />
+          </button>
+        </div>
+        <DiagnosticBanner
+          v-if="finance.usageContext.kind === 'error'"
+          :code="finance.usageContext.diagnostic.code"
+          :message="finance.usageContext.diagnostic.message"
+          :retryable="finance.usageContext.diagnostic.retryable"
+          @retry="finance.loadUsagePage(finance.usagePage)"
+        />
+        <AsyncStateView
+          :state="finance.usage"
+          empty-text="该项目暂无用量记录。"
+          @retry="finance.loadUsagePage(finance.usagePage)"
+        >
+          <template #success="{ data }">
+            <p
+              v-if="data.items.length === 0"
+              class="usage-empty"
+              role="status"
+            >
+              {{ usageEmptyText(data) }}
+            </p>
+            <ul
+              v-else
+              class="usage-list"
+              aria-label="项目用量列表"
+            >
+              <li
+                v-for="record in data.items"
+                :key="record.id"
+                class="usage-row"
+              >
+                <div class="usage-main">
+                  <strong>{{ usageTargetLabel(record) }}</strong>
+                  <small>{{ usageKindLabel(record.kind) }} · {{ usageIntervalLabel(record) }}</small>
+                  <small>状态：{{ settlementLabel(record.settlement) }}</small>
+                  <span
+                    v-if="record.measurement.state === 'known'"
+                    class="usage-quantities"
+                  >{{ usageQuantitiesLabel(record.measurement.quantities) }}</span>
+                  <span
+                    v-else
+                    class="warning-text"
+                  >无法确认用量：{{ record.measurement.reason }}</span>
+                  <details class="advanced-details">
+                    <summary>查看内部关联</summary>
+                    <small>用量记录 ID：{{ record.id }}</small>
+                    <small>事件 ID：{{ record.sourceEventId }}</small>
+                    <small v-if="usageEnvironmentId(record)">环境 ID：{{ usageEnvironmentId(record) }}</small>
+                    <template v-if="usageRequestId(record)">
+                      <small>资源申请 ID：{{ usageRequestId(record) }}</small>
+                      <small v-if="usageLeaseId(record)">租约 ID：{{ usageLeaseId(record) }}</small>
+                    </template>
+                  </details>
+                </div>
+              </li>
+            </ul>
+            <div
+              v-if="data.items.length > 0 || data.page > 1 || data.hasMore"
+              class="usage-pagination"
+              aria-label="项目用量分页"
+            >
+              <button
+                type="button"
+                class="outlined-button small"
+                :disabled="data.page <= 1 || finance.usage.kind === 'loading'"
+                @click="finance.loadUsagePage(data.page - 1)"
+              >
+                上一页
+              </button>
+              <span>第 {{ data.page }} 页</span>
+              <button
+                type="button"
+                class="outlined-button small"
+                :disabled="!data.hasMore || finance.usage.kind === 'loading'"
+                @click="finance.loadUsagePage(data.page + 1)"
+              >
+                下一页
+              </button>
+            </div>
+          </template>
+        </AsyncStateView>
+      </section>
+      <section
         class="budget-card md-card"
         aria-labelledby="budget-heading"
       >
@@ -420,8 +534,9 @@
                 class="charge-row"
               >
                 <div class="charge-main">
-                  <strong>{{ charge.total.amount }} {{ charge.total.currency }}</strong>
-                  <small>{{ charge.id }} · 用量 {{ charge.usageRecordId }}</small>
+                  <strong>{{ chargeTargetLabel(charge) }} · {{ charge.total.amount }} {{ charge.total.currency }}</strong>
+                  <small v-if="chargeUsage(charge)">{{ usageKindLabel(chargeUsage(charge)!.kind) }} · {{ usageIntervalLabel(chargeUsage(charge)!) }}</small>
+                  <small v-else>关联用量详情尚未加载，请查看项目用量列表。</small>
                   <small>{{ formatTimestamp(charge.createdAt) }} · {{ charge.lines.length }} 个计费项</small>
                   <ul
                     class="charge-line-list"
@@ -433,17 +548,25 @@
                       class="charge-line"
                     >
                       <span>{{ billingUnitLabel(line.unit) }}</span>
-                      <small>{{ line.quantity }} / {{ line.unitQuantity }} 基础单位 · 单价 {{ line.unitPrice.amount }} {{ line.unitPrice.currency }}</small>
+                      <small>{{ line.quantity }} / {{ line.unitQuantity }} 基础单位 · 费率版本 {{ line.rateRevision }} · 单价 {{ line.unitPrice.amount }} {{ line.unitPrice.currency }}</small>
                       <strong>{{ line.amount.amount }} {{ line.amount.currency }}</strong>
                     </li>
                   </ul>
                   <small
-                    v-if="charge.settlement !== 'settled' || charge.diagnosticCode"
+                    v-if="charge.settlement !== 'settled'"
                     class="warning-text"
                   >
-                    <template v-if="charge.diagnosticCode">{{ charge.diagnosticCode }} · </template>
                     当前费用{{ charge.settlement === 'pending' ? '待结算' : '未结算' }}，金额可能继续变化。
                   </small>
+                  <details class="advanced-details">
+                    <summary>查看费用关联详情</summary>
+                    <small>费用记录 ID：{{ charge.id }}</small>
+                    <small>用量记录 ID：{{ charge.usageRecordId }}</small>
+                    <small v-if="charge.adjustmentOf">调整自：{{ charge.adjustmentOf }}</small>
+                    <small v-if="charge.adjustedBy">调整人：{{ charge.adjustedBy }}</small>
+                    <small v-if="charge.diagnosticCode">诊断代码：{{ charge.diagnosticCode }}</small>
+                    <small v-if="charge.adjustmentReason">调整原因：{{ charge.adjustmentReason }}</small>
+                  </details>
                 </div>
                 <div class="charge-actions">
                   <span
@@ -481,7 +604,12 @@
               取消
             </button>
           </div>
-          <small>目标费用：{{ selectedCharge.id }} · 原金额 {{ selectedCharge.total.amount }} {{ selectedCharge.total.currency }}</small>
+          <small>目标费用：{{ chargeTargetLabel(selectedCharge) }} · 原金额 {{ selectedCharge.total.amount }} {{ selectedCharge.total.currency }}</small>
+          <details class="advanced-details">
+            <summary>查看费用内部标识</summary>
+            <small>费用记录 ID：{{ selectedCharge.id }}</small>
+            <small>用量记录 ID：{{ selectedCharge.usageRecordId }}</small>
+          </details>
           <div class="two-columns">
             <label>
               <span>调整金额（可为负）</span>
@@ -550,7 +678,15 @@ import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/
 import { useResourceRates } from '@/composables/useResourceRates'
 import { useProjects } from '@/composables/useProjects'
 import { formatTimestamp } from '@/utils/format'
-import type { GpuAllocationMode, GpuCatalogEntrySchema, ResourceBillingUnit, ResourceRateSchema } from '@/generated/contracts'
+import type {
+  GpuAllocationMode,
+  GpuCatalogEntrySchema,
+  ResourceBillingUnit,
+  ResourceRateSchema,
+  ResourceUsagePageSchema,
+  ResourceUsageQuantities,
+  ResourceUsageRecord,
+} from '@/generated/contracts'
 
 const projects = useProjects()
 const route = useRoute()
@@ -636,6 +772,7 @@ const rateDateError = computed(() => {
 const selectedCharge = computed(() => finance.charges.kind === 'success'
   ? finance.charges.data.find((charge) => charge.id === selectedChargeId.value) ?? null
   : null)
+const usageContextData = computed(() => finance.usageContext.kind === 'success' ? finance.usageContext.data : null)
 const budgetEditable = computed(() => finance.budget.kind === 'success' || finance.budget.kind === 'empty')
 const canSaveBudget = computed(() => {
   if (!budgetEditable.value || !selectedProjectId.value) return false
@@ -723,6 +860,99 @@ async function submitAdjustment() {
 
 function settlementLabel(value: ResourceCharge['settlement']) {
   return ({ pending: '待结算', settled: '已结算', unsettled: '未结算' } as Record<ResourceCharge['settlement'], string>)[value]
+}
+
+function usageKindLabel(value: ResourceUsageRecord['kind']) {
+  return value === 'compute' ? '计算用量' : '存储用量'
+}
+
+function usageIntervalLabel(record: ResourceUsageRecord) {
+  return `${formatTimestamp(record.measuredFrom)} 至 ${formatTimestamp(record.measuredUntil)}`
+}
+
+function usageEmptyText(page: ResourceUsagePageSchema) {
+  if (page.page === 1 && !page.hasMore) return '该项目暂无用量记录。'
+  return `本页没有项目用量记录。${page.hasMore ? '可查看下一页。' : ''}`
+}
+
+function environmentLabel(environmentId: string) {
+  const environment = usageContextData.value?.environments.find((item) => item.id === environmentId)
+  return environment?.displayLabel?.trim() || '环境名称待同步'
+}
+
+function requestStateLabel(value: string) {
+  return ({
+    reviewing: '待审核',
+    allocating: '分配中',
+    active: '已分配',
+    expiring: '即将回收',
+    expired: '已回收',
+    rejected: '已拒绝',
+    cancelled: '已取消',
+  } as Record<string, string>)[value] ?? '状态待同步'
+}
+
+function usageTargetLabel(record: ResourceUsageRecord) {
+  if (record.target.kind === 'experiment_environment') return `教学实验环境：${environmentLabel(record.target.environmentId)}`
+  const requestId = usageRequestId(record)
+  const request = requestId ? usageContextData.value?.requests.find((item) => item.id === requestId) : undefined
+  if (!request) return '资源申请（名称待同步）'
+  const state = requestStateLabel(request.state)
+  if (request.target.kind === 'environment') return `资源环境：${environmentLabel(request.target.environmentId)} · ${state}`
+  return `一次性任务资源 · ${state}`
+}
+
+function usageEnvironmentId(record: ResourceUsageRecord) {
+  return record.target.kind === 'experiment_environment'
+    ? record.target.environmentId
+    : null
+}
+
+function usageRequestId(record: ResourceUsageRecord) {
+  return record.target.kind === 'resource_request'
+    ? record.target.requestId
+    : null
+}
+
+function usageLeaseId(record: ResourceUsageRecord) {
+  return record.target.kind === 'resource_request'
+    ? record.target.leaseId ?? null
+    : null
+}
+
+function usageQuantitiesLabel(quantities: ResourceUsageQuantities) {
+  return [
+    `CPU ${formatUsageNumber(quantities.cpuMillicoreSeconds)} millicore·秒`,
+    `内存 ${formatUsageBytes(quantities.memoryByteSeconds)}`,
+    `存储 ${formatUsageBytes(quantities.storageByteSeconds)}`,
+    `GPU ${formatUsageNumber(quantities.gpuUnitSeconds)} 单位·秒`,
+  ].join(' · ')
+}
+
+function formatUsageNumber(value: number) {
+  return Math.trunc(value).toLocaleString('en-US')
+}
+
+function formatUsageBytes(value: number) {
+  if (value === 0) return '0 B·秒'
+  const units = ['B·秒', 'KiB·秒', 'MiB·秒', 'GiB·秒', 'TiB·秒']
+  let amount = value
+  let index = 0
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024
+    index += 1
+  }
+  const rounded = Math.round(amount * 1000) / 1000
+  return `${rounded} ${units[index]}`
+}
+
+function chargeUsage(charge: ResourceCharge) {
+  return finance.usageRecordsById[charge.usageRecordId] ?? null
+}
+
+function chargeTargetLabel(charge: ResourceCharge) {
+  const usage = chargeUsage(charge)
+  return usage ? usageTargetLabel(usage) : '项目用量关联待同步'
 }
 
 function billingUnitLabel(value: ResourceCharge['lines'][number]['unit']) {
@@ -833,6 +1063,17 @@ onMounted(() => { void rates.load(); void loadCatalog() })
 .rate-form button { justify-self: start; }
 .rate-equivalent { grid-column: 1 / -1; margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); line-height: 1.5; }
 .finance-layout { display: grid; grid-template-columns: minmax(300px, .75fr) minmax(0, 1.25fr); gap: 20px; align-items: start; }
+.usage-card { display: grid; grid-column: 1 / -1; gap: 18px; padding: 20px; }
+.usage-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.usage-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 14px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }
+.usage-main { display: grid; gap: 5px; min-width: 0; }
+.usage-main strong { color: var(--md-sys-color-on-surface); font: var(--md-sys-title-medium); }
+.usage-main small, .usage-quantities { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); overflow-wrap: anywhere; }
+.usage-quantities { color: var(--md-sys-color-on-surface); }
+.usage-empty { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-medium); }
+.usage-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 10px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.advanced-details { display: grid; gap: 4px; margin-top: 2px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
+.advanced-details summary { color: var(--md-sys-color-primary); cursor: pointer; }
 .budget-card, .charges-card { display: grid; gap: 18px; padding: 20px; }
 .budget-summary { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .budget-summary div { display: grid; gap: 5px; padding: 13px; border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface-container-low); }

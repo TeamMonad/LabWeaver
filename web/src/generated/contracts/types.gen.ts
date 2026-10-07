@@ -1481,6 +1481,7 @@ export type EnvironmentEndpointSchemaUtcTimestamp = string;
  * PostgreSQL-authoritative environment view.
  */
 export type EnvironmentInstanceSchema = {
+    approvedResources: WorkloadResources;
     capacityBinding?: string | null;
     class: EnvironmentInstanceSchemaEnvironmentClass;
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
@@ -1492,7 +1493,7 @@ export type EnvironmentInstanceSchema = {
     failedPhase?: ObservedEnvironmentState | null;
     generation: number;
     /**
-     * Resource-resolved Experiment GPU allocation held while this instance exists.
+     * Resource-resolved Experiment GPU allocation held while this instance exists, when present.
      *
      * Work environments never use this field; their allocation remains on the Lease
      * authorization. A present value is validated against the immutable instance identity.
@@ -1509,6 +1510,10 @@ export type EnvironmentInstanceSchema = {
     providerBinding: string;
     releaseId: EnvironmentInstanceSchemaReleaseId;
     releaseVersion: number;
+    /**
+     * Set only after Environment has released its Resource reservation at terminal deletion.
+     */
+    resourceReservationReleased?: boolean;
     revision: EnvironmentInstanceSchemaRevision;
     runtimeKind: EnvironmentInstanceSchemaRuntimeKind;
 };
@@ -8413,83 +8418,6 @@ export type ProblemPackageUploadSessionSchemaUploadSessionId = string;
 export type ProblemPackageUploadSessionSchemaUtcTimestamp = string;
 
 /**
- * RecordResourceUsageRequest
- *
- * Provider usage submitted by a trusted Resource meter or reconciler.
- */
-export type RecordResourceUsageRequestSchema = {
-    courseId?: RecordResourceUsageRequestSchemaCourseId | null;
-    kind: ResourceUsageKind;
-    leaseId?: RecordResourceUsageRequestSchemaLeaseId | null;
-    measuredFrom: RecordResourceUsageRequestSchemaUtcTimestamp;
-    measuredUntil: RecordResourceUsageRequestSchemaUtcTimestamp;
-    measurement: UsageMeasurement;
-    projectId: RecordResourceUsageRequestSchemaProjectId;
-    requestId: RecordResourceUsageRequestSchemaResourceRequestId;
-    sourceEventId: RecordResourceUsageRequestSchemaEventId;
-};
-
-/**
- * Strongly typed UUIDv7 identifier for `CourseId`.
- */
-export type RecordResourceUsageRequestSchemaCourseId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `EventId`.
- */
-export type RecordResourceUsageRequestSchemaEventId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `LeaseId`.
- */
-export type RecordResourceUsageRequestSchemaLeaseId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ProjectId`.
- */
-export type RecordResourceUsageRequestSchemaProjectId = string;
-
-/**
- * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
- */
-export type RecordResourceUsageRequestSchemaResourceRequestId = string;
-
-/**
- * Metering scope for one usage interval.
- *
- * Compute and retained-storage intervals are independent meters and may overlap in time.
- * A known record must set non-applicable dimensions to zero so a stored interval cannot be
- * interpreted as both compute and storage usage.
- */
-export type ResourceUsageKind = 'compute' | 'storage';
-
-/**
- * Quantities captured from a provider meter. Values are integral base units.
- */
-export type ResourceUsageQuantities = {
-    cpuMillicoreSeconds: number;
-    gpuUnitSeconds: number;
-    memoryByteSeconds: number;
-    storageByteSeconds: number;
-};
-
-/**
- * Known or explicitly unknown provider measurement.
- */
-export type UsageMeasurement = {
-    quantities: ResourceUsageQuantities;
-    state: 'known';
-} | {
-    reason: string;
-    state: 'unknown';
-};
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type RecordResourceUsageRequestSchemaUtcTimestamp = string;
-
-/**
  * RegisterPlatformImageRequest
  *
  * Administrator registration of one registry reference. The actor is supplied by the gateway.
@@ -10069,49 +9997,47 @@ export type ResourceRequestSchemaWorkloadResources = {
 };
 
 /**
- * ResourceUsageRecord
+ * ResourceUsagePage
  *
- * Provider usage observation bound to a Project and optional teaching Course.
+ * Bounded project usage view. `has_more` is true when another page exists;
+ * callers never need an unbounded usage query.
  */
-export type ResourceUsageRecordSchema = {
-    courseId?: ResourceUsageRecordSchemaCourseId | null;
-    id: ResourceUsageRecordSchemaUsageRecordId;
-    kind: ResourceUsageRecordSchemaResourceUsageKind;
-    leaseId?: ResourceUsageRecordSchemaLeaseId | null;
-    measuredFrom: ResourceUsageRecordSchemaUtcTimestamp;
-    measuredUntil: ResourceUsageRecordSchemaUtcTimestamp;
-    measurement: ResourceUsageRecordSchemaUsageMeasurement;
-    observedAt: ResourceUsageRecordSchemaUtcTimestamp;
-    projectId: ResourceUsageRecordSchemaProjectId;
-    requestId: ResourceUsageRecordSchemaResourceRequestId;
-    settlement: ResourceUsageRecordSchemaUsageSettlementState;
-    sourceEventId: ResourceUsageRecordSchemaEventId;
+export type ResourceUsagePageSchema = {
+    hasMore: boolean;
+    items: Array<ResourceUsageRecord>;
+    page: number;
+    pageSize: number;
 };
 
 /**
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
-export type ResourceUsageRecordSchemaCourseId = string;
+export type ResourceUsagePageSchemaCourseId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `EnvironmentId`.
+ */
+export type ResourceUsagePageSchemaEnvironmentId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `EventId`.
  */
-export type ResourceUsageRecordSchemaEventId = string;
+export type ResourceUsagePageSchemaEventId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `LeaseId`.
  */
-export type ResourceUsageRecordSchemaLeaseId = string;
+export type ResourceUsagePageSchemaLeaseId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
-export type ResourceUsageRecordSchemaProjectId = string;
+export type ResourceUsagePageSchemaProjectId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
  */
-export type ResourceUsageRecordSchemaResourceRequestId = string;
+export type ResourceUsagePageSchemaResourceRequestId = string;
 
 /**
  * Metering scope for one usage interval.
@@ -10120,12 +10046,12 @@ export type ResourceUsageRecordSchemaResourceRequestId = string;
  * A known record must set non-applicable dimensions to zero so a stored interval cannot be
  * interpreted as both compute and storage usage.
  */
-export type ResourceUsageRecordSchemaResourceUsageKind = 'compute' | 'storage';
+export type ResourceUsageKind = 'compute' | 'storage';
 
 /**
  * Quantities captured from a provider meter. Values are integral base units.
  */
-export type ResourceUsageRecordSchemaResourceUsageQuantities = {
+export type ResourceUsageQuantities = {
     cpuMillicoreSeconds: number;
     gpuUnitSeconds: number;
     memoryByteSeconds: number;
@@ -10133,10 +10059,45 @@ export type ResourceUsageRecordSchemaResourceUsageQuantities = {
 };
 
 /**
+ * Provider usage observation bound to a Project and optional teaching Course.
+ */
+export type ResourceUsageRecord = {
+    courseId?: ResourceUsagePageSchemaCourseId | null;
+    id: ResourceUsagePageSchemaUsageRecordId;
+    kind: ResourceUsageKind;
+    measuredFrom: ResourceUsagePageSchemaUtcTimestamp;
+    measuredUntil: ResourceUsagePageSchemaUtcTimestamp;
+    measurement: UsageMeasurement;
+    observedAt: ResourceUsagePageSchemaUtcTimestamp;
+    projectId: ResourceUsagePageSchemaProjectId;
+    settlement: ResourceUsagePageSchemaUsageSettlementState;
+    sourceEventId: ResourceUsagePageSchemaEventId;
+    target: ResourceUsageTarget;
+};
+
+/**
+ * Durable owner of one usage interval.
+ *
+ * Work and task meters point at the Resource request and (for trusted internal
+ * delivery) its Lease. Experiment meters point directly at the Environment
+ * reservation; Resource resolves the project, course, owner, approved
+ * resources, and GPU allocation from its saved authorization instead of
+ * accepting those fields from a meter payload.
+ */
+export type ResourceUsageTarget = {
+    kind: 'resource_request';
+    leaseId?: ResourceUsagePageSchemaLeaseId | null;
+    requestId: ResourceUsagePageSchemaResourceRequestId;
+} | {
+    environmentId: ResourceUsagePageSchemaEnvironmentId;
+    kind: 'experiment_environment';
+};
+
+/**
  * Known or explicitly unknown provider measurement.
  */
-export type ResourceUsageRecordSchemaUsageMeasurement = {
-    quantities: ResourceUsageRecordSchemaResourceUsageQuantities;
+export type UsageMeasurement = {
+    quantities: ResourceUsageQuantities;
     state: 'known';
 } | {
     reason: string;
@@ -10146,17 +10107,17 @@ export type ResourceUsageRecordSchemaUsageMeasurement = {
 /**
  * Strongly typed UUIDv7 identifier for `UsageRecordId`.
  */
-export type ResourceUsageRecordSchemaUsageRecordId = string;
+export type ResourceUsagePageSchemaUsageRecordId = string;
 
 /**
  * Settlement state for one immutable usage observation.
  */
-export type ResourceUsageRecordSchemaUsageSettlementState = 'pending' | 'settled' | 'unsettled';
+export type ResourceUsagePageSchemaUsageSettlementState = 'pending' | 'settled' | 'unsettled';
 
 /**
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
-export type ResourceUsageRecordSchemaUtcTimestamp = string;
+export type ResourceUsagePageSchemaUtcTimestamp = string;
 
 /**
  * SshPublicKey
@@ -16216,6 +16177,76 @@ export type CreateProjectResourceRequestResponses = {
 
 export type CreateProjectResourceRequestResponse = CreateProjectResourceRequestResponses[keyof CreateProjectResourceRequestResponses];
 
+export type ListProjectResourceUsageData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: {
+        page?: number;
+        pageSize?: number;
+    };
+    url: '/api/v1/projects/{projectId}/usage';
+};
+
+export type ListProjectResourceUsageErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListProjectResourceUsageError = ListProjectResourceUsageErrors[keyof ListProjectResourceUsageErrors];
+
+export type ListProjectResourceUsageResponses = {
+    /**
+     * Successful response
+     */
+    200: ResourceUsagePageSchema;
+};
+
+export type ListProjectResourceUsageResponse = ListProjectResourceUsageResponses[keyof ListProjectResourceUsageResponses];
+
 export type CreateProjectWorkConfigurationRunData = {
     body: CreateWorkConfigurationRunRequestSchema;
     headers: {
@@ -17472,71 +17503,6 @@ export type EndResourceRateResponses = {
 };
 
 export type EndResourceRateResponse = EndResourceRateResponses[keyof EndResourceRateResponses];
-
-export type RecordResourceUsageData = {
-    body: RecordResourceUsageRequestSchema;
-    path?: never;
-    query?: never;
-    url: '/api/v1/resource/usage';
-};
-
-export type RecordResourceUsageErrors = {
-    /**
-     * RFC 9457 problem detail
-     */
-    400: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    401: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    403: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    404: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    409: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    410: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    412: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    422: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    429: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    500: ProblemDetails;
-    /**
-     * RFC 9457 problem detail
-     */
-    503: ProblemDetails;
-};
-
-export type RecordResourceUsageError = RecordResourceUsageErrors[keyof RecordResourceUsageErrors];
-
-export type RecordResourceUsageResponses = {
-    /**
-     * Successful response
-     */
-    200: ResourceUsageRecordSchema;
-};
-
-export type RecordResourceUsageResponse = RecordResourceUsageResponses[keyof RecordResourceUsageResponses];
 
 export type ConsumeOidcBackchannelLogoutData = {
     body: {

@@ -2707,12 +2707,14 @@ impl PostgresAgentRunStore {
         let binding: contracts::execution::TaskExecutionBinding =
             serde_json::from_value(intent.binding.clone())
                 .map_err(|_| AgentRunStoreError::InvalidContract)?;
+        let expected_target = contracts::resource::ResourceUsageTarget::ResourceRequest {
+            request_id: binding.resource_request_id,
+            lease_id: Some(binding.lease_id),
+        };
         if deliveries.is_empty()
             || deliveries.len() > 2
             || deliveries.iter().any(|delivery| {
-                delivery.project_id != binding.project_id
-                    || delivery.request_id != binding.resource_request_id
-                    || delivery.lease_id != Some(binding.lease_id)
+                delivery.target != expected_target
                     || delivery.measured_until <= delivery.measured_from
                     || delivery.measurement.validate().is_err()
             })

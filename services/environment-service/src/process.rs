@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_nats::connection::State as NatsConnectionState;
-use contracts::environment::{EnvironmentOperationKind, ReleaseEnvironmentGpuAllocationRequest};
+use contracts::environment::{
+    EnvironmentOperationKind, ReleaseEnvironmentResourceReservationRequest,
+};
 use contracts::supply_chain::VirtualMachineDiskFormat;
 use contracts::{ActorId, PolicyId, Revision, UtcTimestamp};
 use serde::Deserialize;
@@ -363,7 +365,7 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
-        .with_gpu_allocations(self.resource_usage_client.clone())
+        .with_resource_reservations(self.resource_usage_client.clone())
     }
 
     /// Runs all durable loops until SIGINT/SIGTERM; any unhandled loop failure stops the process.
@@ -504,7 +506,7 @@ async fn reconcile_loop(
     store: PgEnvironmentStore,
     worker: ReconcileWorker,
     worker_id: String,
-    gpu_allocations: Option<crate::metering::ResourceUsageClient>,
+    resource_reservations: Option<crate::metering::ResourceUsageClient>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
     let mut interval = tokio::time::interval(WORKER_INTERVAL);
@@ -518,8 +520,8 @@ async fn reconcile_loop(
             _ = interval.tick() => {
                 let now = store.current_time().await?;
                 let outcome = worker.run_once(&worker_id, now).await?;
-                if let Some(client) = &gpu_allocations {
-                    release_deleted_gpu_environments(&store, client).await?;
+                if let Some(client) = &resource_reservations {
+                    release_deleted_resource_environments(&store, client).await?;
                 }
                 match outcome {
                     crate::reconciler::ReconcileWorkerOutcome::Pending => { tracing::debug!(event = "environment.reconcile.pending", outcome = "pending"); }
@@ -534,34 +536,32 @@ async fn reconcile_loop(
     }
 }
 
-/// Releases durable Experiment GPU reservations once an Environment reaches Deleted.
+/// Releases durable Experiment Resource reservations once an Environment reaches Deleted.
 ///
 /// Deletion is terminal: the instance can never render the GPU again, so its reservation must not
 /// be retained. A failed release leaves the aggregate untouched for the next reconcile pass.
-async fn release_deleted_gpu_environments(
+async fn release_deleted_resource_environments(
     store: &PgEnvironmentStore,
     client: &crate::metering::ResourceUsageClient,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
-    for instance in store.list_deleted_gpu_environments(32).await? {
-        let Some(allocation) = instance.gpu_allocation.as_ref() else {
-            continue;
-        };
-        let request = ReleaseEnvironmentGpuAllocationRequest {
+    for instance in store.list_deleted_resource_environments(32).await? {
+        let request = ReleaseEnvironmentResourceReservationRequest {
             version: 1,
             environment_id: instance.id,
             project_id: instance.project_id,
             owner_actor_id: instance.owner_id,
             trace_id: format!("environment-gpu-release-{}", instance.id),
         };
-        match client.release_gpu_allocation(&request).await {
+        match client.release_resource_reservation(&request).await {
             Ok(_) => {
-                store.clear_environment_gpu_allocation(instance.id).await?;
+                store
+                    .clear_environment_resource_reservation(instance.id)
+                    .await?;
             }
             Err(error) => {
                 tracing::error!(
-                    event = "environment.gpu_allocation.release_failed",
+                    event = "environment.resource_reservation.release_failed",
                     environment_id = %instance.id,
-                    gpu_class = %allocation.class,
                     diagnostic_code = error.diagnostic_code(),
                     error_kind = "resource_dependency",
                     retryable = true,

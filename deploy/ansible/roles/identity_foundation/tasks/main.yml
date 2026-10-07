@@ -110,6 +110,15 @@
   loop_control:
     label: "{{ item.caller }} -> realm-management"
 
+- name: Restrict role-only provisioning to the approved directory reader mapping
+  ansible.builtin.assert:
+    that:
+      - identity_service_realm_role_assignments | length == 1
+      - identity_service_realm_role_assignments[0].caller == 'labweaver-access'
+      - (identity_service_realm_role_assignments[0].roles | sort) == ['query-users', 'view-users']
+    fail_msg: IDENTITY_DIRECTORY_ROLE_SCOPE_INVALID
+  when: identity_realm_roles_only | bool
+
 - name: Read the adopted cluster identity
   ansible.builtin.command:
     argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", get, namespace, kube-system, -o, 'jsonpath={.metadata.uid}']
@@ -150,7 +159,9 @@
   when: identity_foundation_verify_only | bool
 
 - name: Reconcile identity foundation
-  when: not (identity_foundation_verify_only | bool)
+  when:
+    - not (identity_foundation_verify_only | bool)
+    - not (identity_realm_roles_only | bool)
   block:
     - name: Install the locked Kubernetes Python client on the control plane
       ansible.builtin.dnf:
@@ -412,6 +423,45 @@
         - name: Stop after failed Keycloak DNS validation
           ansible.builtin.fail: {msg: IDENTITY_DNS_VALIDATION_FAILED}
 
+- name: Apply only the reviewed organization-directory reader mapping
+  when:
+    - not (identity_foundation_verify_only | bool)
+    - identity_realm_roles_only | bool
+  block:
+    - name: Require the existing Keycloak workload before role-only provisioning
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - rollout
+          - status
+          - "deployment/{{ identity_name }}"
+          - --timeout=5m
+      changed_when: false
+
+    - name: Create the restricted organization-directory role provisioning Job
+      kubernetes.core.k8s:
+        kubeconfig: "{{ identity_kubeconfig_path }}"
+        state: present
+        definition: "{{ lookup('template', 'provision-job.yml.j2') | from_yaml }}"
+
+    - name: Wait for organization-directory role provisioning
+      ansible.builtin.command:
+        argv:
+          - "{{ identity_kubectl_path }}"
+          - --kubeconfig
+          - "{{ identity_kubeconfig_path }}"
+          - -n
+          - "{{ identity_namespace }}"
+          - wait
+          - "job/identity-provision-{{ identity_run_suffix }}"
+          - --for=condition=Complete
+          - --timeout=5m
+      changed_when: false
+
 - name: Wait for the identity Gateway
   ansible.builtin.command:
     argv:
@@ -425,6 +475,7 @@
       - --for=condition=Programmed
       - --timeout=5m
   changed_when: false
+  when: not (identity_realm_roles_only | bool)
 
 - name: Verify the exact OIDC issuer over the internal CA
   ansible.builtin.shell: |
@@ -441,6 +492,7 @@
       | grep -F '"issuer":"https://{{ identity_hostname }}/realms/{{ identity_realm }}"' >/dev/null
   args: {executable: /bin/bash}
   changed_when: false
+  when: not (identity_realm_roles_only | bool)
 
 # The browser reaches the advertised issuer through the public entry, whose TLS
 # certificate comes from the public issuer rather than the identity CA, so this
@@ -455,7 +507,9 @@
       | grep -F '"issuer":"https://{{ identity_hostname }}/realms/{{ identity_realm }}"' >/dev/null
   args: {executable: /bin/bash}
   changed_when: false
-  when: identity_public_address | length > 0
+  when:
+    - identity_public_address | length > 0
+    - not (identity_realm_roles_only | bool)
 
 - name: Verify every service token identity without exposing credentials or tokens
   ansible.builtin.shell: |
@@ -522,12 +576,14 @@
   changed_when: false
   failed_when: false
   no_log: true
+  when: not (identity_realm_roles_only | bool)
 
 - name: Reject an invalid service token identity
   ansible.builtin.assert:
     that: identity_token_claims_check.rc == 0
     fail_msg: IDENTITY_TOKEN_CLAIMS_INVALID
   no_log: true
+  when: not (identity_realm_roles_only | bool)
 
 - name: Create the root-only identity manifest directory
   ansible.builtin.file:
@@ -536,6 +592,7 @@
     owner: root
     group: root
     mode: '0700'
+  when: not (identity_realm_roles_only | bool)
 
 - name: Publish the sanitized identity deployment manifest
   ansible.builtin.template:
@@ -544,3 +601,4 @@
     owner: root
     group: root
     mode: '0600'
+  when: not (identity_realm_roles_only | bool)

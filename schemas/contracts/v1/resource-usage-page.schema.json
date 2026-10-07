@@ -65,6 +65,65 @@
       ],
       "type": "object"
     },
+    "ResourceUsageRecord": {
+      "additionalProperties": false,
+      "description": "Provider usage observation bound to a Project and optional teaching Course.",
+      "properties": {
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/UsageRecordId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ResourceUsageKind"
+        },
+        "measuredFrom": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "measuredUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "measurement": {
+          "$ref": "#/$defs/UsageMeasurement"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "settlement": {
+          "$ref": "#/$defs/UsageSettlementState"
+        },
+        "sourceEventId": {
+          "$ref": "#/$defs/EventId"
+        },
+        "target": {
+          "$ref": "#/$defs/ResourceUsageTarget"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "kind",
+        "target",
+        "sourceEventId",
+        "measuredFrom",
+        "measuredUntil",
+        "measurement",
+        "settlement",
+        "observedAt"
+      ],
+      "type": "object"
+    },
     "ResourceUsageTarget": {
       "description": "Durable owner of one usage interval.\n\nWork and task meters point at the Resource request and (for trusted internal\ndelivery) its Lease. Experiment meters point directly at the Environment\nreservation; Resource resolves the project, course, owner, approved\nresources, and GPU allocation from its saved authorization instead of\naccepting those fields from a meter payload.",
       "oneOf": [
@@ -173,61 +232,35 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Provider usage observation bound to a Project and optional teaching Course.",
+  "description": "Bounded project usage view. `has_more` is true when another page exists;\ncallers never need an unbounded usage query.",
   "properties": {
-    "courseId": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/CourseId"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "hasMore": {
+      "type": "boolean"
     },
-    "id": {
-      "$ref": "#/$defs/UsageRecordId"
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ResourceUsageRecord"
+      },
+      "type": "array"
     },
-    "kind": {
-      "$ref": "#/$defs/ResourceUsageKind"
+    "page": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
     },
-    "measuredFrom": {
-      "$ref": "#/$defs/UtcTimestamp"
-    },
-    "measuredUntil": {
-      "$ref": "#/$defs/UtcTimestamp"
-    },
-    "measurement": {
-      "$ref": "#/$defs/UsageMeasurement"
-    },
-    "observedAt": {
-      "$ref": "#/$defs/UtcTimestamp"
-    },
-    "projectId": {
-      "$ref": "#/$defs/ProjectId"
-    },
-    "settlement": {
-      "$ref": "#/$defs/UsageSettlementState"
-    },
-    "sourceEventId": {
-      "$ref": "#/$defs/EventId"
-    },
-    "target": {
-      "$ref": "#/$defs/ResourceUsageTarget"
+    "pageSize": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
     }
   },
   "required": [
-    "id",
-    "projectId",
-    "kind",
-    "target",
-    "sourceEventId",
-    "measuredFrom",
-    "measuredUntil",
-    "measurement",
-    "settlement",
-    "observedAt"
+    "items",
+    "page",
+    "pageSize",
+    "hasMore"
   ],
-  "title": "ResourceUsageRecord",
+  "title": "ResourceUsagePage",
   "type": "object"
 }

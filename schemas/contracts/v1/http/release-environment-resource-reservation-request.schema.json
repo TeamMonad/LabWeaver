@@ -15,7 +15,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Environment-owned request to release one durable Experiment GPU reservation.",
+  "description": "Environment-owned request to release one durable Experiment resource reservation.",
   "properties": {
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
@@ -43,6 +43,6 @@
     "ownerActorId",
     "traceId"
   ],
-  "title": "ReleaseEnvironmentGpuAllocationRequest",
+  "title": "ReleaseEnvironmentResourceReservationRequest",
   "type": "object"
 }

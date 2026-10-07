@@ -34,7 +34,6 @@ const VM_SOURCE_REGISTRY_DIGEST = /^docker:\/\/[^\s@]+@sha256:[0-9a-f]{64}$/i
 const VM_DISK_FORMATS = Object.freeze(['qcow2', 'raw'])
 const GIB = 1024 ** 3
 const FIXED_DECIMAL_SCALE = 1_000_000n
-const WORK_COMPUTE_UNITS = new Set(['cpu_millicore_second', 'memory_byte_second', 'gpu_unit_second'])
 
 function fixedDecimalScaled(value, diagnostic) {
   if (typeof value !== 'string' || !FIXED_DECIMAL.test(value)) {
@@ -47,7 +46,23 @@ function fixedDecimalScaled(value, diagnostic) {
 function usageHasPositiveQuantity(usage) {
   if (usage.measurement?.state !== 'known') return false
   const quantities = usage.measurement.quantities
-  if (!quantities || typeof quantities !== 'object') return false
+  const quantityFields = [
+    'cpuMillicoreSeconds',
+    'memoryByteSeconds',
+    'storageByteSeconds',
+    'gpuUnitSeconds',
+  ]
+  if (
+    !quantities
+    || typeof quantities !== 'object'
+    || quantityFields.some((field) => !Number.isSafeInteger(quantities[field]) || quantities[field] < 0)
+    || (usage.kind === 'compute' && quantities.storageByteSeconds !== 0)
+    || (usage.kind === 'storage' && (
+      quantities.cpuMillicoreSeconds !== 0
+      || quantities.memoryByteSeconds !== 0
+      || quantities.gpuUnitSeconds !== 0
+    ))
+  ) return false
   if (usage.kind === 'compute') {
     return [quantities.cpuMillicoreSeconds, quantities.memoryByteSeconds, quantities.gpuUnitSeconds]
       .some((value) => Number.isSafeInteger(value) && value > 0)
@@ -56,14 +71,113 @@ function usageHasPositiveQuantity(usage) {
   return false
 }
 
-function chargeHasPositiveUnit(charge, kind) {
-  const allowedUnits = kind === 'compute' ? WORK_COMPUTE_UNITS : new Set(['storage_byte_second'])
-  return (charge.lines ?? []).some((line) => (
-    allowedUnits.has(line.unit)
-    && Number.isSafeInteger(line.quantity)
-    && line.quantity > 0
-    && fixedDecimalScaled(line.amount?.amount, 'LW_WORK_USAGE_CHARGE') > 0n
-  ))
+function usageHasValidInterval(usage) {
+  if (typeof usage?.measuredFrom !== 'string' || typeof usage.measuredUntil !== 'string') return false
+  const measuredFrom = Date.parse(usage.measuredFrom)
+  const measuredUntil = Date.parse(usage.measuredUntil)
+  return Number.isFinite(measuredFrom) && Number.isFinite(measuredUntil) && measuredUntil > measuredFrom
+}
+
+function assertGpuRateExpectation(gpu) {
+  const rate = gpu.rate
+  if (
+    typeof gpu.class !== 'string'
+    || gpu.class === ''
+    || typeof gpu.mode !== 'string'
+    || gpu.mode === ''
+    || !rate
+    || typeof rate.id !== 'string'
+    || rate.id === ''
+    || !Number.isSafeInteger(rate.revision)
+    || rate.revision < 1
+    || rate.gpuClass !== gpu.class
+    || rate.gpuMode !== gpu.mode
+    || rate.unit !== 'gpu_unit_second'
+    || !Number.isSafeInteger(rate.unitQuantity)
+    || rate.unitQuantity < 1
+    || typeof rate.unitPrice?.currency !== 'string'
+    || rate.unitPrice.currency === ''
+    || !FIXED_DECIMAL.test(rate.unitPrice.amount ?? '')
+  ) {
+    throw new Error('LW_WORK_GPU_RATE_EXPECTATION_INVALID')
+  }
+  return rate
+}
+
+function lineHasValidAmount(line, diagnostic = 'LW_WORK_USAGE_CHARGE') {
+  return fixedDecimalScaled(line.amount?.amount, diagnostic) >= 0n
+}
+
+function sumMatchingLineQuantities(lines, matches) {
+  let total = 0
+  for (const line of lines) {
+    if (!matches(line) || !Number.isSafeInteger(line.quantity) || line.quantity <= 0) continue
+    if (!lineHasValidAmount(line)) continue
+    total += line.quantity
+    if (!Number.isSafeInteger(total)) return null
+  }
+  return total
+}
+
+function lineHasGpuRate(line, gpu) {
+  const rate = assertGpuRateExpectation(gpu)
+  return (
+    line.unit === 'gpu_unit_second'
+    && line.rateId === rate.id
+    && line.rateRevision === rate.revision
+    && line.unitQuantity === rate.unitQuantity
+    && line.unitPrice?.currency === rate.unitPrice?.currency
+    && line.unitPrice?.amount === rate.unitPrice?.amount
+  )
+}
+
+function chargeMatchesUsageQuantities(charge, usage, gpu) {
+  const quantities = usage.measurement.quantities
+  const lines = Array.isArray(charge.lines) ? charge.lines : []
+  const requirements = []
+  if (usage.kind === 'compute') {
+    if (quantities.cpuMillicoreSeconds > 0) {
+      requirements.push({
+        unit: 'cpu_millicore_second',
+        quantity: quantities.cpuMillicoreSeconds,
+      })
+    }
+    if (quantities.memoryByteSeconds > 0) {
+      requirements.push({
+        unit: 'memory_byte_second',
+        quantity: quantities.memoryByteSeconds,
+      })
+    }
+    if (quantities.gpuUnitSeconds > 0) {
+      if (gpu) assertGpuRateExpectation(gpu)
+      requirements.push({
+        unit: 'gpu_unit_second',
+        quantity: quantities.gpuUnitSeconds,
+        matches: gpu ? (line) => lineHasGpuRate(line, gpu) : undefined,
+      })
+    }
+  } else if (usage.kind === 'storage' && quantities.storageByteSeconds > 0) {
+    requirements.push({
+      unit: 'storage_byte_second',
+      quantity: quantities.storageByteSeconds,
+    })
+  }
+  if (requirements.length === 0) return false
+  const expectedUnits = new Set(requirements.map(({ unit }) => unit))
+  for (const line of lines) {
+    if (!Number.isSafeInteger(line.quantity) || line.quantity < 0) return false
+    lineHasValidAmount(line)
+    if (line.quantity === 0) continue
+    if (!expectedUnits.has(line.unit)) return false
+    if (line.unit === 'gpu_unit_second' && gpu && !lineHasGpuRate(line, gpu)) return false
+  }
+  return requirements.every((requirement) => {
+    const total = sumMatchingLineQuantities(lines, (line) => (
+      line.unit === requirement.unit
+      && (requirement.matches == null || requirement.matches(line))
+    ))
+    return total === requirement.quantity
+  })
 }
 
 /**
@@ -78,6 +192,7 @@ export function selectSettledWorkUsageChargesForLease({
   requestId,
   leaseId,
   baselineChargeIds = new Set(),
+  gpu = null,
 }) {
   if (!Array.isArray(usageRecords) || !Array.isArray(charges)) throw new Error('LW_WORK_USAGE_READ_INVALID')
   if (!baselineChargeIds || typeof baselineChargeIds.has !== 'function') throw new Error('LW_WORK_USAGE_BASELINE_INVALID')
@@ -87,11 +202,16 @@ export function selectSettledWorkUsageChargesForLease({
 
   const scopedUsage = usageRecords.filter((usage) => (
     usage?.projectId === projectId
-    && usage.requestId === requestId
-    && usage.leaseId === leaseId
+    && usage.target?.kind === 'resource_request'
+    && usage.target.requestId === requestId
+    && usage.target.leaseId === leaseId
   ))
+  if (
+    scopedUsage.length === 0
+    || scopedUsage.some((usage) => !usageHasValidInterval(usage))
+    || scopedUsage.some((usage) => usage.measurement?.state !== 'known' || usage.settlement !== 'settled')
+  ) return null
   const readyUsage = scopedUsage.filter((usage) => {
-    if (usage.measurement?.state === 'unknown' || usage.settlement !== 'settled') return false
     if (usage.measurement?.state !== 'known') throw new Error('LW_WORK_USAGE_MEASUREMENT_INVALID')
     if (!['compute', 'storage'].includes(usage.kind)) throw new Error('LW_WORK_USAGE_KIND_INVALID')
     if (typeof usage.id !== 'string' || usage.id === '') throw new Error('LW_WORK_USAGE_ID_INVALID')
@@ -112,11 +232,111 @@ export function selectSettledWorkUsageChargesForLease({
       throw new Error('LW_WORK_USAGE_CHARGE_ID_INVALID')
     }
     if (fixedDecimalScaled(charge.total?.amount, 'LW_WORK_USAGE_CHARGE') <= 0n) continue
-    if (!chargeHasPositiveUnit(charge, usage.kind)) continue
+    if (!chargeMatchesUsageQuantities(charge, usage, gpu)) continue
     matches.push({ usage, charge })
   }
   if (!matches.some(({ usage }) => usage.kind === 'compute') || !matches.some(({ usage }) => usage.kind === 'storage')) return null
   return matches
+}
+
+export async function readProjectUsagePage(request, projectId, { page = 1, pageSize = 100, diagnosticCode = 'REAL_WORK_USAGE_READ_FAILED' } = {}) {
+  if (
+    typeof projectId !== 'string'
+    || projectId === ''
+    || !Number.isSafeInteger(page)
+    || page < 1
+    || !Number.isSafeInteger(pageSize)
+    || pageSize < 1
+    || pageSize > 100
+  ) {
+    throw new Error('LW_WORK_USAGE_PAGE_ARGUMENT_INVALID')
+  }
+  const result = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/usage?page=${page}&pageSize=${pageSize}`),
+    diagnosticCode,
+  )
+  if (
+    !result
+    || !Array.isArray(result.items)
+    || result.page !== page
+    || result.pageSize !== pageSize
+    || typeof result.hasMore !== 'boolean'
+  ) {
+    throw new Error('LW_WORK_USAGE_PAGE_INVALID')
+  }
+  return result
+}
+
+export async function readProjectUsage(request, projectId, { pageSize = 100 } = {}) {
+  const items = []
+  let page = 1
+  for (;;) {
+    const result = await readProjectUsagePage(request, projectId, { page, pageSize })
+    items.push(...result.items)
+    if (!result.hasMore) return items
+    page += 1
+    if (page > 1000) throw new Error('LW_WORK_USAGE_PAGE_LIMIT_EXCEEDED')
+  }
+}
+
+export async function readResourceRates(context, diagnosticCode = 'REAL_WORK_RATES_READ_FAILED') {
+  return await readResourceRatesInternal(context, diagnosticCode)
+}
+
+export async function waitForSettledWorkUsageCharges(browser, baseURL, {
+  projectId,
+  leases,
+  baselineChargeIds = new Set(),
+  gpu = null,
+} = {}) {
+  if (
+    typeof projectId !== 'string'
+    || projectId === ''
+    || !Array.isArray(leases)
+    || leases.length === 0
+    || leases.some((lease) => (
+      typeof lease?.requestId !== 'string'
+      || lease.requestId === ''
+      || typeof lease.leaseId !== 'string'
+      || lease.leaseId === ''
+    ))
+  ) {
+    throw new Error('LW_WORK_USAGE_LEASES_INVALID')
+  }
+  const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  let latestUsage = null
+  let latestCharges = null
+  let latestMatches = null
+  try {
+    await expect.poll(
+      async () => {
+        latestUsage = await readProjectUsage(context.request, projectId)
+        latestCharges = await expectJson(
+          await context.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/charges`),
+          'REAL_WORK_CHARGES_READ_FAILED',
+        )
+        if (!Array.isArray(latestCharges)) throw new Error('LW_WORK_CHARGES_RESPONSE_INVALID')
+        latestMatches = leases.map((lease) => selectSettledWorkUsageChargesForLease({
+          usageRecords: latestUsage,
+          charges: latestCharges,
+          projectId,
+          requestId: lease.requestId,
+          leaseId: lease.leaseId,
+          baselineChargeIds,
+          gpu,
+        }))
+        return latestMatches.every(Boolean)
+      },
+      { timeout: 300_000, intervals: [1000, 2000, 5000] },
+    ).toBe(true)
+    return {
+      usageRecords: latestUsage,
+      charges: latestCharges,
+      matches: latestMatches.flat(),
+    }
+  } finally {
+    await context.close()
+  }
 }
 
 export function selectPendingWorkTaskResourceRequest(requests, {
@@ -783,7 +1003,7 @@ function hasPositiveRatePrice(rate) {
     && Number(rate.unitPrice.amount) > 0
 }
 
-async function readResourceRates(context, diagnosticCode) {
+async function readResourceRatesInternal(context, diagnosticCode) {
   const rates = await expectJson(
     await context.request.get('/api/v1/resource/rates'),
     diagnosticCode,
@@ -1020,7 +1240,15 @@ export async function waitForRealWorkCharges(browser, baseURL, projectId, { gpu 
   }
 }
 
-export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, { gpu = null } = {}) {
+export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
+  gpu = null,
+  usageRecordIds = [],
+  expectedCharges = [],
+} = {}) {
+  if (!Array.isArray(usageRecordIds) || usageRecordIds.some((id) => typeof id !== 'string' || id === '')) {
+    throw new Error('REAL_WORK_FINANCE_USAGE_IDS_INVALID')
+  }
+  if (!Array.isArray(expectedCharges)) throw new Error('REAL_WORK_FINANCE_CHARGES_INVALID')
   const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
   const page = await context.newPage()
   try {
@@ -1048,6 +1276,19 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, { 
     if (gpu) {
       const gpuLine = page.locator('.charge-line').filter({ hasText: 'GPU' })
       await expect(gpuLine.first()).toBeVisible({ timeout: 120_000 })
+    }
+    const expectedByUsageId = new Map(expectedCharges.map((charge) => [charge.usageRecordId, charge]))
+    for (const usageRecordId of usageRecordIds) {
+      const row = page.locator('.charge-row').filter({
+        has: page.locator('details.advanced-details').filter({ hasText: `用量记录 ID：${usageRecordId}` }),
+      })
+      await expect(row).toHaveCount(1, { timeout: 120_000 })
+      const expected = expectedByUsageId.get(usageRecordId)
+      if (!expected) throw new Error(`REAL_WORK_FINANCE_CHARGE_EXPECTATION_MISSING:${usageRecordId}`)
+      await expect(row.locator('.state-chip')).toHaveText('已结算')
+      await expect(row.locator('.charge-main > strong')).toContainText(
+        `${expected.total.amount} ${expected.total.currency}`,
+      )
     }
   } finally {
     await context.close()

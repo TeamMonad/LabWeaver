@@ -8,6 +8,7 @@ use contracts::environment::{
     EnvironmentInstance, EnvironmentOperation, EnvironmentOperationKind, ObservedEnvironmentState,
     OperationState,
 };
+use contracts::resource::WorkloadResources;
 use contracts::{
     ActorId, CourseId, EndpointId, EnvironmentId, OperationId, ProjectId, ReleaseId, Revision,
     UtcTimestamp,
@@ -59,7 +60,14 @@ pub fn ready_instance() -> EnvironmentInstance {
         release_version: 1,
         lease_id: None,
         capacity_binding: None,
+        approved_resources: WorkloadResources {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            gpu: None,
+        },
         gpu_allocation: None,
+        resource_reservation_released: false,
         provider_binding: "container-primary-v1".to_owned(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Ready,
@@ -115,7 +123,14 @@ pub fn requested_instance() -> EnvironmentInstance {
         release_version: 1,
         lease_id: None,
         capacity_binding: None,
+        approved_resources: WorkloadResources {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            gpu: None,
+        },
         gpu_allocation: None,
+        resource_reservation_released: false,
         provider_binding: "container-primary-v1".to_owned(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Requested,

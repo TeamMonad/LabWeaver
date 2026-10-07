@@ -665,6 +665,63 @@ impl UsageMeasurement {
     }
 }
 
+/// Durable owner of one usage interval.
+///
+/// Work and task meters point at the Resource request and (for trusted internal
+/// delivery) its Lease. Experiment meters point directly at the Environment
+/// reservation; Resource resolves the project, course, owner, approved
+/// resources, and GPU allocation from its saved authorization instead of
+/// accepting those fields from a meter payload.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ResourceUsageTarget {
+    ResourceRequest {
+        request_id: ResourceRequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_id: Option<LeaseId>,
+    },
+    ExperimentEnvironment {
+        environment_id: EnvironmentId,
+    },
+}
+
+impl ResourceUsageTarget {
+    pub fn validate(&self) -> Result<(), ResourceError> {
+        match self {
+            Self::ResourceRequest { .. } | Self::ExperimentEnvironment { .. } => Ok(()),
+        }
+    }
+
+    #[must_use]
+    pub const fn request_id(&self) -> Option<ResourceRequestId> {
+        match self {
+            Self::ResourceRequest { request_id, .. } => Some(*request_id),
+            Self::ExperimentEnvironment { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn lease_id(&self) -> Option<LeaseId> {
+        match self {
+            Self::ResourceRequest { lease_id, .. } => *lease_id,
+            Self::ExperimentEnvironment { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn environment_id(&self) -> Option<EnvironmentId> {
+        match self {
+            Self::ResourceRequest { .. } => None,
+            Self::ExperimentEnvironment { environment_id } => Some(*environment_id),
+        }
+    }
+}
+
 /// Settlement state for one immutable usage observation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -682,8 +739,7 @@ pub struct ResourceUsageRecord {
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub kind: ResourceUsageKind,
-    pub request_id: ResourceRequestId,
-    pub lease_id: Option<LeaseId>,
+    pub target: ResourceUsageTarget,
     pub source_event_id: EventId,
     pub measured_from: UtcTimestamp,
     pub measured_until: UtcTimestamp,
@@ -697,6 +753,7 @@ impl ResourceUsageRecord {
         if self.measured_until <= self.measured_from || self.observed_at < self.measured_until {
             return Err(ResourceError::InvalidUsage);
         }
+        self.target.validate()?;
         self.measurement.validate()?;
         if let UsageMeasurement::Known { quantities } = &self.measurement {
             let invalid_scope = match self.kind {
@@ -718,6 +775,17 @@ impl ResourceUsageRecord {
         }
         Ok(())
     }
+}
+
+/// Bounded project usage view. `has_more` is true when another page exists;
+/// callers never need an unbounded usage query.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceUsagePage {
+    pub items: Vec<ResourceUsageRecord>,
+    pub page: u32,
+    pub page_size: u16,
+    pub has_more: bool,
 }
 
 /// One immutable line in a calculated charge.

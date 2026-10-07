@@ -727,6 +727,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_bound_file_accepts_a_kubernetes_projected_symlink()
     -> Result<(), Box<dyn std::error::Error>> {

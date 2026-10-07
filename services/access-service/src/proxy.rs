@@ -829,21 +829,6 @@ async fn authorize_resource_request(
             .await?;
             return Ok("endResourceRate");
         }
-        ["", "api", "v1", "resource", "usage"] if *method == Method::POST => {
-            let usage =
-                contracts::parse_strict_json::<contracts::http::RecordResourceUsageRequest>(body)
-                    .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
-            authorize_resource_scope(
-                state,
-                session,
-                contracts::AuthorizationScope::Project {
-                    project_id: usage.project_id,
-                },
-                "recordResourceUsage",
-            )
-            .await?;
-            return Ok("recordResourceUsage");
-        }
         ["", "api", "v1", "projects", project_id, "resource-budget"] => {
             let project_id = project_id
                 .parse()
@@ -891,6 +876,24 @@ async fn authorize_resource_request(
             )
             .await?;
             return Ok("listProjectResourceCharges");
+        }
+        ["", "api", "v1", "projects", project_id, "usage"] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            let Query(query) = Query::<contracts::http::PageQuery>::try_from_uri(uri)
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            query
+                .normalized()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "listProjectResourceUsage",
+            )
+            .await?;
+            return Ok("listProjectResourceUsage");
         }
         [
             "",
@@ -1925,9 +1928,9 @@ fn valid_resource_path(path: &str) -> bool {
             | ["", "api", "v1", "projects", _, "resource-leases"]
             | ["", "api", "v1", "resource", "gpu-catalog"]
             | ["", "api", "v1", "resource", "rates"]
-            | ["", "api", "v1", "resource", "usage"]
             | ["", "api", "v1", "projects", _, "resource-budget"]
             | ["", "api", "v1", "projects", _, "charges"]
+            | ["", "api", "v1", "projects", _, "usage"]
     ) || matches!(
         segments.as_slice(),
         ["", "api", "v1", "resource-requests", _, action]
@@ -2215,12 +2218,14 @@ mod tests {
         assert!(valid_resource_path(
             "/api/v1/resource/rates/01900000-0000-7000-8000-000000000001/end"
         ));
-        assert!(valid_resource_path("/api/v1/resource/usage"));
         assert!(valid_resource_path(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-budget"
         ));
         assert!(valid_resource_path(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/charges"
+        ));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/usage"
         ));
         assert!(valid_resource_path(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/charges/01900000-0000-7000-8000-000000000002/adjustments"

@@ -27,9 +27,9 @@ use tokio::{net::TcpListener, sync::oneshot};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use auth::{ServiceAuthConfig, ServiceTokenVerifier, TransportSecurityMode};
+use auth::{ServiceAuthConfig, ServiceIdentity, ServiceTokenVerifier, TransportSecurityMode};
 use contracts::environment::{
-    ReleaseEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationRequest,
+    ReleaseEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationRequest,
 };
 use contracts::http::{
     CreateResourceRateRequest, EndResourceRateRequest, InternalCreateTaskResourceRequest,
@@ -41,8 +41,9 @@ use contracts::resource::{
     ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement, WorkloadResources,
 };
 use contracts::{
-    ActorId, CapacityClaimId, CourseId, EnvironmentId, GpuCatalogEntryId, LeaseId, PlatformRole,
-    ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId, Revision, TaskRunId, UtcTimestamp,
+    ActorId, CapacityClaimId, CourseId, EnvironmentId, EventId, GpuCatalogEntryId, LeaseId,
+    PlatformRole, ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId, Revision, TaskRunId,
+    UtcTimestamp,
 };
 use resource_service::ApprovalPolicy;
 use resource_service::LifecycleError;
@@ -67,7 +68,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -82,6 +83,9 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
         include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
         include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql"),
+        include_str!(
+            "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
+        ),
     ))
     .execute(&pool)
     .await?;
@@ -862,7 +866,7 @@ async fn task_resource_lifecycle_returns_owner_scope_and_confirms_fenced_cleanup
 async fn task_resource_reviewing_cancel_is_idempotent_and_rejects_approval_race()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let owner_id = ActorId::new();
     let project_id = ProjectId::new();
@@ -1514,7 +1518,7 @@ async fn gpu_reservation_counts_across_catalog_revisions_for_one_physical_pool()
 async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
-    let store = PgResourceStore::new(pool);
+    let store = PgResourceStore::new(pool.clone());
     let now = store.current_time().await?;
     let provider_binding = "kubernetes-standard".to_owned();
     let allocation_binding = "nvidia.com/gpu".to_owned();
@@ -1545,45 +1549,186 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     let owner_actor_id = ActorId::new();
     let first_environment = EnvironmentId::new();
     let resolve = |environment_id: EnvironmentId, class: &str, count: u32| {
-        ResolveEnvironmentGpuAllocationRequest {
+        let gpu = GpuRequest {
+            class: class.to_owned(),
+            count,
+        };
+        ResolveEnvironmentResourceReservationRequest {
             version: 1,
             environment_id,
             project_id,
             course_id: None,
             owner_actor_id,
             provider_binding: provider_binding.clone(),
-            gpu: GpuRequest {
-                class: class.to_owned(),
-                count,
+            approved_resources: WorkloadResources {
+                cpu_millicores: 1,
+                memory_bytes: 1,
+                storage_bytes: 1,
+                gpu: Some(gpu.clone()),
             },
+            gpu: Some(gpu),
             trace_id: format!("environment-gpu-{environment_id}"),
         }
     };
 
     let first = store
-        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 1))
+        .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 1))
         .await?;
-    assert_eq!(first.class, "a100-exclusive");
-    assert_eq!(first.count, 1);
+    assert_eq!(
+        first.as_ref().map(|value| value.class.as_str()),
+        Some("a100-exclusive")
+    );
+    assert_eq!(first.as_ref().map(|value| value.count), Some(1));
 
     // The same Environment identity replays the durable reservation instead of double counting.
     let replayed = store
-        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 1))
+        .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 1))
         .await?;
     assert_eq!(replayed, first);
 
+    // Rotate the live catalog row after admission.  Settlement must use the immutable
+    // allocation captured in the Environment reservation, including its original class/mode.
+    sqlx::query(
+        "UPDATE resource.gpu_catalog_entries SET class=$2, mode='vm_vgpu', \
+         contract=contract || jsonb_build_object('class',$2,'mode','vm_vgpu') \
+         WHERE entry_id=$1",
+    )
+    .bind(catalog.id.as_uuid())
+    .bind("catalog-rotated")
+    .execute(&pool)
+    .await?;
+    let base_rate = |unit| CreateResourceRateRequest {
+        unit,
+        unit_quantity: 1,
+        gpu_class: None,
+        gpu_mode: None,
+        unit_price: Money {
+            currency: "USD".to_owned(),
+            amount: FixedDecimal::parse("1.000000").expect("fixed GPU test rate"),
+        },
+        effective_from: now,
+        effective_until: None,
+    };
+    store
+        .create_rate(
+            "environment-gpu-rate-cpu",
+            &base_rate(ResourceBillingUnit::CpuMillicoreSecond),
+        )
+        .await?;
+    store
+        .create_rate(
+            "environment-gpu-rate-memory",
+            &base_rate(ResourceBillingUnit::MemoryByteSecond),
+        )
+        .await?;
+    let gpu_rate = store
+        .create_rate(
+            "environment-gpu-rate-gpu",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::GpuUnitSecond,
+                unit_quantity: 1,
+                gpu_class: Some(catalog.class.clone()),
+                gpu_mode: Some(catalog.mode),
+                unit_price: Money {
+                    currency: "USD".to_owned(),
+                    amount: FixedDecimal::parse("1.000000")?,
+                },
+                effective_from: now,
+                effective_until: None,
+            },
+        )
+        .await?;
+    let environment_identity = ServiceIdentity {
+        issuer: "https://keycloak.example.test/realms/workloads".to_owned(),
+        subject: "service-account-environment".to_owned(),
+        client_id: "environment-service".to_owned(),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+        permissions: BTreeSet::new(),
+    };
+    let task_clients = BTreeSet::new();
+    let usage_start = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(1))?;
+    let usage_end = UtcTimestamp::from_utc(usage_start.get() + time::Duration::seconds(1))?;
+    let gpu_usage = store
+        .record_usage_internal(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                    environment_id: first_environment,
+                },
+                source_event_id: EventId::new(),
+                measured_from: usage_start,
+                measured_until: usage_end,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        cpu_millicore_seconds: 1,
+                        memory_byte_seconds: 1,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 1,
+                    },
+                },
+            },
+            usage_end,
+            &environment_identity,
+            "environment-service",
+            &task_clients,
+        )
+        .await?;
+    let gpu_charge = store
+        .settle_usage(gpu_usage.id)
+        .await?
+        .ok_or("GPU Experiment usage was not priced")?;
+    let gpu_charge_replay = store
+        .settle_usage(gpu_usage.id)
+        .await?
+        .ok_or("GPU Experiment charge replay was not returned")?;
+    assert_eq!(gpu_charge, gpu_charge_replay);
+    assert_eq!(gpu_charge.total.amount.as_str(), "3.000000");
+    let gpu_line = gpu_charge
+        .lines
+        .iter()
+        .find(|line| line.unit == ResourceBillingUnit::GpuUnitSecond)
+        .ok_or("GPU charge line missing")?;
+    assert_eq!(gpu_line.rate_id, gpu_rate.id);
+    assert_eq!(gpu_line.quantity, 1);
+    let gpu_charge_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.resource_charges \
+         WHERE usage_record_id=$1 AND adjustment_of IS NULL",
+    )
+    .bind(gpu_usage.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(gpu_charge_count, 1);
+
+    // Restore the catalog fixture before exercising the capacity assertions below.  The
+    // usage settlement above must prove the immutable allocation binding, while the
+    // admission checks intentionally exercise the original catalog contract.
+    sqlx::query(
+        "UPDATE resource.gpu_catalog_entries SET class=$2, mode=$3, contract=$4 \
+         WHERE entry_id=$1",
+    )
+    .bind(catalog.id.as_uuid())
+    .bind(&catalog.class)
+    .bind("exclusive")
+    .bind(serde_json::to_value(&catalog)?)
+    .execute(&pool)
+    .await?;
+
     // A different class or count for the same identity is a conflict, not a silent re-allocation.
     let mismatched = store
-        .resolve_environment_gpu_allocation(&resolve(first_environment, "a100-exclusive", 2))
+        .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 2))
         .await;
     assert!(matches!(
         mismatched,
-        Err(resource_service::store::ResourceStoreError::EnvironmentGpuReservationConflict)
+        Err(resource_service::store::ResourceStoreError::EnvironmentResourceReservationConflict)
     ));
 
     // An unknown class fails closed before any capacity is reserved.
     let unknown = store
-        .resolve_environment_gpu_allocation(&resolve(EnvironmentId::new(), "unknown-class", 1))
+        .resolve_environment_resource_reservation(&resolve(
+            EnvironmentId::new(),
+            "unknown-class",
+            1,
+        ))
         .await;
     assert!(matches!(
         unknown,
@@ -1593,14 +1738,14 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     // The single observed unit is owned by the first Environment, so a second cannot be admitted.
     let second_environment = EnvironmentId::new();
     let exhausted = store
-        .resolve_environment_gpu_allocation(&resolve(second_environment, "a100-exclusive", 1))
+        .resolve_environment_resource_reservation(&resolve(second_environment, "a100-exclusive", 1))
         .await;
     assert!(matches!(
         exhausted,
         Err(resource_service::store::ResourceStoreError::GpuCapacityExhausted)
     ));
 
-    let release = |environment_id: EnvironmentId| ReleaseEnvironmentGpuAllocationRequest {
+    let release = |environment_id: EnvironmentId| ReleaseEnvironmentResourceReservationRequest {
         version: 1,
         environment_id,
         project_id,
@@ -1609,21 +1754,460 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     };
     assert!(
         store
-            .release_environment_gpu_allocation(&release(first_environment))
+            .release_environment_resource_reservation(&release(first_environment))
             .await?
     );
     // Release is idempotent.
     assert!(
         !store
-            .release_environment_gpu_allocation(&release(first_environment))
+            .release_environment_resource_reservation(&release(first_environment))
             .await?
     );
+    let resurrected = store
+        .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 1))
+        .await;
+    assert!(matches!(
+        resurrected,
+        Err(resource_service::store::ResourceStoreError::EnvironmentResourceReservationConflict)
+    ));
 
     // Releasing the first Environment makes the unit available to the second.
     let admitted = store
-        .resolve_environment_gpu_allocation(&resolve(second_environment, "a100-exclusive", 1))
+        .resolve_environment_resource_reservation(&resolve(second_environment, "a100-exclusive", 1))
         .await?;
-    assert_eq!(admitted.count, 1);
+    assert_eq!(admitted.as_ref().map(|value| value.count), Some(1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    let environment_id = EnvironmentId::new();
+    let project_id = ProjectId::new();
+    let course_id = CourseId::new();
+    let owner_actor_id = ActorId::new();
+    let release_id = ReleaseId::new();
+    let provider_binding = "kubernetes-standard";
+    let approved_resources = WorkloadResources {
+        cpu_millicores: 250,
+        memory_bytes: 1024 * 1024 * 1024,
+        storage_bytes: 8 * 1024 * 1024 * 1024,
+        gpu: None,
+    };
+    let accepted_at = "2026-07-14T00:00:00.000Z";
+    let environment_contract = serde_json::json!({
+        "environmentId": environment_id,
+        "displayLabel": "legacy CPU-only experiment",
+        "projectId": project_id,
+        "courseId": course_id,
+        "ownerId": owner_actor_id,
+        "class": "experiment",
+        "runtimeKind": "container",
+        "releaseId": release_id,
+        "releaseVersion": 1,
+        "leaseId": null,
+        "capacityBinding": null,
+        "resourceReservationReleased": false,
+        "providerBinding": provider_binding,
+        "desiredState": "running",
+        "observedState": "ready",
+        "revision": 2,
+        "generation": 1,
+        "observedGeneration": 1,
+        "operation": {
+            "id": contracts::OperationId::new(),
+            "kind": "create",
+            "state": "succeeded",
+            "acceptedRevision": 2,
+            "attempt": 1,
+            "providerStep": 4,
+            "maxAttempts": 3,
+            "nextAttemptAt": accepted_at,
+            "actorId": owner_actor_id,
+            "traceId": "legacy-cpu-only-experiment",
+            "acceptedAt": accepted_at,
+            "deadlineAt": "2026-07-14T00:10:00.000Z",
+            "cleanupStartedAt": null,
+            "diagnosticCode": null,
+            "preserveMutableDisk": false,
+            "accessRevocationRevision": null,
+            "retryFromPhase": null,
+            "resetTarget": null,
+            "leaseAuthorization": null
+        },
+        "eligibilityExpiresAt": "2027-07-15T00:00:00.000Z",
+        "endpoints": [],
+        "lastDiagnosticCode": null,
+        "failedPhase": null,
+        "cleanupEvidence": null,
+        "gpuAllocation": null
+    });
+    let environment_schema = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql")
+    );
+    sqlx::raw_sql(&environment_schema).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO environment.release_projections \
+         (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
+         VALUES ($1,$2,$3,1,$4,$5,$6,$7)",
+    )
+    .bind(release_id.as_uuid())
+    .bind(project_id.as_uuid())
+    .bind(course_id.as_uuid())
+    .bind(provider_binding)
+    .bind("a".repeat(64))
+    .bind(serde_json::json!({
+        "environmentSpec": {
+            "resources": {
+                "cpuMillicores": approved_resources.cpu_millicores,
+                "memoryBytes": approved_resources.memory_bytes,
+                "storageBytes": approved_resources.storage_bytes,
+                "gpu": null
+            }
+        }
+    }))
+    .bind(EventId::new().as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environment.environment_instances \
+         (environment_id,project_id,course_id,owner_actor_id,release_id,generation,observed_generation,\
+          desired_state,observed_state,provider_binding,lease_id,capacity_binding,revision,terminal_diagnostic,\
+          failed_phase,eligibility_expires_at,contract) \
+         VALUES ($1,$2,$3,$4,$5,1,1,'running','ready',$6,NULL,NULL,2,NULL,NULL,$7,$8)",
+    )
+    .bind(environment_id.as_uuid())
+    .bind(project_id.as_uuid())
+    .bind(course_id.as_uuid())
+    .bind(owner_actor_id.as_uuid())
+    .bind(release_id.as_uuid())
+    .bind(provider_binding)
+    .bind(time::OffsetDateTime::parse(
+        "2027-07-15T00:00:00.000Z",
+        &time::format_description::well_known::Rfc3339,
+    )?)
+    .bind(environment_contract)
+    .execute(&pool)
+    .await?;
+
+    let resource_schema = format!(
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
+        include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
+        include_str!("../../../migrations/resource/0004_resource_claim_quota_resources.sql"),
+        include_str!(
+            "../../../migrations/resource/0005_resource_lease_pending_terminal_states.sql"
+        ),
+        include_str!("../../../migrations/resource/0006_resource_lease_reconciliation.sql"),
+        include_str!("../../../migrations/resource/0007_resource_outbox_trigger_fix.sql"),
+        include_str!("../../../migrations/resource/0008_v3_project_gpu_billing.sql"),
+        include_str!("../../../migrations/resource/0009_settlement_retry.sql"),
+        include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
+        include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
+        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql")
+    );
+    sqlx::raw_sql(&resource_schema).execute(&pool).await?;
+    let migration = include_str!(
+        "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
+    );
+    sqlx::raw_sql(migration).execute(&pool).await?;
+
+    let reservation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.environment_resource_reservations WHERE environment_id=$1",
+    )
+    .bind(environment_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reservation_count, 1);
+    let reservation_contract: Value = sqlx::query_scalar(
+        "SELECT contract FROM resource.environment_resource_reservations WHERE environment_id=$1",
+    )
+    .bind(environment_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        reservation_contract["approvedResources"],
+        serde_json::to_value(&approved_resources)?
+    );
+    assert!(reservation_contract["allocation"].is_null());
+
+    let store = PgResourceStore::new(pool.clone());
+    let resolve_request = ResolveEnvironmentResourceReservationRequest {
+        version: 1,
+        environment_id,
+        project_id,
+        course_id: Some(course_id),
+        owner_actor_id,
+        provider_binding: provider_binding.to_owned(),
+        approved_resources: approved_resources.clone(),
+        gpu: None,
+        trace_id: "legacy-cpu-only-resolve-replay".to_owned(),
+    };
+    assert_eq!(
+        store
+            .resolve_environment_resource_reservation(&resolve_request)
+            .await?,
+        None
+    );
+
+    let environment_identity = ServiceIdentity {
+        issuer: "https://keycloak.example.test/realms/workloads".to_owned(),
+        subject: "service-account-environment".to_owned(),
+        client_id: "environment-service".to_owned(),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+        permissions: BTreeSet::new(),
+    };
+    let task_identity = ServiceIdentity {
+        client_id: "evaluation-service".to_owned(),
+        ..environment_identity.clone()
+    };
+    let usage_start = store.current_time().await?;
+    let usage_end = UtcTimestamp::from_utc(usage_start.get() + time::Duration::seconds(1))?;
+    let compute_quantities = ResourceUsageQuantities {
+        cpu_millicore_seconds: u64::from(approved_resources.cpu_millicores),
+        memory_byte_seconds: approved_resources.memory_bytes,
+        storage_byte_seconds: 0,
+        gpu_unit_seconds: 0,
+    };
+    let compute_input = RecordResourceUsageRequest {
+        kind: ResourceUsageKind::Compute,
+        target: contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id },
+        source_event_id: contracts::EventId::new(),
+        measured_from: usage_start,
+        measured_until: usage_end,
+        measurement: UsageMeasurement::Known {
+            quantities: compute_quantities,
+        },
+    };
+    let rate_input = |unit, unit_quantity, amount| CreateResourceRateRequest {
+        unit,
+        unit_quantity,
+        gpu_class: None,
+        gpu_mode: None,
+        unit_price: Money {
+            currency: "USD".to_owned(),
+            amount: FixedDecimal::parse(amount).expect("fixed test rate"),
+        },
+        effective_from: usage_start,
+        effective_until: None,
+    };
+    let cpu_rate = store
+        .create_rate(
+            "legacy-cpu-only-rate-cpu",
+            &rate_input(
+                ResourceBillingUnit::CpuMillicoreSecond,
+                compute_quantities.cpu_millicore_seconds,
+                "1.000000",
+            ),
+        )
+        .await?;
+    let memory_rate = store
+        .create_rate(
+            "legacy-cpu-only-rate-memory",
+            &rate_input(
+                ResourceBillingUnit::MemoryByteSecond,
+                compute_quantities.memory_byte_seconds,
+                "2.000000",
+            ),
+        )
+        .await?;
+    let storage_rate = store
+        .create_rate(
+            "legacy-cpu-only-rate-storage",
+            &rate_input(
+                ResourceBillingUnit::StorageByteSecond,
+                approved_resources.storage_bytes,
+                "3.000000",
+            ),
+        )
+        .await?;
+    let task_clients = BTreeSet::from(["evaluation-service".to_owned()]);
+    assert!(matches!(
+        store
+            .record_usage_internal(
+                &compute_input,
+                usage_end,
+                &task_identity,
+                "environment-service",
+                &task_clients,
+            )
+            .await,
+        Err(ResourceStoreError::ScopeConflict)
+    ));
+    let mut wrong_quantity = compute_input.clone();
+    wrong_quantity.source_event_id = contracts::EventId::new();
+    if let UsageMeasurement::Known { quantities } = &mut wrong_quantity.measurement {
+        quantities.cpu_millicore_seconds = 1;
+    }
+    assert!(matches!(
+        store
+            .record_usage_internal(
+                &wrong_quantity,
+                usage_end,
+                &environment_identity,
+                "environment-service",
+                &task_clients,
+            )
+            .await,
+        Err(ResourceStoreError::ScopeConflict)
+    ));
+    let first_usage = store
+        .record_usage_internal(
+            &compute_input,
+            usage_end,
+            &environment_identity,
+            "environment-service",
+            &task_clients,
+        )
+        .await?;
+    let replayed_usage = store
+        .record_usage_internal(
+            &compute_input,
+            usage_end,
+            &environment_identity,
+            "environment-service",
+            &task_clients,
+        )
+        .await?;
+    assert_eq!(replayed_usage.id, first_usage.id);
+    let first_charge = store
+        .settle_usage(first_usage.id)
+        .await?
+        .ok_or("CPU-only known usage was not priced")?;
+    let first_charge_replay = store
+        .settle_usage(first_usage.id)
+        .await?
+        .ok_or("CPU-only charge replay was not returned")?;
+    assert_eq!(first_charge, first_charge_replay);
+    assert_eq!(first_charge.total.amount.as_str(), "3.000000");
+    assert!(
+        first_charge
+            .lines
+            .iter()
+            .any(|line| line.rate_id == cpu_rate.id)
+    );
+    assert!(
+        first_charge
+            .lines
+            .iter()
+            .any(|line| line.rate_id == memory_rate.id)
+    );
+    let first_charge_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource.resource_charges \
+         WHERE usage_record_id=$1 AND adjustment_of IS NULL",
+    )
+    .bind(first_usage.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(first_charge_count, 1);
+    let overlap_start =
+        UtcTimestamp::from_utc(usage_start.get() + time::Duration::milliseconds(500))?;
+    let overlap_end = UtcTimestamp::from_utc(overlap_start.get() + time::Duration::seconds(1))?;
+    let overlap_input = RecordResourceUsageRequest {
+        source_event_id: contracts::EventId::new(),
+        measured_from: overlap_start,
+        measured_until: overlap_end,
+        ..compute_input.clone()
+    };
+    assert!(matches!(
+        store
+            .record_usage_internal(
+                &overlap_input,
+                overlap_end,
+                &environment_identity,
+                "environment-service",
+                &task_clients,
+            )
+            .await,
+        Err(ResourceStoreError::UsageOverlap)
+    ));
+    let earlier_start = UtcTimestamp::from_utc(usage_start.get() - time::Duration::seconds(2))?;
+    let earlier_end = UtcTimestamp::from_utc(usage_start.get() - time::Duration::seconds(1))?;
+    let earlier_input = RecordResourceUsageRequest {
+        source_event_id: contracts::EventId::new(),
+        measured_from: earlier_start,
+        measured_until: earlier_end,
+        ..compute_input.clone()
+    };
+    store
+        .record_usage_internal(
+            &earlier_input,
+            earlier_end,
+            &environment_identity,
+            "environment-service",
+            &task_clients,
+        )
+        .await?;
+    let storage_start = usage_end;
+    let storage_end = UtcTimestamp::from_utc(storage_start.get() + time::Duration::seconds(1))?;
+    let storage_input = RecordResourceUsageRequest {
+        kind: ResourceUsageKind::Storage,
+        source_event_id: contracts::EventId::new(),
+        measured_from: storage_start,
+        measured_until: storage_end,
+        measurement: UsageMeasurement::Known {
+            quantities: ResourceUsageQuantities {
+                cpu_millicore_seconds: 0,
+                memory_byte_seconds: 0,
+                storage_byte_seconds: approved_resources.storage_bytes,
+                gpu_unit_seconds: 0,
+            },
+        },
+        ..compute_input.clone()
+    };
+    let storage_usage = store
+        .record_usage_internal(
+            &storage_input,
+            storage_end,
+            &environment_identity,
+            "environment-service",
+            &task_clients,
+        )
+        .await?;
+    let storage_charge = store
+        .settle_usage(storage_usage.id)
+        .await?
+        .ok_or("CPU-only storage usage was not priced")?;
+    assert_eq!(storage_charge.total.amount.as_str(), "3.000000");
+    assert_eq!(storage_charge.lines.len(), 1);
+    assert_eq!(storage_charge.lines[0].rate_id, storage_rate.id);
+
+    let release_request = ReleaseEnvironmentResourceReservationRequest {
+        version: 1,
+        environment_id,
+        project_id,
+        owner_actor_id,
+        trace_id: "legacy-cpu-only-release".to_owned(),
+    };
+    assert!(
+        store
+            .release_environment_resource_reservation(&release_request)
+            .await?
+    );
+    assert!(matches!(
+        store
+            .resolve_environment_resource_reservation(&resolve_request)
+            .await,
+        Err(ResourceStoreError::EnvironmentResourceReservationConflict)
+    ));
+    let reservation_state: String = sqlx::query_scalar(
+        "SELECT state FROM resource.environment_resource_reservations WHERE environment_id=$1",
+    )
+    .bind(environment_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reservation_state, "released");
     Ok(())
 }
 
@@ -1646,20 +2230,31 @@ async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
     store
         .create_gpu_catalog_entry("environment-gpu-stale-catalog", &catalog)
         .await?;
-    let request = ResolveEnvironmentGpuAllocationRequest {
+    let request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
         environment_id: EnvironmentId::new(),
         project_id: ProjectId::new(),
         course_id: None,
         owner_actor_id: ActorId::new(),
         provider_binding,
-        gpu: GpuRequest {
+        approved_resources: WorkloadResources {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            gpu: Some(GpuRequest {
+                class: "a100-exclusive".to_owned(),
+                count: 1,
+            }),
+        },
+        gpu: Some(GpuRequest {
             class: "a100-exclusive".to_owned(),
             count: 1,
-        },
+        }),
         trace_id: "environment-gpu-stale".to_owned(),
     };
-    let result = store.resolve_environment_gpu_allocation(&request).await;
+    let result = store
+        .resolve_environment_resource_reservation(&request)
+        .await;
     assert!(matches!(
         result,
         Err(resource_service::store::ResourceStoreError::GpuObservationStale)
@@ -1817,11 +2412,11 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
         .await?;
 
     let first_input = RecordResourceUsageRequest {
-        project_id,
-        course_id: None,
         kind: ResourceUsageKind::Compute,
-        request_id: request.id,
-        lease_id: Some(lease.id),
+        target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+            request_id: request.id,
+            lease_id: Some(lease.id),
+        },
         source_event_id: contracts::EventId::new(),
         measured_from: now,
         measured_until: boundary,
@@ -1880,8 +2475,10 @@ async fn resource_billing_uses_valid_leases_and_is_idempotent_across_rates_unkno
     )
     .await?;
     let crossing_input = RecordResourceUsageRequest {
-        request_id: crossing_request.id,
-        lease_id: Some(crossing_lease.id),
+        target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+            request_id: crossing_request.id,
+            lease_id: Some(crossing_lease.id),
+        },
         source_event_id: contracts::EventId::new(),
         measured_from: now,
         measured_until: end,
@@ -2197,11 +2794,11 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
     let usage = store
         .record_usage(
             &RecordResourceUsageRequest {
-                project_id,
-                course_id: None,
                 kind: ResourceUsageKind::Compute,
-                request_id: request.id,
-                lease_id: Some(lease.id),
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
                 source_event_id: contracts::EventId::new(),
                 measured_from: now,
                 measured_until: usage_until,
@@ -2311,11 +2908,11 @@ async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
     let usage = store
         .record_usage(
             &RecordResourceUsageRequest {
-                project_id,
-                course_id: None,
                 kind: ResourceUsageKind::Compute,
-                request_id: request.id,
-                lease_id: Some(lease.id),
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
                 source_event_id: contracts::EventId::new(),
                 measured_from: now,
                 measured_until,
@@ -2403,11 +3000,11 @@ async fn settlement_retry_caps_exponent_before_integer_cast_for_large_attempts()
     let usage = store
         .record_usage(
             &RecordResourceUsageRequest {
-                project_id,
-                course_id: None,
                 kind: ResourceUsageKind::Compute,
-                request_id: request.id,
-                lease_id: Some(lease.id),
+                target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease.id),
+                },
                 source_event_id: contracts::EventId::new(),
                 measured_from: now,
                 measured_until,
@@ -3022,7 +3619,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -3036,7 +3633,10 @@ async fn migrated_pool()
         include_str!("../../../migrations/resource/0009_settlement_retry.sql"),
         include_str!("../../../migrations/resource/0010_task_run_identity.sql"),
         include_str!("../../../migrations/resource/0011_gpu_catalog_pool_uniqueness.sql"),
-        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql")
+        include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql"),
+        include_str!(
+            "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
+        )
     ))
     .execute(&pool)
     .await?;

@@ -15,6 +15,8 @@ import {
 } from '../support/real-resource.mjs'
 import {
   cleanupWorkResources,
+  inspectRealWorkFinanceByUi,
+  waitForSettledWorkUsageCharges,
   selectPendingWorkTaskResourceRequest,
 } from '../support/real-work.mjs'
 import { issueEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
@@ -43,8 +45,22 @@ function requireRecoveryIds() {
   }
 }
 
-function requireProjectUsageReadContract() {
-  throw new Error('LW_WORK_RECOVERY_PROJECT_USAGE_READ_UNAVAILABLE')
+async function assertProjectUsageReadAvailable(adminPage, projectId) {
+  const response = await adminPage.request.get(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/usage?page=1&pageSize=1`,
+  )
+  if (response.status() === 404) throw new Error('LW_WORK_RECOVERY_PROJECT_USAGE_READ_UNAVAILABLE')
+  const result = await expectJson(response, 'LW_WORK_RECOVERY_PROJECT_USAGE_READ_FAILED')
+  if (
+    !result
+    || !Array.isArray(result.items)
+    || result.page !== 1
+    || result.pageSize !== 1
+    || typeof result.hasMore !== 'boolean'
+  ) {
+    throw new Error('LW_WORK_RECOVERY_PROJECT_USAGE_READ_INVALID')
+  }
+  return result
 }
 
 function isFullyTerminal(run) {
@@ -294,24 +310,30 @@ test('student retries the exact failed Work run once and completes its normal en
   test.skip(!RECOVERY_ENABLED, 'set LABWEAVER_E2E_WORK_RECOVERY=1 with the exact recovery project and run IDs')
   requireRecoveryIds()
 
-  // Keep the one allowed retry behind the real usage-read contract. The current
-  // API has no user-visible project usage read, so fail before any retry or
-  // resource write instead of consuming the approved recovery attempt.
-  requireProjectUsageReadContract()
-
-  const initialRun = await readWorkAuthoringRun(page.request, PROJECT_ID, RUN_ID)
-  assertRetryableFailedRun(initialRun)
-  const studentActorId = await readActorId(page.request)
   let adminContext = null
   let adminPage = null
   let trackedEnvironmentId = null
   let trackedRequestId = null
   let trackedLeaseId = null
+  let baselineChargeIds = new Set()
   let cleanupComplete = false
   let primaryError = null
   try {
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     adminPage = await adminContext.newPage()
+    // The recovery retry is single-use. Verify the real administrator session
+    // can read the usage projection before any retry or resource write.
+    await assertProjectUsageReadAvailable(adminPage, PROJECT_ID)
+    const baselineCharges = await expectJson(
+      await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(PROJECT_ID)}/charges`),
+      'LW_WORK_RECOVERY_BASELINE_CHARGES_READ_FAILED',
+    )
+    if (!Array.isArray(baselineCharges)) throw new Error('LW_WORK_RECOVERY_BASELINE_CHARGES_INVALID')
+    baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
+
+    const initialRun = await readWorkAuthoringRun(page.request, PROJECT_ID, RUN_ID)
+    assertRetryableFailedRun(initialRun)
+    const studentActorId = await readActorId(page.request)
 
     await openExactRunFromHistory(page, PROJECT_ID, RUN_ID)
     const retry = page.getByRole('button', { name: '重试环境候选生成', exact: true })
@@ -462,6 +484,21 @@ test('student retries the exact failed Work run once and completes its normal en
         primaryError = primaryError
           ? new AggregateError([primaryError, cleanupError], 'LW_WORK_RECOVERY_PRIMARY_AND_CLEANUP_FAILED')
           : cleanupError
+      }
+    }
+    if (!primaryError && cleanupComplete && trackedRequestId && trackedLeaseId) {
+      try {
+        const finance = await waitForSettledWorkUsageCharges(browser, baseURL, {
+          projectId: PROJECT_ID,
+          leases: [{ requestId: trackedRequestId, leaseId: trackedLeaseId }],
+          baselineChargeIds,
+        })
+        await inspectRealWorkFinanceByUi(browser, baseURL, PROJECT_ID, {
+          usageRecordIds: finance.matches.map(({ usage }) => usage.id),
+          expectedCharges: finance.matches.map(({ charge }) => charge),
+        })
+      } catch (financeError) {
+        primaryError = financeError
       }
     }
     await adminContext?.close()

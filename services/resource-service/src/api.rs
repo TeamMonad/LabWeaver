@@ -9,19 +9,19 @@ use axum::{
     routing::{get, post},
 };
 use contracts::environment::{
-    ReleaseEnvironmentGpuAllocationRequest, ReleaseEnvironmentGpuAllocationResponse,
-    ResolveEnvironmentGpuAllocationRequest, ResolveEnvironmentGpuAllocationResponse,
+    ReleaseEnvironmentResourceReservationRequest, ReleaseEnvironmentResourceReservationResponse,
+    ResolveEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationResponse,
 };
 use contracts::http::{
     AcknowledgeTaskResourceRequest, ApproveResourceRequest, CreateResourceAdjustmentRequest,
     CreateResourceRateRequest, CreateResourceRequest, EndResourceRateRequest,
-    InternalCreateTaskResourceRequest, RecordResourceUsageRequest, ReleaseTaskResourceRequest,
-    RenewResourceLease, ResourceOperationAccepted, StrongEtag, TaskResourceStatus,
-    UpsertResourceBudgetRequest,
+    InternalCreateTaskResourceRequest, PageQuery, RecordResourceUsageRequest,
+    ReleaseTaskResourceRequest, RenewResourceLease, ResourceOperationAccepted, StrongEtag,
+    TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     GpuCatalogEntry, ResourceCharge, ResourceRate, ResourceRequest, ResourceRequestState,
-    ResourceUsageRecord,
+    ResourceUsagePage, ResourceUsageRecord,
 };
 use contracts::{
     ActorId, ChargeId, DiagnosticCode, LeaseId, ProblemDetails, ProjectId, RateId,
@@ -146,7 +146,6 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             "/api/v1/resource-leases/{lease_id}/revoke",
             post(revoke_lease),
         )
-        .route("/api/v1/resource/usage", post(record_usage))
         .route("/api/v1/resource/rates", get(list_rates).post(create_rate))
         .route("/api/v1/resource/rates/{rate_id}/end", post(end_rate))
         .route(
@@ -158,6 +157,7 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
             get(get_budget).put(upsert_budget),
         )
         .route("/api/v1/projects/{project_id}/charges", get(list_charges))
+        .route("/api/v1/projects/{project_id}/usage", get(list_usage))
         .route(
             "/api/v1/projects/{project_id}/charges/{charge_id}/adjustments",
             post(create_adjustment),
@@ -193,12 +193,12 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         )
         .route("/internal/v1/resource/usage", post(record_internal_usage))
         .route(
-            "/internal/v1/environment-gpu-allocations",
-            post(resolve_environment_gpu_allocation),
+            "/internal/v1/environment-resource-reservations",
+            post(resolve_environment_resource_reservation),
         )
         .route(
-            "/internal/v1/environment-gpu-allocations/release",
-            post(release_environment_gpu_allocation),
+            "/internal/v1/environment-resource-reservations/release",
+            post(release_environment_resource_reservation),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -721,17 +721,6 @@ async fn revoke_lease(
     with_etag(Json(lease), revision)
 }
 
-async fn record_usage(
-    State(state): State<ResourceApiState>,
-    Extension(principal): Extension<ResourceCallerPrincipal>,
-    Json(input): Json<RecordResourceUsageRequest>,
-) -> Result<Json<ResourceUsageRecord>, ResourceApiError> {
-    authorize(&principal);
-    require_admin(&principal)?;
-    let observed_at = state.store.current_time().await?;
-    Ok(Json(state.store.record_usage(&input, observed_at).await?))
-}
-
 async fn create_task_resource(
     State(state): State<ResourceApiState>,
     Extension(_identity): Extension<auth::ServiceIdentity>,
@@ -903,18 +892,18 @@ async fn record_internal_usage(
     ))
 }
 
-/// Resolves and reserves one Experiment GPU allocation for an authenticated Environment caller.
-async fn resolve_environment_gpu_allocation(
+/// Resolves and reserves one Experiment resource reservation for an authenticated Environment caller.
+async fn resolve_environment_resource_reservation(
     State(state): State<ResourceApiState>,
     Extension(identity): Extension<auth::ServiceIdentity>,
-    Json(input): Json<ResolveEnvironmentGpuAllocationRequest>,
-) -> Result<Json<ResolveEnvironmentGpuAllocationResponse>, ResourceApiError> {
+    Json(input): Json<ResolveEnvironmentResourceReservationRequest>,
+) -> Result<Json<ResolveEnvironmentResourceReservationResponse>, ResourceApiError> {
     require_environment_service(&state, &identity)?;
     let allocation = state
         .store
-        .resolve_environment_gpu_allocation(&input)
+        .resolve_environment_resource_reservation(&input)
         .await?;
-    Ok(Json(ResolveEnvironmentGpuAllocationResponse {
+    Ok(Json(ResolveEnvironmentResourceReservationResponse {
         version: 1,
         environment_id: input.environment_id,
         provider_binding: input.provider_binding,
@@ -922,18 +911,18 @@ async fn resolve_environment_gpu_allocation(
     }))
 }
 
-/// Releases one Experiment GPU reservation for an authenticated Environment caller.
-async fn release_environment_gpu_allocation(
+/// Releases one Experiment resource reservation for an authenticated Environment caller.
+async fn release_environment_resource_reservation(
     State(state): State<ResourceApiState>,
     Extension(identity): Extension<auth::ServiceIdentity>,
-    Json(input): Json<ReleaseEnvironmentGpuAllocationRequest>,
-) -> Result<Json<ReleaseEnvironmentGpuAllocationResponse>, ResourceApiError> {
+    Json(input): Json<ReleaseEnvironmentResourceReservationRequest>,
+) -> Result<Json<ReleaseEnvironmentResourceReservationResponse>, ResourceApiError> {
     require_environment_service(&state, &identity)?;
     let released = state
         .store
-        .release_environment_gpu_allocation(&input)
+        .release_environment_resource_reservation(&input)
         .await?;
-    Ok(Json(ReleaseEnvironmentGpuAllocationResponse {
+    Ok(Json(ReleaseEnvironmentResourceReservationResponse {
         version: 1,
         environment_id: input.environment_id,
         released,
@@ -1076,6 +1065,23 @@ async fn list_charges(
     authorize(&principal);
     require_admin(&principal)?;
     Ok(Json(state.store.list_charges(project_id).await?))
+}
+
+async fn list_usage(
+    State(state): State<ResourceApiState>,
+    Extension(principal): Extension<ResourceCallerPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<ResourceUsagePage>, ResourceApiError> {
+    authorize(&principal);
+    require_admin(&principal)?;
+    let (page, page_size, offset) = query.normalized().map_err(|_| ResourceApiError::Invalid)?;
+    Ok(Json(
+        state
+            .store
+            .list_usage(project_id, page, page_size, offset)
+            .await?,
+    ))
 }
 
 async fn create_adjustment(
@@ -1288,11 +1294,11 @@ fn internal_route_permission(path: &str) -> Option<&'static str> {
     if path == "/internal/v1/resource/usage" {
         return Some("resource.usage.record");
     }
-    if path == "/internal/v1/environment-gpu-allocations" {
-        return Some("resource.gpu.resolve");
+    if path == "/internal/v1/environment-resource-reservations" {
+        return Some("resource.environment.resolve");
     }
-    if path == "/internal/v1/environment-gpu-allocations/release" {
-        return Some("resource.gpu.release");
+    if path == "/internal/v1/environment-resource-reservations/release" {
+        return Some("resource.environment.release");
     }
     if path == "/internal/v1/task-resources" {
         return Some("resource.task.create");
@@ -1735,6 +1741,14 @@ mod tests {
 
     #[test]
     fn internal_route_permission_uses_the_task_id_segment() {
+        assert_eq!(
+            internal_route_permission("/internal/v1/environment-resource-reservations"),
+            Some("resource.environment.resolve")
+        );
+        assert_eq!(
+            internal_route_permission("/internal/v1/environment-resource-reservations/release"),
+            Some("resource.environment.release")
+        );
         assert_eq!(
             internal_route_permission("/internal/v1/task-resources"),
             Some("resource.task.create")

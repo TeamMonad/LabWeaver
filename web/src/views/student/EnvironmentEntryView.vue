@@ -1020,7 +1020,7 @@
     <ConfirmDialog
       :open="deleteEnvironment !== null"
       :title="deleteEnvironment && failedCleanup(deleteEnvironment) ? '重试回收环境' : '删除环境'"
-      :description="deleteEnvironment && failedCleanup(deleteEnvironment) ? '上次回收失败，资源释放尚未确认。确定重新回收该环境吗？所有未持久化的数据将丢失。' : '确定删除该环境吗？所有未持久化的数据将丢失。'"
+      :description="deleteEnvironment && failedCleanup(deleteEnvironment) ? '上次回收失败，资源释放尚未确认。重试会继续回收该环境，并删除仍存在的工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。项目材料、已冻结提交和评测记录不在本环境回收范围内。确定继续吗？' : '删除会回收整个环境，删除工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。项目材料、已冻结提交和评测记录不在本环境删除范围内。确定继续吗？'"
       :confirm-text="deleteEnvironment && failedCleanup(deleteEnvironment) ? '重试回收' : '删除'"
       severity="error"
       @cancel="deleteEnvironment = null"
@@ -1493,7 +1493,7 @@ function operationTimelineDescription(op: EnvironmentOperationSnapshotSchema): s
 }
 
 function failedEnvironmentMessage(data: EnvironmentInstanceSchema): string {
-  if (failedCleanup(data)) return '环境回收失败，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
+  if (failedCleanup(data)) return '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。'
   const phase = data.failedPhase ? `（${environmentStateLabel(data.failedPhase)}阶段）` : ''
   return `环境${phase}未能完成操作。${retryableOperation.value ? '请使用顶部操作栏的“重试失败的操作”。' : ''}`
 }
@@ -1795,7 +1795,7 @@ function canDelete(data: EnvironmentInstanceSchema) {
 function lifecycleActionReason(data: EnvironmentInstanceSchema, action: LifecycleTarget['action']): string {
   if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
   if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return action === 'delete'
-    ? '上次回收失败，资源释放尚未确认；可以重新提交回收请求。'
+    ? '上次回收失败，资源释放尚未确认；重新回收会删除仍存在的工作目录和关联磁盘数据。'
     : '环境正在等待回收，只能重试回收，不能重新启动或恢复环境。'
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
   if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
@@ -1815,7 +1815,7 @@ function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
   if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
   if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
-  if (data.observedState === 'stopped') return '环境已停止，启动后才能打开终端。'
+  if (data.observedState === 'stopped') return '环境已停止，启动后才能打开终端。计算用量已停止计量；工作目录和磁盘仍保留并继续按存储费率核算。GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
   if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
   return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
 }

@@ -69,6 +69,25 @@
       "description": "Strongly typed UUIDv7 identifier for `GpuCatalogEntryId`.",
       "type": "string"
     },
+    "GpuRequest": {
+      "additionalProperties": false,
+      "description": "A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ],
+      "type": "object"
+    },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
@@ -98,12 +117,53 @@
     "UtcTimestamp": {
       "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
       "type": "string"
+    },
+    "WorkloadResources": {
+      "additionalProperties": false,
+      "description": "Requested or approved workload resources, independent of Kubernetes quantity syntax.",
+      "properties": {
+        "cpuMillicores": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpuMillicores",
+        "memoryBytes",
+        "storageBytes"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Authoritative fields required to create the first Environment aggregate.",
   "properties": {
+    "approvedResources": {
+      "$ref": "#/$defs/WorkloadResources",
+      "description": "Resources approved by the immutable ReleaseProjection or Work lease.\nEnvironment owns the lifecycle; Resource receives this snapshot only\nthrough the trusted Environment resource reservation handoff."
+    },
     "capacityBinding": {
       "type": [
         "string",
@@ -138,7 +198,7 @@
           "type": "null"
         }
       ],
-      "description": "Resource-resolved Experiment GPU allocation held for this environment instance.\n\nExperiment creation resolves this through Resource before the aggregate is accepted; Work\nenvironments keep their allocation on the Lease authorization instead and leave this absent."
+      "description": "Resource-resolved Experiment GPU allocation held for this environment instance when the\napproved resource snapshot includes GPU capacity.\n\nExperiment creation resolves this through Resource before the aggregate is accepted; Work\nenvironments keep their allocation on the Lease authorization instead and leave this absent."
     },
     "leaseId": {
       "anyOf": [
@@ -180,6 +240,7 @@
     "releaseId",
     "releaseVersion",
     "providerBinding",
+    "approvedResources",
     "eligibilityExpiresAt"
   ],
   "title": "EnvironmentCreateSpec",

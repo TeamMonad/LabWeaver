@@ -1881,13 +1881,23 @@ mod tests {
         {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
+        let (project_id, course_id) =
+            state
+                .status
+                .lock()
+                .map_or((ProjectId::new(), None), |status| {
+                    let project_id = serde_json::from_value(status["projectId"].clone())
+                        .unwrap_or_else(|_| ProjectId::new());
+                    let course_id =
+                        serde_json::from_value(status["request"]["courseId"].clone()).ok();
+                    (project_id, course_id)
+                });
         let record = contracts::resource::ResourceUsageRecord {
             id: UsageRecordId::new(),
-            project_id: request.project_id,
-            course_id: request.course_id,
+            project_id,
+            course_id,
             kind: request.kind,
-            request_id: request.request_id,
-            lease_id: request.lease_id,
+            target: request.target,
             source_event_id: request.source_event_id,
             measured_from: request.measured_from,
             measured_until: request.measured_until,

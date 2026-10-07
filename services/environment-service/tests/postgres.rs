@@ -16,12 +16,16 @@ use std::{
 
 use async_trait::async_trait;
 use contracts::environment::{
-    EndpointHealth, EndpointProtocol, EnvironmentCreateSpec, EnvironmentEndpoint,
-    EnvironmentLeaseAuthorization, EnvironmentOperationKind, ObservedEnvironmentState,
-    OperationState,
+    DesiredEnvironmentState, EndpointHealth, EndpointProtocol, EnvironmentCreateSpec,
+    EnvironmentEndpoint, EnvironmentLeaseAuthorization, EnvironmentOperationKind,
+    ObservedEnvironmentState, OperationState,
 };
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleaseWithdrawn, SPEC_VERSION, subjects};
-use contracts::resource::WorkloadResources;
+use contracts::http::RecordResourceUsageRequest;
+use contracts::resource::{
+    GpuAllocation, GpuAllocationMode, GpuRequest, ResourceUsageKind, UsageMeasurement,
+    WorkloadResources,
+};
 use contracts::supply_chain::{VirtualMachineBaseDisk, VirtualMachineDiskFormat};
 use contracts::{
     ActorId, ArtifactId, ArtifactRef, CourseId, EndpointId, EnvironmentId, EventId, LeaseId,
@@ -46,6 +50,7 @@ use environment_service::{
     ReconcileWorkerOutcome, Reconciler, ReleaseProjectionDecision, apply_provider_observation,
 };
 use persistence_sqlx::Sha256Digest;
+use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
@@ -801,6 +806,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         provider_binding: handoff.provider_binding.clone(),
         lease_id: handoff.lease_id,
         capacity_binding: handoff.capacity_binding.clone(),
+        approved_resources: handoff.approved_resources.clone(),
         gpu_allocation: None,
         eligibility_expires_at: handoff.eligibility_expires_at,
     };
@@ -843,6 +849,532 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
 }
 
 #[tokio::test]
+async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_boundaries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    let old_schema = format!(
+        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}\n{}\n{}",
+        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
+        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
+        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql"),
+        include_str!("../../../migrations/environment/0004_work_configuration_executions.sql"),
+        include_str!("../../../migrations/environment/0005_kubevirt_execution_owner.sql")
+    );
+    sqlx::raw_sql(&old_schema).execute(&pool).await?;
+
+    let resources = WorkloadResources {
+        cpu_millicores: 250,
+        memory_bytes: 512 * 1024 * 1024,
+        storage_bytes: 2 * 1024 * 1024 * 1024,
+        gpu: None,
+    };
+    let legacy_gpu_resources = WorkloadResources {
+        gpu: Some(GpuRequest {
+            class: "a10".to_owned(),
+            count: 1,
+        }),
+        ..resources.clone()
+    };
+    let legacy_gpu_allocation = GpuAllocation {
+        entry_id: contracts::GpuCatalogEntryId::new(),
+        class: "a10".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::Exclusive,
+        provider_binding: "provider".to_owned(),
+        allocation_binding: "allocation".to_owned(),
+        catalog_revision: revision(1),
+    };
+    let fixtures = [
+        (
+            ObservedEnvironmentState::Ready,
+            DesiredEnvironmentState::Running,
+            EnvironmentOperationKind::Create,
+            timestamp("2026-07-14T00:00:00.000Z"),
+        ),
+        (
+            ObservedEnvironmentState::Stopped,
+            DesiredEnvironmentState::Stopped,
+            EnvironmentOperationKind::Stop,
+            timestamp("2026-07-14T00:01:00.000Z"),
+        ),
+        (
+            ObservedEnvironmentState::Deleted,
+            DesiredEnvironmentState::Deleted,
+            EnvironmentOperationKind::Delete,
+            timestamp("2026-07-14T00:02:00.000Z"),
+        ),
+    ];
+    let mut instances = Vec::with_capacity(fixtures.len());
+    for (observed_state, desired_state, operation_kind, accepted_at) in fixtures {
+        let mut instance = support::ready_instance();
+        let instance_resources = if observed_state == ObservedEnvironmentState::Ready {
+            resources.clone()
+        } else {
+            legacy_gpu_resources.clone()
+        };
+        instance.approved_resources = instance_resources.clone();
+        if observed_state != ObservedEnvironmentState::Ready {
+            instance.gpu_allocation = Some(legacy_gpu_allocation.clone());
+        }
+        instance.observed_state = observed_state;
+        instance.desired_state = desired_state;
+        instance.operation.kind = operation_kind;
+        instance.operation.state = OperationState::Succeeded;
+        instance.operation.accepted_revision = instance.revision;
+        instance.operation.accepted_at = accepted_at;
+        instance.operation.next_attempt_at = accepted_at;
+        instance.operation.deadline_at = timestamp("2026-07-14T00:10:00.000Z");
+        instance.operation.access_revocation_revision = match operation_kind {
+            EnvironmentOperationKind::Stop | EnvironmentOperationKind::Delete => Some(revision(3)),
+            _ => None,
+        };
+        if observed_state != ObservedEnvironmentState::Ready {
+            instance.endpoints.clear();
+        }
+        if observed_state == ObservedEnvironmentState::Deleted {
+            instance.cleanup_evidence = Some(ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                object_version: instance.operation.id.to_string(),
+                size_bytes: 1,
+                media_type: "application/json".to_owned(),
+            });
+            instance.operation.cleanup_started_at = Some(accepted_at);
+        }
+        let mut legacy_contract = serde_json::to_value(&instance)?;
+        legacy_contract
+            .as_object_mut()
+            .ok_or("legacy Environment contract must be an object")?
+            .remove("approvedResources");
+        let projection_contract = serde_json::json!({
+            "environmentSpec": {
+                "resources": {
+                    "cpuMillicores": instance_resources.cpu_millicores,
+                    "memoryBytes": instance_resources.memory_bytes,
+                    "storageBytes": instance_resources.storage_bytes,
+                    "gpu": &instance_resources.gpu
+                }
+            }
+        });
+        sqlx::query(
+            "INSERT INTO environment.release_projections \
+             (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id) \
+             VALUES ($1,$2,$3,1,$4,$5,$6,$7)",
+        )
+        .bind(instance.release_id.as_uuid())
+        .bind(instance.project_id.as_uuid())
+        .bind(instance.course_id.map(CourseId::as_uuid))
+        .bind(&instance.provider_binding)
+        .bind("a".repeat(64))
+        .bind(projection_contract)
+        .bind(EventId::new().as_uuid())
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment.environment_instances \
+             (environment_id,project_id,course_id,owner_actor_id,release_id,generation,observed_generation,\
+              desired_state,observed_state,provider_binding,lease_id,capacity_binding,revision,terminal_diagnostic,\
+              failed_phase,eligibility_expires_at,contract) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+        )
+        .bind(instance.id.as_uuid())
+        .bind(instance.project_id.as_uuid())
+        .bind(instance.course_id.map(CourseId::as_uuid))
+        .bind(instance.owner_id.as_uuid())
+        .bind(instance.release_id.as_uuid())
+        .bind(i64::try_from(instance.generation)?)
+        .bind(i64::try_from(instance.observed_generation)?)
+        .bind(match desired_state {
+            DesiredEnvironmentState::Running => "running",
+            DesiredEnvironmentState::Stopped => "stopped",
+            DesiredEnvironmentState::Deleted => "deleted",
+        })
+        .bind(match observed_state {
+            ObservedEnvironmentState::Ready => "ready",
+            ObservedEnvironmentState::Stopped => "stopped",
+            ObservedEnvironmentState::Deleted => "deleted",
+            _ => unreachable!("fixture state is constrained above"),
+        })
+        .bind(&instance.provider_binding)
+        .bind(instance.lease_id.map(LeaseId::as_uuid))
+        .bind(instance.capacity_binding.as_deref())
+        .bind(i64::try_from(instance.revision.get())?)
+        .bind(instance.last_diagnostic_code.as_deref())
+        .bind(Option::<&str>::None)
+        .bind(instance.eligibility_expires_at.get())
+        .bind(legacy_contract)
+        .execute(&pool)
+        .await?;
+        if matches!(
+            observed_state,
+            ObservedEnvironmentState::Stopped | ObservedEnvironmentState::Deleted
+        ) {
+            let legacy_compute_started_at = if observed_state == ObservedEnvironmentState::Deleted {
+                Value::Null
+            } else {
+                serde_json::json!("2026-07-14T00:00:30.000Z")
+            };
+            let legacy_meter = serde_json::json!({
+                "version": 1,
+                "environmentId": instance.id,
+                "projectId": instance.project_id,
+                "courseId": instance.course_id,
+                "ownerActorId": instance.owner_id,
+                "gpuAllocation": &legacy_gpu_allocation,
+                "computeStartedAt": legacy_compute_started_at,
+                "pendingGpuUnitSeconds": 0,
+                "settlementPending": true
+            });
+            sqlx::query(
+                "INSERT INTO environment.resource_metering_state (environment_id, contract) \
+                 VALUES ($1, $2)",
+            )
+            .bind(instance.id.as_uuid())
+            .bind(legacy_meter)
+            .execute(&pool)
+            .await?;
+        }
+        instances.push(instance);
+    }
+
+    let source_event_id = EventId::new();
+    let legacy_delivery = serde_json::json!({
+        "kind": "compute",
+        "projectId": instances[0].project_id,
+        "courseId": instances[0].course_id,
+        "requestId": ResourceRequestId::new(),
+        "leaseId": null,
+        "sourceEventId": source_event_id,
+        "measuredFrom": "2026-07-14T00:10:00.000Z",
+        "measuredUntil": "2026-07-14T00:11:00.000Z",
+        "measurement": {
+            "state": "known",
+            "quantities": {
+                "cpuMillicoreSeconds": 15000,
+                "memoryByteSeconds": 31_457_280_000_u64,
+                "storageByteSeconds": 0,
+                "gpuUnitSeconds": 0
+            }
+        }
+    });
+    sqlx::query(
+        "INSERT INTO environment.resource_meter_deliveries \
+         (delivery_id,environment_id,source_event_id,kind,measured_from,measured_until,request,state,attempts,next_attempt_at) \
+         VALUES ($1,$2,$3,'compute',$4,$5,$6,'pending',0,$7)",
+    )
+    .bind(EventId::new().as_uuid())
+    .bind(instances[0].id.as_uuid())
+    .bind(source_event_id.as_uuid())
+    .bind(timestamp("2026-07-14T00:10:00.000Z").get())
+    .bind(timestamp("2026-07-14T00:11:00.000Z").get())
+    .bind(legacy_delivery)
+    .bind(timestamp("2026-07-14T00:12:00.000Z").get())
+    .execute(&pool)
+    .await?;
+
+    let migration =
+        include_str!("../../../migrations/environment/0006_unified_environment_metering.sql");
+    sqlx::raw_sql(migration).execute(&pool).await?;
+    sqlx::raw_sql(migration).execute(&pool).await?;
+
+    let store = PgEnvironmentStore::new(pool.clone());
+    for instance in &instances {
+        let expected_resources = if instance.gpu_allocation.is_some() {
+            &legacy_gpu_resources
+        } else {
+            &resources
+        };
+        assert_eq!(
+            store.load(instance.id).await?.approved_resources,
+            expected_resources.clone()
+        );
+    }
+    for instance in &instances {
+        let expected_resources = if instance.gpu_allocation.is_some() {
+            &legacy_gpu_resources
+        } else {
+            &resources
+        };
+        let contract: Value = sqlx::query_scalar(
+            "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+        )
+        .bind(instance.id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            contract["approvedResources"],
+            serde_json::to_value(expected_resources)?
+        );
+        assert!(matches!(
+            serde_json::from_value::<contracts::resource::ResourceUsageTarget>(
+                contract["target"].clone()
+            )?,
+            contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id }
+                if environment_id == instance.id
+        ));
+        match instance.observed_state {
+            ObservedEnvironmentState::Ready => {
+                assert!(contract["computeUnknownStartedAt"].is_string());
+                assert!(contract["storageStartedAt"].is_string());
+                assert_eq!(contract["storageKnown"], false);
+            }
+            ObservedEnvironmentState::Stopped => {
+                assert!(contract["computeStartedAt"].is_null());
+                assert!(contract["computeUnknownStartedAt"].is_null());
+                assert!(contract["storageStartedAt"].is_string());
+                assert_eq!(contract["storageKnown"], false);
+                assert!(contract.get("pendingGpuUnitSeconds").is_none());
+                assert!(contract.get("settlementPending").is_none());
+                assert_eq!(
+                    contract["gpuAllocation"],
+                    serde_json::to_value(&legacy_gpu_allocation)?
+                );
+            }
+            ObservedEnvironmentState::Deleted => {
+                assert!(contract["computeStartedAt"].is_null());
+                assert!(contract["computeUnknownStartedAt"].is_null());
+                assert!(contract["storageStartedAt"].is_null());
+                assert_eq!(contract["storageKnown"], false);
+                assert!(contract.get("pendingGpuUnitSeconds").is_none());
+                assert!(contract.get("settlementPending").is_none());
+            }
+            _ => unreachable!(),
+        }
+    }
+    let migrated_request: Value = sqlx::query_scalar(
+        "SELECT request FROM environment.resource_meter_deliveries WHERE source_event_id=$1",
+    )
+    .bind(source_event_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let decoded: RecordResourceUsageRequest = serde_json::from_value(migrated_request.clone())?;
+    assert!(matches!(
+        decoded.target,
+        contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id }
+            if environment_id == instances[0].id
+    ));
+    assert!(migrated_request.get("projectId").is_none());
+    assert!(migrated_request.get("requestId").is_none());
+    let delivery_state: String = sqlx::query_scalar(
+        "SELECT state FROM environment.resource_meter_deliveries WHERE source_event_id=$1",
+    )
+    .bind(source_event_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(delivery_state, "pending");
+
+    // Exercise the migrated Ready row through the real store and worker.  The initial
+    // migration marker is unknown compute/storage; Stop closes only compute, Restart
+    // recovers storage and starts a new known compute interval, and Delete closes both.
+    let migrated_ready = store.load(instances[0].id).await?;
+    let worker = success_worker(store.clone())?;
+    store
+        .accept_command(
+            "legacy-meter-stop",
+            &LifecycleCommand {
+                environment_id: migrated_ready.id,
+                kind: EnvironmentOperationKind::Stop,
+                expected_revision: migrated_ready.revision,
+                actor_id: migrated_ready.owner_id,
+                trace_id: "trace-legacy-meter-stop".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:01:30.000Z"),
+                deadline_at: timestamp("2027-01-14T00:06:00.000Z"),
+                access_revocation_revision: Some(revision(4)),
+                preserve_mutable_disk: true,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "legacy-meter-stop-worker",
+                timestamp("2026-07-14T00:01:30.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Stopped,
+            terminal: true
+        }
+    ));
+    let stopped_meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(stopped_meter["computeStartedAt"].is_null());
+    assert!(stopped_meter["computeUnknownStartedAt"].is_null());
+    assert!(stopped_meter["storageStartedAt"].is_string());
+    assert_eq!(stopped_meter["storageKnown"], false);
+
+    let stopped = store.load(migrated_ready.id).await?;
+    store
+        .accept_command(
+            "legacy-meter-restart",
+            &LifecycleCommand {
+                environment_id: stopped.id,
+                kind: EnvironmentOperationKind::Restart,
+                expected_revision: stopped.revision,
+                actor_id: stopped.owner_id,
+                trace_id: "trace-legacy-meter-restart".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:02:00.000Z"),
+                deadline_at: timestamp("2027-01-15T00:07:00.000Z"),
+                access_revocation_revision: None,
+                preserve_mutable_disk: true,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "legacy-meter-restart-worker",
+                timestamp("2026-07-14T00:03:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Ready,
+            terminal: true
+        }
+    ));
+    let restarted_meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        restarted_meter["computeStartedAt"],
+        serde_json::json!("2026-07-14T00:03:00.000Z")
+    );
+    assert_eq!(
+        restarted_meter["storageStartedAt"],
+        serde_json::json!("2026-07-14T00:03:00.000Z")
+    );
+    assert_eq!(restarted_meter["storageKnown"], true);
+
+    let restarted = store.load(migrated_ready.id).await?;
+    store
+        .accept_command(
+            "legacy-meter-delete",
+            &LifecycleCommand {
+                environment_id: restarted.id,
+                kind: EnvironmentOperationKind::Delete,
+                expected_revision: restarted.revision,
+                actor_id: restarted.owner_id,
+                trace_id: "trace-legacy-meter-delete".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:04:00.000Z"),
+                deadline_at: timestamp("2027-01-16T00:08:00.000Z"),
+                access_revocation_revision: Some(revision(5)),
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        worker
+            .run_once(
+                "legacy-meter-delete-worker",
+                timestamp("2026-07-14T00:04:30.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleted,
+            terminal: true
+        }
+    ));
+    let deleted_meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(deleted_meter["computeStartedAt"].is_null());
+    assert!(deleted_meter["computeUnknownStartedAt"].is_null());
+    assert!(deleted_meter["storageStartedAt"].is_null());
+    assert_eq!(deleted_meter["storageKnown"], false);
+
+    let deliveries: Vec<Value> = sqlx::query_scalar(
+        "SELECT request FROM environment.resource_meter_deliveries \
+         WHERE environment_id=$1 ORDER BY measured_from, delivery_id",
+    )
+    .bind(migrated_ready.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let deliveries: Vec<RecordResourceUsageRequest> = deliveries
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(deliveries.len(), 5);
+    for request in &deliveries {
+        assert!(matches!(
+            request.target,
+            contracts::resource::ResourceUsageTarget::ExperimentEnvironment { environment_id }
+                if environment_id == migrated_ready.id
+        ));
+    }
+    let find_delivery = |kind: ResourceUsageKind, from: &str, until: &str| {
+        deliveries.iter().find(|request| {
+            request.kind == kind
+                && request.measured_from == timestamp(from)
+                && request.measured_until == timestamp(until)
+        })
+    };
+    assert!(matches!(
+        find_delivery(
+            ResourceUsageKind::Compute,
+            "2026-07-14T00:00:00.000Z",
+            "2026-07-14T00:01:30.000Z"
+        )
+        .ok_or("migrated unknown compute delivery missing")?
+        .measurement,
+        UsageMeasurement::Unknown { .. }
+    ));
+    assert!(matches!(
+        find_delivery(
+            ResourceUsageKind::Storage,
+            "2026-07-14T00:00:00.000Z",
+            "2026-07-14T00:03:00.000Z"
+        )
+        .ok_or("migrated unknown storage delivery missing")?
+        .measurement,
+        UsageMeasurement::Unknown { .. }
+    ));
+    assert!(matches!(
+        find_delivery(
+            ResourceUsageKind::Compute,
+            "2026-07-14T00:03:00.000Z",
+            "2026-07-14T00:04:30.000Z"
+        )
+        .ok_or("migrated known compute delivery missing")?
+        .measurement,
+        UsageMeasurement::Known { .. }
+    ));
+    assert!(matches!(
+        find_delivery(
+            ResourceUsageKind::Storage,
+            "2026-07-14T00:03:00.000Z",
+            "2026-07-14T00:04:30.000Z"
+        )
+        .ok_or("migrated known storage delivery missing")?
+        .measurement,
+        UsageMeasurement::Known { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::expect_used)]
 async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -855,15 +1387,9 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         .max_connections(3)
         .connect(&url)
         .await?;
-    let migrations = format!(
-        "CREATE SCHEMA environment; SET search_path TO environment;\n{}\n{}\n{}",
-        include_str!("../../../migrations/environment/0001_platform_baseline.sql"),
-        include_str!("../../../migrations/environment/0002_project_ownership.sql"),
-        include_str!("../../../migrations/environment/0003_resource_usage_deliveries.sql")
-    );
-    sqlx::raw_sql(&migrations).execute(&pool).await?;
+    support::apply_environment_migrations(&pool).await?;
 
-    let store = PgEnvironmentStore::new(pool);
+    let store = PgEnvironmentStore::new(pool.clone());
     let mut work = requested_instance();
     work.class = contracts::authoring::EnvironmentClass::Work;
     work.lease_id = Some(LeaseId::new());
@@ -892,6 +1418,13 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
         active_from: timestamp("2026-07-14T00:00:00.000Z"),
         expires_at: initial_expiry,
     });
+    work.approved_resources = work
+        .operation
+        .lease_authorization
+        .as_ref()
+        .ok_or("expected initial Work lease authorization")?
+        .approved_resources
+        .clone();
     store.create("create-key-lease-refresh", &work).await?;
 
     let worker = success_worker(store.clone())?;
@@ -1005,15 +1538,54 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
 
     store
         .accept_command(
+            "restart-key-after-lease-refresh",
+            &LifecycleCommand {
+                environment_id: work.id,
+                kind: EnvironmentOperationKind::Restart,
+                expected_revision: stopped_refreshed.revision,
+                actor_id: ActorId::new(),
+                trace_id: "trace-restart-after-lease-refresh".to_owned(),
+                accepted_at: timestamp("2026-07-14T00:03:00.000Z"),
+                deadline_at: timestamp("2026-07-14T00:08:00.000Z"),
+                access_revocation_revision: None,
+                preserve_mutable_disk: true,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let restarting = store.load(work.id).await?;
+    assert_eq!(restarting.operation.kind, EnvironmentOperationKind::Restart);
+    assert_eq!(
+        restarting.observed_state,
+        ObservedEnvironmentState::Provisioning
+    );
+    assert!(matches!(
+        worker
+            .run_once(
+                "environment-worker-restart-after-lease-refresh",
+                timestamp("2026-07-14T00:03:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Ready,
+            terminal: true
+        }
+    ));
+    let restarted = store.load(work.id).await?;
+    assert_eq!(restarted.observed_state, ObservedEnvironmentState::Ready);
+
+    store
+        .accept_command(
             "delete-key-after-lease-refresh",
             &LifecycleCommand {
                 environment_id: work.id,
                 kind: EnvironmentOperationKind::Delete,
-                expected_revision: stopped_refreshed.revision,
+                expected_revision: restarted.revision,
                 actor_id: ActorId::new(),
                 trace_id: "trace-delete-after-lease-refresh".to_owned(),
-                accepted_at: timestamp("2026-07-14T00:02:00.000Z"),
-                deadline_at: timestamp("2026-07-14T00:07:00.000Z"),
+                accepted_at: timestamp("2026-07-14T00:04:00.000Z"),
+                deadline_at: timestamp("2026-07-14T00:09:00.000Z"),
                 access_revocation_revision: Some(support::revision(7)),
                 preserve_mutable_disk: false,
                 max_attempts: 3,
@@ -1021,7 +1593,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
             },
         )
         .await?;
-    let mut refresh_during_delete = renewed_authorization;
+    let mut refresh_during_delete = renewed_authorization.clone();
     refresh_during_delete.lease_revision = support::revision(3);
     refresh_during_delete.expires_at = timestamp("2027-07-17T00:00:00.000Z");
     assert!(matches!(
@@ -1030,6 +1602,50 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
             .await,
         Err(EnvironmentStoreError::LeaseAuthorizationInvalid)
     ));
+    assert!(matches!(
+        worker
+            .run_once(
+                "environment-worker-delete-after-lease-refresh",
+                timestamp("2026-07-14T00:04:00.000Z")
+            )
+            .await?,
+        ReconcileWorkerOutcome::Advanced {
+            state: ObservedEnvironmentState::Deleted,
+            terminal: true
+        }
+    ));
+    let deleted = store.load(work.id).await?;
+    assert_eq!(deleted.observed_state, ObservedEnvironmentState::Deleted);
+    let meter: Value = sqlx::query_scalar(
+        "SELECT contract FROM environment.resource_metering_state WHERE environment_id=$1",
+    )
+    .bind(work.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(meter["computeStartedAt"].is_null());
+    assert!(meter["computeUnknownStartedAt"].is_null());
+    assert!(meter["storageStartedAt"].is_null());
+    assert_eq!(meter["storageKnown"], false);
+    let deliveries: Vec<Value> = sqlx::query_scalar(
+        "SELECT request FROM environment.resource_meter_deliveries \
+         WHERE environment_id=$1 ORDER BY measured_from, delivery_id",
+    )
+    .bind(work.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(deliveries.len(), 3);
+    let resource_request_id = renewed_authorization.resource_request_id;
+    let lease_id = work.lease_id.ok_or("expected Work lease id")?;
+    for delivery in deliveries {
+        let request: RecordResourceUsageRequest = serde_json::from_value(delivery)?;
+        assert!(matches!(
+            request.target,
+            contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id,
+                lease_id: Some(target_lease_id),
+            } if request_id == resource_request_id && target_lease_id == lease_id
+        ));
+    }
     Ok(())
 }
 
@@ -2162,6 +2778,20 @@ impl EnvironmentProvider for LifecycleSuccessProvider {
                     ProviderObservation {
                         next_state: ObservedEnvironmentState::Stopped,
                         endpoints: Vec::new(),
+                        cleanup_evidence: None,
+                        operation_complete: true,
+                    }
+                }
+                (ReconcileAction::Restart, ObservedEnvironmentState::Provisioning) => {
+                    ProviderObservation {
+                        next_state: ObservedEnvironmentState::Ready,
+                        endpoints: vec![EnvironmentEndpoint {
+                            id: EndpointId::new(),
+                            protocol: EndpointProtocol::Https,
+                            revision: next_revision,
+                            health: EndpointHealth::Healthy,
+                            observed_at: timestamp("2026-07-14T00:03:00.000Z"),
+                        }],
                         cleanup_evidence: None,
                         operation_complete: true,
                     }

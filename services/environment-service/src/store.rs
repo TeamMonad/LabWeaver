@@ -373,11 +373,11 @@ impl PgEnvironmentStore {
         decode_contract(row.try_get("contract")?)
     }
 
-    /// Lists Deleted Experiment instances that still hold a durable GPU allocation.
+    /// Lists Deleted Experiment instances that still hold a durable Resource reservation.
     ///
     /// Deletion is terminal, so the reservation can be released and the allocation cleared. The
     /// list is bounded; a release that fails simply leaves the row for the next reconcile pass.
-    pub(crate) async fn list_deleted_gpu_environments(
+    pub(crate) async fn list_deleted_resource_environments(
         &self,
         limit: i64,
     ) -> Result<Vec<EnvironmentInstance>, EnvironmentStoreError> {
@@ -387,8 +387,8 @@ impl PgEnvironmentStore {
         let rows = sqlx::query(
             "SELECT contract FROM environment.environment_instances \
              WHERE contract->>'class'='experiment' \
-               AND contract ? 'gpuAllocation' \
                AND contract->>'observedState'='deleted' \
+               AND COALESCE((contract->>'resourceReservationReleased')::boolean, false)=false \
              ORDER BY updated_at, environment_id LIMIT $1",
         )
         .bind(limit)
@@ -399,18 +399,18 @@ impl PgEnvironmentStore {
             .collect()
     }
 
-    /// Clears the GPU allocation from a terminal Deleted Experiment aggregate.
-    pub(crate) async fn clear_environment_gpu_allocation(
+    /// Marks the terminal Experiment Resource reservation as released.
+    pub(crate) async fn clear_environment_resource_reservation(
         &self,
         environment_id: EnvironmentId,
     ) -> Result<(), EnvironmentStoreError> {
         let result = sqlx::query(
             "UPDATE environment.environment_instances \
-             SET contract = contract - 'gpuAllocation', updated_at = clock_timestamp() \
+             SET contract = jsonb_set(contract, '{resourceReservationReleased}', 'true'::jsonb, true), updated_at = clock_timestamp() \
              WHERE environment_id=$1 \
                AND contract->>'class'='experiment' \
                AND contract->>'observedState'='deleted' \
-               AND contract ? 'gpuAllocation'",
+               AND COALESCE((contract->>'resourceReservationReleased')::boolean, false)=false",
         )
         .bind(environment_id.as_uuid())
         .execute(&self.pool)
@@ -1237,7 +1237,9 @@ fn build_create_instance(
         release_version: spec.release_version,
         lease_id: spec.lease_id,
         capacity_binding: spec.capacity_binding.clone(),
+        approved_resources: spec.approved_resources.clone(),
         gpu_allocation: spec.gpu_allocation.clone(),
+        resource_reservation_released: false,
         provider_binding: spec.provider_binding.clone(),
         desired_state: DesiredEnvironmentState::Running,
         observed_state: ObservedEnvironmentState::Requested,

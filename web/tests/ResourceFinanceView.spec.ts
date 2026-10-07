@@ -3,7 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { canonicalRateAmount, equivalentRatePrice, rateVersionState } from '@/utils/resourceRates'
 import { navigationGroupsForRoles, navigationTarget } from '@/utils/navigation'
 import ResourceFinanceView from '@/views/admin/ResourceFinanceView.vue'
-import { createResourceRate, endResourceRate, listResourceRates, listResourceGpuCatalog } from '@/generated/contracts'
+import {
+  createResourceRate,
+  endResourceRate,
+  listEnvironments,
+  listProjectResourceLeases,
+  listProjectResourceRequests,
+  listProjectResourceUsage,
+  listResourceRates,
+  listResourceGpuCatalog,
+} from '@/generated/contracts'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -11,6 +20,10 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     ...actual,
     createResourceRate: vi.fn(),
     endResourceRate: vi.fn(),
+    listEnvironments: vi.fn(),
+    listProjectResourceLeases: vi.fn(),
+    listProjectResourceRequests: vi.fn(),
+    listProjectResourceUsage: vi.fn(),
     listResourceRates: vi.fn(),
     listResourceGpuCatalog: vi.fn(),
   }
@@ -106,6 +119,20 @@ const existingRate = { id: 'rate-vgpu', revision: 1, unit: 'gpu_unit_second', un
 const otherOpenRate = { id: 'rate-memory', revision: 1, unit: 'memory_byte_second', unitQuantity: 1_000_000_000,
   gpuClass: null, gpuMode: null, unitPrice: { currency: 'USD', amount: '0.100000' },
   effectiveFrom: '2026-01-01T00:00:00Z', effectiveUntil: null }
+const knownUsage = {
+  id: 'usage-compute', projectId: 'project-new', kind: 'compute',
+  measuredFrom: '2026-10-06T00:00:00Z', measuredUntil: '2026-10-06T01:00:00Z', observedAt: '2026-10-06T01:01:00Z',
+  settlement: 'pending', sourceEventId: 'event-compute',
+  measurement: { state: 'known', quantities: { cpuMillicoreSeconds: 3_600_000, gpuUnitSeconds: 120, memoryByteSeconds: 2_147_483_648, storageByteSeconds: 0 } },
+  target: { kind: 'experiment_environment', environmentId: 'env-course' },
+}
+const unknownUsage = {
+  id: 'usage-storage', projectId: 'project-new', kind: 'storage',
+  measuredFrom: '2026-10-06T01:00:00Z', measuredUntil: '2026-10-06T02:00:00Z', observedAt: '2026-10-06T02:01:00Z',
+  settlement: 'unsettled', sourceEventId: 'event-storage',
+  measurement: { state: 'unknown', reason: '存储探针尚未上报结束值' },
+  target: { kind: 'resource_request', requestId: 'request-work', leaseId: 'lease-work' },
+}
 
 async function fillGpuForm(wrapper: ReturnType<typeof mountView>, selection = 'nvidia-v100-2q:vm_vgpu') {
   const form = wrapper.get('[data-testid="resource-rate-form"]')
@@ -136,13 +163,28 @@ describe('ResourceFinanceView', () => {
     vi.clearAllMocks()
     vi.mocked(createResourceRate).mockReset()
     vi.mocked(endResourceRate).mockReset()
+    vi.mocked(listEnvironments).mockReset()
+    vi.mocked(listProjectResourceLeases).mockReset()
+    vi.mocked(listProjectResourceRequests).mockReset()
+    vi.mocked(listProjectResourceUsage).mockReset()
     vi.mocked(listResourceRates).mockReset()
     vi.mocked(listResourceGpuCatalog).mockReset()
     vi.mocked(listResourceRates).mockResolvedValue({ data: [] as never, error: undefined as never })
     vi.mocked(listResourceGpuCatalog).mockResolvedValue({ data: gpuCatalog as never, error: undefined as never })
+    vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [] as never, error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [] as never, error: undefined as never })
     api.get.mockImplementation(({ url }: { url: string }) => Promise.resolve(
-      url.endsWith('/resource-budget') ? { error: 'LW_RESOURCE_BUDGET_NOT_FOUND' } : { data: [] },
+      url.endsWith('/resource-budget')
+        ? { error: 'LW_RESOURCE_BUDGET_NOT_FOUND' }
+        : url.endsWith('/usage')
+          ? { data: { items: [], page: 1, pageSize: 25, hasMore: false } }
+          : { data: [] },
     ))
+    vi.mocked(listProjectResourceUsage).mockImplementation(({ path, query }) => api.get({
+      url: `/api/v1/projects/${path.projectId}/usage`,
+      query,
+    }))
     routerMocks.replace.mockImplementation(({ query }: { query: Record<string, string | undefined> }) => { routerMocks.route.query = query })
     routerMocks.route.query = { projectId: 'project-new' }
     projectMocks.state!.projects = { kind: 'success', data: projectMocks.catalog }
@@ -164,6 +206,106 @@ describe('ResourceFinanceView', () => {
     await flushPromises()
     expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ gpuClass: 'nvidia-v100-2q', gpuMode: 'vm_vgpu', unitQuantity: 1, unitPrice: { amount: '0.250000', currency: 'USD' } }) }))
     expect(api.get).not.toHaveBeenCalled()
+  })
+
+  it('shows measured and unknown project usage with human targets and advanced identifiers', async () => {
+    const charge = {
+      id: 'charge-compute', usageRecordId: knownUsage.id, projectId: 'project-new', courseId: null,
+      lines: [{ rateId: 'rate-cpu', rateRevision: 3, unit: 'cpu_millicore_second', quantity: 3_600_000, unitQuantity: 3_600_000,
+        unitPrice: { currency: 'USD', amount: '0.010000' }, amount: { currency: 'USD', amount: '0.010000' } }],
+      total: { currency: 'USD', amount: '0.010000' }, settlement: 'pending', createdAt: '2026-10-06T01:02:00Z',
+      adjustmentOf: null, adjustmentReason: null, adjustedBy: null, diagnosticCode: null,
+    }
+    api.get.mockImplementation(({ url }: { url: string }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      if (url.endsWith('/charges')) return Promise.resolve({ data: [charge] })
+      return Promise.resolve({ data: { items: [knownUsage, unknownUsage], page: 1, pageSize: 25, hasMore: false } })
+    })
+    vi.mocked(listEnvironments).mockResolvedValue({ data: { items: [{ id: 'env-course', displayLabel: '课程实验环境' }] } as never, error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [{ id: 'request-work', state: 'active', target: { kind: 'task', taskRunId: 'task-work' } }] as never, error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [{ id: 'lease-work', requestId: 'request-work', state: 'active' }] as never, error: undefined as never })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const usageList = wrapper.get('[aria-label="项目用量列表"]')
+    expect(usageList.text()).toContain('教学实验环境：课程实验环境')
+    expect(usageList.text()).toContain('CPU 3,600,000 millicore·秒')
+    expect(usageList.text()).toContain('GPU 120 单位·秒')
+    expect(usageList.text()).toContain('无法确认用量：存储探针尚未上报结束值')
+    expect(usageList.text()).toContain('一次性任务资源 · 已分配')
+    expect(wrapper.get('.charge-list').text()).toContain('教学实验环境：课程实验环境')
+    expect(wrapper.get('.charge-list').text()).toContain('费率版本 3')
+    expect(wrapper.findAll('.usage-row details')[0].text()).toContain('usage-compute')
+    expect(wrapper.findAll('.charge-row details')[0].text()).toContain('charge-compute')
+  })
+
+  it('requests the next usage page and keeps the page boundary visible', async () => {
+    const pageOne = { ...knownUsage, id: 'usage-page-1' }
+    const pageTwo = { ...knownUsage, id: 'usage-page-2', kind: 'storage' }
+    api.get.mockImplementation(({ url, query }: { url: string; query?: { page?: number } }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      if (url.endsWith('/usage')) {
+        const page = query?.page ?? 1
+        return Promise.resolve({ data: { items: [page === 1 ? pageOne : pageTwo], page, pageSize: 1, hasMore: page === 1 } })
+      }
+      return Promise.resolve({ data: [] })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目用量分页"]').text()).toContain('第 1 页')
+    await wrapper.get('[aria-label="项目用量分页"]').findAll('button')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目用量分页"]').text()).toContain('第 2 页')
+    expect(listProjectResourceUsage).toHaveBeenLastCalledWith({
+      path: { projectId: 'project-new' },
+      query: { page: 2, pageSize: 1 },
+    })
+    expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('存储用量')
+  })
+
+  it('recovers project usage after a read error without inventing a zero amount', async () => {
+    let usageReads = 0
+    api.get.mockImplementation(({ url }: { url: string }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      if (url.endsWith('/usage') && usageReads++ === 0) return Promise.resolve({ error: { diagnosticCode: 'RESOURCE_USAGE_LOAD_FAILED', detail: '用量服务暂不可用', retryable: true } })
+      if (url.endsWith('/usage')) return Promise.resolve({ data: { items: [], page: 1, pageSize: 25, hasMore: false } })
+      return Promise.resolve({ data: [] })
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('.usage-card').text()).toContain('用量服务暂不可用')
+    await wrapper.get('.usage-card .diagnostic-banner button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.usage-card').text()).toContain('该项目暂无用量记录')
+    expect(usageReads).toBe(2)
+  })
+
+  it('keeps project names primary and moves the internal project ID to advanced details', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('.project-strip option[value="project-new"]').text()).toBe('新项目')
+    expect(wrapper.get('.project-id-details').text()).toContain('project-new')
+  })
+
+  it('ignores a late usage response after switching project context', async () => {
+    const pending = new Map<string, (value: unknown) => void>()
+    api.get.mockImplementation(({ url }: { url: string }) => {
+      if (url.endsWith('/resource-budget')) return Promise.resolve({ error: 'LW_RESOURCE_BUDGET_NOT_FOUND' })
+      if (url.endsWith('/charges')) return Promise.resolve({ data: [] })
+      const projectId = url.split('/projects/')[1].split('/')[0]
+      return new Promise((resolve) => pending.set(projectId, resolve))
+    })
+    const wrapper = mountView()
+    await wrapper.get('.project-strip select').setValue('project-other')
+    await flushPromises()
+    pending.get('project-other')!({ data: { items: [{ ...knownUsage, projectId: 'project-other', id: 'usage-other' }], page: 1, pageSize: 25, hasMore: false } })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('计算用量')
+    pending.get('project-new')!({ data: { items: [{ ...knownUsage, id: 'usage-old' }], page: 1, pageSize: 25, hasMore: false } })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目用量列表"]').text()).toContain('usage-other')
+    expect(wrapper.get('[aria-label="项目用量列表"]').text()).not.toContain('usage-old')
   })
 
   it('creates a shared allocation-unit price from the real catalog without manually typing a class', async () => {

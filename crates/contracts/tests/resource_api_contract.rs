@@ -264,6 +264,17 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         charges["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
         "../contracts/v1/resource-charge.schema.json"
     );
+    let usage = assert_operation(
+        "/api/v1/projects/{projectId}/usage",
+        "get",
+        "listProjectResourceUsage",
+        "resource_charge:read",
+        "project",
+    );
+    assert_eq!(
+        usage["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/resource-usage-page.schema.json"
+    );
     let adjustment = assert_operation(
         "/api/v1/projects/{projectId}/charges/{chargeId}/adjustments",
         "post",

@@ -148,12 +148,8 @@ pub struct ReleaseTaskResourceRequest {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecordResourceUsageRequest {
-    pub project_id: ProjectId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub course_id: Option<CourseId>,
     pub kind: crate::resource::ResourceUsageKind,
-    pub request_id: ResourceRequestId,
-    pub lease_id: Option<LeaseId>,
+    pub target: crate::resource::ResourceUsageTarget,
     pub source_event_id: crate::EventId,
     pub measured_from: UtcTimestamp,
     pub measured_until: UtcTimestamp,
@@ -3065,6 +3061,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Get,
+        "/api/v1/projects/{projectId}/usage",
+        "listProjectResourceUsage",
+        "resource_charge:read",
+        BffSession,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Project
+    ),
+    op!(
+        Public,
         Post,
         "/api/v1/projects/{projectId}/charges/{chargeId}/adjustments",
         "createProjectResourceChargeAdjustment",
@@ -3706,20 +3716,6 @@ pub const OPERATIONS: &[OperationContract] = &[
         true,
         PLATFORM_ADMIN,
         Service
-    ),
-    op!(
-        Public,
-        Post,
-        "/api/v1/resource/usage",
-        "recordResourceUsage",
-        "resource:usage_record",
-        BffSession,
-        None,
-        200,
-        false,
-        true,
-        PLATFORM_ADMIN,
-        Project
     ),
     op!(
         GatewayInternal,

@@ -21,8 +21,8 @@ use contracts::{
         EnvironmentLifecycleCommand, EnvironmentOperationKind, EnvironmentOwnerRelation,
         EnvironmentOwnerSummary, EnvironmentResetTarget, EnvironmentSummary,
         EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
-        ResolveEnvironmentGpuAllocationRequest, ResourceWorkCleanup, ResourceWorkCleanupStatus,
-        ResourceWorkHandoff, ResourceWorkLeaseUpdate,
+        ResolveEnvironmentResourceReservationRequest, ResourceWorkCleanup,
+        ResourceWorkCleanupStatus, ResourceWorkHandoff, ResourceWorkLeaseUpdate,
     },
     http::{
         ContainerWorkExecutionQuery, ContainerWorkExecutionReceipt, ContainerWorkExecutionRequest,
@@ -38,7 +38,7 @@ use crate::{
     ContainerReleaseResolver, ContainerWorkExecutionService, EnvironmentInventoryFilter,
     EnvironmentStoreError, FreezeBindingError, FreezeBindingService, NatsAccessRevoker,
     NatsMessagingError, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
-    ReleaseProjectionError, WorkExecutionError, metering::ExperimentGpuAllocator,
+    ReleaseProjectionError, WorkExecutionError, metering::ExperimentResourceAllocator,
     work_execution::validate_work_environment,
 };
 
@@ -62,7 +62,7 @@ pub struct EnvironmentApiState {
     lease_verifier: NatsResourceLeaseVerifier,
     freeze_bindings: FreezeBindingService,
     pub(crate) work_executions: Option<ContainerWorkExecutionService>,
-    gpu_allocations: Option<Arc<dyn ExperimentGpuAllocator>>,
+    resource_reservations: Option<Arc<dyn ExperimentResourceAllocator>>,
 }
 
 impl EnvironmentApiState {
@@ -81,7 +81,7 @@ impl EnvironmentApiState {
             lease_verifier,
             freeze_bindings,
             work_executions: None,
-            gpu_allocations: None,
+            resource_reservations: None,
         }
     }
 
@@ -92,13 +92,13 @@ impl EnvironmentApiState {
         self
     }
 
-    /// Installs the Resource GPU allocation boundary used to reserve Experiment GPU capacity.
+    /// Installs the Resource reservation boundary used to reserve Experiment resources.
     #[must_use]
-    pub fn with_gpu_allocations<T>(mut self, client: T) -> Self
+    pub fn with_resource_reservations<T>(mut self, client: T) -> Self
     where
-        T: ExperimentGpuAllocator + 'static,
+        T: ExperimentResourceAllocator + 'static,
     {
-        self.gpu_allocations = Some(Arc::new(client));
+        self.resource_reservations = Some(Arc::new(client));
         self
     }
 }
@@ -505,6 +505,7 @@ async fn accept_resource_work_handoff(
         provider_binding: handoff.provider_binding,
         lease_id: Some(handoff.lease_id),
         capacity_binding: Some(handoff.capacity_binding),
+        approved_resources: handoff.approved_resources.clone(),
         gpu_allocation: None,
         eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
     };
@@ -794,11 +795,18 @@ async fn create_environment(
             provider_binding, ..
         } => provider_binding.clone(),
     };
+    let approved_resources = contracts::resource::WorkloadResources {
+        cpu_millicores: release.projection.environment_spec.resources.cpu_millicores,
+        memory_bytes: release.projection.environment_spec.resources.memory_bytes,
+        storage_bytes: release.projection.environment_spec.resources.storage_bytes,
+        gpu: release.projection.environment_spec.resources.gpu.clone(),
+    };
     let accepted_at = state.store.current_time().await?;
     let deadline_at = add_duration(accepted_at, OPERATION_DEADLINE)?;
     let environment_id = EnvironmentId::new();
-    let gpu_allocation = resolve_experiment_gpu(
+    let gpu_allocation = resolve_experiment_resources(
         &state,
+        &approved_resources,
         release.projection.environment_spec.resources.gpu.as_ref(),
         environment_id,
         request.project_id,
@@ -836,6 +844,7 @@ async fn create_environment(
         provider_binding,
         lease_id: None,
         capacity_binding: None,
+        approved_resources: approved_resources.clone(),
         gpu_allocation: gpu_allocation.clone(),
         eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
     };
@@ -853,9 +862,9 @@ async fn create_environment(
     {
         Ok(accepted) => accepted,
         Err(error) => {
-            release_experiment_gpu(
+            release_experiment_resource_reservation(
                 &state,
-                gpu_allocation.is_some(),
+                true,
                 environment_id,
                 request.project_id,
                 actor_id,
@@ -869,9 +878,9 @@ async fn create_environment(
         // The idempotency ledger replayed a previously accepted Environment. The allocation
         // resolved above belongs to a fresh identity that was never persisted, so release it
         // instead of leaking capacity. The original Environment keeps its durable reservation.
-        release_experiment_gpu(
+        release_experiment_resource_reservation(
             &state,
-            gpu_allocation.is_some(),
+            true,
             environment_id,
             request.project_id,
             actor_id,
@@ -882,14 +891,15 @@ async fn create_environment(
     Ok((StatusCode::ACCEPTED, Json(accepted)))
 }
 
-/// Resolves the durable Resource GPU allocation for an Experiment create command.
+/// Resolves the durable Resource reservation for an Experiment create command.
 ///
-/// This is a no-op for a release without a GPU request or without a configured Resource client
-/// used only when the release declares a GPU. A declared GPU with no configured client fails
-/// closed rather than rendering a GPU the Environment does not own.
+/// Resource receives the complete immutable `ReleaseProjection` resource snapshot. A missing
+/// client fails closed even for a non-GPU release because CPU, memory, and storage authorization
+/// also belongs to Resource.
 #[allow(clippy::too_many_arguments)]
-async fn resolve_experiment_gpu(
+async fn resolve_experiment_resources(
     state: &EnvironmentApiState,
+    approved_resources: &contracts::resource::WorkloadResources,
     gpu: Option<&contracts::resource::GpuRequest>,
     environment_id: EnvironmentId,
     project_id: contracts::ProjectId,
@@ -898,28 +908,26 @@ async fn resolve_experiment_gpu(
     provider_binding: &str,
     trace_id: &str,
 ) -> Result<Option<contracts::resource::GpuAllocation>, EnvironmentApiError> {
-    let Some(gpu) = gpu else {
-        return Ok(None);
-    };
     let client = state
-        .gpu_allocations
+        .resource_reservations
         .as_ref()
-        .ok_or(EnvironmentApiError::GpuAllocationUnavailable)?;
-    let request = ResolveEnvironmentGpuAllocationRequest {
+        .ok_or(EnvironmentApiError::ResourceReservationUnavailable)?;
+    let request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
         environment_id,
         project_id,
         course_id,
         owner_actor_id,
         provider_binding: provider_binding.to_owned(),
-        gpu: gpu.clone(),
+        approved_resources: approved_resources.clone(),
+        gpu: gpu.cloned(),
         trace_id: trace_id.to_owned(),
     };
-    match client.resolve_gpu_allocation(&request).await {
-        Ok(allocation) => Ok(Some(allocation)),
+    match client.resolve_resource_reservation(&request).await {
+        Ok(allocation) => Ok(allocation),
         Err(error) => {
             tracing::warn!(
-                event = "environment.gpu_allocation.resolve_failed",
+                event = "environment.resource_reservation.resolve_failed",
                 component = "api-error-boundary",
                 environment_id = %environment_id,
                 diagnostic_code = error.diagnostic_code(),
@@ -931,36 +939,36 @@ async fn resolve_experiment_gpu(
                         | crate::metering::ResourceUsageClientError::TokenDiscovery
                 ),
             );
-            Err(EnvironmentApiError::GpuAllocationRejected)
+            Err(EnvironmentApiError::ResourceReservationRejected)
         }
     }
 }
 
-/// Best-effort release for an Experiment GPU reservation that was not persisted.
-async fn release_experiment_gpu(
+/// Best-effort release for an Experiment reservation that was not persisted.
+async fn release_experiment_resource_reservation(
     state: &EnvironmentApiState,
-    had_allocation: bool,
+    reservation_resolved: bool,
     environment_id: EnvironmentId,
     project_id: contracts::ProjectId,
     owner_actor_id: ActorId,
     trace_id: &str,
 ) {
-    if !had_allocation {
+    if !reservation_resolved {
         return;
     }
-    let Some(client) = state.gpu_allocations.as_ref() else {
+    let Some(client) = state.resource_reservations.as_ref() else {
         return;
     };
-    let request = contracts::environment::ReleaseEnvironmentGpuAllocationRequest {
+    let request = contracts::environment::ReleaseEnvironmentResourceReservationRequest {
         version: 1,
         environment_id,
         project_id,
         owner_actor_id,
         trace_id: trace_id.to_owned(),
     };
-    if let Err(error) = client.release_gpu_allocation(&request).await {
+    if let Err(error) = client.release_resource_reservation(&request).await {
         tracing::error!(
-            event = "environment.gpu_allocation.orphan_release_failed",
+            event = "environment.resource_reservation.orphan_release_failed",
             component = "api-error-boundary",
             environment_id = %environment_id,
             diagnostic_code = error.diagnostic_code(),
@@ -1369,10 +1377,10 @@ pub enum EnvironmentApiError {
     ResponseInvalid,
     #[error("LW_ENVIRONMENT_WORK_EXECUTION_UNAVAILABLE")]
     WorkExecutionUnavailable,
-    #[error("LW_ENVIRONMENT_GPU_ALLOCATION_UNAVAILABLE")]
-    GpuAllocationUnavailable,
-    #[error("LW_ENVIRONMENT_GPU_ALLOCATION_REJECTED")]
-    GpuAllocationRejected,
+    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_UNAVAILABLE")]
+    ResourceReservationUnavailable,
+    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_REJECTED")]
+    ResourceReservationRejected,
     #[error(transparent)]
     ServiceAuth(#[from] auth::ServiceAuthError),
     #[error(transparent)]
@@ -1419,17 +1427,18 @@ impl IntoResponse for EnvironmentApiError {
             | Self::WorkExecution(
                 WorkExecutionError::IdentityMismatch | WorkExecutionError::AdmissionMismatch,
             ) => StatusCode::PRECONDITION_FAILED,
-            Self::ReleaseDenied | Self::GpuAllocationRejected => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::ReleaseDenied
+            | Self::ResourceReservationRejected
+            | Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)
+            | Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::Store(
                 EnvironmentStoreError::EnvironmentNotFound
                 | EnvironmentStoreError::OperationNotFound,
             )
             | Self::Release(ReleaseProjectionError::NotFound)
             | Self::WorkExecution(WorkExecutionError::NotFound) => StatusCode::NOT_FOUND,
-            Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)
-            | Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
             Self::Store(
                 EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress,

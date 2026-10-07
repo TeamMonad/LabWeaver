@@ -260,6 +260,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::ResourceUsageRecord
     );
     document!(
+        "schemas/contracts/v1/resource-usage-page.schema.json",
+        crate::resource::ResourceUsagePage
+    );
+    document!(
         "schemas/contracts/v1/resource-charge.schema.json",
         crate::resource::ResourceCharge
     );
@@ -628,20 +632,20 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::http::RecordResourceUsageRequest
     );
     document!(
-        "schemas/contracts/v1/http/resolve-environment-gpu-allocation-request.schema.json",
-        crate::environment::ResolveEnvironmentGpuAllocationRequest
+        "schemas/contracts/v1/http/resolve-environment-resource-reservation-request.schema.json",
+        crate::environment::ResolveEnvironmentResourceReservationRequest
     );
     document!(
-        "schemas/contracts/v1/http/resolve-environment-gpu-allocation-response.schema.json",
-        crate::environment::ResolveEnvironmentGpuAllocationResponse
+        "schemas/contracts/v1/http/resolve-environment-resource-reservation-response.schema.json",
+        crate::environment::ResolveEnvironmentResourceReservationResponse
     );
     document!(
-        "schemas/contracts/v1/http/release-environment-gpu-allocation-request.schema.json",
-        crate::environment::ReleaseEnvironmentGpuAllocationRequest
+        "schemas/contracts/v1/http/release-environment-resource-reservation-request.schema.json",
+        crate::environment::ReleaseEnvironmentResourceReservationRequest
     );
     document!(
-        "schemas/contracts/v1/http/release-environment-gpu-allocation-response.schema.json",
-        crate::environment::ReleaseEnvironmentGpuAllocationResponse
+        "schemas/contracts/v1/http/release-environment-resource-reservation-response.schema.json",
+        crate::environment::ReleaseEnvironmentResourceReservationResponse
     );
     document!(
         "schemas/contracts/v1/http/task-resource-status.schema.json",
@@ -1052,7 +1056,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
             ]);
         }
-        if operation.operation_id == "listProjectAgentRuns" {
+        if matches!(
+            operation.operation_id,
+            "listProjectAgentRuns" | "listProjectResourceUsage"
+        ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
                 json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
@@ -1602,9 +1609,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "endResourceRate" => "http/end-resource-rate-request",
         "upsertProjectResourceBudget" => "http/upsert-resource-budget-request",
         "createProjectResourceChargeAdjustment" => "http/create-resource-adjustment-request",
-        "recordResourceUsage" | "recordInternalResourceUsage" => {
-            "http/record-resource-usage-request"
-        }
+        "recordInternalResourceUsage" => "http/record-resource-usage-request",
         "acknowledgeTaskResource" => "http/acknowledge-task-resource-request",
         "releaseTaskResource" => "http/release-task-resource-request",
         "cancelTaskResource"
@@ -1717,9 +1722,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "resolveEnvironmentWorkConfigurationTarget" => {
             contract_ref("environment-work-configuration-target")
         }
-        "recordResourceUsage" | "recordInternalResourceUsage" => {
-            contract_ref("resource-usage-record")
-        }
+        "recordInternalResourceUsage" => contract_ref("resource-usage-record"),
         "claimTaskResource"
         | "acknowledgeTaskResource"
         | "getTaskResource"
@@ -1745,6 +1748,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listProjectResourceCharges" => {
             json!({"type":"array","items":contract_ref("resource-charge")})
         }
+        "listProjectResourceUsage" => contract_ref("resource-usage-page"),
         "createProjectResourceChargeAdjustment" => contract_ref("resource-charge"),
         "getResourceLease" | "renewResourceLease" | "revokeResourceLease" => {
             contract_ref("resource-lease")

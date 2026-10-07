@@ -74,7 +74,12 @@ pub struct EnvironmentCreateSpec {
     pub provider_binding: String,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
-    /// Resource-resolved Experiment GPU allocation held for this environment instance.
+    /// Resources approved by the immutable ReleaseProjection or Work lease.
+    /// Environment owns the lifecycle; Resource receives this snapshot only
+    /// through the trusted Environment resource reservation handoff.
+    pub approved_resources: WorkloadResources,
+    /// Resource-resolved Experiment GPU allocation held for this environment instance when the
+    /// approved resource snapshot includes GPU capacity.
     ///
     /// Experiment creation resolves this through Resource before the aggregate is accepted; Work
     /// environments keep their allocation on the Lease authorization instead and leave this absent.
@@ -446,25 +451,26 @@ fn validate_gpu_allocation(
     }
 }
 
-/// Environment-owned request to resolve and durably hold one Experiment GPU allocation.
+/// Environment-owned request to resolve and durably hold one Experiment resource reservation.
 ///
 /// The caller submits only a policy-catalogued class and count. Resource selects the exact
 /// allocation binding, mode, and provider binding from its active catalog and current capacity
 /// observation; an unknown class, exhausted pool, or stale observation fails closed.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ResolveEnvironmentGpuAllocationRequest {
+pub struct ResolveEnvironmentResourceReservationRequest {
     pub version: u8,
     pub environment_id: EnvironmentId,
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub owner_actor_id: ActorId,
     pub provider_binding: String,
-    pub gpu: crate::resource::GpuRequest,
+    pub approved_resources: WorkloadResources,
+    pub gpu: Option<crate::resource::GpuRequest>,
     pub trace_id: String,
 }
 
-impl ResolveEnvironmentGpuAllocationRequest {
+impl ResolveEnvironmentResourceReservationRequest {
     /// Validates the trusted Environment command before any capacity side effect.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.version != 1
@@ -476,9 +482,16 @@ impl ResolveEnvironmentGpuAllocationRequest {
         {
             return Err(EnvironmentError::InvalidResourceHandoff);
         }
-        self.gpu
+        self.approved_resources
             .validate()
             .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        if let Some(gpu) = &self.gpu {
+            gpu.validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        if self.approved_resources.gpu.as_ref() != self.gpu.as_ref() {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
         Ok(())
     }
 }
@@ -486,37 +499,46 @@ impl ResolveEnvironmentGpuAllocationRequest {
 /// Resource-authoritative resolution returned to Environment.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ResolveEnvironmentGpuAllocationResponse {
+pub struct ResolveEnvironmentResourceReservationResponse {
     pub version: u8,
     pub environment_id: EnvironmentId,
     pub provider_binding: String,
-    pub allocation: GpuAllocation,
+    pub allocation: Option<GpuAllocation>,
 }
 
-impl ResolveEnvironmentGpuAllocationResponse {
+impl ResolveEnvironmentResourceReservationResponse {
     /// Validates the resolved allocation against the requesting Environment identity.
     pub fn validate_for(
         &self,
-        request: &ResolveEnvironmentGpuAllocationRequest,
+        request: &ResolveEnvironmentResourceReservationRequest,
     ) -> Result<(), EnvironmentError> {
         if self.version != 1
             || self.environment_id != request.environment_id
             || self.provider_binding != request.provider_binding
-            || self.allocation.class != request.gpu.class
-            || self.allocation.count != request.gpu.count
+            || self
+                .allocation
+                .as_ref()
+                .map(|value| (&value.class, value.count))
+                != request
+                    .gpu
+                    .as_ref()
+                    .map(|value| (&value.class, value.count))
         {
             return Err(EnvironmentError::InvalidResourceHandoff);
         }
-        self.allocation
-            .validate()
-            .map_err(|_| EnvironmentError::InvalidResourceHandoff)
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        Ok(())
     }
 }
 
-/// Environment-owned request to release one durable Experiment GPU reservation.
+/// Environment-owned request to release one durable Experiment resource reservation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReleaseEnvironmentGpuAllocationRequest {
+pub struct ReleaseEnvironmentResourceReservationRequest {
     pub version: u8,
     pub environment_id: EnvironmentId,
     pub project_id: ProjectId,
@@ -524,7 +546,7 @@ pub struct ReleaseEnvironmentGpuAllocationRequest {
     pub trace_id: String,
 }
 
-impl ReleaseEnvironmentGpuAllocationRequest {
+impl ReleaseEnvironmentResourceReservationRequest {
     /// Validates the trusted Environment release command.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.version != 1
@@ -541,7 +563,7 @@ impl ReleaseEnvironmentGpuAllocationRequest {
 /// Idempotent Resource release readback. `released` is false when no reservation remained.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReleaseEnvironmentGpuAllocationResponse {
+pub struct ReleaseEnvironmentResourceReservationResponse {
     pub version: u8,
     pub environment_id: EnvironmentId,
     pub released: bool,
@@ -906,6 +928,7 @@ pub struct EnvironmentInstance {
     pub release_version: u64,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
+    pub approved_resources: WorkloadResources,
     pub provider_binding: String,
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
@@ -913,12 +936,15 @@ pub struct EnvironmentInstance {
     pub generation: u64,
     pub observed_generation: u64,
     pub operation: EnvironmentOperation,
-    /// Resource-resolved Experiment GPU allocation held while this instance exists.
+    /// Resource-resolved Experiment GPU allocation held while this instance exists, when present.
     ///
     /// Work environments never use this field; their allocation remains on the Lease
     /// authorization. A present value is validated against the immutable instance identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_allocation: Option<GpuAllocation>,
+    /// Set only after Environment has released its Resource reservation at terminal deletion.
+    #[serde(default)]
+    pub resource_reservation_released: bool,
     pub eligibility_expires_at: UtcTimestamp,
     pub endpoints: Vec<EnvironmentEndpoint>,
     pub last_diagnostic_code: Option<String>,
@@ -957,6 +983,9 @@ impl EnvironmentInstance {
         {
             return Err(EnvironmentError::InvalidAggregate);
         }
+        self.approved_resources
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidAggregate)?;
         for code in [
             self.last_diagnostic_code.as_deref(),
             self.operation.diagnostic_code.as_deref(),
@@ -976,6 +1005,7 @@ impl EnvironmentInstance {
             EnvironmentClass::Work
                 if self.lease_id.is_none()
                     || self.gpu_allocation.is_some()
+                    || self.resource_reservation_released
                     || self
                         .capacity_binding
                         .as_deref()
@@ -984,6 +1014,12 @@ impl EnvironmentInstance {
                 return Err(EnvironmentError::LeaseRequired);
             }
             _ => {}
+        }
+        if self.resource_reservation_released
+            && (self.class != EnvironmentClass::Experiment
+                || self.observed_state != ObservedEnvironmentState::Deleted)
+        {
+            return Err(EnvironmentError::InvalidAggregate);
         }
         if let Some(allocation) = &self.gpu_allocation {
             allocation

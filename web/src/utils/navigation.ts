@@ -95,6 +95,7 @@ export const NAVIGATION_GROUPS: readonly NavigationGroup[] = [
         icon: 'desktop_windows',
         keywords: ['教学环境', '环境', '教师', 'console'],
         allowedRoles: TEACHER_ONLY,
+        projectScoped: true,
       },
       {
         id: 'teacher-approvals',

@@ -27,6 +27,6 @@
     "environmentId",
     "released"
   ],
-  "title": "ReleaseEnvironmentGpuAllocationResponse",
+  "title": "ReleaseEnvironmentResourceReservationResponse",
   "type": "object"
 }

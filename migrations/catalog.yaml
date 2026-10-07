@@ -71,6 +71,9 @@ domains:
       - id: 5
         file: environment/0005_kubevirt_execution_owner.sql
         sha256: acebef74ad5ec342abbc1eff5d1eb915de78f666b54c28c35fda512cdc1f5a1f
+      - id: 6
+        file: environment/0006_unified_environment_metering.sql
+        sha256: 0751928ac75d8b410c41d2f42c281989f246be04f616cf54d90d22823a3e24ab
   - name: agent
     migrations:
       - id: 1
@@ -130,6 +133,9 @@ domains:
       - id: 19
         file: agent/0019_build_executor_import_stage.sql
         sha256: 40c1d4af53c76be4e02b0cdcd040b7b4995ca41ca3666c5383339aaa5c3a139b
+      - id: 20
+        file: agent/0020_unified_usage_payload_target.sql
+        sha256: 8621e4c4ace464ed258103eb2bab16452b295667726f67e6cb43fe3e4cfa6329
   - name: evaluation
     migrations:
       - id: 1
@@ -159,6 +165,9 @@ domains:
       - id: 9
         file: evaluation/0009_evaluation_step_reviews.sql
         sha256: ccb88e7ac4430ec03d1ad4f389cacf0ba676c64d650815cb337b32d115ac8fea
+      - id: 10
+        file: evaluation/0010_unified_usage_request_target.sql
+        sha256: 269a730f5fbd640057b11848888fb793552b40f42d4ae4607c2151b7f9af94d2
   - name: resource
     migrations:
       - id: 1
@@ -197,3 +206,6 @@ domains:
       - id: 12
         file: resource/0012_environment_gpu_reservations.sql
         sha256: 931a5c2f5b3364aa31703fafaeb30c70f41f6dc8c9c5b54f890b1cbbd704fef0
+      - id: 13
+        file: resource/0013_environment_resource_usage_attribution.sql
+        sha256: e681f92b7dc8452c2167141646e85e37bf12159566888642909591731a47a220

@@ -13,7 +13,6 @@ import {
   uuidv7,
 } from '../support/live.mjs'
 import {
-  assertRealWorkCharges,
   assertRealWorkGpuContainerCandidate,
   assertRealWorkVmCandidate,
   configureRealWorkBudgetByUi,
@@ -27,7 +26,7 @@ import {
   realWorkVmConfig,
   readResumablePublishedWork,
   selectPendingWorkTaskResourceRequest,
-  waitForRealWorkCharges,
+  waitForSettledWorkUsageCharges,
   waitForDeletedEnvironment,
 } from '../support/real-work.mjs'
 import { readActorId } from '../support/real-experiment.mjs'
@@ -567,6 +566,9 @@ test('student provisions a Work environment, configures it, and releases its cap
   let vmSshKey = null
   let adminContext = null
   let adminPage = null
+  let workRates = null
+  let gpuRate = null
+  let baselineChargeIds = new Set()
   let studentActorId = null
   let primaryFailure = null
   const cleanupFailures = []
@@ -584,7 +586,24 @@ test('student provisions a Work environment, configures it, and releases its cap
     const expectedPersistenceMarker = packageCopy?.persistenceMarker ?? resumed?.persistenceMarker
 
     if (REAL_WORK_MODE) {
-      await ensureRealWorkRates(browser, baseURL, { gpu: REAL_WORK_GPU })
+      workRates = await ensureRealWorkRates(browser, baseURL, { gpu: REAL_WORK_GPU })
+      if (REAL_WORK_GPU) {
+        const matchingGpuRates = workRates.filter((rate) => (
+          rate.unit === 'gpu_unit_second'
+          && rate.gpuClass === REAL_WORK_GPU.class
+          && rate.gpuMode === REAL_WORK_GPU.mode
+        ))
+        if (matchingGpuRates.length !== 1) {
+          throw new Error(`REAL_WORK_GPU_RATE_READBACK_AMBIGUOUS:${REAL_WORK_GPU.class}:${REAL_WORK_GPU.mode}`)
+        }
+        [gpuRate] = matchingGpuRates
+      }
+      const baselineCharges = await expectJson(
+        await adminPage.request.get(`/api/v1/projects/${encodeURIComponent(project.id)}/charges`),
+        'REAL_WORK_BASELINE_CHARGES_READ_FAILED',
+      )
+      if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
+      baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
       await configureRealWorkBudgetByUi(browser, baseURL, project.id)
     }
 
@@ -1148,9 +1167,17 @@ test('student provisions a Work environment, configures it, and releases its cap
     await auditAccessibility(page, 'researcher-resource-released')
     guards.assertCleanConsole('researcher-resource-released')
     if (REAL_WORK_MODE) {
-      const finance = await waitForRealWorkCharges(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
-      assertRealWorkCharges(finance.charges, REAL_WORK_GPU)
-      await inspectRealWorkFinanceByUi(browser, baseURL, project.id, { gpu: REAL_WORK_GPU })
+      const finance = await waitForSettledWorkUsageCharges(browser, baseURL, {
+        projectId: project.id,
+        leases: [{ requestId: trackedRequestId, leaseId: trackedLeaseId }],
+        baselineChargeIds,
+        gpu: REAL_WORK_GPU ? { ...REAL_WORK_GPU, rate: gpuRate } : null,
+      })
+      await inspectRealWorkFinanceByUi(browser, baseURL, project.id, {
+        gpu: REAL_WORK_GPU,
+        usageRecordIds: finance.matches.map(({ usage }) => usage.id),
+        expectedCharges: finance.matches.map(({ charge }) => charge),
+      })
     }
     await assertConnectionBlockedAfterLeaseRevoke(page, project.id, stoppedEnvironment)
   } catch (error) {

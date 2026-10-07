@@ -6,7 +6,7 @@ use contracts::{
     authoring::AgentTrackKind,
     execution::{ExecutionObservation, ExecutionWorkloadState, TaskExecutionBinding},
     http::RecordResourceUsageRequest,
-    resource::{ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement},
+    resource::{ResourceUsageKind, ResourceUsageQuantities, ResourceUsageTarget, UsageMeasurement},
 };
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
@@ -67,11 +67,11 @@ fn intent() -> Result<SandboxAttemptIntent, Box<dyn std::error::Error>> {
 fn usage(intent: &SandboxAttemptIntent) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let binding: TaskExecutionBinding = serde_json::from_value(intent.binding.clone())?;
     Ok(serde_json::to_value([RecordResourceUsageRequest {
-        project_id: binding.project_id,
-        course_id: None,
         kind: ResourceUsageKind::Compute,
-        request_id: binding.resource_request_id,
-        lease_id: Some(binding.lease_id),
+        target: ResourceUsageTarget::ResourceRequest {
+            request_id: binding.resource_request_id,
+            lease_id: Some(binding.lease_id),
+        },
         source_event_id: EventId::new(),
         measured_from: time_at(100)?,
         measured_until: time_at(160)?,
@@ -154,6 +154,83 @@ async fn fixed_usage_replays_after_release_and_refuses_same_event_payload_change
         row.try_get::<Option<String>, _>("usage_diagnostic_code")?,
         None
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_usage_payloads_migrate_for_pending_and_delivered_replay() -> TestResult {
+    let (pool, _container) = fixture().await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+
+    let delivered_intent = intent()?;
+    terminal(&store, &delivered_intent).await?;
+    let delivered_payload = usage(&delivered_intent)?;
+    store
+        .checkpoint_sandbox_usage(&delivered_intent, &delivered_payload)
+        .await?;
+    store
+        .mark_sandbox_usage_delivered(&delivered_intent)
+        .await?;
+
+    let pending_intent = intent()?;
+    terminal(&store, &pending_intent).await?;
+    let pending_payload = usage(&pending_intent)?;
+    store
+        .checkpoint_sandbox_usage(&pending_intent, &pending_payload)
+        .await?;
+
+    for (intent, payload) in [
+        (&delivered_intent, &delivered_payload),
+        (&pending_intent, &pending_payload),
+    ] {
+        let binding: TaskExecutionBinding = serde_json::from_value(intent.binding.clone())?;
+        let mut legacy_item = payload[0].clone();
+        let target = legacy_item
+            .as_object_mut()
+            .and_then(|item| item.remove("target"))
+            .ok_or("usage target missing")?;
+        let item = legacy_item
+            .as_object_mut()
+            .ok_or("usage item is not an object")?;
+        item.insert(
+            "projectId".to_owned(),
+            serde_json::json!(binding.project_id),
+        );
+        item.insert("courseId".to_owned(), serde_json::Value::Null);
+        item.insert("requestId".to_owned(), target["requestId"].clone());
+        item.insert("leaseId".to_owned(), target["leaseId"].clone());
+        let legacy_payload = serde_json::Value::Array(vec![legacy_item]);
+        sqlx::query(
+            "UPDATE agent.authoring_sandbox_attempts
+             SET usage_payload=$5
+             WHERE run_id=$1 AND track=$2 AND attempt_number=$3 AND execution_generation=$4",
+        )
+        .bind(intent.run_id.as_uuid())
+        .bind("environment")
+        .bind(i64::from(intent.attempt))
+        .bind(i64::try_from(intent.execution_generation)?)
+        .bind(legacy_payload)
+        .execute(&pool)
+        .await?;
+    }
+
+    let migration = include_str!("../../../migrations/agent/0020_unified_usage_payload_target.sql");
+    sqlx::raw_sql(migration).execute(&pool).await?;
+    // Re-running the transformation is safe for a replayed migration invocation and must not
+    // change either the immutable usage payload or its delivered acknowledgement.
+    sqlx::raw_sql(migration).execute(&pool).await?;
+
+    for (intent, expected, delivered) in [
+        (&delivered_intent, &delivered_payload, true),
+        (&pending_intent, &pending_payload, false),
+    ] {
+        let Some((actual, actual_delivered)) = store.load_sandbox_usage(intent).await? else {
+            return Err("migrated usage payload missing".into());
+        };
+        assert_eq!(&actual, expected);
+        assert_eq!(actual_delivered, delivered);
+        let _: Vec<RecordResourceUsageRequest> = serde_json::from_value(actual)?;
+    }
     Ok(())
 }
 

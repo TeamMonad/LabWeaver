@@ -586,6 +586,9 @@
   "additionalProperties": false,
   "description": "PostgreSQL-authoritative environment view.",
   "properties": {
+    "approvedResources": {
+      "$ref": "#/$defs/WorkloadResources"
+    },
     "capacityBinding": {
       "type": [
         "string",
@@ -654,7 +657,7 @@
           "type": "null"
         }
       ],
-      "description": "Resource-resolved Experiment GPU allocation held while this instance exists.\n\nWork environments never use this field; their allocation remains on the Lease\nauthorization. A present value is validated against the immutable instance identity."
+      "description": "Resource-resolved Experiment GPU allocation held while this instance exists, when present.\n\nWork environments never use this field; their allocation remains on the Lease\nauthorization. A present value is validated against the immutable instance identity."
     },
     "id": {
       "$ref": "#/$defs/EnvironmentId"
@@ -703,6 +706,11 @@
       "minimum": 0,
       "type": "integer"
     },
+    "resourceReservationReleased": {
+      "default": false,
+      "description": "Set only after Environment has released its Resource reservation at terminal deletion.",
+      "type": "boolean"
+    },
     "revision": {
       "$ref": "#/$defs/Revision"
     },
@@ -719,6 +727,7 @@
     "runtimeKind",
     "releaseId",
     "releaseVersion",
+    "approvedResources",
     "providerBinding",
     "desiredState",
     "observedState",

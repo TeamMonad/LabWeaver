@@ -18,17 +18,19 @@ GPU 目录明确区分独占、容器时间片和 VM vGPU。目录规格绑定�
 
 Resource 通过只读集群观测刷新可用容量，并设置观测有效期。观测必须覆盖所选资源的节点容量与外部工作负载占用；自身工作负载只有与持久分配记录匹配后才能从外部占用中排除，不能仅相信标签。容量检查在扣除外部占用后，再扣除尚未确认释放的本平台分配。查询失败、数据不完整或观测过期时停止新增分配。
 
-课程 Experiment 的环境规格在 `resources.gpu` 声明目录类别与数量。Environment 在创建实验前调用 Resource 内部接口解析并预留容量，只提交类别与数量，绝不接受来自客户端的 Kubernetes 资源名。Resource 从活动目录与当前观测解析分配绑定、模式和 Provider，并写入以 Environment 实例为键的持久预留；相同实例重试幂等，未知类别、容量耗尽或观测过期时明确失败。预留计入同一物理分配绑定的容量扣减，并在容量观测中作为平台自身占用排除，不与 Work 租约重复计数。环境删除时由 Environment 触发释放；停止保留预留以支持重启，避免静默丢失容量。
+课程 Experiment 使用教师已批准发布版本中的 CPU、内存、存储和可选 GPU 规格。Environment 从同项目、同发布版本的权威发布快照取得规格，在创建实验前通过受限服务接口向 Resource 登记归属、规格和执行绑定。Resource 保存这一不可变授权，拒绝同实例下不同归属或规格的重试；浏览器不能自行登记授权或指定 Kubernetes 资源名。GPU 在活动目录及实际容量观测中解析并预留；相同实例重试幂等，未知类别、容量耗尽或观测过期时明确失败。教学环境直接以 Environment 实例为归属，不创建虚假的 Work 申请或租约。GPU 预留计入同一物理分配绑定的容量扣减，并在容量观测中作为平台自身占用排除，不与 Work 租约重复计数。实际删除后才释放预留；停止仍保留，以支持重启。已释放实例的迟到申请不能重新占用容量。
 
-内部路由 `POST /internal/v1/environment-gpu-allocations` 需要服务账户权限 `resource.gpu.resolve`，`POST /internal/v1/environment-gpu-allocations/release` 需要 `resource.gpu.release`；两者都要求调用方为已配置的 Environment 服务客户端，浏览器委托路径不可访问。
+内部路由 `POST /internal/v1/environment-resource-reservations` 需要服务账户权限 `resource.environment.resolve`，`POST /internal/v1/environment-resource-reservations/release` 需要 `resource.environment.release`；两者都要求调用方为已配置的 Environment 服务客户端，浏览器委托路径不可访问。内部用量报告继续需要 `resource.usage.record`，并检查对应 Environment 或一次性任务的执行方身份。
 
 ## 用量
 
 计算资源从环境可用时开始计量，正常停止以执行后端观察到的实际停止时间结束。排队和镜像准备不算作环境可用时间。异常清理或无法确认停止时暂停自动结算，保留待核实状态，不能据此声称资源免费或已释放。
 
-Experiment GPU 没有 Work 申请与租约，现有结算路径无法在没有 Work claim 的情况下结算其实验用量。Environment 仍按实际 Ready 与停止/删除边界累计真实 GPU 秒数并持久保留，绝不因为缺少申请而回填为零，也绝不报告结算成功；这些用量保持待结算状态。Experiment GPU 的正式结算属于“计费分离”评估范围，本轮只保证容量与运行时正确。
+Experiment 与 Work 共享同一持久化生命周期计量实现。CPU、内存、存储和 GPU 都进入 Resource 的用量、费率分段、结算和调整流程；一次性 Agent/Evaluation 任务继续绑定真实申请及租约。用量目标明确区分 `resource_request`（真实申请与租约）和 `experiment_environment`（教学环境），Resource 从已保存的授权确认项目与课程归属。GPU 类别、模式及数量取实际分配快照，不能按后来修改的目录重新解释历史用量。
 
-存储占用和计算占用分开；停止计算后保留的存储继续按存储规则计量，直到实际删除或释放。每条占用记录绑定资源归属、时间区间和事件身份。重复投递不能重复计费；乱序通知不能回滚已确认的生命周期。未知用量必须显式表示，不能填零。
+历史记录通过一次性迁移保存原事件、区间、授权快照与费用关联。缺失可信边界或数量时保留待核实状态，不补造零值，也不以新的计费路径追溯生成没有依据的费用。
+
+存储占用和计算占用分开；停止计算后保留的存储继续按存储规则计量，直到实际删除或释放。每条占用记录绑定资源归属、时间区间和事件身份。重复投递不能重复计费；乱序通知不能回滚已确认的生命周期。未知用量必须显式表示，不能填零。项目用量通过 `GET /api/v1/projects/{projectId}/usage` 分页查询，响应包含 `items`、`page`、`pageSize` 和 `hasMore`；费用以 `usageRecordId` 关联对应环境或任务及实际区间，历史费用不能代替当前任务的结算状态。
 
 ## 费率与费用
 

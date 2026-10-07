@@ -69,7 +69,14 @@
   "description": "Resource-authoritative resolution returned to Environment.",
   "properties": {
     "allocation": {
-      "$ref": "#/$defs/GpuAllocation"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GpuAllocation"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
@@ -87,9 +94,8 @@
   "required": [
     "version",
     "environmentId",
-    "providerBinding",
-    "allocation"
+    "providerBinding"
   ],
-  "title": "ResolveEnvironmentGpuAllocationResponse",
+  "title": "ResolveEnvironmentResourceReservationResponse",
   "type": "object"
 }

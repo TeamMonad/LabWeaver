@@ -22,8 +22,8 @@ use axum::{
 };
 use contracts::environment::{
     EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentInstance,
-    EnvironmentOperationKind, ReleaseEnvironmentGpuAllocationRequest,
-    ResolveEnvironmentGpuAllocationRequest,
+    EnvironmentOperationKind, ReleaseEnvironmentResourceReservationRequest,
+    ResolveEnvironmentResourceReservationRequest,
 };
 use contracts::events::ReleasePublished;
 use contracts::http::{SnapshotPage, StrongEtag};
@@ -33,10 +33,11 @@ use contracts::{
     ImageArtifactId, OperationId, PolicyId, ProjectId, ReleaseId, Revision, UtcTimestamp,
 };
 use environment_service::{
-    EnvironmentApiState, ExperimentGpuAllocator, FreezeBindingConfiguration, FreezeBindingService,
-    NatsAccessRevoker, NatsResourceLeaseVerifier, PgEnvironmentStore, PgReleaseProjectionStore,
-    ProviderObservation, ResourceUsageClientError, WorkAdmissionClientError, WorkAdmissionResolver,
-    apply_provider_failure, apply_provider_observation, environment_api_router,
+    EnvironmentApiState, ExperimentResourceAllocator, FreezeBindingConfiguration,
+    FreezeBindingService, NatsAccessRevoker, NatsResourceLeaseVerifier, PgEnvironmentStore,
+    PgReleaseProjectionStore, ProviderObservation, ResourceUsageClientError,
+    WorkAdmissionClientError, WorkAdmissionResolver, apply_provider_failure,
+    apply_provider_observation, environment_api_router,
 };
 use futures_util::StreamExt;
 use persistence_sqlx::Sha256Digest;
@@ -76,27 +77,31 @@ struct CountingGpuAllocator {
 }
 
 #[async_trait]
-impl ExperimentGpuAllocator for CountingGpuAllocator {
-    async fn resolve_gpu_allocation(
+impl ExperimentResourceAllocator for CountingGpuAllocator {
+    async fn resolve_resource_reservation(
         &self,
-        request: &ResolveEnvironmentGpuAllocationRequest,
-    ) -> Result<GpuAllocation, ResourceUsageClientError> {
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
         let count = self.resolve_count.fetch_add(1, Ordering::SeqCst) + 1;
         if count > 1 {
             return Err(ResourceUsageClientError::Rejected);
         }
-        if request.gpu.class != self.allocation.class
-            || request.gpu.count != self.allocation.count
+        let gpu = request
+            .gpu
+            .as_ref()
+            .ok_or(ResourceUsageClientError::InvalidResponse)?;
+        if gpu.class != self.allocation.class
+            || gpu.count != self.allocation.count
             || request.provider_binding != self.allocation.provider_binding
         {
             return Err(ResourceUsageClientError::InvalidResponse);
         }
-        Ok(self.allocation.clone())
+        Ok(Some(self.allocation.clone()))
     }
 
-    async fn release_gpu_allocation(
+    async fn release_resource_reservation(
         &self,
-        request: &ReleaseEnvironmentGpuAllocationRequest,
+        request: &ReleaseEnvironmentResourceReservationRequest,
     ) -> Result<bool, ResourceUsageClientError> {
         self.release_count.fetch_add(1, Ordering::SeqCst);
         let _ = request;
@@ -186,7 +191,7 @@ async fn public_create_replay_does_not_resolve_gpu_or_claim_capacity_twice()
                 UnusedAdmission,
             )?,
         )
-        .with_gpu_allocations(allocator),
+        .with_resource_reservations(allocator),
     );
     let identity = access_identity();
     let actor_id = ActorId::new();
