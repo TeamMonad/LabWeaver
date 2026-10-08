@@ -23,8 +23,7 @@ use uuid::Uuid;
 
 use crate::clients::AgentClient;
 use crate::{
-    CREATE_PLATFORM_IMAGE_UPLOAD, ControlError, ControlService, db, platform_image_kind_from_str,
-    schedule_staged_archive_cleanup,
+    ControlError, ControlService, db, platform_image_kind_from_str, schedule_staged_archive_cleanup,
 };
 
 const CANCELLED_DIAGNOSTIC: &str = "LW_PLATFORM_IMAGE_IMPORT_CANCELLED";
@@ -489,35 +488,9 @@ impl PlatformImageImportWorker {
             .recover_pending_platform_image_upload_creation()
             .await?;
         let mut expiration_transaction = self.control.pool.begin().await.map_err(db)?;
-        let expired_creations = sqlx::query(
-            r"UPDATE control.platform_image_upload_sessions
-                  SET state='failed',terminal_diagnostic='LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
-                      cancel_requested=false,multipart_creation_lease_token=NULL,
-                      multipart_creation_lease_expires_at=NULL,revision=revision+1,
-                      updated_at=$1
-                WHERE state='pending' AND multipart_upload_id IS NULL AND expires_at<=$1
-             RETURNING create_idempotency_key",
-        )
-        .bind(now.get())
-        .fetch_all(&mut *expiration_transaction)
-        .await
-        .map_err(db)?;
-        for row in expired_creations {
-            if let Some(create_idempotency_key) = row
-                .try_get::<Option<String>, _>("create_idempotency_key")
-                .map_err(db)?
-            {
-                sqlx::query(
-                    "DELETE FROM control.idempotency_ledger \
-                       WHERE operation=$1 AND idempotency_key=$2 AND state='in_progress'",
-                )
-                .bind(CREATE_PLATFORM_IMAGE_UPLOAD)
-                .bind(create_idempotency_key)
-                .execute(&mut *expiration_transaction)
-                .await
-                .map_err(db)?;
-            }
-        }
+        // Pending creation rows without a persisted multipart ID are recovered above.  Their
+        // exact object key is the only safe scope for discovery and abort, so never terminalize
+        // them with a bulk SQL update that would lose an accepted S3 multipart upload.
         sqlx::query(
             r"UPDATE control.platform_image_upload_sessions
                   SET state='queued',cancel_requested=true,revision=revision+1,updated_at=$1

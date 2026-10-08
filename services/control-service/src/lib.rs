@@ -1504,7 +1504,22 @@ impl ControlService {
                     .map_err(|_| ControlError::PersistenceIdentityMismatch);
             }
             IdempotencyDecision::Conflict => return Err(ControlError::IdempotencyConflict),
-            IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
+            IdempotencyDecision::InProgress => {
+                let expired = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM control.platform_image_upload_sessions \
+                                    WHERE create_idempotency_key=$1 AND state='failed' \
+                                      AND terminal_diagnostic='LW_PLATFORM_IMAGE_UPLOAD_EXPIRED')",
+                )
+                .bind(idempotency_key.as_str())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(db)?;
+                transaction.rollback().await.map_err(db)?;
+                if expired {
+                    return Err(ControlError::PlatformImageUploadExpired);
+                }
+                return Err(ControlError::OperationInProgress);
+            }
             IdempotencyDecision::Reserved => {}
         }
         sqlx::query(
@@ -1590,6 +1605,7 @@ impl ControlService {
                                 upload_id,
                                 creation_lease,
                                 recovery_error.diagnostic_code(),
+                                true,
                             )
                             .await?;
                             return Err(recovery_error.into());
@@ -1600,6 +1616,7 @@ impl ControlService {
                         upload_id,
                         creation_lease,
                         error.diagnostic_code(),
+                        true,
                     )
                     .await?;
                     return Err(error.into());
@@ -1617,6 +1634,7 @@ impl ControlService {
                         upload_id,
                         creation_lease,
                         error.diagnostic_code(),
+                        true,
                     )
                     .await?;
                     return Err(error.into());
@@ -1640,6 +1658,7 @@ impl ControlService {
                 upload_id,
                 creation_lease,
                 "LW_OBJECT_STORE_IDENTITY_MISMATCH",
+                true,
             )
             .await?;
             return Err(ControlError::ObjectStoreIdentityMismatch);
@@ -1733,6 +1752,7 @@ impl ControlService {
         upload_id: UploadSessionId,
         creation_lease: Uuid,
         diagnostic: &str,
+        clear_idempotency: bool,
     ) -> Result<(), ControlError> {
         let mut transaction = self.pool.begin().await.map_err(db)?;
         let row = sqlx::query(
@@ -1749,7 +1769,8 @@ impl ControlService {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(db)?;
-        if let Some(row) = row
+        if clear_idempotency
+            && let Some(row) = row
             && let Some(key) = row
                 .try_get::<Option<String>, _>("create_idempotency_key")
                 .map_err(db)?
@@ -1806,10 +1827,25 @@ impl ControlService {
         let archive_bytes = u64::try_from(row.try_get::<i64, _>("archive_bytes").map_err(db)?)
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
         if now.get() >= expires_at.get() {
+            let active_uploads = self
+                .objects
+                .find_platform_image_multipart_uploads(&object_key)
+                .await?;
+            for active_upload in active_uploads {
+                match self
+                    .objects
+                    .abort_platform_image_multipart_upload(&object_key, &active_upload)
+                    .await
+                {
+                    Ok(()) | Err(ObjectStoreError::ObjectNotFound) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
             self.fail_platform_image_upload_creation(
                 upload_id,
                 recovery_lease,
                 "LW_PLATFORM_IMAGE_UPLOAD_EXPIRED",
+                false,
             )
             .await?;
             return Ok(());
@@ -1835,6 +1871,7 @@ impl ControlService {
                 upload_id,
                 recovery_lease,
                 "LW_PLATFORM_IMAGE_UPLOAD_CREATION_AMBIGUOUS",
+                true,
             )
             .await?;
             return Ok(());
@@ -1863,6 +1900,7 @@ impl ControlService {
                     upload_id,
                     recovery_lease,
                     error.diagnostic_code(),
+                    true,
                 )
                 .await?;
                 return Ok(());
@@ -1891,6 +1929,7 @@ impl ControlService {
                 upload_id,
                 recovery_lease,
                 "LW_OBJECT_STORE_IDENTITY_MISMATCH",
+                true,
             )
             .await?;
             return Ok(());
@@ -1990,8 +2029,10 @@ impl ControlService {
         &self,
     ) -> Result<(), ControlError> {
         let row = sqlx::query(
-            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id,\
+            "SELECT upload_id,created_by,kind,binding,target_reference,trust_revision,reason,\
+                    state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id,\
                     object_key,archive_bytes,archive_media_type,multipart_upload_id,\
+                    disk_format,disk_path,capacity_bytes,\
                     multipart_part_size_bytes,multipart_part_count,multipart_complete_started,\
                     expires_at,multipart_creation_lease_token,create_idempotency_key\
                FROM control.platform_image_upload_sessions\
@@ -2274,8 +2315,10 @@ impl ControlService {
         upload_id: UploadSessionId,
     ) -> Result<PlatformImageUploadStatus, ControlError> {
         let row = sqlx::query(
-            "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id,\
+            "SELECT upload_id,created_by,kind,binding,target_reference,trust_revision,reason,\
+                    state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id,\
                     object_key,archive_bytes,archive_media_type,multipart_upload_id,\
+                    disk_format,disk_path,capacity_bytes,\
                     multipart_part_size_bytes,multipart_part_count,multipart_complete_started,\
                     expires_at,multipart_creation_lease_token,create_idempotency_key \
              FROM control.platform_image_upload_sessions WHERE upload_id=$1",
@@ -2293,8 +2336,10 @@ impl ControlService {
         {
             self.recover_platform_image_upload_creation(&row).await?;
             let recovered = sqlx::query(
-                "SELECT upload_id,state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id,\
+                "SELECT upload_id,created_by,kind,binding,target_reference,trust_revision,reason,\
+                        state,revision,cancel_requested,terminal_diagnostic,imported_catalog_id,\
                         object_key,archive_bytes,archive_media_type,multipart_upload_id,\
+                        disk_format,disk_path,capacity_bytes,\
                         multipart_part_size_bytes,multipart_part_count,multipart_complete_started,\
                         expires_at,multipart_creation_lease_token,create_idempotency_key \
                  FROM control.platform_image_upload_sessions WHERE upload_id=$1",

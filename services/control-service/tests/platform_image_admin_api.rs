@@ -2346,6 +2346,184 @@ fn completion_request(session: &PlatformImageUploadSession) -> CompletePlatformI
 }
 
 #[tokio::test]
+async fn platform_image_status_recovers_lost_multipart_creation_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let actor = ActorId::new();
+    let request = upload_request("recover-lost-create");
+    let create_key = IdempotencyKey::parse("create-recover-lost")?;
+    let session = control
+        .create_platform_image_upload(actor, &request, &create_key, import_now()?)
+        .await?;
+    let object_key = format!(
+        "problem-packages/platform-image-uploads/{}",
+        session.upload_id
+    );
+    let active_upload = objects
+        .find_platform_image_multipart_uploads(&object_key)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("fake multipart upload missing")?;
+    sqlx::query(
+        "UPDATE control.platform_image_upload_sessions
+            SET multipart_upload_id=NULL,multipart_part_size_bytes=NULL,
+                multipart_part_count=NULL,multipart_creation_lease_token=NULL,
+                multipart_creation_lease_expires_at=NULL
+          WHERE upload_id=$1",
+    )
+    .bind(session.upload_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE control.idempotency_ledger
+            SET state='in_progress',result=NULL,completed_at=NULL
+          WHERE operation='control_create_platform_image_upload_v1'
+            AND idempotency_key=$1",
+    )
+    .bind(create_key.as_str())
+    .execute(&pool)
+    .await?;
+
+    let recovered = control
+        .platform_image_upload_status(session.upload_id)
+        .await?;
+    assert_eq!(recovered.state, PlatformImageUploadState::Pending);
+    let target = recovered
+        .upload_target
+        .as_ref()
+        .ok_or("recovered upload target missing")?;
+    assert_eq!(
+        target.part_size_bytes,
+        PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES
+    );
+    assert_eq!(
+        recovered.uploaded_parts.len(),
+        session.upload_target.parts.len()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT multipart_upload_id FROM control.platform_image_upload_sessions WHERE upload_id=$1",
+        )
+        .bind(session.upload_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        Some(active_upload)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM control.idempotency_ledger
+              WHERE operation='control_create_platform_image_upload_v1' AND idempotency_key=$1",
+        )
+        .bind(create_key.as_str())
+        .fetch_one(&pool)
+        .await?,
+        "completed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_lost_multipart_creation_is_aborted_without_idempotency_recreation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
+    let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
+    let transport = ImportTransportState {
+        accepted: Arc::new(Mutex::new(None)),
+        failures: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let (agent, _server, _authority, _temp) = worker_transport(transport).await?;
+    let worker = control_service::platform_image_jobs::PlatformImageImportWorker {
+        control: control.clone(),
+        agent,
+        poll_interval: std::time::Duration::from_millis(10),
+    };
+    let actor = ActorId::new();
+    let request = upload_request("expire-lost-create");
+    let create_key = IdempotencyKey::parse("create-expire-lost")?;
+    let session = control
+        .create_platform_image_upload(actor, &request, &create_key, import_now()?)
+        .await?;
+    let object_key = format!(
+        "problem-packages/platform-image-uploads/{}",
+        session.upload_id
+    );
+    let _active_upload = objects
+        .find_platform_image_multipart_uploads(&object_key)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("fake multipart upload missing")?;
+    sqlx::query(
+        "UPDATE control.platform_image_upload_sessions
+            SET multipart_upload_id=NULL,multipart_part_size_bytes=NULL,
+                multipart_part_count=NULL,multipart_creation_lease_token=NULL,
+                multipart_creation_lease_expires_at=NULL,
+                expires_at=clock_timestamp()-interval '1 second'
+          WHERE upload_id=$1",
+    )
+    .bind(session.upload_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE control.idempotency_ledger
+            SET state='in_progress',result=NULL,completed_at=NULL
+          WHERE operation='control_create_platform_image_upload_v1'
+            AND idempotency_key=$1",
+    )
+    .bind(create_key.as_str())
+    .execute(&pool)
+    .await?;
+
+    worker.tick().await?;
+    let failed = control
+        .platform_image_upload_status(session.upload_id)
+        .await?;
+    assert_eq!(failed.state, PlatformImageUploadState::Failed);
+    assert_eq!(
+        failed.diagnostic.as_deref(),
+        Some("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")
+    );
+    assert!(
+        objects
+            .find_platform_image_multipart_uploads(&object_key)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM control.idempotency_ledger
+              WHERE operation='control_create_platform_image_upload_v1' AND idempotency_key=$1",
+        )
+        .bind(create_key.as_str())
+        .fetch_one(&pool)
+        .await?,
+        "in_progress"
+    );
+    assert!(matches!(
+        control
+            .create_platform_image_upload(actor, &request, &create_key, import_now()?)
+            .await,
+        Err(control_service::ControlError::PlatformImageUploadExpired)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM control.platform_image_upload_sessions
+              WHERE create_idempotency_key=$1",
+        )
+        .bind(create_key.as_str())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "one persisted upload exercises stale-owner fencing, restart and late cancellation in order"
