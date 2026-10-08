@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import {
@@ -22,7 +22,13 @@ import {
 } from '../support/ssh-access.mjs'
 import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../examples/linux-config-probe')
+const PACKAGE_ROOT = (() => {
+  const configured = process.env.LABWEAVER_E2E_CONFIG_PROBE_PACKAGE_DIR
+  if (configured === undefined) return join(dirname(fileURLToPath(import.meta.url)), '../../../examples/linux-config-probe')
+  const trimmed = configured.trim()
+  if (trimmed === '') throw new Error('CONFIG_PROBE_PACKAGE_DIR_INVALID')
+  return resolve(trimmed)
+})()
 const TASK_PROVIDER = process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim() || 'container-primary-v1'
 const TERMINAL_STATES = ['succeeded', 'partially_succeeded', 'failed', 'cancelled']
