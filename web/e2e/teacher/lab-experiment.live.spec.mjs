@@ -120,6 +120,22 @@ async function configureLabPackageCopy(packageCopy) {
   if (gpuIndex < 0 || classIndex < 0) throw new Error('LAB_EXPERIMENT_GPU_CLASS_FIELD_MISSING')
   const indent = lines[classIndex].match(/^\s*/)?.[0] ?? ''
   lines[classIndex] = `${indent}class: ${LAB.gpuClass}`
+  if (RETAIN_CUDA_SAMPLE) {
+    const retentionIndex = lines.findIndex((line) => line.trim() === 'retention:')
+    const retainUntilIndex = retentionIndex >= 0
+      ? lines.findIndex((line, index) => index > retentionIndex && line.trimStart().startsWith('retainUntil:'))
+      : -1
+    const dispositionIndex = retentionIndex >= 0
+      ? lines.findIndex((line, index) => index > retentionIndex && line.trimStart().startsWith('disposition:'))
+      : -1
+    if (retentionIndex < 0 || retainUntilIndex < 0 || dispositionIndex < 0) {
+      throw new Error('LAB_EXPERIMENT_CUDA_PERMANENT_RETENTION_FIELDS_MISSING')
+    }
+    const retainUntilIndent = lines[retainUntilIndex].match(/^\s*/)?.[0] ?? ''
+    const dispositionIndent = lines[dispositionIndex].match(/^\s*/)?.[0] ?? ''
+    lines[retainUntilIndex] = `${retainUntilIndent}retainUntil: null`
+    lines[dispositionIndex] = `${dispositionIndent}disposition: retain_until_revoked`
+  }
   const updatedEnvironment = lines.join('\n')
   await writeFile(environmentPath, updatedEnvironment, 'utf8')
 
@@ -682,6 +698,38 @@ test('student completes a published lab experiment through the browser terminal'
         completed.evaluationCandidateId,
         built.artifact,
       )
+    if (RETAIN_CUDA_SAMPLE) {
+      const publishedCandidate = await expectJson(
+        await request.get(
+          `/api/v1/projects/${encodeURIComponent(project.id)}/environment-candidates/${encodeURIComponent(completed.environmentCandidateId)}`,
+        ),
+        'LAB_EXPERIMENT_CUDA_PERMANENT_CANDIDATE_READ_FAILED',
+      )
+      expect(publishedCandidate).toMatchObject({
+        candidate: {
+          id: completed.environmentCandidateId,
+          projectId: project.id,
+          spec: {
+            retention: {
+              retainUntil: null,
+              disposition: 'retain_until_revoked',
+            },
+          },
+        },
+      })
+      const publishedRelease = await expectJson(
+        await request.get(
+          `/api/v1/projects/${encodeURIComponent(project.id)}/environment-template-releases/${encodeURIComponent(published.publication.environmentReleaseId)}`,
+        ),
+        'LAB_EXPERIMENT_CUDA_PERMANENT_RELEASE_READ_FAILED',
+      )
+      expect(publishedRelease).toMatchObject({
+        id: published.publication.environmentReleaseId,
+        projectId: project.id,
+        candidateId: completed.environmentCandidateId,
+        approval: { decision: 'approved' },
+      })
+    }
     await assertNoStuckProgress(page, 'teacher-approval')
     await auditAccessibility(page, 'teacher-approval', testInfo)
     teacherGuards.assertCleanConsole('teacher-approval')
@@ -707,6 +755,7 @@ test('student completes a published lab experiment through the browser terminal'
       environmentId,
       studentActorId,
     )
+    if (RETAIN_CUDA_SAMPLE) expect(environment.eligibilityExpiresAt).toBeNull()
     if (LAB.gpuMode) {
       expect(environment.gpuAllocation?.mode, 'LAB_EXPERIMENT_GPU_MODE_MISSING').toBe(LAB.gpuMode)
       expect(environment.gpuAllocation?.class, 'LAB_EXPERIMENT_GPU_CLASS_MISSING').toBe(LAB.gpuClass)
@@ -813,6 +862,7 @@ test('student completes a published lab experiment through the browser terminal'
         id: retainedCudaSampleEnvironmentId,
         observedState: 'ready',
         desiredState: 'running',
+        eligibilityExpiresAt: null,
         gpuAllocation: {
           mode: 'exclusive',
           class: LAB.gpuClass,
@@ -908,6 +958,7 @@ test('student completes a published lab experiment through the browser terminal'
         id: retainedCudaSampleEnvironmentId,
         observedState: 'stopped',
         desiredState: 'stopped',
+        eligibilityExpiresAt: null,
       })
       await expect(studentPage.getByRole('button', { name: '启动', exact: true })).toBeEnabled({ timeout: 30_000 })
       await expect(studentPage.locator('#lifecycle-action-hint')).toContainText('工作目录和磁盘仍保留', { timeout: 120_000 })
