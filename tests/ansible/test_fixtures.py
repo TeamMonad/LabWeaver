@@ -6,9 +6,12 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import socket
 import sys
+import types
 import unittest
 from jinja2 import Environment, StrictUndefined
+from unittest.mock import patch
 import yaml
 
 
@@ -710,6 +713,7 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("PGSERVICEFILE", postgres_apply)
         self.assertIn("port-forward", postgres_apply)
+        self.assertIn("def local_port_occupied", postgres_apply)
         self.assertIn("def postgres_protocol_ready", postgres_apply)
         self.assertIn('"SELECT 1"', postgres_apply)
         self.assertNotIn("connect_ex", postgres_apply)
@@ -721,6 +725,70 @@ class AnsibleFixtureTests(unittest.TestCase):
         self.assertIn("LW_RESOURCE_ACCEPTANCE_PROFILE_ACCESS_ROLE_CONFLICT", seed)
         self.assertNotIn("resource_requests", seed)
         self.assertNotIn("environment_template_releases", seed)
+
+    def test_postgres_apply_rejects_an_unknown_listener_without_protocol_probe(self) -> None:
+        apply_path = ROOT / "deploy/ansible/library/labweaver_postgres_apply.py"
+        spec = importlib.util.spec_from_file_location("labweaver_postgres_apply_test", apply_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("postgres apply module could not be loaded")
+        postgres_apply = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = postgres_apply
+        basic = types.ModuleType("ansible.module_utils.basic")
+        basic.AnsibleModule = object
+        with patch.dict(
+            sys.modules,
+            {
+                "ansible": types.ModuleType("ansible"),
+                "ansible.module_utils": types.ModuleType("ansible.module_utils"),
+                "ansible.module_utils.basic": basic,
+            },
+        ):
+            spec.loader.exec_module(postgres_apply)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            postgres_apply.POSTGRES_FORWARD_PORT = listener.getsockname()[1]
+            with patch.object(postgres_apply.subprocess, "run") as run:
+                self.assertTrue(postgres_apply.local_port_occupied())
+                run.assert_not_called()
+
+        class StopModule(Exception):
+            pass
+
+        class FakeModule:
+            params = {
+                "kubeconfig": "unused",
+                "psql": sys.executable,
+                "service_file": "unused",
+                "service": "platform-admin",
+                "sql_file": "unused",
+            }
+
+            def fail_json(self, **kwargs: object) -> None:
+                raise StopModule(kwargs)
+
+            def exit_json(self, **_kwargs: object) -> None:
+                raise AssertionError("postgres apply unexpectedly completed")
+
+        with (
+            patch.object(postgres_apply, "AnsibleModule", return_value=FakeModule()),
+            patch.object(postgres_apply, "regular_file", return_value=Path("unused")),
+            patch.object(postgres_apply, "canonical_forward_service_active", return_value=False),
+            patch.object(postgres_apply, "local_port_occupied", return_value=True),
+            patch.object(postgres_apply, "postgres_protocol_ready") as protocol_ready,
+            patch.object(postgres_apply.subprocess, "run") as run,
+            patch.object(postgres_apply.subprocess, "Popen") as popen,
+        ):
+            with self.assertRaises(StopModule) as failure:
+                postgres_apply.main()
+        self.assertEqual(
+            failure.exception.args[0]["diagnostic_code"],
+            "RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT",
+        )
+        protocol_ready.assert_not_called()
+        run.assert_not_called()
+        popen.assert_not_called()
 
     def test_resource_api_uses_mtls_and_signed_access_delegation(self) -> None:
         values = (ROOT / "deploy/helm/labweaver/values.yaml").read_text(encoding="utf-8")
