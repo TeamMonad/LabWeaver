@@ -51,13 +51,13 @@ workloads:
     args: []
     configMap: control-service-config
     secret: control-service-secrets
-    # Platform image completion stages the uploaded archive here before it
-    # hands the immutable object to Agent. Keep this workload-specific budget
-    # separate from the small default used by ordinary API services.
-    tmpSizeLimit: 3Gi
+    # Platform image completion stages the uploaded compressed archive here before it
+    # hands the immutable object to Agent. The contract permits a 5,000,000,000-byte
+    # archive, so allow 6 GiB for the archive and bounded scratch space.
+    tmpSizeLimit: 6Gi
     resources:
       requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 1Gi}
-      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 3Gi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 6Gi}
     env:
       LABWEAVER_CONTROL_CONFIG_FILE: /etc/labweaver/config/config.yaml
       SSL_CERT_FILE: /etc/labweaver/secrets/minio-ca.pem
