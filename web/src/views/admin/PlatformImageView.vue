@@ -94,11 +94,19 @@
           <span>registry 引用（host/repo:tag）</span>
           <input v-model="registerForm.sourceReference" class="text-input" required />
         </label>
-        <label>
-          <span>信任版本</span>
-          <input v-model.number="registerForm.trustRevision" class="text-input" type="number" min="1" required />
-          <small class="field-hint">用于和平台当前认可的镜像版本匹配；版本不一致时，已发布内容可能无法引用该镜像。</small>
-        </label>
+        <div class="form-field">
+          <label for="register-trust-revision">信任版本</label>
+          <input
+            id="register-trust-revision"
+            v-model.number="registerForm.trustRevision"
+            class="text-input"
+            type="number"
+            min="1"
+            required
+            aria-describedby="register-trust-revision-hint"
+          />
+          <small id="register-trust-revision-hint" class="field-hint">用于和平台当前认可的镜像版本匹配；版本不一致时，已发布内容可能无法引用该镜像。</small>
+        </div>
         <label class="wide-field">
           <span>原因</span>
           <textarea v-model="registerForm.reason" class="text-input" rows="2" maxlength="512" required />
@@ -130,20 +138,33 @@
           <span>目标引用（host/repo:tag）</span>
           <input v-model="uploadForm.targetReference" class="text-input" required />
         </label>
-        <label>
-          <span>信任版本</span>
-          <input v-model.number="uploadForm.trustRevision" class="text-input" type="number" min="1" required />
-          <small class="field-hint">用于和平台当前认可的镜像版本匹配；版本不一致时，已发布内容可能无法引用该镜像。</small>
-        </label>
+        <div class="form-field">
+          <label for="upload-trust-revision">信任版本</label>
+          <input
+            id="upload-trust-revision"
+            v-model.number="uploadForm.trustRevision"
+            class="text-input"
+            type="number"
+            min="1"
+            required
+            aria-describedby="upload-trust-revision-hint"
+          />
+          <small id="upload-trust-revision-hint" class="field-hint">用于和平台当前认可的镜像版本匹配；版本不一致时，已发布内容可能无法引用该镜像。</small>
+        </div>
         <template v-if="uploadForm.kind === 'virtual_machine'">
-          <label>
-            <span>磁盘格式</span>
-            <select v-model="uploadForm.diskFormat" class="text-input" aria-label="磁盘格式">
+          <div class="form-field">
+            <label for="upload-disk-format">磁盘格式</label>
+            <select
+              id="upload-disk-format"
+              v-model="uploadForm.diskFormat"
+              class="text-input"
+              aria-describedby="upload-disk-format-hint"
+            >
               <option value="qcow2">qcow2</option>
               <option value="raw">raw</option>
             </select>
-            <small class="field-hint">必须与归档内磁盘的实际格式一致，否则虚拟机导入或启动可能失败。</small>
-          </label>
+            <small id="upload-disk-format-hint" class="field-hint">必须与归档内磁盘的实际格式一致，否则虚拟机导入或启动可能失败。</small>
+          </div>
           <label>
             <span>容量（字节）</span>
             <input v-model="uploadForm.capacityBytes" class="text-input" type="number" min="1" step="1" placeholder="例如 10737418240" required />
@@ -157,11 +178,19 @@
           <span>原因</span>
           <textarea v-model="uploadForm.reason" class="text-input" rows="2" maxlength="512" required />
         </label>
-        <label class="wide-field">
-          <span>{{ uploadForm.kind === 'virtual_machine' ? '虚拟机模板归档（.tar、.tar.gz、.tgz）' : 'OCI 归档（.tar）' }}</span>
-          <input ref="fileInput" class="text-input" type="file" :accept="uploadAccept" @change="selectFile" />
-          <small v-if="uploadForm.kind === 'virtual_machine'" class="field-hint">请上传包含单个 qcow2 或 raw 磁盘文件的归档；不能直接上传裸磁盘文件或 OCI 布局。</small>
-        </label>
+        <div class="form-field wide-field">
+          <label for="upload-archive">{{ uploadForm.kind === 'virtual_machine' ? '虚拟机模板归档（.tar、.tar.gz、.tgz）' : 'OCI 归档（.tar）' }}</label>
+          <input
+            id="upload-archive"
+            ref="fileInput"
+            class="text-input"
+            type="file"
+            :accept="uploadAccept"
+            :aria-describedby="uploadForm.kind === 'virtual_machine' ? 'upload-archive-hint' : undefined"
+            @change="selectFile"
+          />
+          <small v-if="uploadForm.kind === 'virtual_machine'" id="upload-archive-hint" class="field-hint">请上传包含单个 qcow2 或 raw 磁盘文件的归档；不能直接上传裸磁盘文件或 OCI 布局。</small>
+        </div>
         <p class="upload-limit-hint">归档大小上限：5 GB（5,000,000,000 字节）。</p>
         <button type="submit" class="filled-button" :disabled="busy || !uploadFile">上传并导入</button>
       </form>
@@ -536,7 +565,7 @@ onMounted(async () => {
 .field-hint { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.4; }
 .catalog-card, .register-card, .upload-card { display: grid; gap: 16px; padding: 20px; }
 .admin-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
-.admin-form label, .operation-credentials label { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
+.admin-form label, .operation-credentials label, .form-field { display: grid; gap: 6px; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-medium); }
 .admin-form .wide-field { grid-column: 1 / -1; }
 .admin-form button { justify-self: start; }
 .text-input { box-sizing: border-box; min-height: 40px; width: 100%; padding: 8px 11px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-surface); color: var(--md-sys-color-on-surface); font: var(--md-sys-body-medium); }

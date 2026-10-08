@@ -1445,10 +1445,6 @@ where
                 format!("requests.{}", allocation.allocation_binding),
                 quantity.clone(),
             );
-            quota_hard.insert(
-                format!("limits.{}", allocation.allocation_binding),
-                quantity,
-            );
         }
         let mut pod_labels = json!({
             "app": app_name,

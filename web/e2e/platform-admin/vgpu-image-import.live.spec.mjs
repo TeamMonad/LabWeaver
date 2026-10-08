@@ -81,15 +81,21 @@ async function fillVmUploadForm(page, input, reason) {
   return uploadCard
 }
 
+function waitForResponseSafely(page, predicate, options) {
+  const responsePromise = page.waitForResponse(predicate, options)
+  void responsePromise.catch(() => undefined)
+  return responsePromise
+}
+
 async function waitForUploadSession(page, input) {
-  const sessionResponsePromise = page.waitForResponse((response) => {
+  const uploadCard = await fillVmUploadForm(page, input, '导入已评审的 vGPU guest image。')
+  const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
+  await expect(importButton).toBeEnabled()
+  const sessionResponsePromise = waitForResponseSafely(page, (response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
       && url.pathname === '/api/v1/admin/images/uploads'
   })
-  const uploadCard = await fillVmUploadForm(page, input, '导入已评审的 vGPU guest image。')
-  const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
-  await expect(importButton).toBeEnabled()
   await importButton.click()
   const sessionResponse = await sessionResponsePromise
   const session = await expectJson(sessionResponse, 'LW_VGPU_IMAGE_UPLOAD_SESSION_READ_FAILED')
@@ -236,7 +242,7 @@ test('platform administrator refreshes a real VM upload and cancels it through t
   let cleanupError
   try {
     ({ session } = await waitForUploadSession(page, input))
-    const completionResponsePromise = page.waitForResponse((response) => {
+    const completionResponsePromise = waitForResponseSafely(page, (response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
@@ -278,12 +284,18 @@ test('platform administrator refreshes a real VM upload and cancels it through t
       }
     }
   }
+  if (cleanupError) {
+    test.info().annotations.push({
+      type: 'image-import-cleanup',
+      description: `upload-cancel-cleanup-failed:${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+    })
+  }
   if (primaryError && cleanupError) {
-    const primaryReason = primaryError instanceof Error ? primaryError.message : String(primaryError)
-    const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-    const combinedError = new Error(`${primaryReason}; upload-cancel-cleanup-failed:${cleanupReason}`)
-    combinedError.cause = primaryError
-    throw combinedError
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      'vGPU image import failed and upload cleanup also failed',
+      { cause: primaryError },
+    )
   }
   if (primaryError) throw primaryError
   if (cleanupError) throw cleanupError
@@ -323,6 +335,7 @@ test('platform administrator retries a real VM import after a network failure th
     firstCompletionFaultResolve = resolve
     firstCompletionFaultReject = reject
   })
+  void firstCompletionFault.catch(() => undefined)
   await page.route('**/api/v1/admin/images/uploads/*/complete', async (route) => {
     if (!abortFirstCompletion) return route.continue()
     abortFirstCompletion = false
@@ -351,7 +364,7 @@ test('platform administrator retries a real VM import after a network failure th
     const retryButton = page.locator('.upload-status').getByRole('button', { name: '重试导入', exact: true })
     await expect(retryButton).toBeVisible({ timeout: 120_000 })
     await expect(retryButton).toBeEnabled()
-    const completionResponsePromise = page.waitForResponse((response) => {
+    const completionResponsePromise = waitForResponseSafely(page, (response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
@@ -395,19 +408,19 @@ test('platform administrator retries a real VM import after a network failure th
     } catch (error) {
       cleanupError ??= error
     }
-    if (cleanupError) {
-      test.info().annotations.push({
-        type: 'image-import-cleanup',
-        description: `upload-cancel-cleanup-failed:${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-      })
-    }
+  }
+  if (cleanupError) {
+    test.info().annotations.push({
+      type: 'image-import-cleanup',
+      description: `upload-cancel-cleanup-failed:${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+    })
   }
   if (primaryError && cleanupError) {
-    const primaryReason = primaryError instanceof Error ? primaryError.message : String(primaryError)
-    const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-    const combinedError = new Error(`${primaryReason}; upload-cancel-cleanup-failed:${cleanupReason}`)
-    combinedError.cause = primaryError
-    throw combinedError
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      'vGPU image import failed and upload cleanup also failed',
+      { cause: primaryError },
+    )
   }
   if (primaryError) throw primaryError
   if (cleanupError) throw cleanupError
@@ -448,7 +461,7 @@ test('platform administrator imports one requested vGPU guest image through the 
 
   const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
   await expect(importButton).toBeEnabled()
-  const completionResponsePromise = page.waitForResponse((response) => {
+  const completionResponsePromise = waitForResponseSafely(page, (response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
       && /^\/api\/v1\/admin\/images\/uploads\/[^/]+\/complete$/.test(url.pathname)

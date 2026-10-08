@@ -63,13 +63,19 @@ const LABS = Object.freeze({
 })
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
-const AGENT_RUN_TIMEOUT_MS = Number(process.env.LABWEAVER_E2E_AGENT_RUN_TIMEOUT_MS) || 1_800_000
+// This journey owns real projects, environments and charges. Keep separate
+// ceilings for authoring and image build so the four-hour test budget leaves
+// time for publication, evaluation, finance and cleanup.
+const FULL_CHAIN_TIMEOUT_MS = 14_400_000
+const AUTHORING_RUN_TIMEOUT_MS = Number(process.env.LABWEAVER_E2E_AGENT_RUN_TIMEOUT_MS) || 9_000_000
+const CANDIDATE_BUILD_TIMEOUT_MS = 3_600_000
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
   || 'container-primary-v1'
 
 test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6 or LABWEAVER_E2E_LAB=cuda for a real lab acceptance run.')
+test.describe.configure({ timeout: FULL_CHAIN_TIMEOUT_MS, retries: 0 })
 
 function diagnosticCodes(run) {
   return run.tracks
@@ -154,7 +160,7 @@ async function waitForTerminalExperimentRun(
       return complete
     },
     'LAB_EXPERIMENT_AGENT_RUN_STATUS_FAILED',
-    AGENT_RUN_TIMEOUT_MS,
+    AUTHORING_RUN_TIMEOUT_MS,
   )
 }
 
@@ -284,7 +290,7 @@ async function waitForBuiltCandidate(request, projectId, candidateId, onPendingR
       return ['succeeded', 'failed', 'cancelled'].includes(value.build?.state)
     },
     'LAB_EXPERIMENT_CANDIDATE_BUILD_STATUS_FAILED',
-    600_000,
+    CANDIDATE_BUILD_TIMEOUT_MS,
   )
   if (candidate.build?.state !== 'succeeded') {
     throw new Error(`LAB_EXPERIMENT_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'diagnostic missing'}`)
@@ -496,7 +502,7 @@ async function closeExperimentEnvironment(page, projectId, environmentId) {
 }
 
 test('student completes a published lab experiment through the browser terminal', async ({ browser, page, baseURL }, testInfo) => {
-  test.setTimeout(1_800_000)
+  test.setTimeout(FULL_CHAIN_TIMEOUT_MS)
   const request = page.context().request
   const teacherGuards = installUsabilityGuards(page)
   const resumeProjectId = process.env.LABWEAVER_E2E_LAB_RESUME_PROJECT_ID?.trim() ?? ''

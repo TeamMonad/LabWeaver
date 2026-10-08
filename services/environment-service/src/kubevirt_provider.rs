@@ -397,7 +397,7 @@ pub struct KubeVirtCleanupPlan {
     pub plan_sha256: Sha256Digest,
 }
 
-/// Complete readiness identity returned only after VM, guest agent and SSH converge.
+/// Complete readiness identity returned after VM and SSH converge; guest-agent state is observed separately.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubeVirtRunningObservation {
@@ -2495,7 +2495,7 @@ where
         ]);
         if let Some(allocation) = gpu_allocation {
             quota_hard.insert(
-                format!("limits.{}", allocation.allocation_binding),
+                format!("requests.{}", allocation.allocation_binding),
                 json!(allocation.count.to_string()),
             );
         }

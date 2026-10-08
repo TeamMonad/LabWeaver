@@ -158,6 +158,26 @@ describe('PlatformImageView', () => {
     expect(columnText(wrapper, 0, '状态')).toBe('可用')
   })
 
+  it('keeps field hints out of accessible names and associates them with their controls', async () => {
+    const wrapper = await mountView()
+
+    const registerTrust = wrapper.get('#register-trust-revision')
+    expect(wrapper.get('label[for="register-trust-revision"]').text()).toBe('信任版本')
+    expect(registerTrust.attributes('aria-describedby')).toBe('register-trust-revision-hint')
+    expect(wrapper.find('label[for="register-trust-revision"] .field-hint').exists()).toBe(false)
+
+    const uploadTrust = wrapper.get('#upload-trust-revision')
+    expect(wrapper.get('label[for="upload-trust-revision"]').text()).toBe('信任版本')
+    expect(uploadTrust.attributes('aria-describedby')).toBe('upload-trust-revision-hint')
+    expect(wrapper.find('label[for="upload-trust-revision"] .field-hint').exists()).toBe(false)
+
+    await wrapper.get('.upload-card select').setValue('virtual_machine')
+    const diskFormat = wrapper.get('#upload-disk-format')
+    expect(wrapper.get('label[for="upload-disk-format"]').text()).toBe('磁盘格式')
+    expect(diskFormat.attributes('aria-describedby')).toBe('upload-disk-format-hint')
+    expect(wrapper.find('label[for="upload-disk-format"] .field-hint').exists()).toBe(false)
+  })
+
   it('disables the pinned digest only after the confirmation dialog is accepted', async () => {
     vi.mocked(disablePlatformImage).mockResolvedValue({ data: { ...entry, status: 'disabled' }, error: undefined as never })
     const wrapper = await mountView()

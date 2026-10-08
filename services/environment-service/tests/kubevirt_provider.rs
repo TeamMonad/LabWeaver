@@ -673,11 +673,18 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
         Some(&json!("2"))
     );
     let quota = resource(&plan, "ResourceQuota");
+    let escaped_binding = allocation_binding.replace('~', "~0").replace('/', "~1");
     assert_eq!(
         quota
             .document
-            .pointer("/spec/hard/limits.nvidia.com~1GRID_V100DX-2Q"),
+            .pointer(&format!("/spec/hard/requests.{escaped_binding}")),
         Some(&json!("2"))
+    );
+    assert_eq!(
+        quota
+            .document
+            .pointer(&format!("/spec/hard/limits.{escaped_binding}")),
+        None
     );
     assert_vgpu_license_projection(&plan);
 }
@@ -749,13 +756,14 @@ fn experiment_vm_gpu_allocation_renders_vgpu_devices_and_limits() {
     });
     projection.validate().expect("GPU VM projection");
     let mut instance = instance_for(&projection);
+    let allocation_binding = "nvidia.com/grid-t4-4c".to_owned();
     instance.gpu_allocation = Some(GpuAllocation {
         entry_id: GpuCatalogEntryId::new(),
         class: "t4-vgpu".to_owned(),
         count: 1,
         mode: GpuAllocationMode::VmVgpu,
         provider_binding: "kubevirt-primary-v1".to_owned(),
-        allocation_binding: "nvidia.com/grid-t4-4c".to_owned(),
+        allocation_binding: allocation_binding.clone(),
         catalog_revision: revision(1),
     });
     let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
@@ -772,13 +780,27 @@ fn experiment_vm_gpu_allocation_renders_vgpu_devices_and_limits() {
     assert_eq!(gpus.len(), 1);
     assert_eq!(
         gpus[0].pointer("/deviceName"),
-        Some(&json!("nvidia.com/grid-t4-4c"))
+        Some(&json!(allocation_binding))
+    );
+    let escaped_binding = allocation_binding.replace('~', "~0").replace('/', "~1");
+    assert_eq!(
+        virtual_machine.document.pointer(&format!(
+            "/spec/template/spec/domain/resources/limits/{escaped_binding}"
+        )),
+        Some(&json!("1"))
+    );
+    let quota = resource(&plan, "ResourceQuota");
+    assert_eq!(
+        quota
+            .document
+            .pointer(&format!("/spec/hard/requests.{escaped_binding}")),
+        Some(&json!("1"))
     );
     assert_eq!(
-        virtual_machine
+        quota
             .document
-            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1grid-t4-4c"),
-        Some(&json!("1"))
+            .pointer(&format!("/spec/hard/limits.{escaped_binding}")),
+        None
     );
 }
 

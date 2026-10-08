@@ -58,6 +58,7 @@ struct Authority {
     jwk: Value,
     admin: Uuid,
     requests: Arc<Mutex<Vec<Value>>>,
+    upstream: &'static str,
 }
 
 async fn discovery(State(state): State<Authority>) -> Json<Value> {
@@ -135,9 +136,11 @@ fn control_request_record(
     headers: &HeaderMap,
     body: &Bytes,
     actor: Option<&str>,
+    upstream: &'static str,
 ) -> Value {
     json!({
-        "method": method.as_str(), "path": uri.path(), "actor": actor,
+        "method": method.as_str(), "path": uri.path(), "query": uri.query(), "actor": actor,
+        "upstream": upstream,
         "session": headers.get("x-labweaver-session-id").and_then(|v| v.to_str().ok()),
         "ifMatch": headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()),
         "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
@@ -172,10 +175,16 @@ async fn control(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let delegated_actor = headers
+        .get("x-labweaver-resource-delegation")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|token| auth::decode_resource_delegation(&[7_u8; 32], token).ok())
+        .map(|delegation| delegation.actor_id.to_string());
     let actor = headers
         .get("x-labweaver-actor-id")
-        .and_then(|v| v.to_str().ok());
-    let record = control_request_record(&method, &uri, &headers, &body, actor);
+        .and_then(|v| v.to_str().ok())
+        .or(delegated_actor.as_deref());
+    let record = control_request_record(&method, &uri, &headers, &body, actor, state.upstream);
     state.requests.lock().await.push(record);
     if method == Method::GET && uri.path() == "/admin/realms/test/users" {
         return directory_users_response();
@@ -320,6 +329,7 @@ async fn state(
         signing_key: Arc::new(EncodingKey::from_ec_der(&key.serialize_der())),
         decoding_key: DecodingKey::from_ec_components(&x, &y)?,
         jwk: json!({"kty": "EC", "crv": "P-256", "x": x, "y": y, "use": "sig", "alg": "ES256", "kid": "fixture"}),
+        upstream: "control",
     };
     let router = Router::new()
         .route(
@@ -341,8 +351,21 @@ async fn state(
         .route("/api/v1/projects/{project_id}", any(control))
         .route("/admin/realms/test/users", any(control))
         .with_state(authority.clone());
+    let control_server_config = Arc::clone(&server_config);
     tasks.0.push(tokio::spawn(async move {
-        let _ = http_transport::serve_tls(listener, router, server_config).await;
+        let _ = http_transport::serve_tls(listener, router, control_server_config).await;
+    }));
+    let resource_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let resource_base = format!("https://{}/", resource_listener.local_addr()?);
+    let resource_authority = Authority {
+        upstream: "resource",
+        ..authority.clone()
+    };
+    let resource_router = Router::new()
+        .route("/api/v1/projects/{project_id}/usage", get(control))
+        .with_state(resource_authority);
+    tasks.0.push(tokio::spawn(async move {
+        let _ = http_transport::serve_tls(resource_listener, resource_router, server_config).await;
     }));
     let mut deployment = AccessAuthFile::parse_yaml(include_str!(
         "../../../deploy/config/access-auth.yaml.example"
@@ -358,7 +381,7 @@ async fn state(
         gateway.allowed_server_sans = vec!["127.0.0.1".to_owned()];
     }
     deployment.environment_owner_resolver.resolver_uri = base.trim_end_matches('/').to_owned();
-    deployment.resource_gateway.base_uri.clone_from(&base);
+    deployment.resource_gateway.base_uri = resource_base;
     deployment.resource_gateway.allowed_server_sans = vec!["127.0.0.1".to_owned()];
     let config = AuthConfig::new(
         &issuer,
@@ -957,6 +980,93 @@ async fn candidate_build_status_and_cancel_reach_control_with_session_auth()
         assert_eq!(records[2]["body"]["expectedRevision"], 2);
         assert_eq!(records[3]["actor"], other.actor_id.to_string());
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn project_usage_reaches_resource_with_session_auth() -> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let admin = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool, admin, &mut tasks)).await?;
+    let admin_session = session(
+        &state.pool,
+        &state.key_ring,
+        admin,
+        contracts::PlatformRole::PlatformAdmin,
+    )
+    .await?;
+    let student_session = session(
+        &state.pool,
+        &state.key_ring,
+        Uuid::now_v7(),
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, admin_session.session_id
+    );
+    let student_cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, student_session.session_id
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state);
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let project_id = Uuid::now_v7();
+    let path = format!("/api/v1/projects/{project_id}/usage?page=1&pageSize=1");
+
+    assert_eq!(
+        client.get(format!("{base}{path}")).send().await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let denied = client
+        .get(format!("{base}{path}"))
+        .header(header::COOKIE, student_cookie)
+        .send()
+        .await?;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        denied.json::<Value>().await?,
+        json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
+    );
+    let response = client
+        .get(format!("{base}{path}"))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await?;
+    let response_status = response.status();
+    let response_body = response.text().await?;
+    assert_eq!(response_status, StatusCode::OK, "{response_body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&response_body)?,
+        json!({"state": "importing", "revision": 3})
+    );
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["path"],
+        format!("/api/v1/projects/{project_id}/usage")
+    );
+    assert_eq!(requests[0]["query"], "page=1&pageSize=1");
+    assert_eq!(requests[0]["method"], "GET");
+    assert_eq!(requests[0]["actor"], admin.to_string());
+    assert_eq!(requests[0]["upstream"], "resource");
     Ok(())
 }
 

@@ -804,40 +804,56 @@ fn instance_for(projection: &ReleasePublished) -> contracts::environment::Enviro
 }
 
 #[test]
-fn experiment_gpu_allocation_renders_the_extended_resource_on_the_pod() {
-    let projection = gpu_projection();
-    let mut instance = instance_for(&projection);
-    instance.gpu_allocation = Some(gpu_allocation("a100-exclusive", 1));
-    instance
-        .gpu_allocation
-        .as_mut()
-        .expect("GPU allocation")
-        .allocation_binding = "nvidia.com/gpu.shared".to_owned();
-    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+fn experiment_gpu_allocation_renders_workload_limits_and_request_quota_for_modes() {
+    for (mode, allocation_binding) in [
+        (
+            contracts::resource::GpuAllocationMode::Exclusive,
+            "nvidia.com/gpu",
+        ),
+        (
+            contracts::resource::GpuAllocationMode::ContainerTimeSlice,
+            "nvidia.com/gpu.shared",
+        ),
+    ] {
+        let projection = gpu_projection();
+        let mut instance = instance_for(&projection);
+        let mut allocation = gpu_allocation("a100-exclusive", 1);
+        allocation.mode = mode;
+        allocation.allocation_binding = allocation_binding.to_owned();
+        instance.gpu_allocation = Some(allocation);
+        let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
 
-    let plan = provider
-        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
-        .expect("resolved Experiment GPU allocation is rendered");
-    let deployment = resource(&plan, "Deployment");
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu.shared"),
-        Some(&json!("1"))
-    );
-    assert_eq!(
-        deployment
-            .document
-            .pointer("/spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu.shared"),
-        Some(&json!("1"))
-    );
-    let quota = resource(&plan, "ResourceQuota");
-    assert_eq!(
-        quota
-            .document
-            .pointer("/spec/hard/limits.nvidia.com~1gpu.shared"),
-        Some(&json!("1"))
-    );
+        let plan = provider
+            .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+            .expect("resolved Experiment GPU allocation is rendered");
+        let deployment = resource(&plan, "Deployment");
+        let escaped_binding = allocation_binding.replace('~', "~0").replace('/', "~1");
+        assert_eq!(
+            deployment.document.pointer(&format!(
+                "/spec/template/spec/containers/0/resources/requests/{escaped_binding}"
+            )),
+            Some(&json!("1"))
+        );
+        assert_eq!(
+            deployment.document.pointer(&format!(
+                "/spec/template/spec/containers/0/resources/limits/{escaped_binding}"
+            )),
+            Some(&json!("1"))
+        );
+        let quota = resource(&plan, "ResourceQuota");
+        assert_eq!(
+            quota
+                .document
+                .pointer(&format!("/spec/hard/requests.{escaped_binding}")),
+            Some(&json!("1"))
+        );
+        assert_eq!(
+            quota
+                .document
+                .pointer(&format!("/spec/hard/limits.{escaped_binding}")),
+            None
+        );
+    }
 }
 
 #[test]

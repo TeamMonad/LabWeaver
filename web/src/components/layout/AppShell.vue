@@ -28,10 +28,8 @@ import { useRoute } from 'vue-router'
 import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
 import { useThemeStore } from '@/stores/theme'
-import { useAuth } from '@/composables/useAuth'
 
 const themeStore = useThemeStore()
-const auth = useAuth()
 const route = useRoute()
 const appMain = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
@@ -63,7 +61,6 @@ watch(
 
 onMounted(() => {
   themeStore.listenToSystemTheme()
-  void auth.loadUser()
 })
 </script>
 

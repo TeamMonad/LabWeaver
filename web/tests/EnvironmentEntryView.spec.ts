@@ -1,16 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { createRouter, createWebHistory, RouterView } from 'vue-router'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
+import { useProjects } from '@/composables/useProjects'
 import {
   listEnvironmentTemplateReleases,
   listProjects,
   getEnvironment,
   listEnvironmentEndpoints,
   listEnvironmentAccessGrants,
+  getAccessGrant,
   listEnvironmentOperations,
   cancelEnvironmentOperation,
   startEnvironment,
@@ -31,6 +33,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     getEnvironment: vi.fn(),
     listEnvironmentEndpoints: vi.fn(),
     listEnvironmentAccessGrants: vi.fn(),
+    getAccessGrant: vi.fn(),
     listEnvironmentOperations: vi.fn(),
     cancelEnvironmentOperation: vi.fn(),
     startEnvironment: vi.fn(),
@@ -221,6 +224,55 @@ describe('EnvironmentEntryView', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('PROJECT_CONTEXT_MISSING'))
   })
 
+  it('keeps a task navigation when the project list resolves during the auth guard', async () => {
+    let resolveProjects!: (value: unknown) => void
+    const projectsResponse = new Promise((resolve) => { resolveProjects = resolve })
+    vi.mocked(listProjects).mockImplementation(() => projectsResponse as never)
+
+    let releaseGuard!: () => void
+    const guardReady = new Promise<void>((resolve) => { releaseGuard = resolve })
+    const RootView = defineComponent({
+      setup() {
+        const projects = useProjects()
+        projects.projects = { kind: 'idle' }
+        projects.selectedProjectId = null
+        return { projects }
+      },
+      template: '<RouterLink to="/student/environments" data-testid="student-environment-link">环境控制台</RouterLink>',
+    })
+    const router = createRouter({
+      history: createWebHistory(),
+      routes: [
+        { path: '/', component: RootView },
+        { path: '/student/environments', component: EnvironmentEntryView },
+      ],
+    })
+    router.beforeEach(async (to) => {
+      if (to.path === '/student/environments') await guardReady
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(defineComponent({ setup: () => () => h(RouterView) }), {
+      global: { plugins: [router] },
+    })
+    mountedWrappers.push(wrapper)
+    await vi.waitFor(() => expect(vi.mocked(listProjects)).toHaveBeenCalledTimes(1))
+
+    const navigation = router.push('/student/environments')
+    await Promise.resolve()
+    expect(router.currentRoute.value.path).toBe('/')
+
+    resolveProjects({ data: [mockProject], error: undefined as never })
+    await Promise.resolve()
+    releaseGuard()
+    await navigation
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/student/environments')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('项目环境控制台'))
+    expect(router.currentRoute.value.query.projectId).toBe('project-1')
+  })
+
   it('offers the project Work environment list before the advanced ID input', async () => {
     const { wrapper } = await mountAt(
       { projectId: 'project-1' },
@@ -297,7 +349,7 @@ describe('EnvironmentEntryView', () => {
     })
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    expect(wrapper.text()).toContain('运行中')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('运行中'))
     expect(wrapper.text()).toContain('启动')
     expect(wrapper.get('#lifecycle-action-hint').text()).toContain('重启会中断当前运行')
     await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
@@ -549,6 +601,55 @@ describe('EnvironmentEntryView', () => {
     if (!canIssue) expect(wrapper.text()).toContain(hint)
   })
 
+  it('opens an HTTP endpoint through its authorized same-origin connect URL', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+      data: {
+        items: [{ id: 'ep-http', protocol: 'http', health: 'healthy', observedAt: '2026-07-11T10:00:00.000Z' }],
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({
+      data: { items: [{ id: 'grant-http' }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(getAccessGrant).mockResolvedValue({
+      data: {
+        id: 'grant-http',
+        actorId: 'student-1',
+        environmentId: 'env-1',
+        environmentRevision: 11,
+        projectId: 'project-1',
+        state: 'active',
+        revision: 1,
+        endpointGrants: [{
+          id: 'endpoint-grant-http',
+          accessGrantId: 'grant-http',
+          endpointId: 'ep-http',
+          endpointRevision: 1,
+          protocol: 'http',
+          action: 'connect',
+          health: 'healthy',
+          connectUrl: '/connect/endpoint-grant-http/',
+          expiresAt: '2026-07-12T10:00:00.000Z',
+        }],
+        issuedAt: '2026-07-11T10:00:00.000Z',
+        expiresAt: '2026-07-12T10:00:00.000Z',
+      },
+      error: undefined as never,
+    } as never)
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.find('.runtime-access').exists()).toBe(true))
+    expect(wrapper.find('.endpoint-grants').text()).toContain('http')
+    const openButton = wrapper.findAll('button').find((button) => button.text() === '打开容器实验')
+    expect(openButton).toBeDefined()
+    await openButton!.trigger('click')
+    expect(open).toHaveBeenCalledWith('/connect/endpoint-grant-http/', '_blank', 'noopener,noreferrer')
+    open.mockRestore()
+  })
+
   it.each([
     ['stopped', 'stopped', '环境已停止，启动后才能签发访问授权。'],
     ['failed', 'running', '环境处于失败状态，重试成功并恢复就绪后才能签发访问授权。'],
@@ -749,8 +850,8 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
 
+    await vi.waitFor(() => expect(wrapper.findAll('button').find((b) => b.text() === '启动')).toBeDefined())
     const startButton = wrapper.findAll('button').find((b) => b.text() === '启动')
-    expect(startButton).toBeDefined()
     await startButton!.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('ENVIRONMENT_LIFECYCLE_FAILED'))
     expect(wrapper.text()).toContain('环境 env-1 处于失败状态')

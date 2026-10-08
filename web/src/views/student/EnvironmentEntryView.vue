@@ -492,7 +492,7 @@
                             class="runtime-access"
                           >
                             <div
-                              v-if="httpsGrant(g)"
+                              v-if="webGrant(g)"
                               class="access-card"
                             >
                               <h5 class="access-card__title">
@@ -1039,7 +1039,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentInstance } from '@/composables/useEnvironmentInstance'
@@ -1339,22 +1339,40 @@ onBeforeRouteUpdate((to) => {
   return true
 })
 
-watch(
-  () => projects.selectedProjectId,
-  (selectedId, previousId) => {
-    if (!selectedId || !hasProject(selectedId)) return
-    if (routeNavigationProjectId.value === selectedId) {
-      routeNavigationProjectId.value = null
-      return
-    }
-    const contextProjectId = routeProjectId.value ?? environmentProjectId.value
-    if (routeProjectId.value && !hasProject(routeProjectId.value)) return
-    if (contextProjectId === selectedId) return
-    if (selectedEnvironmentId.value && !environmentProjectId.value && (env.instance.kind === 'idle' || env.instance.kind === 'loading') && previousId === null) return
-    clearEnvironmentSelection()
-    void router.replace({ query: { ...route.query, projectId: selectedId, environmentId: undefined } })
-  },
-)
+function syncSelectedProjectToRoute(selectedId: string | null, previousId: string | null = null) {
+  if (!selectedId || !hasProject(selectedId)) return
+  if (routeNavigationProjectId.value === selectedId) {
+    routeNavigationProjectId.value = null
+    return
+  }
+  const contextProjectId = routeProjectId.value ?? environmentProjectId.value
+  if (routeProjectId.value && !hasProject(routeProjectId.value)) return
+  if (contextProjectId === selectedId) return
+  if (selectedEnvironmentId.value && !environmentProjectId.value && (env.instance.kind === 'idle' || env.instance.kind === 'loading') && previousId === null) return
+  clearEnvironmentSelection()
+  void router.replace({ query: { ...route.query, projectId: selectedId, environmentId: undefined } })
+}
+
+// Wait until this route has mounted before synchronizing project context. A
+// project list can resolve while the router is still running the auth guard;
+// replacing from setup in that window would use the previous route (often the
+// root route) and cancel the user's navigation. Mounting is the router's
+// committed route boundary, so the same synchronization remains immediate for
+// this page without racing a pending navigation.
+onMounted(() => {
+  if (selectedEnvironmentId.value) {
+    watch(
+      () => projects.selectedProjectId,
+      syncSelectedProjectToRoute,
+    )
+    return
+  }
+  watch(
+    [() => projects.selectedProjectId, () => projects.projects],
+    ([selectedId], [previousId]) => syncSelectedProjectToRoute(selectedId, previousId),
+    { immediate: true },
+  )
+})
 
 watch(
   () =>
@@ -1531,12 +1549,12 @@ async function cancelCurrentOperation() {
   }
 }
 
-function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'https' | 'ssh') {
+function endpointGrantOf(g: AccessGrantWithGateway, protocol: 'http' | 'https' | 'ssh') {
   return g.endpointGrants.find((eg) => eg.protocol === protocol && eg.health === 'healthy') ?? null
 }
 
-function httpsGrant(g: AccessGrantWithGateway) {
-  return endpointGrantOf(g, 'https')
+function webGrant(g: AccessGrantWithGateway) {
+  return endpointGrantOf(g, 'https') ?? endpointGrantOf(g, 'http')
 }
 
 function sshGrant(g: AccessGrantWithGateway) {
@@ -1544,7 +1562,7 @@ function sshGrant(g: AccessGrantWithGateway) {
 }
 
 function connectUrl(g: AccessGrantWithGateway): string | null {
-  const eg = httpsGrant(g)
+  const eg = webGrant(g)
   return eg ? resolveConnectUrl(eg) : null
 }
 
