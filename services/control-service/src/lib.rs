@@ -1796,8 +1796,11 @@ impl ControlService {
             &row.try_get::<Uuid, _>("upload_id").map_err(db)?.to_string(),
         )
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
-        let now = UtcTimestamp::from_utc(time::OffsetDateTime::now_utc())
+        let now = time::OffsetDateTime::now_utc();
+        let now = now
+            .replace_nanosecond((now.nanosecond() / 1_000_000) * 1_000_000)
             .map_err(|_| ControlError::ContractInvalid)?;
+        let now = UtcTimestamp::from_utc(now).map_err(|_| ControlError::ContractInvalid)?;
         let expires_at = UtcTimestamp::from_utc(row.try_get("expires_at").map_err(db)?)
             .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
         let recovery_lease = Uuid::now_v7();
