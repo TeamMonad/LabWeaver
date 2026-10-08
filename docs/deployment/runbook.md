@@ -203,6 +203,8 @@ GPU 目录中的模式、provider binding 和 allocation binding 必须来自实
 
 当前配置中的容器 provider binding 是 `container-primary-v1`，VM provider binding 是 `kubevirt-primary-v1`；以当前 platform bundle 为准。真实 observer 的 key 就是 `gpuObservers[].providerBinding`，必须与对应 GPU catalog entry 完全一致，否则 Resource 只读观测不会被用于准入。观测器的实际 Kubernetes API server、ServiceAccount token 文件和 CA 文件来自私有 bundle，不在文档中固定地址或凭据。
 
+当前候选部署中，63 是 Ollama 模型主机，158 由容器设备插件暴露 `nvidia.com/gpu`，97 由 KubeVirt 暴露 `nvidia.com/GRID_V100DX-2Q`。这是当前部署配置的职责划分，不是长期节点角色；切换时必须以显式 Ansible 节点变量、节点标签和 Resource observer 的实时读回为准，不按节点编号或硬件名称推断可用模式。
+
 `deploy/versions.lock.yml` 当前只提供 reviewed 的 `nvidia-cuda` 独占 bootstrap seed（`container-primary-v1`、`nvidia.com/gpu`），它不是运行时 GPU catalog 的第二真源。新增时间片或 VM vGPU class 前，先在设备插件/KubeVirt 和 Resource 观测中配置真实容量，再由管理员 UI 创建目录项和费率；缺失费率时报告缺失项，不覆盖现有活动费率 revision，也不把未观测容量当作可用。
 
 ### 5.2 设备插件和 mediated device

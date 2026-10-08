@@ -16,12 +16,19 @@ base so that `profiles/cuda-nvcc.json` can invoke `/usr/local/cuda/bin/nvcc`.
 ## GPU catalog placeholder
 
 `environment.yaml` requests one GPU of class `v100-exclusive`. That class is a
-placeholder; the operator must either register the exclusive Tesla V100 worker
-(worker-97, runtime device `nvidia.com/gpu`) under the catalog class
-`v100-exclusive`, or change `resources.gpu.class` to the catalog class that is
-actually active. The worker-158 P40 vGPU capacity is a different catalog class
-and must not satisfy this package. The catalog entry, not the package, owns the
-mapping from the policy class to the runtime device.
+placeholder; the operator must either register the currently active exclusive
+container resource under that class, or change `resources.gpu.class` to the
+active catalog class. The current deployment exposes `nvidia.com/gpu` from the
+container GPU node (158) and `nvidia.com/GRID_V100DX-2Q` from the VM vGPU node
+(97). The latter is a separate VM catalog entry and must not satisfy this
+container package. The catalog entry, not the package, owns the mapping from
+the policy class to the runtime resource.
+
+The current deployment keeps node 63 as the Ollama model host; it has no
+platform GPU extended resource. These node assignments describe the current
+deployment only. Mode changes must use the explicit Ansible node variables and
+the Resource observer readback, rather than treating a node number or hardware
+label as a permanent role.
 
 The GPU field is additive to CPU, memory, and storage. The environment also
 declares an interactive terminal and a read-only HTTP file entry over the
