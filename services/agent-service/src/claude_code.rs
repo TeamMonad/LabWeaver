@@ -3172,7 +3172,14 @@ fn evaluation_schema_diagnostic(
     }
 
     let message = error.to_string();
-    let (category, constraint) = if error.is_syntax() || error.is_eof() {
+    evaluation_document_diagnostic(&message, error.is_syntax() || error.is_eof())
+}
+
+fn evaluation_document_diagnostic(
+    message: &str,
+    syntax_invalid: bool,
+) -> EvaluationSchemaDiagnostic {
+    let (category, constraint) = if syntax_invalid {
         (
             "json_document_invalid",
             "evaluation must be one complete JSON object with balanced syntax",
@@ -3204,7 +3211,7 @@ fn evaluation_schema_diagnostic(
         )
     };
     EvaluationSchemaDiagnostic {
-        schema_path: serde_error_schema_path(&message),
+        schema_path: serde_error_schema_path(message),
         category,
         constraint,
         diagnostic_code: "LW_EVAL_SPEC_DOCUMENT_INVALID",
@@ -3213,11 +3220,9 @@ fn evaluation_schema_diagnostic(
 
 fn evaluation_spec_error_diagnostic(error: &EvaluationSpecError) -> EvaluationSchemaDiagnostic {
     let (schema_path, category, constraint) = match error {
-        EvaluationSpecError::InvalidDocument(_) => (
-            "/evaluation",
-            "evaluation_document_invalid",
-            "evaluation must use the exact camelCase fields, discriminators, and value types from EvaluationSpec",
-        ),
+        EvaluationSpecError::InvalidDocument(message) => {
+            return evaluation_document_diagnostic(message, false);
+        }
         EvaluationSpecError::InvalidMetadata => (
             "/evaluation/metadata",
             "metadata_invalid",
@@ -3812,12 +3817,36 @@ mod tests {
     use super::{
         CLAUDE_RUNTIME_PATH, ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
         ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError, RunCancellation, TokioClaudeCodeProcess,
-        decimal_to_microusd, execute_process, microusd_to_usd, platform_image_prompt,
-        provider_evaluation_schema, read_stream_until_result, recipe_failure_runtime_error,
-        recipe_repair_detail, usd_number_to_microusd,
+        decimal_to_microusd, evaluation_schema_diagnostic, execute_process, microusd_to_usd,
+        platform_image_prompt, provider_evaluation_schema, read_stream_until_result,
+        recipe_failure_runtime_error, recipe_repair_detail, usd_number_to_microusd,
     };
     use crate::candidate_materializer::CandidateMaterializationError;
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
+
+    #[test]
+    fn evaluation_document_parse_errors_keep_inner_serde_path() -> Result<(), Box<dyn Error>> {
+        let mut evaluation = serde_json::to_value(
+            contracts::evaluation::EvaluationSpec::from_yaml(include_str!(
+                "../../../crates/contracts/tests/fixtures/evaluation/oj/evaluation.yaml"
+            ))?,
+        )?;
+        let object = evaluation
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("evaluation must be an object"))?;
+        object
+            .remove("apiVersion")
+            .ok_or_else(|| std::io::Error::other("fixture apiVersion missing"))?;
+        let error =
+            serde_json::from_value::<contracts::evaluation::EvaluationSpec>(evaluation.clone())
+                .expect_err("the evaluation document must be rejected");
+
+        let diagnostic = evaluation_schema_diagnostic(&evaluation, &error);
+        assert_eq!(diagnostic.schema_path, "/evaluation/apiVersion");
+        assert_eq!(diagnostic.category, "required_field_missing");
+        assert_eq!(diagnostic.diagnostic_code, "LW_EVAL_SPEC_DOCUMENT_INVALID");
+        Ok(())
+    }
 
     #[test]
     fn provider_evaluation_schema_validates_existing_candidates() -> Result<(), Box<dyn Error>> {
