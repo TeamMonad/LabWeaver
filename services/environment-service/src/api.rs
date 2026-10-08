@@ -507,6 +507,7 @@ async fn accept_resource_work_handoff(
         capacity_binding: Some(handoff.capacity_binding),
         approved_resources: handoff.approved_resources.clone(),
         gpu_allocation: None,
+        retention: release.projection.environment_spec.retention.clone(),
         eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
     };
     let idempotency_key = format!(
@@ -708,8 +709,11 @@ fn environment_summary(
             .count(),
     )
     .map_err(|_| EnvironmentApiError::ResponseInvalid)?;
-    let eligible =
-        healthy_endpoint_count > 0 && record.instance.eligibility_expires_at > snapshot_at;
+    let eligible = healthy_endpoint_count > 0
+        && record
+            .instance
+            .eligibility_expires_at
+            .is_none_or(|deadline| deadline > snapshot_at);
     let summary = EnvironmentSummary {
         id: record.instance.id,
         display_label: record.instance.display_label,
@@ -846,6 +850,7 @@ async fn create_environment(
         capacity_binding: None,
         approved_resources: approved_resources.clone(),
         gpu_allocation: gpu_allocation.clone(),
+        retention: release.projection.environment_spec.retention.clone(),
         eligibility_expires_at: release.projection.environment_spec.retention.retain_until,
     };
     let accepted = match state

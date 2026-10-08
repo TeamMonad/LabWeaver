@@ -1490,7 +1490,7 @@ export type EnvironmentInstanceSchema = {
     courseId?: EnvironmentInstanceSchemaCourseId | null;
     desiredState: DesiredEnvironmentState;
     displayLabel: string;
-    eligibilityExpiresAt: EnvironmentInstanceSchemaUtcTimestamp;
+    eligibilityExpiresAt: string | null;
     endpoints: Array<EnvironmentEndpoint>;
     failedPhase?: ObservedEnvironmentState | null;
     generation: number;
@@ -2603,7 +2603,7 @@ export type RetentionClass = 'course_material' | 'build_evidence' | 'run_evidenc
 /**
  * Required action after retention expires.
  */
-export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type RetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -2626,9 +2626,10 @@ export type RetentionSnapshot = {
      */
     policyRevision: FrozenSubmissionSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: FrozenSubmissionSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -3591,6 +3592,7 @@ export type CreateProblemPackageUploadRequestSchema = {
     courseId?: CreateProblemPackageUploadRequestSchemaCourseId | null;
     files: Array<ProblemPackageUploadFile>;
     projectId: CreateProblemPackageUploadRequestSchemaProjectId;
+    retentionChoice: ProblemPackageRetentionChoice;
     retentionPolicyRevision: CreateProblemPackageUploadRequestSchemaRevision;
 };
 
@@ -3598,6 +3600,11 @@ export type CreateProblemPackageUploadRequestSchema = {
  * Strongly typed UUIDv7 identifier for `CourseId`.
  */
 export type CreateProblemPackageUploadRequestSchemaCourseId = string;
+
+/**
+ * Explicit retention choice made when a new CourseMaterial package upload starts.
+ */
+export type ProblemPackageRetentionChoice = 'finite' | 'permanent';
 
 export type ProblemPackageUploadFile = {
     mediaType: string;
@@ -4258,7 +4265,7 @@ export type EnvironmentCandidateViewSchemaRetentionClass = 'course_material' | '
 /**
  * Required action after retention expires.
  */
-export type EnvironmentCandidateViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type EnvironmentCandidateViewSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -4281,9 +4288,10 @@ export type EnvironmentCandidateViewSchemaRetentionSnapshot = {
      */
     policyRevision: EnvironmentCandidateViewSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: EnvironmentCandidateViewSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -4630,7 +4638,7 @@ export type EnvironmentSummary = {
     currentOperation?: EnvironmentSummaryPageSchemaEnvironmentOperationSnapshot | null;
     desiredState: EnvironmentSummaryPageSchemaDesiredEnvironmentState;
     displayLabel: string;
-    eligibilityExpiresAt: EnvironmentSummaryPageSchemaUtcTimestamp;
+    eligibilityExpiresAt: string | null;
     id: EnvironmentSummaryPageSchemaEnvironmentId;
     lastChangedStreamSequence: EnvironmentSummaryPageSchemaStreamSequence;
     observedState: EnvironmentSummaryPageSchemaObservedEnvironmentState;
@@ -6568,7 +6576,7 @@ export type InternalAgentRunOutcomeSchemaRetentionClass = 'course_material' | 'b
 /**
  * Required action after retention expires.
  */
-export type InternalAgentRunOutcomeSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type InternalAgentRunOutcomeSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -6591,9 +6599,10 @@ export type InternalAgentRunOutcomeSchemaRetentionSnapshot = {
      */
     policyRevision: InternalAgentRunOutcomeSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: InternalAgentRunOutcomeSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -7192,7 +7201,7 @@ export type InternalCreateAgentRunRequestSchemaRetentionClass = 'course_material
 /**
  * Required action after retention expires.
  */
-export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type InternalCreateAgentRunRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -7215,9 +7224,10 @@ export type InternalCreateAgentRunRequestSchemaRetentionSnapshot = {
      */
     policyRevision: InternalCreateAgentRunRequestSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: InternalCreateAgentRunRequestSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -7864,7 +7874,7 @@ export type InternalPublishEvaluationReleaseRequestSchemaRetentionClass = 'cours
 /**
  * Required action after retention expires.
  */
-export type InternalPublishEvaluationReleaseRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type InternalPublishEvaluationReleaseRequestSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -7887,9 +7897,10 @@ export type InternalPublishEvaluationReleaseRequestSchemaRetentionSnapshot = {
      */
     policyRevision: InternalPublishEvaluationReleaseRequestSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: InternalPublishEvaluationReleaseRequestSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**
@@ -9313,7 +9324,7 @@ export type ProblemPackageSchemaRetentionClass = 'course_material' | 'build_evid
 /**
  * Required action after retention expires.
  */
-export type ProblemPackageSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt';
+export type ProblemPackageSchemaRetentionDisposition = 'delete' | 'purge_after_export' | 'retain_sanitized_receipt' | 'retain_until_revoked';
 
 /**
  * Frozen data-retention decision for an immutable resource.
@@ -9336,9 +9347,10 @@ export type ProblemPackageSchemaRetentionSnapshot = {
      */
     policyRevision: ProblemPackageSchemaRevision;
     /**
-     * Absolute retention boundary.
+     * Absolute retention boundary. `None` is valid only for an explicitly permanent course
+     * material decision whose disposition is `RetainUntilRevoked`.
      */
-    retainUntil: ProblemPackageSchemaUtcTimestamp;
+    retainUntil: string | null;
 };
 
 /**

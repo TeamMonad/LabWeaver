@@ -40,8 +40,8 @@ use contracts::http::{
     GeneratedArtifactRecord, IdempotencyKey, InternalPublishEvaluationReleaseRequest,
     PlatformImageEntry, PlatformImageKind, PlatformImageStatus, PlatformImageUploadSession,
     PlatformImageUploadState, PlatformImageUploadStatus, PlatformImageUploadTarget,
-    ProblemPackageUploadFile, ProblemPackageUploadSession, ProblemPackageUploadTarget,
-    RemoveProjectMembershipRequest, ResolvedProjectMembershipRequest,
+    ProblemPackageRetentionChoice, ProblemPackageUploadFile, ProblemPackageUploadSession,
+    ProblemPackageUploadTarget, RemoveProjectMembershipRequest, ResolvedProjectMembershipRequest,
     WorkConfigurationAdmissionBinding, WorkConfigurationAdmissionQuery,
     WorkConfigurationRecoveryIdentity,
 };
@@ -1082,6 +1082,10 @@ impl ControlService {
         let upload_id = UploadSessionId::new();
         let revision = Revision::new(1).map_err(|_| ControlError::ContractInvalid)?;
         let expires_at = add_seconds(now, self.config.upload_ttl_seconds)?;
+        let retention_choice = match request.retention_choice {
+            ProblemPackageRetentionChoice::Finite => "finite",
+            ProblemPackageRetentionChoice::Permanent => "permanent",
+        };
 
         let mut files = request.files.clone();
         files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1142,13 +1146,14 @@ impl ControlService {
         }
         sqlx::query(
             "INSERT INTO control.problem_package_upload_sessions \
-             (upload_id,project_id,course_id,revision,state,retention_policy_revision,expires_at) \
-             VALUES ($1,$2,$3,1,'pending',$4,$5)",
+             (upload_id,project_id,course_id,revision,state,retention_policy_revision,retention_choice,expires_at) \
+             VALUES ($1,$2,$3,1,'pending',$4,$5,$6)",
         )
         .bind(upload_id.as_uuid())
         .bind(request.project_id.as_uuid())
         .bind(request.course_id.map(CourseId::as_uuid))
         .bind(i64_revision(request.retention_policy_revision)?)
+        .bind(retention_choice)
         .bind(expires_at.get())
         .execute(&mut *transaction)
         .await
@@ -1373,7 +1378,7 @@ impl ControlService {
         }
         let _package_manifest_sha256 = canonical_hash(&package_files)?;
         let session = sqlx::query(
-            "SELECT project_id,course_id,retention_policy_revision FROM control.problem_package_upload_sessions \
+            "SELECT project_id,course_id,retention_policy_revision,retention_choice FROM control.problem_package_upload_sessions \
              WHERE upload_id=$1 AND ($2::uuid IS NULL OR project_id=$2) AND course_id IS NOT DISTINCT FROM $3 \
                AND state='completing' AND completion_lease_token=$4 AND completion_lease_expires_at>now()",
         )
@@ -1406,6 +1411,24 @@ impl ControlService {
         }
         let policy_revision =
             revision_from_i64(session.try_get("retention_policy_revision").map_err(db)?)?;
+        let retention_choice = match session
+            .try_get::<String, _>("retention_choice")
+            .map_err(db)?
+            .as_str()
+        {
+            "finite" => ProblemPackageRetentionChoice::Finite,
+            "permanent" => ProblemPackageRetentionChoice::Permanent,
+            _ => return Err(ControlError::PersistenceIdentityMismatch),
+        };
+        let (retain_until, disposition) = match retention_choice {
+            ProblemPackageRetentionChoice::Finite => (
+                Some(add_seconds(now, self.config.retention_seconds)?),
+                RetentionDisposition::Delete,
+            ),
+            ProblemPackageRetentionChoice::Permanent => {
+                (None, RetentionDisposition::RetainUntilRevoked)
+            }
+        };
         let package = ProblemPackage {
             id: ProblemPackageId::new(),
             project_id: stored_project_id,
@@ -1416,8 +1439,8 @@ impl ControlService {
                 policy_id: self.config.retention_policy_id,
                 policy_revision,
                 class: RetentionClass::CourseMaterial,
-                retain_until: add_seconds(now, self.config.retention_seconds)?,
-                disposition: RetentionDisposition::Delete,
+                retain_until,
+                disposition,
             },
             completed_at: now,
         };
@@ -8038,7 +8061,10 @@ fn ensure_retention_active(
     retention: &RetentionSnapshot,
     now: UtcTimestamp,
 ) -> Result<(), ControlError> {
-    if retention.retain_until <= now {
+    if retention
+        .retain_until
+        .is_some_and(|retain_until| retain_until <= now)
+    {
         Err(ControlError::MaterialRetentionExpired)
     } else {
         Ok(())
@@ -8279,7 +8305,9 @@ mod tests {
     use contracts::AgentRunId;
     use contracts::authoring::{EnvironmentCandidate, EnvironmentRuntimeSpec};
     use contracts::evaluation::EvaluationSpec;
-    use contracts::http::{CreateProblemPackageUploadRequest, ProblemPackageUploadFile};
+    use contracts::http::{
+        CreateProblemPackageUploadRequest, ProblemPackageRetentionChoice, ProblemPackageUploadFile,
+    };
     use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk};
     use contracts::{
         CourseId, PolicyId, ProjectId, RetentionClass, RetentionDisposition, RetentionSnapshot,
@@ -8364,7 +8392,7 @@ mod tests {
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: now,
+            retain_until: Some(now),
             disposition: RetentionDisposition::Delete,
         };
         assert!(matches!(
@@ -8387,6 +8415,7 @@ mod tests {
             course_id: Some(CourseId::new()),
             files: vec![file.clone()],
             retention_policy_revision: Revision::new(1)?,
+            retention_choice: ProblemPackageRetentionChoice::Finite,
         };
         validate_upload_request(&request, &config()?)?;
         let duplicate = CreateProblemPackageUploadRequest {
@@ -8394,6 +8423,7 @@ mod tests {
             course_id: request.course_id,
             files: vec![file.clone(), file],
             retention_policy_revision: Revision::new(1)?,
+            retention_choice: ProblemPackageRetentionChoice::Finite,
         };
         assert!(matches!(
             validate_upload_request(&duplicate, &config()?),

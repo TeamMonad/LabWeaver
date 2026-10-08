@@ -509,10 +509,12 @@ impl FreezeCoordinator {
                 policy_id: self.configuration.retention_policy_id,
                 policy_revision: self.configuration.retention_policy_revision,
                 class: RetentionClass::StudentSubmission,
-                retain_until: UtcTimestamp::from_utc(
-                    now.get() + time::Duration::days(self.configuration.retention_days),
-                )
-                .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+                retain_until: Some(
+                    UtcTimestamp::from_utc(
+                        now.get() + time::Duration::days(self.configuration.retention_days),
+                    )
+                    .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+                ),
                 disposition: RetentionDisposition::Delete,
             },
             idempotency_key: command.idempotency_key.clone(),
@@ -1433,7 +1435,7 @@ spec:
                 policy_id: PolicyId::new(),
                 policy_revision: Revision::new(1)?,
                 class: RetentionClass::CourseMaterial,
-                retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+                retain_until: Some("2027-01-01T00:00:00.000Z".parse()?),
                 disposition: RetentionDisposition::Delete,
             },
             completed_at: "2026-01-01T00:00:00.000Z".parse()?,

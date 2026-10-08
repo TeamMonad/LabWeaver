@@ -10,8 +10,8 @@ use contracts::environment::{
 };
 use contracts::resource::WorkloadResources;
 use contracts::{
-    ActorId, CourseId, EndpointId, EnvironmentId, OperationId, ProjectId, ReleaseId, Revision,
-    UtcTimestamp,
+    ActorId, CourseId, EndpointId, EnvironmentId, OperationId, PolicyId, ProjectId, ReleaseId,
+    RetentionClass, RetentionDisposition, RetentionSnapshot, Revision, UtcTimestamp,
 };
 use persistence_sqlx::{Domain, MigrationCatalog};
 use sqlx::PgPool;
@@ -44,6 +44,17 @@ pub async fn apply_environment_migrations(pool: &PgPool) -> Result<(), Box<dyn E
 
 pub fn timestamp(value: &str) -> UtcTimestamp {
     UtcTimestamp::from_str(value).unwrap_or_else(|error| panic!("invalid test timestamp: {error}"))
+}
+
+pub fn finite_retention() -> RetentionSnapshot {
+    RetentionSnapshot {
+        policy_id: PolicyId::new(),
+        policy_revision: Revision::new(1)
+            .unwrap_or_else(|error| unreachable!("static revision should parse: {error}")),
+        class: RetentionClass::CourseMaterial,
+        retain_until: Some(timestamp("2027-07-15T00:00:00.000Z")),
+        disposition: RetentionDisposition::Delete,
+    }
 }
 
 pub fn ready_instance() -> EnvironmentInstance {
@@ -95,7 +106,7 @@ pub fn ready_instance() -> EnvironmentInstance {
             reset_target: None,
             lease_authorization: None,
         },
-        eligibility_expires_at: timestamp("2026-07-15T00:00:00.000Z"),
+        eligibility_expires_at: Some(timestamp("2026-07-15T00:00:00.000Z")),
         endpoints: vec![EnvironmentEndpoint {
             id: EndpointId::new(),
             protocol: EndpointProtocol::Https,
@@ -158,7 +169,7 @@ pub fn requested_instance() -> EnvironmentInstance {
             reset_target: None,
             lease_authorization: None,
         },
-        eligibility_expires_at: timestamp("2026-07-15T00:00:00.000Z"),
+        eligibility_expires_at: Some(timestamp("2026-07-15T00:00:00.000Z")),
         endpoints: Vec::new(),
         last_diagnostic_code: None,
         failed_phase: None,

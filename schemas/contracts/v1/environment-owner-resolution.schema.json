@@ -4,12 +4,37 @@
       "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
       "type": "string"
     },
+    "ConsoleLeaseFence": {
+      "additionalProperties": false,
+      "description": "Resource-owned Lease identity that fences a Work console capability.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "leaseRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
     "CourseId": {
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
     "EnvironmentId": {
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
     "ProjectId": {
@@ -42,13 +67,26 @@
       ]
     },
     "eligibilityExpiresAt": {
-      "$ref": "#/$defs/UtcTimestamp"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
     },
     "environmentRevision": {
       "$ref": "#/$defs/Revision"
+    },
+    "leaseFence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConsoleLeaseFence"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "ownerActorId": {
       "$ref": "#/$defs/ActorId"

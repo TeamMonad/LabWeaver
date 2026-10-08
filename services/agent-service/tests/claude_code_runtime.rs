@@ -910,7 +910,7 @@ fn package(
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: "2026-08-14T08:00:00.000Z".parse::<UtcTimestamp>()?,
+            retain_until: Some("2026-08-14T08:00:00.000Z".parse::<UtcTimestamp>()?),
             disposition: RetentionDisposition::Delete,
         },
         completed_at: "2026-07-14T08:00:00.000Z".parse::<UtcTimestamp>()?,

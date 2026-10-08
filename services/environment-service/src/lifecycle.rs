@@ -93,7 +93,9 @@ pub fn plan_command_authorized(
             | EnvironmentOperationKind::Retry
             | EnvironmentOperationKind::Recover
             | EnvironmentOperationKind::Reset
-    ) && current.eligibility_expires_at <= authority_now
+    ) && current
+        .eligibility_expires_at
+        .is_some_and(|deadline| deadline <= authority_now)
     {
         return Err(LifecycleError::EligibilityExpired);
     }

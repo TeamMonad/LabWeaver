@@ -242,6 +242,16 @@ pub struct ProblemPackageUploadFile {
     pub media_type: String,
 }
 
+/// Explicit retention choice made when a new CourseMaterial package upload starts.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemPackageRetentionChoice {
+    /// Use the configured finite CourseMaterial policy.
+    Finite,
+    /// Retain the completed material until an explicit business revocation.
+    Permanent,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProblemPackageUploadRequest {
@@ -249,6 +259,7 @@ pub struct CreateProblemPackageUploadRequest {
     pub course_id: Option<CourseId>,
     pub files: Vec<ProblemPackageUploadFile>,
     pub retention_policy_revision: Revision,
+    pub retention_choice: ProblemPackageRetentionChoice,
 }
 
 /// Short-lived, per-object upload authority returned only by session creation.

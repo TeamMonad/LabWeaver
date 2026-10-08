@@ -658,7 +658,7 @@ fn package(
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: completed_at,
+            retain_until: Some(completed_at),
             disposition: RetentionDisposition::Delete,
         },
         completed_at,

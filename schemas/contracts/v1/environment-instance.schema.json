@@ -625,7 +625,10 @@
       "type": "string"
     },
     "eligibilityExpiresAt": {
-      "$ref": "#/$defs/UtcTimestamp"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "endpoints": {
       "items": {

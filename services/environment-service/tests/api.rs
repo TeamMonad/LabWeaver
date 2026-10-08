@@ -712,7 +712,7 @@ async fn failed_instance(
     instance.project_id = project_id;
     instance.course_id = None;
     instance.owner_id = owner_id;
-    instance.eligibility_expires_at = timestamp("2099-01-01T00:00:00.000Z");
+    instance.eligibility_expires_at = Some(timestamp("2099-01-01T00:00:00.000Z"));
     instance.operation.actor_id = owner_id;
     store.create(key, &instance).await?;
 

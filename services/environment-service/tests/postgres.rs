@@ -503,7 +503,7 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     );
 
     let mut crash_target = requested_instance();
-    crash_target.eligibility_expires_at = timestamp("2027-07-15T00:00:00.000Z");
+    crash_target.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     store
         .create("create-key-crash-recovery", &crash_target)
         .await?;
@@ -755,7 +755,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
     handoff.class = contracts::authoring::EnvironmentClass::Work;
     handoff.lease_id = Some(LeaseId::new());
     handoff.capacity_binding = Some("work-capacity-regression".to_owned());
-    handoff.eligibility_expires_at = timestamp("2027-07-15T00:00:00.000Z");
+    handoff.eligibility_expires_at = Some(timestamp("2027-07-15T00:00:00.000Z"));
     let lease_id = handoff.lease_id.ok_or("lease id missing")?;
     let capacity_binding = handoff
         .capacity_binding
@@ -808,6 +808,7 @@ async fn api_work_handoff_persists_verified_lease_authorization_and_replays()
         capacity_binding: handoff.capacity_binding.clone(),
         approved_resources: handoff.approved_resources.clone(),
         gpu_allocation: None,
+        retention: support::finite_retention(),
         eligibility_expires_at: handoff.eligibility_expires_at,
     };
 
@@ -1008,7 +1009,7 @@ async fn legacy_environment_metering_migration_closes_old_ready_stopped_deleted_
         .bind(i64::try_from(instance.revision.get())?)
         .bind(instance.last_diagnostic_code.as_deref())
         .bind(Option::<&str>::None)
-        .bind(instance.eligibility_expires_at.get())
+        .bind(instance.eligibility_expires_at.map(contracts::UtcTimestamp::get))
         .bind(legacy_contract)
         .execute(&pool)
         .await?;
@@ -1437,7 +1438,7 @@ async fn work_lease_refresh_rebinds_ready_endpoints_and_fences_cleanup()
     work.lease_id = Some(LeaseId::new());
     work.capacity_binding = Some("workspace-v1".to_owned());
     let initial_expiry = timestamp("2027-07-15T00:00:00.000Z");
-    work.eligibility_expires_at = initial_expiry;
+    work.eligibility_expires_at = Some(initial_expiry);
     work.operation.lease_authorization = Some(EnvironmentLeaseAuthorization {
         resource_request_id: ResourceRequestId::new(),
         lease_id: work.lease_id.expect("lease set above"),
@@ -2292,7 +2293,7 @@ async fn kubevirt_executor_replays_and_permanently_tombstones_cleanup()
     authority.operation.accepted_at = observed_at;
     authority.operation.next_attempt_at = observed_at;
     authority.operation.deadline_at = deadline;
-    authority.eligibility_expires_at = deadline;
+    authority.eligibility_expires_at = Some(deadline);
     PgEnvironmentStore::new(pool.clone())
         .create("kubevirt-replay-authority", &authority)
         .await?;
@@ -2958,7 +2959,7 @@ async fn kubevirt_pending_cancellation_and_timeout_preserve_exact_execution()
     authority.operation.accepted_at = now;
     authority.operation.next_attempt_at = now;
     authority.operation.deadline_at = container_add_time(now, time::Duration::seconds(5))?;
-    authority.eligibility_expires_at = container_add_time(now, time::Duration::minutes(2))?;
+    authority.eligibility_expires_at = Some(container_add_time(now, time::Duration::minutes(2))?);
     store.create("pending-authority", &authority).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Notify::new());
@@ -3058,7 +3059,7 @@ async fn kubevirt_pending_cancellation_and_timeout_preserve_exact_execution()
     timed.operation.accepted_at = now;
     timed.operation.next_attempt_at = now;
     timed.operation.deadline_at = container_add_time(now, time::Duration::milliseconds(350))?;
-    timed.eligibility_expires_at = container_add_time(now, time::Duration::minutes(1))?;
+    timed.eligibility_expires_at = Some(container_add_time(now, time::Duration::minutes(1))?);
     store.create("timeout-authority", &timed).await?;
     dropped.store(false, Ordering::SeqCst);
     let timeout_request = kubevirt_executor_envelope(
@@ -3121,7 +3122,7 @@ async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
     instance.operation.accepted_at = now;
     instance.operation.next_attempt_at = now;
     instance.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
-    instance.eligibility_expires_at = instance.operation.deadline_at;
+    instance.eligibility_expires_at = Some(instance.operation.deadline_at);
     store.create("pending-reconcile", &instance).await?;
     let before_events: i64 = sqlx::query_scalar("SELECT count(*) FROM environment.outbox_events")
         .fetch_one(&pool)
@@ -3181,7 +3182,7 @@ async fn kubevirt_incarnation_recovery_and_terminal_commit_retry_do_not_repeat_e
     authority.operation.accepted_at = now;
     authority.operation.next_attempt_at = now;
     authority.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
-    authority.eligibility_expires_at = authority.operation.deadline_at;
+    authority.eligibility_expires_at = Some(authority.operation.deadline_at);
     store.create("incarnation-recovery", &authority).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Notify::new());
@@ -3263,7 +3264,7 @@ async fn kubevirt_incarnation_recovery_and_terminal_commit_retry_do_not_repeat_e
     second.operation.accepted_at = now;
     second.operation.next_attempt_at = now;
     second.operation.deadline_at = authority.operation.deadline_at;
-    second.eligibility_expires_at = authority.operation.deadline_at;
+    second.eligibility_expires_at = Some(authority.operation.deadline_at);
     store.create("terminal-commit-retry", &second).await?;
     let executor = FencedKubeVirtExecutor::new(
         PgKubeVirtExecutorFenceStore::new(pool.clone()),
@@ -3356,7 +3357,7 @@ async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit
     authority.operation.accepted_at = now;
     authority.operation.next_attempt_at = now;
     authority.operation.deadline_at = container_add_time(now, time::Duration::minutes(1))?;
-    authority.eligibility_expires_at = authority.operation.deadline_at;
+    authority.eligibility_expires_at = Some(authority.operation.deadline_at);
     store.create("graceful-drain", &authority).await?;
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));

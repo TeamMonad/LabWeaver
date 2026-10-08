@@ -40,6 +40,9 @@ domains:
       - id: 11
         file: control/0011_platform_image_import_jobs.sql
         sha256: 1bc13e48040c3f42941729e8b604a6e3dfaa27b93a09f5b79a8514235db1d778
+      - id: 12
+        file: control/0012_material_retention_choice.sql
+        sha256: 6601637e28f8e4039bb74794c299a1f97465cbe2e48d7cef757cc45009db7675
   - name: access
     migrations:
       - id: 1
@@ -74,6 +77,9 @@ domains:
       - id: 6
         file: environment/0006_unified_environment_metering.sql
         sha256: 976cddc501d0521d2e79b25f37612d77e427b8617c540be606465b6323cecd37
+      - id: 7
+        file: environment/0007_permanent_material_eligibility.sql
+        sha256: 393824fd7f130f7161ed2b2a3542a467c37b2cfad58b794812c1c6fc2f1981f4
   - name: agent
     migrations:
       - id: 1

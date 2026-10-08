@@ -384,7 +384,7 @@ impl S3EnvironmentCandidateMaterializer {
         let now = current_timestamp().map_err(|()| CandidateMaterializationError::Storage)?;
         let object = self
             .objects
-            .put_governance_locked(
+            .put_immutable(
                 &key,
                 &archive,
                 BUILD_CONTEXT_MEDIA_TYPE,
@@ -589,7 +589,7 @@ impl S3EnvironmentCandidateMaterializer {
         let now = current_timestamp().map_err(|()| CandidateMaterializationError::Storage)?;
         let object = self
             .objects
-            .put_governance_locked(
+            .put_immutable(
                 &key,
                 bytes,
                 WORK_SCRIPT_MEDIA_TYPE,

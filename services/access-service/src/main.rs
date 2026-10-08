@@ -1146,8 +1146,15 @@ async fn resolve_environment_owner(
         .await
         .map_err(ApiError::from)?;
     decision.scope_revision = resolution.environment_revision;
-    if resolution.eligibility_expires_at < decision.valid_until {
-        decision.valid_until = resolution.eligibility_expires_at;
+    if let Some(deadline) = resolution.eligibility_expires_at
+        && deadline < decision.valid_until
+    {
+        decision.valid_until = deadline;
+    }
+    if let Some(fence) = resolution.lease_fence.as_ref()
+        && fence.expires_at < decision.valid_until
+    {
+        decision.valid_until = fence.expires_at;
     }
     Ok(())
 }

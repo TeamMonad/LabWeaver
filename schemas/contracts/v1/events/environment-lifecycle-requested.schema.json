@@ -87,7 +87,11 @@
           "type": "string"
         },
         "eligibilityExpiresAt": {
-          "$ref": "#/$defs/UtcTimestamp"
+          "description": "Material eligibility deadline. `None` is the explicit permanent CourseMaterial form;\nWork instances are later bounded by their Resource lease fence.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "gpuAllocation": {
           "anyOf": [
@@ -127,6 +131,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "retention": {
+          "$ref": "#/$defs/RetentionSnapshot",
+          "description": "Immutable material retention decision that authorizes the eligibility boundary below."
+        },
         "runtimeKind": {
           "$ref": "#/$defs/RuntimeKind"
         }
@@ -141,6 +149,7 @@
         "releaseVersion",
         "providerBinding",
         "approvedResources",
+        "retention",
         "eligibilityExpiresAt"
       ],
       "type": "object"
@@ -411,6 +420,10 @@
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
       "type": "string"
     },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
     "ProjectId": {
       "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
       "type": "string"
@@ -418,6 +431,64 @@
     "ReleaseId": {
       "description": "Strongly typed UUIDv7 identifier for `ReleaseId`.",
       "type": "string"
+    },
+    "RetentionClass": {
+      "description": "Retention classes with distinct privacy and recovery requirements.",
+      "enum": [
+        "course_material",
+        "build_evidence",
+        "run_evidence",
+        "student_submission",
+        "security_audit"
+      ],
+      "type": "string"
+    },
+    "RetentionDisposition": {
+      "description": "Required action after retention expires.",
+      "enum": [
+        "delete",
+        "purge_after_export",
+        "retain_sanitized_receipt",
+        "retain_until_revoked"
+      ],
+      "type": "string"
+    },
+    "RetentionSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen data-retention decision for an immutable resource.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/RetentionClass",
+          "description": "Stable retention class."
+        },
+        "disposition": {
+          "$ref": "#/$defs/RetentionDisposition",
+          "description": "Required terminal disposition."
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId",
+          "description": "Policy identity."
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact policy revision used at creation."
+        },
+        "retainUntil": {
+          "description": "Absolute retention boundary. `None` is valid only for an explicitly permanent course\nmaterial decision whose disposition is `RetainUntilRevoked`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "class",
+        "retainUntil",
+        "disposition"
+      ],
+      "type": "object"
     },
     "Revision": {
       "description": "Monotonic aggregate revision. Zero is never a persisted revision.",

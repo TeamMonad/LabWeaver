@@ -139,7 +139,8 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
                 capacity_binding: None,
                 approved_resources: instance.approved_resources.clone(),
                 gpu_allocation: None,
-                eligibility_expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+                retention: support::finite_retention(),
+                eligibility_expires_at: Some(timestamp("2027-07-15T00:00:00.000Z")),
             }),
         },
     };
@@ -300,7 +301,8 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
             gpu: None,
         },
         gpu_allocation: None,
-        eligibility_expires_at: timestamp("2027-07-15T00:00:00.000Z"),
+        retention: support::finite_retention(),
+        eligibility_expires_at: Some(timestamp("2027-07-15T00:00:00.000Z")),
     });
     context
         .publish(

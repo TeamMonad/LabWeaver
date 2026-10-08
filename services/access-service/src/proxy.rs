@@ -1439,7 +1439,13 @@ async fn authorize_runtime(
                 | contracts::environment::EndpointProtocol::Https
         )
         || endpoint.health != contracts::environment::EndpointHealth::Healthy
-        || eligibility.eligibility_expires_at.get() <= now
+        || eligibility
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline.get() <= now)
+        || eligibility
+            .lease_fence
+            .as_ref()
+            .is_some_and(|fence| fence.expires_at.get() <= now)
     {
         return Err(ApiError::forbidden("LW_ACCESS_RUNTIME_DENIED"));
     }

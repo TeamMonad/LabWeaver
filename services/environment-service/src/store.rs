@@ -661,7 +661,6 @@ impl PgEnvironmentStore {
             return Ok(current);
         }
         if authorization.lease_revision <= current_authorization.lease_revision
-            || authorization.expires_at <= current.eligibility_expires_at
             || authorization.expires_at <= current_authorization.expires_at
         {
             return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
@@ -673,7 +672,6 @@ impl PgEnvironmentStore {
         for endpoint in &mut updated.endpoints {
             endpoint.revision = updated.revision;
         }
-        updated.eligibility_expires_at = authorization.expires_at;
         updated.operation.lease_authorization = Some(authorization);
         update_instance(&mut transaction, &current, &updated).await?;
         enqueue_environment_event(
@@ -885,7 +883,8 @@ impl PgEnvironmentStore {
         }
         let rows = sqlx::query(
             "SELECT contract FROM environment.environment_instances \
-             WHERE desired_state <> 'deleted' AND eligibility_expires_at <= $1 \
+             WHERE desired_state <> 'deleted' AND eligibility_expires_at IS NOT NULL \
+               AND eligibility_expires_at <= $1 \
              ORDER BY eligibility_expires_at \
              LIMIT $2",
         )
@@ -1141,7 +1140,7 @@ async fn create_in_transaction(
     .bind(as_i64(instance.revision.get(), "revision")?)
     .bind(&instance.last_diagnostic_code)
     .bind(instance.failed_phase.map(wire_name).transpose()?)
-    .bind(instance.eligibility_expires_at.get())
+    .bind(instance.eligibility_expires_at.map(UtcTimestamp::get))
     .bind(serde_json::to_value(instance)?)
     .execute(&mut **transaction)
     .await;
@@ -1185,7 +1184,11 @@ fn build_create_instance(
         || course_id != spec.course_id
         || spec.release_version == 0
         || spec.provider_binding.trim().is_empty()
-        || spec.eligibility_expires_at <= authority_now
+        || spec.retention.validate().is_err()
+        || spec.retention.retain_until != spec.eligibility_expires_at
+        || spec
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline <= authority_now)
         || !(1..=100).contains(&command.max_attempts)
         || command.deadline_at <= command.accepted_at
         || command.deadline_at <= authority_now
@@ -1222,7 +1225,7 @@ fn build_create_instance(
                 return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
             }
             authorization.validate()?;
-            std::cmp::min(spec.eligibility_expires_at, authorization.expires_at)
+            spec.eligibility_expires_at
         }
     };
     let instance = EnvironmentInstance {
@@ -1545,7 +1548,7 @@ async fn update_instance(
     .bind(as_i64(updated.revision.get(), "revision")?)
     .bind(&updated.last_diagnostic_code)
     .bind(updated.failed_phase.map(wire_name).transpose()?)
-    .bind(updated.eligibility_expires_at.get())
+    .bind(updated.eligibility_expires_at.map(UtcTimestamp::get))
     .bind(serde_json::to_value(updated)?)
     .execute(&mut **transaction)
     .await?;
@@ -1868,7 +1871,15 @@ fn public_operation_snapshot(
         && record.operation.attempt < record.operation.max_attempts
         && instance.observed_state == ObservedEnvironmentState::Failed
         && instance.failed_phase.is_some()
-        && instance.eligibility_expires_at > snapshot_at
+        && instance
+            .eligibility_expires_at
+            .is_none_or(|deadline| deadline > snapshot_at)
+        && (instance.class == contracts::authoring::EnvironmentClass::Experiment
+            || instance
+                .operation
+                .lease_authorization
+                .as_ref()
+                .is_some_and(|authorization| authorization.expires_at > snapshot_at))
         && EnvironmentInstance::ensure_operation_allowed(
             instance.observed_state,
             EnvironmentOperationKind::Retry,

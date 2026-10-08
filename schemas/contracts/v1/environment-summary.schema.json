@@ -315,7 +315,10 @@
       "type": "string"
     },
     "eligibilityExpiresAt": {
-      "$ref": "#/$defs/UtcTimestamp"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "id": {
       "$ref": "#/$defs/EnvironmentId"

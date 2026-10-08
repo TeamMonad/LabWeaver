@@ -197,14 +197,17 @@ pub trait ImmutableObjectStore: Send + Sync {
         Err(ObjectStoreError::StreamingUnsupported)
     }
 
-    /// Writes bytes once under Governance Object Lock and verifies the exact retained version.
-    async fn put_governance_locked(
+    /// Writes bytes once under the validated retention decision and verifies the exact version.
+    ///
+    /// `Some(deadline)` uses Governance Object Lock. `None` is reserved for the already validated
+    /// permanent `CourseMaterial` form and uses versioned conditional storage without Object Lock.
+    async fn put_immutable(
         &self,
         _key: &str,
         _bytes: &[u8],
         _media_type: &str,
         _now: UtcTimestamp,
-        _retain_until: UtcTimestamp,
+        _retain_until: Option<UtcTimestamp>,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectLockRequired)
     }
@@ -825,14 +828,17 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
             .await
     }
 
-    async fn put_governance_locked(
+    async fn put_immutable(
         &self,
         key: &str,
         bytes: &[u8],
         media_type: &str,
         now: UtcTimestamp,
-        retain_until: UtcTimestamp,
+        retain_until: Option<UtcTimestamp>,
     ) -> Result<VerifiedObject, ObjectStoreError> {
+        let Some(retain_until) = retain_until else {
+            return self.put_versioned_immutable(key, bytes, media_type).await;
+        };
         self.validate_key(key)?;
         let size_bytes =
             u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
@@ -1378,24 +1384,24 @@ mod tests {
         let locked_bytes = b"immutable frozen submission";
         let locked_key = "problem-packages/course/submissions/frozen";
         let locked = store
-            .put_governance_locked(
+            .put_immutable(
                 locked_key,
                 locked_bytes,
                 "application/vnd.labweaver.frozen-submission.v1+json",
                 now,
-                retain_until,
+                Some(retain_until),
             )
             .await?;
         assert_eq!(locked.bytes, locked_bytes);
         assert!(!locked.reference.object_version.is_empty());
         assert!(
             store
-                .put_governance_locked(
+                .put_immutable(
                     locked_key,
                     locked_bytes,
                     "application/vnd.labweaver.frozen-submission.v1+json",
                     now,
-                    retain_until,
+                    Some(retain_until),
                 )
                 .await
                 .is_err()

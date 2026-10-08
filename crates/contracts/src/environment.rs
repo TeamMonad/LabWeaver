@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::access::{ConsoleKind, ConsoleLeaseFence, validate_ssh_public_key};
 use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
@@ -13,6 +13,18 @@ use crate::{
     EvaluationRunId, EvaluationStepRunId, LeaseId, OperationId, ProjectId, ReleaseId,
     ResourceRequestId, Revision, StreamSequence, UtcTimestamp,
 };
+
+/// Requires nullable timestamps to be present on strict service-to-service DTOs.
+///
+/// The field may carry an explicit JSON `null` for a validated permanent material decision, while
+/// an omitted field remains a malformed older or incomplete response.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// Requested steady state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -85,7 +97,16 @@ pub struct EnvironmentCreateSpec {
     /// environments keep their allocation on the Lease authorization instead and leave this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_allocation: Option<GpuAllocation>,
-    pub eligibility_expires_at: UtcTimestamp,
+    /// Immutable material retention decision that authorizes the eligibility boundary below.
+    pub retention: crate::RetentionSnapshot,
+    /// Material eligibility deadline. `None` is the explicit permanent CourseMaterial form;
+    /// Work instances are later bounded by their Resource lease fence.
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
 }
 
 /// Explicit immutable target selected for one reset operation.
@@ -824,7 +845,12 @@ pub struct EnvironmentSummary {
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
     pub revision: Revision,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
     pub created_at: UtcTimestamp,
     pub updated_at: UtcTimestamp,
     pub last_changed_stream_sequence: StreamSequence,
@@ -945,7 +971,12 @@ pub struct EnvironmentInstance {
     /// Set only after Environment has released its Resource reservation at terminal deletion.
     #[serde(default)]
     pub resource_reservation_released: bool,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
     pub endpoints: Vec<EnvironmentEndpoint>,
     pub last_diagnostic_code: Option<String>,
     pub failed_phase: Option<ObservedEnvironmentState>,
@@ -1343,7 +1374,13 @@ pub struct EnvironmentOwnerResolution {
     pub course_id: Option<CourseId>,
     pub owner_actor_id: ActorId,
     pub environment_revision: Revision,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
+    pub lease_fence: Option<ConsoleLeaseFence>,
 }
 
 /// Control-to-Environment request for the authoritative Work execution target.
@@ -1453,7 +1490,12 @@ pub struct EnvironmentConsoleEligibility {
     pub environment_revision: Revision,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
     pub lease_fence: Option<ConsoleLeaseFence>,
     pub binding: EnvironmentConsoleBinding,
 }
@@ -1466,9 +1508,7 @@ impl EnvironmentConsoleEligibility {
     ) -> Result<(), EnvironmentError> {
         let lease_valid = match (self.environment_class, &self.lease_fence) {
             (EnvironmentClass::Experiment, None) => true,
-            (EnvironmentClass::Work, Some(fence)) => {
-                fence.expires_at >= self.eligibility_expires_at
-            }
+            (EnvironmentClass::Work, Some(fence)) => fence.expires_at > now,
             _ => false,
         };
         let binding_valid = match (&self.binding, self.runtime_kind) {
@@ -1486,7 +1526,9 @@ impl EnvironmentConsoleEligibility {
                 && self.owner_actor_id != request.actor_id)
             || self.environment_revision != request.expected_revision
             || self.release_version == 0
-            || self.eligibility_expires_at <= now
+            || self
+                .eligibility_expires_at
+                .is_some_and(|deadline| deadline <= now)
             || !lease_valid
         {
             return Err(EnvironmentError::ConsoleEligibilityInvalid);
@@ -1513,7 +1555,13 @@ pub struct EnvironmentEndpointEligibility {
     pub course_id: Option<CourseId>,
     pub owner_actor_id: ActorId,
     pub environment_revision: Revision,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
+    pub lease_fence: Option<ConsoleLeaseFence>,
     pub endpoints: Vec<EnvironmentEndpoint>,
 }
 
@@ -1541,7 +1589,13 @@ impl EnvironmentEndpointEligibility {
             || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
                 && self.owner_actor_id != request.actor_id)
             || self.environment_revision != request.expected_revision
-            || self.eligibility_expires_at <= now
+            || self
+                .eligibility_expires_at
+                .is_some_and(|deadline| deadline <= now)
+            || self
+                .lease_fence
+                .as_ref()
+                .is_some_and(|fence| fence.expires_at <= now)
             || requested != returned
             || self
                 .endpoints
@@ -1601,9 +1655,10 @@ mod tests {
     use super::{
         EnvironmentAccessSubjectKind, EnvironmentConsoleBinding, EnvironmentConsoleEligibility,
         EnvironmentConsoleEligibilityRequest, EnvironmentInstance, EnvironmentOperationKind,
-        EnvironmentOwnerResolverClientConfig, EnvironmentWorkConfigurationTarget,
-        EnvironmentWorkConfigurationTargetQuery, ObservedEnvironmentState, ResourceWorkCleanup,
-        ResourceWorkHandoff, ResourceWorkLeaseUpdate,
+        EnvironmentOwnerResolution, EnvironmentOwnerResolverClientConfig,
+        EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
+        ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkHandoff,
+        ResourceWorkLeaseUpdate,
     };
     use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
     use crate::{
@@ -1655,6 +1710,32 @@ mod tests {
     }
 
     #[test]
+    fn environment_material_deadline_requires_explicit_null() {
+        let environment_id = EnvironmentId::new();
+        let project_id = ProjectId::new();
+        let owner_actor_id = ActorId::new();
+        let base = serde_json::json!({
+            "environmentId": environment_id,
+            "projectId": project_id,
+            "courseId": null,
+            "ownerActorId": owner_actor_id,
+            "environmentRevision": 1,
+            "eligibilityExpiresAt": null
+        });
+        let resolution: EnvironmentOwnerResolution =
+            serde_json::from_value(base.clone()).expect("explicit nullable deadline");
+        assert_eq!(resolution.eligibility_expires_at, None);
+        let mut missing = base.as_object().expect("object").clone();
+        missing.remove("eligibilityExpiresAt");
+        assert!(
+            serde_json::from_value::<EnvironmentOwnerResolution>(serde_json::Value::Object(
+                missing
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn console_binding_matches_the_authoritative_runtime_without_exposing_a_vmi_locator() {
         let environment_id = EnvironmentId::new();
         let project_id = ProjectId::new();
@@ -1680,7 +1761,7 @@ mod tests {
             environment_revision: Revision::new(3).expect("revision"),
             release_id: ReleaseId::new(),
             release_version: 1,
-            eligibility_expires_at: expires,
+            eligibility_expires_at: Some(expires),
             lease_fence: None,
             binding: EnvironmentConsoleBinding::Novnc,
         };

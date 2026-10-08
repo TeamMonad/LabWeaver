@@ -131,7 +131,7 @@ pub(crate) async fn test_permit(
     authority.operation.accepted_at = contracts::UtcTimestamp::from_utc(now)?;
     authority.operation.next_attempt_at = authority.operation.accepted_at;
     authority.operation.deadline_at = fence.deadline_at;
-    authority.eligibility_expires_at = fence.deadline_at;
+    authority.eligibility_expires_at = Some(fence.deadline_at);
     crate::PgEnvironmentStore::new(pool.clone())
         .create("runtime-authority", &authority)
         .await?;

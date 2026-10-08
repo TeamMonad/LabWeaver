@@ -636,7 +636,7 @@ mod tests {
                 reset_target: None,
                 lease_authorization: None,
             },
-            eligibility_expires_at: timestamp("2026-07-23T00:00:00.000Z"),
+            eligibility_expires_at: Some(timestamp("2026-07-23T00:00:00.000Z")),
             endpoints: Vec::new(),
             last_diagnostic_code: None,
             failed_phase: None,

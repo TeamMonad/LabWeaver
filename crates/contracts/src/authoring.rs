@@ -41,6 +41,9 @@ pub struct ProblemPackage {
 impl ProblemPackage {
     /// Validates atomic package identity.
     pub fn validate(&self) -> Result<(), AuthoringError> {
+        self.retention.validate().map_err(|_| {
+            AuthoringError::InvalidPackage("retention decision is invalid".to_owned())
+        })?;
         if self.files.is_empty() {
             return Err(AuthoringError::InvalidPackage(
                 "files must not be empty".to_owned(),
@@ -672,6 +675,9 @@ impl<'de> Deserialize<'de> for EnvironmentSpec {
 impl EnvironmentSpec {
     /// Validates required bindings, resources, and runtime-specific guards.
     pub fn validate(&self) -> Result<(), AuthoringError> {
+        self.retention.validate().map_err(|_| {
+            AuthoringError::InvalidEnvironmentSpec("retention decision is invalid".to_owned())
+        })?;
         if self.name.trim().is_empty() {
             return Err(AuthoringError::InvalidEnvironmentSpec(
                 "name is required".to_owned(),

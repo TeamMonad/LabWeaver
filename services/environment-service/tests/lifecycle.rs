@@ -601,7 +601,7 @@ fn work_commands_require_active_exact_lease_and_unexpired_eligibility()
                 contracts::environment::EnvironmentError::LeaseAuthorizationInvalid
             ))
         ));
-        candidate.eligibility_expires_at = timestamp("2026-07-14T01:59:59.000Z");
+        candidate.eligibility_expires_at = Some(timestamp("2026-07-14T01:59:59.000Z"));
         assert!(matches!(
             plan_command_authorized(
                 &candidate,

@@ -23,7 +23,7 @@ use contracts::http::{
     CreateEnvironmentTemplateReleaseRequest, CreateProblemPackageUploadRequest,
     EnvironmentPublicationAdmissionQuery, GeneratedArtifactKind, GeneratedArtifactRecord,
     IdempotencyKey, PlatformImageEntry, PlatformImageKind, PlatformImageStatus,
-    ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
+    ProblemPackageRetentionChoice, ProblemPackageUploadFile, WorkConfigurationAdmissionQuery,
 };
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::{
@@ -159,6 +159,37 @@ async fn issue_48_migrations_enforce_fencing_and_monotonic_course_sequences()
             .fetch_one(&pool)
             .await?,
         1
+    );
+
+    let permanent_course = contracts::CourseId::new();
+    let mut permanent_request = upload_request(permanent_course)?;
+    permanent_request.retention_choice = ProblemPackageRetentionChoice::Permanent;
+    let permanent_session = service
+        .create_upload(
+            permanent_course,
+            &permanent_request,
+            &IdempotencyKey::parse("issue-48-permanent-create")?,
+            now,
+        )
+        .await?;
+    let permanent_package = service
+        .complete_upload(
+            permanent_course,
+            permanent_session.id,
+            permanent_session.revision,
+            &IdempotencyKey::parse("issue-48-permanent-complete")?,
+            now,
+        )
+        .await?;
+    assert!(permanent_package.retention.is_permanent());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT retention_choice FROM control.problem_package_upload_sessions WHERE upload_id=$1",
+        )
+        .bind(permanent_session.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "permanent"
     );
 
     let recovery_course = contracts::CourseId::new();
@@ -908,7 +939,7 @@ async fn generated_container_context_is_bound_to_agent_artifact_metadata()
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: "2026-12-31T08:00:00.000Z".parse()?,
+            retain_until: Some("2026-12-31T08:00:00.000Z".parse()?),
             disposition: RetentionDisposition::Delete,
         },
         completed_at: now,
@@ -2799,6 +2830,7 @@ fn authoring_upload_request(
             },
         ],
         retention_policy_revision: Revision::new(1)?,
+        retention_choice: contracts::http::ProblemPackageRetentionChoice::Finite,
     })
 }
 
@@ -3064,6 +3096,7 @@ fn upload_request(
             },
         ],
         retention_policy_revision: Revision::new(1)?,
+        retention_choice: contracts::http::ProblemPackageRetentionChoice::Finite,
     })
 }
 

@@ -950,22 +950,35 @@ pub async fn create_gateway_session(
     if resolved.protocol != EndpointProtocol::Ssh
         || resolved.health != EndpointHealth::Healthy
         || resolved.revision != endpoint_revision
-        || eligibility.eligibility_expires_at.get() <= now
+        || eligibility
+            .eligibility_expires_at
+            .is_some_and(|deadline| deadline.get() <= now)
     {
         return Err(ApiError::forbidden("LW_ACCESS_SSH_DENIED"));
     }
-    let expires_at = [
-        Some(auth.get::<OffsetDateTime, _>("expires_at")),
-        Some(candidate.get::<OffsetDateTime, _>("expires_at")),
-        Some(candidate.get::<OffsetDateTime, _>("endpoint_expires_at")),
-        candidate.get::<Option<OffsetDateTime>, _>("project_membership_expires_at"),
-        candidate.get::<Option<OffsetDateTime>, _>("course_membership_expires_at"),
-        Some(eligibility.eligibility_expires_at.get()),
+    let mut expires_at = [
+        auth.get::<OffsetDateTime, _>("expires_at"),
+        candidate.get::<OffsetDateTime, _>("expires_at"),
+        candidate.get::<OffsetDateTime, _>("endpoint_expires_at"),
     ]
     .into_iter()
-    .flatten()
     .min()
     .ok_or_else(|| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
+    if let Some(deadline) = eligibility.eligibility_expires_at {
+        expires_at = expires_at.min(deadline.get());
+    }
+    if let Some(fence) = eligibility.lease_fence {
+        expires_at = expires_at.min(fence.expires_at.get());
+    }
+    if let Some(expiry) =
+        candidate.get::<Option<OffsetDateTime>, _>("project_membership_expires_at")
+    {
+        expires_at = expires_at.min(expiry);
+    }
+    if let Some(expiry) = candidate.get::<Option<OffsetDateTime>, _>("course_membership_expires_at")
+    {
+        expires_at = expires_at.min(expiry);
+    }
     sqlx::query(
         "INSERT INTO access.gateway_sessions \
          (session_id,grant_id,grant_revision,actor_id,endpoint_id,endpoint_grant_id,key_id,state,started_at,expires_at,contract,gateway_identity,connection_id,revision,last_heartbeat_at) \
@@ -1205,10 +1218,13 @@ async fn activate_grant(
         tx.commit().await?;
         return Ok(());
     };
-    let expires_at = std::cmp::min(
-        grant.get::<OffsetDateTime, _>("expires_at"),
-        eligibility.eligibility_expires_at.get(),
-    );
+    let mut expires_at = grant.get::<OffsetDateTime, _>("expires_at");
+    if let Some(deadline) = eligibility.eligibility_expires_at {
+        expires_at = expires_at.min(deadline.get());
+    }
+    if let Some(fence) = eligibility.lease_fence {
+        expires_at = expires_at.min(fence.expires_at.get());
+    }
     if expires_at <= now {
         deny_grant_tx(
             &mut tx,
