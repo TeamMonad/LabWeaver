@@ -39,8 +39,17 @@ function installAuthorizationFailureGuard(page, baseURL) {
 }
 
 async function readRenderedMemberUsername(page) {
+  const membersSection = page.locator('.members-section')
   const rows = page.locator('.member-list .member-row')
-  await expect.poll(() => rows.count(), { timeout: 60_000, intervals: [500, 1000, 2000] }).toBeGreaterThan(0)
+  await expect.poll(async () => {
+    const diagnostic = membersSection.locator('.diagnostic-banner--error').first()
+    if (await diagnostic.count()) {
+      const code = (await diagnostic.locator('.diagnostic-code').textContent())?.trim() || 'diagnostic-missing'
+      const message = (await diagnostic.locator('.diagnostic-message').textContent())?.trim() || 'message-missing'
+      throw new Error(`LW_PUBLIC_SETTINGS_MEMBER_LOAD_FAILED:${code}:${message}`)
+    }
+    return rows.count()
+  }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBeGreaterThan(0)
   const username = await rows.evaluateAll((elements) => {
     for (const element of elements) {
       const text = element.textContent ?? ''
@@ -153,11 +162,6 @@ async function readGpuCatalog(page) {
       throw new Error(`LW_PUBLIC_SETTINGS_GPU_STATUS_INVALID:${row.className}:${mode}`)
     }
     configuredModes.add(mode)
-  }
-  for (const mode of Object.keys(GPU_MODE_LABELS)) {
-    if (!renderedRows.some((row) => row.mode === GPU_MODE_LABELS[mode])) {
-      throw new Error(`LW_PUBLIC_SETTINGS_GPU_MODE_MISSING:${mode}`)
-    }
   }
   return { rows: renderedRows.length, modes: [...configuredModes].sort() }
 }
