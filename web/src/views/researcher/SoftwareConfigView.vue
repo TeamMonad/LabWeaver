@@ -329,6 +329,10 @@ const routeProjectId = computed(() => {
   const id = typeof route?.query.projectId === 'string' ? route.query.projectId.trim() : ''
   return id || null
 })
+const routePackageId = computed(() => {
+  const id = typeof route?.query.packageId === 'string' ? route.query.packageId.trim() : ''
+  return id || null
+})
 const routeRunId = computed(() => {
   const id = typeof route?.query.runId === 'string' ? route.query.runId.trim() : ''
   return id || null
@@ -375,6 +379,8 @@ const uploadedPackage = computed<ProblemPackageSchema | null>(() => packageUploa
 const packageDone = computed(() => uploadedPackage.value !== null)
 const packageId = computed(() => uploadedPackage.value?.id ?? '')
 const packageRevision = computed(() => uploadedPackage.value?.revision ?? 0)
+let packageRestoreKey: string | null = null
+let packageRestoreGeneration = 0
 const canUploadPackage = computed(() => {
   const ready = packageUpload.state.kind === 'ready' || packageUpload.state.kind === 'error'
   return Boolean(selectedProject.value && ready && packageUpload.files.length > 0 && policyRevision.value !== undefined)
@@ -472,6 +478,7 @@ function invalidatePlan() {
 function syncSoftwareRoute(
   runId: string | null | undefined = routeRunId.value,
   releaseId: string | null | undefined = routeReleaseId.value,
+  packageIdValue: string | null | undefined = routePackageId.value,
 ) {
   if (!router || !route) return
   void router.replace({
@@ -484,6 +491,7 @@ function syncSoftwareRoute(
       mode: mode.value === 'template' ? 'template' : undefined,
       runId: runId ?? undefined,
       releaseId: releaseId ?? undefined,
+      packageId: packageIdValue ?? undefined,
     },
   })
 }
@@ -500,6 +508,7 @@ watch(selectedProjectId, (id, previousId) => {
   syncSoftwareRoute(
     previousId && previousId !== id ? null : sameProject ? routeRunId.value : null,
     previousId && previousId !== id ? null : sameProject ? routeReleaseId.value : null,
+    previousId && previousId !== id ? null : sameProject ? routePackageId.value : null,
   )
   policyGeneration += 1
   void reloadPolicy()
@@ -520,6 +529,22 @@ watch(mode, (nextMode, previousMode) => {
   if (!routeRestoresNextMode) syncSoftwareRoute(null, null)
   if (nextMode === 'configuration') void reloadPolicy()
 })
+
+async function restorePackageContext() {
+  const projectId = selectedProjectId.value
+  const packageId = routePackageId.value
+  const contextKey = `${projectId ?? ''}:${packageId ?? ''}`
+  if (contextKey === packageRestoreKey) return
+  packageRestoreKey = contextKey
+  const generation = ++packageRestoreGeneration
+  if (mode.value !== 'configuration' || !projectId || !packageId) return
+  await packageUpload.loadPackage(packageId)
+  if (generation !== packageRestoreGeneration || selectedProjectId.value !== projectId || routePackageId.value !== packageId) return
+}
+
+watch([selectedProjectId, routePackageId, mode], () => {
+  void restorePackageContext()
+}, { immediate: true })
 
 function persistTemplateRun(runId: string) {
   syncSoftwareRoute(runId, null)
@@ -767,7 +792,7 @@ function prepareNewTask() {
   invalidatePlan()
   approvalOperationGeneration += 1
   approving.value = false
-  syncSoftwareRoute(null, null)
+  syncSoftwareRoute(null, null, null)
   agent.reset()
   packageUpload.clear()
   selectedEnvironmentId.value = ''

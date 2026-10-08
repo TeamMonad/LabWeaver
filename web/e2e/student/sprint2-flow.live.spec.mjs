@@ -972,14 +972,16 @@ test('student provisions a Work environment, configures it, and releases its cap
     await auditAccessibility(page, 'student-work-environment')
     guards.assertCleanConsole('student-work-environment')
 
-    await page.goto(`/researcher/software?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(
+      `/researcher/software?projectId=${encodeURIComponent(project.id)}&packageId=${encodeURIComponent(packageData.id)}`,
+      { waitUntil: 'domcontentloaded' },
+    )
     await selectProjectByUi(page, project.id)
     await expect(page.getByRole('button', { name: '配置现有 Work', exact: true })).toHaveAttribute('aria-pressed', 'true')
     const workEnvironment = page.getByLabel('Work 环境')
     await expect(workEnvironment.locator(`option[value="${environmentId}"]`)).toHaveCount(1, { timeout: 120_000 })
     await workEnvironment.selectOption(environmentId)
-    await page.getByLabel('材料包 ID').fill(packageData.id)
-    await page.getByLabel('材料包 Revision').fill(String(packageData.revision))
+    await expect(page.locator('.package-upload-success')).toContainText(`材料包版本：${packageData.revision}`, { timeout: 120_000 })
     await page.getByLabel(/我确认 Agent 可能修改该 Work/).check()
     const planResponsePromise = page.waitForResponse(
       (response) => {

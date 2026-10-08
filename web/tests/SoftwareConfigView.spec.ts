@@ -53,6 +53,7 @@ const packageUploadMock = vi.hoisted(() => {
       this.state = { kind: 'idle' }
     }),
     createSession: vi.fn(),
+    loadPackage: vi.fn(),
     retry: vi.fn(),
     formatBytes: (size: number) => `${size} B`,
     setPackage(id: string) {
@@ -205,6 +206,10 @@ describe('SoftwareConfigView', () => {
         files: [], retention: {}, completedAt: '2026-09-08T00:00:00.000Z',
       },
     }
+    vi.mocked(packageUploadMock.loadPackage).mockImplementation(async (id: string) => {
+      packageUploadMock.setPackage(id)
+      return true
+    })
     vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
     vi.mocked(listProjectAgentRuns).mockResolvedValue({ data: { items: [], page: 1, pageSize: 25, hasMore: false } as never, error: undefined as never })
     vi.mocked(listEnvironments).mockResolvedValue({
@@ -253,6 +258,25 @@ describe('SoftwareConfigView', () => {
     expect(wrapper.text()).toContain('Apply the requested packages')
     expect(wrapper.text()).toContain('sudo apt-get update')
     expect((wrapper.get('form.config-form button[type="submit"]').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('restores a route-selected material package without exposing an ID form field', async () => {
+    packageUploadMock.state = { kind: 'idle' }
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', packageId: 'published-package' } },
+          [routerKey as symbol]: { replace: vi.fn() },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledWith('published-package'))
+    expect(wrapper.text()).toContain('材料包已准备')
+    expect(wrapper.text()).toContain('材料包版本：1')
+    expect(wrapper.find('input[aria-label="材料包 ID"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('requires a future approval expiry before approving a Work plan', async () => {
