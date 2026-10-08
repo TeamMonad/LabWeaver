@@ -205,6 +205,55 @@ describe('usePlatformImages', () => {
     expect(listPlatformImages).toHaveBeenCalledTimes(1)
   })
 
+  it('reuses a pending creation idempotency key only for the same file and body', async () => {
+    const session = {
+      uploadId: '0197f0e0-0000-7000-8000-000000000003',
+      kind: 'container' as const,
+      binding: 'ubuntu-24.04-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+      archiveBytes: 7,
+      archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+      uploadTarget: {
+        partSizeBytes: 64 * 1024 * 1024,
+        parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: {}, expiresAt: '2026-07-16T09:00:00.000Z' }],
+        expiresAt: '2026-07-16T09:00:00.000Z',
+      },
+      uploadedParts: [],
+      expiresAt: '2026-07-16T09:00:00.000Z',
+      revision: 1,
+    }
+    vi.mocked(createPlatformImageUpload)
+      .mockResolvedValueOnce({ error: new Error('request timed out') } as never)
+      .mockResolvedValueOnce({ data: session, error: undefined as never })
+    vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
+    vi.mocked(getPlatformImageUpload).mockResolvedValue({
+      data: { uploadId: session.uploadId, revision: 2, state: 'imported', catalogId: entry.catalogId },
+      error: undefined as never,
+    })
+    const input = {
+      kind: 'container' as const,
+      binding: 'ubuntu-24.04-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+      trustRevision: 3,
+      reason: '导入已评审归档',
+    }
+    const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
+    const images = usePlatformImages()
+
+    await expect(images.upload(file, input)).resolves.toBe(false)
+    const firstKey = vi.mocked(createPlatformImageUpload).mock.calls[0][0].headers['Idempotency-Key']
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload:create')).toContain(firstKey)
+
+    await expect(images.upload(new File(['archive'], 'different-name.tar'), input)).resolves.toBe(false)
+    expect(createPlatformImageUpload).toHaveBeenCalledOnce()
+    expect(images.state).toMatchObject({ kind: 'error', diagnostic: { code: 'PLATFORM_IMAGE_UPLOAD_CREATION_PENDING' } })
+
+    await expect(images.upload(file, input)).resolves.toBe(true)
+    expect(createPlatformImageUpload).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(createPlatformImageUpload).mock.calls[1][0].headers['Idempotency-Key']).toBe(firstKey)
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload:create')).toBeNull()
+  })
+
   it('uploads at most three missing parts and completes with the server manifest', async () => {
     const partSize = 64 * 1024 * 1024
     const uploadId = '0197f0e0-0000-7000-8000-000000000040'
@@ -738,6 +787,34 @@ describe('usePlatformImages', () => {
 
     expect(images.state).toMatchObject({ kind: 'terminal', state: 'imported' })
     expect(window.sessionStorage.getItem('labweaver.platform-image-upload')).toBeNull()
+  })
+
+  it('clears a persisted session when the server reports it missing', async () => {
+    const uploadId = '0197f0e0-0000-7000-8000-000000000006'
+    window.sessionStorage.setItem('labweaver.platform-image-upload', JSON.stringify({
+      uploadId,
+      revision: 2,
+      completeIdempotencyKey: 'complete-key',
+      cancelIdempotencyKey: 'cancel-key',
+      phase: 'uploading',
+      state: 'pending',
+      archiveBytes: 7,
+    }))
+    vi.mocked(getPlatformImageUpload).mockResolvedValue({
+      error: problem('LW_PLATFORM_IMAGE_UPLOAD_NOT_FOUND', '上传会话不存在。'),
+      response: { status: 404 },
+    } as never)
+    const images = usePlatformImages()
+
+    await expect(images.resumeUpload()).resolves.toBe(false)
+
+    expect(images.uploadActive).toBe(false)
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload')).toBeNull()
+    expect(images.state).toMatchObject({
+      kind: 'error',
+      uploadId,
+      diagnostic: { code: 'LW_PLATFORM_IMAGE_UPLOAD_NOT_FOUND', retryable: false },
+    })
   })
 
   it('does not poll an interrupted object upload until the file is selected again or cancelled', async () => {

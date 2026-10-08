@@ -40,6 +40,7 @@ const ANY_REVISION = '*'
 /** Object storage accepts one presigned archive upload up to 5 GB (5,000,000,000 bytes). */
 export const MAX_PLATFORM_IMAGE_ARCHIVE_BYTES = 5_000_000_000
 const UPLOAD_STORAGE_KEY = 'labweaver.platform-image-upload'
+const UPLOAD_CREATE_INTENT_STORAGE_KEY = `${UPLOAD_STORAGE_KEY}:create`
 const UPLOAD_POLL_INTERVAL_MS = 1000
 const UPLOAD_POLL_TIMEOUT_MS = 15 * 60 * 1000
 const PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES = 64 * 1024 * 1024
@@ -89,6 +90,26 @@ interface PersistedUpload {
   phase: UploadPhase
   state: PlatformImageUploadState
   archiveBytes: number
+}
+
+interface UploadCreationBody {
+  kind: PlatformImageKind
+  binding: string
+  targetReference: string
+  trustRevision: number
+  reason: string
+  archiveBytes: number
+  archiveMediaType: string
+  diskFormat?: VirtualMachineDiskFormat
+  diskPath?: string
+  capacityBytes?: number
+}
+
+interface PendingUploadCreation {
+  idempotencyKey: string
+  body: UploadCreationBody
+  fileName: string
+  fileLastModified: number
 }
 
 interface ActiveUpload extends PersistedUpload {
@@ -265,6 +286,75 @@ export function usePlatformImages() {
     }
   }
 
+  function readPendingUploadCreation(): PendingUploadCreation | null {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = window.sessionStorage.getItem(UPLOAD_CREATE_INTENT_STORAGE_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as Partial<PendingUploadCreation>
+      const fileLastModified = parsed.fileLastModified
+      if (
+        typeof parsed.idempotencyKey !== 'string'
+        || parsed.idempotencyKey.trim() === ''
+        || !parsed.body
+        || typeof parsed.body !== 'object'
+        || typeof parsed.fileName !== 'string'
+        || typeof fileLastModified !== 'number'
+        || !Number.isSafeInteger(fileLastModified)
+        || fileLastModified < 0
+      ) return null
+      const body = parsed.body as Partial<UploadCreationBody>
+      const archiveBytes = body.archiveBytes
+      const capacityBytes = body.capacityBytes
+      if (
+        (body.kind !== 'container' && body.kind !== 'virtual_machine')
+        || typeof body.binding !== 'string'
+        || typeof body.targetReference !== 'string'
+        || !Number.isSafeInteger(body.trustRevision)
+        || typeof body.reason !== 'string'
+        || typeof archiveBytes !== 'number'
+        || !Number.isSafeInteger(archiveBytes)
+        || archiveBytes < 0
+        || typeof body.archiveMediaType !== 'string'
+        || (body.kind === 'virtual_machine' && (
+          (body.diskFormat !== 'qcow2' && body.diskFormat !== 'raw')
+          || typeof body.diskPath !== 'string'
+          || typeof capacityBytes !== 'number'
+          || !Number.isSafeInteger(capacityBytes)
+          || capacityBytes <= 0
+        ))
+      ) return null
+      return {
+        idempotencyKey: parsed.idempotencyKey,
+        body: body as UploadCreationBody,
+        fileName: parsed.fileName,
+        fileLastModified,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  function persistPendingUploadCreation(intent: PendingUploadCreation | null): void {
+    if (typeof window === 'undefined') return
+    try {
+      if (intent) window.sessionStorage.setItem(UPLOAD_CREATE_INTENT_STORAGE_KEY, JSON.stringify(intent))
+      else window.sessionStorage.removeItem(UPLOAD_CREATE_INTENT_STORAGE_KEY)
+    } catch {
+      // Storage is an optional retry aid; the server remains authoritative.
+    }
+  }
+
+  function sameUploadCreation(
+    pending: PendingUploadCreation,
+    body: UploadCreationBody,
+    file: File,
+  ): boolean {
+    return pending.fileName === file.name
+      && pending.fileLastModified === file.lastModified
+      && JSON.stringify(pending.body) === JSON.stringify(body)
+  }
+
   function persistUpload(upload: ActiveUpload | null): void {
     if (typeof window === 'undefined') return
     try {
@@ -379,6 +469,19 @@ export function usePlatformImages() {
     const result = await getPlatformImageUpload({ path: { uploadId } })
     if (disposed) return null
     if (result.error) {
+      if (result.response?.status === 404) {
+        failure(
+          result.error,
+          'PLATFORM_IMAGE_UPLOAD_SESSION_NOT_FOUND',
+          '上传会话已不存在，请重新选择归档文件上传。',
+          uploadId,
+          false,
+        )
+        activeUpload.value = null
+        persistUpload(null)
+        stopUploadStatusMonitor()
+        return null
+      }
       failure(
         result.error,
         'PLATFORM_IMAGE_UPLOAD_STATUS_FAILED',
@@ -766,20 +869,43 @@ export function usePlatformImages() {
     const descriptor = input.kind === 'virtual_machine'
       ? { diskFormat: input.diskFormat, diskPath: input.diskPath, capacityBytes: input.capacityBytes }
       : {}
+    const body: UploadCreationBody = {
+      kind: input.kind,
+      binding: input.binding,
+      targetReference: input.targetReference,
+      trustRevision: input.trustRevision,
+      reason: input.reason,
+      archiveBytes: file.size,
+      archiveMediaType: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE,
+      ...descriptor,
+    }
+    const pendingCreation = readPendingUploadCreation()
+    let createIdempotencyKey = pendingCreation?.idempotencyKey
+    if (pendingCreation && !sameUploadCreation(pendingCreation, body, file)) {
+      failure(
+        undefined,
+        'PLATFORM_IMAGE_UPLOAD_CREATION_PENDING',
+        '已有未确认的上传创建请求。请重新选择原归档文件以继续，避免重复创建上传会话。',
+        undefined,
+        false,
+      )
+      return false
+    }
+    if (!createIdempotencyKey) {
+      createIdempotencyKey = idempotencyKey()
+      persistPendingUploadCreation({
+        idempotencyKey: createIdempotencyKey,
+        body,
+        fileName: file.name,
+        fileLastModified: file.lastModified,
+      })
+    }
     const session = await createPlatformImageUpload({
-      headers: { 'Idempotency-Key': idempotencyKey() },
-      body: {
-        kind: input.kind,
-        binding: input.binding,
-        targetReference: input.targetReference,
-        trustRevision: input.trustRevision,
-        reason: input.reason,
-        archiveBytes: file.size,
-        archiveMediaType: PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE,
-        ...descriptor,
-      },
+      headers: { 'Idempotency-Key': createIdempotencyKey },
+      body,
     })
     if (session.error) {
+      if (extractProblemDetails(session.error)?.retryable === false) persistPendingUploadCreation(null)
       failure(session.error, 'PLATFORM_IMAGE_UPLOAD_FAILED', '创建镜像上传会话失败。')
       return false
     }
@@ -812,6 +938,7 @@ export function usePlatformImages() {
       archiveBytes: sessionData.archiveBytes,
       uploadedParts: sessionData.uploadedParts,
     }
+    persistPendingUploadCreation(null)
     activeUpload.value = active
     persistUpload(active)
     // The upload session can finish creating after its view has unmounted.
