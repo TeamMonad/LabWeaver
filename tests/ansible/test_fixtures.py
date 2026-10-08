@@ -710,6 +710,9 @@ class AnsibleFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("PGSERVICEFILE", postgres_apply)
         self.assertIn("port-forward", postgres_apply)
+        self.assertIn("def postgres_protocol_ready", postgres_apply)
+        self.assertIn('"SELECT 1"', postgres_apply)
+        self.assertNotIn("connect_ex", postgres_apply)
         seed = (
             ROOT
             / "deploy/ansible/roles/resource_application/templates/access-seed-adopt.sql.j2"

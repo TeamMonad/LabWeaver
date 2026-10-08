@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import re
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -37,10 +36,36 @@ def regular_file(module: AnsibleModule, value: str, code: str) -> Path:
     return path
 
 
-def local_port_ready() -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-        connection.settimeout(0.2)
-        return connection.connect_ex(("127.0.0.1", 15432)) == 0
+def postgres_protocol_ready(psql: Path, service_file: Path, service: str) -> bool:
+    """Check the forwarded endpoint with a real PostgreSQL protocol exchange.
+
+    A bare TCP connect makes kubectl port-forward open and immediately tear down a
+    backend PostgreSQL stream.  That can make the controller restart the forward
+    while the next database command is starting.  The existing psql binary performs
+    the protocol handshake and closes the session normally.
+    """
+    try:
+        result = subprocess.run(
+            [
+                str(psql),
+                f"service={service}",
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--command",
+                "SELECT 1",
+            ],
+            env={"PGSERVICEFILE": str(service_file), "PATH": "/usr/local/bin:/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "1"
 
 
 def canonical_forward_service_active() -> bool:
@@ -115,12 +140,9 @@ def main() -> None:
     if not SERVICE.fullmatch(service):
         fail(module, "RESOURCE_APPLICATION_POSTGRES_SERVICE_INVALID")
     tunnel: subprocess.Popen[str] | None = None
-    if local_port_ready():
-        if not canonical_forward_service_active():
+    if not canonical_forward_service_active():
+        if postgres_protocol_ready(psql, service_file, service):
             fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_CONFLICT")
-    else:
-        if canonical_forward_service_active():
-            fail(module, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE")
         tunnel = subprocess.Popen(
             [
                 "/usr/bin/kubectl", "--kubeconfig", str(kubeconfig), "--namespace", "labweaver-data",
@@ -135,7 +157,7 @@ def main() -> None:
         if tunnel is not None:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                if local_port_ready():
+                if postgres_protocol_ready(psql, service_file, service):
                     break
                 if tunnel.poll() is not None:
                     fail(module, process_diagnostic(tunnel, "RESOURCE_APPLICATION_POSTGRES_TUNNEL_UNAVAILABLE"))
