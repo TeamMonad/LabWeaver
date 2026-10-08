@@ -377,6 +377,12 @@ function adminDetailRow(page, detail, label) {
   return detail.locator('.meta-row').filter({ has: page.locator('.meta-label', { hasText: new RegExp(`^${label}$`) }) })
 }
 
+function adminTechnicalDetailValue(detail, label) {
+  return detail.locator('.advanced-detail-grid .meta-label')
+    .filter({ hasText: new RegExp(`^${label}$`) })
+    .locator('xpath=following-sibling::code[1]')
+}
+
 async function reloadAdminApprovalPage(page) {
   await page.reload({ waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: '资源审批与资源使用授权管理', exact: true }))
@@ -454,11 +460,15 @@ export async function approveResourceRequestByUi(page, {
 
   const detail = page.locator('.request-detail')
   await expect(detail).toBeVisible({ timeout: RESOURCE_PAGE_TIMEOUT_MS })
-  await expect(detail).toContainText(requestKey)
-  if (requestId) await expect(detail).toContainText(requestId)
-  if (projectId) await expect(adminDetailRow(page, detail, '课程 / 项目').locator('.meta-value')).toContainText(projectId)
-  if (requesterId) await expect(adminDetailRow(page, detail, '申请人').locator('.meta-value')).toContainText(requesterId)
-  if (environmentId) await expect(adminDetailRow(page, detail, '目标').locator('.meta-value')).toContainText(environmentId)
+  const technicalDetails = detail.locator('details.advanced-details')
+  await expect(technicalDetails).toBeVisible()
+  if ((await technicalDetails.getAttribute('open')) === null) await technicalDetails.locator('summary').click()
+  await expect(technicalDetails.locator('.advanced-detail-grid')).toBeVisible()
+  await expect(adminTechnicalDetailValue(detail, 'Request Key')).toHaveText(requestKey)
+  if (requestId) await expect(adminTechnicalDetailValue(detail, '申请 ID')).toHaveText(requestId)
+  if (projectId) await expect(adminTechnicalDetailValue(detail, '项目 ID')).toHaveText(projectId)
+  if (requesterId) await expect(adminTechnicalDetailValue(detail, '申请人 Actor ID')).toHaveText(requesterId)
+  if (environmentId) await expect(adminTechnicalDetailValue(detail, '目标标识')).toHaveText(environmentId)
   await expect(adminDetailRow(page, detail, '状态').locator('.gcp-status-pill .status-label'))
     .toHaveText(ADMIN_REQUEST_STATE.reviewing)
 
