@@ -556,6 +556,7 @@ describe('EnvironmentEntryView', () => {
 
   it('explains retained storage and resource reservations while stopped', async () => {
     mockEnvironmentInstance({
+      class: 'work',
       desiredState: 'stopped',
       observedState: 'stopped',
       operation: { ...mockOperation('succeeded', { kind: 'stop' }) },
@@ -574,6 +575,22 @@ describe('EnvironmentEntryView', () => {
     expect(dialog.props('description')).toContain('工作目录及关联容器存储或虚拟机磁盘')
     expect(dialog.props('description')).toContain('操作不可恢复')
     expect(dialog.props('description')).toContain('项目材料、已冻结提交和评测记录不在本环境删除范围内')
+  })
+
+  it('explains that a stopped experiment releases GPU capacity for the next start', async () => {
+    mockEnvironmentInstance({
+      class: 'experiment',
+      desiredState: 'stopped',
+      observedState: 'stopped',
+      operation: { ...mockOperation('succeeded', { kind: 'stop' }) },
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
+    const hint = wrapper.get('#lifecycle-action-hint').text()
+    expect(hint).toContain('GPU 预留已释放')
+    expect(hint).toContain('重新启动时会重新进行 GPU 资源准入')
+    expect(hint).not.toContain('Work 资源租约会保留')
   })
 
   it('keeps teacher console navigation in the teacher workbench and omits student submission controls', async () => {

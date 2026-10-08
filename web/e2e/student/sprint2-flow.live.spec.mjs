@@ -78,6 +78,20 @@ const REAL_WORK_CONFIG = realWorkConfig({ virtualMachine: Boolean(REAL_WORK_VM) 
 const REAL_WORK_RESUME = realWorkResumeConfig()
 const REAL_WORK_GPU = realWorkGpuConfig()
 const PRESERVE_EXISTING_PROJECT = EXISTING_PROJECT_MODE || Boolean(REAL_WORK_RESUME)
+const RECLAIM_CONNECTION_CHECK_IDS = Object.freeze({
+  projectId: process.env.LABWEAVER_E2E_WORK_RECLAIM_PROJECT_ID?.trim() ?? '',
+  environmentId: process.env.LABWEAVER_E2E_WORK_RECLAIM_ENVIRONMENT_ID?.trim() ?? '',
+  leaseId: process.env.LABWEAVER_E2E_WORK_RECLAIM_LEASE_ID?.trim() ?? '',
+  requestId: process.env.LABWEAVER_E2E_WORK_RECLAIM_REQUEST_ID?.trim() ?? '',
+})
+const RECLAIM_CONNECTION_CHECK_VALUES = Object.values(RECLAIM_CONNECTION_CHECK_IDS)
+const RECLAIM_CONNECTION_CHECK_ENABLED = RECLAIM_CONNECTION_CHECK_VALUES.every(Boolean)
+if (RECLAIM_CONNECTION_CHECK_VALUES.some(Boolean) && !RECLAIM_CONNECTION_CHECK_ENABLED) {
+  throw new Error('LABWEAVER_E2E_WORK_RECLAIM_IDS_INCOMPLETE')
+}
+if (RECLAIM_CONNECTION_CHECK_ENABLED && RECLAIM_CONNECTION_CHECK_VALUES.some((value) => !UUID.test(value))) {
+  throw new Error('LABWEAVER_E2E_WORK_RECLAIM_IDS_INVALID')
+}
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
@@ -560,14 +574,56 @@ async function verifyCrossProjectEnvironmentDenied(browser, baseURL, projectId, 
   }
 }
 
+async function readReclaimedEnvironment(request, projectId, environmentId) {
+  const response = await request.get(`/api/v1/environments/${environmentId}`)
+  if (response.status() === 404) {
+    const bodyText = await response.text()
+    let body
+    try {
+      body = JSON.parse(bodyText)
+    } catch (error) {
+      throw new Error(`RECLAIMED_ENVIRONMENT_READ_FAILED:404:invalid JSON`, { cause: error })
+    }
+    if (diagnosticCode(body) !== 'LW_ENVIRONMENT_NOT_FOUND') {
+      throw new Error(`RECLAIMED_ENVIRONMENT_READ_FAILED:404:${diagnosticCode(body)}`)
+    }
+    return { id: environmentId, projectId, observedState: 'deleted', desiredState: 'deleted' }
+  }
+  const environment = await expectJson(response, 'RECLAIMED_ENVIRONMENT_READ_FAILED')
+  if (environment.id !== environmentId || environment.projectId !== projectId) {
+    throw new Error(`RECLAIMED_ENVIRONMENT_SCOPE_INVALID:${environment.id ?? 'missing'}:${environment.projectId ?? 'missing'}`)
+  }
+  if (!['stopped', 'deleted'].includes(environment.observedState)) {
+    throw new Error(`RECLAIMED_ENVIRONMENT_STATE_INVALID:${environment.observedState ?? 'missing'}`)
+  }
+  if (environment.observedState === 'stopped' && environment.desiredState !== 'stopped') {
+    throw new Error(`RECLAIMED_ENVIRONMENT_STOP_TARGET_INVALID:${environment.desiredState ?? 'missing'}`)
+  }
+  if (environment.observedState === 'deleted' && environment.desiredState !== 'deleted') {
+    throw new Error(`RECLAIMED_ENVIRONMENT_DELETE_TARGET_INVALID:${environment.desiredState ?? 'missing'}`)
+  }
+  return environment
+}
+
 async function assertConnectionBlockedAfterLeaseRevoke(page, projectId, environment) {
+  const authoritativeEnvironment = await readReclaimedEnvironment(page.request, projectId, environment.id)
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environment.id)}`, {
     waitUntil: 'domcontentloaded',
   })
   await expect(page.getByRole('heading', { name: '项目环境控制台', exact: true })).toBeVisible({ timeout: 120_000 })
-  await expect(page.getByText('环境已停止，启动后才能签发访问授权。', { exact: true })).toBeVisible({ timeout: 120_000 })
   const createButton = page.getByRole('button', { name: '签发访问授权', exact: true })
-  if (await createButton.count() > 0) await expect(createButton).toBeDisabled()
+  if (authoritativeEnvironment.observedState === 'stopped') {
+    await expect(page.getByText('环境已停止，启动后才能签发访问授权。', { exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(createButton).toHaveCount(1)
+    await expect(createButton).toBeDisabled()
+    return authoritativeEnvironment
+  }
+
+  await expect(page.getByText('此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。', { exact: true })).toBeVisible({ timeout: 120_000 })
+  await expect(createButton).toHaveCount(0)
+  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
+  await expect(page.getByRole('button', { name: '立即签发授权并连接终端', exact: true })).toHaveCount(0)
+  return authoritativeEnvironment
 }
 
 function realContainerArtifact(candidate) {
@@ -1419,4 +1475,31 @@ test('student provisions a Work environment, configures it, and releases its cap
     const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
     throw new Error(`REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: cleanupFailures[0] })
   }
+})
+
+test('checks access controls for an already reclaimed Work environment', async ({ page }) => {
+  test.skip(!RECLAIM_CONNECTION_CHECK_ENABLED, 'set the four LABWEAVER_E2E_WORK_RECLAIM_* IDs to inspect an existing reclaimed Work environment')
+  const { projectId, environmentId, leaseId, requestId } = RECLAIM_CONNECTION_CHECK_IDS
+  const resourceRequest = await expectJson(
+    await page.request.get(`/api/v1/resource-requests/${requestId}`),
+    'RECLAIM_CONNECTION_RESOURCE_REQUEST_READ_FAILED',
+  )
+  if (
+    resourceRequest.id !== requestId
+    || resourceRequest.projectId !== projectId
+    || resourceRequest.target?.kind !== 'environment'
+    || resourceRequest.target.environmentId !== environmentId
+  ) {
+    throw new Error('RECLAIM_CONNECTION_RESOURCE_REQUEST_SCOPE_INVALID')
+  }
+
+  const lease = await expectJson(
+    await page.request.get(`/api/v1/resource-leases/${leaseId}`),
+    'RECLAIM_CONNECTION_LEASE_READ_FAILED',
+  )
+  if (lease.id !== leaseId || lease.requestId !== requestId || !['revoked', 'expired'].includes(lease.state)) {
+    throw new Error(`RECLAIM_CONNECTION_LEASE_STATE_INVALID:${lease.state ?? 'missing'}`)
+  }
+
+  await assertConnectionBlockedAfterLeaseRevoke(page, projectId, { id: environmentId })
 })

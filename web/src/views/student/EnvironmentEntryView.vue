@@ -1864,7 +1864,12 @@ function lifecycleActionHint(data: EnvironmentInstanceSchema): string {
   if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
   if (hasActiveLifecycleOperation(data)) return `当前正在${operationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
   if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
-  if (data.observedState === 'stopped') return '环境已停止，启动后才能打开终端。计算用量已停止计量；工作目录和磁盘仍保留并继续按存储费率核算。GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
+  if (data.observedState === 'stopped') {
+    const resourceHint = data.class === 'experiment'
+      ? 'GPU 预留已释放，重新启动时会重新进行 GPU 资源准入。'
+      : 'GPU 预留和 Work 资源租约会保留，删除环境并完成回收后才归还容量。'
+    return `环境已停止，启动后才能打开终端。计算用量已停止计量；工作目录和磁盘仍保留并继续按存储费率核算。${resourceHint}`
+  }
   if (data.observedState === 'failed') return retryableOperation.value ? '上次操作失败，可以重试失败的操作。' : '上次操作失败，请先查看操作诊断。'
   return `环境当前为${environmentStateLabel(data.observedState)}，请等待状态更新。`
 }
