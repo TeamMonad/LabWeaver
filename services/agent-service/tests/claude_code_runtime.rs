@@ -102,6 +102,7 @@ enum FakeMode {
     ProtectedField,
     BudgetExceeded,
     EvaluationFails,
+    EvaluationSchemaRepair,
     RepairThenSuccess,
     ReviewRepairThenSuccess,
     ReviewRepairThenCancel,
@@ -488,6 +489,7 @@ impl ClaudeCodeProcess for FakeProcess {
                 | FakeMode::SlowFullSuccess
                 | FakeMode::WorkFullSuccess
                 | FakeMode::ContainerFullSuccess
+                | FakeMode::EvaluationSchemaRepair
         ) && evaluation_track
         {
             evaluation_track_candidate()?
@@ -517,6 +519,12 @@ impl ClaudeCodeProcess for FakeProcess {
                 files
                     .push(json!({"path": "requirements.txt", "content": "ansible-core==2.20.5\n"}));
             }
+        }
+        if matches!(self.mode, FakeMode::EvaluationSchemaRepair)
+            && evaluation_track
+            && call_number == 1
+        {
+            output["evaluation"]["spec"]["steps"] = json!([]);
         }
         if matches!(self.mode, FakeMode::ProtectedField) {
             output["metadata"] = json!({"Final_Score": 100});
@@ -4516,6 +4524,35 @@ async fn evaluation_track_materializes_exactly_one_runner_context_alongside_envi
 }
 
 #[tokio::test]
+async fn evaluation_schema_repair_reports_contract_path_before_materialization()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy, materializer) =
+        materializing_runtime(FakeMode::EvaluationSchemaRepair)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Evaluation(_)
+    ));
+    assert_eq!(process.total_calls(), 2);
+    assert_eq!(materializer.runner_plans().len(), 1);
+    let commands = process.commands();
+    let repair_prompt = commands[1]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("evaluation repair prompt missing"))?;
+    assert!(repair_prompt.contains("/evaluation/spec/steps"));
+    assert!(repair_prompt.contains("LW_EVAL_STEPS_EMPTY"));
+    assert!(repair_prompt.contains("spec.steps must contain at least one step"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn advisory_review_restricts_evidence_to_submission_files() -> Result<(), Box<dyn Error>> {
     let process = Arc::new(FakeProcess::new(FakeMode::ReviewRepairThenSuccess));
     let mut policy = valid_policy()?;
@@ -4645,6 +4682,8 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         "runtime variant properties are exactly provider_binding",
         "Container security requires rootFilesystemPolicy read_only_required",
         "virtual_machine requires rootFilesystemPolicy mutable_required",
+        "retainUntil must either be null only for class course_material with disposition retain_until_revoked",
+        "Preserve the materials' legal retention form exactly",
         "\"build_recipe\"",
         "\"source_path\"",
         "\"service_port\"",

@@ -13,7 +13,7 @@ use contracts::authoring::{
 };
 use contracts::diagnostic;
 use contracts::evaluation::{
-    EvaluationSpec, GoalReview, evaluation_spec_schema, goal_review_schema,
+    EvaluationSpec, EvaluationSpecError, GoalReview, evaluation_spec_schema, goal_review_schema,
 };
 use contracts::{
     ActorId, AgentRunId, ArtifactRef, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision,
@@ -53,7 +53,7 @@ const ENVIRONMENT_PROMPT: &str = r#"Stdin is a JSON EgressEnvelope. Its files ar
 
 Use the exact JSON property spelling from the schema and never add unknown properties. runtime variant properties are exactly provider_binding, build_recipe, service_port, terminal for container and provider_binding, base_disk, storage_class_binding, ssh_port for virtual_machine. Preserve every declared surface of the materials' environment: copy the materials' terminal object (executable, args, workingDirectory) and every entry and service port into the candidate exactly as declared, because the Web console and terminal access resolve their binding from it. A candidate that drops the terminal or an entry the materials declare is rejected by the user even when the schema is satisfied: environments without a terminal cannot open a console. A container build_recipe must be exactly one of {"mode":"generated","files":[{"path":"Dockerfile","content":"FROM ..."}, ...]}, {"mode":"package"} with an optional package-relative "context_path" directory, or {"mode":"submitted","source_path":"relative/package/context.tar.gz"}. Mode package makes the server assemble the build context from the verified package files, so use it whenever the supplied package already contains the Dockerfile and every file that Dockerfile reads, especially when any referenced file is binary or there are more files than you can return as bounded text; with mode package, never echo file contents, and only set context_path when the Dockerfile and its files live below that package-relative directory. Generated files are bounded UTF-8 text files and must include Dockerfile; source_path must name an explicitly selected build-context file in the supplied package. A build_context ArtifactRef that appears inside a materials environmentSpec is a placeholder from a previously published specification, not a selectable package file: never emit it and never use mode submitted for it. Use mode submitted only when the supplied files array literally contains a file whose mediaType is an archive or build-context type, and then use that file's exact path. When no such archive exists and the package does not itself provide the complete context, you must use mode generated and reproduce the package Dockerfile together with every file each COPY or ADD reads. Never emit build_context, ArtifactRef fields, fabricated build artifact or image digests, approval state, or any object-store identity: the server validates and binds those values after materialization. Preserve every complete Dockerfile FROM image reference supplied by the materials exactly, including an existing @sha256 digest; do not replace it with a tag or latest, and do not require a digest when the materials do not provide one. The server does not silently copy a submitted context when generated files were requested.
 
-Container security requires rootFilesystemPolicy read_only_required. A virtual_machine requires rootFilesystemPolicy mutable_required while userPolicy stays non_root_required (there is no mutable userPolicy value), an ssh entry on port 22, and must never use allow_all. All resource sizes and ports must be non-zero, entries must be non-empty with unique names, identifiers must be non-nil UUIDv7 strings, and retainUntil must be a UTC RFC 3339 timestamp with exactly three fractional-second digits such as 2027-08-31T00:00:00.000Z.
+Container security requires rootFilesystemPolicy read_only_required. A virtual_machine requires rootFilesystemPolicy mutable_required while userPolicy stays non_root_required (there is no mutable userPolicy value), an ssh entry on port 22, and must never use allow_all. All resource sizes and ports must be non-zero, entries must be non-empty with unique names, identifiers must be non-nil UUIDv7 strings, and retainUntil must either be null only for class course_material with disposition retain_until_revoked (the explicit permanent form), or be a UTC RFC 3339 timestamp with exactly three fractional-second digits such as 2027-08-31T00:00:00.000Z. Preserve the materials' legal retention form exactly; do not turn a permanent decision into a finite deadline or vice versa.
 
 Before returning, silently parse and self-check the complete object against the exact schema, including discriminator-specific required fields and semantic constraints. Do not return the outer EgressEnvelope, execute commands, or invent approval state. Container environments may use network mode allow_all when unrestricted outbound network access is required; virtual_machine environments must not use allow_all.
 
@@ -2278,7 +2278,7 @@ impl ClaudeCodeRuntime {
             })?;
             materializer
                 .validate_recipe_plan(&plan, "Dockerfile")
-                .map_err(|error| recipe_failure(error, audit.clone()))?;
+                .map_err(|error| recipe_failure(&error, audit.clone(), "/runtime/build_recipe"))?;
             let artifact = materializer
                 .materialize(
                     input.project_id(),
@@ -2297,7 +2297,7 @@ impl ClaudeCodeRuntime {
                         track = ?track,
                         failure_stage = "environment_build_context",
                         diagnostic_code = error.diagnostic_code(),
-                        error_kind = ?error,
+                        error_kind = error.diagnostic_code(),
                         retryable = false,
                     );
                     failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
@@ -2337,6 +2337,12 @@ impl ClaudeCodeRuntime {
             let evaluation = object.remove("evaluation").ok_or_else(|| {
                 failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone())
             })?;
+            // Parse and semantically validate the EvaluationSpec before creating a runner
+            // artifact.  A malformed evaluation must not leave an otherwise unreachable
+            // generated object behind, and the repair prompt needs the contract failure rather
+            // than the old generic syntax hint.
+            let spec = serde_json::from_value::<EvaluationSpec>(evaluation.clone())
+                .map_err(|error| evaluation_spec_failure(&evaluation, &error, audit.clone()))?;
             let plan = object.remove("runnerBuildRecipe").ok_or_else(|| {
                 tracing::warn!(
                     event = "agent.candidate_materialization.failed",
@@ -2355,7 +2361,7 @@ impl ClaudeCodeRuntime {
                 &plan,
                 "evaluation/Dockerfile",
             )
-            .map_err(|error| recipe_failure(error, audit.clone()))?;
+            .map_err(|error| recipe_failure(&error, audit.clone(), "/runnerBuildRecipe"))?;
             let materializer = self.materializer.as_ref().ok_or_else(|| {
                 tracing::error!(
                     event = "agent.candidate_materialization.failed",
@@ -2372,7 +2378,7 @@ impl ClaudeCodeRuntime {
             })?;
             materializer
                 .validate_recipe_plan(&plan, "evaluation/Dockerfile")
-                .map_err(|error| recipe_failure(error, audit.clone()))?;
+                .map_err(|error| recipe_failure(&error, audit.clone(), "/runnerBuildRecipe"))?;
             let artifact = materializer
                 .materialize_runner(
                     input.project_id(),
@@ -2391,14 +2397,10 @@ impl ClaudeCodeRuntime {
                         track = ?track,
                         failure_stage = "evaluation_runner_build_context",
                         diagnostic_code = error.diagnostic_code(),
-                        error_kind = ?error,
+                        error_kind = error.diagnostic_code(),
                         retryable = false,
                     );
                     failure_with_audit(ClaudeCodeRuntimeError::MaterializationFailed, audit.clone())
-                })?;
-            let spec =
-                serde_json::from_value::<EvaluationSpec>(evaluation.clone()).map_err(|_| {
-                    failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit.clone())
                 })?;
             let artifact_value = serde_json::to_value(&artifact).map_err(|_| {
                 tracing::error!(
@@ -3123,24 +3125,267 @@ fn failure_with_audit(
     }
 }
 
-fn recipe_failure(
-    error: crate::candidate_materializer::CandidateMaterializationError,
+#[derive(Clone, Copy)]
+struct EvaluationSchemaDiagnostic {
+    schema_path: &'static str,
+    category: &'static str,
+    constraint: &'static str,
+    diagnostic_code: &'static str,
+}
+
+fn evaluation_spec_failure(
+    evaluation: &Value,
+    error: &serde_json::Error,
     audit: ClaudeCodeAudit,
 ) -> ClaudeCodeFailure {
+    let diagnostic = evaluation_schema_diagnostic(evaluation, error);
+    tracing::warn!(
+        event = "agent.candidate_parse_failed",
+        component = "agent-service",
+        operation = "candidate.parse",
+        outcome = "rejected",
+        failure_stage = "evaluation_spec_validation",
+        schema_path = diagnostic.schema_path,
+        error_category = diagnostic.category,
+        diagnostic_code = diagnostic.diagnostic_code,
+        retryable = true,
+    );
     let mut failure = failure_with_audit(ClaudeCodeRuntimeError::SchemaInvalid, audit);
-    if let crate::candidate_materializer::CandidateMaterializationError::MissingCopySource(source) =
-        error
+    failure.repair_detail = Some(format!(
+        "The evaluation object was rejected at schema path {} ({}; {}). Required constraint: {}. Return one corrected JSON object that satisfies the complete EvaluationSpec contract.",
+        diagnostic.schema_path,
+        diagnostic.category,
+        diagnostic.diagnostic_code,
+        diagnostic.constraint,
+    ));
+    failure
+}
+
+fn evaluation_schema_diagnostic(
+    evaluation: &Value,
+    error: &serde_json::Error,
+) -> EvaluationSchemaDiagnostic {
+    if let Ok(serialized) = serde_yaml::to_string(evaluation)
+        && let Err(error) = EvaluationSpec::from_yaml(&serialized)
     {
-        // Source has already passed the package-relative path validator. Quote and bound
-        // only this path; no provider text is retained or written to diagnostic logs.
-        let source: String = source.chars().take(256).collect();
-        if let Ok(quoted) = serde_json::to_string(&source) {
-            failure.repair_detail = Some(format!(
-                "Missing local COPY/ADD source {quoted}. Include that source in the generated files array or choose the complete verified package context."
-            ));
+        return evaluation_spec_error_diagnostic(&error);
+    }
+
+    let message = error.to_string();
+    let (category, constraint) = if error.is_syntax() || error.is_eof() {
+        (
+            "json_document_invalid",
+            "evaluation must be one complete JSON object with balanced syntax",
+        )
+    } else if message.contains("missing field") {
+        (
+            "required_field_missing",
+            "all required EvaluationSpec fields must be present with their exact camelCase names",
+        )
+    } else if message.contains("unknown field") {
+        (
+            "unknown_field",
+            "EvaluationSpec objects use deny-unknown-fields and may contain only schema-defined fields",
+        )
+    } else if message.contains("invalid type") {
+        (
+            "field_type_invalid",
+            "every EvaluationSpec field must use the type declared by the contract",
+        )
+    } else if message.contains("invalid value") {
+        (
+            "field_value_invalid",
+            "enum values and discriminator fields must be one of the exact contract variants",
+        )
+    } else {
+        (
+            "deserialization_failed",
+            "evaluation must satisfy the complete EvaluationSpec schema and semantic validation",
+        )
+    };
+    EvaluationSchemaDiagnostic {
+        schema_path: serde_error_schema_path(&message),
+        category,
+        constraint,
+        diagnostic_code: "LW_EVAL_SPEC_DOCUMENT_INVALID",
+    }
+}
+
+fn evaluation_spec_error_diagnostic(error: &EvaluationSpecError) -> EvaluationSchemaDiagnostic {
+    let (schema_path, category, constraint) = match error {
+        EvaluationSpecError::InvalidDocument(_) => (
+            "/evaluation",
+            "evaluation_document_invalid",
+            "evaluation must use the exact camelCase fields, discriminators, and value types from EvaluationSpec",
+        ),
+        EvaluationSpecError::InvalidMetadata => (
+            "/evaluation/metadata",
+            "metadata_invalid",
+            "metadata.name and metadata.version must both be non-empty",
+        ),
+        EvaluationSpecError::EmptySteps => (
+            "/evaluation/spec/steps",
+            "steps_empty",
+            "spec.steps must contain at least one step",
+        ),
+        EvaluationSpecError::DuplicateStepId { .. } => (
+            "/evaluation/spec/steps",
+            "step_id_duplicate",
+            "every spec.steps entry must have a unique id",
+        ),
+        EvaluationSpecError::MissingDependency { .. } => (
+            "/evaluation/spec/steps",
+            "dependency_missing",
+            "every dependsOn entry must name a declared step id",
+        ),
+        EvaluationSpecError::DependencyCycle => (
+            "/evaluation/spec/steps",
+            "dependency_cycle",
+            "the step dependency graph must be acyclic",
+        ),
+        EvaluationSpecError::UnsafePath { .. } => (
+            "/evaluation/spec",
+            "relative_path_invalid",
+            "submission paths must be normalized relative paths and must not escape the submission root",
+        ),
+        EvaluationSpecError::InvalidCollector(_) => (
+            "/evaluation/spec/submission/collector",
+            "collector_invalid",
+            "collector inputs must be non-empty, bounded, and use a supported collector variant",
+        ),
+        EvaluationSpecError::LlmReadableNotCollected { .. } => (
+            "/evaluation/spec/submission/llmReadable",
+            "llm_readable_not_collected",
+            "every llmReadable path must be included in the frozen submission collection",
+        ),
+        EvaluationSpecError::LlmIncludeNotAllowed { .. } => (
+            "/evaluation/spec/steps",
+            "llm_include_not_allowlisted",
+            "advisory include paths must be present in submission.llmReadable",
+        ),
+        EvaluationSpecError::InvalidStepConfiguration { .. } => (
+            "/evaluation/spec/steps",
+            "step_configuration_invalid",
+            "runner, checker, phase, path, score, and execution-limit combinations must satisfy the contract",
+        ),
+        EvaluationSpecError::AggregationScoreMismatch { .. } => (
+            "/evaluation/spec/aggregation",
+            "aggregation_score_mismatch",
+            "aggregation.maxScore must equal the sum of all score.max values",
+        ),
+        EvaluationSpecError::AggregationScoreOverflow { .. } => (
+            "/evaluation/spec/aggregation",
+            "aggregation_score_overflow",
+            "the deterministic score total must fit the contract integer range",
+        ),
+        EvaluationSpecError::InvalidAggregationGate { .. } => (
+            "/evaluation/spec/aggregation/gates",
+            "aggregation_gate_invalid",
+            "every aggregation gate must reference a declared Gate step",
+        ),
+        EvaluationSpecError::TeacherApprovalRequired => (
+            "/evaluation/spec/review/teacherApprovalRequiredForRelease",
+            "teacher_approval_required",
+            "teacherApprovalRequiredForRelease must be true",
+        ),
+    };
+    EvaluationSchemaDiagnostic {
+        schema_path,
+        category,
+        constraint,
+        diagnostic_code: error.diagnostic_code(),
+    }
+}
+
+fn serde_error_schema_path(message: &str) -> &'static str {
+    for (field, path) in [
+        ("missing field `apiVersion`", "/evaluation/apiVersion"),
+        ("missing field `metadata`", "/evaluation/metadata"),
+        ("missing field `spec`", "/evaluation/spec"),
+        ("unknown field `apiVersion`", "/evaluation/apiVersion"),
+        ("unknown field `metadata`", "/evaluation/metadata"),
+        ("unknown field `spec`", "/evaluation/spec"),
+    ] {
+        if message.contains(field) {
+            return path;
         }
     }
+    "/evaluation"
+}
+
+fn recipe_failure(
+    error: &crate::candidate_materializer::CandidateMaterializationError,
+    audit: ClaudeCodeAudit,
+    schema_path: &'static str,
+) -> ClaudeCodeFailure {
+    let runtime_error = recipe_failure_runtime_error(error);
+    let error_category = match &error {
+        crate::candidate_materializer::CandidateMaterializationError::InvalidPlan => {
+            "recipe_invalid"
+        }
+        crate::candidate_materializer::CandidateMaterializationError::MissingCopySource(_) => {
+            "copy_source_missing"
+        }
+        crate::candidate_materializer::CandidateMaterializationError::Storage => {
+            "materializer_storage_failed"
+        }
+        crate::candidate_materializer::CandidateMaterializationError::ScopeUnavailable => {
+            "materializer_scope_unavailable"
+        }
+    };
+    tracing::warn!(
+        event = "agent.candidate_materialization.rejected",
+        component = "agent-service",
+        operation = "candidate.materialize",
+        outcome = "failed",
+        failure_stage = "build_recipe_validation",
+        schema_path,
+        error_category,
+        diagnostic_code = runtime_error.diagnostic_code(),
+        retryable = runtime_error == ClaudeCodeRuntimeError::SchemaInvalid,
+    );
+    let repair_detail = recipe_repair_detail(error, schema_path);
+    let mut failure = failure_with_audit(runtime_error, audit);
+    failure.repair_detail = repair_detail;
     failure
+}
+
+fn recipe_failure_runtime_error(
+    error: &crate::candidate_materializer::CandidateMaterializationError,
+) -> ClaudeCodeRuntimeError {
+    match error {
+        crate::candidate_materializer::CandidateMaterializationError::InvalidPlan
+        | crate::candidate_materializer::CandidateMaterializationError::MissingCopySource(_) => {
+            ClaudeCodeRuntimeError::SchemaInvalid
+        }
+        crate::candidate_materializer::CandidateMaterializationError::Storage
+        | crate::candidate_materializer::CandidateMaterializationError::ScopeUnavailable => {
+            ClaudeCodeRuntimeError::MaterializationFailed
+        }
+    }
+}
+
+fn recipe_repair_detail(
+    error: &crate::candidate_materializer::CandidateMaterializationError,
+    schema_path: &str,
+) -> Option<String> {
+    match error {
+        crate::candidate_materializer::CandidateMaterializationError::InvalidPlan => Some(format!(
+            "The build recipe at {schema_path} failed the materialization gate. Use exactly one of generated, package, or submitted: generated must contain the required Dockerfile and every relative COPY/ADD source; package must contain the complete context and required Dockerfile; submitted source_path must name a verified package archive or build-context file. Keep all paths relative, unique, non-empty, and within their package scope."
+        )),
+        crate::candidate_materializer::CandidateMaterializationError::MissingCopySource(source) => {
+            // Source has already passed the package-relative path validator. Quote and bound
+            // only this path; no provider text is retained or written to diagnostic logs.
+            let source: String = source.chars().take(256).collect();
+            serde_json::to_string(&source).ok().map(|quoted| {
+                format!(
+                    "Missing local COPY/ADD source {quoted} at {schema_path}. Include that source in the generated files array or choose the complete verified package context."
+                )
+            })
+        }
+        crate::candidate_materializer::CandidateMaterializationError::Storage
+        | crate::candidate_materializer::CandidateMaterializationError::ScopeUnavailable => None,
+    }
 }
 
 fn zero_usage() -> LlmUsage {
@@ -3568,8 +3813,10 @@ mod tests {
         CLAUDE_RUNTIME_PATH, ClaudeCodeCommand, ClaudeCodeProcessError, ClaudeCodeProcessOutput,
         ClaudeCodeResultEnvelope, ClaudeCodeRuntimeError, RunCancellation, TokioClaudeCodeProcess,
         decimal_to_microusd, execute_process, microusd_to_usd, platform_image_prompt,
-        provider_evaluation_schema, read_stream_until_result, usd_number_to_microusd,
+        provider_evaluation_schema, read_stream_until_result, recipe_failure_runtime_error,
+        recipe_repair_detail, usd_number_to_microusd,
     };
+    use crate::candidate_materializer::CandidateMaterializationError;
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
 
     #[test]
@@ -3656,6 +3903,32 @@ mod tests {
         candidate["runner_build_context"] = json!({"artifactId": "provider-owned"});
         assert!(!validator.is_valid(&candidate));
         Ok(())
+    }
+
+    #[test]
+    fn recipe_gate_keeps_invalid_plans_repairable_but_storage_failures_terminal() {
+        assert_eq!(
+            recipe_failure_runtime_error(&CandidateMaterializationError::InvalidPlan),
+            ClaudeCodeRuntimeError::SchemaInvalid
+        );
+        assert_eq!(
+            recipe_failure_runtime_error(&CandidateMaterializationError::Storage),
+            ClaudeCodeRuntimeError::MaterializationFailed
+        );
+        let repair = recipe_repair_detail(
+            &CandidateMaterializationError::InvalidPlan,
+            "/runnerBuildRecipe",
+        )
+        .unwrap_or_default();
+        assert!(!repair.is_empty());
+        assert!(repair.contains("/runnerBuildRecipe"));
+        assert!(
+            recipe_repair_detail(
+                &CandidateMaterializationError::ScopeUnavailable,
+                "/runnerBuildRecipe"
+            )
+            .is_none()
+        );
     }
 
     #[test]
