@@ -548,6 +548,10 @@ fn compiler_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 fn execution_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = canonical_system_read_paths(&SUBMISSION_READ_PATHS);
+    // Test profiles may inspect the materialized submission directly (for example a
+    // deterministic checker that reads `{source}`), so keep the immutable submission tree
+    // readable while leaving the evaluator tree restricted to staged support files.
+    paths.push(PathBuf::from(SUBMISSION_ROOT));
     let _ = support_paths;
     paths.push(PathBuf::from(SUPPORT_ROOT));
     // The case program consumes the compiled artifacts (the runner reads
@@ -1617,13 +1621,14 @@ impl OjWorkerError {
 mod tests {
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
+    use std::path::PathBuf;
     use std::process::Command as StdCommand;
 
     use super::{
         COMMAND_PATH_ENV, COMPILER_READ_PATHS, CompletedProcess, EVALUATOR_ROOT,
-        OJ_HELPER_FAILURE_EXIT_CODE, ProcessCapture, SUBMISSION_READ_PATHS, classify_case,
-        consume_helper_ready, create_helper_ready, ensure_helper_started, execute_process,
-        mark_helper_ready,
+        OJ_HELPER_FAILURE_EXIT_CODE, ProcessCapture, SUBMISSION_READ_PATHS, SUBMISSION_ROOT,
+        classify_case, consume_helper_ready, create_helper_ready, ensure_helper_started,
+        execute_process, execution_read_paths, mark_helper_ready,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1751,6 +1756,13 @@ mod tests {
                 .iter()
                 .any(|path| path.starts_with("/input"))
         );
+    }
+
+    #[test]
+    fn execution_filesystem_allowlist_reads_submission_without_evaluator_root() {
+        let paths = execution_read_paths(&[]);
+        assert!(paths.contains(&PathBuf::from(SUBMISSION_ROOT)));
+        assert!(!paths.contains(&PathBuf::from(EVALUATOR_ROOT)));
     }
 
     #[test]
