@@ -50,6 +50,11 @@ Copy and specialize the examples as follows:
 - `resource-capacity.json.example` → `resource-service-config/capacity.json`
 - `web-deployment.json.example` → `web-config/deployment.json`
 
+The KubeVirt provider's `gatewayNamespace` must match the
+`platform_application_namespace` used for the Helm release because the bundled
+`openssh-gateway` is deployed in that namespace. The default application
+namespace is `labweaver-system`; `gatewayPodLabel` remains `openssh-gateway`.
+
 The Resource API is exposed over its server TLS listener. Access calls use a short-lived Keycloak
 service JWT with the `resource.api.invoke` permission and the configured Access client ID, then
 carry a short-lived signed user delegation for user scope. The Access and Resource private bundles

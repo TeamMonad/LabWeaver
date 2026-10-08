@@ -556,6 +556,17 @@
            | first).data['config.yaml']) | from_yaml }}
   no_log: true
 
+- name: Require the KubeVirt SSH gateway binding to use the application namespace
+  ansible.builtin.assert:
+    that:
+      - platform_application_environment_providers | selectattr('providerKind', 'equalto', 'kubevirt') | list | length == 1
+      - >-
+        (platform_application_environment_providers
+         | selectattr('providerKind', 'equalto', 'kubevirt')
+         | first).gatewayNamespace == platform_application_namespace
+    fail_msg: PLATFORM_APPLICATION_KUBEVIRT_GATEWAY_BINDING_INVALID
+  no_log: true
+
 - name: Require one shared namespaced Harbor pull-secret identity
   ansible.builtin.assert:
     that:

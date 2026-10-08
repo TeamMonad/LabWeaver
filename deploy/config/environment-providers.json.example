@@ -17,7 +17,7 @@
     "binding": "kubevirt-primary-v1",
     "subject": "labweaver.provider.kubevirt.vm.v1",
     "providerKind": "kubevirt",
-    "gatewayNamespace": "access-system",
+    "gatewayNamespace": "labweaver-system",
     "gatewayPodLabel": "openssh-gateway",
     "collectorNamespace": "labweaver-evaluation",
     "collectorPodLabel": "evaluation-freeze-worker",

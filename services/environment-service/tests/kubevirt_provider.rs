@@ -48,6 +48,7 @@ use uuid::Uuid;
 const VM_UID: Uuid = Uuid::from_u128(1);
 const VMI_UID: Uuid = Uuid::from_u128(2);
 const ROOT_DISK_UID: Uuid = Uuid::from_u128(3);
+const PLATFORM_APPLICATION_NAMESPACE: &str = "labweaver-system";
 
 #[derive(Clone)]
 struct FixtureResolver {
@@ -557,7 +558,7 @@ fn plan_is_deterministic_private_and_digest_bound() {
         ingress.document.pointer(
             "/spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
         ),
-        Some(&json!("access-system"))
+        Some(&json!(PLATFORM_APPLICATION_NAMESPACE))
     );
     assert_eq!(
         ingress
@@ -1103,7 +1104,7 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
     assert!(ubuntu_base_disk("INVALID".to_owned()).is_err());
     assert!(
         KubeVirtSshBootstrap::new(
-            "access-system".to_owned(),
+            PLATFORM_APPLICATION_NAMESPACE.to_owned(),
             "openssh-gateway".to_owned(),
             "labweaver-evaluation".to_owned(),
             "evaluation-freeze-worker".to_owned(),
@@ -1238,7 +1239,7 @@ fn provider_with_budget_and_licensing(
             vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
             None,
             KubeVirtSshBootstrap::new(
-                "access-system".to_owned(),
+                PLATFORM_APPLICATION_NAMESPACE.to_owned(),
                 "openssh-gateway".to_owned(),
                 "labweaver-evaluation".to_owned(),
                 "evaluation-freeze-worker".to_owned(),
@@ -1831,7 +1832,7 @@ fn provider_with_runtime_policy(
             vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
             Some(policy),
             KubeVirtSshBootstrap::new(
-                "access-system".to_owned(),
+                PLATFORM_APPLICATION_NAMESPACE.to_owned(),
                 "openssh-gateway".to_owned(),
                 "labweaver-evaluation".to_owned(),
                 "evaluation-freeze-worker".to_owned(),
