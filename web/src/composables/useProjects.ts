@@ -37,8 +37,17 @@ export interface ProjectMutationResult {
   diagnostic: DiagnosticViewModel
 }
 
+function persistedProjectId(): string | null {
+  if (typeof localStorage === 'undefined') return null
+  const value = localStorage.getItem('labweaver_project_id')
+  const projectId = value?.trim()
+  return projectId || null
+}
+
 const projects = ref<AsyncState<ProjectSchema[]>>({ kind: 'idle' })
-const selectedProjectId = ref<string | null>(null)
+// Restore the browser's existing project context before the first async list
+// response so project-scoped links remain scoped during a page reload.
+const selectedProjectId = ref<string | null>(persistedProjectId())
 const acting = ref<string | null>(null)
 const outcome = ref<ProjectMutationResult | null>(null)
 let loadGeneration = 0
@@ -53,7 +62,7 @@ function preserveSelection(items: ProjectSchema[]) {
     selectedProjectId.value = null
     return
   }
-  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('labweaver_project_id') : null
+  const saved = persistedProjectId()
   if (!selectedProjectId.value || !items.some((project) => project.id === selectedProjectId.value)) {
     selectedProjectId.value = saved && items.some((project) => project.id === saved) ? saved : items[0].id
   }
