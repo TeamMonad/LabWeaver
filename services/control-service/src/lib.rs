@@ -1713,8 +1713,8 @@ impl ControlService {
              SET multipart_upload_id=$2,multipart_part_size_bytes=$3,multipart_part_count=$4,\
                  multipart_creation_lease_token=NULL,multipart_creation_lease_expires_at=NULL,\
                  updated_at=$5 \
-             WHERE upload_id=$1 AND state='pending' AND multipart_upload_id IS NULL\
-               AND multipart_creation_lease_token=$6\
+             WHERE upload_id=$1 AND state='pending' AND multipart_upload_id IS NULL \
+               AND multipart_creation_lease_token=$6 \
              RETURNING revision",
         )
         .bind(upload_id.as_uuid())
@@ -2034,12 +2034,12 @@ impl ControlService {
                     object_key,archive_bytes,archive_media_type,multipart_upload_id,\
                     disk_format,disk_path,capacity_bytes,\
                     multipart_part_size_bytes,multipart_part_count,multipart_complete_started,\
-                    expires_at,multipart_creation_lease_token,create_idempotency_key\
-               FROM control.platform_image_upload_sessions\
-              WHERE state='pending' AND multipart_upload_id IS NULL\
-                AND (multipart_creation_lease_expires_at IS NULL\
-                     OR multipart_creation_lease_expires_at<=clock_timestamp())\
-              ORDER BY updated_at,upload_id\
+                    expires_at,multipart_creation_lease_token,create_idempotency_key \
+               FROM control.platform_image_upload_sessions \
+              WHERE state='pending' AND multipart_upload_id IS NULL \
+                AND (multipart_creation_lease_expires_at IS NULL \
+                     OR multipart_creation_lease_expires_at<=clock_timestamp()) \
+              ORDER BY updated_at,upload_id \
               LIMIT 1",
         )
         .fetch_optional(&self.pool)
