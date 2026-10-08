@@ -153,16 +153,21 @@ export function usePlatformImages() {
     stopUploadStatusMonitor()
     let stopped = false
     let timer: number | null = null
+    let resolvePendingRead: (() => void) | null = null
     const stop = () => {
       stopped = true
       if (timer !== null) {
         window.clearTimeout(timer)
         timer = null
       }
+      resolvePendingRead?.()
+      resolvePendingRead = null
     }
     const waitForNextRead = () => new Promise<void>((resolve) => {
+      resolvePendingRead = resolve
       timer = window.setTimeout(() => {
         timer = null
+        resolvePendingRead = null
         resolve()
       }, UPLOAD_POLL_INTERVAL_MS)
     })
@@ -531,6 +536,7 @@ export function usePlatformImages() {
     })
     try {
       await uploadTaskForSession
+      if (transferTerminalStatus) return false
     } catch (error) {
       if (transferTerminalStatus) return false
       if (!disposed && !uploadCancelRequested) {
@@ -546,7 +552,7 @@ export function usePlatformImages() {
       uploadAbortController = null
     }
 
-    if (uploadCancelRequested || disposed) return false
+    if (transferTerminalStatus || uploadCancelRequested || disposed) return false
     state.value = {
       kind: 'processing',
       uploadId: active.uploadId,

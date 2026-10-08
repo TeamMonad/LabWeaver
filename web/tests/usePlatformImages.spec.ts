@@ -308,6 +308,72 @@ describe('usePlatformImages', () => {
     }
   })
 
+  it('keeps a terminal expiry when the PUT resolves successfully on the abort tick', async () => {
+    vi.useFakeTimers()
+    try {
+      const uploadId = '0197f0e0-0000-7000-8000-000000000033'
+      vi.mocked(createPlatformImageUpload).mockResolvedValue({
+        data: {
+          uploadId,
+          kind: 'virtual_machine' as const,
+          binding: 'ubuntu-24.04-vm-v1',
+          targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+          archiveBytes: 2048,
+          archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+          uploadTarget: {
+            uploadUrl: 'https://objects.example.test/staged-template',
+            requiredHeaders: {},
+            expiresAt: '2026-10-09T04:00:00.000Z',
+          },
+          expiresAt: '2026-10-09T04:00:00.000Z',
+          revision: 1,
+        },
+        error: undefined as never,
+      })
+      let resolvePut!: () => void
+      vi.mocked(putFileWithProgress).mockImplementation(async (_file, _url, _headers, _onProgress, signal) => {
+        await new Promise<void>((resolve) => {
+          resolvePut = resolve
+          signal?.addEventListener('abort', resolve, { once: true })
+        })
+      })
+      let resolveStatus!: (result: Awaited<ReturnType<typeof getPlatformImageUpload>>) => void
+      vi.mocked(getPlatformImageUpload).mockReturnValue(new Promise((resolve) => {
+        resolveStatus = resolve
+      }) as ReturnType<typeof getPlatformImageUpload>)
+      const images = usePlatformImages()
+      const uploadPromise = images.upload(new File(['archive'], 'template.tar'), {
+        kind: 'virtual_machine',
+        binding: 'ubuntu-24.04-vm-v1',
+        targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+        trustRevision: 1,
+        reason: '导入已评审虚拟机模板',
+        diskFormat: 'qcow2',
+        diskPath: 'disk/disk.img',
+        capacityBytes: 10737418240,
+      })
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(getPlatformImageUpload).toHaveBeenCalledOnce()
+      resolveStatus({
+        data: { uploadId, revision: 2, state: 'failed', diagnostic: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED' },
+        error: undefined as never,
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(resolvePut).toBeDefined()
+      await expect(uploadPromise).resolves.toBe(false)
+      expect(completePlatformImageUpload).not.toHaveBeenCalled()
+      expect(images.state).toMatchObject({
+        kind: 'terminal',
+        uploadId,
+        state: 'failed',
+        diagnostic: { code: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED' },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('does not let the transfer monitor replace a user cancellation race', async () => {
     vi.useFakeTimers()
     try {
