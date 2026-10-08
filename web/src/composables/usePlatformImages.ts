@@ -58,11 +58,9 @@ const UPLOAD_STATES = new Set<PlatformImageUploadState>([
   'failed',
   'cancelled',
 ])
-const TERMINAL_UPLOAD_CREATION_DIAGNOSTICS = new Set([
-  'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
+const DETERMINISTIC_UPLOAD_CREATION_DIAGNOSTICS = new Set([
   'LW_PLATFORM_IMAGE_UPLOAD_INVALID',
-  'LW_PLATFORM_IMAGE_UPLOAD_NOT_FOUND',
-  'LW_PLATFORM_IMAGE_UPLOAD_STATE_CONFLICT',
+  'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
 ])
 
 type UploadPhase = 'uploading' | 'completing'
@@ -881,10 +879,13 @@ export function usePlatformImages() {
       const problem = extractProblemDetails(session.error)
       const responseStatus = session.response?.status ?? problem?.status
       const deterministicRejection = responseStatus !== undefined
-        && responseStatus >= 400
-        && responseStatus < 500
         && problem?.retryable !== true
-        && (responseStatus !== 409 || TERMINAL_UPLOAD_CREATION_DIAGNOSTICS.has(problem?.diagnosticCode ?? ''))
+        && DETERMINISTIC_UPLOAD_CREATION_DIAGNOSTICS.has(problem?.diagnosticCode ?? '')
+        && (
+          (problem?.diagnosticCode === 'LW_PLATFORM_IMAGE_UPLOAD_INVALID'
+            && (responseStatus === 400 || responseStatus === 422))
+          || (problem?.diagnosticCode === 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED' && responseStatus === 410)
+        )
       if (deterministicRejection) {
         persistPendingUploadCreation(null)
       }

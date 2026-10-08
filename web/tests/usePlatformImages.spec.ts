@@ -284,6 +284,33 @@ describe('usePlatformImages', () => {
     expect(images.state).toMatchObject({ kind: 'error', diagnostic: { code: 'LW_PLATFORM_IMAGE_UPLOAD_INVALID' } })
   })
 
+  it('keeps the creation key after an unknown authentication rejection', async () => {
+    vi.mocked(createPlatformImageUpload)
+      .mockResolvedValueOnce({
+        error: problem('LW_AUTH_SESSION_REQUIRED', '登录状态已失效，请重新登录。'),
+        response: { status: 401 },
+      } as never)
+      .mockResolvedValueOnce({ error: new Error('request timed out') } as never)
+    const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
+    const input = {
+      kind: 'container' as const,
+      binding: 'ubuntu-24.04-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+      trustRevision: 3,
+      reason: '登录后继续上传',
+    }
+    const images = usePlatformImages()
+
+    await expect(images.upload(file, input)).resolves.toBe(false)
+    const firstKey = createPlatformImageUpload.mock.calls[0][0].headers['Idempotency-Key']
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload:create')).toContain(firstKey)
+
+    await expect(images.upload(file, input)).resolves.toBe(false)
+    expect(createPlatformImageUpload).toHaveBeenCalledTimes(2)
+    expect(createPlatformImageUpload.mock.calls[1][0].headers['Idempotency-Key']).toBe(firstKey)
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload:create')).toContain(firstKey)
+  })
+
   it('keeps the creation key when the server reports an in-progress operation', async () => {
     vi.mocked(createPlatformImageUpload)
       .mockResolvedValueOnce({
