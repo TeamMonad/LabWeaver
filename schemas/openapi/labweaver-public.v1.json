@@ -2885,7 +2885,8 @@
         "summary": "listEnvironments",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -5466,7 +5467,8 @@
         "summary": "updateProject",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -6397,7 +6399,8 @@
         "summary": "archiveProject",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -8953,7 +8956,8 @@
         "summary": "listProjectMemberships",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -9064,7 +9068,8 @@
         "summary": "addProjectMembership",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
@@ -9198,7 +9203,8 @@
         "summary": "removeProjectMembership",
         "x-labweaver-allowed-roles": [
           "teacher",
-          "student"
+          "student",
+          "platform_admin"
         ],
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [

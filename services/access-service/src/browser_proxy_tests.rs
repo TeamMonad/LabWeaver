@@ -150,6 +150,10 @@ fn control_request_record(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture keeps downstream authorization and response boundaries in one handler"
+)]
 async fn control(
     State(state): State<Authority>,
     method: Method,
@@ -188,6 +192,52 @@ async fn control(
     state.requests.lock().await.push(record);
     if method == Method::GET && uri.path() == "/admin/realms/test/users" {
         return directory_users_response();
+    }
+    let project_membership_read = method == Method::GET
+        && state.upstream == "control"
+        && uri
+            .path()
+            .strip_prefix("/api/v1/projects/")
+            .is_some_and(|value| value.split('/').count() == 2 && value.ends_with("/members"));
+    let environment_inventory_read = method == Method::GET
+        && state.upstream == "environment"
+        && uri.path() == "/api/v1/environments";
+    if (project_membership_read || environment_inventory_read)
+        && actor != Some(state.admin.to_string().as_str())
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})),
+        )
+            .into_response();
+    }
+    if project_membership_read {
+        return (
+            StatusCode::OK,
+            Json(json!([{
+                "actorId": state.admin,
+                "courseId": null,
+                "username": "admin",
+                "displayName": "Platform Admin",
+                "role": "teacher",
+                "state": "active",
+                "revision": 1,
+                "expiresAt": null
+            }])),
+        )
+            .into_response();
+    }
+    if environment_inventory_read {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "items": [],
+                "nextCursor": null,
+                "snapshotSequence": 1,
+                "snapshotAt": "2026-01-01T00:00:00.000Z"
+            })),
+        )
+            .into_response();
     }
     if actor != Some(state.admin.to_string().as_str()) {
         if method == Method::GET
@@ -349,11 +399,30 @@ async fn state(
             any(control),
         )
         .route("/api/v1/projects/{project_id}", any(control))
+        .route("/api/v1/projects/{project_id}/members", any(control))
         .route("/admin/realms/test/users", any(control))
         .with_state(authority.clone());
     let control_server_config = Arc::clone(&server_config);
     tasks.0.push(tokio::spawn(async move {
         let _ = http_transport::serve_tls(listener, router, control_server_config).await;
+    }));
+    let environment_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let environment_base = format!("https://{}/", environment_listener.local_addr()?);
+    let environment_authority = Authority {
+        upstream: "environment",
+        ..authority.clone()
+    };
+    let environment_router = Router::new()
+        .route("/api/v1/environments", any(control))
+        .with_state(environment_authority);
+    let environment_server_config = Arc::clone(&server_config);
+    tasks.0.push(tokio::spawn(async move {
+        let _ = http_transport::serve_tls(
+            environment_listener,
+            environment_router,
+            environment_server_config,
+        )
+        .await;
     }));
     let resource_listener = TcpListener::bind("127.0.0.1:0").await?;
     let resource_base = format!("https://{}/", resource_listener.local_addr()?);
@@ -380,6 +449,7 @@ async fn state(
         gateway.base_uri.clone_from(&base);
         gateway.allowed_server_sans = vec!["127.0.0.1".to_owned()];
     }
+    deployment.environment_gateway.base_uri = environment_base;
     deployment.environment_owner_resolver.resolver_uri = base.trim_end_matches('/').to_owned();
     deployment.resource_gateway.base_uri = resource_base;
     deployment.resource_gateway.allowed_server_sans = vec!["127.0.0.1".to_owned()];
@@ -441,7 +511,13 @@ async fn state(
         Arc::clone(&token_client),
         target.clone(),
     )?;
-    let environment_proxy = control_proxy.clone();
+    let environment_proxy = proxy::ControlGatewayProxy::new(
+        &deployment.environment_gateway,
+        ca.as_bytes(),
+        TransportSecurityMode::Strict,
+        Arc::clone(&token_client),
+        target.clone(),
+    )?;
     let evaluation_proxy = control_proxy.clone();
     let owner_resolver = EnvironmentOwnerResolverClient::new(
         &deployment.environment_owner_resolver.contract(),
@@ -1067,6 +1143,150 @@ async fn project_usage_reaches_resource_with_session_auth() -> Result<(), Box<dy
     assert_eq!(requests[0]["method"], "GET");
     assert_eq!(requests[0]["actor"], admin.to_string());
     assert_eq!(requests[0]["upstream"], "resource");
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the browser scenario covers two authorized upstreams and two denied roles"
+)]
+async fn platform_admin_project_reads_reach_their_distinct_upstreams_without_membership()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+    let mut tasks = Tasks(Vec::new());
+    let admin = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool, admin, &mut tasks)).await?;
+    let admin_session = session(
+        &state.pool,
+        &state.key_ring,
+        admin,
+        contracts::PlatformRole::PlatformAdmin,
+    )
+    .await?;
+    let student = Uuid::now_v7();
+    let student_session = session(
+        &state.pool,
+        &state.key_ring,
+        student,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let project_id = Uuid::now_v7();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router(state.clone());
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let admin_cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, admin_session.session_id
+    );
+    let student_cookie = format!(
+        "{}={}",
+        state.deployment.browser.session_cookie_name, student_session.session_id
+    );
+
+    let project = client
+        .get(format!("{base}/api/v1/projects/{project_id}"))
+        .header(header::COOKIE, &admin_cookie)
+        .send()
+        .await?;
+    assert_eq!(project.status(), StatusCode::OK);
+
+    let members = client
+        .get(format!("{base}/api/v1/projects/{project_id}/members"))
+        .header(header::COOKIE, &admin_cookie)
+        .send()
+        .await?;
+    assert_eq!(members.status(), StatusCode::OK);
+    assert_eq!(
+        members.json::<Value>().await?,
+        json!([{
+            "actorId": admin,
+            "courseId": null,
+            "username": "admin",
+            "displayName": "Platform Admin",
+            "role": "teacher",
+            "state": "active",
+            "revision": 1,
+            "expiresAt": null
+        }])
+    );
+
+    let environments = client
+        .get(format!(
+            "{base}/api/v1/environments?projectId={project_id}&class=work&limit=10"
+        ))
+        .header(header::COOKIE, &admin_cookie)
+        .send()
+        .await?;
+    assert_eq!(environments.status(), StatusCode::OK);
+    assert_eq!(
+        environments.json::<Value>().await?,
+        json!({
+            "items": [],
+            "nextCursor": null,
+            "snapshotSequence": 1,
+            "snapshotAt": "2026-01-01T00:00:00.000Z"
+        })
+    );
+
+    for path in [
+        format!("/api/v1/projects/{project_id}/members"),
+        format!("/api/v1/environments?projectId={project_id}&class=work&limit=10"),
+    ] {
+        let response = client
+            .get(format!("{base}{path}"))
+            .header(header::COOKIE, &student_cookie)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.json::<Value>().await?,
+            json!({"diagnosticCode": "LW_AUTH_SCOPE_DENIED"})
+        );
+    }
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 4);
+    assert!(requests.iter().any(|request| {
+        request["upstream"] == "control"
+            && request["path"] == format!("/api/v1/projects/{project_id}")
+            && request["method"] == "GET"
+            && request["actor"] == admin.to_string()
+    }));
+    assert!(requests.iter().any(|request| {
+        request["upstream"] == "control"
+            && request["path"] == format!("/api/v1/projects/{project_id}/members")
+            && request["method"] == "GET"
+            && request["actor"] == admin.to_string()
+    }));
+    assert!(requests.iter().any(|request| {
+        request["upstream"] == "environment"
+            && request["path"] == "/api/v1/environments"
+            && request["query"] == format!("projectId={project_id}&class=work&limit=10")
+            && request["method"] == "GET"
+            && request["actor"] == admin.to_string()
+    }));
+    assert!(requests.iter().any(|request| {
+        request["upstream"] == "control"
+            && request["path"] == format!("/api/v1/projects/{project_id}/members")
+            && request["actor"] == student.to_string()
+    }));
+    assert!(!requests.iter().any(|request| {
+        request["upstream"] == "environment" && request["actor"] == student.to_string()
+    }));
     Ok(())
 }
 

@@ -47,11 +47,22 @@ pub fn authorize(
             )
         }
         AuthorizationScope::Project { project_id } => {
-            let membership = active_project_membership(context, *project_id, required_roles)?;
-            (
-                membership.revision,
-                earliest(context.actor.expires_at, membership.expires_at),
-            )
+            // PlatformAdmin is a global project authority only when the operation policy grants
+            // that role; keep the requested Project scope in the decision for downstream checks.
+            if context.actor.roles.contains(&PlatformRole::PlatformAdmin)
+                && required_roles.contains(&PlatformRole::PlatformAdmin)
+            {
+                (
+                    Revision::new(1).map_err(|_| AuthorizationError::RoleDenied)?,
+                    context.actor.expires_at,
+                )
+            } else {
+                let membership = active_project_membership(context, *project_id, required_roles)?;
+                (
+                    membership.revision,
+                    earliest(context.actor.expires_at, membership.expires_at),
+                )
+            }
         }
         AuthorizationScope::Environment {
             project_id,
@@ -182,7 +193,7 @@ mod tests {
     };
     use time::OffsetDateTime;
 
-    use super::{AuthorizationContext, authorize};
+    use super::{AuthorizationContext, AuthorizationError, authorize};
 
     fn timestamp(value: &str) -> Result<UtcTimestamp, contracts::foundation::FoundationError> {
         UtcTimestamp::from_str(value)
@@ -324,6 +335,196 @@ mod tests {
             &BTreeSet::from([PlatformRole::Student]),
         );
         assert_eq!(result, Err(super::AuthorizationError::ProjectScopeDenied));
+        Ok(())
+    }
+
+    #[test]
+    fn platform_admin_project_scope_does_not_require_membership_when_policy_grants_admin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor_id = ActorId::new();
+        let project_id = ProjectId::new();
+        let expires_at = timestamp("2026-07-15T00:00:00.000Z")?;
+        let context = AuthorizationContext {
+            actor: AuthenticatedActor {
+                actor_id,
+                roles: vec![PlatformRole::PlatformAdmin],
+                expires_at,
+            },
+            course_memberships: Vec::new(),
+            project_memberships: Vec::new(),
+            now: OffsetDateTime::parse(
+                "2026-07-14T00:00:00Z",
+                &time::format_description::well_known::Rfc3339,
+            )?,
+        };
+
+        let decision = authorize(
+            &context,
+            AuthorizationScope::Project { project_id },
+            &BTreeSet::from([PlatformRole::Teacher, PlatformRole::PlatformAdmin]),
+        )?;
+
+        assert_eq!(decision.scope, AuthorizationScope::Project { project_id });
+        assert_eq!(decision.authorization_revision.get(), 1);
+        assert_eq!(decision.scope_revision.get(), 1);
+        assert_eq!(decision.valid_until, expires_at);
+        Ok(())
+    }
+
+    #[test]
+    fn project_scope_keeps_membership_fence_for_non_admins_and_excluded_admins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let actor_id = ActorId::new();
+        let requested_project = ProjectId::new();
+        let context = AuthorizationContext {
+            actor: AuthenticatedActor {
+                actor_id,
+                roles: vec![PlatformRole::Teacher],
+                expires_at: timestamp("2026-07-15T00:00:00.000Z")?,
+            },
+            course_memberships: Vec::new(),
+            project_memberships: vec![ProjectMembership {
+                course_id: None,
+                project_id: ProjectId::new(),
+                actor_id,
+                username: None,
+                display_name: None,
+                role: PlatformRole::Teacher,
+                state: MembershipState::Active,
+                revision: Revision::new(2)?,
+                expires_at: None,
+            }],
+            now: OffsetDateTime::parse(
+                "2026-07-14T00:00:00Z",
+                &time::format_description::well_known::Rfc3339,
+            )?,
+        };
+
+        assert_eq!(
+            authorize(
+                &context,
+                AuthorizationScope::Project {
+                    project_id: requested_project,
+                },
+                &BTreeSet::from([PlatformRole::Teacher]),
+            ),
+            Err(super::AuthorizationError::ProjectScopeDenied)
+        );
+
+        let excluded_admin = AuthorizationContext {
+            actor: AuthenticatedActor {
+                actor_id,
+                roles: vec![PlatformRole::PlatformAdmin],
+                expires_at: timestamp("2026-07-15T00:00:00.000Z")?,
+            },
+            course_memberships: Vec::new(),
+            project_memberships: Vec::new(),
+            now: context.now,
+        };
+        assert_eq!(
+            authorize(
+                &excluded_admin,
+                AuthorizationScope::Project {
+                    project_id: requested_project,
+                },
+                &BTreeSet::from([PlatformRole::Teacher, PlatformRole::Student]),
+            ),
+            Err(super::AuthorizationError::RoleDenied)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_operation_policies_allow_owner_and_platform_admin_but_deny_cross_project()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let owner_id = ActorId::new();
+        let project_id = ProjectId::new();
+        let other_project_id = ProjectId::new();
+        let now = OffsetDateTime::parse(
+            "2026-07-14T00:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        let expires_at = timestamp("2026-07-15T00:00:00.000Z")?;
+        let owner_context = AuthorizationContext {
+            actor: AuthenticatedActor {
+                actor_id: owner_id,
+                roles: vec![PlatformRole::Student],
+                expires_at,
+            },
+            course_memberships: Vec::new(),
+            project_memberships: vec![ProjectMembership {
+                course_id: None,
+                project_id,
+                actor_id: owner_id,
+                username: None,
+                display_name: None,
+                role: PlatformRole::Student,
+                state: MembershipState::Active,
+                revision: Revision::new(3)?,
+                expires_at: None,
+            }],
+            now,
+        };
+        let operation_ids = [
+            "updateProject",
+            "archiveProject",
+            "listProjectMemberships",
+            "addProjectMembership",
+            "removeProjectMembership",
+            "listEnvironments",
+        ];
+        for operation_id in operation_ids {
+            let operation = contracts::operation_contract(operation_id)
+                .ok_or("project operation contract missing")?;
+            let roles = operation.allowed_roles.iter().copied().collect();
+            assert!(
+                authorize(
+                    &owner_context,
+                    AuthorizationScope::Project { project_id },
+                    &roles,
+                )
+                .is_ok(),
+                "project owner must authorize {operation_id}"
+            );
+            assert_eq!(
+                authorize(
+                    &owner_context,
+                    AuthorizationScope::Project {
+                        project_id: other_project_id,
+                    },
+                    &roles,
+                ),
+                Err(AuthorizationError::ProjectScopeDenied),
+                "project owner must not cross the project fence for {operation_id}"
+            );
+        }
+
+        let admin_context = AuthorizationContext {
+            actor: AuthenticatedActor {
+                actor_id: ActorId::new(),
+                roles: vec![PlatformRole::PlatformAdmin],
+                expires_at,
+            },
+            course_memberships: Vec::new(),
+            project_memberships: Vec::new(),
+            now,
+        };
+        for operation_id in operation_ids {
+            let operation = contracts::operation_contract(operation_id)
+                .ok_or("project operation contract missing")?;
+            let roles = operation.allowed_roles.iter().copied().collect();
+            assert!(
+                authorize(
+                    &admin_context,
+                    AuthorizationScope::Project {
+                        project_id: other_project_id,
+                    },
+                    &roles,
+                )
+                .is_ok(),
+                "platform admin must authorize {operation_id}"
+            );
+        }
         Ok(())
     }
 }

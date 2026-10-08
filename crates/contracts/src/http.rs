@@ -2314,7 +2314,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2328,7 +2328,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2342,7 +2342,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2356,7 +2356,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         201,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -2370,7 +2370,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -3266,7 +3266,7 @@ pub const OPERATIONS: &[OperationContract] = &[
         200,
         false,
         true,
-        TEACHER_OR_STUDENT,
+        ALL_ROLES,
         Project
     ),
     op!(
@@ -4163,6 +4163,7 @@ mod tests {
     fn operation_ids_and_surfaces_are_sound() -> Result<(), HttpContractError> {
         validate_operation_catalog()
     }
+
     #[test]
     fn weak_etag_is_rejected() {
         assert!(matches!(
