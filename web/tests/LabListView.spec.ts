@@ -186,6 +186,7 @@ describe('LabListView', () => {
     await releaseButton.trigger('click')
     const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
     expect(dialog.props('description')).toContain('已有环境不会自动释放')
+    expect(dialog.props('description')).toContain('已建立连接不会因撤回自动断开')
     await dialog.vm.$emit('cancel')
     expect(mocks.withdrawRelease).not.toHaveBeenCalled()
 

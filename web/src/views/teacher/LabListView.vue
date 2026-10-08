@@ -200,7 +200,7 @@ const publishedReleases = computed(() => releases.releases.kind === 'success'
 const withdrawalDescription = computed(() => {
   const release = withdrawalTarget.value
   if (!release) return ''
-  return `撤回环境模板 v${release.version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问连接不会自动撤销；已有环境可以停止，但启动、重启或依赖此版本的 Work 提交会被拒绝。确认在当前项目中撤回吗？`
+  return `撤回环境模板 v${release.version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问授权不会自动撤销，已建立连接不会因撤回自动断开；它们仍受原授权、会话和环境生命周期限制。已有环境可以停止，但启动、重启或依赖此版本的 Work 提交会被拒绝。确认在当前项目中撤回吗？`
 })
 
 function openWithdrawal(release: EnvironmentTemplateReleaseViewSchema) {

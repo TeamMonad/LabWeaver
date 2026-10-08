@@ -324,7 +324,7 @@
         </div>
       </div>
       <p v-if="release.kind === 'success'" class="release-withdrawal-note">
-        撤回会阻止新的环境使用此版本；已有环境不会自动释放，已有访问连接不会自动撤销。已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。
+        撤回会阻止新的环境使用此版本；已有环境不会自动释放，已有访问授权不会自动撤销，已建立连接不会因撤回自动断开；它们仍受原授权、会话和环境生命周期限制。已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。
       </p>
     </section>
 
@@ -472,7 +472,7 @@ const canWithdrawRelease = computed(() => Boolean(
 const releaseWithdrawalDescription = computed(() => {
   const version = currentReleaseVersion.value
   if (!version) return ''
-  return `撤回 Work 模板 v${version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问连接不会自动撤销；已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。确认撤回吗？`
+  return `撤回 Work 模板 v${version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问授权不会自动撤销，已建立连接不会因撤回自动断开；它们仍受原授权、会话和环境生命周期限制。已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。确认撤回吗？`
 })
 
 watch(
