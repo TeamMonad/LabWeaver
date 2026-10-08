@@ -55,7 +55,8 @@ export async function copyAuthoritativePackage(source, destination) {
   const paths = new Set(['manifest.json'])
   for (const entry of entries) {
     const path = validatePackageRelativePath(entry?.path)
-    if (!paths.add(path)) throw new Error('REAL_EXPERIMENT_PACKAGE_MANIFEST_PATH_DUPLICATE')
+    if (paths.has(path)) throw new Error('REAL_EXPERIMENT_PACKAGE_MANIFEST_PATH_DUPLICATE')
+    paths.add(path)
   }
   const readmePath = join(source, 'README.md')
   try {
