@@ -305,13 +305,39 @@
       <div v-else class="operation-summary" role="status">
         <SvgIcon name="check_circle" size="md" aria-hidden="true" />
         <div>
-          <strong>Work 模板发布操作已接受</strong>
+          <strong>{{ releaseWithdrawal ? 'Work 模板已撤回' : 'Work 模板发布操作已接受' }}</strong>
           <code>{{ release.data.operationId }}</code>
           <a :href="release.data.statusUrl">查看发布状态</a>
-          <RouterLink class="filled-button" data-testid="work-template-resource-link" :to="{ path: '/researcher/resources', query: { projectId: props.projectId ?? undefined } }">申请 Work 资源</RouterLink>
+          <span v-if="releaseWithdrawal" class="release-withdrawn" data-testid="work-template-release-withdrawn">
+            撤回原因：{{ releaseWithdrawal.reasonCode }}
+          </span>
+          <RouterLink v-else class="filled-button" data-testid="work-template-resource-link" :to="{ path: '/researcher/resources', query: { projectId: props.projectId ?? undefined } }">申请 Work 资源</RouterLink>
+          <button
+            v-if="canWithdrawRelease"
+            type="button"
+            class="outlined-button"
+            data-testid="work-template-withdraw-release-button"
+            @click="openReleaseWithdrawal"
+          >
+            撤回 Work 模板
+          </button>
         </div>
       </div>
+      <p v-if="release.kind === 'success'" class="release-withdrawal-note">
+        撤回会阻止新的环境使用此版本；已有环境不会自动释放，已有访问连接不会自动撤销。已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。
+      </p>
     </section>
+
+    <ConfirmDialog
+      :open="withdrawalConfirmationOpen"
+      title="撤回 Work 模板版本？"
+      :description="releaseWithdrawalDescription"
+      confirm-text="撤回版本"
+      cancel-text="取消"
+      severity="warning"
+      @cancel="cancelReleaseWithdrawal"
+      @confirm="confirmReleaseWithdrawal"
+    />
   </section>
 </template>
 
@@ -321,6 +347,7 @@ import { RouterLink } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import CandidateBuildTask from '@/components/common/CandidateBuildTask.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { appendProjectEnvironmentCandidateDecision, createEnvironmentTemplateRelease, getEnvironmentTemplateRelease, getProjectEnvironmentCandidate } from '@/generated/contracts'
 import type {
@@ -330,8 +357,10 @@ import type {
   EnvironmentCandidateViewSchema,
   OperationAccepted,
   ProblemPackageSchema,
+  ReleaseWithdrawal,
 } from '@/generated/contracts'
 import { useActiveProjectLlmPolicy } from '@/composables/useActiveProjectLlmPolicy'
+import { withdrawEnvironmentTemplateReleaseByUi } from '@/composables/useEnvironmentTemplateReleases'
 import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import { useProjectProblemPackageUpload } from '@/composables/useProjectProblemPackageUpload'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
@@ -369,6 +398,9 @@ const approvingCandidate = ref(false)
 const publishingRelease = ref(false)
 const approvedCandidate = ref<CandidateApprovalSchema | null>(null)
 const release = ref<AsyncState<OperationAccepted>>({ kind: 'idle' })
+const releaseWithdrawal = ref<ReleaseWithdrawal | null>(null)
+const withdrawalConfirmationOpen = ref(false)
+const withdrawalInFlight = ref(false)
 const releaseRouteState = ref<'none' | 'loading' | 'loaded' | 'error'>('none')
 let candidateGeneration = 0
 let candidateKey = ''
@@ -420,6 +452,28 @@ const canPublishRelease = computed(() => {
   if (releaseIdRef.value && releaseRouteState.value !== 'loaded') return false
   return candidateArtifactReady.value && candidateReviewAcknowledged.value
 })
+const currentReleaseId = computed(() => {
+  if (releaseIdRef.value) return releaseIdRef.value
+  if (release.value.kind !== 'success') return null
+  const segments = release.value.data.statusUrl.split('/').filter(Boolean)
+  const id = segments[segments.length - 1]
+  return id ? decodeURIComponent(id) : null
+})
+const currentReleaseVersion = computed(() => release.value.kind === 'success' ? release.value.data.revision : null)
+const canWithdrawRelease = computed(() => Boolean(
+  props.projectId
+  && currentReleaseId.value
+  && currentReleaseVersion.value
+  && releaseRouteState.value === 'loaded'
+  && !releaseWithdrawal.value
+  && !publishingRelease.value
+  && !withdrawalInFlight.value,
+))
+const releaseWithdrawalDescription = computed(() => {
+  const version = currentReleaseVersion.value
+  if (!version) return ''
+  return `撤回 Work 模板 v${version} 后，新的环境不能使用此版本；已有环境不会自动释放，已有访问连接不会自动撤销；已有环境可以停止，但启动、重启或依赖此版本的配置提交会被拒绝。确认撤回吗？`
+})
 
 watch(
   () => agent.run,
@@ -461,6 +515,8 @@ watch(
     approvedCandidate.value = null
     candidateReviewAcknowledged.value = false
     release.value = { kind: 'idle' }
+    releaseWithdrawal.value = null
+    withdrawalConfirmationOpen.value = false
     releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     stopCandidatePolling()
     if (previousProjectId || previousRunId) upload.clear()
@@ -477,9 +533,13 @@ watch(
     releaseGeneration += 1
     if (!projectId || !releaseId) {
       releaseRouteState.value = 'none'
+      releaseWithdrawal.value = null
+      withdrawalConfirmationOpen.value = false
       if (!releaseId) release.value = { kind: 'idle' }
       return
     }
+    releaseWithdrawal.value = null
+    withdrawalConfirmationOpen.value = false
     void loadRelease(releaseId)
   },
   { immediate: true },
@@ -497,6 +557,8 @@ watch(
     approvedCandidate.value = null
     candidateReviewAcknowledged.value = false
     release.value = { kind: 'idle' }
+    releaseWithdrawal.value = null
+    withdrawalConfirmationOpen.value = false
     releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     approvalReason.value = ''
     approvalRequestKey = null
@@ -631,6 +693,7 @@ async function loadRelease(id: string, silent = false) {
     return
   }
   releaseRouteState.value = 'loaded'
+  releaseWithdrawal.value = result.data.withdrawal ?? null
   release.value = {
     kind: 'success',
     data: {
@@ -746,6 +809,7 @@ async function publishRelease() {
       return
     }
     release.value = { kind: 'success', data: result.data }
+    releaseWithdrawal.value = null
     releaseRouteState.value = 'loaded'
     const statusSegments = result.data.statusUrl.split('/').filter(Boolean)
     const releaseId = statusSegments[statusSegments.length - 1]
@@ -753,6 +817,54 @@ async function publishRelease() {
     releaseOutcome.value = makeDiagnostic('WORK_TEMPLATE_RELEASE_ACCEPTED', 'Work 模板发布操作已接受。', false)
   } finally {
     publishingRelease.value = false
+  }
+}
+
+function openReleaseWithdrawal() {
+  if (!canWithdrawRelease.value) return
+  withdrawalConfirmationOpen.value = true
+}
+
+function cancelReleaseWithdrawal() {
+  withdrawalConfirmationOpen.value = false
+}
+
+async function confirmReleaseWithdrawal() {
+  const projectId = props.projectId
+  const releaseId = currentReleaseId.value
+  const releaseVersion = currentReleaseVersion.value
+  if (!projectId || !releaseId || !releaseVersion || !canWithdrawRelease.value) return
+  withdrawalConfirmationOpen.value = false
+  withdrawalInFlight.value = true
+  try {
+    const result = await withdrawEnvironmentTemplateReleaseByUi(projectId, releaseId, releaseVersion)
+    if (result.error) {
+      if (props.projectId !== projectId || currentReleaseId.value !== releaseId) return
+      const problem = extractProblemDetails(result.error)
+      releaseOutcome.value = makeDiagnostic(
+        problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED',
+        problem?.detail ?? '撤回 Work 模板失败',
+        problem?.retryable ?? true,
+      )
+      return
+    }
+    if (props.projectId !== projectId || currentReleaseId.value !== releaseId) return
+    if (result.data.releaseId !== releaseId || result.data.releaseVersion !== releaseVersion) {
+      releaseOutcome.value = makeDiagnostic('WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED', '撤回响应与当前 Work 模板不匹配。', false)
+      return
+    }
+    releaseWithdrawal.value = result.data
+    releaseOutcome.value = makeDiagnostic('WORK_TEMPLATE_RELEASE_WITHDRAWN', 'Work 模板已撤回。', false)
+  } catch (error) {
+    if (props.projectId !== projectId || currentReleaseId.value !== releaseId) return
+    const problem = extractProblemDetails(error)
+    releaseOutcome.value = makeDiagnostic(
+      problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_WITHDRAW_FAILED',
+      problem?.detail ?? '撤回 Work 模板失败',
+      problem?.retryable ?? true,
+    )
+  } finally {
+    withdrawalInFlight.value = false
   }
 }
 
@@ -951,5 +1063,7 @@ onUnmounted(() => {
 .operation-summary div { display: grid; gap: 4px; }
 .operation-summary code { overflow-wrap: anywhere; }
 .operation-summary a { color: inherit; }
+.release-withdrawn { color: var(--md-sys-color-error); font: var(--md-sys-label-medium); }
+.release-withdrawal-note { margin: 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); line-height: 1.5; }
 @media (max-width: 680px) { .file-row, .track-row { grid-template-columns: 1fr auto; } .file-size, .file-status { justify-self: start; } .section-heading { flex-direction: column; } .section-heading--compact { flex-direction: row; } }
 </style>

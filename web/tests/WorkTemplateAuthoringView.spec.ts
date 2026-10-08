@@ -9,6 +9,7 @@ import {
   getEnvironmentTemplateRelease,
   getProjectAgentRun,
   getProjectEnvironmentCandidate,
+  withdrawEnvironmentTemplateRelease,
 } from '@/generated/contracts'
 
 const packageData = {
@@ -146,6 +147,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     getEnvironmentTemplateRelease: vi.fn(),
     getProjectEnvironmentCandidate: vi.fn(),
     getProjectAgentRun: vi.fn(),
+    withdrawEnvironmentTemplateRelease: vi.fn(),
   }
 })
 
@@ -197,6 +199,7 @@ describe('WorkTemplateAuthoringView', () => {
     vi.mocked(getProjectEnvironmentCandidate).mockImplementation(async () => ({ data: candidate as never, error: undefined as never }))
     vi.mocked(appendProjectEnvironmentCandidateDecision).mockResolvedValue({ data: approval as never, error: undefined as never })
     vi.mocked(createEnvironmentTemplateRelease).mockResolvedValue({ data: { operationId: 'operation-1', statusUrl: '/operations/operation-1' } as never, error: undefined as never })
+    vi.mocked(withdrawEnvironmentTemplateRelease).mockResolvedValue({ data: undefined as never, error: undefined as never })
   })
 
   async function mountView() {
@@ -432,6 +435,51 @@ describe('WorkTemplateAuthoringView', () => {
     expect(wrapper.find('[data-testid="work-template-release"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="work-template-release-button"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('release-1')
+    wrapper.unmount()
+  })
+
+  it('requires confirmation before withdrawing a restored Work release', async () => {
+    candidate = makeCandidate({ approvals: [approval] })
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: run as never, error: undefined as never })
+    vi.mocked(getEnvironmentTemplateRelease).mockResolvedValue({
+      data: { id: 'release-1', version: 2, withdrawal: null } as never,
+      error: undefined as never,
+    })
+    vi.mocked(withdrawEnvironmentTemplateRelease).mockResolvedValue({
+      data: {
+        releaseId: 'release-1',
+        releaseVersion: 2,
+        actorId: 'teacher-1',
+        reasonCode: 'TEACHER_WITHDRAWN',
+        withdrawnAt: '2026-09-12T10:00:00.000Z',
+      } as never,
+      error: undefined as never,
+    })
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-1', releaseId: 'release-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(getEnvironmentTemplateRelease).toHaveBeenCalledWith({ path: { projectId: 'project-1', releaseId: 'release-1' } }))
+    await vi.waitFor(() => expect(getProjectEnvironmentCandidate).toHaveBeenCalledWith({ path: { projectId: 'project-1', candidateId: 'candidate-1' } }))
+    const withdrawButton = wrapper.get('[data-testid="work-template-withdraw-release-button"]')
+    await withdrawButton.trigger('click')
+    const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
+    expect(dialog.props('description')).toContain('已有环境不会自动释放')
+    await dialog.vm.$emit('cancel')
+    expect(withdrawEnvironmentTemplateRelease).not.toHaveBeenCalled()
+
+    await withdrawButton.trigger('click')
+    await dialog.vm.$emit('confirm')
+    await vi.waitFor(() => expect(withdrawEnvironmentTemplateRelease).toHaveBeenCalledTimes(1))
+    expect(withdrawEnvironmentTemplateRelease).toHaveBeenCalledWith(expect.objectContaining({
+      path: { projectId: 'project-1', releaseId: 'release-1' },
+      headers: { 'Idempotency-Key': expect.any(String), 'If-Match': '"rev-2"' },
+      body: { reasonCode: 'TEACHER_WITHDRAWN' },
+    }))
+    expect(wrapper.text()).toContain('Work 模板已撤回')
+    expect(wrapper.find('[data-testid="work-template-resource-link"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
