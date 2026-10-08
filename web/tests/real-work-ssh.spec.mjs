@@ -11,6 +11,7 @@ import {
   typeTerminalCommand,
 } from '../e2e/support/real-gpu.mjs'
 import {
+  classifyPinnedSshSessionClose,
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
   realWorkVmWorkspaceRelativePath,
@@ -138,6 +139,16 @@ GPU 00000000:01:00.0
       [],
       { timeoutMs: 1000, outputCode: 'PROCESS_TEST', outputLimitBytes: 4 },
     )).rejects.toThrow('PROCESS_TEST_START_FAILED')
+  })
+
+  it('distinguishes a remote SSH termination from a local process signal', () => {
+    expect(classifyPinnedSshSessionClose({
+      code: 255,
+      signal: null,
+      stderr: 'Connection to gateway.example closed by remote host.',
+    })).toBe('remote_terminated')
+    expect(classifyPinnedSshSessionClose({ code: null, signal: 'SIGKILL', stderr: '' }))
+      .toBe('process_signaled')
   })
 })
 

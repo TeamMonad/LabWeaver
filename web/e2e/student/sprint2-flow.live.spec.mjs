@@ -34,15 +34,18 @@ import { runTerminalCudaProbe } from '../support/real-gpu.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
 import {
   createRealWorkSshIdentity,
+  openPinnedSshSession,
   readRealWorkVmLicenseStatus,
   readRealWorkVmWorkspaceFile,
   runRealWorkVmCudaProbe,
+  runPinnedSsh,
 } from '../support/real-work-ssh.mjs'
 import {
   addSshPublicKeyByUi as addStudentSshKeyByUi,
   deleteSshPublicKeyByUi as deleteStudentSshKeyByUi,
   issueEnvironmentSshAccessGrantByUi as issueWorkAccessGrantByUi,
   issueEnvironmentAccessGrantByUi,
+  revokeEnvironmentAccessGrantByUi,
   waitForActiveAccessGrant,
 } from '../support/ssh-access.mjs'
 import { assertNoStuckProgress, auditAccessibility, installUsabilityGuards } from '../support/usability.mjs'
@@ -564,6 +567,7 @@ test('student provisions a Work environment, configures it, and releases its cap
   let trackedRequestId = null
   let vmSshIdentity = null
   let vmSshKey = null
+  let vmSshSession = null
   let adminContext = null
   let adminPage = null
   let workRates = null
@@ -804,6 +808,52 @@ test('student provisions a Work environment, configures it, and releases its cap
         await terminalPage.close()
       }
     }
+    if (REAL_WORK_VM) {
+      const revokedGrant = accessGrant
+      const revokedEndpointGrant = sshEndpointGrant
+      vmSshSession = await openPinnedSshSession(revokedEndpointGrant, vmSshIdentity)
+      if (vmSshSession.closed) throw new Error('WORK_SSH_SESSION_CLOSED_BEFORE_REVOKE')
+
+      const revokedAccessGrant = await revokeEnvironmentAccessGrantByUi(
+        page,
+        project.id,
+        environmentId,
+        revokedGrant.id,
+      )
+      expect(revokedAccessGrant).toMatchObject({
+        id: revokedGrant.id,
+        state: 'revoked',
+        reasonCode: 'user_revoked',
+      })
+      const closedSession = await vmSshSession.waitForClose()
+      vmSshSession = null
+      if (
+        !closedSession.closed
+        || closedSession.code === null
+        || closedSession.signal !== null
+        || !['remote_terminated', 'process_exited', 'process_failed'].includes(closedSession.reasonCode)
+      ) {
+        throw new Error('WORK_SSH_SESSION_CLOSE_RESULT_INVALID')
+      }
+
+      await expect(
+        runPinnedSsh(revokedEndpointGrant, vmSshIdentity, 'printf WORK_SSH_OLD_ALIAS_ACCEPTED'),
+      ).rejects.toThrow(/^WORK_SSH_COMMAND_FAILED:(?:\d+|signal)$/)
+
+      const reissued = await issueWorkAccessGrantByUi(page, project.id, environment)
+      expect(reissued.grant.id).not.toBe(revokedGrant.id)
+      accessGrant = reissued.grant
+      expectedAccessGrantId = accessGrant.id
+      sshEndpointGrant = reissued.endpointGrant
+      revocationTargetGrant = accessGrant
+      const reissuedVmLicense = await readRealWorkVmLicenseStatus(sshEndpointGrant, vmSshIdentity)
+      expect(reissuedVmLicense).toMatchObject({
+        driverVersion: expect.any(String),
+        licenseStatus: 'Licensed',
+      })
+      const reissuedCudaResult = await runRealWorkVmCudaProbe(sshEndpointGrant, vmSshIdentity)
+      expect(reissuedCudaResult).toEqual({ count: 256, sum: 32640, max: 255 })
+    }
     await assertNoStuckProgress(page, 'student-work-environment')
     await auditAccessibility(page, 'student-work-environment')
     guards.assertCleanConsole('student-work-environment')
@@ -931,6 +981,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       if (REAL_WORK_VM) {
         const configuredConnection = await issueWorkAccessGrantByUi(page, project.id, configuredEnvironment)
         revocationTargetGrant = configuredConnection.grant
+        sshEndpointGrant = configuredConnection.endpointGrant
         const configuredPersistenceBody = await readRealWorkVmWorkspaceFile(
           configuredConnection.endpointGrant,
           vmSshIdentity,
@@ -1003,6 +1054,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       if (REAL_WORK_VM) {
         const restartedConnection = await issueWorkAccessGrantByUi(page, project.id, restartedEnvironment)
         revocationTargetGrant = restartedConnection.grant
+        sshEndpointGrant = restartedConnection.endpointGrant
         const restartedPersistenceBody = await readRealWorkVmWorkspaceFile(
           restartedConnection.endpointGrant,
           vmSshIdentity,
@@ -1192,6 +1244,11 @@ test('student provisions a Work environment, configures it, and releases its cap
       }
     }
   } finally {
+    try {
+      await vmSshSession?.close()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
     try {
       if (vmSshKey) await deleteStudentSshKeyByUi(page, vmSshKey)
     } catch (error) {

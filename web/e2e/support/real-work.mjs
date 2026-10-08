@@ -1546,6 +1546,296 @@ export async function inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
   }
 }
 
+function formatFixedDecimalScaled(value) {
+  const negative = value < 0n
+  const magnitude = negative ? -value : value
+  const whole = magnitude / FIXED_DECIMAL_SCALE
+  const fraction = (magnitude % FIXED_DECIMAL_SCALE).toString().padStart(6, '0')
+  return `${negative ? '-' : ''}${whole}.${fraction}`
+}
+
+function normalizeRealWorkCharge(charge) {
+  return {
+    id: charge?.id ?? null,
+    usageRecordId: charge?.usageRecordId ?? null,
+    projectId: charge?.projectId ?? null,
+    courseId: charge?.courseId ?? null,
+    lines: charge?.lines ?? null,
+    total: charge?.total ?? null,
+    settlement: charge?.settlement ?? null,
+    createdAt: charge?.createdAt ?? null,
+    adjustmentOf: charge?.adjustmentOf ?? null,
+    adjustmentReason: charge?.adjustmentReason ?? null,
+    adjustedBy: charge?.adjustedBy ?? null,
+    diagnosticCode: charge?.diagnosticCode ?? null,
+  }
+}
+
+function sameRealWorkCharge(left, right) {
+  return JSON.stringify(normalizeRealWorkCharge(left)) === JSON.stringify(normalizeRealWorkCharge(right))
+}
+
+function validateRealWorkAdjustmentCharge(charge, projectId) {
+  if (
+    !charge
+    || typeof projectId !== 'string'
+    || projectId === ''
+    || typeof charge.id !== 'string'
+    || charge.id === ''
+    || charge.projectId !== projectId
+    || charge.settlement !== 'settled'
+    || charge.adjustmentOf != null
+    || typeof charge.total?.currency !== 'string'
+    || !CURRENCY.test(charge.total.currency)
+    || !FIXED_DECIMAL.test(charge.total.amount ?? '')
+  ) {
+    throw new Error('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_NOT_ORIGINAL')
+  }
+  const totalScaled = fixedDecimalScaled(charge.total.amount, 'REAL_WORK_FINANCE_ADJUSTMENT_CHARGE')
+  if (totalScaled < 1n) throw new Error('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_TOO_SMALL')
+  return totalScaled
+}
+
+async function readRealWorkFinanceSnapshot(request, projectId) {
+  const encodedProjectId = encodeURIComponent(projectId)
+  const [budgetResponse, chargesResponse] = await Promise.all([
+    request.get(`/api/v1/projects/${encodedProjectId}/resource-budget`),
+    request.get(`/api/v1/projects/${encodedProjectId}/charges`),
+  ])
+  const [budget, charges] = await Promise.all([
+    expectJson(budgetResponse, 'REAL_WORK_FINANCE_BUDGET_READ_FAILED'),
+    expectJson(chargesResponse, 'REAL_WORK_FINANCE_CHARGES_READ_FAILED'),
+  ])
+  if (!budget || budget.projectId !== projectId || !Array.isArray(charges)) {
+    throw new Error('REAL_WORK_FINANCE_SNAPSHOT_INVALID')
+  }
+  return { budget, charges }
+}
+
+function validateRealWorkBudget(budget, projectId) {
+  if (
+    !budget
+    || budget.projectId !== projectId
+    || typeof budget.limit?.currency !== 'string'
+    || budget.limit.currency !== budget.warningAt?.currency
+    || budget.limit.currency !== budget.spent?.currency
+    || !CURRENCY.test(budget.limit.currency)
+    || !FIXED_DECIMAL.test(budget.limit.amount ?? '')
+    || !FIXED_DECIMAL.test(budget.warningAt.amount ?? '')
+    || !FIXED_DECIMAL.test(budget.spent.amount ?? '')
+  ) {
+    throw new Error('REAL_WORK_FINANCE_BUDGET_INVALID')
+  }
+  const limitScaled = fixedDecimalScaled(budget.limit.amount, 'REAL_WORK_FINANCE_BUDGET')
+  const warningScaled = fixedDecimalScaled(budget.warningAt.amount, 'REAL_WORK_FINANCE_BUDGET')
+  const spentScaled = fixedDecimalScaled(budget.spent.amount, 'REAL_WORK_FINANCE_BUDGET')
+  if (warningScaled > limitScaled) throw new Error('REAL_WORK_FINANCE_BUDGET_WARNING_ABOVE_LIMIT')
+  if (spentScaled > limitScaled) throw new Error('REAL_WORK_FINANCE_BUDGET_LIMIT_BELOW_SPENT')
+  return { limitScaled, warningScaled, spentScaled }
+}
+
+function findRealWorkCharge(charges, chargeId) {
+  const matches = charges.filter((charge) => charge?.id === chargeId)
+  if (matches.length !== 1) throw new Error(`REAL_WORK_FINANCE_CHARGE_NOT_UNIQUE:${chargeId}`)
+  return matches[0]
+}
+
+function waitForResponseSafely(page, predicate, options) {
+  const responsePromise = page.waitForResponse(predicate, options)
+  void responsePromise.catch(() => undefined)
+  return responsePromise
+}
+
+async function saveRealWorkBudgetByUi(page, projectId, limit, warningAt) {
+  const form = page.locator('.budget-form')
+  await expect(form).toBeVisible({ timeout: 120_000 })
+  const inputs = form.locator('input')
+  await expect(inputs).toHaveCount(3)
+  await expect(inputs.nth(0)).toHaveValue('USD')
+  await inputs.nth(1).fill(limit)
+  await inputs.nth(2).fill(warningAt)
+  const responsePromise = waitForResponseSafely(page, (response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'PUT'
+      && url.pathname === `/api/v1/projects/${projectId}/resource-budget`
+  })
+  await form.locator('button[type="submit"]').click()
+  try {
+    await expectJson(await responsePromise, 'REAL_WORK_FINANCE_BUDGET_SAVE_FAILED')
+  } catch (error) {
+    const observed = await readRealWorkFinanceSnapshot(page.request, projectId)
+    if (observed.budget.limit.amount !== limit || observed.budget.warningAt.amount !== warningAt) throw error
+    return observed
+  }
+  const observed = await readRealWorkFinanceSnapshot(page.request, projectId)
+  if (observed.budget.limit.amount !== limit || observed.budget.warningAt.amount !== warningAt) {
+    throw new Error('REAL_WORK_FINANCE_BUDGET_READBACK_MISMATCH')
+  }
+  return observed
+}
+
+function realWorkChargeRow(page, chargeId) {
+  return page.locator('.charge-row').filter({
+    has: page.locator('details.advanced-details').filter({ hasText: `费用记录 ID：${chargeId}` }),
+  })
+}
+
+async function waitForRealWorkAdjustment(request, projectId, original, expectedSpent, reason) {
+  let latest = null
+  let adjustment = null
+  await expect.poll(
+    async () => {
+      latest = await readRealWorkFinanceSnapshot(request, projectId)
+      const currentOriginal = findRealWorkCharge(latest.charges, original.id)
+      if (!sameRealWorkCharge(currentOriginal, original)) return false
+      const candidates = latest.charges.filter((charge) => charge?.adjustmentOf === original.id)
+      if (candidates.length !== 1) return false
+      adjustment = candidates[0]
+      return (
+        adjustment.settlement === 'settled'
+        && adjustment.total?.currency === original.total.currency
+        && adjustment.total?.amount === '-0.000001'
+        && adjustment.adjustmentReason === reason
+        && latest.budget.spent?.amount === expectedSpent
+      )
+    },
+    { timeout: 120_000, intervals: [500, 1000, 2000] },
+  ).toBe(true)
+  return { snapshot: latest, adjustment }
+}
+
+/**
+ * Verify one already-settled Work charge through the administrator UI. The
+ * helper changes only the selected project's budget reminder and appends one
+ * six-decimal adjustment; all diagnostic reads use GET and the original
+ * budget threshold is restored before returning.
+ */
+export async function verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, projectId, settledCharge) {
+  const originalTotalScaled = validateRealWorkAdjustmentCharge(settledCharge, projectId)
+  const adjustmentAmount = '-0.000001'
+  const adjustmentReason = '试用账目调整'
+  if (!browser || typeof browser.newContext !== 'function') throw new Error('REAL_WORK_FINANCE_BROWSER_INVALID')
+
+  const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  const page = await context.newPage()
+  let budgetOverrideApplied = false
+  let budgetRestored = false
+  let initialBudget = null
+  let failure = null
+  let result = null
+  try {
+    await navigateFromHomeByUi(page, '预算与费用')
+    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    const projectSelect = page.locator('.project-strip select')
+    await expect(projectSelect.locator(`option[value="${projectId}"]`)).toHaveCount(1, { timeout: 120_000 })
+    await projectSelect.selectOption(projectId)
+
+    const initial = await readRealWorkFinanceSnapshot(page.request, projectId)
+    const initialBudgetNumbers = validateRealWorkBudget(initial.budget, projectId)
+    initialBudget = initial.budget
+    if (initial.budget.limit.currency !== 'USD' || settledCharge.total.currency !== 'USD') {
+      throw new Error('REAL_WORK_FINANCE_USD_REQUIRED')
+    }
+    const original = findRealWorkCharge(initial.charges, settledCharge.id)
+    if (!sameRealWorkCharge(original, settledCharge)) throw new Error('REAL_WORK_FINANCE_CHARGE_READBACK_MISMATCH')
+    if (initial.charges.some((charge) => charge?.adjustmentOf === original.id)) {
+      throw new Error('REAL_WORK_FINANCE_CHARGE_ALREADY_ADJUSTED')
+    }
+    if (originalTotalScaled !== fixedDecimalScaled(original.total.amount, 'REAL_WORK_FINANCE_CHARGE')) {
+      throw new Error('REAL_WORK_FINANCE_CHARGE_AMOUNT_CHANGED')
+    }
+    if (initialBudgetNumbers.spentScaled < 1n) throw new Error('REAL_WORK_FINANCE_BUDGET_SPENT_TOO_SMALL')
+    const expectedSpentScaled = initialBudgetNumbers.spentScaled - 1n
+    const expectedSpent = formatFixedDecimalScaled(expectedSpentScaled)
+    const projectRow = realWorkChargeRow(page, original.id)
+    await expect(projectRow).toHaveCount(1, { timeout: 120_000 })
+    await expect(projectRow.locator('.state-chip')).toHaveText('已结算')
+
+    budgetOverrideApplied = true
+    await saveRealWorkBudgetByUi(page, projectId, initial.budget.limit.amount, initial.budget.spent.amount)
+    await expect(page.getByTestId('budget-threshold-warning')).toBeVisible({ timeout: 120_000 })
+
+    const adjustmentRow = realWorkChargeRow(page, original.id)
+    await expect(adjustmentRow).toHaveCount(1, { timeout: 120_000 })
+    await adjustmentRow.getByRole('button', { name: '调整', exact: true }).click()
+    const form = page.locator('.adjustment-form')
+    await expect(form).toBeVisible({ timeout: 120_000 })
+    await expect(form.locator('details.advanced-details')).toContainText(`费用记录 ID：${original.id}`)
+    await form.getByLabel('调整金额（可为负）', { exact: true }).fill(adjustmentAmount)
+    await form.getByLabel('调整原因', { exact: true }).fill(adjustmentReason)
+    const responsePromise = waitForResponseSafely(page, (response) => {
+      const url = new URL(response.url())
+      return response.request().method() === 'POST'
+        && url.pathname === `/api/v1/projects/${projectId}/charges/${original.id}/adjustments`
+    })
+    await form.getByRole('button', { name: '记录调整', exact: true }).click()
+    try {
+      await expectJson(await responsePromise, 'REAL_WORK_FINANCE_ADJUSTMENT_FAILED')
+    } catch (error) {
+      const observed = await readRealWorkFinanceSnapshot(page.request, projectId)
+      const observedAdjustment = observed.charges.find((charge) => charge?.adjustmentOf === original.id)
+      if (!observedAdjustment) throw error
+    }
+
+    const adjusted = await waitForRealWorkAdjustment(page.request, projectId, original, expectedSpent, adjustmentReason)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.getByTestId('budget-threshold-warning')).toHaveCount(0)
+    await expect(page.getByTestId('budget-limit-warning')).toHaveCount(0)
+    const originalRowAfterAdjustment = realWorkChargeRow(page, original.id)
+    await expect(originalRowAfterAdjustment).toHaveCount(1, { timeout: 120_000 })
+    await expect(originalRowAfterAdjustment.locator('.charge-main > strong')).toContainText(
+      `${original.total.amount} ${original.total.currency}`,
+    )
+    const adjustmentUiRow = page.locator('.charge-row').filter({ hasText: '调整原因：试用账目调整' })
+    await expect(adjustmentUiRow).toHaveCount(1, { timeout: 120_000 })
+
+    const restored = await saveRealWorkBudgetByUi(
+      page,
+      projectId,
+      initial.budget.limit.amount,
+      initial.budget.warningAt.amount,
+    )
+    budgetRestored = true
+    const finalSnapshot = await readRealWorkFinanceSnapshot(page.request, projectId)
+    if (
+      finalSnapshot.budget.limit.amount !== initial.budget.limit.amount
+      || finalSnapshot.budget.warningAt.amount !== initial.budget.warningAt.amount
+      || finalSnapshot.budget.spent.amount !== expectedSpent
+    ) throw new Error('REAL_WORK_FINANCE_BUDGET_RESTORE_READBACK_MISMATCH')
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: '费率、预算与费用', exact: true })).toBeVisible({ timeout: 120_000 })
+    await expect(page.locator('.budget-summary')).toBeVisible({ timeout: 120_000 })
+    await expect(page.locator('.budget-form input').nth(2)).toHaveValue(initial.budget.warningAt.amount)
+    await expect(realWorkChargeRow(page, original.id)).toHaveCount(1, { timeout: 120_000 })
+    await expect(page.locator('.charge-row').filter({ hasText: '调整原因：试用账目调整' })).toHaveCount(1, { timeout: 120_000 })
+    result = {
+      originalCharge: original,
+      adjustment: adjusted.adjustment,
+      budgetBefore: initial.budget,
+      budgetAfterAdjustment: adjusted.snapshot.budget,
+      budgetRestored: restored.budget,
+    }
+  } catch (error) {
+    failure = error
+  }
+
+  if (budgetOverrideApplied && !budgetRestored) {
+    try {
+      if (!initialBudget) throw new Error('REAL_WORK_FINANCE_BUDGET_BASELINE_MISSING')
+      await saveRealWorkBudgetByUi(page, projectId, initialBudget.limit.amount, initialBudget.warningAt.amount)
+      budgetRestored = true
+    } catch (restoreError) {
+      failure = failure
+        ? new AggregateError([failure, restoreError], 'REAL_WORK_FINANCE_BUDGET_RESTORE_FAILED')
+        : restoreError
+    }
+  }
+  await context.close()
+  if (failure) throw failure
+  return result
+}
+
 export async function waitForDeletedEnvironment(request, environmentId) {
   let latest
   await expect.poll(async () => {

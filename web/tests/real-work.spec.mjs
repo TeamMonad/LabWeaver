@@ -32,6 +32,7 @@ import {
   selectSettledExperimentUsageCharges,
   selectPendingWorkTaskResourceRequest,
   selectSettledWorkUsageChargesForLease,
+  verifyRealWorkFinanceAdjustmentByUi,
   waitForActiveRateReadback,
 } from '../e2e/support/real-work.mjs'
 
@@ -702,6 +703,34 @@ afterEach(() => {
   }
   if (savedProviderOptIn === undefined) delete process.env.LABWEAVER_E2E_REAL_PROVIDER
   else process.env.LABWEAVER_E2E_REAL_PROVIDER = savedProviderOptIn
+})
+
+describe('Real finance adjustment helper', () => {
+  const charge = {
+    id: 'charge-original',
+    projectId: 'project',
+    settlement: 'settled',
+    adjustmentOf: null,
+    total: { currency: 'USD', amount: '0.000001' },
+  }
+
+  it('rejects a derived adjustment charge before opening a browser context', async () => {
+    const browser = { newContext: vi.fn() }
+    await expect(verifyRealWorkFinanceAdjustmentByUi(browser, 'http://localhost:8080', 'project', {
+      ...charge,
+      adjustmentOf: 'charge-source',
+    })).rejects.toThrow('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_NOT_ORIGINAL')
+    expect(browser.newContext).not.toHaveBeenCalled()
+  })
+
+  it('requires at least one micro-dollar in the original settled charge', async () => {
+    const browser = { newContext: vi.fn() }
+    await expect(verifyRealWorkFinanceAdjustmentByUi(browser, 'http://localhost:8080', 'project', {
+      ...charge,
+      total: { currency: 'USD', amount: '0.000000' },
+    })).rejects.toThrow('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_TOO_SMALL')
+    expect(browser.newContext).not.toHaveBeenCalled()
+  })
 })
 
 describe('real Work VM package', () => {

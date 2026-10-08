@@ -162,9 +162,8 @@ async function preparePinnedSsh(endpointGrant, identity) {
   return { ...endpoint, knownHostsPath, sshConfigPath }
 }
 
-export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
-  const endpoint = await preparePinnedSsh(endpointGrant, identity)
-  const result = await runProcess('ssh', [
+function pinnedSshArgs(endpoint, identity, command) {
+  return [
     '-F', endpoint.sshConfigPath,
     '-T',
     '-p', String(endpoint.port),
@@ -186,7 +185,16 @@ export async function runPinnedSsh(endpointGrant, identity, command, input = und
     '-o', 'ConnectTimeout=20',
     `${endpoint.alias}@${endpoint.hostname}`,
     command,
-  ], { input, timeoutMs: 120_000, outputCode: 'WORK_SSH_COMMAND' })
+  ]
+}
+
+export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
+  const endpoint = await preparePinnedSsh(endpointGrant, identity)
+  const result = await runProcess('ssh', pinnedSshArgs(endpoint, identity, command), {
+    input,
+    timeoutMs: 120_000,
+    outputCode: 'WORK_SSH_COMMAND',
+  })
   if (result.timedOut) throw new Error('WORK_SSH_COMMAND_TIMEOUT')
   if (result.outputExceeded) throw new Error('WORK_SSH_COMMAND_OUTPUT_LIMIT')
   if (result.code !== 0) {
@@ -197,6 +205,148 @@ export async function runPinnedSsh(endpointGrant, identity, command, input = und
     throw new Error(guestDiagnostic ?? `WORK_SSH_COMMAND_FAILED:${result.code ?? 'signal'}`)
   }
   return result.stdout
+}
+
+export function classifyPinnedSshSessionClose({ code, signal, stderr = '' }) {
+  if (/(?:closed by remote host|connection reset|connection aborted|broken pipe|administratively prohibited)/i.test(stderr)) {
+    return 'remote_terminated'
+  }
+  if (signal) return 'process_signaled'
+  if (code === 0) return 'process_exited'
+  return 'process_failed'
+}
+
+/**
+ * Keep one pinned SSH connection open until the gateway closes it. The ready
+ * marker proves the authenticated session reached the guest before a grant is
+ * revoked; waitForClose() reports the actual child exit instead of treating a
+ * timeout as revocation evidence.
+ */
+export async function openPinnedSshSession(endpointGrant, identity) {
+  const endpoint = await preparePinnedSsh(endpointGrant, identity)
+  const readyMarker = `LABWEAVER_SSH_SESSION_READY_${randomUUID()}`
+  const command = `printf '%s\\n' '${readyMarker}'; while IFS= read -r line; do :; done`
+  let child
+  try {
+    child = spawn('ssh', pinnedSshArgs(endpoint, identity, command), {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+  } catch {
+    throw new Error('WORK_SSH_SESSION_START_FAILED')
+  }
+
+  const stdout = []
+  const stderr = []
+  let outputBytes = 0
+  let outputExceeded = false
+  let ready = false
+  let closed = false
+  let closeResult = null
+  let resolveReady
+  let rejectReady
+  let resolveClosed
+  const readyPromise = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  const closePromise = new Promise((resolve) => {
+    resolveClosed = resolve
+  })
+  const collect = (chunks) => (chunk) => {
+    if (outputExceeded) return
+    outputBytes += chunk.length
+    if (outputBytes > MAX_PROCESS_OUTPUT_BYTES) {
+      outputExceeded = true
+      child.kill('SIGKILL')
+      return
+    }
+    chunks.push(chunk)
+  }
+  const stdoutListener = collect(stdout)
+  child.stdout.on('data', (chunk) => {
+    stdoutListener(chunk)
+    if (!ready && !outputExceeded && Buffer.concat(stdout).toString('utf8').includes(readyMarker)) {
+      ready = true
+      resolveReady()
+    }
+  })
+  child.stderr.on('data', collect(stderr))
+  child.stdin.on('error', () => {})
+  child.once('error', () => {
+    if (!ready) rejectReady(new Error('WORK_SSH_SESSION_START_FAILED'))
+  })
+  child.once('close', (code, signal) => {
+    closed = true
+    closeResult = {
+      closed: true,
+      code,
+      signal,
+      reasonCode: outputExceeded
+        ? 'output_limit'
+        : classifyPinnedSshSessionClose({
+          code,
+          signal,
+          stderr: Buffer.concat(stderr).toString('utf8'),
+        }),
+    }
+    if (!ready) rejectReady(new Error('WORK_SSH_SESSION_CONNECT_FAILED'))
+    resolveClosed(closeResult)
+  })
+
+  let readyTimer
+  try {
+    await Promise.race([
+      readyPromise,
+      new Promise((_, reject) => {
+        readyTimer = setTimeout(() => reject(new Error('WORK_SSH_SESSION_CONNECT_TIMEOUT')), 30_000)
+      }),
+    ])
+  } catch (error) {
+    if (!closed) child.kill('SIGKILL')
+    await closePromise
+    throw error
+  } finally {
+    if (readyTimer) clearTimeout(readyTimer)
+  }
+
+  async function waitForClose(timeoutMs = 90_000) {
+    if (closed) return closeResult
+    let closeTimer
+    try {
+      return await Promise.race([
+        closePromise,
+        new Promise((_, reject) => {
+          closeTimer = setTimeout(() => reject(new Error('WORK_SSH_SESSION_CLOSE_TIMEOUT')), timeoutMs)
+        }),
+      ])
+    } finally {
+      if (closeTimer) clearTimeout(closeTimer)
+    }
+  }
+
+  async function close() {
+    if (closed) return closeResult
+    try {
+      child.stdin.end('exit\n')
+    } catch {
+      // The gateway may have already closed the pipe; closeResult captures it.
+    }
+    try {
+      return await waitForClose(10_000)
+    } catch {
+      if (!closed) child.kill('SIGKILL')
+      return await closePromise
+    }
+  }
+
+  return {
+    get closed() {
+      return closed
+    },
+    waitForClose,
+    close,
+  }
 }
 
 /**

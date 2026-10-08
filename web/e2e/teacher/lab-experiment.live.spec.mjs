@@ -32,7 +32,7 @@ import {
   waitForSettledExperimentUsageCharges,
 } from '../support/real-work.mjs'
 import { issueAccessGrantAndConnect, hasTerminalLine, typeTerminalCommand } from '../support/real-gpu.mjs'
-import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
+import { deleteEnvironmentByUi, stopEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 
 const LAB_ROOT = fileURLToPath(new URL('../../../examples', import.meta.url))
@@ -63,6 +63,13 @@ const LABS = Object.freeze({
 })
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
+const RETAIN_CUDA_SAMPLE = process.env.LABWEAVER_E2E_RETAIN_CUDA_SAMPLE?.trim() === '1'
+if (RETAIN_CUDA_SAMPLE && process.env.LABWEAVER_E2E_LAB !== 'cuda') {
+  throw new Error('LAB_EXPERIMENT_RETAIN_CUDA_SAMPLE_REQUIRES_CUDA_LAB')
+}
+if (RETAIN_CUDA_SAMPLE && LAB?.gpuMode !== 'exclusive') {
+  throw new Error('LAB_EXPERIMENT_RETAIN_CUDA_SAMPLE_REQUIRES_EXCLUSIVE_GPU')
+}
 // This journey owns real projects, environments and charges. Keep separate
 // ceilings for authoring and image build so the four-hour test budget leaves
 // time for publication, evaluation, finance and cleanup.
@@ -469,8 +476,9 @@ async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPat
 
 async function revokeEnvironmentAccessGrants(page, projectId, environmentId) {
   const listResponse = await page.request.get(`/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=100`)
-  if (listResponse.status() === 404) return
+  if (listResponse.status() === 404) return 0
   const listed = await expectJson(listResponse, 'LAB_EXPERIMENT_ACCESS_GRANTS_CLEANUP_LIST_FAILED')
+  let revokedCount = 0
   for (const item of listed.items ?? []) {
     let grantResponse = await page.request.get(`/api/v1/access-grants/${item.id}`)
     if (grantResponse.status() === 404) continue
@@ -488,7 +496,9 @@ async function revokeEnvironmentAccessGrants(page, projectId, environmentId) {
       120_000,
     )
     if (grant.state !== 'revoked') throw new Error(`LAB_EXPERIMENT_ACCESS_GRANT_NOT_REVOKED:${grant.state}`)
+    revokedCount += 1
   }
+  return revokedCount
 }
 
 async function closeExperimentEnvironment(page, projectId, environmentId) {
@@ -511,6 +521,9 @@ test('student completes a published lab experiment through the browser terminal'
     throw new Error('LAB_EXPERIMENT_RESUME_TARGET_INCOMPLETE')
   }
   const resumeExistingRun = Boolean(resumeProjectId && resumeRunId)
+  if (RETAIN_CUDA_SAMPLE && resumeExistingRun) {
+    throw new Error('LAB_EXPERIMENT_RETAIN_CUDA_SAMPLE_REQUIRES_NEW_PROJECT')
+  }
   const resumeApprovalId = process.env.LABWEAVER_E2E_LAB_RESUME_APPROVAL_ID?.trim() ?? ''
   if (resumeApprovalId && !resumeExistingRun) {
     throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_REQUIRES_TARGET')
@@ -524,6 +537,8 @@ test('student completes a published lab experiment through the browser terminal'
   let primaryFailure
   let primaryFailed = false
   let environmentReleased = false
+  let retainedCudaSampleEnvironmentId = null
+  let retainedCudaSampleCompleted = false
   let baselineChargeIds = new Set()
   const cleanupErrors = []
   const frames = []
@@ -747,7 +762,6 @@ test('student completes a published lab experiment through the browser terminal'
     studentGuards.assertCleanConsole('student-results')
 
     await closeExperimentEnvironment(studentPage, project.id, environmentId)
-    environmentReleased = true
     const financeRates = await readResourceRates(adminPage, 'LAB_EXPERIMENT_RATES_READ_FAILED')
     const finance = await waitForSettledExperimentUsageCharges(browser, baseURL, {
       projectId: project.id,
@@ -766,6 +780,127 @@ test('student completes a published lab experiment through the browser terminal'
       usageRecordIds: finance.matches.map(({ usage }) => usage.id),
       expectedCharges: finance.matches.map(({ charge }) => charge),
     })
+    environmentReleased = true
+
+    if (RETAIN_CUDA_SAMPLE) {
+      retainedCudaSampleEnvironmentId = await createEnvironmentByStudentUi(
+        studentPage,
+        project.id,
+        published.publication.environmentReleaseId,
+      )
+      const retainedEnvironment = await waitForStudentEnvironmentWithResourceApproval(
+        studentContext.request,
+        adminPage,
+        project.id,
+        retainedCudaSampleEnvironmentId,
+        studentActorId,
+      )
+      expect(retainedEnvironment).toMatchObject({
+        id: retainedCudaSampleEnvironmentId,
+        observedState: 'ready',
+        desiredState: 'running',
+        gpuAllocation: {
+          mode: 'exclusive',
+          class: LAB.gpuClass,
+        },
+      })
+
+      let sampleTerminal = await issueAccessGrantAndConnect(
+        studentPage,
+        project.id,
+        retainedCudaSampleEnvironmentId,
+      )
+      const sampleStarterCommand = "grep -Fx '#define BLOCKS 2' student/gpu_stats.cu && /usr/local/cuda/bin/nvcc -o gpu_stats student/gpu_stats.cu && ./gpu_stats > student/result.txt && cat student/result.txt"
+      const sampleStarterOutput = await typeTerminalCommand(
+        studentPage,
+        sampleTerminal.input,
+        frames,
+        sampleStarterCommand,
+        'LABWEAVER_CUDA_SAMPLE_STARTER_DONE',
+      )
+      expect(hasTerminalLine(sampleStarterOutput, 'N=256'), 'LAB_EXPERIMENT_CUDA_SAMPLE_STARTER_COUNT_MISSING').toBe(true)
+      expect(hasTerminalLine(sampleStarterOutput, 'sum=2016'), 'LAB_EXPERIMENT_CUDA_SAMPLE_STARTER_SUM_MISSING').toBe(true)
+      expect(hasTerminalLine(sampleStarterOutput, 'max=63'), 'LAB_EXPERIMENT_CUDA_SAMPLE_STARTER_MAX_MISSING').toBe(true)
+
+      sampleTerminal = await issueAccessGrantAndConnect(
+        studentPage,
+        project.id,
+        retainedCudaSampleEnvironmentId,
+      )
+      for (const [index, command] of LAB.fixCommands.entries()) {
+        const output = await typeTerminalCommand(
+          studentPage,
+          sampleTerminal.input,
+          frames,
+          command,
+          `LABWEAVER_CUDA_SAMPLE_DONE_${index}`,
+        )
+        if (index === LAB.fixCommands.length - 1) {
+          expect(hasTerminalLine(output, 'N=256'), 'LAB_EXPERIMENT_CUDA_SAMPLE_COUNT_MISSING').toBe(true)
+          expect(hasTerminalLine(output, 'sum=32640'), 'LAB_EXPERIMENT_CUDA_SAMPLE_SUM_MISSING').toBe(true)
+          expect(hasTerminalLine(output, 'max=255'), 'LAB_EXPERIMENT_CUDA_SAMPLE_MAX_MISSING').toBe(true)
+        }
+      }
+
+      const sampleBeforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
+      const sampleFrozen = await freezeStudentSourceByUi(
+        studentPage,
+        project.id,
+        retainedCudaSampleEnvironmentId,
+        LAB.frozenPath,
+      )
+      const sampleResult = await waitForProjectEvaluationResultWithResourceApproval({
+        request: studentContext.request,
+        adminPage,
+        projectId: project.id,
+        frozenSubmissionId: sampleFrozen.id,
+        studentActorId,
+        existingRequestIds: sampleBeforeRequestIds,
+      })
+      expect(sampleResult.awardedScore).toBe(sampleResult.maxScore)
+      await studentPage.goto(`/student/results?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+      const sampleCard = studentPage.locator('.result-card').filter({ hasText: sampleResult.runId })
+      await expect(sampleCard).toHaveCount(1, { timeout: 120_000 })
+      await expect(sampleCard.locator('.result-score')).toHaveText(`${sampleResult.awardedScore} / ${sampleResult.maxScore}`)
+
+      const revokedGrantCount = await revokeEnvironmentAccessGrants(
+        studentPage,
+        project.id,
+        retainedCudaSampleEnvironmentId,
+      )
+      if (revokedGrantCount < 1) throw new Error('LAB_EXPERIMENT_CUDA_SAMPLE_ACCESS_GRANT_NOT_REVOKED')
+
+      const stoppedSample = await stopEnvironmentByUi(studentPage, {
+        routePrefix: 'student',
+        projectId: project.id,
+        environmentId: retainedCudaSampleEnvironmentId,
+        label: 'LAB_EXPERIMENT_CUDA_SAMPLE_STOP',
+      })
+      expect(stoppedSample).toMatchObject({
+        id: retainedCudaSampleEnvironmentId,
+        observedState: 'stopped',
+        desiredState: 'stopped',
+      })
+      await studentPage.goto(
+        `/student/environments?projectId=${encodeURIComponent(project.id)}&environmentId=${encodeURIComponent(retainedCudaSampleEnvironmentId)}`,
+        { waitUntil: 'domcontentloaded' },
+      )
+      await expect(studentPage.getByRole('heading', { name: '项目环境控制台', exact: true })).toBeVisible({ timeout: 120_000 })
+      const stoppedSampleRead = await expectJson(
+        await studentPage.request.get(`/api/v1/environments/${encodeURIComponent(retainedCudaSampleEnvironmentId)}`),
+        'LAB_EXPERIMENT_CUDA_SAMPLE_STOPPED_READ_FAILED',
+      )
+      expect(stoppedSampleRead).toMatchObject({
+        id: retainedCudaSampleEnvironmentId,
+        observedState: 'stopped',
+        desiredState: 'stopped',
+      })
+      await expect(studentPage.getByRole('button', { name: '启动', exact: true })).toBeEnabled({ timeout: 30_000 })
+      await expect(studentPage.locator('#lifecycle-action-hint')).toContainText('工作目录和磁盘仍保留', { timeout: 120_000 })
+
+      retainedCudaSampleCompleted = true
+      console.log(`[LABWEAVER_CUDA_SAMPLE_READY] name=${project.name} project=${project.id} environment=${retainedCudaSampleEnvironmentId} release=${published.publication.environmentReleaseId}`)
+    }
   } catch (error) {
     primaryFailure = error
     primaryFailed = true
@@ -785,6 +920,16 @@ test('student completes a published lab experiment through the browser terminal'
         const cleanupPage = await studentContext.newPage()
         if (!projectId) cleanupErrors.push(new Error('LAB_EXPERIMENT_CLEANUP_PROJECT_ID_MISSING'))
         else await closeExperimentEnvironment(cleanupPage, projectId, environmentId)
+      }
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      if (retainedCudaSampleEnvironmentId && !retainedCudaSampleCompleted) {
+        if (!studentContext) studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
+        const cleanupPage = await studentContext.newPage()
+        if (!projectId) cleanupErrors.push(new Error('LAB_EXPERIMENT_CUDA_SAMPLE_CLEANUP_PROJECT_ID_MISSING'))
+        else await closeExperimentEnvironment(cleanupPage, projectId, retainedCudaSampleEnvironmentId)
       }
     } catch (error) {
       cleanupErrors.push(error)
