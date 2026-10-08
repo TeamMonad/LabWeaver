@@ -140,10 +140,23 @@ export async function issueAccessGrantAndConnect(page, projectId, environmentId)
   await environmentIdDetails.locator('summary').click()
   await expect(environmentIdDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
   const grantButton = page.getByRole('button', { name: '签发访问授权', exact: true })
-  if (await grantButton.count() > 0) {
-    await expect(grantButton).toBeEnabled({ timeout: 120_000 })
-    await grantButton.click()
-  }
+  const activeGrant = page.locator('.grant-card .env-state--active')
+  let grantState = null
+  await expect.poll(async () => {
+    if (await activeGrant.count() > 0 && await activeGrant.first().isVisible()) {
+      grantState = 'active'
+      return grantState
+    }
+    if (await grantButton.count() > 0) {
+      const loadingGrant = page.locator('.access-section [role="status"]').filter({ hasText: '加载当前访问授权' })
+      if (await loadingGrant.count() === 0 && await grantButton.isEnabled()) {
+        grantState = 'needs-issue'
+        return grantState
+      }
+    }
+    return null
+  }, { timeout: 120_000, intervals: [250, 500, 1000] }).not.toBeNull()
+  if (grantState === 'needs-issue') await grantButton.click()
   await pollJson(
     page.request,
     `/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=10`,
@@ -151,17 +164,34 @@ export async function issueAccessGrantAndConnect(page, projectId, environmentId)
     'LAB_EXPERIMENT_ACCESS_GRANT_ACTIVE_TIMEOUT',
     120_000,
   )
-  await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
-  if (await reconnect.count() > 0) {
+  const consoleTab = page.getByRole('button', { name: 'Web 控制台', exact: true })
+  await expect(consoleTab).toBeEnabled({ timeout: 120_000 })
+  await consoleTab.click()
+  const reconnect = page.getByRole('button', { name: /^(?:重新连接终端|重新签发授权并连接终端)$/ })
+  let consoleState = null
+  await expect.poll(async () => {
+    if (await reconnect.count() > 0 && await reconnect.first().isVisible()) {
+      consoleState = 'reconnect'
+      return consoleState
+    }
+    const consolePanel = page.locator('.console-panel')
+    if (await consolePanel.count() > 0 && await consolePanel.first().isVisible()) {
+      consoleState = 'panel'
+      return consoleState
+    }
+    return null
+  }, { timeout: 120_000, intervals: [250, 500, 1000] }).not.toBeNull()
+  if (consoleState === 'reconnect') {
     await expect(reconnect).toBeEnabled({ timeout: 120_000 })
     await reconnect.click()
   }
-  const consolePanel = page.locator('.console-panel')
-  await expect(consolePanel).toBeVisible({ timeout: 120_000 })
-  const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
-  await expect(openTerminal).toBeVisible({ timeout: 120_000 })
-  await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
+  const openTerminal = page.locator('.console-panel').getByRole('button', { name: '打开终端', exact: true })
+  await expect.poll(async () => {
+    const consolePanel = page.locator('.console-panel')
+    if (await consolePanel.count() === 0 || !await consolePanel.first().isVisible()) return false
+    if (await openTerminal.count() === 0) return false
+    return await openTerminal.first().isVisible() && await openTerminal.first().isEnabled()
+  }, { timeout: 120_000, intervals: [250, 500, 1000] }).toBe(true)
   await openTerminal.click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
