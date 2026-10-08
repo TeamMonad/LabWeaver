@@ -26,14 +26,14 @@ PAGE = """<!doctype html>
 <body>
 <h1>Flag Vault</h1>
 <p>Sign in to the operations console. Members receive a signed session note.</p>
-<form method="get" action="/login">
+<form method="get" action="./login">
   <label>Username <input name="u" autocomplete="off"></label>
   <label>Password <input name="p" autocomplete="off"></label>
   <button type="submit">Sign in</button>
 </form>
 <hr>
 <p>Captured the flag? Submit it for scoring.</p>
-<form method="post" action="/submit">
+<form method="post" action="./submit">
   <label>Flag <input name="flag" autocomplete="off"></label>
   <button type="submit">Submit proof</button>
 </form>

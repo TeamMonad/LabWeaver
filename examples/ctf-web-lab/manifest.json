@@ -26,7 +26,7 @@
       {
         "path": "app/server.py",
         "role": "public",
-        "sha256": "77d6ee479898a4f1d00aed5fe99878eb3dc69e4bc6ddb9373ac086a1410c1089"
+        "sha256": "0e9b82ccb82f17c945379a2330829599da744f9ddb9fa33eb554b576b755125c"
       },
       {
         "path": "environment.yaml",

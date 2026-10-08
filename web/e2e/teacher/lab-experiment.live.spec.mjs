@@ -33,7 +33,7 @@ import {
 } from '../support/real-work.mjs'
 import { issueAccessGrantAndConnect, hasTerminalLine, typeTerminalCommand } from '../support/real-gpu.mjs'
 import { deleteEnvironmentByUi, stopEnvironmentByUi } from '../support/environment-lifecycle.mjs'
-import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
+import { issueEnvironmentAccessGrantByUi, revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 
 const LAB_ROOT = fileURLToPath(new URL('../../../examples', import.meta.url))
 
@@ -60,6 +60,13 @@ const LABS = Object.freeze({
     ],
     expectImprovement: true,
   }),
+  ctf: Object.freeze({
+    root: join(LAB_ROOT, 'ctf-web-lab'),
+    frozenPath: 'student/flag.txt',
+    uploadCheckPath: 'statement.md',
+    kind: 'ctf',
+    expectImprovement: true,
+  }),
 })
 
 const LAB = LABS[process.env.LABWEAVER_E2E_LAB ?? '']
@@ -81,7 +88,7 @@ const AUTHORING_RESOURCE_PROVIDER_BINDING =
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
   || 'container-primary-v1'
 
-test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6 or LABWEAVER_E2E_LAB=cuda for a real lab acceptance run.')
+test.skip(!LAB, 'Set LABWEAVER_E2E_LAB=xv6, LABWEAVER_E2E_LAB=cuda, or LABWEAVER_E2E_LAB=ctf for a real lab acceptance run.')
 test.describe.configure({ timeout: FULL_CHAIN_TIMEOUT_MS, retries: 0 })
 
 function diagnosticCodes(run) {
@@ -500,6 +507,47 @@ async function freezeStudentSourceByUi(page, projectId, environmentId, frozenPat
   return frozen
 }
 
+async function readCtfFlagByUi(page, connectUrl) {
+  await page.goto(connectUrl, { waitUntil: 'domcontentloaded' })
+  const connectPath = new URL(connectUrl, page.url()).pathname
+  if (!connectPath.endsWith('/')) throw new Error('LAB_EXPERIMENT_CTF_CONNECT_URL_NOT_CANONICAL')
+  await expect(page.getByRole('heading', { name: 'Flag Vault', exact: true })).toBeVisible({ timeout: 120_000 })
+  const loginForm = page.locator('form').first()
+  await expect(loginForm).toHaveAttribute('action', './login')
+  const loginAction = await loginForm.getAttribute('action')
+  if (new URL(loginAction, new URL(connectUrl, page.url())).pathname !== `${connectPath}login`) {
+    throw new Error('LAB_EXPERIMENT_CTF_LOGIN_ACTION_SCOPE_INVALID')
+  }
+  await page.getByLabel('Username', { exact: true }).fill("' OR 1=1--")
+  await page.getByLabel('Password', { exact: true }).fill('incorrect-password')
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+    page.getByRole('button', { name: 'Sign in', exact: true }).click(),
+  ])
+  const body = await page.locator('body').innerText()
+  const flag = body.match(/FLAG\{[A-Za-z0-9_:-]{1,120}\}/)?.[0]
+  if (!flag) throw new Error('LAB_EXPERIMENT_CTF_FLAG_NOT_DISCLOSED')
+  return flag
+}
+
+async function submitCtfFlagByUi(page, connectUrl, flag) {
+  await page.goto(connectUrl, { waitUntil: 'domcontentloaded' })
+  const connectPath = new URL(connectUrl, page.url()).pathname
+  if (!connectPath.endsWith('/')) throw new Error('LAB_EXPERIMENT_CTF_CONNECT_URL_NOT_CANONICAL')
+  const submitForm = page.locator('form').nth(1)
+  await expect(submitForm).toHaveAttribute('action', './submit')
+  const submitAction = await submitForm.getAttribute('action')
+  if (new URL(submitAction, new URL(connectUrl, page.url())).pathname !== `${connectPath}submit`) {
+    throw new Error('LAB_EXPERIMENT_CTF_SUBMIT_ACTION_SCOPE_INVALID')
+  }
+  await page.getByLabel('Flag', { exact: true }).fill(flag)
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+    page.getByRole('button', { name: 'Submit proof', exact: true }).click(),
+  ])
+  await expect(page.locator('body')).toContainText(`proof recorded: ${flag}`)
+}
+
 async function revokeEnvironmentAccessGrants(page, projectId, environmentId) {
   const listResponse = await page.request.get(`/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=100`)
   if (listResponse.status() === 404) return 0
@@ -537,7 +585,7 @@ async function closeExperimentEnvironment(page, projectId, environmentId) {
   })
 }
 
-test('student completes a published lab experiment through the browser terminal', async ({ browser, page, baseURL }, testInfo) => {
+test('student completes a published lab experiment through its browser entry', async ({ browser, page, baseURL }, testInfo) => {
   test.setTimeout(FULL_CHAIN_TIMEOUT_MS)
   const request = page.context().request
   const teacherGuards = installUsabilityGuards(page)
@@ -670,7 +718,7 @@ test('student completes a published lab experiment through the browser terminal'
       await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
       await selectProjectByUi(page, project.id)
       if (RETAIN_CUDA_SAMPLE) await selectPermanentMaterialRetentionByUi(page)
-      packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.frozenPath)
+      packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.uploadCheckPath ?? LAB.frozenPath)
       if (RETAIN_CUDA_SAMPLE) {
         expect(packageData.retention).toMatchObject({
           retainUntil: null,
@@ -780,8 +828,20 @@ test('student completes a published lab experiment through the browser terminal'
     await auditAccessibility(studentPage, 'student-environment', testInfo)
     const beforeRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
 
-    studentPage.on('websocket', captureTerminalSocket)
-    let terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
+    const isCtfLab = LAB.kind === 'ctf'
+    let terminal = null
+    let httpGrant = null
+    let ctfFlag = null
+    if (isCtfLab) {
+      const issued = await issueEnvironmentAccessGrantByUi(studentPage, project.id, environment, 'http')
+      httpGrant = issued.endpointGrant
+      expect(httpGrant.connectUrl).toBe(`/connect/${httpGrant.id}/`)
+      ctfFlag = await readCtfFlagByUi(studentPage, httpGrant.connectUrl)
+      await submitCtfFlagByUi(studentPage, httpGrant.connectUrl, 'FLAG{student-first-attempt}')
+    } else {
+      studentPage.on('websocket', captureTerminalSocket)
+      terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
+    }
     if (process.env.LABWEAVER_E2E_LAB === 'cuda') {
       const starterCommand = "grep -Fx '#define BLOCKS 2' student/gpu_stats.cu && /usr/local/cuda/bin/nvcc -o gpu_stats student/gpu_stats.cu && ./gpu_stats > student/result.txt && cat student/result.txt"
       const output = await typeTerminalCommand(studentPage, terminal.input, frames, starterCommand, 'LABWEAVER_LAB_STARTER_DONE')
@@ -804,7 +864,27 @@ test('student completes a published lab experiment through the browser terminal'
       expect(firstResult.awardedScore).toBe(firstResult.maxScore)
     }
 
-    if (LAB.fixCommands.length > 0) {
+    if (isCtfLab) {
+      if (!ctfFlag || !httpGrant) throw new Error('LAB_EXPERIMENT_CTF_CONTEXT_MISSING')
+      expect(firstResult.awardedScore).toBeLessThan(firstResult.maxScore)
+      const afterRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
+      await submitCtfFlagByUi(studentPage, httpGrant.connectUrl, ctfFlag)
+      const afterFrozen = await freezeStudentSourceByUi(studentPage, project.id, environmentId, LAB.frozenPath)
+      const afterResult = await waitForProjectEvaluationResultWithResourceApproval({
+        request: studentContext.request,
+        adminPage,
+        projectId: project.id,
+        frozenSubmissionId: afterFrozen.id,
+        studentActorId,
+        existingRequestIds: afterRequestIds,
+      })
+      expect(afterResult.awardedScore).toBeGreaterThan(firstResult.awardedScore)
+      expect(afterResult.awardedScore).toBe(afterResult.maxScore)
+      await studentPage.goto(`/student/results?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+      const card = studentPage.locator('.result-card').filter({ hasText: afterResult.runId })
+      await expect(card).toHaveCount(1, { timeout: 120_000 })
+      await expect(card.locator('.result-score')).toHaveText(`${afterResult.awardedScore} / ${afterResult.maxScore}`)
+    } else if (LAB.fixCommands.length > 0) {
       terminal = await issueAccessGrantAndConnect(studentPage, project.id, environmentId)
       for (const [index, command] of LAB.fixCommands.entries()) {
         const output = await typeTerminalCommand(studentPage, terminal.input, frames, command, `LABWEAVER_LAB_DONE_${index}`)
