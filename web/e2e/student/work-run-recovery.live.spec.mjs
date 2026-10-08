@@ -23,6 +23,7 @@ import { issueEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 import { hasTerminalLine, issueAccessGrantAndConnect, typeTerminalCommand } from '../support/real-gpu.mjs'
 
 const RECOVERY_ENABLED = process.env.LABWEAVER_E2E_WORK_RECOVERY === '1'
+const RESUME_ACCEPTED = process.env.LABWEAVER_E2E_WORK_RECOVERY_RESUME_ACCEPTED === '1'
 const PROJECT_ID = process.env.LABWEAVER_E2E_RECOVERY_PROJECT_ID?.trim() ?? ''
 const RUN_ID = process.env.LABWEAVER_E2E_RECOVERY_RUN_ID?.trim() ?? ''
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
@@ -112,13 +113,64 @@ function assertRetryableFailedRun(run) {
   }
 }
 
+function inspectAcceptedResumeRun(run, projectId, runId) {
+  assertWorkAuthoringRun(run, projectId, runId)
+  if (!Array.isArray(run.tracks) || run.tracks.length !== 1 || run.tracks[0]?.kind !== 'environment') {
+    throw new Error('LW_WORK_RECOVERY_RESUME_TRACK_SCOPE_INVALID')
+  }
+  const attempts = environmentTrack(run).attempts ?? []
+  if (attempts.length > 2) throw new Error('LW_WORK_RECOVERY_RESUME_ATTEMPT_ALREADY_RETRIED')
+  const numbers = attempts.map((attempt) => attempt.number)
+  if (new Set(numbers).size !== numbers.length || numbers.some((number) => ![1, 2].includes(number))) {
+    throw new Error('LW_WORK_RECOVERY_RESUME_ATTEMPT_NUMBER_INVALID')
+  }
+  const first = attempts.find((attempt) => attempt.number === 1)
+  if (!first || !['failed', 'cancelled'].includes(first.state)) {
+    throw new Error('LW_WORK_RECOVERY_RESUME_ATTEMPT1_INVALID')
+  }
+  if (attempts.length !== 2 || !numbers.includes(2)) throw new Error('LW_WORK_RECOVERY_RESUME_ATTEMPT2_MISSING')
+  const second = attempts.find((attempt) => attempt.number === 2)
+  if (!second || (run.state !== 'requested' && run.state !== 'running' && run.state !== 'awaiting_approval' && run.state !== 'succeeded')) {
+    if (run.state === 'failed' || run.state === 'cancelled' || ['failed', 'cancelled'].includes(second?.state)) {
+      throw new Error(`LW_WORK_RECOVERY_RESUME_RUN_TERMINAL:${run.state}:${second?.state ?? 'missing'}`)
+    }
+    throw new Error('LW_WORK_RECOVERY_RESUME_ATTEMPT2_INVALID')
+  }
+  if (!ACTIVE_ATTEMPT_STATES.has(second.state) && second.state !== 'succeeded') {
+    throw new Error(`LW_WORK_RECOVERY_RESUME_ATTEMPT2_INVALID:${second.state}`)
+  }
+  if (second.state === 'succeeded' && run.state !== 'succeeded') {
+    throw new Error(`LW_WORK_RECOVERY_RESUME_RUN_STATE_INVALID:${run.state}`)
+  }
+  return { run, attempt: second }
+}
+
+async function assertNoExistingWorkRelease(request, projectId, runId) {
+  // Work environments are created only from a published release; the release
+  // binding is the authoritative duplicate marker for this run.
+  const releasePage = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/environment-template-releases?limit=100`),
+    'LW_WORK_RECOVERY_RESUME_RELEASES_READ_FAILED',
+  )
+  if (!releasePage || !Array.isArray(releasePage.items)) {
+    throw new Error('LW_WORK_RECOVERY_RESUME_RELEASES_READ_INVALID')
+  }
+  if (releasePage.nextCursor !== undefined && releasePage.nextCursor !== null) {
+    throw new Error('LW_WORK_RECOVERY_RESUME_RELEASES_LIST_INCOMPLETE')
+  }
+  const releases = releasePage.items
+  const runReleases = releases.filter((release) => release?.agentRunId === runId)
+  if (runReleases.length > 0) throw new Error(`LW_WORK_RECOVERY_RESUME_RELEASE_ALREADY_EXISTS:${runReleases.length}`)
+}
+
 async function approvePendingWorkAuthoringResourceByUi(adminPage, {
   projectId,
   runId,
   requesterId,
   approvedRequestIds,
+  run: suppliedRun = null,
 }) {
-  const run = await readWorkAuthoringRun(
+  const run = suppliedRun ?? await readWorkAuthoringRun(
     adminPage.request,
     projectId,
     runId,
@@ -181,6 +233,29 @@ async function waitForRetriedAuthoringRun(request, adminPage, projectId, runId, 
     return true
   }, { timeout: AUTHORING_TIMEOUT_MS, intervals: [1000, 2000, 3000] }).toBe(true)
   return latest
+}
+
+async function waitForAcceptedAuthoringRun(request, adminPage, projectId, runId, requesterId) {
+  const approvedRequestIds = new Set()
+  let latest = null
+  await expect.poll(async () => {
+    const response = await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/agent-runs/${encodeURIComponent(runId)}`)
+    latest = inspectAcceptedResumeRun(
+      await expectJson(response, 'LW_WORK_RECOVERY_RESUME_RUN_READ_FAILED'),
+      projectId,
+      runId,
+    )
+    if (latest.attempt.state === 'succeeded') return true
+    await approvePendingWorkAuthoringResourceByUi(adminPage, {
+      projectId,
+      runId,
+      requesterId,
+      approvedRequestIds,
+      run: latest.run,
+    })
+    return false
+  }, { timeout: AUTHORING_TIMEOUT_MS, intervals: [1000, 2000, 3000] }).toBe(true)
+  return latest.run
 }
 
 async function waitForEnvironmentReady(request, projectId, environmentId) {
@@ -328,7 +403,7 @@ async function runWorkTerminalCommand(page, projectId, environmentId, command, m
   }
 }
 
-test('student retries the exact failed Work run once and completes its normal environment lifecycle', async ({ page, browser, baseURL }) => {
+test('student retries or resumes the exact failed Work run and completes its normal environment lifecycle', async ({ page, browser, baseURL }) => {
   test.setTimeout(14_400_000)
   test.skip(!RECOVERY_ENABLED, 'set LABWEAVER_E2E_WORK_RECOVERY=1 with the exact recovery project and run IDs')
   requireRecoveryIds()
@@ -354,36 +429,51 @@ test('student retries the exact failed Work run once and completes its normal en
     if (!Array.isArray(baselineCharges)) throw new Error('LW_WORK_RECOVERY_BASELINE_CHARGES_INVALID')
     baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
 
-    const initialRun = await readWorkAuthoringRun(page.request, PROJECT_ID, RUN_ID)
-    assertRetryableFailedRun(initialRun)
     const studentActorId = await readActorId(page.request)
+    let run
+    if (RESUME_ACCEPTED) {
+      // Resume starts only after the accepted retry has produced the real
+      // AgentRun attempt 2 and never sends another retry mutation.
+      await assertNoExistingWorkRelease(page.request, PROJECT_ID, RUN_ID)
+      await openExactRunFromHistory(page, PROJECT_ID, RUN_ID)
+      run = await waitForAcceptedAuthoringRun(
+        page.request,
+        adminPage,
+        PROJECT_ID,
+        RUN_ID,
+        studentActorId,
+      )
+    } else {
+      const initialRun = await readWorkAuthoringRun(page.request, PROJECT_ID, RUN_ID)
+      assertRetryableFailedRun(initialRun)
 
-    await openExactRunFromHistory(page, PROJECT_ID, RUN_ID)
-    const retry = page.getByRole('button', { name: '重试环境候选生成', exact: true })
-    await expect(retry).toBeVisible({ timeout: 120_000 })
-    await expect(retry).toBeEnabled()
-    const retryResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/projects/${PROJECT_ID}/agent-runs/${RUN_ID}/tracks/environment/retry`
-    })
-    await retry.click()
-    const retryResponse = await retryResponsePromise
-    const retryHeaders = retryResponse.request().headers()
-    expect(retryHeaders['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i)
-    expect(retryHeaders['if-match']).toBe(`"rev-${initialRun.revision}"`)
-    const acceptedRetry = await expectJson(retryResponse, 'LW_WORK_RECOVERY_TRACK_RETRY_FAILED')
-    expect(acceptedRetry).toMatchObject({ id: RUN_ID, projectId: PROJECT_ID })
-    expect(acceptedRetry.revision).toBeGreaterThan(initialRun.revision)
+      await openExactRunFromHistory(page, PROJECT_ID, RUN_ID)
+      const retry = page.getByRole('button', { name: '重试环境候选生成', exact: true })
+      await expect(retry).toBeVisible({ timeout: 120_000 })
+      await expect(retry).toBeEnabled()
+      const retryResponsePromise = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'POST'
+          && url.pathname === `/api/v1/projects/${PROJECT_ID}/agent-runs/${RUN_ID}/tracks/environment/retry`
+      })
+      await retry.click()
+      const retryResponse = await retryResponsePromise
+      const retryHeaders = retryResponse.request().headers()
+      expect(retryHeaders['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/i)
+      expect(retryHeaders['if-match']).toBe(`"rev-${initialRun.revision}"`)
+      const acceptedRetry = await expectJson(retryResponse, 'LW_WORK_RECOVERY_TRACK_RETRY_FAILED')
+      expect(acceptedRetry).toMatchObject({ id: RUN_ID, projectId: PROJECT_ID })
+      expect(acceptedRetry.revision).toBeGreaterThan(initialRun.revision)
 
-    let run = await waitForRetriedAuthoringRun(
-      page.request,
-      adminPage,
-      PROJECT_ID,
-      RUN_ID,
-      studentActorId,
-      acceptedRetry.revision,
-    )
+      run = await waitForRetriedAuthoringRun(
+        page.request,
+        adminPage,
+        PROJECT_ID,
+        RUN_ID,
+        studentActorId,
+        acceptedRetry.revision,
+      )
+    }
     if (run.state !== 'succeeded') throw new Error(`LW_WORK_RECOVERY_RUN_FAILED_AFTER_RETRY:${run.state}`)
     const candidateId = environmentTrack(run).candidateId
     if (!candidateId) throw new Error('LW_WORK_RECOVERY_CANDIDATE_MISSING')
