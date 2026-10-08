@@ -192,6 +192,57 @@ async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter
   }
 }
 
+async function waitForFirstCompletionFaultOrUiFailure(page, faultPromise, timeout, isFaultInjectionInProgress) {
+  let faultSettled = false
+  let pollCancelled = false
+  let latestDiagnostic = null
+  const faultOutcome = faultPromise.then(
+    (url) => {
+      faultSettled = true
+      return { kind: 'fault', url }
+    },
+    (error) => {
+      faultSettled = true
+      throw error
+    },
+  )
+  void faultOutcome.catch(() => undefined)
+
+  const diagnosticOrFault = expect.poll(async () => {
+    if (pollCancelled) return 'cancelled'
+    if (faultSettled) return 'fault'
+    if (isFaultInjectionInProgress()) return 'pending'
+    const diagnostic = await readUploadUiDiagnostic(page)
+    if (faultSettled) return 'fault'
+    if (isFaultInjectionInProgress()) return 'pending'
+    if (diagnostic) {
+      latestDiagnostic = diagnostic
+      return 'diagnostic'
+    }
+    return 'pending'
+  }, {
+    timeout,
+    intervals: [500, 1000, 2000],
+  }).toMatch(/^(fault|diagnostic)$/).then(() => {
+    if (faultSettled) return faultOutcome
+    if (!latestDiagnostic) throw new Error('LW_VGPU_IMAGE_UPLOAD_UI_DIAGNOSTIC_MISSING')
+    return { kind: 'diagnostic', failure: latestDiagnostic }
+  })
+  void diagnosticOrFault.catch(() => undefined)
+
+  try {
+    const outcome = await Promise.race([faultOutcome, diagnosticOrFault])
+    if (outcome.kind === 'diagnostic') {
+      const error = new Error(`LW_VGPU_IMAGE_UPLOAD_UI_FAILED:${outcome.failure.code}:${outcome.failure.message}`)
+      error.code = outcome.failure.code
+      throw error
+    }
+    return outcome.url
+  } finally {
+    pollCancelled = true
+  }
+}
+
 async function waitForUploadSession(page, input) {
   const uploadCard = await fillVmUploadForm(page, input, '导入已评审的 vGPU guest image。')
   const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
@@ -459,6 +510,7 @@ test('platform administrator retries a real VM import after a network failure th
   // the archive is still the real operator-supplied OCI/VM input and the retry
   // below uses the same session and idempotency key through the normal UI.
   let abortFirstCompletion = true
+  let firstCompletionFaultInProgress = false
   let firstCompletionFaultResolve
   let firstCompletionFaultReject
   const firstCompletionFault = new Promise((resolve, reject) => {
@@ -469,6 +521,7 @@ test('platform administrator retries a real VM import after a network failure th
   await page.route('**/api/v1/admin/images/uploads/*/complete', async (route) => {
     if (!abortFirstCompletion) return route.continue()
     abortFirstCompletion = false
+    firstCompletionFaultInProgress = true
     try {
       await page.context().setOffline(true)
       await route.abort('failed')
@@ -476,13 +529,21 @@ test('platform administrator retries a real VM import after a network failure th
     } catch (error) {
       firstCompletionFaultReject(error)
       throw error
+    } finally {
+      firstCompletionFaultInProgress = false
     }
   })
   let primaryError
   let cleanupError
+  let session
   try {
-    const { session } = await waitForUploadSession(page, INPUT)
-    const firstCompletionUrl = await firstCompletionFault
+    ({ session } = await waitForUploadSession(page, INPUT))
+    const firstCompletionUrl = await waitForFirstCompletionFaultOrUiFailure(
+      page,
+      firstCompletionFault,
+      uploadCompletionTimeout(session),
+      () => firstCompletionFaultInProgress,
+    )
     if (firstCompletionUrl.pathname !== `/api/v1/admin/images/uploads/${session.uploadId}/complete`) {
       throw new Error('LW_VGPU_IMAGE_COMPLETION_UPLOAD_ID_MISMATCH')
     }
@@ -531,10 +592,14 @@ test('platform administrator retries a real VM import after a network failure th
       cleanupError ??= error
     }
     try {
-      const cancelButton = page.locator('.upload-status').getByRole('button', { name: '取消上传', exact: true })
-      if (await cancelButton.count() > 0 && await cancelButton.first().isVisible()) {
-        await cancelButton.first().click()
-        await expect(page.locator('.upload-status')).toContainText('镜像导入：已取消', { timeout: 120_000 })
+      if (session?.uploadId) {
+        const status = await expectJson(
+          await page.request.get(`/api/v1/admin/images/uploads/${encodeURIComponent(session.uploadId)}`),
+          'LW_VGPU_IMAGE_RETRY_CLEANUP_STATUS_READ_FAILED',
+        )
+        if (status.state !== 'imported') {
+          await cleanupCancelledUploadThroughUi(page, INPUT, session.uploadId)
+        }
       }
     } catch (error) {
       cleanupError ??= error
