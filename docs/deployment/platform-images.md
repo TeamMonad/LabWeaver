@@ -10,6 +10,10 @@ Refresh and retry reuse the same upload and Agent import job.
 The signed URL lifetime also bounds acceptance of completion. An abandoned upload
 that never completes becomes `failed` with `LW_PLATFORM_IMAGE_UPLOAD_EXPIRED`; choose
 the archive again to start a new upload. Already accepted imports continue after the URL expires.
+The checked-in Control deployment profile gives new archive uploads a one-hour (`3600` second)
+session. This is a session lifetime bound, not a throughput guarantee: an upload that still has
+not finished after one hour expires. Sessions created before a configuration rollout keep their
+persisted expiry time.
 
 Control freezes the archive's exact object version before enqueueing Agent work. The
 Control credential needs `s3:ListBucketVersions` restricted to the configured bucket and

@@ -185,6 +185,10 @@ platform_application_keycloak_required_users: [platform-teacher, platform-studen
 platform_application_access_seed_file: ""
 platform_application_chart_source: "{{ playbook_dir }}/../../helm/labweaver"
 platform_application_values_files: []
+# Runtime upload lifetimes are fields in the reviewed configuration bundle,
+# not Ansible role defaults. The Control profile keeps object_store and control
+# uploadTtlSeconds at 3600 seconds for new sessions; the role applies that
+# bundle verbatim and never rewrites existing session metadata.
 platform_application_configuration_bundle: ""
 platform_application_configuration_manifest: "{{ playbook_dir }}/../../config/platform-bundle-manifest.json"
 platform_application_nats_credential_validator: "{{ playbook_dir }}/../../../tools/validate_nats_user_credentials.py"

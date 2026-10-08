@@ -13,6 +13,8 @@ imagePullSecrets: []
 # The private configuration bundle is applied by Ansible before Helm. Binding
 # its immutable digest to every Pod template ensures services that read their
 # configuration only during startup are rolled whenever that bundle changes.
+# Control's uploadTtlSeconds (3600 seconds in the checked-in profile) is owned
+# by that bundle; this chart has no second upload-TTL setting.
 deploymentIdentity:
   configurationBundleSha256: ""
 
