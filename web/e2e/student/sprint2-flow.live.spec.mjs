@@ -7,6 +7,7 @@ import {
   createProjectByUi,
   configureProjectPolicyByUi,
   expectJson,
+  navigateFromHomeByUi,
   pollEnvironmentCandidate,
   pollJson,
   selectProjectByUi,
@@ -66,6 +67,10 @@ const VM_PERSISTENCE_MARKER_PATH = 'workspace/persistence-marker.txt'
 const FULL_CHAIN_TIMEOUT_MS = 14_400_000
 const AUTHORING_RUN_TIMEOUT_MS = 9_000_000
 const CANDIDATE_BUILD_TIMEOUT_MS = 3_600_000
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const EXISTING_PROJECT_ID = process.env.LABWEAVER_E2E_WORK_PROJECT_ID?.trim() ?? ''
+const EXISTING_PROJECT_MODE = Boolean(EXISTING_PROJECT_ID)
+const EXISTING_PROJECT_MODEL = 'qwen3.6:35b'
 const REAL_WORK_VM = realWorkVmConfig()
 const REAL_WORK_CONFIG = realWorkConfig({ virtualMachine: Boolean(REAL_WORK_VM) })
 const REAL_WORK_RESUME = realWorkResumeConfig()
@@ -77,7 +82,16 @@ const AUTHORING_RESOURCE_PROVIDER_BINDING =
 const WORK_PROVIDER_BINDING = REAL_WORK_VM?.providerBinding
   ?? process.env.LABWEAVER_E2E_PROVIDER_BINDING
   ?? 'kubernetes-work-local-hostpath'
-const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME || REAL_WORK_VM)
+const REAL_WORK_MODE = Boolean(REAL_WORK_CONFIG || REAL_WORK_RESUME || REAL_WORK_VM || EXISTING_PROJECT_MODE)
+if (EXISTING_PROJECT_MODE && !UUID.test(EXISTING_PROJECT_ID)) {
+  throw new Error('LABWEAVER_E2E_WORK_PROJECT_ID_INVALID')
+}
+if (EXISTING_PROJECT_MODE && REAL_WORK_RESUME) {
+  throw new Error('LABWEAVER_E2E_WORK_PROJECT_AND_RESUME_CONFLICT')
+}
+if (EXISTING_PROJECT_MODE && !REAL_WORK_CONFIG && !REAL_WORK_VM) {
+  throw new Error('LABWEAVER_E2E_WORK_PROJECT_REQUIRES_REAL_PROVIDER')
+}
 if (REAL_WORK_GPU && !REAL_WORK_MODE) throw new Error('LABWEAVER_E2E_WORK_GPU_REQUIRES_REAL_PROVIDER')
 if (REAL_WORK_VM && REAL_WORK_GPU?.mode !== 'vm_vgpu') throw new Error('LABWEAVER_E2E_VM_REQUIRES_VM_VGPU')
 if (REAL_WORK_GPU?.mode === 'vm_vgpu' && !REAL_WORK_VM) throw new Error('LABWEAVER_E2E_VM_VGPU_REQUIRES_VM_CONFIGURATION')
@@ -90,6 +104,121 @@ function diagnosticCode(value) {
 
 function terminalRunState(value) {
   return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value)
+}
+
+const WORK_RESOURCE_REQUEST_TERMINAL_STATES = new Set(['expired', 'rejected', 'cancelled'])
+const WORK_RESOURCE_REQUEST_ACTIVE_STATES = new Set(['reviewing', 'allocating', 'active', 'expiring'])
+const WORK_RESOURCE_LEASE_TERMINAL_STATES = new Set(['expired', 'revoked'])
+const WORK_RESOURCE_LEASE_ACTIVE_STATES = new Set(['allocating', 'active', 'expiring'])
+
+async function readExistingProjectPolicy(request, projectId) {
+  const policy = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/llm-egress-policies/active`),
+    'REAL_WORK_EXISTING_PROJECT_POLICY_READ_FAILED',
+  )
+  if (
+    policy?.projectId !== projectId
+    || policy.binding?.model !== EXISTING_PROJECT_MODEL
+    || !policy.budget
+    || typeof policy.budget !== 'object'
+    || Array.isArray(policy.budget)
+  ) {
+    throw new Error(`REAL_WORK_EXISTING_PROJECT_POLICY_INVALID:${policy?.binding?.model ?? 'missing'}`)
+  }
+  return policy
+}
+
+async function readExistingProjectResourceBudget(request, projectId, diagnostic = 'REAL_WORK_EXISTING_PROJECT_RESOURCE_BUDGET_READ_FAILED') {
+  const response = await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-budget`)
+  if (response.status() === 404) {
+    const bodyText = await response.text()
+    let body
+    try {
+      body = JSON.parse(bodyText)
+    } catch (error) {
+      throw new Error(`${diagnostic}:404:invalid JSON`, { cause: error })
+    }
+    if (diagnosticCode(body) === 'LW_RESOURCE_BUDGET_NOT_FOUND') return null
+    throw new Error(`${diagnostic}:404:${diagnosticCode(body)}`)
+  }
+  const budget = await expectJson(response, diagnostic)
+  if (
+    budget?.projectId !== projectId
+    || !budget.limit
+    || !budget.warningAt
+  ) {
+    throw new Error(`${diagnostic}:invalid`)
+  }
+  return budget
+}
+
+async function readWorkEnvironmentSummaries(request, projectId) {
+  const items = []
+  const seenCursors = new Set()
+  let cursor = null
+  for (;;) {
+    const query = new URLSearchParams({ projectId, class: 'work', limit: '100' })
+    if (cursor) query.set('cursor', cursor)
+    const page = await expectJson(
+      await request.get(`/api/v1/environments?${query.toString()}`),
+      'REAL_WORK_EXISTING_PROJECT_ENVIRONMENTS_READ_FAILED',
+    )
+    if (!page || !Array.isArray(page.items)) {
+      throw new Error('REAL_WORK_EXISTING_PROJECT_ENVIRONMENTS_INVALID')
+    }
+    for (const environment of page.items) {
+      if (environment.projectId !== projectId || environment.class !== 'work') {
+        throw new Error('REAL_WORK_EXISTING_PROJECT_ENVIRONMENT_SCOPE_INVALID')
+      }
+      items.push(environment)
+    }
+    const nextCursor = page.nextCursor ?? null
+    if (!nextCursor) return items
+    if (typeof nextCursor !== 'string' || seenCursors.has(nextCursor)) {
+      throw new Error('REAL_WORK_EXISTING_PROJECT_ENVIRONMENTS_CURSOR_INVALID')
+    }
+    seenCursors.add(nextCursor)
+    cursor = nextCursor
+  }
+}
+
+async function assertExistingProjectWorkResourcesReleased(request, projectId) {
+  const environments = await readWorkEnvironmentSummaries(request, projectId)
+  for (const environment of environments) {
+    if (environment.observedState !== 'deleted') {
+      throw new Error(`REAL_WORK_EXISTING_PROJECT_ENVIRONMENT_ACTIVE:${environment.id}:${environment.observedState}`)
+    }
+  }
+
+  const requests = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-requests`),
+    'REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUESTS_READ_FAILED',
+  )
+  if (!Array.isArray(requests)) throw new Error('REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUESTS_INVALID')
+
+  for (const resourceRequest of requests) {
+    if (resourceRequest?.projectId !== projectId) {
+      throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUEST_SCOPE_INVALID:${resourceRequest?.id ?? 'missing'}`)
+    }
+    if (WORK_RESOURCE_REQUEST_TERMINAL_STATES.has(resourceRequest.state)) continue
+    if (WORK_RESOURCE_REQUEST_ACTIVE_STATES.has(resourceRequest.state)) {
+      throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUEST_ACTIVE:${resourceRequest.id}:${resourceRequest.state}`)
+    }
+    throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_REQUEST_STATE_INVALID:${resourceRequest.id}:${resourceRequest.state}`)
+  }
+
+  const leases = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-leases`),
+    'REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASES_READ_FAILED',
+  )
+  if (!Array.isArray(leases)) throw new Error('REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASES_INVALID')
+  for (const lease of leases) {
+    if (WORK_RESOURCE_LEASE_TERMINAL_STATES.has(lease.state)) continue
+    if (WORK_RESOURCE_LEASE_ACTIVE_STATES.has(lease.state)) {
+      throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASE_ACTIVE:${lease.id}:${lease.state}`)
+    }
+    throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASE_STATE_INVALID:${lease.id}:${lease.state}`)
+  }
 }
 
 async function approvePendingAgentTaskResourceByUi(adminPage, {
@@ -549,12 +678,28 @@ test('student provisions a Work environment, configures it, and releases its cap
   const resumed = REAL_WORK_RESUME
     ? await readResumablePublishedWork(page.request, REAL_WORK_RESUME, { gpu: REAL_WORK_GPU, vm: REAL_WORK_VM })
     : null
-  const project = resumed?.project ?? await createProjectByUi(page, `live-work-${Date.now()}-${uuidv7().slice(0, 8)}`)
+  const studentActorId = await readActorId(page.request)
+  let existingProjectPolicy = null
+  let project
   if (resumed) {
+    project = resumed.project
     await page.goto(`/researcher/workspaces?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+  } else if (EXISTING_PROJECT_MODE) {
+    await navigateFromHomeByUi(page, '项目与工作空间')
+    project = await expectJson(
+      await page.request.get(`/api/v1/projects/${encodeURIComponent(EXISTING_PROJECT_ID)}`),
+      'REAL_WORK_EXISTING_PROJECT_READ_FAILED',
+    )
+    if (project.id !== EXISTING_PROJECT_ID || project.ownerActorId !== studentActorId) {
+      throw new Error('REAL_WORK_EXISTING_PROJECT_OWNERSHIP_INVALID')
+    }
+    existingProjectPolicy = await readExistingProjectPolicy(page.request, project.id)
+    await assertExistingProjectWorkResourcesReleased(page.request, project.id)
+  } else {
+    project = await createProjectByUi(page, `live-work-${Date.now()}-${uuidv7().slice(0, 8)}`)
   }
   await selectProjectByUi(page, project.id)
-  if (!resumed) await configureProjectPolicyByUi(page, project.id)
+  if (!resumed && !EXISTING_PROJECT_MODE) await configureProjectPolicyByUi(page, project.id)
   const packageCopy = !resumed && (REAL_WORK_VM || REAL_WORK_CONFIG)
     ? await createRealWorkPackage(REAL_WORK_VM ? null : REAL_WORK_CONFIG.goldenBaseImage, {
       gpu: REAL_WORK_GPU,
@@ -573,13 +718,15 @@ test('student provisions a Work environment, configures it, and releases its cap
   let workRates = null
   let gpuRate = null
   let baselineChargeIds = new Set()
-  let studentActorId = null
+  let existingResourceBudget = null
   let primaryFailure = null
   const cleanupFailures = []
   try {
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     adminPage = await adminContext.newPage()
-    studentActorId = await readActorId(page.request)
+    if (EXISTING_PROJECT_MODE) {
+      existingResourceBudget = await readExistingProjectResourceBudget(adminPage.request, project.id)
+    }
     const { packageData, release } = resumed
       ? { packageData: resumed.packageData, release: resumed.release }
       : await publishWorkTemplate(page, project, packageCopy, { adminPage, studentActorId })
@@ -608,7 +755,9 @@ test('student provisions a Work environment, configures it, and releases its cap
       )
       if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
       baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
-      await configureRealWorkBudgetByUi(browser, baseURL, project.id)
+      if (!EXISTING_PROJECT_MODE) {
+        await configureRealWorkBudgetByUi(browser, baseURL, project.id)
+      }
     }
 
     await page.goto(`/researcher/resources?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
@@ -1225,10 +1374,29 @@ test('student provisions a Work environment, configures it, and releases its cap
         baselineChargeIds,
         gpu: REAL_WORK_GPU ? { ...REAL_WORK_GPU, rate: gpuRate } : null,
       })
+      if (EXISTING_PROJECT_MODE) {
+        const finalPolicy = await readExistingProjectPolicy(page.request, project.id)
+        expect(finalPolicy.budget).toEqual(existingProjectPolicy.budget)
+        const finalResourceBudget = await readExistingProjectResourceBudget(
+          adminPage.request,
+          project.id,
+          'REAL_WORK_EXISTING_PROJECT_RESOURCE_BUDGET_FINAL_READ_FAILED',
+        )
+        if (existingResourceBudget === null) {
+          expect(finalResourceBudget).toBeNull()
+        } else {
+          expect(finalResourceBudget).toMatchObject({
+            projectId: project.id,
+            limit: existingResourceBudget.limit,
+            warningAt: existingResourceBudget.warningAt,
+          })
+        }
+      }
       await inspectRealWorkFinanceByUi(browser, baseURL, project.id, {
         gpu: REAL_WORK_GPU,
         usageRecordIds: finance.matches.map(({ usage }) => usage.id),
         expectedCharges: finance.matches.map(({ charge }) => charge),
+        requireBudget: !EXISTING_PROJECT_MODE || existingResourceBudget !== null,
       })
     }
     await assertConnectionBlockedAfterLeaseRevoke(page, project.id, stoppedEnvironment)
