@@ -2527,7 +2527,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     } else {
         FakeMode::FullSuccess
     };
-    let (runtime, process, policy) = runtime(mode)?;
+    let (runtime, process, policy, _materializer) = materializing_runtime(mode)?;
     let bytes = b"reserved dispatch must execute exactly once".to_vec();
     let package = package(policy.project_id, policy.course_id, &bytes)?;
     let gate = ProblemPackageEgressGate::new(

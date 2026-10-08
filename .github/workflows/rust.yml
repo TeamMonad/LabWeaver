@@ -58,4 +58,6 @@ jobs:
         working-directory: ./web
         run: pnpm typecheck
       - run: cargo build --workspace --locked
+      - name: Run Agent retry PostgreSQL regression
+        run: cargo test -p agent-service --test claude_code_runtime postgres_authoring_retry_starts_a_new_fenced_attempt --locked -- --ignored
       - run: cargo test --workspace --locked --no-fail-fast
