@@ -4,7 +4,6 @@ import { expectJson, navigateFromHomeByUi, pollJson } from '../support/live.mjs'
 import {
   assertAcceptedVgpuImageCompletion,
   matchesVgpuImageCatalogRow,
-  raceVgpuImageCompletionWithDiagnostic,
   validateVgpuImageImport,
 } from '../support/vgpu-image-import.mjs'
 
@@ -90,45 +89,37 @@ function waitForResponseSafely(page, predicate, options) {
 
 function waitForCompletionResponse(page, predicate, timeout) {
   let settled = false
-  let timeoutId
   let resolveResponse
   let rejectResponse
-  const cleanup = () => {
-    page.off('response', onResponse)
-    if (timeoutId !== undefined) clearTimeout(timeoutId)
+  const promise = new Promise((resolve, reject) => {
+    resolveResponse = resolve
+    rejectResponse = reject
+  })
+  const cleanup = () => page.off('response', onResponse)
+  const settle = (error, response) => {
+    if (settled) return
+    settled = true
+    cleanup()
+    if (error) rejectResponse(error)
+    else resolveResponse(response)
   }
   const onResponse = (response) => {
     if (settled) return
     try {
       if (!predicate(response)) return
     } catch (error) {
-      settled = true
-      cleanup()
-      rejectResponse(error)
+      settle(error)
       return
     }
-    settled = true
-    cleanup()
-    resolveResponse(response)
+    settle(null, response)
   }
-  const promise = new Promise((resolve, reject) => {
-    resolveResponse = resolve
-    rejectResponse = reject
-  })
   void promise.catch(() => undefined)
   page.on('response', onResponse)
-  timeoutId = setTimeout(() => {
-    if (settled) return
-    settled = true
-    cleanup()
-    rejectResponse(new Error('LW_VGPU_IMAGE_COMPLETION_RESPONSE_TIMEOUT'))
-  }, timeout)
   return {
     promise,
+    timeout,
     cancel() {
-      if (settled) return
-      settled = true
-      cleanup()
+      settle(new Error('LW_VGPU_IMAGE_COMPLETION_RESPONSE_CANCELLED'))
     },
   }
 }
@@ -145,62 +136,48 @@ async function readUploadUiDiagnostic(page) {
   }
 }
 
-function waitForUploadUiDiagnostic(page, previousDiagnostic = null) {
-  let cancelled = false
-  let timerId
-  let resolveDiagnostic
-  let rejectDiagnostic
-  let intervalIndex = 0
-  const intervals = [500, 1000, 2000]
-  const poll = async () => {
-    if (cancelled) return
-    try {
-      const diagnostic = await readUploadUiDiagnostic(page)
-      if (cancelled) return
-      if (
-        previousDiagnostic
-        && diagnostic
-        && diagnostic.code === previousDiagnostic.code
-        && diagnostic.message === previousDiagnostic.message
-      ) {
-        const delay = intervals[Math.min(intervalIndex, intervals.length - 1)]
-        intervalIndex += 1
-        timerId = setTimeout(() => { void poll() }, delay)
-        return
-      }
-      if (diagnostic) {
-        resolveDiagnostic(diagnostic)
-        return
-      }
-      const delay = intervals[Math.min(intervalIndex, intervals.length - 1)]
-      intervalIndex += 1
-      timerId = setTimeout(() => { void poll() }, delay)
-    } catch (error) {
-      if (!cancelled) rejectDiagnostic(error)
-    }
-  }
-  const promise = new Promise((resolve, reject) => {
-    resolveDiagnostic = resolve
-    rejectDiagnostic = reject
-  })
-  void promise.catch(() => undefined)
-  void poll()
-  return {
-    promise,
-    cancel() {
-      cancelled = true
-      if (timerId !== undefined) clearTimeout(timerId)
-    },
-  }
-}
-
 async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, previousDiagnostic = null) {
-  const diagnosticWaiter = waitForUploadUiDiagnostic(page, previousDiagnostic)
+  let responseSettled = false
+  let latestDiagnostic = null
+  const completionPromise = completionResponseWaiter.promise.then(
+    (response) => {
+      responseSettled = true
+      return { kind: 'completion', response }
+    },
+    (error) => {
+      responseSettled = true
+      throw error
+    },
+  )
+  void completionPromise.catch(() => undefined)
+
+  const diagnosticOrResponse = expect.poll(async () => {
+    if (responseSettled) return 'response'
+    const diagnostic = await readUploadUiDiagnostic(page)
+    if (responseSettled) return 'response'
+    if (
+      previousDiagnostic
+      && diagnostic
+      && diagnostic.code === previousDiagnostic.code
+      && diagnostic.message === previousDiagnostic.message
+    ) return 'pending'
+    if (diagnostic) {
+      latestDiagnostic = diagnostic
+      return 'diagnostic'
+    }
+    return 'pending'
+  }, {
+    timeout: completionResponseWaiter.timeout,
+    intervals: [500, 1000, 2000],
+  }).toMatch(/^(response|diagnostic)$/).then(async () => {
+    if (responseSettled) return completionPromise
+    if (!latestDiagnostic) throw new Error('LW_VGPU_IMAGE_UPLOAD_UI_DIAGNOSTIC_MISSING')
+    return { kind: 'diagnostic', failure: latestDiagnostic }
+  })
+  void diagnosticOrResponse.catch(() => undefined)
+
   try {
-    const outcome = await raceVgpuImageCompletionWithDiagnostic(
-      completionResponseWaiter.promise,
-      diagnosticWaiter.promise,
-    )
+    const outcome = await Promise.race([completionPromise, diagnosticOrResponse])
     if (outcome.kind === 'diagnostic') {
       const error = new Error(`LW_VGPU_IMAGE_UPLOAD_UI_FAILED:${outcome.failure.code}:${outcome.failure.message}`)
       error.code = outcome.failure.code
@@ -209,7 +186,6 @@ async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter
     return outcome.response
   } finally {
     completionResponseWaiter.cancel()
-    diagnosticWaiter.cancel()
   }
 }
 
