@@ -141,6 +141,7 @@ async function readUploadUiDiagnostic(page) {
 
 async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, previousDiagnostic = null) {
   let responseSettled = false
+  let pollCancelled = false
   let latestDiagnostic = null
   const completionPromise = completionResponseWaiter.promise.then(
     (response) => {
@@ -155,6 +156,7 @@ async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter
   void completionPromise.catch(() => undefined)
 
   const diagnosticOrResponse = expect.poll(async () => {
+    if (pollCancelled) return 'cancelled'
     if (responseSettled) return 'response'
     const diagnostic = await readUploadUiDiagnostic(page)
     if (responseSettled) return 'response'
@@ -172,7 +174,8 @@ async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter
   }, {
     timeout: completionResponseWaiter.timeout,
     intervals: [500, 1000, 2000],
-  }).toMatch(/^(response|diagnostic)$/).then(async () => {
+  }).toMatch(/^(response|diagnostic|cancelled)$/).then(async () => {
+    if (pollCancelled) return { kind: 'cancelled' }
     if (responseSettled) return completionPromise
     if (!latestDiagnostic) throw new Error('LW_VGPU_IMAGE_UPLOAD_UI_DIAGNOSTIC_MISSING')
     return { kind: 'diagnostic', failure: latestDiagnostic }
@@ -188,6 +191,7 @@ async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter
     }
     return outcome.response
   } finally {
+    pollCancelled = true
     completionResponseWaiter.cancel()
   }
 }
@@ -223,7 +227,8 @@ async function waitForFirstCompletionFaultOrUiFailure(page, faultPromise, timeou
   }, {
     timeout,
     intervals: [500, 1000, 2000],
-  }).toMatch(/^(fault|diagnostic)$/).then(() => {
+  }).toMatch(/^(fault|diagnostic|cancelled)$/).then(() => {
+    if (pollCancelled) return { kind: 'cancelled' }
     if (faultSettled) return faultOutcome
     if (!latestDiagnostic) throw new Error('LW_VGPU_IMAGE_UPLOAD_UI_DIAGNOSTIC_MISSING')
     return { kind: 'diagnostic', failure: latestDiagnostic }
