@@ -1047,9 +1047,10 @@ async function readResumeActorId(request) {
 
 /**
  * Validate a previously completed Work authoring/build/publication chain by
- * its exact IDs. This read-only gate is the only entry point for resume mode.
+ * its exact IDs. This gate intentionally stops before any resume-only marker
+ * checks so other recovery journeys can reuse the same immutable chain proof.
  */
-export async function readResumablePublishedWork(request, resume, { gpu = null, vm = null } = {}) {
+export async function readPublishedWork(request, resume, { gpu = null, vm = null } = {}) {
   const { projectId, runId, releaseId } = resume
   const actorId = await readResumeActorId(request)
   const project = await expectJson(
@@ -1189,16 +1190,26 @@ export async function readResumablePublishedWork(request, resume, { gpu = null, 
     throw new Error('REAL_WORK_RESUME_PACKAGE_INVALID')
   }
 
-  if ((!vm && !resume.seedMarker) || !resume.persistenceMarker) {
-    throw new Error(vm ? 'REAL_WORK_RESUME_VM_PERSISTENCE_MARKER_REQUIRED' : 'REAL_WORK_RESUME_MARKERS_REQUIRED')
-  }
-
   return {
     project,
     run,
     candidateView,
     release,
     packageData,
+  }
+}
+
+/**
+ * Resume a previously completed Work chain after validating the immutable
+ * published chain and the resume-only persistence markers.
+ */
+export async function readResumablePublishedWork(request, resume, { gpu = null, vm = null } = {}) {
+  const published = await readPublishedWork(request, resume, { gpu, vm })
+  if ((!vm && !resume.seedMarker) || !resume.persistenceMarker) {
+    throw new Error(vm ? 'REAL_WORK_RESUME_VM_PERSISTENCE_MARKER_REQUIRED' : 'REAL_WORK_RESUME_MARKERS_REQUIRED')
+  }
+  return {
+    ...published,
     seedMarker: resume.seedMarker,
     persistenceMarker: resume.persistenceMarker,
   }

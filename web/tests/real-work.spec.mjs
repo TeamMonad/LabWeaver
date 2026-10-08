@@ -27,6 +27,7 @@ import {
   realWorkConfig,
   realWorkGpuConfig,
   realWorkVmConfig,
+  readPublishedWork,
   readProjectUsage,
   readResumablePublishedWork,
   selectSettledExperimentUsageCharges,
@@ -667,6 +668,16 @@ describe('published Work resume retention', () => {
   it('continues a bound release with future retention', async () => {
     const { request, resume, release } = resumedWork({ retainUntil: '2026-10-04T10:15:00.123456Z' })
     await expect(readResumablePublishedWork(request, resume)).resolves.toMatchObject({ release })
+  })
+
+  it('reads the published chain without resume-only persistence markers', async () => {
+    const { request, resume, release } = resumedWork({ retainUntil: '2026-10-04T10:15:00.123456Z' })
+    const publishedIdentity = {
+      projectId: resume.projectId,
+      runId: resume.runId,
+      releaseId: resume.releaseId,
+    }
+    await expect(readPublishedWork(request, publishedIdentity)).resolves.toMatchObject({ release })
   })
 
   it.each(['2026-10-03T10:15:00.000Z', '2026-10-01T14:32:04.364Z'])('rejects retention at or before now: %s', async (retainUntil) => {

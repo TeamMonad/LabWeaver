@@ -16,6 +16,7 @@ import {
 import {
   cleanupWorkResources,
   inspectRealWorkFinanceByUi,
+  readPublishedWork,
   waitForSettledWorkUsageCharges,
   selectPendingWorkTaskResourceRequest,
 } from '../support/real-work.mjs'
@@ -26,6 +27,7 @@ const RECOVERY_ENABLED = process.env.LABWEAVER_E2E_WORK_RECOVERY === '1'
 const RESUME_ACCEPTED = process.env.LABWEAVER_E2E_WORK_RECOVERY_RESUME_ACCEPTED === '1'
 const PROJECT_ID = process.env.LABWEAVER_E2E_RECOVERY_PROJECT_ID?.trim() ?? ''
 const RUN_ID = process.env.LABWEAVER_E2E_RECOVERY_RUN_ID?.trim() ?? ''
+const RECOVERY_RELEASE_ID = process.env.LABWEAVER_E2E_RECOVERY_RELEASE_ID?.trim() ?? ''
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
@@ -36,6 +38,8 @@ const CANDIDATE_TIMEOUT_MS = 3_600_000
 const ENVIRONMENT_TIMEOUT_MS = 240_000
 const TERMINAL_RUN_STATES = new Set(['succeeded', 'partially_succeeded', 'failed', 'cancelled'])
 const ACTIVE_ATTEMPT_STATES = new Set(['pending', 'running', 'repairing', 'awaiting_approval'])
+const TERMINAL_RESOURCE_REQUEST_STATES = new Set(['expired', 'rejected', 'cancelled'])
+const TERMINAL_RESOURCE_LEASE_STATES = new Set(['expired', 'revoked'])
 
 test.describe.configure({ timeout: 14_400_000 })
 
@@ -43,6 +47,9 @@ function requireRecoveryIds() {
   if (!PROJECT_ID || !RUN_ID) throw new Error('LW_WORK_RECOVERY_PROJECT_AND_RUN_REQUIRED')
   if (!/^[0-9a-f-]{36}$/i.test(PROJECT_ID) || !/^[0-9a-f-]{36}$/i.test(RUN_ID)) {
     throw new Error('LW_WORK_RECOVERY_PROJECT_AND_RUN_ID_INVALID')
+  }
+  if (RECOVERY_RELEASE_ID && !/^[0-9a-f-]{36}$/i.test(RECOVERY_RELEASE_ID)) {
+    throw new Error('LW_WORK_RECOVERY_RELEASE_ID_INVALID')
   }
 }
 
@@ -143,6 +150,66 @@ function inspectAcceptedResumeRun(run, projectId, runId) {
     throw new Error(`LW_WORK_RECOVERY_RESUME_RUN_STATE_INVALID:${run.state}`)
   }
   return { run, attempt: second }
+}
+
+async function readWorkEnvironmentsForRelease(request, projectId, releaseId) {
+  const items = []
+  const seenCursors = new Set()
+  let cursor = null
+  for (;;) {
+    const query = new URLSearchParams({ projectId, class: 'work', releaseId, limit: '100' })
+    if (cursor) query.set('cursor', cursor)
+    const page = await expectJson(
+      await request.get(`/api/v1/environments?${query.toString()}`),
+      'LW_WORK_RECOVERY_RELEASE_ENVIRONMENTS_READ_FAILED',
+    )
+    if (!page || !Array.isArray(page.items)) throw new Error('LW_WORK_RECOVERY_RELEASE_ENVIRONMENTS_READ_INVALID')
+    items.push(...page.items)
+    const nextCursor = page.nextCursor ?? null
+    if (!nextCursor) return items
+    if (seenCursors.has(nextCursor)) throw new Error('LW_WORK_RECOVERY_RELEASE_ENVIRONMENTS_CURSOR_REPEATED')
+    seenCursors.add(nextCursor)
+    cursor = nextCursor
+  }
+}
+
+async function assertNoExistingPublishedReleaseResources(request, projectId, release) {
+  const requests = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-requests`),
+    'LW_WORK_RECOVERY_RELEASE_RESOURCE_REQUESTS_READ_FAILED',
+  )
+  if (!Array.isArray(requests)) throw new Error('LW_WORK_RECOVERY_RELEASE_RESOURCE_REQUESTS_READ_INVALID')
+  const matchingRequests = requests.filter((item) => (
+    item?.projectId === projectId
+    && item.target?.kind === 'environment'
+    && item.target.releaseId === release.id
+    && item.target.releaseVersion === release.version
+  ))
+  for (const item of matchingRequests) {
+    if (!TERMINAL_RESOURCE_REQUEST_STATES.has(item.state)) {
+      throw new Error(`LW_WORK_RECOVERY_RELEASE_RESOURCE_REQUEST_ACTIVE:${item.id}:${item.state}`)
+    }
+  }
+  const requestIds = new Set(matchingRequests.map((item) => item.id))
+  const leases = await expectJson(
+    await request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/resource-leases`),
+    'LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASES_READ_FAILED',
+  )
+  if (!Array.isArray(leases)) throw new Error('LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASES_READ_INVALID')
+  for (const lease of leases.filter((item) => requestIds.has(item.requestId))) {
+    if (!TERMINAL_RESOURCE_LEASE_STATES.has(lease.state)) {
+      throw new Error(`LW_WORK_RECOVERY_RELEASE_RESOURCE_LEASE_ACTIVE:${lease.id}:${lease.state}`)
+    }
+  }
+  const environments = await readWorkEnvironmentsForRelease(request, projectId, release.id)
+  for (const environment of environments) {
+    if (environment.projectId !== projectId || environment.releaseId !== release.id) {
+      throw new Error('LW_WORK_RECOVERY_RELEASE_ENVIRONMENT_SCOPE_INVALID')
+    }
+    if (environment.observedState !== 'deleted') {
+      throw new Error(`LW_WORK_RECOVERY_RELEASE_ENVIRONMENT_ACTIVE:${environment.id}:${environment.observedState}`)
+    }
+  }
 }
 
 async function assertNoExistingWorkRelease(request, projectId, runId) {
@@ -258,20 +325,93 @@ async function waitForAcceptedAuthoringRun(request, adminPage, projectId, runId,
   return latest.run
 }
 
-async function waitForEnvironmentReady(request, projectId, environmentId) {
-  return await pollJson(
-    request,
-    `/api/v1/environments/${encodeURIComponent(environmentId)}`,
-    (value) => value.projectId === projectId
-      && (value.observedState === 'ready' || ['failed', 'deleted'].includes(value.observedState)),
-    'LW_WORK_RECOVERY_ENVIRONMENT_READY_STATUS_FAILED',
-    ENVIRONMENT_TIMEOUT_MS,
-  ).then((value) => {
-    if (value.observedState !== 'ready') {
-      throw new Error(`LW_WORK_RECOVERY_ENVIRONMENT_NOT_READY:${value.observedState}:${value.lastDiagnosticCode ?? 'diagnostic missing'}`)
+async function readApprovedWorkResourceState(request, projectId, environmentId, requestId, leaseId) {
+  const [requestResponse, leaseResponse] = await Promise.all([
+    request.get(`/api/v1/resource-requests/${encodeURIComponent(requestId)}`),
+    request.get(`/api/v1/resource-leases/${encodeURIComponent(leaseId)}`),
+  ])
+  const resourceRequest = await expectJson(requestResponse, 'LW_WORK_RECOVERY_APPROVED_RESOURCE_REQUEST_READ_FAILED')
+  const lease = await expectJson(leaseResponse, 'LW_WORK_RECOVERY_APPROVED_RESOURCE_LEASE_READ_FAILED')
+  if (
+    resourceRequest.id !== requestId
+    || resourceRequest.projectId !== projectId
+    || resourceRequest.target?.kind !== 'environment'
+    || resourceRequest.target.environmentId !== environmentId
+  ) {
+    throw new Error('LW_WORK_RECOVERY_APPROVED_RESOURCE_REQUEST_SCOPE_INVALID')
+  }
+  if (lease.id !== leaseId || lease.requestId !== requestId) {
+    throw new Error('LW_WORK_RECOVERY_APPROVED_RESOURCE_LEASE_SCOPE_INVALID')
+  }
+  if (TERMINAL_RESOURCE_REQUEST_STATES.has(resourceRequest.state)) {
+    throw new Error(`LW_WORK_RECOVERY_RESOURCE_REQUEST_TERMINAL_BEFORE_ENVIRONMENT:${resourceRequest.state}`)
+  }
+  if (TERMINAL_RESOURCE_LEASE_STATES.has(lease.state)) {
+    throw new Error(`LW_WORK_RECOVERY_RESOURCE_LEASE_TERMINAL_BEFORE_ENVIRONMENT:${lease.state}`)
+  }
+  if (resourceRequest.state !== 'active' || lease.state !== 'active') {
+    throw new Error(`LW_WORK_RECOVERY_RESOURCE_NOT_ACTIVE_BEFORE_ENVIRONMENT:${resourceRequest.state}:${lease.state}`)
+  }
+  return { resourceRequest, lease }
+}
+
+async function waitForEnvironmentReady(request, projectId, environmentId, { requestId = null, leaseId = null } = {}) {
+  const approvedResourceIdentity = typeof requestId === 'string' && requestId !== ''
+    && typeof leaseId === 'string' && leaseId !== ''
+  let latest = null
+  let fatalError = null
+  await expect.poll(async () => {
+    let response
+    try {
+      response = await request.get(`/api/v1/environments/${encodeURIComponent(environmentId)}`)
+    } catch (error) {
+      fatalError = new Error('LW_WORK_RECOVERY_ENVIRONMENT_READY_REQUEST_FAILED', { cause: error })
+      return true
     }
-    return value
-  })
+
+    if (response.status() === 404) {
+      const bodyText = await response.text()
+      let body
+      try {
+        body = JSON.parse(bodyText)
+      } catch (error) {
+        fatalError = new Error(`LW_WORK_RECOVERY_ENVIRONMENT_READY_STATUS_FAILED:404 ${bodyText.slice(0, 2000)}`, { cause: error })
+        return true
+      }
+      if (body?.diagnosticCode !== 'LW_ENVIRONMENT_NOT_FOUND') {
+        fatalError = new Error(`LW_WORK_RECOVERY_ENVIRONMENT_READY_STATUS_FAILED:404 ${bodyText.slice(0, 2000)}`)
+        return true
+      }
+      if (!approvedResourceIdentity) {
+        fatalError = new Error('LW_WORK_RECOVERY_ENVIRONMENT_NOT_FOUND_WITHOUT_APPROVED_RESOURCE')
+        return true
+      }
+      try {
+        await readApprovedWorkResourceState(request, projectId, environmentId, requestId, leaseId)
+      } catch (error) {
+        fatalError = error
+        return true
+      }
+      return false
+    }
+
+    try {
+      latest = await expectJson(response, 'LW_WORK_RECOVERY_ENVIRONMENT_READY_STATUS_FAILED')
+    } catch (error) {
+      fatalError = error
+      return true
+    }
+    if (latest.id !== environmentId || latest.projectId !== projectId) {
+      fatalError = new Error('LW_WORK_RECOVERY_ENVIRONMENT_SCOPE_INVALID')
+      return true
+    }
+    return latest.observedState === 'ready' || ['failed', 'deleted'].includes(latest.observedState)
+  }, { timeout: ENVIRONMENT_TIMEOUT_MS, intervals: [1000, 2000, 3000] }).toBe(true)
+  if (fatalError) throw fatalError
+  if (latest?.observedState !== 'ready') {
+    throw new Error(`LW_WORK_RECOVERY_ENVIRONMENT_NOT_READY:${latest?.observedState ?? 'missing'}:${latest?.lastDiagnosticCode ?? 'diagnostic missing'}`)
+  }
+  return latest
 }
 
 async function openExactRunFromHistory(page, projectId, runId) {
@@ -431,7 +571,22 @@ test('student retries or resumes the exact failed Work run and completes its nor
 
     const studentActorId = await readActorId(page.request)
     let run
-    if (RESUME_ACCEPTED) {
+    let candidate = null
+    let release = null
+    if (RECOVERY_RELEASE_ID) {
+      const recovered = await readPublishedWork(page.request, {
+        projectId: PROJECT_ID,
+        runId: RUN_ID,
+        releaseId: RECOVERY_RELEASE_ID,
+      })
+      const inspected = inspectAcceptedResumeRun(recovered.run, PROJECT_ID, RUN_ID)
+      if (inspected.attempt.state !== 'succeeded') {
+        throw new Error(`LW_WORK_RECOVERY_RELEASE_RUN_NOT_SUCCEEDED:${recovered.run.state}:${inspected.attempt.state}`)
+      }
+      run = recovered.run
+      candidate = recovered.candidateView
+      release = recovered.release
+    } else if (RESUME_ACCEPTED) {
       // Resume starts only after the accepted retry has produced the real
       // AgentRun attempt 2 and never sends another retry mutation.
       await assertNoExistingWorkRelease(page.request, PROJECT_ID, RUN_ID)
@@ -478,36 +633,42 @@ test('student retries or resumes the exact failed Work run and completes its nor
     const candidateId = environmentTrack(run).candidateId
     if (!candidateId) throw new Error('LW_WORK_RECOVERY_CANDIDATE_MISSING')
 
-    const candidate = await pollEnvironmentCandidate(
-      page.request,
-      PROJECT_ID,
-      candidateId,
-      async (value) => {
-        if (value.candidate?.id !== candidateId || value.candidate.projectId !== PROJECT_ID || value.candidate.runId !== RUN_ID) {
-          throw new Error('LW_WORK_RECOVERY_CANDIDATE_SCOPE_INVALID')
-        }
-        if (!['succeeded', 'failed', 'cancelled'].includes(value.build?.state)) {
-          await approvePendingWorkAuthoringResourceByUi(adminPage, {
-            projectId: PROJECT_ID,
-            runId: RUN_ID,
-            requesterId: studentActorId,
-            approvedRequestIds: new Set(),
-          })
-          return false
-        }
-        return true
-      },
-      'LW_WORK_RECOVERY_CANDIDATE_STATUS_FAILED',
-      CANDIDATE_TIMEOUT_MS,
-    )
+    if (!candidate) {
+      candidate = await pollEnvironmentCandidate(
+        page.request,
+        PROJECT_ID,
+        candidateId,
+        async (value) => {
+          if (value.candidate?.id !== candidateId || value.candidate.projectId !== PROJECT_ID || value.candidate.runId !== RUN_ID) {
+            throw new Error('LW_WORK_RECOVERY_CANDIDATE_SCOPE_INVALID')
+          }
+          if (!['succeeded', 'failed', 'cancelled'].includes(value.build?.state)) {
+            await approvePendingWorkAuthoringResourceByUi(adminPage, {
+              projectId: PROJECT_ID,
+              runId: RUN_ID,
+              requesterId: studentActorId,
+              approvedRequestIds: new Set(),
+            })
+            return false
+          }
+          return true
+        },
+        'LW_WORK_RECOVERY_CANDIDATE_STATUS_FAILED',
+        CANDIDATE_TIMEOUT_MS,
+      )
+    }
     if (candidate.build?.state !== 'succeeded' || !candidate.imageArtifact) {
       throw new Error(`LW_WORK_RECOVERY_CANDIDATE_BUILD_FAILED:${candidate.build?.diagnosticCode ?? 'artifact missing'}`)
     }
 
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByTestId('work-template-candidate')).toBeVisible({ timeout: 120_000 })
-    run = await readWorkAuthoringRun(page.request, PROJECT_ID, RUN_ID)
-    const release = await approveCandidateAndPublishByUi(page, PROJECT_ID, environmentTrack(run).candidateId)
+    if (!release) {
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await expect(page.getByTestId('work-template-candidate')).toBeVisible({ timeout: 120_000 })
+      run = await readWorkAuthoringRun(page.request, PROJECT_ID, RUN_ID)
+      release = await approveCandidateAndPublishByUi(page, PROJECT_ID, environmentTrack(run).candidateId)
+    } else {
+      await assertNoExistingPublishedReleaseResources(page.request, PROJECT_ID, release)
+    }
 
     const resource = await requestProjectResourceByUi(page, {
       projectId: PROJECT_ID,
@@ -534,7 +695,10 @@ test('student retries or resumes the exact failed Work run and completes its nor
       providerBinding: WORK_PROVIDER_BINDING,
     })
     trackedLeaseId = approval.leaseId
-    let environment = await waitForEnvironmentReady(page.request, PROJECT_ID, resource.environmentId)
+    let environment = await waitForEnvironmentReady(page.request, PROJECT_ID, resource.environmentId, {
+      requestId: resource.requestId,
+      leaseId: approval.leaseId,
+    })
     const firstAccess = await issueEnvironmentAccessGrantByUi(page, PROJECT_ID, environment, 'http')
     const firstAccessResponse = await page.request.get(firstAccess.endpointGrant.connectUrl)
     if (!firstAccessResponse.ok()) throw new Error(`LW_WORK_RECOVERY_ACCESS_READ_FAILED:${firstAccessResponse.status()}`)

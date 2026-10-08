@@ -344,7 +344,7 @@
 
           <AsyncStateView
             :state="env.instance"
-            @retry="env.load"
+            @retry="env.startPolling"
           >
             <template #success="{ data }">
               <!-- TAB 1: Overview & Endpoints -->
@@ -1106,16 +1106,20 @@ const lifecycleDiagnostic = ref<DiagnosticViewModel | null>(null)
 const createGrantDiagnostic = ref<DiagnosticViewModel | null>(null)
 const environmentToolsOpen = ref(false)
 
-const env = useEnvironmentInstance(selectedEnvironmentId)
+const routeProjectId = computed(() => {
+  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
+  return id || undefined
+})
+const waitForEnvironmentHandoff = computed(() => route.path.startsWith('/researcher/'))
+const handoffProjectId = computed(() => waitForEnvironmentHandoff.value
+  ? routeProjectId.value ?? projects.selectedProjectId ?? undefined
+  : undefined)
+const env = useEnvironmentInstance(selectedEnvironmentId, handoffProjectId)
 const isEnvironmentLoaded = computed(() => env.instance.kind === 'success')
 const environmentTitle = computed(() => {
   if (env.instance.kind === 'success') return env.instance.data.displayLabel
   if (env.instance.kind === 'loading') return '正在加载环境'
   return null
-})
-const routeProjectId = computed(() => {
-  const id = typeof route.query.projectId === 'string' ? route.query.projectId.trim() : ''
-  return id || undefined
 })
 const environmentProjectId = computed(() => (
   env.instance.kind === 'success' ? env.instance.data.projectId : undefined
@@ -1131,7 +1135,7 @@ const courseId = computed(() => {
   return selectedProject.value?.courseId ?? undefined
 })
 const isContextMissing = computed(() => !projectId.value)
-const isWorkConnection = computed(() => route.path.startsWith('/researcher/') || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
+const isWorkConnection = computed(() => waitForEnvironmentHandoff.value || (env.instance.kind === 'success' && env.instance.data.class === 'work'))
 const environmentListPath = computed(() => props.teacherMode
   ? '/teacher/environments'
   : isWorkConnection.value ? '/researcher/workspaces' : '/student/labs')

@@ -9,6 +9,8 @@ import { useProjects } from '@/composables/useProjects'
 import {
   listEnvironmentTemplateReleases,
   listProjects,
+  listProjectResourceLeases,
+  listProjectResourceRequests,
   getEnvironment,
   listEnvironmentEndpoints,
   listEnvironmentAccessGrants,
@@ -29,6 +31,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     ...actual,
     listEnvironmentTemplateReleases: vi.fn(),
     listProjects: vi.fn(),
+    listProjectResourceLeases: vi.fn(),
+    listProjectResourceRequests: vi.fn(),
     createEnvironment: vi.fn(),
     getEnvironment: vi.fn(),
     listEnvironmentEndpoints: vi.fn(),
@@ -207,6 +211,8 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
     window.localStorage.clear()
   })
 
@@ -354,6 +360,188 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.get('#lifecycle-action-hint').text()).toContain('重启会中断当前运行')
     await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
     expect(wrapper.text()).toContain('ssh')
+  })
+
+  it('keeps a researcher Work console pending while the approved environment handoff appears', async () => {
+    vi.useFakeTimers()
+    try {
+      mockEnvironmentInstance()
+      vi.mocked(getEnvironment).mockResolvedValueOnce({
+        response: { status: 404 },
+        error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+      } as never)
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({
+        data: [{
+          id: 'request-1',
+          projectId: 'project-1',
+          target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+          state: 'active',
+        }],
+        error: undefined as never,
+      } as never)
+      vi.mocked(listProjectResourceLeases).mockResolvedValue({
+        data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }],
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt(
+        { environmentId: 'env-1', projectId: 'project-1' },
+        false,
+        false,
+        '/researcher/environments',
+      )
+      await flushPromises()
+      expect(wrapper.text()).toContain('环境正在准备')
+
+      await vi.advanceTimersByTimeAsync(3000)
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('Environment 1')
+      expect(getEnvironment).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not wait for an unknown Work environment ID', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-unknown', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not wait when the matching Work request belongs to another project', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [{
+        id: 'request-other-project',
+        projectId: 'project-2',
+        target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+        state: 'active',
+      }],
+      error: undefined as never,
+    } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({
+      data: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }],
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops immediately with the resource diagnostic after an approved request becomes terminal', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [{
+        id: 'request-1',
+        projectId: 'project-1',
+        diagnosticCode: 'LW_ENVIRONMENT_CREATE_AGGREGATE_INVALID',
+        target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+        state: 'rejected',
+      }],
+      error: undefined as never,
+    } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_CREATE_AGGREGATE_INVALID')
+    expect(wrapper.text()).toContain('资源申请已拒绝')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops immediately when the approved Work lease is terminal', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [{
+        id: 'request-1',
+        projectId: 'project-1',
+        target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+        state: 'active',
+      }],
+      error: undefined as never,
+    } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({
+      data: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }],
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('task_owner_release')
+    expect(wrapper.text()).toContain('资源授权已撤销')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a resource permission error instead of waiting on the environment 404', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      response: { status: 403 },
+      error: { diagnosticCode: 'LW_AUTH_SCOPE_DENIED', detail: '无权读取项目资源', retryable: false },
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_AUTH_SCOPE_DENIED')
+    expect(wrapper.text()).toContain('无权读取项目资源')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a direct student environment 404 as an error', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
   })
 
   it('explains retained storage and resource reservations while stopped', async () => {
