@@ -35,6 +35,167 @@ const TERMINAL_STATES = ['succeeded', 'partially_succeeded', 'failed', 'cancelle
 test.describe.configure({ timeout: 3_600_000, retries: 0 })
 test.skip(process.env.LABWEAVER_E2E_CONFIG_PROBE !== '1', 'Opt in to the real VM configuration experiment.')
 
+function configProbeResumeConfig() {
+  const projectId = process.env.LABWEAVER_E2E_RESUME_PROJECT_ID?.trim() ?? ''
+  const runId = process.env.LABWEAVER_E2E_RESUME_RUN_ID?.trim() ?? ''
+  const releaseId = process.env.LABWEAVER_E2E_RESUME_RELEASE_ID?.trim() ?? ''
+  const configured = [projectId, runId, releaseId].some((value) => value !== '')
+  if (!configured) return null
+  if (!projectId || !runId || !releaseId) throw new Error('CONFIG_PROBE_RESUME_PROJECT_RUN_RELEASE_REQUIRED')
+  return Object.freeze({ projectId, runId, releaseId })
+}
+
+function configProbeBaseDiskMatches(actual, expected) {
+  return actual?.binding === expected?.binding
+    && actual?.sourceRegistryDigest === expected?.sourceRegistryDigest
+    && actual?.capacityBytes === expected?.capacityBytes
+}
+
+async function assertConfigProbeBaseDiskCatalog(request, environmentSpec) {
+  const baseDisk = environmentSpec.runtime?.base_disk
+  if (!baseDisk) throw new Error('CONFIG_PROBE_BASE_DISK_FIXTURE_MISSING')
+  const catalog = await expectJson(await request.get('/api/v1/admin/images'), 'CONFIG_PROBE_CATALOG_READ_FAILED')
+  const disk = catalog.entries.filter((entry) => entry.binding === baseDisk.binding)
+  expect(disk).toHaveLength(1)
+  expect(disk[0]).toMatchObject({
+    kind: 'virtual_machine',
+    status: 'active',
+    format: 'qcow2',
+    capacityBytes: baseDisk.capacityBytes,
+  })
+  expect(`docker://${disk[0].sourceReference.split('@')[0].replace(/:[^/:]+$/, '')}@${disk[0].resolvedDigest}`)
+    .toBe(baseDisk.sourceRegistryDigest)
+}
+
+async function readResumableConfigProbePublication(page, resume, environmentSpec, evaluationSpec, teacherActorId) {
+  const { projectId, runId, releaseId } = resume
+  const project = await expectJson(
+    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}`),
+    'CONFIG_PROBE_RESUME_PROJECT_READ_FAILED',
+  )
+  if (project.id !== projectId || project.ownerActorId !== teacherActorId) {
+    throw new Error('CONFIG_PROBE_RESUME_PROJECT_OWNERSHIP_INVALID')
+  }
+
+  const run = await expectJson(
+    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/agent-runs/${encodeURIComponent(runId)}`),
+    'CONFIG_PROBE_RESUME_RUN_READ_FAILED',
+  )
+  const environmentTrack = run.tracks?.find((track) => track.kind === 'environment')
+  const evaluationTrack = run.tracks?.find((track) => track.kind === 'evaluation')
+  if (
+    run.id !== runId
+    || run.projectId !== projectId
+    || run.state !== 'succeeded'
+    || run.purpose?.kind !== 'authoring'
+    || run.purpose.environmentClass !== 'experiment'
+    || !Array.isArray(run.tracks)
+    || run.tracks.length !== 2
+    || !environmentTrack?.candidateId
+    || !evaluationTrack?.candidateId
+  ) {
+    throw new Error('CONFIG_PROBE_RESUME_RUN_INVALID')
+  }
+
+  const [environmentCandidateView, evaluationCandidateView] = await Promise.all([
+    expectJson(
+      await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/environment-candidates/${encodeURIComponent(environmentTrack.candidateId)}`),
+      'CONFIG_PROBE_RESUME_ENVIRONMENT_CANDIDATE_READ_FAILED',
+    ),
+    expectJson(
+      await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/evaluation-candidates/${encodeURIComponent(evaluationTrack.candidateId)}`),
+      'CONFIG_PROBE_RESUME_EVALUATION_CANDIDATE_READ_FAILED',
+    ),
+  ])
+  const environment = environmentCandidateView.candidate
+  const evaluation = evaluationCandidateView.candidate
+  if (
+    environment?.id !== environmentTrack.candidateId
+    || environment.projectId !== projectId
+    || environment.runId !== runId
+    || environment.spec?.class !== environmentSpec.class
+    || (environmentCandidateView.build != null && environmentCandidateView.build.state !== 'succeeded')
+    || evaluation?.id !== evaluationTrack.candidateId
+    || evaluation.projectId !== projectId
+    || evaluation.runId !== runId
+  ) {
+    throw new Error('CONFIG_PROBE_RESUME_CANDIDATE_SCOPE_INVALID')
+  }
+  for (const field of ['class', 'resources', 'network', 'entries', 'security', 'runtime']) {
+    expect(environment.spec?.[field], `CONFIG_PROBE_RESUME_ENVIRONMENT_CHANGED:${field}`).toEqual(environmentSpec[field])
+  }
+  expect(evaluation.spec?.spec).toEqual(evaluationSpec.spec)
+
+  const expectedArtifact = environmentSpec.runtime.base_disk
+  const artifact = environmentCandidateView.imageArtifact
+  if (
+    artifact?.kind !== 'virtual_machine'
+    || artifact.format !== 'qcow2'
+    || !configProbeBaseDiskMatches(artifact.base_disk, expectedArtifact)
+  ) {
+    throw new Error('CONFIG_PROBE_RESUME_BASE_DISK_INVALID')
+  }
+
+  const release = await expectJson(
+    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/environment-template-releases/${encodeURIComponent(releaseId)}`),
+    'CONFIG_PROBE_RESUME_RELEASE_READ_FAILED',
+  )
+  if (
+    release.id !== releaseId
+    || release.projectId !== projectId
+    || release.agentRunId !== runId
+    || release.candidateId !== environment.id
+    || release.candidateRevision !== environment.revision
+    || release.runtimeKind !== 'virtual_machine'
+    || typeof release.publishedAt !== 'string'
+    || release.withdrawal != null
+    || release.approval?.decision !== 'approved'
+    || release.approval?.candidateId !== environment.id
+    || release.approval?.candidateRevision !== environment.revision
+    || !configProbeBaseDiskMatches(release.artifact?.base_disk, expectedArtifact)
+  ) {
+    throw new Error('CONFIG_PROBE_RESUME_RELEASE_INVALID')
+  }
+  const approvalId = release.approval?.id
+  if (typeof approvalId !== 'string' || approvalId.trim() === '') {
+    throw new Error('CONFIG_PROBE_RESUME_RELEASE_APPROVAL_MISSING')
+  }
+  const publication = await expectJson(
+    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/authoring-approvals/${encodeURIComponent(approvalId)}`),
+    'CONFIG_PROBE_RESUME_PUBLICATION_READ_FAILED',
+  )
+  if (
+    publication.status !== 'ready'
+    || publication.approval?.id !== approvalId
+    || publication.approval?.projectId !== projectId
+    || publication.approval?.environmentCandidateId !== environment.id
+    || publication.approval?.evaluationCandidateId !== evaluation.id
+    || publication.approval?.environmentCandidateRevision !== environment.revision
+    || publication.approval?.evaluationCandidateRevision !== evaluation.revision
+    || publication.environmentReleaseId !== releaseId
+    || typeof publication.evaluationReleaseId !== 'string'
+    || publication.evaluationReleaseId.trim() === ''
+  ) {
+    throw new Error('CONFIG_PROBE_RESUME_PUBLICATION_INVALID')
+  }
+  return { project, run, publication }
+}
+
+async function ensureProjectStudentByUi(page, projectId, studentActorId) {
+  const memberships = await expectJson(
+    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/members`),
+    'CONFIG_PROBE_PROJECT_MEMBERS_READ_FAILED',
+  )
+  const existing = memberships.find((membership) => (
+    membership.projectId === projectId
+    && membership.actorId === studentActorId
+    && membership.role === 'student'
+    && membership.state === 'active'
+  ))
+  if (existing) return existing
+  return await addProjectStudentByUi(page, projectId)
+}
+
 async function authorAndPublish(page, adminPage, project, environmentSpec, evaluationSpec, teacherActorId, onRun) {
   await configureProjectPolicyByUi(page, project.id, { maxTransientRetries: 0 })
   await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
@@ -226,6 +387,7 @@ async function cleanupEnvironment(page, projectId, environmentId) {
 
 test('teacher publishes a configuration experiment and student repairs live VM facts', async ({ page, browser, baseURL }) => {
   if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
+  const resume = configProbeResumeConfig()
   const environmentSpec = JSON.parse(await readFile(join(PACKAGE_ROOT, 'environment.yaml'), 'utf8'))
   const evaluationSpec = JSON.parse(await readFile(join(PACKAGE_ROOT, 'evaluation.yaml'), 'utf8'))
   const content = await readFile(join(PACKAGE_ROOT, 'materials/application.conf'), 'utf8')
@@ -242,17 +404,34 @@ test('teacher publishes a configuration experiment and student repairs live VM f
   let primaryFailure
   const cleanupFailures = []
   try {
-    const catalog = await expectJson(await adminPage.request.get('/api/v1/admin/images'), 'CONFIG_PROBE_CATALOG_READ_FAILED')
-    const disk = catalog.entries.filter((entry) => entry.binding === environmentSpec.runtime.base_disk.binding)
-    expect(disk).toHaveLength(1)
-    expect(disk[0]).toMatchObject({ kind: 'virtual_machine', status: 'active', format: 'qcow2', capacityBytes: environmentSpec.runtime.base_disk.capacityBytes })
-    expect(`docker://${disk[0].sourceReference.split('@')[0].replace(/:[^/:]+$/, '')}@${disk[0].resolvedDigest}`)
-      .toBe(environmentSpec.runtime.base_disk.sourceRegistryDigest)
     const teacherActorId = await readActorId(page.request)
     const studentActorId = await readActorId(studentPage.request)
-    project = await createProjectByUi(page, `config-probe-${Date.now()}-${uuidv7().slice(0, 8)}`)
-    const publication = await authorAndPublish(page, adminPage, project, environmentSpec, evaluationSpec, teacherActorId, (accepted) => { run = accepted })
-    await addProjectStudentByUi(page, project.id)
+    await assertConfigProbeBaseDiskCatalog(adminPage.request, environmentSpec)
+    let publication
+    if (resume) {
+      const resumed = await readResumableConfigProbePublication(
+        page,
+        resume,
+        environmentSpec,
+        evaluationSpec,
+        teacherActorId,
+      )
+      project = resumed.project
+      run = resumed.run
+      publication = resumed.publication
+    } else {
+      project = await createProjectByUi(page, `config-probe-${Date.now()}-${uuidv7().slice(0, 8)}`)
+      publication = await authorAndPublish(
+        page,
+        adminPage,
+        project,
+        environmentSpec,
+        evaluationSpec,
+        teacherActorId,
+        (accepted) => { run = accepted },
+      )
+    }
+    await ensureProjectStudentByUi(page, project.id, studentActorId)
     identity = await createRealWorkSshIdentity()
     key = await addSshPublicKeyByUi(studentPage, identity, (accepted) => { key = accepted })
     const environment = await startStudentEnvironment(studentPage, adminPage, project.id,
