@@ -3184,7 +3184,15 @@ export type CompleteAuthoringApprovalRequestSchemaVirtualMachineDiskFormat = 'qc
  * Completion request for one staged OCI archive upload.
  */
 export type CompletePlatformImageUploadRequestSchema = {
-    [key: string]: never;
+    parts: Array<CompletePlatformImageUploadPart>;
+};
+
+/**
+ * ETag receipt for one completed multipart part.
+ */
+export type CompletePlatformImageUploadPart = {
+    etag: string;
+    partNumber: number;
 };
 
 /**
@@ -8303,6 +8311,7 @@ export type PlatformImageUploadSessionSchema = {
     targetReference: string;
     uploadId: PlatformImageUploadSessionSchemaUploadSessionId;
     uploadTarget: PlatformImageUploadTarget;
+    uploadedParts: Array<PlatformImageUploadedPart>;
 };
 
 /**
@@ -8311,14 +8320,33 @@ export type PlatformImageUploadSessionSchema = {
 export type PlatformImageUploadSessionSchemaPlatformImageKind = 'container' | 'virtual_machine';
 
 /**
- * Short-lived per-object upload authority for one OCI archive.
+ * One short-lived presigned multipart part authority for one OCI archive.
  */
-export type PlatformImageUploadTarget = {
+export type PlatformImageUploadPartTarget = {
     expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
+    partNumber: number;
     requiredHeaders: {
         [key: string]: string;
     };
     uploadUrl: string;
+};
+
+/**
+ * Short-lived multipart upload authority for one OCI archive.
+ */
+export type PlatformImageUploadTarget = {
+    expiresAt: PlatformImageUploadSessionSchemaUtcTimestamp;
+    partSizeBytes: number;
+    parts: Array<PlatformImageUploadPartTarget>;
+};
+
+/**
+ * Actual part observed by the object store during upload status refresh.
+ */
+export type PlatformImageUploadedPart = {
+    etag: string;
+    partNumber: number;
+    sizeBytes: number;
 };
 
 /**
@@ -8352,6 +8380,8 @@ export type PlatformImageUploadStatusSchema = {
     revision: PlatformImageUploadStatusSchemaRevision;
     state: PlatformImageUploadState;
     uploadId: PlatformImageUploadStatusSchemaUploadSessionId;
+    uploadTarget?: PlatformImageUploadStatusSchemaPlatformImageUploadTarget | null;
+    uploadedParts?: Array<PlatformImageUploadStatusSchemaPlatformImageUploadedPart>;
 };
 
 /**
@@ -8360,9 +8390,39 @@ export type PlatformImageUploadStatusSchema = {
 export type PlatformImageUploadStatusSchemaPlatformImageId = string;
 
 /**
+ * One short-lived presigned multipart part authority for one OCI archive.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageUploadPartTarget = {
+    expiresAt: PlatformImageUploadStatusSchemaUtcTimestamp;
+    partNumber: number;
+    requiredHeaders: {
+        [key: string]: string;
+    };
+    uploadUrl: string;
+};
+
+/**
  * Control-owned lifecycle state for a platform image upload.
  */
 export type PlatformImageUploadState = 'pending' | 'queued' | 'freezing' | 'importing' | 'cancelling' | 'imported' | 'failed' | 'cancelled';
+
+/**
+ * Short-lived multipart upload authority for one OCI archive.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageUploadTarget = {
+    expiresAt: PlatformImageUploadStatusSchemaUtcTimestamp;
+    partSizeBytes: number;
+    parts: Array<PlatformImageUploadStatusSchemaPlatformImageUploadPartTarget>;
+};
+
+/**
+ * Actual part observed by the object store during upload status refresh.
+ */
+export type PlatformImageUploadStatusSchemaPlatformImageUploadedPart = {
+    etag: string;
+    partNumber: number;
+    sizeBytes: number;
+};
 
 /**
  * Monotonic aggregate revision. Zero is never a persisted revision.
@@ -8373,6 +8433,11 @@ export type PlatformImageUploadStatusSchemaRevision = number;
  * Strongly typed UUIDv7 identifier for `UploadSessionId`.
  */
 export type PlatformImageUploadStatusSchemaUploadSessionId = string;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type PlatformImageUploadStatusSchemaUtcTimestamp = string;
 
 /**
  * ProblemPackageUploadSession
