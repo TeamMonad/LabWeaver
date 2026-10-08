@@ -131,6 +131,13 @@ async function configureLabPackageCopy(packageCopy) {
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 }
 
+async function selectPermanentMaterialRetentionByUi(page) {
+  const choice = page.getByRole('radio', { name: '不过期，直到明确撤回', exact: true })
+  await expect(choice).toBeVisible()
+  await choice.check()
+  await expect(choice).toBeChecked()
+}
+
 async function waitForExperimentRun(request, projectId, runId, onPendingResourceRequests = null, waitOptions = {}) {
   const run = await waitForTerminalExperimentRun(request, projectId, runId, onPendingResourceRequests, waitOptions)
   if (run.state !== 'succeeded') {
@@ -630,7 +637,14 @@ test('student completes a published lab experiment through the browser terminal'
       await configureProjectPolicyByUi(page, project.id)
       await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
       await selectProjectByUi(page, project.id)
+      if (RETAIN_CUDA_SAMPLE) await selectPermanentMaterialRetentionByUi(page)
       packageData = await uploadPackageDirectoryByUi(page, packageCopy, LAB.frozenPath)
+      if (RETAIN_CUDA_SAMPLE) {
+        expect(packageData.retention).toMatchObject({
+          retainUntil: null,
+          disposition: 'retain_until_revoked',
+        })
+      }
       run = await startExperimentRunByUi(page, project.id)
       completed = await waitForExperimentRun(
         request,

@@ -136,6 +136,26 @@
         材料包
       </h3>
 
+      <fieldset
+        class="retention-choice"
+        :disabled="!retentionChoiceEditable"
+        aria-describedby="retention-choice-help"
+        data-testid="material-retention-choice"
+      >
+        <legend>材料保留策略</legend>
+        <label>
+          <input v-model="retentionChoice" type="radio" value="finite">
+          <span>有限保留（默认）</span>
+        </label>
+        <label>
+          <input v-model="retentionChoice" type="radio" value="permanent">
+          <span>不过期，直到明确撤回</span>
+        </label>
+        <p id="retention-choice-help" class="retention-choice__help">
+          选择会写入新材料包的保留决策；上传开始后不能修改。默认有限保留，长期课程材料才选择不过期。
+        </p>
+      </fieldset>
+
       <div
         class="drop-zone"
         :class="{ 'drop-zone--active': dragOver }"
@@ -275,7 +295,7 @@
         />
         <div>
           <strong>材料包已归档</strong>
-          <span>可以启动实验候选生成。</span>
+          <span>可以启动实验候选生成。保留策略：{{ packageRetentionLabel(uploadedPackage) }}。</span>
         </div>
         <details class="technical-details package-technical-details">
           <summary>查看材料包引用</summary>
@@ -514,7 +534,7 @@ import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type { AgentRunHistoryItem, AgentRunSchema } from '@/generated/contracts'
-import type { UploadFile } from '@/composables/useProjectProblemPackageUpload'
+import type { ProblemPackageRetentionChoice, UploadFile } from '@/composables/useProjectProblemPackageUpload'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
 const route = useRoute()
@@ -524,7 +544,8 @@ const projectId = computed(() => projects.selectedProjectId)
 const courseId = computed(() => projects.selectedProject?.courseId ?? null)
 const policy = useActiveProjectLlmPolicy(projectId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
-const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+const retentionChoice = ref<ProblemPackageRetentionChoice>('finite')
+const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice)
 const agent = useProjectAgentRun(projectId, { kind: 'authoring', environmentClass: 'experiment' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -550,6 +571,11 @@ const restoreDiagnostic = ref<DiagnosticViewModel | null>(null)
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.state.package : null))
+const retentionChoiceEditable = computed(() => (
+  upload.session === null
+  && !packageDone.value
+  && ['idle', 'ready', 'error'].includes(upload.state.kind)
+))
 const IN_FLIGHT_RUN_STATES = ['requested', 'running', 'cancelling', 'awaiting_approval'] as const
 
 const displayRun = computed(() => {
@@ -622,7 +648,19 @@ function clearAuthoring() {
   restoredContextKey = ''
   restoreDiagnostic.value = null
   upload.clear()
+  retentionChoice.value = 'finite'
   updateAuthoringRoute({})
+}
+
+function packageRetentionLabel(packageData: NonNullable<typeof uploadedPackage.value>): string {
+  const retention = packageData.retention as unknown as { disposition?: string; retainUntil?: string | null }
+  return retention.retainUntil === null && retention.disposition === 'retain_until_revoked'
+    ? '不过期'
+    : '有限保留'
+}
+
+function packageRetentionChoice(packageData: NonNullable<typeof uploadedPackage.value>): ProblemPackageRetentionChoice {
+  return packageRetentionLabel(packageData) === '不过期' ? 'permanent' : 'finite'
 }
 
 function attemptDiagnostic(track: AgentRunSchema['tracks'][number]): string | null {
@@ -736,6 +774,7 @@ watch(projectId, (id, previousId) => {
   restoredContextKey = ''
   restoreDiagnostic.value = null
   upload.clear()
+  retentionChoice.value = 'finite'
   if (followsRouteProject) void restoreAuthoringContext()
   else updateAuthoringRoute({})
 })
@@ -744,6 +783,7 @@ watch(
   () => upload.state,
   (state) => {
     if (state.kind !== 'done' || !projectId.value) return
+    retentionChoice.value = packageRetentionChoice(state.package)
     const packageId = state.package.id
     const currentRun = agent.run.kind === 'success' ? agent.run.data : null
     const runId = routeRunId.value
@@ -831,6 +871,40 @@ onUnmounted(() => {
   font: var(--md-sys-title-medium);
   color: var(--md-sys-color-on-surface);
   margin: 0 0 12px;
+}
+
+.retention-choice {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  color: var(--md-sys-color-on-surface);
+}
+
+.retention-choice legend {
+  padding: 0 4px;
+  font: var(--md-sys-label-large);
+}
+
+.retention-choice label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: var(--md-sys-body-medium);
+  cursor: pointer;
+}
+
+.retention-choice__help {
+  margin: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+  line-height: 1.5;
+}
+
+.retention-choice:disabled {
+  opacity: .7;
 }
 
 .section-subtitle {

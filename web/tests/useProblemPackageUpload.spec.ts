@@ -276,6 +276,45 @@ describe('useProjectProblemPackageUpload', () => {
     expect(completeProjectProblemPackageUpload).not.toHaveBeenCalled()
   })
 
+  it('sends the explicit retention choice when starting a package upload', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const retentionChoice = ref<'finite' | 'permanent'>('permanent')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice)
+    await upload.addFiles([makeFile('README.md', '# package')])
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValue({
+      data: {
+        id: 'upload-1',
+        projectId: 'project-1',
+        courseId: 'course-1',
+        expiresAt: '2026-07-16T10:00:00.000Z',
+        revision: 1,
+        files: [{ path: 'README.md', sizeBytes: 9, mediaType: 'text/plain' }],
+        uploadTargets: [],
+      } as never,
+      error: undefined as never,
+    })
+    vi.mocked(completeProjectProblemPackageUpload).mockResolvedValue({
+      data: {
+        id: 'package-1',
+        projectId: 'project-1',
+        courseId: 'course-1',
+        revision: 1,
+        files: [],
+        retention: { retainUntil: null, disposition: 'retain_until_revoked' },
+        completedAt: '2026-07-16T10:00:00.000Z',
+      } as never,
+      error: undefined as never,
+    })
+
+    await upload.createSession()
+
+    expect(createProjectProblemPackageUpload).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ retentionChoice: 'permanent' }),
+    }))
+  })
+
   it('marks object upload failure without throwing unhandled rejection', async () => {
     const projectId = ref<string | null>('project-1')
     const policyRevision = ref<number | undefined>(1)
@@ -337,6 +376,7 @@ describe('useProjectProblemPackageUpload', () => {
         projectId: 'project-1',
         courseId: 'course-1',
         retentionPolicyRevision: 1,
+        retentionChoice: 'finite',
       }),
     }))
   })

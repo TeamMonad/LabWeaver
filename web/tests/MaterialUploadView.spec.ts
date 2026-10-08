@@ -139,6 +139,9 @@ describe('MaterialUploadView', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('claude-3-5-sonnet'))
     expect(wrapper.text()).toContain('secret')
     expect(wrapper.text()).toContain('rev-3 / policy-1')
+    expect((wrapper.get('[data-testid="material-retention-choice"] input[value="finite"]').element as HTMLInputElement).checked).toBe(true)
+    await wrapper.get('[data-testid="material-retention-choice"] input[value="permanent"]').setValue()
+    expect((wrapper.get('[data-testid="material-retention-choice"] input[value="permanent"]').element as HTMLInputElement).checked).toBe(true)
     expect(getActiveProjectLlmPolicy).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
   })
 
