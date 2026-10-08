@@ -2463,7 +2463,7 @@ async fn expired_lost_multipart_creation_is_aborted_without_idempotency_recreati
             SET multipart_upload_id=NULL,multipart_part_size_bytes=NULL,
                 multipart_part_count=NULL,multipart_creation_lease_token=NULL,
                 multipart_creation_lease_expires_at=NULL,
-                expires_at=clock_timestamp()-interval '1 second'
+                expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second'
           WHERE upload_id=$1",
     )
     .bind(session.upload_id.as_uuid())
