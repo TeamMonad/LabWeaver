@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -66,14 +67,14 @@ def main() -> int:
             }
         )
         subprocess.run(
-            ["/usr/bin/python3", str(seed_path())],
+            [sys.executable, str(seed_path())],
             env=environment,
             check=True,
             stdout=subprocess.DEVNULL,
         )
 
         server = subprocess.Popen(
-            ["/usr/bin/python3", str(server_path())],
+            [sys.executable, str(server_path())],
             env=environment,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
