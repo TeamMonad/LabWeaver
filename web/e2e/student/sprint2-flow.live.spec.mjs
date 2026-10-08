@@ -77,6 +77,7 @@ const REAL_WORK_VM = realWorkVmConfig()
 const REAL_WORK_CONFIG = realWorkConfig({ virtualMachine: Boolean(REAL_WORK_VM) })
 const REAL_WORK_RESUME = realWorkResumeConfig()
 const REAL_WORK_GPU = realWorkGpuConfig()
+const PRESERVE_EXISTING_PROJECT = EXISTING_PROJECT_MODE || Boolean(REAL_WORK_RESUME)
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim()
@@ -639,6 +640,7 @@ test('student provisions a Work environment, configures it, and releases its cap
   if (resumed) {
     project = resumed.project
     await page.goto(`/researcher/workspaces?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    existingProjectPolicy = await readExistingProjectPolicy(page.request, project.id)
   } else if (EXISTING_PROJECT_MODE) {
     await navigateFromHomeByUi(page, '项目与工作空间')
     project = await expectJson(
@@ -654,7 +656,7 @@ test('student provisions a Work environment, configures it, and releases its cap
     project = await createProjectByUi(page, `live-work-${Date.now()}-${uuidv7().slice(0, 8)}`)
   }
   await selectProjectByUi(page, project.id)
-  if (!resumed && !EXISTING_PROJECT_MODE) await configureProjectPolicyByUi(page, project.id)
+  if (!PRESERVE_EXISTING_PROJECT) await configureProjectPolicyByUi(page, project.id)
   const packageCopy = !resumed && (REAL_WORK_VM || REAL_WORK_CONFIG)
     ? await createRealWorkPackage(REAL_WORK_VM ? null : REAL_WORK_CONFIG.goldenBaseImage, {
       gpu: REAL_WORK_GPU,
@@ -679,7 +681,7 @@ test('student provisions a Work environment, configures it, and releases its cap
   try {
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     adminPage = await adminContext.newPage()
-    if (EXISTING_PROJECT_MODE) {
+    if (PRESERVE_EXISTING_PROJECT) {
       existingResourceBudget = await readExistingProjectResourceBudget(adminPage.request, project.id)
     }
     const { packageData, release } = resumed
@@ -710,7 +712,7 @@ test('student provisions a Work environment, configures it, and releases its cap
       )
       if (!Array.isArray(baselineCharges)) throw new Error('REAL_WORK_BASELINE_CHARGES_INVALID')
       baselineChargeIds = new Set(baselineCharges.map((charge) => charge.id).filter((id) => typeof id === 'string' && id !== ''))
-      if (!EXISTING_PROJECT_MODE) {
+      if (!PRESERVE_EXISTING_PROJECT) {
         await configureRealWorkBudgetByUi(browser, baseURL, project.id)
       }
     }
@@ -1337,7 +1339,7 @@ test('student provisions a Work environment, configures it, and releases its cap
         baselineChargeIds,
         gpu: REAL_WORK_GPU ? { ...REAL_WORK_GPU, rate: gpuRate } : null,
       })
-      if (EXISTING_PROJECT_MODE) {
+      if (PRESERVE_EXISTING_PROJECT) {
         const finalPolicy = await readExistingProjectPolicy(page.request, project.id)
         expect(finalPolicy.budget).toEqual(existingProjectPolicy.budget)
         const finalResourceBudget = await readExistingProjectResourceBudget(
@@ -1359,9 +1361,9 @@ test('student provisions a Work environment, configures it, and releases its cap
         gpu: REAL_WORK_GPU,
         usageRecordIds: finance.matches.map(({ usage }) => usage.id),
         expectedCharges: finance.matches.map(({ charge }) => charge),
-        requireBudget: !EXISTING_PROJECT_MODE || existingResourceBudget !== null,
+        requireBudget: !PRESERVE_EXISTING_PROJECT || existingResourceBudget !== null,
       })
-      if (!EXISTING_PROJECT_MODE && !REAL_WORK_RESUME) {
+      if (!PRESERVE_EXISTING_PROJECT) {
         const settledCharge = selectRealWorkFinanceAdjustmentCharge(finance.matches)
         await verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, project.id, settledCharge)
       }
