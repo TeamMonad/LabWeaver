@@ -20,8 +20,19 @@ export type AsyncState<T> =
   | { kind: 'revoked'; diagnostic: DiagnosticViewModel }
   | { kind: 'sse-gap'; diagnostic: DiagnosticViewModel }
 
+function readableDiagnosticMessage(code: string, message: string): string {
+  switch (code) {
+    case 'LW_MATERIAL_RETENTION_EXPIRED':
+      return '材料保留期限已过期。请重新上传材料，并重新生成、审批和发布；重试当前过期版本无法恢复。'
+    case 'LW_RESOURCE_GPU_CAPACITY_EXHAUSTED':
+      return 'GPU 容量当前不可用，可能已被其他任务占用。请稍后重试或调整资源申请。'
+    default:
+      return message
+  }
+}
+
 export function makeDiagnostic(code: string, message: string, retryable = false): DiagnosticViewModel {
-  return { code, message, retryable }
+  return { code, message: readableDiagnosticMessage(code, message), retryable }
 }
 
 /**
