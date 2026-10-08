@@ -380,7 +380,6 @@ const packageDone = computed(() => uploadedPackage.value !== null)
 const packageId = computed(() => uploadedPackage.value?.id ?? '')
 const packageRevision = computed(() => uploadedPackage.value?.revision ?? 0)
 let packageRestoreKey: string | null = null
-let packageRestoreGeneration = 0
 const canUploadPackage = computed(() => {
   const ready = packageUpload.state.kind === 'ready' || packageUpload.state.kind === 'error'
   return Boolean(selectedProject.value && ready && packageUpload.files.length > 0 && policyRevision.value !== undefined)
@@ -533,13 +532,11 @@ watch(mode, (nextMode, previousMode) => {
 async function restorePackageContext() {
   const projectId = selectedProjectId.value
   const packageId = routePackageId.value
-  const contextKey = `${projectId ?? ''}:${packageId ?? ''}`
+  const contextKey = `${mode.value}:${projectId ?? ''}:${packageId ?? ''}`
   if (contextKey === packageRestoreKey) return
   packageRestoreKey = contextKey
-  const generation = ++packageRestoreGeneration
   if (mode.value !== 'configuration' || !projectId || !packageId) return
   await packageUpload.loadPackage(packageId)
-  if (generation !== packageRestoreGeneration || selectedProjectId.value !== projectId || routePackageId.value !== packageId) return
 }
 
 watch([selectedProjectId, routePackageId, mode], () => {

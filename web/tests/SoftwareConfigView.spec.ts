@@ -279,6 +279,28 @@ describe('SoftwareConfigView', () => {
     wrapper.unmount()
   })
 
+  it('restores the route package when switching from template to configuration mode', async () => {
+    packageUploadMock.state = { kind: 'idle' }
+    const wrapper = mount(SoftwareConfigView, {
+      global: {
+        stubs: { RouterLink: true },
+        provide: {
+          [routeLocationKey as symbol]: { query: { projectId: 'project-1', packageId: 'published-package', mode: 'template' } },
+          [routerKey as symbol]: { replace: vi.fn() },
+        },
+      },
+    })
+
+    await vi.waitFor(() => expect(packageUploadMock.loadPackage).not.toHaveBeenCalled())
+    const configurationButton = wrapper.find('button.mode-switch__button')
+    expect(configurationButton.text()).toContain('配置')
+    await configurationButton.trigger('click')
+
+    await vi.waitFor(() => expect(packageUploadMock.loadPackage).toHaveBeenCalledWith('published-package'))
+    expect(wrapper.text()).toContain('材料包已准备')
+    wrapper.unmount()
+  })
+
   it('requires a future approval expiry before approving a Work plan', async () => {
     const approvedRun = { ...run, state: 'running', revision: 2 }
     vi.mocked(approveProjectWorkConfigurationRun).mockResolvedValue({ data: approvedRun as never, error: undefined as never })
