@@ -26,6 +26,7 @@ import {
   realWorkResumeConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
+  readResourceRates,
   selectRealWorkFinanceAdjustmentCharge,
   selectPendingWorkTaskResourceRequest,
   waitForSettledWorkUsageCharges,
@@ -91,6 +92,20 @@ if (RECLAIM_CONNECTION_CHECK_VALUES.some(Boolean) && !RECLAIM_CONNECTION_CHECK_E
 }
 if (RECLAIM_CONNECTION_CHECK_ENABLED && RECLAIM_CONNECTION_CHECK_VALUES.some((value) => !UUID.test(value))) {
   throw new Error('LABWEAVER_E2E_WORK_RECLAIM_IDS_INVALID')
+}
+const FINANCE_CONTINUATION_IDS = Object.freeze({
+  projectId: process.env.LABWEAVER_E2E_WORK_FINANCE_PROJECT_ID?.trim() ?? '',
+  environmentId: process.env.LABWEAVER_E2E_WORK_FINANCE_ENVIRONMENT_ID?.trim() ?? '',
+  requestId: process.env.LABWEAVER_E2E_WORK_FINANCE_REQUEST_ID?.trim() ?? '',
+  leaseId: process.env.LABWEAVER_E2E_WORK_FINANCE_LEASE_ID?.trim() ?? '',
+})
+const FINANCE_CONTINUATION_VALUES = Object.values(FINANCE_CONTINUATION_IDS)
+const FINANCE_CONTINUATION_ENABLED = FINANCE_CONTINUATION_VALUES.every(Boolean)
+if (FINANCE_CONTINUATION_VALUES.some(Boolean) && !FINANCE_CONTINUATION_ENABLED) {
+  throw new Error('LABWEAVER_E2E_WORK_FINANCE_IDS_INCOMPLETE')
+}
+if (FINANCE_CONTINUATION_ENABLED && FINANCE_CONTINUATION_VALUES.some((value) => !UUID.test(value))) {
+  throw new Error('LABWEAVER_E2E_WORK_FINANCE_IDS_INVALID')
 }
 const AUTHORING_RESOURCE_PROVIDER_BINDING =
   process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
@@ -235,6 +250,35 @@ async function assertExistingProjectWorkResourcesReleased(request, projectId) {
       throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASE_ACTIVE:${lease.id}:${lease.state}`)
     }
     throw new Error(`REAL_WORK_EXISTING_PROJECT_RESOURCE_LEASE_STATE_INVALID:${lease.id}:${lease.state}`)
+  }
+}
+
+async function readContinuationGpuRate(browser, baseURL) {
+  const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  try {
+    const rates = await readResourceRates(context, 'REAL_WORK_FINANCE_GPU_RATE_READ_FAILED')
+    const active = rates.filter((rate) => {
+      const effectiveFrom = Date.parse(rate.effectiveFrom)
+      const effectiveUntil = rate.effectiveUntil == null ? null : Date.parse(rate.effectiveUntil)
+      return rate.unit === 'gpu_unit_second'
+        && rate.gpuClass === 'nvidia-cuda'
+        && rate.gpuMode === 'exclusive'
+        && rate.unitQuantity === 1
+        && rate.unitPrice?.currency === 'USD'
+        && rate.unitPrice?.amount === '0.000100'
+        && Number.isFinite(effectiveFrom)
+        && effectiveFrom <= Date.now()
+        && (effectiveUntil === null || (Number.isFinite(effectiveUntil) && effectiveUntil > Date.now()))
+    })
+    if (active.length !== 1) throw new Error(`REAL_WORK_FINANCE_GPU_RATE_INVALID:${active.length}`)
+    return {
+      class: 'nvidia-cuda',
+      mode: 'exclusive',
+      count: 1,
+      rate: active[0],
+    }
+  } finally {
+    await context.close()
   }
 }
 
@@ -1502,4 +1546,57 @@ test('checks access controls for an already reclaimed Work environment', async (
   }
 
   await assertConnectionBlockedAfterLeaseRevoke(page, projectId, { id: environmentId })
+})
+
+test('continues finance verification for an already released exclusive Work run', async ({ page, browser, baseURL }) => {
+  test.skip(
+    !FINANCE_CONTINUATION_ENABLED,
+    'set the four LABWEAVER_E2E_WORK_FINANCE_* IDs to continue an exact released Work finance check',
+  )
+  if (!baseURL) throw new Error('PW_BASE_URL_REQUIRED')
+  const { projectId, environmentId, requestId, leaseId } = FINANCE_CONTINUATION_IDS
+  const resourceRequest = await expectJson(
+    await page.request.get(`/api/v1/resource-requests/${requestId}`),
+    'WORK_FINANCE_CONTINUATION_REQUEST_READ_FAILED',
+  )
+  if (
+    resourceRequest.id !== requestId
+    || resourceRequest.projectId !== projectId
+    || !WORK_RESOURCE_REQUEST_TERMINAL_STATES.has(resourceRequest.state)
+    || resourceRequest.target?.kind !== 'environment'
+    || resourceRequest.target.environmentId !== environmentId
+  ) {
+    throw new Error(`WORK_FINANCE_CONTINUATION_REQUEST_SCOPE_INVALID:${resourceRequest.state ?? 'missing'}`)
+  }
+
+  const lease = await expectJson(
+    await page.request.get(`/api/v1/resource-leases/${leaseId}`),
+    'WORK_FINANCE_CONTINUATION_LEASE_READ_FAILED',
+  )
+  if (lease.id !== leaseId || lease.requestId !== requestId || lease.state !== 'revoked') {
+    throw new Error(`WORK_FINANCE_CONTINUATION_LEASE_STATE_INVALID:${lease.state ?? 'missing'}`)
+  }
+
+  const environment = await readReclaimedEnvironment(page.request, projectId, environmentId)
+  if (environment.observedState !== 'deleted') {
+    throw new Error(`WORK_FINANCE_CONTINUATION_ENVIRONMENT_STATE_INVALID:${environment.observedState ?? 'missing'}`)
+  }
+  await assertConnectionBlockedAfterLeaseRevoke(page, projectId, environment)
+
+  const gpu = await readContinuationGpuRate(browser, baseURL)
+  const finance = await waitForSettledWorkUsageCharges(browser, baseURL, {
+    projectId,
+    leases: [{ requestId, leaseId }],
+    gpu,
+  })
+  if (finance.matches.length === 0) throw new Error('WORK_FINANCE_CONTINUATION_CHARGES_MISSING')
+  await inspectRealWorkFinanceByUi(browser, baseURL, projectId, {
+    gpu,
+    usageRecordIds: finance.matches.map(({ usage }) => usage.id),
+    expectedCharges: finance.matches.map(({ charge }) => charge),
+    requireBudget: true,
+  })
+
+  const settledCharge = selectRealWorkFinanceAdjustmentCharge(finance.matches)
+  await verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, projectId, settledCharge)
 })
