@@ -42,6 +42,8 @@ export const MAX_PLATFORM_IMAGE_ARCHIVE_BYTES = 5_000_000_000
 const UPLOAD_STORAGE_KEY = 'labweaver.platform-image-upload'
 const UPLOAD_POLL_INTERVAL_MS = 1000
 const UPLOAD_POLL_TIMEOUT_MS = 15 * 60 * 1000
+const PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES = 64 * 1024 * 1024
+const PLATFORM_IMAGE_UPLOAD_MAX_CONCURRENCY = 3
 const UPLOAD_STATES = new Set<PlatformImageUploadState>([
   'pending',
   'queued',
@@ -55,6 +57,30 @@ const UPLOAD_STATES = new Set<PlatformImageUploadState>([
 
 type UploadPhase = 'uploading' | 'completing'
 
+interface UploadedPart {
+  partNumber: number
+  etag: string
+  sizeBytes: number
+}
+
+interface UploadPartTarget {
+  partNumber: number
+  uploadUrl: string
+  requiredHeaders: Record<string, string>
+  expiresAt: string
+}
+
+interface MultipartUploadTarget {
+  partSizeBytes: number
+  parts: UploadPartTarget[]
+  expiresAt: string
+}
+
+interface MultipartUploadStatus extends PlatformImageUploadStatus {
+  uploadTarget?: MultipartUploadTarget | null
+  uploadedParts: UploadedPart[]
+}
+
 interface PersistedUpload {
   uploadId: string
   revision: number
@@ -62,9 +88,12 @@ interface PersistedUpload {
   cancelIdempotencyKey: string
   phase: UploadPhase
   state: PlatformImageUploadState
+  archiveBytes: number
 }
 
-type ActiveUpload = PersistedUpload
+interface ActiveUpload extends PersistedUpload {
+  uploadedParts: UploadedPart[]
+}
 
 export type PlatformImageState =
   | { kind: 'idle' }
@@ -134,6 +163,11 @@ export function usePlatformImages() {
   const uploadActive = computed(() => activeUpload.value !== null)
   const uploadCompletionRetryable = computed(() => activeUpload.value?.phase === 'completing')
   const uploadCancellationPending = computed(() => activeUpload.value?.state === 'cancelling')
+  const uploadNeedsFile = computed(() => (
+    activeUpload.value?.phase === 'uploading'
+    && state.value.kind === 'error'
+    && state.value.uploadId === activeUpload.value.uploadId
+  ))
   let uploadPoll: Promise<boolean> | null = null
   let uploadTask: Promise<void> | null = null
   let uploadAbortController: AbortController | null = null
@@ -221,8 +255,11 @@ export function usePlatformImages() {
         || (parsed.phase !== 'uploading' && parsed.phase !== 'completing')
         || typeof parsed.state !== 'string'
         || !UPLOAD_STATES.has(parsed.state as PlatformImageUploadState)
+        || typeof parsed.archiveBytes !== 'number'
+        || !Number.isSafeInteger(parsed.archiveBytes)
+        || parsed.archiveBytes < 0
       ) return null
-      return parsed as ActiveUpload
+      return { ...parsed, uploadedParts: [] } as ActiveUpload
     } catch {
       return null
     }
@@ -231,7 +268,18 @@ export function usePlatformImages() {
   function persistUpload(upload: ActiveUpload | null): void {
     if (typeof window === 'undefined') return
     try {
-      if (upload) window.sessionStorage.setItem(UPLOAD_STORAGE_KEY, JSON.stringify(upload))
+      if (upload) {
+        const persisted: PersistedUpload = {
+          uploadId: upload.uploadId,
+          revision: upload.revision,
+          completeIdempotencyKey: upload.completeIdempotencyKey,
+          cancelIdempotencyKey: upload.cancelIdempotencyKey,
+          phase: upload.phase,
+          state: upload.state,
+          archiveBytes: upload.archiveBytes,
+        }
+        window.sessionStorage.setItem(UPLOAD_STORAGE_KEY, JSON.stringify(persisted))
+      }
       else window.sessionStorage.removeItem(UPLOAD_STORAGE_KEY)
     } catch {
       // Storage is an optional refresh aid; it must not block the server flow.
@@ -271,11 +319,39 @@ export function usePlatformImages() {
     return current.kind === 'terminal' && current.state === 'cancelled'
   }
 
+  function multipartStatus(status: PlatformImageUploadStatus): MultipartUploadStatus {
+    const value = status as PlatformImageUploadStatus & Partial<MultipartUploadStatus>
+    return {
+      ...status,
+      uploadedParts: Array.isArray(value.uploadedParts) ? value.uploadedParts : [],
+      uploadTarget: value.uploadTarget ?? null,
+    }
+  }
+
+  function setUploadedParts(upload: ActiveUpload, parts: UploadedPart[]): void {
+    const byNumber = new Map<number, UploadedPart>()
+    for (const part of parts) {
+      if (Number.isInteger(part.partNumber) && part.partNumber > 0 && part.etag.trim().length > 0) {
+        byNumber.set(part.partNumber, {
+          partNumber: part.partNumber,
+          etag: part.etag,
+          sizeBytes: part.sizeBytes,
+        })
+      }
+    }
+    upload.uploadedParts = [...byNumber.values()].sort((left, right) => left.partNumber - right.partNumber)
+    persistUpload(upload)
+  }
+
   function applyStatus(status: PlatformImageUploadStatus): PlatformImageState | null {
     const current = activeUpload.value
     if (disposed || !current || current.uploadId !== status.uploadId) return null
     current.revision = status.revision
     current.state = status.state
+    const details = multipartStatus(status)
+    if (Object.prototype.hasOwnProperty.call(status, 'uploadedParts')) {
+      setUploadedParts(current, details.uploadedParts)
+    }
     persistUpload(current)
     if (status.state === 'imported' || status.state === 'failed' || status.state === 'cancelled') {
       const diagnostic = statusDiagnostic(status)
@@ -349,16 +425,149 @@ export function usePlatformImages() {
     return pending
   }
 
+  function partByteLength(file: Blob, partSizeBytes: number, partNumber: number): number {
+    const start = (partNumber - 1) * partSizeBytes
+    if (start < 0 || start >= file.size) return 0
+    return Math.min(partSizeBytes, file.size - start)
+  }
+
+  function uploadProgress(
+    file: Blob,
+    partSizeBytes: number,
+    uploaded: Map<number, UploadedPart>,
+    inFlight: Map<number, number>,
+  ): number {
+    let completeBytes = 0
+    for (let partNumber = 1; ; partNumber += 1) {
+      const expectedBytes = partByteLength(file, partSizeBytes, partNumber)
+      if (expectedBytes === 0) break
+      completeBytes += uploaded.get(partNumber)?.sizeBytes ?? 0
+      completeBytes += inFlight.get(partNumber) ?? 0
+    }
+    return Math.min(100, Math.round((completeBytes / file.size) * 100))
+  }
+
+  async function uploadRemainingParts(
+    upload: ActiveUpload,
+    file: File,
+    target: MultipartUploadTarget,
+  ): Promise<void> {
+    if (target.partSizeBytes !== PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES) {
+      throw new Error('平台镜像上传分块大小与服务端不一致。')
+    }
+    if (file.size !== upload.archiveBytes) {
+      throw new Error('所选归档大小与原上传会话不一致，请重新选择同一个归档文件。')
+    }
+
+    const uploaded = new Map<number, UploadedPart>()
+    for (const part of upload.uploadedParts) {
+      const expectedBytes = partByteLength(file, target.partSizeBytes, part.partNumber)
+      if (expectedBytes === 0 || part.sizeBytes !== expectedBytes) {
+        throw new Error('服务端已上传的归档分块与所选文件不一致。')
+      }
+      uploaded.set(part.partNumber, part)
+    }
+    const targets = target.parts
+      .filter((part) => !uploaded.has(part.partNumber))
+      .sort((left, right) => left.partNumber - right.partNumber)
+    const expectedPartCount = Math.ceil(file.size / target.partSizeBytes)
+    if (expectedPartCount === 0 || uploaded.size + targets.length !== expectedPartCount) {
+      throw new Error('上传会话返回的归档分块清单不完整。')
+    }
+    const targetNumbers = new Set(targets.map((part) => part.partNumber))
+    for (const part of uploaded.values()) {
+      if (part.partNumber < 1 || part.partNumber > expectedPartCount) {
+        throw new Error('服务端返回了无效的归档分块编号。')
+      }
+    }
+    if (new Set([...uploaded.keys(), ...targetNumbers]).size !== expectedPartCount) {
+      throw new Error('上传会话返回了重复或缺失的归档分块。')
+    }
+
+    const inFlight = new Map<number, number>()
+    const controller = uploadAbortController
+    if (!controller) throw new Error('上传任务已停止。')
+    let nextTarget = 0
+    let firstError: unknown = null
+    const updateProgress = () => {
+      if (disposed || uploadCancelRequested || activeUpload.value?.uploadId !== upload.uploadId) return
+      state.value = {
+        kind: 'uploading',
+        progress: uploadProgress(file, target.partSizeBytes, uploaded, inFlight),
+        uploadId: upload.uploadId,
+      }
+    }
+    updateProgress()
+
+    const worker = async () => {
+      while (!firstError && !controller.signal.aborted) {
+        const part = targets[nextTarget]
+        nextTarget += 1
+        if (!part) return
+        const expectedBytes = partByteLength(file, target.partSizeBytes, part.partNumber)
+        if (expectedBytes === 0) {
+          firstError = new Error('上传会话返回了超出归档大小的分块。')
+          controller.abort()
+          return
+        }
+        inFlight.set(part.partNumber, 0)
+        try {
+          const result = await putFileWithProgress(
+            file.slice((part.partNumber - 1) * target.partSizeBytes, (part.partNumber - 1) * target.partSizeBytes + expectedBytes),
+            part.uploadUrl,
+            part.requiredHeaders,
+            (progress) => {
+              inFlight.set(part.partNumber, Math.round(expectedBytes * progress / 100))
+              updateProgress()
+            },
+            controller.signal,
+          )
+          if (!result.etag || result.etag.trim().length === 0) {
+            throw new Error('对象存储未返回归档分块的 ETag。')
+          }
+          inFlight.delete(part.partNumber)
+          uploaded.set(part.partNumber, {
+            partNumber: part.partNumber,
+            etag: result.etag,
+            sizeBytes: expectedBytes,
+          })
+          setUploadedParts(upload, [...uploaded.values()])
+          updateProgress()
+        } catch (error) {
+          inFlight.delete(part.partNumber)
+          if (!firstError) firstError = error
+          controller.abort()
+          return
+        }
+      }
+    }
+    const workerCount = Math.min(PLATFORM_IMAGE_UPLOAD_MAX_CONCURRENCY, targets.length)
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+    if (firstError) throw firstError
+    if (controller.signal.aborted || uploadCancelRequested || disposed) return
+    updateProgress()
+  }
+
   async function completeCurrentUpload(upload: ActiveUpload): Promise<boolean> {
     if (disposed || uploadCancelRequested) return false
+    if (upload.uploadedParts.length === 0) {
+      failure(undefined, 'PLATFORM_IMAGE_UPLOAD_PARTS_MISSING', '归档分块尚未全部上传，无法启动镜像导入。', upload.uploadId, false)
+      return false
+    }
     upload.phase = 'completing'
     persistUpload(upload)
     const completion = await completePlatformImageUpload({
       path: { uploadId: upload.uploadId },
       headers: { 'Idempotency-Key': upload.completeIdempotencyKey, 'If-Match': ifMatch(upload.revision) },
-      body: {},
-    })
+      body: {
+        parts: upload.uploadedParts.map((part) => ({ partNumber: part.partNumber, etag: part.etag })),
+      },
+    } as never)
     if (disposed || uploadCancelRequested) return false
+    if (!completion.error && completion.data) {
+      const status = completion.data as unknown as PlatformImageUploadStatus
+      if (status.uploadId === upload.uploadId) applyStatus(status)
+    }
     const problem = completion.error ? extractProblemDetails(completion.error) : null
     if (completion.error && problem?.retryable === false) {
       failure(completion.error, 'PLATFORM_IMAGE_UPLOAD_FAILED', '启动镜像导入失败。', upload.uploadId)
@@ -420,12 +629,57 @@ export function usePlatformImages() {
     return settle(result, 'PLATFORM_IMAGE_DISABLE_FAILED', '停用镜像失败。')
   }
 
+  async function transferAndComplete(
+    upload: ActiveUpload,
+    file: File,
+    target: MultipartUploadTarget,
+  ): Promise<boolean> {
+    uploadCancelRequested = false
+    uploadAbortController = new AbortController()
+    let transferTerminalStatus: PlatformImageUploadStatus | null = null
+    const uploadTaskForSession = uploadRemainingParts(upload, file, target)
+    uploadTask = uploadTaskForSession
+    monitorUploadStatusDuringTransfer(upload.uploadId, (status) => {
+      if (disposed || uploadCancelRequested || activeUpload.value?.uploadId !== upload.uploadId) return
+      transferTerminalStatus = status
+      const next = applyStatus(status)
+      if (next?.kind === 'terminal') {
+        state.value = next
+        uploadAbortController?.abort()
+      }
+    })
+    try {
+      await uploadTaskForSession
+      if (transferTerminalStatus) return false
+    } catch (error) {
+      if (transferTerminalStatus) return false
+      if (!disposed && !uploadCancelRequested) {
+        const detail = error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : '归档分块上传失败。请重新选择同一归档后继续。'
+        failure(error, 'PLATFORM_IMAGE_UPLOAD_FAILED', detail, upload.uploadId, false)
+      }
+      return false
+    } finally {
+      stopUploadStatusMonitor()
+      uploadTask = null
+      uploadAbortController = null
+    }
+
+    if (transferTerminalStatus || uploadCancelRequested || disposed) return false
+    state.value = {
+      kind: 'processing',
+      uploadId: upload.uploadId,
+      state: upload.state,
+      revision: upload.revision,
+    }
+    return completeCurrentUpload(upload)
+  }
+
   /**
-   * Stages one OCI archive and completes the import.
-   *
-   * Every call creates a fresh upload authority, so a retry after an expired
-   * presigned URL never reuses the previous target. The selected file stays
-   * with the caller until it explicitly clears it.
+   * Resumes the current multipart session when a file is selected again.
+   * Presigned targets and observed parts always come from the server status;
+   * the browser never treats a local progress value as an uploaded part.
    */
   async function resumeUpload(): Promise<boolean> {
     if (disposed || uploadPoll) return false
@@ -446,17 +700,23 @@ export function usePlatformImages() {
       state.value = next
       return next.state === 'imported'
     }
+    const details = multipartStatus(status)
+    if (details.uploadedParts.length > 0) setUploadedParts(persisted, details.uploadedParts)
     if (persisted.phase === 'uploading' && status.state === 'pending') {
       failure(
         undefined,
         'PLATFORM_IMAGE_UPLOAD_FILE_REQUIRED',
-        '上次上传中断，浏览器未保存文件。请取消这次上传，再重新选择归档并上传。',
+        '上传会话仍在等待归档。请重新选择同一个归档文件以继续上传已完成的部分。',
         persisted.uploadId,
         false,
       )
       return false
     }
     if (persisted.phase === 'completing' && status.state === 'pending') {
+      if (details.uploadedParts.length === 0) {
+        failure(undefined, 'PLATFORM_IMAGE_UPLOAD_PARTS_MISSING', '归档分块状态尚未同步，无法启动镜像导入。', persisted.uploadId, false)
+        return false
+      }
       return completeCurrentUpload(persisted)
     }
     return pollUpload(persisted.uploadId)
@@ -464,13 +724,41 @@ export function usePlatformImages() {
 
   async function upload(file: File, input: UploadPlatformImageInput): Promise<boolean> {
     if (disposed) return false
-    if (activeUpload.value) {
-      failure(undefined, 'PLATFORM_IMAGE_UPLOAD_IN_PROGRESS', '已有镜像上传任务正在处理。')
-      return false
-    }
     if (file.size > MAX_PLATFORM_IMAGE_ARCHIVE_BYTES) {
       failure(undefined, 'PLATFORM_IMAGE_UPLOAD_TOO_LARGE', '所选归档超过 5 GB 限制。')
       return false
+    }
+
+    const existing = activeUpload.value
+    if (existing) {
+      if (existing.phase !== 'uploading' || existing.state === 'cancelling') {
+        failure(undefined, 'PLATFORM_IMAGE_UPLOAD_IN_PROGRESS', '已有镜像上传任务正在处理。')
+        return false
+      }
+      if (file.size !== existing.archiveBytes) {
+        failure(undefined, 'PLATFORM_IMAGE_UPLOAD_FILE_MISMATCH', '请重新选择与原上传会话大小相同的归档文件。', existing.uploadId, false)
+        return false
+      }
+      const status = await readUploadStatus(existing.uploadId)
+      if (!status) return false
+      const next = applyStatus(status)
+      if (!next || next.kind === 'terminal') return next?.kind === 'terminal' && next.state === 'imported'
+      const details = multipartStatus(status)
+      if (status.state !== 'pending') {
+        return pollUpload(existing.uploadId)
+      }
+      if (!details.uploadTarget) {
+        failure(
+          undefined,
+          'PLATFORM_IMAGE_UPLOAD_TARGET_MISSING',
+          '上传会话未返回继续上传所需的授权信息，请刷新任务状态后重试。',
+          existing.uploadId,
+          false,
+        )
+        return false
+      }
+      setUploadedParts(existing, details.uploadedParts)
+      return transferAndComplete(existing, file, details.uploadTarget)
     }
 
     uploadCancelRequested = false
@@ -496,13 +784,33 @@ export function usePlatformImages() {
       return false
     }
 
+    const sessionData = session.data as unknown as {
+      uploadId: string
+      archiveBytes: number
+      revision: number
+      uploadTarget: MultipartUploadTarget
+      uploadedParts: UploadedPart[]
+    }
+    if (
+      sessionData.archiveBytes !== file.size
+      || !sessionData.uploadTarget
+      || sessionData.uploadTarget.partSizeBytes !== PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES
+      || !Array.isArray(sessionData.uploadTarget.parts)
+      || !Array.isArray(sessionData.uploadedParts)
+    ) {
+      failure(undefined, 'PLATFORM_IMAGE_UPLOAD_TARGET_INVALID', '镜像上传会话返回的分块清单无效。')
+      return false
+    }
+
     const active: ActiveUpload = {
-      uploadId: session.data.uploadId,
-      revision: session.data.revision,
+      uploadId: sessionData.uploadId,
+      revision: sessionData.revision,
       completeIdempotencyKey: idempotencyKey(),
       cancelIdempotencyKey: idempotencyKey(),
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: sessionData.archiveBytes,
+      uploadedParts: sessionData.uploadedParts,
     }
     activeUpload.value = active
     persistUpload(active)
@@ -511,55 +819,7 @@ export function usePlatformImages() {
     // not start an object-store PUT without a live owner for its progress and
     // cancellation controls.
     if (disposed) return false
-
-    uploadAbortController = new AbortController()
-    const signal = uploadAbortController.signal
-    let transferTerminalStatus: PlatformImageUploadStatus | null = null
-    const uploadTaskForSession = putFileWithProgress(
-      file,
-      session.data.uploadTarget.uploadUrl,
-      session.data.uploadTarget.requiredHeaders,
-      (progress) => {
-        state.value = { kind: 'uploading', progress, uploadId: active.uploadId }
-      },
-      signal,
-    )
-    uploadTask = uploadTaskForSession
-    monitorUploadStatusDuringTransfer(active.uploadId, (status) => {
-      if (disposed || uploadCancelRequested || activeUpload.value?.uploadId !== active.uploadId) return
-      transferTerminalStatus = status
-      const next = applyStatus(status)
-      if (next?.kind === 'terminal') {
-        state.value = next
-        uploadAbortController?.abort()
-      }
-    })
-    try {
-      await uploadTaskForSession
-      if (transferTerminalStatus) return false
-    } catch (error) {
-      if (transferTerminalStatus) return false
-      if (!disposed && !uploadCancelRequested) {
-        const detail = error instanceof Error && error.message.trim().length > 0
-          ? error.message
-          : '归档上传失败。请检查网络后重新选择文件。'
-        failure(error, 'PLATFORM_IMAGE_UPLOAD_FAILED', detail, active.uploadId, false)
-      }
-      return false
-    } finally {
-      stopUploadStatusMonitor()
-      uploadTask = null
-      uploadAbortController = null
-    }
-
-    if (transferTerminalStatus || uploadCancelRequested || disposed) return false
-    state.value = {
-      kind: 'processing',
-      uploadId: active.uploadId,
-      state: active.state,
-      revision: active.revision,
-    }
-    return completeCurrentUpload(active)
+    return transferAndComplete(active, file, sessionData.uploadTarget)
   }
 
   async function retryUploadCompletion(): Promise<boolean> {
@@ -652,6 +912,7 @@ export function usePlatformImages() {
     entries,
     state,
     uploadActive,
+    uploadNeedsFile,
     uploadCompletionRetryable,
     uploadCancellationPending,
     load,

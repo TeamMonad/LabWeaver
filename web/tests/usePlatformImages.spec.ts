@@ -58,6 +58,7 @@ describe('usePlatformImages', () => {
     vi.resetAllMocks()
     window.sessionStorage.clear()
     vi.mocked(listPlatformImages).mockResolvedValue({ data: { entries: [entry] }, error: undefined as never })
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"etag-default"' })
   })
 
   it('renders the server catalog projection after load', async () => {
@@ -147,13 +148,9 @@ describe('usePlatformImages', () => {
       kind: 'container' as const,
       binding: 'ubuntu-24.04-v1',
       targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
-      archiveBytes: 2048,
+      archiveBytes: 7,
       archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-      uploadTarget: {
-        uploadUrl: 'https://objects.example.test/staged-archive',
-        requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' },
-        expiresAt: '2026-07-16T09:00:00.000Z',
-      },
+      uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' }, expiresAt: '2026-07-16T09:00:00.000Z' }], expiresAt: '2026-07-16T09:00:00.000Z' }, uploadedParts: [],
       expiresAt: '2026-07-16T09:00:00.000Z',
       revision: 1,
     }
@@ -168,6 +165,7 @@ describe('usePlatformImages', () => {
     vi.mocked(putFileWithProgress).mockImplementation(async (_file, _url, _headers, onProgress) => {
       onProgress(42)
       observedProgress = images.state.kind === 'uploading' ? images.state.progress : null
+      return { etag: '"etag-1"' }
     })
     const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
 
@@ -193,17 +191,146 @@ describe('usePlatformImages', () => {
     expect(containerBody).not.toHaveProperty('diskPath')
     expect(containerBody).not.toHaveProperty('capacityBytes')
     expect(putFileWithProgress).toHaveBeenCalledWith(
-      file,
-      session.uploadTarget.uploadUrl,
-      session.uploadTarget.requiredHeaders,
+      expect.any(Blob),
+      session.uploadTarget.parts[0].uploadUrl,
+      session.uploadTarget.parts[0].requiredHeaders,
       expect.any(Function),
       expect.any(AbortSignal),
     )
-    expect(observedProgress).toBe(42)
+    expect(vi.mocked(putFileWithProgress).mock.calls[0][0]).toEqual(expect.objectContaining({ size: file.size }))
+    expect(observedProgress).toBe(43)
     const completion = vi.mocked(completePlatformImageUpload).mock.calls[0][0]
     expect(completion.path).toEqual({ uploadId: session.uploadId })
     expect(completion.headers).toEqual({ 'Idempotency-Key': expect.any(String), 'If-Match': '"rev-1"' })
     expect(listPlatformImages).toHaveBeenCalledTimes(1)
+  })
+
+  it('uploads at most three missing parts and completes with the server manifest', async () => {
+    const partSize = 64 * 1024 * 1024
+    const uploadId = '0197f0e0-0000-7000-8000-000000000040'
+    const archiveBytes = partSize * 4 + 1
+    const parts = Array.from({ length: 5 }, (_, index) => ({
+      partNumber: index + 1,
+      uploadUrl: `https://objects.example.test/part-${index + 1}`,
+      requiredHeaders: {},
+      expiresAt: '2026-07-16T09:00:00.000Z',
+    }))
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({
+      data: {
+        uploadId,
+        kind: 'container' as const,
+        binding: 'ubuntu-24.04-v1',
+        targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+        archiveBytes,
+        archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+        uploadTarget: { partSizeBytes: partSize, parts, expiresAt: '2026-07-16T09:00:00.000Z' },
+        uploadedParts: [],
+        expiresAt: '2026-07-16T09:00:00.000Z',
+        revision: 1,
+      },
+      error: undefined as never,
+    })
+    vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
+    vi.mocked(getPlatformImageUpload).mockResolvedValue({
+      data: { uploadId, revision: 2, state: 'imported', catalogId: entry.catalogId },
+      error: undefined as never,
+    })
+    const file = {
+      size: archiveBytes,
+      slice: vi.fn(() => new Blob(['part'])),
+    } as unknown as File
+    let inFlight = 0
+    let maxInFlight = 0
+    const releases: Array<() => void> = []
+    vi.mocked(putFileWithProgress).mockImplementation(async (_file, _url, _headers, onProgress) => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      onProgress(100)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      inFlight -= 1
+      return { etag: `"etag-${vi.mocked(putFileWithProgress).mock.calls.length}"` }
+    })
+    const images = usePlatformImages()
+    const uploadPromise = images.upload(file, {
+      kind: 'container',
+      binding: 'ubuntu-24.04-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+      trustRevision: 3,
+      reason: '导入已评审归档',
+    })
+
+    await vi.waitFor(() => expect(putFileWithProgress).toHaveBeenCalledTimes(3))
+    expect(maxInFlight).toBe(3)
+    while (putFileWithProgress.mock.calls.length < 5) {
+      releases.shift()?.()
+      await Promise.resolve()
+    }
+    while (releases.length > 0) {
+      releases.shift()?.()
+      await Promise.resolve()
+    }
+    await expect(uploadPromise).resolves.toBe(true)
+
+    expect(completePlatformImageUpload.mock.calls[0][0].body).toEqual({
+      parts: [1, 2, 3, 4, 5].map((partNumber) => ({ partNumber, etag: expect.any(String) })),
+    })
+  })
+
+  it('reselects the same file and uploads only parts still missing after refresh', async () => {
+    const partSize = 64 * 1024 * 1024
+    const uploadId = '0197f0e0-0000-7000-8000-000000000041'
+    const archiveBytes = partSize + 2
+    const uploadedPart = { partNumber: 1, etag: '"already-there"', sizeBytes: partSize }
+    const target = {
+      partSizeBytes: partSize,
+      parts: [{ partNumber: 2, uploadUrl: 'https://objects.example.test/part-2', requiredHeaders: {}, expiresAt: '2026-07-16T09:00:00.000Z' }],
+      expiresAt: '2026-07-16T09:00:00.000Z',
+    }
+    window.sessionStorage.setItem('labweaver.platform-image-upload', JSON.stringify({
+      uploadId,
+      revision: 1,
+      completeIdempotencyKey: 'complete-key',
+      cancelIdempotencyKey: 'cancel-key',
+      phase: 'uploading',
+      state: 'pending',
+      archiveBytes,
+    }))
+    vi.mocked(getPlatformImageUpload)
+      .mockResolvedValueOnce({
+        data: { uploadId, revision: 1, state: 'pending', uploadTarget: target, uploadedParts: [uploadedPart] },
+        error: undefined as never,
+      })
+      .mockResolvedValueOnce({
+        data: { uploadId, revision: 1, state: 'pending', uploadTarget: target, uploadedParts: [uploadedPart] },
+        error: undefined as never,
+      })
+      .mockResolvedValueOnce({ data: { uploadId, revision: 2, state: 'imported', catalogId: entry.catalogId }, error: undefined as never })
+    vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"new-part"' })
+    const file = {
+      size: archiveBytes,
+      slice: vi.fn(() => new Blob(['part'])),
+    } as unknown as File
+    const images = usePlatformImages()
+
+    await expect(images.resumeUpload()).resolves.toBe(false)
+    expect(images.uploadNeedsFile).toBe(true)
+    await expect(images.upload(file, {
+      kind: 'container',
+      binding: 'ubuntu-24.04-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+      trustRevision: 3,
+      reason: '继续导入已评审归档',
+    })).resolves.toBe(true)
+
+    expect(putFileWithProgress).toHaveBeenCalledOnce()
+    expect(putFileWithProgress.mock.calls[0][1]).toBe(target.parts[0].uploadUrl)
+    expect(completePlatformImageUpload.mock.calls[0][0].body).toEqual({
+      parts: [
+        { partNumber: 1, etag: uploadedPart.etag },
+        { partNumber: 2, etag: '"new-part"' },
+      ],
+    })
   })
 
   it('reports a failed object upload with the upload diagnostic', async () => {
@@ -213,13 +340,9 @@ describe('usePlatformImages', () => {
         kind: 'container' as const,
         binding: 'ubuntu-24.04-v1',
         targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
-        archiveBytes: 2048,
+        archiveBytes: 7,
         archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-        uploadTarget: {
-          uploadUrl: 'https://objects.example.test/staged-archive',
-          requiredHeaders: {},
-          expiresAt: '2026-07-16T09:00:00.000Z',
-        },
+        uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: {}, expiresAt: '2026-07-16T09:00:00.000Z' }], expiresAt: '2026-07-16T09:00:00.000Z' }, uploadedParts: [],
         expiresAt: '2026-07-16T09:00:00.000Z',
         revision: 1,
       },
@@ -256,13 +379,9 @@ describe('usePlatformImages', () => {
           kind: 'virtual_machine' as const,
           binding: 'ubuntu-24.04-vm-v1',
           targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
-          archiveBytes: 2048,
+          archiveBytes: 7,
           archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-          uploadTarget: {
-            uploadUrl: 'https://objects.example.test/staged-template',
-            requiredHeaders: {},
-            expiresAt: '2026-10-09T04:00:00.000Z',
-          },
+          uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-template', requiredHeaders: {}, expiresAt: '2026-10-09T04:00:00.000Z' }], expiresAt: '2026-10-09T04:00:00.000Z' }, uploadedParts: [],
           expiresAt: '2026-10-09T04:00:00.000Z',
           revision: 1,
         },
@@ -318,13 +437,9 @@ describe('usePlatformImages', () => {
           kind: 'virtual_machine' as const,
           binding: 'ubuntu-24.04-vm-v1',
           targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
-          archiveBytes: 2048,
+          archiveBytes: 7,
           archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-          uploadTarget: {
-            uploadUrl: 'https://objects.example.test/staged-template',
-            requiredHeaders: {},
-            expiresAt: '2026-10-09T04:00:00.000Z',
-          },
+          uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-template', requiredHeaders: {}, expiresAt: '2026-10-09T04:00:00.000Z' }], expiresAt: '2026-10-09T04:00:00.000Z' }, uploadedParts: [],
           expiresAt: '2026-10-09T04:00:00.000Z',
           revision: 1,
         },
@@ -386,11 +501,7 @@ describe('usePlatformImages', () => {
           targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
           archiveBytes: 7,
           archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-          uploadTarget: {
-            uploadUrl: 'https://objects.example.test/staged-archive',
-            requiredHeaders: {},
-            expiresAt: '2026-10-09T04:00:00.000Z',
-          },
+          uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: {}, expiresAt: '2026-10-09T04:00:00.000Z' }], expiresAt: '2026-10-09T04:00:00.000Z' }, uploadedParts: [],
           expiresAt: '2026-10-09T04:00:00.000Z',
           revision: 1,
         },
@@ -439,11 +550,7 @@ describe('usePlatformImages', () => {
           targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
           archiveBytes: 7,
           archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-          uploadTarget: {
-            uploadUrl: 'https://objects.example.test/staged-archive',
-            requiredHeaders: {},
-            expiresAt: '2026-10-09T04:00:00.000Z',
-          },
+          uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: {}, expiresAt: '2026-10-09T04:00:00.000Z' }], expiresAt: '2026-10-09T04:00:00.000Z' }, uploadedParts: [],
           expiresAt: '2026-10-09T04:00:00.000Z',
           revision: 1,
         },
@@ -489,6 +596,7 @@ describe('usePlatformImages', () => {
       cancelIdempotencyKey: 'expired-cancel-key',
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload)
       .mockResolvedValueOnce({
@@ -510,15 +618,15 @@ describe('usePlatformImages', () => {
         kind: 'container' as const,
         binding: 'ubuntu-24.04-v1',
         targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
-        archiveBytes: 7,
+        archiveBytes: 13,
         archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-        uploadTarget: { uploadUrl: 'https://objects.example.test/replacement', requiredHeaders: {}, expiresAt: '2026-10-01T00:00:00.000Z' },
+        uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/replacement', requiredHeaders: {}, expiresAt: '2026-10-01T00:00:00.000Z'  }], expiresAt: '2026-10-01T00:00:00.000Z'  }, uploadedParts: [],
         expiresAt: '2026-10-01T00:00:00.000Z',
         revision: 1,
       },
       error: undefined as never,
     })
-    vi.mocked(putFileWithProgress).mockResolvedValue(undefined)
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"etag-1"' })
     vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
     const images = usePlatformImages()
 
@@ -560,16 +668,12 @@ describe('usePlatformImages', () => {
         kind: 'virtual_machine' as const,
         binding: 'ubuntu-24.04-vm-v1',
         targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
-        archiveBytes: 4096,
+        archiveBytes: 4,
         archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
         capacityBytes: 10737418240,
         diskFormat: 'qcow2' as const,
         diskPath: 'disk/disk.img',
-        uploadTarget: {
-          uploadUrl: 'https://objects.example.test/staged-template',
-          requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' },
-          expiresAt: '2026-07-16T09:00:00.000Z',
-        },
+        uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-template', requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' }, expiresAt: '2026-07-16T09:00:00.000Z' }], expiresAt: '2026-07-16T09:00:00.000Z' }, uploadedParts: [],
         expiresAt: '2026-07-16T09:00:00.000Z',
         revision: 1,
       },
@@ -580,7 +684,7 @@ describe('usePlatformImages', () => {
       data: { uploadId: '0197f0e0-0000-7000-8000-000000000005', revision: 2, state: 'imported', catalogId: entry.catalogId },
       error: undefined as never,
     })
-    vi.mocked(putFileWithProgress).mockResolvedValue(undefined)
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"etag-1"' })
     const images = usePlatformImages()
 
     await expect(images.upload(new File(['disk'], 'template.tar'), {
@@ -617,6 +721,7 @@ describe('usePlatformImages', () => {
       cancelIdempotencyKey: 'cancel-key',
       phase: 'completing',
       state: 'importing',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload).mockResolvedValue({
       data: {
@@ -643,6 +748,7 @@ describe('usePlatformImages', () => {
       cancelIdempotencyKey: 'cancel-key',
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload).mockResolvedValue({
       data: {
@@ -670,6 +776,7 @@ describe('usePlatformImages', () => {
       cancelIdempotencyKey: 'cancel-key',
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload)
       .mockResolvedValueOnce({
@@ -715,6 +822,7 @@ describe('usePlatformImages', () => {
       cancelIdempotencyKey: 'cancel-key',
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload)
       .mockResolvedValueOnce({
@@ -758,17 +866,13 @@ describe('usePlatformImages', () => {
         targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
         archiveBytes: 7,
         archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-        uploadTarget: {
-          uploadUrl: 'https://objects.example.test/staged-archive',
-          requiredHeaders: {},
-          expiresAt: '2026-07-16T09:00:00.000Z',
-        },
+        uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: {}, expiresAt: '2026-07-16T09:00:00.000Z' }], expiresAt: '2026-07-16T09:00:00.000Z' }, uploadedParts: [],
         expiresAt: '2026-07-16T09:00:00.000Z',
         revision: 1,
       },
       error: undefined as never,
     })
-    vi.mocked(putFileWithProgress).mockResolvedValue(undefined)
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"etag-1"' })
     let resolveCompletion!: (value: unknown) => void
     const completion = new Promise<unknown>((resolve) => { resolveCompletion = resolve })
     vi.mocked(completePlatformImageUpload).mockReturnValue(completion as never)

@@ -68,11 +68,7 @@ const uploadSession = {
   targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
   archiveBytes: 7,
   archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-  uploadTarget: {
-    uploadUrl: 'https://objects.example.test/staged-archive',
-    requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' },
-    expiresAt: '2026-07-16T09:00:00.000Z',
-  },
+  uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' }, expiresAt: '2026-07-16T09:00:00.000Z' }], expiresAt: '2026-07-16T09:00:00.000Z' }, uploadedParts: [],
   expiresAt: '2026-07-16T09:00:00.000Z',
   revision: 1,
 }
@@ -134,7 +130,7 @@ describe('PlatformImageView', () => {
     vi.resetAllMocks()
     window.sessionStorage.clear()
     vi.mocked(listPlatformImages).mockResolvedValue({ data: { entries: [entry] }, error: undefined as never })
-    vi.mocked(putFileWithProgress).mockResolvedValue(undefined)
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"etag-default"' })
     vi.mocked(createPlatformImageUpload).mockResolvedValue({ data: uploadSession, error: undefined as never })
     vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
     vi.mocked(getPlatformImageUpload).mockResolvedValue({
@@ -280,9 +276,9 @@ describe('PlatformImageView', () => {
     expect(containerBody).not.toHaveProperty('diskPath')
     expect(containerBody).not.toHaveProperty('capacityBytes')
     expect(putFileWithProgress).toHaveBeenCalledWith(
-      file,
-      uploadSession.uploadTarget.uploadUrl,
-      uploadSession.uploadTarget.requiredHeaders,
+      expect.any(Blob),
+      uploadSession.uploadTarget.parts[0].uploadUrl,
+      uploadSession.uploadTarget.parts[0].requiredHeaders,
       expect.any(Function),
       expect.any(AbortSignal),
     )
@@ -326,9 +322,8 @@ describe('PlatformImageView', () => {
     expect(listPlatformImages).toHaveBeenCalledTimes(2)
   })
 
-  it('cancels an interrupted upload after refresh and starts again from a reselected file', async () => {
+  it('resumes an interrupted upload after refresh from a reselected file', async () => {
     const interruptedUploadId = '0197f0e0-0000-7000-8000-000000000011'
-    const resumedUploadId = '0197f0e0-0000-7000-8000-000000000012'
     window.sessionStorage.setItem('labweaver.platform-image-upload', JSON.stringify({
       uploadId: interruptedUploadId,
       revision: 2,
@@ -336,49 +331,40 @@ describe('PlatformImageView', () => {
       cancelIdempotencyKey: 'interrupted-cancel-key',
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload)
       .mockResolvedValueOnce({
-        data: { uploadId: interruptedUploadId, revision: 2, state: 'pending' },
+        data: { uploadId: interruptedUploadId, revision: 2, state: 'pending', uploadTarget: uploadSession.uploadTarget, uploadedParts: [] },
         error: undefined as never,
       })
       .mockResolvedValueOnce({
-        data: { uploadId: interruptedUploadId, revision: 3, state: 'cancelled' },
+        data: { uploadId: interruptedUploadId, revision: 2, state: 'pending', uploadTarget: uploadSession.uploadTarget, uploadedParts: [] },
         error: undefined as never,
       })
       .mockResolvedValueOnce({
-        data: { uploadId: resumedUploadId, revision: 2, state: 'imported', catalogId: entry.catalogId },
+        data: { uploadId: interruptedUploadId, revision: 3, state: 'imported', catalogId: entry.catalogId },
         error: undefined as never,
       })
-    vi.mocked(cancelPlatformImageUpload).mockResolvedValue({ data: {}, error: undefined as never })
-    vi.mocked(createPlatformImageUpload).mockResolvedValue({
-      data: { ...uploadSession, uploadId: resumedUploadId },
-      error: undefined as never,
-    })
     const wrapper = await mountView()
 
-    expect(wrapper.get('.upload-status').text()).toContain('上次上传中断，浏览器未保存文件。')
+    expect(wrapper.get('.upload-status').text()).toContain('上传会话仍在等待归档。')
     expect(wrapper.find('.upload-file').exists()).toBe(false)
-    await wrapper.get('.upload-status button').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.get('.upload-status').text()).toContain('已取消')
-    expect(wrapper.get('.upload-card .admin-form button[type="submit"]').element.hasAttribute('disabled')).toBe(true)
 
     const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
     await fillUploadForm(wrapper, file)
     await wrapper.get('.upload-card .admin-form').trigger('submit')
     await flushPromises()
 
-    expect(createPlatformImageUpload).toHaveBeenCalledOnce()
+    expect(createPlatformImageUpload).not.toHaveBeenCalled()
     expect(putFileWithProgress).toHaveBeenCalledWith(
-      file,
-      uploadSession.uploadTarget.uploadUrl,
-      uploadSession.uploadTarget.requiredHeaders,
+      expect.any(Blob),
+      uploadSession.uploadTarget.parts[0].uploadUrl,
+      uploadSession.uploadTarget.parts[0].requiredHeaders,
       expect.any(Function),
       expect.any(AbortSignal),
     )
-    expect(vi.mocked(completePlatformImageUpload).mock.calls[0][0].path).toEqual({ uploadId: resumedUploadId })
+    expect(vi.mocked(completePlatformImageUpload).mock.calls[0][0].path).toEqual({ uploadId: interruptedUploadId })
     expect(wrapper.get('.upload-status').text()).toContain('已导入')
   })
 
@@ -392,6 +378,7 @@ describe('PlatformImageView', () => {
       cancelIdempotencyKey: 'expired-cancel-key',
       phase: 'uploading',
       state: 'pending',
+      archiveBytes: 7,
     }))
     vi.mocked(getPlatformImageUpload)
       .mockResolvedValueOnce({
@@ -408,7 +395,7 @@ describe('PlatformImageView', () => {
         error: undefined as never,
       })
     vi.mocked(createPlatformImageUpload).mockResolvedValue({
-      data: { ...uploadSession, uploadId: replacementUploadId },
+      data: { ...uploadSession, uploadId: replacementUploadId, archiveBytes: 13 },
       error: undefined as never,
     })
     const wrapper = await mountView()
@@ -449,7 +436,7 @@ describe('PlatformImageView', () => {
     const saved = JSON.parse(window.sessionStorage.getItem('labweaver.platform-image-upload')!)
     expect(saved).toMatchObject({ uploadId: uploadSession.uploadId, phase: 'uploading', state: 'pending' })
     expect(saved).not.toHaveProperty('uploadTarget')
-    expect(JSON.stringify(saved)).not.toContain(uploadSession.uploadTarget.uploadUrl)
+    expect(JSON.stringify(saved)).not.toContain(uploadSession.uploadTarget.parts[0].uploadUrl)
   })
 
   it('shows the upstream diagnostic code and keeps the catalog when a mutation conflicts', async () => {
@@ -480,6 +467,7 @@ describe('PlatformImageView', () => {
   })
 
   it('accepts a virtual-machine archive and submits its disk descriptor', async () => {
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({ data: { ...uploadSession, archiveBytes: 8 }, error: undefined as never })
     const wrapper = await mountView()
     const file = new File(['template'], 'template.tar')
 
@@ -532,6 +520,7 @@ describe('PlatformImageView', () => {
   })
 
   it('surfaces the Agent diagnostic when the virtual-machine import fails', async () => {
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({ data: { ...uploadSession, archiveBytes: 8 }, error: undefined as never })
     vi.mocked(completePlatformImageUpload).mockResolvedValue({
       error: { diagnosticCode: 'LW_PLATFORM_IMAGE_DISK_INVALID', detail: '归档中的磁盘与声明的路径不一致。' },
     } as never)

@@ -119,7 +119,7 @@
       <div class="section-heading">
         <div>
           <h3 id="upload-heading">上传归档</h3>
-          <p>归档经预签名地址直传对象存储：容器归档由 Agent 校验每个 blob，虚拟机模板按声明的磁盘路径与容量包装后推送 registry 并登记目录。</p>
+          <p>归档会安全上传到对象存储：容器归档由 Agent 校验每个 blob，虚拟机模板按声明的磁盘路径与容量包装后推送 registry 并登记目录。刷新页面后重新选择同一归档即可继续未完成的上传。</p>
         </div>
       </div>
       <form class="admin-form" @submit.prevent="submitUpload">
@@ -192,7 +192,7 @@
           <small v-if="uploadForm.kind === 'virtual_machine'" id="upload-archive-hint" class="field-hint">请上传包含单个 qcow2 或 raw 磁盘文件的归档；不能直接上传裸磁盘文件或 OCI 布局。</small>
         </div>
         <p class="upload-limit-hint">归档大小上限：5 GB（5,000,000,000 字节）。</p>
-        <button type="submit" class="filled-button" :disabled="busy || !uploadFile">上传并导入</button>
+        <button type="submit" class="filled-button" :disabled="busy || !uploadFile">{{ images.uploadNeedsFile ? '继续上传并导入' : '上传并导入' }}</button>
       </form>
       <section v-if="uploadStatusLabel" class="upload-status" role="status" aria-live="polite">
         <div class="upload-status-header">
@@ -331,7 +331,11 @@ const catalogColumns: DataTableColumn<CatalogRow>[] = [
   { key: 'actions', title: '操作' },
 ]
 
-const busy = computed(() => images.state.kind === 'loading' || images.state.kind === 'uploading' || images.uploadActive)
+const busy = computed(() => (
+  images.state.kind === 'loading'
+  || images.state.kind === 'uploading'
+  || (images.uploadActive && !images.uploadNeedsFile)
+))
 const actionReady = computed(() => operationReason.value.trim().length > 0)
 const uploadProgress = computed(() => (images.state.kind === 'uploading' ? images.state.progress : null))
 

@@ -8,6 +8,7 @@ class MockUploadXhr extends EventTarget {
   upload = { addEventListener: vi.fn() }
   open = vi.fn()
   setRequestHeader = vi.fn()
+  getResponseHeader = vi.fn()
   send = vi.fn()
   abort = vi.fn(() => this.dispatchEvent(new Event('abort')))
 }
@@ -66,6 +67,22 @@ describe('putFileWithProgress', () => {
 
     await expect(upload).rejects.toThrow('对象存储上传失败：HTTP 503；对象存储错误 SlowDown：Please retry later')
     await expect(upload).rejects.not.toThrow('signed.example')
+  })
+
+  it('returns the object-store ETag from a successful upload', async () => {
+    const xhr = new MockUploadXhr()
+    vi.stubGlobal('XMLHttpRequest', vi.fn(() => xhr))
+    vi.mocked(xhr.getResponseHeader).mockReturnValue('"etag-1"')
+    const upload = putFileWithProgress(
+      new Blob(['data']),
+      'https://upload.example/part-1',
+      {},
+      vi.fn(),
+    )
+    xhr.status = 200
+    xhr.dispatchEvent(new Event('load'))
+
+    await expect(upload).resolves.toEqual({ etag: '"etag-1"' })
   })
 
   it('distinguishes a transport error from an HTTP response', async () => {

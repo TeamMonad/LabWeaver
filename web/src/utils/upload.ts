@@ -1,17 +1,17 @@
 /**
- * Upload one browser file straight to a presigned object-store URL.
+ * Upload one browser blob straight to a presigned object-store URL.
  *
  * The object store authorizes the exact signed request, so the caller-supplied
  * headers are applied verbatim and the file body is sent unmodified. Progress
  * is reported as a whole percentage so callers can render it directly.
  */
 export function putFileWithProgress(
-  file: File,
+  file: Blob,
   url: string,
   headers: Record<string, string>,
   onProgress: (progress: number) => void,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<{ etag: string | null }> {
   return new Promise((resolve, reject) => {
     const MAX_ERROR_BODY_LENGTH = 8 * 1024
     const MAX_ERROR_FIELD_LENGTH = 256
@@ -46,7 +46,12 @@ export function putFileWithProgress(
     })
     xhr.addEventListener('load', () => {
       cleanup()
-      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const etag = typeof xhr.getResponseHeader === 'function'
+          ? xhr.getResponseHeader('ETag')?.trim() || null
+          : null
+        resolve({ etag })
+      }
       else {
         const objectStoreError = readObjectStoreError(xhr.responseText)
         const detail = objectStoreError

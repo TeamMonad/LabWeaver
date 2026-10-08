@@ -196,7 +196,13 @@ async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter
   }
 }
 
-async function waitForFirstCompletionFaultOrUiFailure(page, faultPromise, timeout, isFaultInjectionInProgress) {
+async function waitForFirstCompletionFaultOrUiFailure(
+  page,
+  faultPromise,
+  timeout,
+  isFaultInjectionInProgress,
+  previousDiagnostic = null,
+) {
   let faultSettled = false
   let pollCancelled = false
   let latestDiagnostic = null
@@ -219,6 +225,12 @@ async function waitForFirstCompletionFaultOrUiFailure(page, faultPromise, timeou
     const diagnostic = await readUploadUiDiagnostic(page)
     if (faultSettled) return 'fault'
     if (isFaultInjectionInProgress()) return 'pending'
+    if (
+      previousDiagnostic
+      && diagnostic
+      && diagnostic.code === previousDiagnostic.code
+      && diagnostic.message === previousDiagnostic.message
+    ) return 'pending'
     if (diagnostic) {
       latestDiagnostic = diagnostic
       return 'diagnostic'
@@ -263,10 +275,40 @@ async function waitForUploadSession(page, input) {
   if (typeof session.uploadId !== 'string' || session.uploadId.length === 0) {
     throw new Error('LW_VGPU_IMAGE_UPLOAD_SESSION_INVALID')
   }
+  if (session.uploadTarget?.partSizeBytes !== 64 * 1024 * 1024
+    || !Array.isArray(session.uploadTarget.parts)
+    || session.uploadTarget.parts.length === 0
+    || !Array.isArray(session.uploadedParts)
+    || session.uploadTarget.parts.some((part, index) => (
+      part?.partNumber !== index + 1
+      || typeof part.uploadUrl !== 'string'
+      || typeof part.expiresAt !== 'string'
+    ))) {
+    throw new Error('LW_VGPU_IMAGE_MULTIPART_TARGET_INVALID')
+  }
   if (typeof session.uploadTarget?.expiresAt !== 'string' || !Number.isFinite(Date.parse(session.uploadTarget.expiresAt))) {
     throw new Error('LW_VGPU_IMAGE_UPLOAD_EXPIRY_INVALID')
   }
   return { uploadCard, importButton, session }
+}
+
+async function readUploadStatus(page, uploadId, failureCode = 'LW_VGPU_IMAGE_UPLOAD_STATUS_READ_FAILED') {
+  return expectJson(
+    await page.request.get(`/api/v1/admin/images/uploads/${encodeURIComponent(uploadId)}`),
+    failureCode,
+  )
+}
+
+async function waitForUploadedPart(page, uploadId, timeout) {
+  let latestStatus
+  await expect.poll(async () => {
+    latestStatus = await readUploadStatus(page, uploadId)
+    if (latestStatus.state !== 'pending') {
+      throw new Error(`LW_VGPU_IMAGE_UPLOAD_FINISHED_BEFORE_PART:${String(latestStatus.state)}`)
+    }
+    return Array.isArray(latestStatus.uploadedParts) && latestStatus.uploadedParts.length > 0
+  }, { timeout, intervals: [500, 1000, 2000] }).toBe(true)
+  return latestStatus
 }
 
 function uploadCompletionTimeout(session) {
@@ -279,10 +321,7 @@ function uploadCompletionTimeout(session) {
 
 async function waitForUploadStatus(page, uploadId, state) {
   await expect.poll(async () => {
-    const status = await expectJson(
-      await page.request.get(`/api/v1/admin/images/uploads/${encodeURIComponent(uploadId)}`),
-      'LW_VGPU_IMAGE_UPLOAD_STATUS_READ_FAILED',
-    )
+    const status = await readUploadStatus(page, uploadId)
     return status.state === state
   }, { timeout: 120_000, intervals: [500, 1000, 2000] }).toBe(true)
 }
@@ -428,17 +467,7 @@ test('platform administrator refreshes a real VM upload and cancels it through t
   let cleanupError
   try {
     ({ session } = await waitForUploadSession(page, input))
-    const completionResponseWaiter = waitForCompletionResponse(page, (response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
-    }, uploadCompletionTimeout(session))
-    const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter)
-    const completion = {
-      status: completionResponse.status(),
-      body: await completionResponse.json().catch(() => null),
-    }
-    assertAcceptedVgpuImageCompletion(completion)
+    await waitForUploadedPart(page, session.uploadId, uploadCompletionTimeout(session))
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: '平台镜像', exact: true })).toBeVisible()
     await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
@@ -511,9 +540,43 @@ test('platform administrator retries a real VM import after a network failure th
     return
   }
 
-  // Simulate the user's network dropping exactly when the UI submits completion;
-  // the archive is still the real operator-supplied OCI/VM input and the retry
-  // below uses the same session and idempotency key through the normal UI.
+  // The first injected failure interrupts one real multipart PUT. The retry
+  // below uses the same session and lets the server's uploaded-parts manifest
+  // decide which parts still need a PUT before the completion fault is tested.
+  let partFailureTargetUrl = null
+  let abortOnePart = true
+  let partFaultInProgress = false
+  let partFaultResolve
+  let partFaultReject
+  const partFault = new Promise((resolve, reject) => {
+    partFaultResolve = resolve
+    partFaultReject = reject
+  })
+  void partFault.catch(() => undefined)
+  const partFailureHandler = async (route) => {
+    const request = route.request()
+    if (
+      abortOnePart
+      && partFailureTargetUrl
+      && request.method() === 'PUT'
+      && request.url() === partFailureTargetUrl
+    ) {
+      abortOnePart = false
+      partFaultInProgress = true
+      try {
+        await route.abort('failed')
+        partFaultResolve(request.url())
+      } catch (error) {
+        partFaultReject(error)
+        throw error
+      } finally {
+        partFaultInProgress = false
+      }
+      return
+    }
+    await route.fallback()
+  }
+
   let abortFirstCompletion = true
   let firstCompletionFaultInProgress = false
   let firstCompletionFaultResolve
@@ -523,7 +586,7 @@ test('platform administrator retries a real VM import after a network failure th
     firstCompletionFaultReject = reject
   })
   void firstCompletionFault.catch(() => undefined)
-  await page.route('**/api/v1/admin/images/uploads/*/complete', async (route) => {
+  const completionFailureHandler = async (route) => {
     if (!abortFirstCompletion) return route.continue()
     abortFirstCompletion = false
     firstCompletionFaultInProgress = true
@@ -537,37 +600,104 @@ test('platform administrator retries a real VM import after a network failure th
     } finally {
       firstCompletionFaultInProgress = false
     }
-  })
+  }
+  await page.route('**/*', partFailureHandler)
+  await page.route('**/api/v1/admin/images/uploads/*/complete', completionFailureHandler)
   let primaryError
   let cleanupError
   let session
+  const observedPartRequests = []
+  const onPartRequest = (request) => {
+    if (request.method() === 'PUT') observedPartRequests.push(request.url())
+  }
+  page.on('request', onPartRequest)
   try {
     ({ session } = await waitForUploadSession(page, INPUT))
+    if (session.uploadTarget.parts.length < 2) {
+      throw new Error('LW_VGPU_IMAGE_MULTIPART_PART_FAULT_TARGET_MISSING')
+    }
+    const uploadedBeforeFault = await waitForUploadedPart(
+      page,
+      session.uploadId,
+      uploadCompletionTimeout(session),
+    )
+    if (uploadedBeforeFault.uploadedParts.length === 0) {
+      throw new Error('LW_VGPU_IMAGE_MULTIPART_UPLOADED_PART_MISSING')
+    }
+    const uploadedPartNumbers = new Set(uploadedBeforeFault.uploadedParts.map((part) => part.partNumber))
+    const maxUploadedPart = Math.max(...uploadedPartNumbers)
+    const unrequestedTargets = session.uploadTarget.parts
+      .filter((target) => !observedPartRequests.includes(target.uploadUrl))
+      .sort((left, right) => right.partNumber - left.partNumber)
+    const subsequentTarget = unrequestedTargets.find((target) => target.partNumber > maxUploadedPart)
+      ?? unrequestedTargets[0]
+    if (!subsequentTarget) {
+      throw new Error('LW_VGPU_IMAGE_MULTIPART_PART_FAULT_TARGET_ALREADY_REQUESTED')
+    }
+    partFailureTargetUrl = subsequentTarget.uploadUrl
+    const partFaultUrl = await waitForFirstCompletionFaultOrUiFailure(
+      page,
+      partFault,
+      uploadCompletionTimeout(session),
+      () => partFaultInProgress,
+    )
+    if (partFaultUrl !== partFailureTargetUrl) {
+      throw new Error('LW_VGPU_IMAGE_MULTIPART_PART_FAULT_TARGET_MISMATCH')
+    }
+    await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
+    await expect(page.locator('.upload-status')).toContainText('镜像导入：需要操作', { timeout: 120_000 })
+    const statusAfterPartFault = await readUploadStatus(page, session.uploadId)
+    if (statusAfterPartFault.state !== 'pending' || statusAfterPartFault.uploadedParts.length === 0) {
+      throw new Error(`LW_VGPU_IMAGE_MULTIPART_PART_FAULT_STATUS_INVALID:${statusAfterPartFault.state}`)
+    }
+    const uploadedBeforeRetry = new Set(
+      statusAfterPartFault.uploadedParts.map((part) => part.partNumber),
+    )
+    if (uploadedBeforeRetry.size === 0) throw new Error('LW_VGPU_IMAGE_MULTIPART_RESUME_MANIFEST_EMPTY')
+
+    await page.context().setOffline(false)
+    await page.unroute('**/*', partFailureHandler)
+    observedPartRequests.length = 0
+    const uploadCard = page.locator('section.upload-card')
+    await uploadCard.locator('input[type="file"]').setInputFiles(INPUT.archivePath)
+    const continueButton = uploadCard.getByRole('button', { name: '继续上传并导入', exact: true })
+    await expect(continueButton).toBeVisible({ timeout: 120_000 })
+    await expect(continueButton).toBeEnabled()
+    const partFailureDiagnostic = await readUploadUiDiagnostic(page)
+    await continueButton.click()
     const firstCompletionUrl = await waitForFirstCompletionFaultOrUiFailure(
       page,
       firstCompletionFault,
       uploadCompletionTimeout(session),
       () => firstCompletionFaultInProgress,
+      partFailureDiagnostic,
     )
     if (firstCompletionUrl.pathname !== `/api/v1/admin/images/uploads/${session.uploadId}/complete`) {
       throw new Error('LW_VGPU_IMAGE_COMPLETION_UPLOAD_ID_MISMATCH')
     }
+    const resumedPartUrls = new Set(observedPartRequests)
+    const resumedUploadedPartTargets = statusAfterPartFault.uploadedParts
+      .map((part) => session.uploadTarget.parts.find((target) => target.partNumber === part.partNumber)?.uploadUrl)
+      .filter((url) => typeof url === 'string')
+    if (resumedUploadedPartTargets.some((url) => resumedPartUrls.has(url))) {
+      throw new Error('LW_VGPU_IMAGE_MULTIPART_RESUME_REUPLOADED_PART')
+    }
     await expect(page.locator('.upload-status')).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.upload-status')).toContainText('镜像导入：需要操作', { timeout: 120_000 })
     await page.context().setOffline(false)
-    await page.unroute('**/api/v1/admin/images/uploads/*/complete')
+    await page.unroute('**/api/v1/admin/images/uploads/*/complete', completionFailureHandler)
 
     const retryButton = page.locator('.upload-status').getByRole('button', { name: '重试导入', exact: true })
     await expect(retryButton).toBeVisible({ timeout: 120_000 })
     await expect(retryButton).toBeEnabled()
-    const previousDiagnostic = await readUploadUiDiagnostic(page)
+    const completionFailureDiagnostic = await readUploadUiDiagnostic(page)
     const completionResponseWaiter = waitForCompletionResponse(page, (response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
     }, uploadCompletionTimeout(session))
     await retryButton.click()
-    const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, previousDiagnostic)
+    const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, completionFailureDiagnostic)
     const completion = {
       status: completionResponse.status(),
       body: await completionResponse.json().catch(() => null),
@@ -592,10 +722,12 @@ test('platform administrator retries a real VM import after a network failure th
       cleanupError = error
     }
     try {
-      await page.unroute('**/api/v1/admin/images/uploads/*/complete')
+      await page.unroute('**/*', partFailureHandler)
+      await page.unroute('**/api/v1/admin/images/uploads/*/complete', completionFailureHandler)
     } catch (error) {
       cleanupError ??= error
     }
+    page.off('request', onPartRequest)
     try {
       if (session?.uploadId) {
         const status = await expectJson(
