@@ -41,18 +41,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onScopeDispose, ref } from 'vue'
+import { computed, inject, nextTick, onMounted, onScopeDispose, ref } from 'vue'
+import { routeLocationKey, routerKey, type LocationQueryRaw } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjects } from '@/composables/useProjects'
 import type { ProjectSchema } from '@/generated/contracts'
+import { NAVIGATION_GROUPS } from '@/utils/navigation'
 
 const projects = useProjects()
+const route = inject(routeLocationKey, null)
+const router = inject(routerKey, null)
 const isOpen = ref(false)
 const searchQuery = ref('')
 const containerRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const activeProject = computed(() => projects.selectedProject)
+const projectScopedPaths = NAVIGATION_GROUPS.flatMap((group) => group.items)
+  .filter((item) => item.projectScoped)
+  .map((item) => item.path)
 
 function filteredProjects(items: ProjectSchema[]) {
   const query = searchQuery.value.trim().toLowerCase()
@@ -63,10 +70,32 @@ function toggleOpen() {
   isOpen.value = !isOpen.value
   if (isOpen.value) void nextTick(() => searchInputRef.value?.focus())
 }
+
+function projectScopedBasePath(path: string) {
+  return projectScopedPaths.find((itemPath) => path === itemPath || path.startsWith(`${itemPath}/`)) ?? null
+}
+
+const PROJECT_CONTEXT_QUERY_KEYS = ['environmentId', 'releaseId', 'runId', 'packageId', 'approvalId'] as const
+
 function selectProject(id: string) {
+  const routeProjectId = typeof route?.query.projectId === 'string' ? route.query.projectId : undefined
+  const currentProjectId = routeProjectId ?? projects.selectedProjectId
+  const routeProjectChanged = routeProjectId !== id
+  const projectChanged = currentProjectId !== id
   projects.select(id)
   isOpen.value = false
   searchQuery.value = ''
+  const basePath = route ? projectScopedBasePath(route.path) : null
+  if (router && route && (basePath || route.query.projectId !== undefined) && (projectChanged || routeProjectChanged)) {
+    const query: LocationQueryRaw = { ...route.query, projectId: id }
+    if (projectChanged) {
+      for (const key of PROJECT_CONTEXT_QUERY_KEYS) query[key] = undefined
+    }
+    void router.replace({
+      ...(projectChanged && basePath && basePath !== route.path ? { path: basePath } : {}),
+      query,
+    })
+  }
 }
 function handleClickOutside(event: MouseEvent) {
   if (containerRef.value && !containerRef.value.contains(event.target as Node)) isOpen.value = false
