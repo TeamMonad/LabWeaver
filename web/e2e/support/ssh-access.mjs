@@ -65,8 +65,12 @@ export async function issueEnvironmentAccessGrantByUi(page, projectId, environme
     waitUntil: 'domcontentloaded',
   })
   await expect(
-    page.locator('.resource-title-row').getByRole('heading', { name: environment.id }),
+    page.locator('.resource-title-row').getByRole('heading', {
+      name: environment.displayLabel,
+      exact: true,
+    }),
   ).toBeVisible({ timeout: 120_000 })
+  await expect(page.locator('.environment-id-details code')).toHaveText(environment.id, { timeout: 120_000 })
 
   const activePage = await expectJson(
     await page.request.get(`/api/v1/environments/${environment.id}/access-grants?state=active&includeTerminal=false&limit=2`),
