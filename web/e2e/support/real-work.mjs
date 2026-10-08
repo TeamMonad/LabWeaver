@@ -1651,6 +1651,16 @@ function findRealWorkCharge(charges, chargeId) {
   return matches[0]
 }
 
+export function selectRealWorkFinanceAdjustmentCharge(matches) {
+  if (!Array.isArray(matches)) throw new Error('REAL_WORK_FINANCE_MATCHES_INVALID')
+  const eligible = matches.find(({ charge }) => (
+    charge?.settlement === 'settled'
+    && fixedDecimalScaled(charge.total?.amount, 'REAL_WORK_FINANCE_ADJUSTMENT_CHARGE') >= 1n
+  ))
+  if (!eligible) throw new Error('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_ELIGIBLE_NOT_FOUND')
+  return eligible.charge
+}
+
 function waitForResponseSafely(page, predicate, options) {
   const responsePromise = page.waitForResponse(predicate, options)
   void responsePromise.catch(() => undefined)

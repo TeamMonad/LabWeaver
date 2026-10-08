@@ -26,8 +26,10 @@ import {
   realWorkResumeConfig,
   realWorkVmConfig,
   readResumablePublishedWork,
+  selectRealWorkFinanceAdjustmentCharge,
   selectPendingWorkTaskResourceRequest,
   waitForSettledWorkUsageCharges,
+  verifyRealWorkFinanceAdjustmentByUi,
   waitForDeletedEnvironment,
 } from '../support/real-work.mjs'
 import { readActorId } from '../support/real-experiment.mjs'
@@ -1398,6 +1400,10 @@ test('student provisions a Work environment, configures it, and releases its cap
         expectedCharges: finance.matches.map(({ charge }) => charge),
         requireBudget: !EXISTING_PROJECT_MODE || existingResourceBudget !== null,
       })
+      if (!EXISTING_PROJECT_MODE && !REAL_WORK_RESUME) {
+        const settledCharge = selectRealWorkFinanceAdjustmentCharge(finance.matches)
+        await verifyRealWorkFinanceAdjustmentByUi(browser, baseURL, project.id, settledCharge)
+      }
     }
     await assertConnectionBlockedAfterLeaseRevoke(page, project.id, stoppedEnvironment)
   } catch (error) {

@@ -30,6 +30,7 @@ import {
   readPublishedWork,
   readProjectUsage,
   readResumablePublishedWork,
+  selectRealWorkFinanceAdjustmentCharge,
   selectSettledExperimentUsageCharges,
   selectPendingWorkTaskResourceRequest,
   selectSettledWorkUsageChargesForLease,
@@ -741,6 +742,22 @@ describe('Real finance adjustment helper', () => {
       total: { currency: 'USD', amount: '0.000000' },
     })).rejects.toThrow('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_TOO_SMALL')
     expect(browser.newContext).not.toHaveBeenCalled()
+  })
+
+  it('selects a settled charge with at least one micro-dollar', () => {
+    const selected = selectRealWorkFinanceAdjustmentCharge([
+      { charge: { ...charge, id: 'zero', total: { currency: 'USD', amount: '0.000000' } } },
+      { charge },
+    ])
+
+    expect(selected).toBe(charge)
+  })
+
+  it('fails clearly when no settled charge is eligible for adjustment', () => {
+    expect(() => selectRealWorkFinanceAdjustmentCharge([
+      { charge: { ...charge, settlement: 'pending' } },
+      { charge: { ...charge, id: 'zero', total: { currency: 'USD', amount: '0.000000' } } },
+    ])).toThrow('REAL_WORK_FINANCE_ADJUSTMENT_CHARGE_ELIGIBLE_NOT_FOUND')
   })
 })
 
