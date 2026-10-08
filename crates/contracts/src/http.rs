@@ -291,13 +291,14 @@ pub struct CompleteProblemPackageUploadRequest {}
 /// Reviewed archive media type accepted for an administrator OCI layout upload.
 pub const PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE: &str = "application/vnd.oci.image.layout.v1+tar";
 
-/// Maximum compressed archive object accepted for a single-request platform image import.
+/// Maximum compressed archive object accepted for a platform image import.
 ///
 /// The expanded OCI/disk validation budget is enforced by Agent separately; this bound is the
 /// object-store and browser upload budget and is deliberately independent of virtual disk capacity.
-/// It stays below the common S3 single-request limit; larger images require a future multipart
-/// upload contract.
 pub const PLATFORM_IMAGE_ARCHIVE_MAX_BYTES: u64 = 5_000_000_000;
+
+/// Fixed multipart part size for platform image browser uploads.
+pub const PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Returns whether a catalog binding uses the reviewed lowercase locator charset.
 #[must_use]
@@ -490,13 +491,32 @@ pub struct CreatePlatformImageUploadRequest {
     pub reason: String,
 }
 
-/// Short-lived per-object upload authority for one OCI archive.
+/// One short-lived presigned multipart part authority for one OCI archive.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlatformImageUploadTarget {
+pub struct PlatformImageUploadPartTarget {
+    pub part_number: u32,
     pub upload_url: String,
     pub required_headers: BTreeMap<String, String>,
     pub expires_at: UtcTimestamp,
+}
+
+/// Short-lived multipart upload authority for one OCI archive.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformImageUploadTarget {
+    pub part_size_bytes: u64,
+    pub parts: Vec<PlatformImageUploadPartTarget>,
+    pub expires_at: UtcTimestamp,
+}
+
+/// Actual part observed by the object store during upload status refresh.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformImageUploadedPart {
+    pub part_number: u32,
+    pub etag: String,
+    pub size_bytes: u64,
 }
 
 /// Staged OCI archive upload session owned by Control.
@@ -516,6 +536,7 @@ pub struct PlatformImageUploadSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_bytes: Option<u64>,
     pub upload_target: PlatformImageUploadTarget,
+    pub uploaded_parts: Vec<PlatformImageUploadedPart>,
     pub expires_at: UtcTimestamp,
     pub revision: Revision,
 }
@@ -542,15 +563,29 @@ pub struct PlatformImageUploadStatus {
     pub state: PlatformImageUploadState,
     pub revision: Revision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_target: Option<PlatformImageUploadTarget>,
+    #[serde(default)]
+    pub uploaded_parts: Vec<PlatformImageUploadedPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_id: Option<PlatformImageId>,
 }
 
+/// ETag receipt for one completed multipart part.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletePlatformImageUploadPart {
+    pub part_number: u32,
+    pub etag: String,
+}
+
 /// Completion request for one staged OCI archive upload.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompletePlatformImageUploadRequest {}
+pub struct CompletePlatformImageUploadRequest {
+    pub parts: Vec<CompletePlatformImageUploadPart>,
+}
 
 /// Revision-fenced cancellation of a platform image upload.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

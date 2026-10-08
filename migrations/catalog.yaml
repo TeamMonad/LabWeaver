@@ -43,6 +43,9 @@ domains:
       - id: 12
         file: control/0012_material_retention_choice.sql
         sha256: 6601637e28f8e4039bb74794c299a1f97465cbe2e48d7cef757cc45009db7675
+      - id: 13
+        file: control/0013_platform_image_multipart_uploads.sql
+        sha256: b81fd23d1a129375bca4856db443afdc7a3b634b54959e6511ab1a29e21dc5b9
   - name: access
     migrations:
       - id: 1

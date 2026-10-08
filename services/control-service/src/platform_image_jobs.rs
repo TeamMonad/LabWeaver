@@ -9,7 +9,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use artifact_store::ObjectStoreError;
+use artifact_store::{ObjectStoreError, PlatformImageMultipartPartInput};
 use contracts::http::{
     IdempotencyKey, InternalPlatformImageImportEnqueueRequest, InternalPlatformImageImportRequest,
     PlatformImageImportJobState, PlatformImageKind,
@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::clients::AgentClient;
 use crate::{
-    ControlError, ControlService, db, platform_image_kind_from_str, schedule_staged_archive_cleanup,
+    CREATE_PLATFORM_IMAGE_UPLOAD, ControlError, ControlService, db, platform_image_kind_from_str,
+    schedule_staged_archive_cleanup,
 };
 
 const CANCELLED_DIAGNOSTIC: &str = "LW_PLATFORM_IMAGE_IMPORT_CANCELLED";
@@ -62,6 +63,10 @@ pub struct PlatformImageImportClaim {
     pub reason: String,
     pub completion_key: Option<IdempotencyKey>,
     pub archive: Option<ArtifactRef>,
+    pub multipart_upload_id: Option<String>,
+    pub multipart_part_size_bytes: Option<u64>,
+    pub multipart_part_count: Option<u32>,
+    pub multipart_complete_started: bool,
     pub cancel_requested: bool,
     pub expires_at: UtcTimestamp,
 }
@@ -82,10 +87,12 @@ impl ControlService {
             r"SELECT upload_id,created_by,kind,binding,target_reference,trust_revision,reason,
                       archive_bytes,archive_media_type,object_key,object_version,artifact_id,
                       disk_format,disk_path,capacity_bytes,state,cancel_requested,
-                      completion_idempotency_key,expires_at
+                      completion_idempotency_key,expires_at,multipart_upload_id,
+                      multipart_part_size_bytes,multipart_part_count,multipart_complete_started
                FROM control.platform_image_upload_sessions
-              WHERE state='queued'
+              WHERE (state='queued' AND multipart_upload_id IS NOT NULL)
                  OR (state IN ('freezing','importing','cancelling')
+                     AND multipart_upload_id IS NOT NULL
                      AND completion_lease_expires_at<=date_trunc('milliseconds',clock_timestamp()))
               ORDER BY updated_at,upload_id
               LIMIT 1
@@ -145,6 +152,128 @@ impl ControlService {
         )?;
         transaction.commit().await.map_err(db)?;
         Ok(Some(claim))
+    }
+
+    /// Reads the client-supplied multipart manifest under the current worker fence.
+    pub async fn platform_image_multipart_completion_parts(
+        &self,
+        claim: &PlatformImageImportClaim,
+    ) -> Result<Vec<PlatformImageMultipartPartInput>, ControlError> {
+        let rows = sqlx::query(
+            "SELECT part_number,requested_etag \
+               FROM control.platform_image_upload_parts WHERE upload_id=$1 ORDER BY part_number",
+        )
+        .bind(claim.upload_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        let expected_count = usize::try_from(
+            claim
+                .multipart_part_count
+                .ok_or(ControlError::PersistenceIdentityMismatch)?,
+        )
+        .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+        if rows.len() != expected_count {
+            return Err(ControlError::PersistenceIdentityMismatch);
+        }
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let part_number = u32::try_from(row.try_get::<i32, _>("part_number").map_err(db)?)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                if part_number != u32::try_from(index + 1).unwrap_or_default() {
+                    return Err(ControlError::PersistenceIdentityMismatch);
+                }
+                Ok(PlatformImageMultipartPartInput {
+                    part_number,
+                    etag: row
+                        .try_get::<Option<String>, _>("requested_etag")
+                        .map_err(db)?
+                        .ok_or(ControlError::PersistenceIdentityMismatch)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Fences the transition from queued manifest validation to S3 completion.
+    pub async fn mark_platform_image_multipart_complete_started(
+        &self,
+        claim: &PlatformImageImportClaim,
+        now: UtcTimestamp,
+    ) -> Result<(), ControlError> {
+        if claim.multipart_complete_started {
+            return Ok(());
+        }
+        let updated = sqlx::query(
+            "UPDATE control.platform_image_upload_sessions \
+                SET multipart_complete_started=true,revision=revision+1,updated_at=$3 \
+              WHERE upload_id=$1 AND completion_lease_token=$2 \
+                AND state IN ('freezing','cancelling') \
+                AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()) \
+                AND multipart_complete_started=false",
+        )
+        .bind(claim.upload_id.as_uuid())
+        .bind(claim.lease_token)
+        .bind(now.get())
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        if updated.rows_affected() != 1 {
+            let current = sqlx::query_scalar::<_, bool>(
+                "SELECT multipart_complete_started FROM control.platform_image_upload_sessions \
+                  WHERE upload_id=$1 AND completion_lease_token=$2",
+            )
+            .bind(claim.upload_id.as_uuid())
+            .bind(claim.lease_token)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
+            if current != Some(true) {
+                return Err(ControlError::OperationLeaseLost);
+            }
+        }
+        Ok(())
+    }
+
+    /// Persists the exact S3 part facts before `CompleteMultipartUpload` is attempted.
+    pub async fn record_platform_image_multipart_parts(
+        &self,
+        claim: &PlatformImageImportClaim,
+        parts: &[artifact_store::PlatformImageMultipartPart],
+        now: UtcTimestamp,
+    ) -> Result<(), ControlError> {
+        let lease_valid = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM control.platform_image_upload_sessions
+               WHERE upload_id=$1 AND completion_lease_token=$2
+                 AND state IN ('freezing','cancelling')
+                 AND completion_lease_expires_at>date_trunc('milliseconds',clock_timestamp()))",
+        )
+        .bind(claim.upload_id.as_uuid())
+        .bind(claim.lease_token)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db)?;
+        if !lease_valid {
+            return Err(ControlError::OperationLeaseLost);
+        }
+        for part in parts {
+            let updated = sqlx::query(
+                "UPDATE control.platform_image_upload_parts \
+                    SET etag=$3,observed_size_bytes=$4 \
+                  WHERE upload_id=$1 AND part_number=$2 AND requested_etag=$3",
+            )
+            .bind(claim.upload_id.as_uuid())
+            .bind(i32::try_from(part.part_number).map_err(|_| ControlError::ContractInvalid)?)
+            .bind(&part.etag)
+            .bind(i64::try_from(part.size_bytes).map_err(|_| ControlError::ContractInvalid)?)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+            if updated.rows_affected() != 1 {
+                return Err(ControlError::ObjectStoreIdentityMismatch);
+            }
+        }
+        self.renew_platform_image_import(claim, now).await
     }
 
     /// Records the exact object version frozen by the worker and moves it to Agent import.
@@ -353,24 +482,188 @@ impl PlatformImageImportWorker {
     )]
     pub async fn tick(&self) -> Result<(), PlatformImageImportWorkerError> {
         let now = timestamp().map_err(|()| PlatformImageImportWorkerError::Invalid)?;
-        // Only sessions that never accepted completion expire here. A queued or running
-        // immutable Agent job continues independently of the signed PUT lifetime.
-        sqlx::query(
+        // An uncompleted multipart upload is cancelled through the worker so S3 receives an
+        // abort for this exact upload identity. A completion accepted before expiry continues
+        // independently of the browser URL lifetime.
+        self.control
+            .recover_pending_platform_image_upload_creation()
+            .await?;
+        let mut expiration_transaction = self.control.pool.begin().await.map_err(db)?;
+        let expired_creations = sqlx::query(
             r"UPDATE control.platform_image_upload_sessions
                   SET state='failed',terminal_diagnostic='LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
-                      revision=revision+1,updated_at=$1
-                WHERE state='pending' AND expires_at<=$1",
+                      cancel_requested=false,multipart_creation_lease_token=NULL,
+                      multipart_creation_lease_expires_at=NULL,revision=revision+1,
+                      updated_at=$1
+                WHERE state='pending' AND multipart_upload_id IS NULL AND expires_at<=$1
+             RETURNING create_idempotency_key",
         )
         .bind(now.get())
-        .execute(&self.control.pool)
+        .fetch_all(&mut *expiration_transaction)
         .await
         .map_err(db)?;
+        for row in expired_creations {
+            if let Some(create_idempotency_key) = row
+                .try_get::<Option<String>, _>("create_idempotency_key")
+                .map_err(db)?
+            {
+                sqlx::query(
+                    "DELETE FROM control.idempotency_ledger \
+                       WHERE operation=$1 AND idempotency_key=$2 AND state='in_progress'",
+                )
+                .bind(CREATE_PLATFORM_IMAGE_UPLOAD)
+                .bind(create_idempotency_key)
+                .execute(&mut *expiration_transaction)
+                .await
+                .map_err(db)?;
+            }
+        }
+        sqlx::query(
+            r"UPDATE control.platform_image_upload_sessions
+                  SET state='queued',cancel_requested=true,revision=revision+1,updated_at=$1
+                WHERE state='pending' AND multipart_upload_id IS NOT NULL AND expires_at<=$1",
+        )
+        .bind(now.get())
+        .execute(&mut *expiration_transaction)
+        .await
+        .map_err(db)?;
+        expiration_transaction.commit().await.map_err(db)?;
         self.record_expired_upload_versions(now).await?;
         let Some(mut claim) = self.control.claim_platform_image_import(now).await? else {
             return Ok(());
         };
         let had_archive_reference = claim.archive.is_some();
         if claim.archive.is_none() {
+            let multipart_upload_id = claim
+                .multipart_upload_id
+                .clone()
+                .ok_or(PlatformImageImportWorkerError::Invalid)?;
+            if claim.cancel_requested && !claim.multipart_complete_started {
+                match self
+                    .control
+                    .objects
+                    .abort_platform_image_multipart_upload(
+                        &claim.archive_object_key,
+                        &multipart_upload_id,
+                    )
+                    .await
+                {
+                    Ok(()) | Err(ObjectStoreError::ObjectNotFound) => {
+                        self.control
+                            .cancel_platform_image_import_fenced(
+                                &claim,
+                                timestamp()
+                                    .map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                    Err(ObjectStoreError::ObjectUnavailable) => {
+                        return Err(ObjectStoreError::ObjectUnavailable.into());
+                    }
+                    Err(error) => {
+                        self.control
+                            .fail_platform_image_import_fenced(
+                                &claim,
+                                error.diagnostic_code(),
+                                timestamp()
+                                    .map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+            let parts = self
+                .control
+                .platform_image_multipart_completion_parts(&claim)
+                .await?;
+            let completion_started_before = claim.multipart_complete_started;
+            if !claim.multipart_complete_started {
+                self.control
+                    .mark_platform_image_multipart_complete_started(
+                        &claim,
+                        timestamp().map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                    )
+                    .await?;
+                claim.multipart_complete_started = true;
+            }
+            let observed = match self
+                .control
+                .objects
+                .list_platform_image_multipart_parts(
+                    &claim.archive_object_key,
+                    &multipart_upload_id,
+                )
+                .await
+            {
+                Ok(parts) => parts,
+                Err(ObjectStoreError::ObjectNotFound) if claim.multipart_complete_started => {
+                    Vec::new()
+                }
+                Err(ObjectStoreError::ObjectUnavailable) => {
+                    return Err(ObjectStoreError::ObjectUnavailable.into());
+                }
+                Err(error) => {
+                    self.control
+                        .fail_platform_image_import_fenced(
+                            &claim,
+                            error.diagnostic_code(),
+                            timestamp().map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
+            if observed.is_empty() && !completion_started_before {
+                self.control
+                    .fail_platform_image_import_fenced(
+                        &claim,
+                        ObjectStoreError::ObjectIdentityMismatch.diagnostic_code(),
+                        timestamp().map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                    )
+                    .await?;
+                return Ok(());
+            }
+            if !observed.is_empty()
+                && let Err(error) = self
+                    .control
+                    .record_platform_image_multipart_parts(
+                        &claim,
+                        &observed,
+                        timestamp().map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                    )
+                    .await
+            {
+                if matches!(error, ControlError::ObjectStoreIdentityMismatch) {
+                    self.control
+                        .fail_platform_image_import_fenced(
+                            &claim,
+                            ObjectStoreError::ObjectIdentityMismatch.diagnostic_code(),
+                            timestamp().map_err(|()| PlatformImageImportWorkerError::Invalid)?,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
+            if !observed.is_empty() {
+                self.control
+                    .objects
+                    .complete_platform_image_multipart_upload(
+                        &claim.archive_object_key,
+                        &multipart_upload_id,
+                        claim.archive_size,
+                        &parts,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        ObjectStoreError::ObjectUnavailable => {
+                            PlatformImageImportWorkerError::Objects(error)
+                        }
+                        error => PlatformImageImportWorkerError::Objects(error),
+                    })?;
+            }
             let archive = match self
                 .control
                 .objects
@@ -382,69 +675,7 @@ impl PlatformImageImportWorker {
                 .await
             {
                 Ok(archive) => archive,
-                Err(ObjectStoreError::ObjectNotFound) => {
-                    claim.cancel_requested = self
-                        .control
-                        .platform_image_import_cancel_requested(&claim)
-                        .await?;
-                    if now.get() < claim.expires_at.get() {
-                        return Ok(());
-                    }
-                    // The presigned URL normally expires with the session, but a late upload
-                    // can race the worker's first HEAD. Resolve once more after expiry so any
-                    // cleanup still records the exact immutable version; never delete the key
-                    // without a version.
-                    match self
-                        .control
-                        .objects
-                        .freeze_current_reference(
-                            &claim.archive_object_key,
-                            claim.archive_size,
-                            &claim.archive_media_type,
-                        )
-                        .await
-                    {
-                        Ok(archive) => archive,
-                        Err(ObjectStoreError::ObjectNotFound) => {
-                            if claim.cancel_requested {
-                                self.control
-                                    .cancel_platform_image_import_fenced(
-                                        &claim,
-                                        timestamp().map_err(|()| {
-                                            PlatformImageImportWorkerError::Invalid
-                                        })?,
-                                    )
-                                    .await?;
-                            } else {
-                                self.control
-                                    .fail_platform_image_import_fenced(
-                                        &claim,
-                                        "LW_OBJECT_UNAVAILABLE",
-                                        timestamp().map_err(|()| {
-                                            PlatformImageImportWorkerError::Invalid
-                                        })?,
-                                    )
-                                    .await?;
-                            }
-                            return Ok(());
-                        }
-                        Err(ObjectStoreError::ObjectUnavailable) => {
-                            return Err(ObjectStoreError::ObjectUnavailable.into());
-                        }
-                        Err(error) => {
-                            self.control
-                                .fail_platform_image_import_fenced(
-                                    &claim,
-                                    error.diagnostic_code(),
-                                    timestamp()
-                                        .map_err(|()| PlatformImageImportWorkerError::Invalid)?,
-                                )
-                                .await?;
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(ObjectStoreError::ObjectUnavailable) => {
+                Err(ObjectStoreError::ObjectNotFound | ObjectStoreError::ObjectUnavailable) => {
                     return Err(ObjectStoreError::ObjectUnavailable.into());
                 }
                 Err(error) => {
@@ -735,6 +966,20 @@ fn claim_from_row(
     let reason = row.try_get("reason").map_err(db)?;
     let expires_at = UtcTimestamp::from_utc(row.try_get("expires_at").map_err(db)?)
         .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+    let multipart_upload_id = row
+        .try_get::<Option<String>, _>("multipart_upload_id")
+        .map_err(db)?;
+    let multipart_part_size_bytes = row
+        .try_get::<Option<i64>, _>("multipart_part_size_bytes")
+        .map_err(db)?
+        .map(|value| u64::try_from(value).map_err(|_| ControlError::PersistenceIdentityMismatch))
+        .transpose()?;
+    let multipart_part_count = row
+        .try_get::<Option<i32>, _>("multipart_part_count")
+        .map_err(db)?
+        .map(|value| u32::try_from(value).map_err(|_| ControlError::PersistenceIdentityMismatch))
+        .transpose()?;
+    let multipart_complete_started = row.try_get("multipart_complete_started").map_err(db)?;
     Ok(PlatformImageImportClaim {
         upload_id,
         lease_token,
@@ -752,6 +997,10 @@ fn claim_from_row(
         reason,
         completion_key,
         archive,
+        multipart_upload_id,
+        multipart_part_size_bytes,
+        multipart_part_count,
+        multipart_complete_started,
         cancel_requested,
         expires_at,
     })

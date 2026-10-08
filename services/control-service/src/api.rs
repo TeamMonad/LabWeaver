@@ -2710,7 +2710,7 @@ async fn complete_admin_image_upload(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(upload_id): Path<UploadSessionId>,
     headers: HeaderMap,
-    Json(_request): Json<CompletePlatformImageUploadRequest>,
+    Json(request): Json<CompletePlatformImageUploadRequest>,
 ) -> Result<Response, ApiError> {
     let decision =
         authorize_global(&state, &principal, &headers, "completePlatformImageUpload").await?;
@@ -2718,7 +2718,7 @@ async fn complete_admin_image_upload(
     let key = idempotency(&headers)?;
     let status = state
         .control
-        .queue_platform_image_completion(decision.actor.actor_id, upload_id, &key, now()?)
+        .queue_platform_image_completion(decision.actor.actor_id, upload_id, &request, &key, now()?)
         .await?;
     Ok(with_etag(StatusCode::ACCEPTED, &status, status.revision))
 }

@@ -15,7 +15,9 @@ use std::{
 };
 
 use artifact_store::{
-    ImmutableObjectStore, ObjectStoreError, PresignedUpload, VerifiedObject, VerifiedObjectFile,
+    ImmutableObjectStore, ObjectStoreError, PlatformImageMultipartPart,
+    PlatformImageMultipartPartInput, PlatformImageMultipartUpload, PresignedPlatformImagePart,
+    PresignedUpload, VerifiedObject, VerifiedObjectFile,
 };
 use async_trait::async_trait;
 use auth::{
@@ -35,16 +37,16 @@ use contracts::authoring::{
     CandidateApproval, CandidateDecision, EnvironmentCandidate, ProjectLlmEgressPolicy, RuntimeKind,
 };
 use contracts::http::{
-    CancelPlatformImageUploadRequest, CandidateDecisionRequest,
-    CreateEnvironmentTemplateReleaseRequest, CreatePlatformImageUploadRequest,
-    DisablePlatformImageRequest, EnvironmentCandidateView, IdempotencyKey,
-    InternalPlatformImageDisableRequest, InternalPlatformImageImportEnqueueRequest,
+    CancelPlatformImageUploadRequest, CandidateDecisionRequest, CompletePlatformImageUploadPart,
+    CompletePlatformImageUploadRequest, CreateEnvironmentTemplateReleaseRequest,
+    CreatePlatformImageUploadRequest, DisablePlatformImageRequest, EnvironmentCandidateView,
+    IdempotencyKey, InternalPlatformImageDisableRequest, InternalPlatformImageImportEnqueueRequest,
     InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, OperationAccepted, PLATFORM_IMAGE_ARCHIVE_MEDIA_TYPE,
-    PlatformImageCatalog, PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
-    PlatformImageImportJobState, PlatformImageKind, PlatformImageStatus,
-    PlatformImageUploadSession, PlatformImageUploadState, PlatformImageUploadStatus,
-    RegisterPlatformImageRequest, RepinPlatformImageRequest, StrongEtag,
+    PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES, PlatformImageCatalog, PlatformImageCatalogView,
+    PlatformImageEntry, PlatformImageEntryView, PlatformImageImportJobState, PlatformImageKind,
+    PlatformImageStatus, PlatformImageUploadSession, PlatformImageUploadState,
+    PlatformImageUploadStatus, RegisterPlatformImageRequest, RepinPlatformImageRequest, StrongEtag,
 };
 use contracts::supply_chain::{
     EnvironmentTemplateRelease, EnvironmentTemplateReleaseView, ImageArtifact,
@@ -471,12 +473,42 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
     let session: PlatformImageUploadSession = serde_json::from_slice(&upload_bytes)?;
     assert_eq!(session.archive_bytes, 4_096);
     assert_eq!(
-        session.upload_target.upload_url,
-        "https://objects.example.invalid/platform-image-archive"
+        session.upload_target.parts[0].upload_url,
+        "https://objects.example.invalid/fake-problem-packages/platform-image-uploads/".to_owned()
+            + &session.upload_id.to_string()
+            + "/1"
     );
     assert_eq!(
         upload_state(&pool, session.upload_id).await?,
         ("pending".to_owned(), None, None)
+    );
+
+    let malformed_complete = app
+        .clone()
+        .oneshot(admin_request(
+            format!(
+                "/api/v1/admin/images/uploads/{}/complete",
+                session.upload_id
+            ),
+            "POST",
+            actor_id,
+            session_id,
+            Some("malformed-complete-key"),
+            Some(serde_json::to_vec(&CompletePlatformImageUploadRequest {
+                parts: Vec::new(),
+            })?),
+        )?)
+        .await?;
+    assert_eq!(
+        malformed_complete.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        problem_body(malformed_complete)
+            .await?
+            .diagnostic_code
+            .as_str(),
+        "LW_PLATFORM_IMAGE_UPLOAD_INVALID"
     );
 
     // Completion only queues durable work. The HTTP operation remains fast and the browser reads
@@ -492,7 +524,7 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
             actor_id,
             session_id,
             Some("complete-key"),
-            Some(b"{}".to_vec()),
+            Some(serde_json::to_vec(&completion_request(&session))?),
         )?)
         .await?;
     let complete_status = complete_response.status();
@@ -526,7 +558,11 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
     assert_eq!(status_response.status(), StatusCode::OK);
     let current: PlatformImageUploadStatus =
         serde_json::from_slice(&to_bytes(status_response.into_body(), usize::MAX).await?)?;
-    assert_eq!(current, queued);
+    assert_eq!(current.upload_id, queued.upload_id);
+    assert_eq!(current.state, queued.state);
+    assert_eq!(current.revision, queued.revision);
+    assert!(current.upload_target.is_some());
+    assert_eq!(current.uploaded_parts.len(), 1);
 
     let cancel_response = app
         .clone()
@@ -589,7 +625,7 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
             actor_id,
             session_id,
             Some("complete-expired-http"),
-            Some(b"{}".to_vec()),
+            Some(serde_json::to_vec(&completion_request(&expired_session))?),
         )?)
         .await?;
     assert_eq!(expired_response.status(), StatusCode::GONE);
@@ -646,7 +682,7 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
             actor_id,
             session_id,
             Some("vm-complete-key"),
-            Some(b"{}".to_vec()),
+            Some(serde_json::to_vec(&completion_request(&vm_session))?),
         )?)
         .await?;
     let vm_complete_status = vm_complete.status();
@@ -727,7 +763,7 @@ async fn platform_image_admin_routes_gateway_the_agent_authority()
             actor_id,
             session_id,
             Some("rejected-complete-key"),
-            Some(b"{}".to_vec()),
+            Some(serde_json::to_vec(&completion_request(&rejected_session))?),
         )?)
         .await?;
     let rejected_status = rejected_complete.status();
@@ -793,9 +829,18 @@ impl Drop for TlsServiceHandle {
 struct PlatformImageObjects {
     bytes: Vec<u8>,
     frozen: Mutex<BTreeMap<String, ArtifactRef>>,
+    multipart: Mutex<BTreeMap<String, FakeMultipartUpload>>,
     available: AtomicBool,
     read_failure: AtomicBool,
     versions: Mutex<Vec<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct FakeMultipartUpload {
+    upload_id: String,
+    size_bytes: u64,
+    part_count: u32,
+    aborted: bool,
 }
 
 impl PlatformImageObjects {
@@ -803,9 +848,10 @@ impl PlatformImageObjects {
         Self {
             bytes,
             frozen: Mutex::new(BTreeMap::new()),
+            multipart: Mutex::new(BTreeMap::new()),
             available: AtomicBool::new(true),
             read_failure: AtomicBool::new(false),
-            versions: Mutex::new(vec![FROZEN_OBJECT_VERSION.to_owned()]),
+            versions: Mutex::new(Vec::new()),
         }
     }
 }
@@ -838,6 +884,165 @@ impl ImmutableObjectStore for PlatformImageObjects {
             )
             .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
         })
+    }
+
+    async fn create_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        _media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        let part_count = u32::try_from(
+            size_bytes
+                .checked_add(PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES - 1)
+                .ok_or(ObjectStoreError::ObjectTooLarge)?
+                / PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES,
+        )
+        .map_err(|_| ObjectStoreError::ObjectTooLarge)?;
+        let upload_id = format!("fake-{key}");
+        self.multipart
+            .lock()
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?
+            .insert(
+                key.to_owned(),
+                FakeMultipartUpload {
+                    upload_id: upload_id.clone(),
+                    size_bytes,
+                    part_count,
+                    aborted: false,
+                },
+            );
+        self.presign_platform_image_multipart_upload(
+            key,
+            &upload_id,
+            size_bytes,
+            now,
+            UtcTimestamp::from_utc(
+                now.get()
+                    + Duration::seconds(
+                        i64::try_from(UPLOAD_TTL_SECONDS)
+                            .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+                    ),
+            )
+            .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+        )
+        .await
+    }
+
+    async fn presign_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        size_bytes: u64,
+        _now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        let multipart = self
+            .multipart
+            .lock()
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?
+            .get(key)
+            .filter(|upload| !upload.aborted && upload.upload_id == upload_id)
+            .cloned()
+            .ok_or(ObjectStoreError::ObjectNotFound)?;
+        if multipart.size_bytes != size_bytes {
+            return Err(ObjectStoreError::ObjectIdentityMismatch);
+        }
+        let parts = (1..=multipart.part_count)
+            .map(|part_number| PresignedPlatformImagePart {
+                part_number,
+                url: format!("https://objects.example.invalid/{upload_id}/{part_number}"),
+                required_headers: BTreeMap::new(),
+                expires_at,
+            })
+            .collect();
+        Ok(PlatformImageMultipartUpload {
+            upload_id: multipart.upload_id,
+            part_size_bytes: PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES,
+            part_count: multipart.part_count,
+            parts,
+            expires_at,
+        })
+    }
+
+    async fn find_platform_image_multipart_uploads(
+        &self,
+        key: &str,
+    ) -> Result<Vec<String>, ObjectStoreError> {
+        Ok(self
+            .multipart
+            .lock()
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?
+            .get(key)
+            .filter(|upload| !upload.aborted)
+            .map(|upload| vec![upload.upload_id.clone()])
+            .unwrap_or_default())
+    }
+
+    async fn list_platform_image_multipart_parts(
+        &self,
+        key: &str,
+        upload_id: &str,
+    ) -> Result<Vec<PlatformImageMultipartPart>, ObjectStoreError> {
+        let multipart = self
+            .multipart
+            .lock()
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?
+            .get(key)
+            .filter(|upload| !upload.aborted && upload.upload_id == upload_id)
+            .cloned()
+            .ok_or(ObjectStoreError::ObjectNotFound)?;
+        Ok((1..=multipart.part_count)
+            .map(|part_number| PlatformImageMultipartPart {
+                part_number,
+                etag: format!("etag-{part_number}"),
+                size_bytes: if part_number == multipart.part_count {
+                    multipart.size_bytes
+                        - PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES * u64::from(part_number - 1)
+                } else {
+                    PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES
+                },
+            })
+            .collect())
+    }
+
+    async fn complete_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        size_bytes: u64,
+        parts: &[PlatformImageMultipartPartInput],
+    ) -> Result<(), ObjectStoreError> {
+        let observed = self
+            .list_platform_image_multipart_parts(key, upload_id)
+            .await?;
+        if observed.len() != parts.len()
+            || observed.iter().zip(parts).any(|(observed, requested)| {
+                observed.part_number != requested.part_number || observed.etag != requested.etag
+            })
+            || observed.iter().map(|part| part.size_bytes).sum::<u64>() != size_bytes
+        {
+            return Err(ObjectStoreError::ObjectIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    async fn abort_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+    ) -> Result<(), ObjectStoreError> {
+        let mut uploads = self
+            .multipart
+            .lock()
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        let upload = uploads
+            .get_mut(key)
+            .filter(|upload| upload.upload_id == upload_id)
+            .ok_or(ObjectStoreError::ObjectNotFound)?;
+        upload.aborted = true;
+        Ok(())
     }
 
     async fn read_verified(
@@ -884,6 +1089,13 @@ impl ImmutableObjectStore for PlatformImageObjects {
             .lock()
             .map_err(|_| ObjectStoreError::ObjectUnavailable)?
             .insert(key.to_owned(), reference.clone());
+        let mut versions = self
+            .versions
+            .lock()
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        if !versions.contains(&FROZEN_OBJECT_VERSION.to_owned()) {
+            versions.push(FROZEN_OBJECT_VERSION.to_owned());
+        }
         Ok(VerifiedObject {
             reference,
             bytes: self.bytes.clone(),
@@ -2119,6 +2331,20 @@ fn upload_request(binding: &str) -> CreatePlatformImageUploadRequest {
     }
 }
 
+fn completion_request(session: &PlatformImageUploadSession) -> CompletePlatformImageUploadRequest {
+    CompletePlatformImageUploadRequest {
+        parts: session
+            .upload_target
+            .parts
+            .iter()
+            .map(|part| CompletePlatformImageUploadPart {
+                part_number: part.part_number,
+                etag: format!("etag-{}", part.part_number),
+            })
+            .collect(),
+    }
+}
+
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
@@ -2144,6 +2370,7 @@ async fn control_import_restart_fences_old_workers_and_freezes_a_cancelled_late_
         .queue_platform_image_completion(
             actor,
             session.upload_id,
+            &completion_request(&session),
             &IdempotencyKey::parse("complete-late")?,
             import_now()?,
         )
@@ -2153,6 +2380,7 @@ async fn control_import_restart_fences_old_workers_and_freezes_a_cancelled_late_
             .queue_platform_image_completion(
                 actor,
                 session.upload_id,
+                &completion_request(&session),
                 &IdempotencyKey::parse("complete-late")?,
                 import_now()?
             )
@@ -2453,6 +2681,7 @@ async fn unknown_agent_enqueue_response_recovers_the_same_job_before_cancelling_
         .queue_platform_image_completion(
             actor,
             session.upload_id,
+            &completion_request(&session),
             &IdempotencyKey::parse("complete-lost")?,
             import_now()?,
         )
@@ -2523,11 +2752,10 @@ async fn unknown_agent_enqueue_response_recovers_the_same_job_before_cancelling_
 }
 
 #[tokio::test]
-async fn pending_cancel_waits_for_a_late_put_without_creating_an_agent_job()
+async fn pending_cancel_aborts_multipart_without_creating_an_agent_job()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, _postgres) = import_database().await?;
     let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
-    objects.available.store(false, Ordering::SeqCst);
     let control = ControlService::new(pool.clone(), objects.clone(), config()?)?;
     let transport = ImportTransportState {
         accepted: Arc::new(Mutex::new(None)),
@@ -2566,23 +2794,6 @@ async fn pending_cancel_waits_for_a_late_put_without_creating_an_agent_job()
             .platform_image_upload_status(session.upload_id)
             .await?
             .state,
-        PlatformImageUploadState::Cancelling
-    );
-    assert!(
-        transport
-            .accepted
-            .lock()
-            .map_err(|_| "fixture lock poisoned")?
-            .is_none()
-    );
-    sqlx::query("UPDATE control.platform_image_upload_sessions SET completion_lease_expires_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1").bind(session.upload_id.as_uuid()).execute(&pool).await?;
-    objects.available.store(true, Ordering::SeqCst);
-    worker.tick().await?;
-    assert_eq!(
-        control
-            .platform_image_upload_status(session.upload_id)
-            .await?
-            .state,
         PlatformImageUploadState::Cancelled
     );
     assert!(
@@ -2598,38 +2809,16 @@ async fn pending_cancel_waits_for_a_late_put_without_creating_an_agent_job()
     .bind(session.upload_id.as_uuid())
     .fetch_all(&pool)
     .await?;
-    assert_eq!(versions, vec![FROZEN_OBJECT_VERSION.to_owned()]);
-    *objects
-        .versions
-        .lock()
-        .map_err(|_| "fixture lock poisoned")? = vec![
-        FROZEN_OBJECT_VERSION.to_owned(),
-        "overwritten-between-ticks".to_owned(),
-        "latest-late-put".to_owned(),
-    ];
-    sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
-        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
-    let restarted = control_service::platform_image_jobs::PlatformImageImportWorker {
-        control,
-        agent: worker.agent.clone(),
-        poll_interval: worker.poll_interval,
-    };
-    restarted.tick().await?;
-    let versions: Vec<String> = sqlx::query_scalar("SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1 ORDER BY object_version").bind(session.upload_id.as_uuid()).fetch_all(&pool).await?;
-    assert_eq!(versions.len(), 3);
-    assert!(versions.contains(&"overwritten-between-ticks".to_owned()));
-    assert!(versions.contains(&"latest-late-put".to_owned()));
-    assert!(sqlx::query_scalar::<_, bool>("SELECT cleanup_versions_next_attempt_at>clock_timestamp() FROM control.platform_image_upload_sessions WHERE upload_id=$1")
-        .bind(session.upload_id.as_uuid()).fetch_one(&pool).await?);
+    assert!(versions.is_empty());
     Ok(())
 }
 
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "one upload keeps temporary failure, confirmed absence and later committed PUT recovery together"
+    reason = "one expired upload keeps abort and exact late-version cleanup ordering together"
 )]
-async fn expired_upload_does_not_turn_a_temporary_object_store_failure_into_terminal_absence()
+async fn expired_upload_aborts_before_terminal_cleanup_and_does_not_create_an_agent_job()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, _postgres) = import_database().await?;
     let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
@@ -2673,18 +2862,6 @@ async fn expired_upload_does_not_turn_a_temporary_object_store_failure_into_term
         .await?;
     sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
         .bind(session.upload_id.as_uuid()).execute(&pool).await?;
-    assert!(worker.tick().await.is_err());
-    assert_eq!(
-        control
-            .platform_image_upload_status(session.upload_id)
-            .await?
-            .state,
-        PlatformImageUploadState::Cancelling
-    );
-    sqlx::query("UPDATE control.platform_image_upload_sessions SET completion_lease_expires_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1")
-        .bind(session.upload_id.as_uuid()).execute(&pool).await?;
-    objects.read_failure.store(false, Ordering::SeqCst);
-    objects.available.store(false, Ordering::SeqCst);
     worker.tick().await?;
     assert_eq!(
         control
@@ -2693,6 +2870,7 @@ async fn expired_upload_does_not_turn_a_temporary_object_store_failure_into_term
             .state,
         PlatformImageUploadState::Cancelled
     );
+    objects.read_failure.store(false, Ordering::SeqCst);
     objects.read_failure.store(true, Ordering::SeqCst);
     assert!(worker.tick().await.is_err());
     assert!(sqlx::query_scalar::<_, bool>("SELECT cleanup_versions_next_attempt_at>clock_timestamp() FROM control.platform_image_upload_sessions WHERE upload_id=$1")
@@ -2739,9 +2917,9 @@ async fn expired_upload_does_not_turn_a_temporary_object_store_failure_into_term
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "one worker exercises orphaned uploads with and without a committed PUT, then a delayed PUT and an accepted import"
+    reason = "one worker exercises multipart expiry and an accepted completion after the deadline"
 )]
-async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
+async fn abandoned_multipart_uploads_abort_and_accepted_completion_survives_expiry()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, _postgres) = import_database().await?;
     let objects = Arc::new(PlatformImageObjects::new(Vec::new()));
@@ -2758,16 +2936,7 @@ async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
         poll_interval: std::time::Duration::from_millis(10),
     };
     let actor = ActorId::new();
-    for (binding, uploaded) in [("orphan-put", true), ("orphan-empty", false)] {
-        *objects
-            .versions
-            .lock()
-            .map_err(|_| "fixture lock poisoned")? = if uploaded {
-            vec![FROZEN_OBJECT_VERSION.to_owned()]
-        } else {
-            Vec::new()
-        };
-        objects.available.store(uploaded, Ordering::SeqCst);
+    for binding in ["orphan-put", "orphan-empty"] {
         let session = control
             .create_platform_image_upload(
                 actor,
@@ -2783,6 +2952,7 @@ async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
                 .queue_platform_image_completion(
                     actor,
                     session.upload_id,
+                    &completion_request(&session),
                     &IdempotencyKey::parse(&format!("expired-{binding}"))?,
                     import_now()?,
                 )
@@ -2793,26 +2963,15 @@ async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
         let status = control
             .platform_image_upload_status(session.upload_id)
             .await?;
-        assert_eq!(status.state, PlatformImageUploadState::Failed);
-        assert_eq!(status.revision.get(), session.revision.get() + 1);
-        assert_eq!(
-            status.diagnostic.as_deref(),
-            Some("LW_PLATFORM_IMAGE_UPLOAD_EXPIRED")
-        );
+        assert_eq!(status.state, PlatformImageUploadState::Cancelled);
+        assert_eq!(status.revision.get(), session.revision.get() + 3);
         let versions: Vec<String> = sqlx::query_scalar(
             "SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1",
         )
         .bind(session.upload_id.as_uuid())
         .fetch_all(&pool)
         .await?;
-        assert_eq!(
-            versions,
-            if uploaded {
-                vec![FROZEN_OBJECT_VERSION.to_owned()]
-            } else {
-                Vec::new()
-            }
-        );
+        assert!(versions.is_empty());
         assert!(
             transport
                 .accepted
@@ -2827,30 +2986,12 @@ async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
                 .await?,
             status
         );
-        if !uploaded {
-            *objects
-                .versions
-                .lock()
-                .map_err(|_| "fixture lock poisoned")? = vec!["late-orphan-put".to_owned()];
-            sqlx::query("UPDATE control.platform_image_upload_sessions SET cleanup_versions_next_attempt_at=clock_timestamp()-interval '1 second' WHERE upload_id=$1")
-                .bind(session.upload_id.as_uuid()).execute(&pool).await?;
-            worker.tick().await?;
-            assert_eq!(
-                sqlx::query_scalar::<_, String>(
-                    "SELECT object_version FROM control.object_cleanup_ledger WHERE upload_id=$1",
-                )
-                .bind(session.upload_id.as_uuid())
-                .fetch_one(&pool)
+        assert_eq!(
+            control
+                .platform_image_upload_status(session.upload_id)
                 .await?,
-                "late-orphan-put"
-            );
-            assert_eq!(
-                control
-                    .platform_image_upload_status(session.upload_id)
-                    .await?,
-                status
-            );
-        }
+            status
+        );
     }
     // Accepted completion owns the job independently of the PUT deadline.
     let session = control
@@ -2863,13 +3004,25 @@ async fn abandoned_pending_uploads_expire_and_late_versions_are_reconciled()
         .await?;
     let key = IdempotencyKey::parse("complete-accepted-expiry")?;
     let queued = control
-        .queue_platform_image_completion(actor, session.upload_id, &key, import_now()?)
+        .queue_platform_image_completion(
+            actor,
+            session.upload_id,
+            &completion_request(&session),
+            &key,
+            import_now()?,
+        )
         .await?;
     sqlx::query("UPDATE control.platform_image_upload_sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())-interval '1 second',created_at=date_trunc('milliseconds',clock_timestamp())-interval '2 seconds' WHERE upload_id=$1")
         .bind(session.upload_id.as_uuid()).execute(&pool).await?;
     assert_eq!(
         control
-            .queue_platform_image_completion(actor, session.upload_id, &key, import_now()?)
+            .queue_platform_image_completion(
+                actor,
+                session.upload_id,
+                &completion_request(&session),
+                &key,
+                import_now()?,
+            )
             .await?,
         queued
     );
