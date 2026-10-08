@@ -479,9 +479,12 @@ export function usePlatformImages() {
     uploadTask = uploadTaskForSession
     try {
       await uploadTaskForSession
-    } catch {
+    } catch (error) {
       if (!disposed && !uploadCancelRequested) {
-        failure(undefined, 'PLATFORM_IMAGE_UPLOAD_FAILED', '归档上传失败。请检查网络后重新选择文件。', active.uploadId, false)
+        const detail = error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : '归档上传失败。请检查网络后重新选择文件。'
+        failure(error, 'PLATFORM_IMAGE_UPLOAD_FAILED', detail, active.uploadId, false)
       }
       return false
     } finally {

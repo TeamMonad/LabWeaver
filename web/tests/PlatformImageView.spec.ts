@@ -293,7 +293,7 @@ describe('PlatformImageView', () => {
   })
 
   it('keeps the selected file and stages a new session when the object upload fails', async () => {
-    vi.mocked(putFileWithProgress).mockRejectedValueOnce(new Error('上传失败：403 Forbidden'))
+    vi.mocked(putFileWithProgress).mockRejectedValueOnce(new Error('对象存储上传失败：HTTP 503'))
     const wrapper = await mountView()
     const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
     await fillUploadForm(wrapper, file)
@@ -302,7 +302,7 @@ describe('PlatformImageView', () => {
     await form.trigger('submit')
     await flushPromises()
 
-    expect(wrapper.get('.diagnostic-banner').text()).toContain('归档上传失败。请检查网络后重新选择文件。')
+    expect(wrapper.get('.diagnostic-banner').text()).toContain('对象存储上传失败：HTTP 503')
     expect(completePlatformImageUpload).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('已选择：layout.tar')
 
