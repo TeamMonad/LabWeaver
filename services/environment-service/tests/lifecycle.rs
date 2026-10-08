@@ -107,6 +107,11 @@ fn stopped_reset_reconciles_through_stop_before_completion_and_recovery()
         ObservedEnvironmentState::Provisioning
     );
 
+    let mut provider_endpoints = reset_plan.endpoints.clone();
+    for endpoint in &mut provider_endpoints {
+        endpoint.health = EndpointHealth::Healthy;
+    }
+
     // Providers report the newly reset runtime as Ready. Environment records a non-terminal
     // Stopping checkpoint so Resource capacity remains held until the next Stop action.
     let stopping = apply_provider_observation(
@@ -114,13 +119,14 @@ fn stopped_reset_reconciles_through_stop_before_completion_and_recovery()
         reset_plan.operation.id,
         ProviderObservation {
             next_state: ObservedEnvironmentState::Ready,
-            endpoints: Vec::new(),
+            endpoints: provider_endpoints,
             cleanup_evidence: None,
             operation_complete: true,
         },
     )?;
     assert_eq!(stopping.observed_state, ObservedEnvironmentState::Stopping);
     assert_eq!(stopping.operation.state, OperationState::Running);
+    assert!(stopping.endpoints.is_empty());
     assert_eq!(
         stopping.operation.provider_step,
         reset_plan.operation.provider_step + 1

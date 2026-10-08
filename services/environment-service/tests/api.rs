@@ -86,7 +86,7 @@ impl ExperimentResourceAllocator for CountingGpuAllocator {
     ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
         let count = self.resolve_count.fetch_add(1, Ordering::SeqCst) + 1;
         if count > 1 {
-            return Err(ResourceUsageClientError::Rejected);
+            return Err(ResourceUsageClientError::Rejected { retryable: false });
         }
         let gpu = request
             .gpu

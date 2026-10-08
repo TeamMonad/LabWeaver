@@ -947,12 +947,7 @@ async fn resolve_experiment_resources(
                 environment_id = %environment_id,
                 diagnostic_code = error.diagnostic_code(),
                 error_kind = "resource_dependency",
-                retryable = matches!(
-                    error,
-                    crate::metering::ResourceUsageClientError::Transport
-                        | crate::metering::ResourceUsageClientError::TokenExchange
-                        | crate::metering::ResourceUsageClientError::TokenDiscovery
-                ),
+                retryable = error.retryable(),
             );
             Err(EnvironmentApiError::ResourceReservationRejected)
         }

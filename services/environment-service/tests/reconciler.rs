@@ -41,7 +41,7 @@ impl environment_service::ExperimentResourceAllocator for RecordingAllocator {
         &self,
         _request: &ResolveEnvironmentResourceReservationRequest,
     ) -> Result<Option<GpuAllocation>, environment_service::ResourceUsageClientError> {
-        Err(environment_service::ResourceUsageClientError::Rejected)
+        Err(environment_service::ResourceUsageClientError::Rejected { retryable: false })
     }
 
     async fn release_resource_reservation(

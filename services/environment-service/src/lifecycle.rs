@@ -288,6 +288,7 @@ fn normalize_reset_to_stop(
         // release Resource capacity.
         observation.next_state = ObservedEnvironmentState::Stopping;
         observation.operation_complete = false;
+        observation.endpoints.clear();
     }
     observation
 }

@@ -1064,7 +1064,9 @@ impl ResourceUsageClient {
             .await
             .map_err(|_| ResourceUsageClientError::Transport)?;
         if response.status() != StatusCode::OK && response.status() != StatusCode::CREATED {
-            return Err(ResourceUsageClientError::Rejected);
+            return Err(ResourceUsageClientError::rejected_for_status(
+                response.status(),
+            ));
         }
         let record: contracts::resource::ResourceUsageRecord = response
             .json()
@@ -1188,6 +1190,7 @@ impl ResourceUsageClient {
             .await
             .map_err(|_| ResourceUsageClientError::Transport)?;
         if !response.status().is_success() {
+            let status = response.status();
             let problem = response.json::<ProblemDetails>().await.ok();
             if let Some(problem) = problem {
                 if problem.diagnostic_code.as_str() == "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED" {
@@ -1198,7 +1201,7 @@ impl ResourceUsageClient {
                     retryable: problem.retryable,
                 });
             }
-            return Err(ResourceUsageClientError::Rejected);
+            return Err(ResourceUsageClientError::rejected_for_status(status));
         }
         Ok(response)
     }
@@ -1330,7 +1333,7 @@ pub enum ResourceUsageClientError {
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_TRANSPORT_FAILED")]
     Transport,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED")]
-    Rejected,
+    Rejected { retryable: bool },
     #[error("{diagnostic_code}")]
     Problem {
         diagnostic_code: String,
@@ -1343,13 +1346,22 @@ pub enum ResourceUsageClientError {
 }
 
 impl ResourceUsageClientError {
+    fn rejected_for_status(status: StatusCode) -> Self {
+        Self::Rejected {
+            retryable: matches!(
+                status,
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+            ) || status.is_server_error(),
+        }
+    }
+
     pub(crate) fn diagnostic_code(&self) -> &str {
         match self {
             Self::Configuration => "LW_ENVIRONMENT_RESOURCE_USAGE_CONFIGURATION_INVALID",
             Self::TokenDiscovery => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_DISCOVERY_FAILED",
             Self::TokenExchange => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_EXCHANGE_FAILED",
             Self::Transport => "LW_ENVIRONMENT_RESOURCE_USAGE_TRANSPORT_FAILED",
-            Self::Rejected => "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED",
+            Self::Rejected { .. } => "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED",
             Self::Problem {
                 diagnostic_code, ..
             } => diagnostic_code.as_str(),
@@ -1362,7 +1374,7 @@ impl ResourceUsageClientError {
     pub(crate) const fn retryable(&self) -> bool {
         match self {
             Self::TokenDiscovery | Self::TokenExchange | Self::Transport => true,
-            Self::Problem { retryable, .. } => *retryable,
+            Self::Rejected { retryable } | Self::Problem { retryable, .. } => *retryable,
             _ => false,
         }
     }
@@ -1561,6 +1573,39 @@ mod tests {
             "LW_RESOURCE_RESERVATION_REJECTED"
         );
         assert!(!rejected.retryable());
+    }
+
+    #[test]
+    fn plain_resource_http_failures_follow_status_retryability() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let error = ResourceUsageClientError::rejected_for_status(status);
+            assert_eq!(
+                error.diagnostic_code(),
+                "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED"
+            );
+            assert!(error.retryable(), "status {status} should be retryable");
+        }
+
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::CONFLICT,
+        ] {
+            let error = ResourceUsageClientError::rejected_for_status(status);
+            assert!(
+                !error.retryable(),
+                "status {status} should not be retried without ProblemDetails"
+            );
+        }
     }
 
     #[test]
