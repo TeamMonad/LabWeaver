@@ -488,6 +488,8 @@ pub struct ResolveEnvironmentResourceReservationRequest {
     pub provider_binding: String,
     pub approved_resources: WorkloadResources,
     pub gpu: Option<crate::resource::GpuRequest>,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
     pub trace_id: String,
 }
 
@@ -500,6 +502,7 @@ impl ResolveEnvironmentResourceReservationRequest {
             || self.trace_id.is_empty()
             || self.trace_id.len() > 128
             || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
         {
             return Err(EnvironmentError::InvalidResourceHandoff);
         }
@@ -525,6 +528,9 @@ pub struct ResolveEnvironmentResourceReservationResponse {
     pub environment_id: EnvironmentId,
     pub provider_binding: String,
     pub allocation: Option<GpuAllocation>,
+    pub state: EnvironmentResourceReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
 }
 
 impl ResolveEnvironmentResourceReservationResponse {
@@ -536,6 +542,114 @@ impl ResolveEnvironmentResourceReservationResponse {
         if self.version != 1
             || self.environment_id != request.environment_id
             || self.provider_binding != request.provider_binding
+            || self
+                .allocation
+                .as_ref()
+                .map(|value| (&value.class, value.count))
+                != request
+                    .gpu
+                    .as_ref()
+                    .map(|value| (&value.class, value.count))
+            || self.environment_generation != request.environment_generation
+            || self.reservation_generation == 0
+            || self.state != EnvironmentResourceReservationState::Reserved
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        Ok(())
+    }
+}
+
+/// Durable state of an Environment-owned Resource reservation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentResourceReservationState {
+    Reserved,
+    Suspended,
+    Released,
+}
+
+/// Environment request to revalidate and activate an existing Experiment reservation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivateEnvironmentResourceReservationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub provider_binding: String,
+    pub approved_resources: WorkloadResources,
+    pub gpu: Option<crate::resource::GpuRequest>,
+    pub expected_allocation: Option<GpuAllocation>,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
+    pub trace_id: String,
+}
+
+impl ActivateEnvironmentResourceReservationRequest {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.provider_binding.is_empty()
+            || self.provider_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        self.approved_resources
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        if self.approved_resources.gpu.as_ref() != self.gpu.as_ref() {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.expected_allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        if self
+            .expected_allocation
+            .as_ref()
+            .map(|allocation| (&allocation.class, allocation.count))
+            != self.gpu.as_ref().map(|gpu| (&gpu.class, gpu.count))
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource readback for a fenced activate operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivateEnvironmentResourceReservationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub state: EnvironmentResourceReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+    pub allocation: Option<GpuAllocation>,
+    pub applied: bool,
+}
+
+impl ActivateEnvironmentResourceReservationResponse {
+    pub fn validate_for(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.environment_id != request.environment_id
+            || self.reservation_generation == 0
+            || self.environment_generation > request.environment_generation
+            || self.state == EnvironmentResourceReservationState::Released
             || self
                 .allocation
                 .as_ref()
@@ -556,6 +670,67 @@ impl ResolveEnvironmentResourceReservationResponse {
     }
 }
 
+/// Environment request to release GPU capacity while retaining the reservation identity.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuspendEnvironmentResourceReservationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub owner_actor_id: ActorId,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
+    pub trace_id: String,
+}
+
+impl SuspendEnvironmentResourceReservationRequest {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource readback for a fenced suspend operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuspendEnvironmentResourceReservationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub state: EnvironmentResourceReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+    pub allocation: Option<GpuAllocation>,
+    pub applied: bool,
+}
+
+impl SuspendEnvironmentResourceReservationResponse {
+    pub fn validate_for(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.environment_id != request.environment_id
+            || self.reservation_generation == 0
+            || self.environment_generation > request.environment_generation
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        Ok(())
+    }
+}
+
 /// Environment-owned request to release one durable Experiment resource reservation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -564,6 +739,8 @@ pub struct ReleaseEnvironmentResourceReservationRequest {
     pub environment_id: EnvironmentId,
     pub project_id: ProjectId,
     pub owner_actor_id: ActorId,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
     pub trace_id: String,
 }
 
@@ -574,6 +751,7 @@ impl ReleaseEnvironmentResourceReservationRequest {
             || self.trace_id.is_empty()
             || self.trace_id.len() > 128
             || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
         {
             return Err(EnvironmentError::InvalidResourceHandoff);
         }

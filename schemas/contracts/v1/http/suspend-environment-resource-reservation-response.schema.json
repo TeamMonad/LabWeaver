@@ -75,7 +75,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Resource-authoritative resolution returned to Environment.",
+  "description": "Resource readback for a fenced suspend operation.",
   "properties": {
     "allocation": {
       "anyOf": [
@@ -87,6 +87,9 @@
         }
       ]
     },
+    "applied": {
+      "type": "boolean"
+    },
     "environmentGeneration": {
       "format": "uint64",
       "minimum": 0,
@@ -94,9 +97,6 @@
     },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
-    },
-    "providerBinding": {
-      "type": "string"
     },
     "reservationGeneration": {
       "format": "uint64",
@@ -116,11 +116,11 @@
   "required": [
     "version",
     "environmentId",
-    "providerBinding",
     "state",
     "reservationGeneration",
-    "environmentGeneration"
+    "environmentGeneration",
+    "applied"
   ],
-  "title": "ResolveEnvironmentResourceReservationResponse",
+  "title": "SuspendEnvironmentResourceReservationResponse",
   "type": "object"
 }

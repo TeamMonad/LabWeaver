@@ -19,7 +19,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Environment-owned request to release one durable Experiment resource reservation.",
+  "description": "Environment request to release GPU capacity while retaining the reservation identity.",
   "properties": {
     "environmentGeneration": {
       "format": "uint64",
@@ -57,6 +57,6 @@
     "environmentGeneration",
     "traceId"
   ],
-  "title": "ReleaseEnvironmentResourceReservationRequest",
+  "title": "SuspendEnvironmentResourceReservationRequest",
   "type": "object"
 }

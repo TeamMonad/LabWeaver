@@ -808,18 +808,6 @@ async fn create_environment(
     let accepted_at = state.store.current_time().await?;
     let deadline_at = add_duration(accepted_at, OPERATION_DEADLINE)?;
     let environment_id = EnvironmentId::new();
-    let gpu_allocation = resolve_experiment_resources(
-        &state,
-        &approved_resources,
-        release.projection.environment_spec.resources.gpu.as_ref(),
-        environment_id,
-        request.project_id,
-        request.course_id,
-        actor_id,
-        &provider_binding,
-        context.trace_id(),
-    )
-    .await?;
     let command = EnvironmentLifecycleCommand {
         environment_id,
         kind: EnvironmentOperationKind::Create,
@@ -833,6 +821,20 @@ async fn create_environment(
         max_attempts: 3,
         reset_target: None,
     };
+    let gpu_allocation = resolve_experiment_resources(
+        &state,
+        &approved_resources,
+        release.projection.environment_spec.resources.gpu.as_ref(),
+        environment_id,
+        request.project_id,
+        request.course_id,
+        actor_id,
+        &provider_binding,
+        contracts::OperationId::new(),
+        1,
+        context.trace_id(),
+    )
+    .await?;
     let create = EnvironmentCreateSpec {
         project_id: request.project_id,
         course_id: request.course_id,
@@ -873,6 +875,8 @@ async fn create_environment(
                 environment_id,
                 request.project_id,
                 actor_id,
+                contracts::OperationId::new(),
+                2,
                 context.trace_id(),
             )
             .await;
@@ -889,6 +893,8 @@ async fn create_environment(
             environment_id,
             request.project_id,
             actor_id,
+            contracts::OperationId::new(),
+            2,
             context.trace_id(),
         )
         .await;
@@ -911,6 +917,8 @@ async fn resolve_experiment_resources(
     course_id: Option<contracts::CourseId>,
     owner_actor_id: ActorId,
     provider_binding: &str,
+    operation_id: contracts::OperationId,
+    environment_generation: u64,
     trace_id: &str,
 ) -> Result<Option<contracts::resource::GpuAllocation>, EnvironmentApiError> {
     let client = state
@@ -926,6 +934,8 @@ async fn resolve_experiment_resources(
         provider_binding: provider_binding.to_owned(),
         approved_resources: approved_resources.clone(),
         gpu: gpu.cloned(),
+        operation_id,
+        environment_generation,
         trace_id: trace_id.to_owned(),
     };
     match client.resolve_resource_reservation(&request).await {
@@ -950,12 +960,18 @@ async fn resolve_experiment_resources(
 }
 
 /// Best-effort release for an Experiment reservation that was not persisted.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the cleanup identity is kept explicit at the Resource boundary"
+)]
 async fn release_experiment_resource_reservation(
     state: &EnvironmentApiState,
     reservation_resolved: bool,
     environment_id: EnvironmentId,
     project_id: contracts::ProjectId,
     owner_actor_id: ActorId,
+    operation_id: contracts::OperationId,
+    environment_generation: u64,
     trace_id: &str,
 ) {
     if !reservation_resolved {
@@ -969,6 +985,8 @@ async fn release_experiment_resource_reservation(
         environment_id,
         project_id,
         owner_actor_id,
+        operation_id,
+        environment_generation,
         trace_id: trace_id.to_owned(),
     };
     if let Err(error) = client.release_resource_reservation(&request).await {

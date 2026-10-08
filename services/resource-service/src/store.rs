@@ -8,6 +8,7 @@
 use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
     EnvironmentLeaseVerificationResponse,
+    EnvironmentResourceReservationState as ContractReservationState,
 };
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ResourceLeaseChanged, ResourceRequestChanged, subjects,
@@ -25,8 +26,8 @@ use contracts::resource::{
     WorkloadResources,
 };
 use contracts::{
-    BudgetId, ChargeId, EventId, GpuCatalogEntryId, LeaseId, ProjectId, RateId, ResourceRequestId,
-    Revision, Sequence, TaskRunId, UsageRecordId, UtcTimestamp,
+    BudgetId, ChargeId, EventId, GpuCatalogEntryId, LeaseId, OperationId, ProjectId, RateId,
+    ResourceRequestId, Revision, Sequence, TaskRunId, UsageRecordId, UtcTimestamp,
 };
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use persistence_sqlx::{
@@ -119,6 +120,7 @@ pub(crate) struct ActiveGpuReservation {
 #[serde(rename_all = "snake_case")]
 enum EnvironmentResourceReservationState {
     Reserved,
+    Suspended,
     Released,
 }
 
@@ -134,11 +136,27 @@ struct EnvironmentResourceReservationContract {
     #[serde(default)]
     allocation: Option<GpuAllocation>,
     state: EnvironmentResourceReservationState,
+    reservation_generation: u64,
+    environment_generation: u64,
+    #[serde(default)]
+    operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnvironmentResourceReservationResult {
+    pub state: ContractReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+    pub allocation: Option<GpuAllocation>,
+    pub applied: bool,
 }
 
 impl EnvironmentResourceReservationContract {
     fn validate(&self) -> Result<(), ResourceStoreError> {
         if self.provider_binding.trim().is_empty() || self.provider_binding.len() > 120 {
+            return Err(ResourceStoreError::EnvironmentResourceReservationInvalid);
+        }
+        if self.reservation_generation == 0 || self.environment_generation == 0 {
             return Err(ResourceStoreError::EnvironmentResourceReservationInvalid);
         }
         self.allocation.as_ref().map_or(Ok(()), |allocation| {
@@ -621,7 +639,7 @@ impl PgResourceStore {
                     decode_environment_resource_reservation(row.try_get("contract")?)?;
                 let state: String = row.try_get("state")?;
                 if reservation.environment_id != environment_id
-                    || !matches!(state.as_str(), "reserved" | "released")
+                    || !matches!(state.as_str(), "reserved" | "suspended" | "released")
                 {
                     return Err(ResourceStoreError::ScopeConflict);
                 }
@@ -1398,6 +1416,7 @@ impl PgResourceStore {
                     && reservation.owner_actor_id == request.owner_actor_id
                     && reservation.provider_binding == request.provider_binding
                     && reservation.approved_resources == request.approved_resources
+                    && reservation.environment_generation == request.environment_generation
                     && reservation
                         .allocation
                         .as_ref()
@@ -1428,12 +1447,16 @@ impl PgResourceStore {
             approved_resources: request.approved_resources.clone(),
             allocation: allocation.clone(),
             state: EnvironmentResourceReservationState::Reserved,
+            reservation_generation: 1,
+            environment_generation: request.environment_generation,
+            operation_id: Some(request.operation_id),
         };
         sqlx::query(
             "INSERT INTO resource.environment_resource_reservations (
                  reservation_id, environment_id, project_id, course_id, owner_actor_id,
-                 provider_binding, entry_id, allocation_binding, units, state, released_at, contract)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NULL,$10)",
+                 provider_binding, entry_id, allocation_binding, units, state, released_at,
+                 reservation_generation, environment_generation, operation_id, suspended_at, contract)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NULL,1,$10,$11,NULL,$12)",
         )
         .bind(uuid::Uuid::now_v7())
         .bind(request.environment_id.as_uuid())
@@ -1444,11 +1467,188 @@ impl PgResourceStore {
         .bind(allocation.as_ref().map(|value| value.entry_id.as_uuid()))
         .bind(allocation.as_ref().map(|value| value.allocation_binding.as_str()))
         .bind(allocation.as_ref().map(|value| i32::try_from(value.count)).transpose()?)
+        .bind(i64::try_from(request.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
         .bind(serde_json::to_value(&contract)?)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
         Ok(allocation)
+    }
+
+    /// Revalidates the exact original allocation and reserves capacity before an Experiment
+    /// provider is started.  A suspended reservation can only be resumed with the same catalog
+    /// entry and binding; Resource never assigns a replacement GPU during resume.
+    pub async fn activate_environment_resource_reservation(
+        &self,
+        request: &contracts::environment::ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<EnvironmentResourceReservationResult, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let row = sqlx::query(
+            "SELECT contract, project_id, owner_actor_id
+             FROM resource.environment_resource_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ResourceStoreError::EnvironmentResourceReservationConflict)?;
+        let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+        ensure_environment_reservation_identity(
+            &reservation,
+            request.environment_id,
+            request.project_id,
+            request.course_id,
+            request.owner_actor_id,
+            &request.provider_binding,
+            &request.approved_resources,
+            request.expected_allocation.as_ref(),
+        )?;
+        if reservation.state == EnvironmentResourceReservationState::Released {
+            return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+        }
+        if reservation_fence_is_stale(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        ) {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let same_fence = reservation_fence_is_same(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        );
+        if let Some(expected) = request.expected_allocation.as_ref() {
+            validate_existing_gpu_allocation(
+                &mut transaction,
+                expected,
+                Some(request.environment_id),
+            )
+            .await?;
+        }
+        if same_fence && reservation.state == EnvironmentResourceReservationState::Reserved {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let mut activated = reservation;
+        activated.state = EnvironmentResourceReservationState::Reserved;
+        activated.environment_generation = request.environment_generation;
+        activated.operation_id = Some(request.operation_id);
+        if !same_fence {
+            activated.reservation_generation = activated
+                .reservation_generation
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?;
+        }
+        let contract = serde_json::to_value(&activated)?;
+        sqlx::query(
+            "UPDATE resource.environment_resource_reservations
+             SET state='reserved', suspended_at=NULL, reservation_generation=$2,
+                 environment_generation=$3, operation_id=$4, contract=$5
+             WHERE environment_id=$1",
+        )
+        .bind(request.environment_id.as_uuid())
+        .bind(i64::try_from(activated.reservation_generation)?)
+        .bind(i64::try_from(activated.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
+        .bind(contract)
+        .execute(&mut *transaction)
+        .await?;
+        let result = reservation_result(&activated, true);
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    /// Releases GPU capacity after a successful physical stop while retaining the reservation
+    /// identity and immutable allocation for accounting and a later fenced resume.
+    pub async fn suspend_environment_resource_reservation(
+        &self,
+        request: &contracts::environment::SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<EnvironmentResourceReservationResult, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let row = sqlx::query(
+            "SELECT contract, project_id, owner_actor_id
+             FROM resource.environment_resource_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ResourceStoreError::EnvironmentResourceReservationConflict)?;
+        let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+        ensure_environment_reservation_owner(
+            &reservation,
+            request.environment_id,
+            request.project_id,
+            request.owner_actor_id,
+        )?;
+        if reservation.state == EnvironmentResourceReservationState::Released {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        if reservation_fence_is_stale(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        ) {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let same_fence = reservation_fence_is_same(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        );
+        if same_fence && reservation.state == EnvironmentResourceReservationState::Suspended {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let mut suspended = reservation;
+        suspended.state = EnvironmentResourceReservationState::Suspended;
+        suspended.environment_generation = request.environment_generation;
+        suspended.operation_id = Some(request.operation_id);
+        if !same_fence {
+            suspended.reservation_generation = suspended
+                .reservation_generation
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?;
+        }
+        let contract = serde_json::to_value(&suspended)?;
+        sqlx::query(
+            "UPDATE resource.environment_resource_reservations
+             SET state='suspended', suspended_at=clock_timestamp(), reservation_generation=$2,
+                 environment_generation=$3, operation_id=$4, contract=$5
+             WHERE environment_id=$1",
+        )
+        .bind(request.environment_id.as_uuid())
+        .bind(i64::try_from(suspended.reservation_generation)?)
+        .bind(i64::try_from(suspended.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
+        .bind(contract)
+        .execute(&mut *transaction)
+        .await?;
+        let result = reservation_result(&suspended, true);
+        transaction.commit().await?;
+        Ok(result)
     }
 
     /// Releases the durable Experiment resource reservation for one Environment instance.
@@ -1489,14 +1689,33 @@ impl PgResourceStore {
             transaction.commit().await?;
             return Ok(false);
         }
+        if reservation_fence_is_stale(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        ) {
+            transaction.commit().await?;
+            return Ok(false);
+        }
         let mut released = reservation;
         released.state = EnvironmentResourceReservationState::Released;
+        released.environment_generation = request.environment_generation;
+        released.operation_id = Some(request.operation_id);
+        released.reservation_generation = released
+            .reservation_generation
+            .checked_add(1)
+            .ok_or(ResourceStoreError::NumericOverflow)?;
         let result = sqlx::query(
             "UPDATE resource.environment_resource_reservations
-             SET state='released', released_at=clock_timestamp(), contract=$2
-             WHERE environment_id=$1 AND state='reserved'",
+             SET state='released', released_at=clock_timestamp(), suspended_at=NULL,
+                 reservation_generation=$2, environment_generation=$3, operation_id=$4, contract=$5
+             WHERE environment_id=$1 AND state IN ('reserved','suspended')",
         )
         .bind(request.environment_id.as_uuid())
+        .bind(i64::try_from(released.reservation_generation)?)
+        .bind(i64::try_from(released.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
         .bind(serde_json::to_value(&released)?)
         .execute(&mut *transaction)
         .await?;
@@ -4973,6 +5192,156 @@ fn decode_environment_resource_reservation(
     let reservation: EnvironmentResourceReservationContract = serde_json::from_value(value)?;
     reservation.validate()?;
     Ok(reservation)
+}
+
+fn reservation_result(
+    reservation: &EnvironmentResourceReservationContract,
+    applied: bool,
+) -> EnvironmentResourceReservationResult {
+    EnvironmentResourceReservationResult {
+        state: match reservation.state {
+            EnvironmentResourceReservationState::Reserved => ContractReservationState::Reserved,
+            EnvironmentResourceReservationState::Suspended => ContractReservationState::Suspended,
+            EnvironmentResourceReservationState::Released => ContractReservationState::Released,
+        },
+        reservation_generation: reservation.reservation_generation,
+        environment_generation: reservation.environment_generation,
+        allocation: reservation.allocation.clone(),
+        applied,
+    }
+}
+
+fn reservation_fence_is_same(
+    stored_generation: u64,
+    stored_operation: Option<OperationId>,
+    request_generation: u64,
+    request_operation: OperationId,
+) -> bool {
+    stored_generation == request_generation
+        && stored_operation.is_none_or(|operation| operation == request_operation)
+}
+
+fn reservation_fence_is_stale(
+    stored_generation: u64,
+    stored_operation: Option<OperationId>,
+    request_generation: u64,
+    request_operation: OperationId,
+) -> bool {
+    request_generation < stored_generation
+        || (request_generation == stored_generation
+            && stored_operation.is_some_and(|operation| operation != request_operation))
+}
+
+fn ensure_environment_reservation_owner(
+    reservation: &EnvironmentResourceReservationContract,
+    environment_id: contracts::EnvironmentId,
+    project_id: ProjectId,
+    owner_actor_id: contracts::ActorId,
+) -> Result<(), ResourceStoreError> {
+    if reservation.environment_id != environment_id
+        || reservation.project_id != project_id
+        || reservation.owner_actor_id != owner_actor_id
+    {
+        return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the identity fields are checked explicitly at the Resource authorization boundary"
+)]
+fn ensure_environment_reservation_identity(
+    reservation: &EnvironmentResourceReservationContract,
+    environment_id: contracts::EnvironmentId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    owner_actor_id: contracts::ActorId,
+    provider_binding: &str,
+    approved_resources: &WorkloadResources,
+    expected_allocation: Option<&GpuAllocation>,
+) -> Result<(), ResourceStoreError> {
+    ensure_environment_reservation_owner(reservation, environment_id, project_id, owner_actor_id)?;
+    if reservation.course_id != course_id
+        || reservation.provider_binding != provider_binding
+        || reservation.approved_resources != *approved_resources
+        || reservation.allocation.as_ref() != expected_allocation
+    {
+        return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+    }
+    Ok(())
+}
+
+async fn validate_existing_gpu_allocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    allocation: &GpuAllocation,
+    excluded_environment_id: Option<contracts::EnvironmentId>,
+) -> Result<(), ResourceStoreError> {
+    let row = sqlx::query(
+        "SELECT class,mode,provider_binding,capacity_units,allocation_binding,revision,active
+         FROM resource.gpu_catalog_entries WHERE entry_id=$1 FOR UPDATE",
+    )
+    .bind(allocation.entry_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(ResourceStoreError::GpuCatalogMissing)?;
+    let class: String = row.try_get("class")?;
+    let mode: String = row.try_get("mode")?;
+    let provider_binding: String = row.try_get("provider_binding")?;
+    let capacity_units: i32 = row.try_get("capacity_units")?;
+    let allocation_binding: String = row.try_get("allocation_binding")?;
+    let revision: i64 = row.try_get("revision")?;
+    let active: bool = row.try_get("active")?;
+    let mode: GpuAllocationMode = serde_json::from_value(Value::String(mode))
+        .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?;
+    if !active
+        || class != allocation.class
+        || mode != allocation.mode
+        || provider_binding != allocation.provider_binding
+        || allocation_binding != allocation.allocation_binding
+        || Revision::new(u64::try_from(revision)?)? != allocation.catalog_revision
+        || u32::try_from(capacity_units)? < allocation.count
+    {
+        return Err(ResourceStoreError::GpuCatalogRevisionConflict);
+    }
+    let available: Option<i64> = sqlx::query_scalar(
+        "SELECT available_units::bigint FROM resource.gpu_capacity_observations
+         WHERE entry_id=$1 AND valid_until > clock_timestamp()
+         ORDER BY observed_at DESC LIMIT 1",
+    )
+    .bind(allocation.entry_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let available = available.ok_or(ResourceStoreError::GpuObservationStale)?;
+    let reserved: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(reserved.units),0)::bigint
+         FROM (
+             SELECT reservation.units
+             FROM resource.gpu_capacity_reservations reservation
+             JOIN resource.gpu_catalog_entries catalog
+               ON catalog.entry_id=reservation.entry_id
+             WHERE reservation.state='reserved'
+               AND catalog.allocation_binding=$1
+             UNION ALL
+             SELECT reservation.units
+             FROM resource.environment_resource_reservations reservation
+             WHERE reservation.state='reserved'
+               AND reservation.allocation_binding=$1
+               AND ($2::uuid IS NULL OR reservation.environment_id<>$2)
+         ) AS reserved",
+    )
+    .bind(&allocation.allocation_binding)
+    .bind(excluded_environment_id.map(contracts::EnvironmentId::as_uuid))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if available
+        .min(i64::from(capacity_units))
+        .saturating_sub(reserved)
+        < i64::from(allocation.count)
+    {
+        return Err(ResourceStoreError::GpuCapacityExhausted);
+    }
+    Ok(())
 }
 fn decode_budget(value: Value) -> Result<ResourceBudget, ResourceStoreError> {
     let budget: ResourceBudget = serde_json::from_value(value)?;

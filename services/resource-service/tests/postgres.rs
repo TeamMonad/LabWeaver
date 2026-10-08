@@ -29,7 +29,9 @@ use uuid::Uuid;
 
 use auth::{ServiceAuthConfig, ServiceIdentity, ServiceTokenVerifier, TransportSecurityMode};
 use contracts::environment::{
+    ActivateEnvironmentResourceReservationRequest, EnvironmentResourceReservationState,
     ReleaseEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationRequest,
+    SuspendEnvironmentResourceReservationRequest,
 };
 use contracts::http::{
     CreateResourceRateRequest, EndResourceRateRequest, InternalCreateTaskResourceRequest,
@@ -42,8 +44,8 @@ use contracts::resource::{
 };
 use contracts::{
     ActorId, CapacityClaimId, CourseId, EnvironmentId, EventId, GpuCatalogEntryId, LeaseId,
-    PlatformRole, ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId, Revision, TaskRunId,
-    UtcTimestamp,
+    OperationId, PlatformRole, ProjectId, ReleaseId, ResourceApprovalId, ResourceRequestId,
+    Revision, TaskRunId, UtcTimestamp,
 };
 use resource_service::ApprovalPolicy;
 use resource_service::LifecycleError;
@@ -68,7 +70,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -85,6 +87,9 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql"),
         include_str!(
             "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
+        ),
+        include_str!(
+            "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         ),
     ))
     .execute(&pool)
@@ -1548,6 +1553,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     let project_id = ProjectId::new();
     let owner_actor_id = ActorId::new();
     let first_environment = EnvironmentId::new();
+    let operation_id = OperationId::new();
     let resolve = |environment_id: EnvironmentId, class: &str, count: u32| {
         let gpu = GpuRequest {
             class: class.to_owned(),
@@ -1567,6 +1573,8 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 gpu: Some(gpu.clone()),
             },
             gpu: Some(gpu),
+            operation_id,
+            environment_generation: 1,
             trace_id: format!("environment-gpu-{environment_id}"),
         }
     };
@@ -1636,6 +1644,12 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
                 effective_from: now,
                 effective_until: None,
             },
+        )
+        .await?;
+    let storage_rate = store
+        .create_rate(
+            "environment-gpu-rate-storage",
+            &base_rate(ResourceBillingUnit::StorageByteSecond),
         )
         .await?;
     let environment_identity = ServiceIdentity {
@@ -1735,45 +1749,166 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
         Err(resource_service::store::ResourceStoreError::GpuCatalogMissing)
     ));
 
-    // The single observed unit is owned by the first Environment, so a second cannot be admitted.
+    // Stop the first provider before releasing capacity.  The original allocation remains fixed
+    // on the suspended row for usage accounting and a later fenced resume.
+    let first_allocation = first.clone();
+    let suspend_request = SuspendEnvironmentResourceReservationRequest {
+        version: 1,
+        environment_id: first_environment,
+        project_id,
+        owner_actor_id,
+        operation_id: OperationId::new(),
+        environment_generation: 2,
+        trace_id: "environment-gpu-suspend-first".to_owned(),
+    };
+    let suspended = store
+        .suspend_environment_resource_reservation(&suspend_request)
+        .await?;
+    assert_eq!(
+        suspended.state,
+        EnvironmentResourceReservationState::Suspended
+    );
+    assert!(suspended.applied);
+
+    // A stopped Experiment releases active GPU capacity but retains its immutable allocation and
+    // storage authorization, so storage remains billable while the provider is stopped.
+    let suspended_usage_start = store.current_time().await?;
+    let suspended_usage_end =
+        UtcTimestamp::from_utc(suspended_usage_start.get() + time::Duration::seconds(1))?;
+    let storage_usage = store
+        .record_usage_internal(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Storage,
+                target: contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                    environment_id: first_environment,
+                },
+                source_event_id: EventId::new(),
+                measured_from: suspended_usage_start,
+                measured_until: suspended_usage_end,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        cpu_millicore_seconds: 0,
+                        memory_byte_seconds: 0,
+                        storage_byte_seconds: 1,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            suspended_usage_end,
+            &environment_identity,
+            "environment-service",
+            &task_clients,
+        )
+        .await?;
+    let storage_charge = store
+        .settle_usage(storage_usage.id)
+        .await?
+        .ok_or("suspended Experiment storage usage was not priced")?;
+    assert_eq!(storage_charge.total.amount.as_str(), "1.000000");
+    assert_eq!(storage_charge.lines[0].rate_id, storage_rate.id);
+
+    // A second Environment may use the released GPU while the first remains resumable.
     let second_environment = EnvironmentId::new();
-    let exhausted = store
+    let second = store
         .resolve_environment_resource_reservation(&resolve(second_environment, "a100-exclusive", 1))
+        .await?;
+    assert_eq!(second.as_ref().map(|value| value.count), Some(1));
+
+    // Resume must use the fixed original allocation and deny while the other Environment owns
+    // the only observed unit.
+    let activate_request = ActivateEnvironmentResourceReservationRequest {
+        version: 1,
+        environment_id: first_environment,
+        project_id,
+        course_id: None,
+        owner_actor_id,
+        provider_binding: provider_binding.clone(),
+        approved_resources: WorkloadResources {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            gpu: Some(GpuRequest {
+                class: "a100-exclusive".to_owned(),
+                count: 1,
+            }),
+        },
+        gpu: Some(GpuRequest {
+            class: "a100-exclusive".to_owned(),
+            count: 1,
+        }),
+        expected_allocation: first_allocation.clone(),
+        operation_id: OperationId::new(),
+        environment_generation: 3,
+        trace_id: "environment-gpu-activate-first".to_owned(),
+    };
+    let denied = store
+        .activate_environment_resource_reservation(&activate_request)
         .await;
     assert!(matches!(
-        exhausted,
+        denied,
         Err(resource_service::store::ResourceStoreError::GpuCapacityExhausted)
     ));
 
-    let release = |environment_id: EnvironmentId| ReleaseEnvironmentResourceReservationRequest {
-        version: 1,
-        environment_id,
-        project_id,
-        owner_actor_id,
-        trace_id: format!("environment-gpu-release-{environment_id}"),
+    let release = |environment_id: EnvironmentId, generation: u64| {
+        ReleaseEnvironmentResourceReservationRequest {
+            version: 1,
+            environment_id,
+            project_id,
+            owner_actor_id,
+            operation_id: OperationId::new(),
+            environment_generation: generation,
+            trace_id: format!("environment-gpu-release-{environment_id}"),
+        }
     };
     assert!(
         store
-            .release_environment_resource_reservation(&release(first_environment))
+            .release_environment_resource_reservation(&release(second_environment, 2))
+            .await?
+    );
+    // Once the other Environment releases capacity, the same fenced resume succeeds.
+    let resumed = store
+        .activate_environment_resource_reservation(&activate_request)
+        .await?;
+    assert_eq!(resumed.state, EnvironmentResourceReservationState::Reserved);
+    assert!(resumed.applied);
+
+    // A delayed stop from the previous generation cannot suspend the resumed reservation.
+    let stale_stop = store
+        .suspend_environment_resource_reservation(&suspend_request)
+        .await?;
+    assert_eq!(
+        stale_stop.state,
+        EnvironmentResourceReservationState::Reserved
+    );
+    assert!(!stale_stop.applied);
+
+    assert!(
+        store
+            .release_environment_resource_reservation(&release(first_environment, 4))
             .await?
     );
     // Release is idempotent.
     assert!(
         !store
-            .release_environment_resource_reservation(&release(first_environment))
+            .release_environment_resource_reservation(&release(first_environment, 4))
             .await?
     );
     let resurrected = store
-        .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 1))
+        .activate_environment_resource_reservation(&activate_request)
         .await;
     assert!(matches!(
         resurrected,
         Err(resource_service::store::ResourceStoreError::EnvironmentResourceReservationConflict)
     ));
 
-    // Releasing the first Environment makes the unit available to the second.
+    // Releasing the first Environment makes the unit available to a new Environment, while a
+    // terminal Released identity can never be resurrected.
     let admitted = store
-        .resolve_environment_resource_reservation(&resolve(second_environment, "a100-exclusive", 1))
+        .resolve_environment_resource_reservation(&resolve(
+            EnvironmentId::new(),
+            "a100-exclusive",
+            1,
+        ))
         .await?;
     assert_eq!(admitted.as_ref().map(|value| value.count), Some(1));
     Ok(())
@@ -1922,6 +2057,11 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
     );
     sqlx::raw_sql(migration).execute(&pool).await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
+    ))
+    .execute(&pool)
+    .await?;
 
     let reservation_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM resource.environment_resource_reservations WHERE environment_id=$1",
@@ -1952,6 +2092,8 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         provider_binding: provider_binding.to_owned(),
         approved_resources: approved_resources.clone(),
         gpu: None,
+        operation_id: OperationId::new(),
+        environment_generation: 1,
         trace_id: "legacy-cpu-only-resolve-replay".to_owned(),
     };
     assert_eq!(
@@ -2188,6 +2330,8 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
         environment_id,
         project_id,
         owner_actor_id,
+        operation_id: OperationId::new(),
+        environment_generation: 2,
         trace_id: "legacy-cpu-only-release".to_owned(),
     };
     assert!(
@@ -2250,6 +2394,8 @@ async fn environment_gpu_resolution_fails_closed_without_a_fresh_observation()
             class: "a100-exclusive".to_owned(),
             count: 1,
         }),
+        operation_id: OperationId::new(),
+        environment_generation: 1,
         trace_id: "environment-gpu-stale".to_owned(),
     };
     let result = store
@@ -3699,7 +3845,7 @@ async fn migrated_pool()
         .connect(&url)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "CREATE SCHEMA resource; SET search_path TO resource;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../../migrations/resource/0001_platform_baseline.sql"),
         include_str!("../../../migrations/resource/0002_resource_request_capacity_lease.sql"),
         include_str!("../../../migrations/resource/0003_resource_contract_snapshots.sql"),
@@ -3716,6 +3862,9 @@ async fn migrated_pool()
         include_str!("../../../migrations/resource/0012_environment_gpu_reservations.sql"),
         include_str!(
             "../../../migrations/resource/0013_environment_resource_usage_attribution.sql"
+        ),
+        include_str!(
+            "../../../migrations/resource/0014_environment_resource_reservation_lifecycle.sql"
         )
     ))
     .execute(&pool)

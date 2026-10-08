@@ -4,8 +4,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use contracts::UtcTimestamp;
+use contracts::authoring::EnvironmentClass;
 use contracts::environment::{
-    EnvironmentInstance, EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
+    ActivateEnvironmentResourceReservationRequest, EnvironmentInstance, EnvironmentOperationKind,
+    EnvironmentResourceReservationState, ObservedEnvironmentState, OperationState,
+    SuspendEnvironmentResourceReservationRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
@@ -135,6 +138,7 @@ impl ProviderRegistry {
 pub struct Reconciler {
     registry: ProviderRegistry,
     provider_timeout: Duration,
+    resource_reservations: Option<Arc<dyn crate::metering::ExperimentResourceAllocator>>,
 }
 
 /// Durable one-item reconciler worker. A caller may drive this in a bounded loop.
@@ -410,7 +414,19 @@ impl Reconciler {
         Ok(Self {
             registry,
             provider_timeout,
+            resource_reservations: None,
         })
+    }
+
+    /// Installs the Resource authority used to fence Experiment start, stop, and restart
+    /// provider side effects. Work instances intentionally bypass this boundary.
+    #[must_use]
+    pub fn with_resource_allocator<T>(mut self, allocator: T) -> Self
+    where
+        T: crate::metering::ExperimentResourceAllocator + 'static,
+    {
+        self.resource_reservations = Some(Arc::new(allocator));
+        self
     }
 
     pub async fn execute_once(
@@ -419,11 +435,90 @@ impl Reconciler {
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
+        if matches!(action, ReconcileAction::Start | ReconcileAction::Restart)
+            && instance.class == EnvironmentClass::Experiment
+        {
+            self.activate_experiment_reservation(instance).await?;
+        }
         let provider = self.registry.resolve(&instance.provider_binding)?;
         let result = timeout(self.provider_timeout, provider.execute(action, instance))
             .await
             .map_err(|_| ReconcileError::ProviderTimeout)?;
-        result.map_err(ReconcileError::Provider)
+        let outcome = result.map_err(ReconcileError::Provider)?;
+        if matches!(action, ReconcileAction::Stop)
+            && instance.class == EnvironmentClass::Experiment
+            && instance.desired_state != contracts::environment::DesiredEnvironmentState::Deleted
+            && let ProviderOutcome::Completed(observation) = &outcome
+            && observation.next_state == ObservedEnvironmentState::Stopped
+            && observation.operation_complete
+        {
+            self.suspend_experiment_reservation(instance).await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn activate_experiment_reservation(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), ReconcileError> {
+        let Some(allocator) = self.resource_reservations.as_ref() else {
+            // Unit-level provider tests may construct a reconciler without the production
+            // Resource boundary. The process runtime always installs it before serving.
+            return Ok(());
+        };
+        let request = ActivateEnvironmentResourceReservationRequest {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            provider_binding: instance.provider_binding.clone(),
+            approved_resources: instance.approved_resources.clone(),
+            gpu: instance.approved_resources.gpu.clone(),
+            expected_allocation: instance.gpu_allocation.clone(),
+            operation_id: instance.operation.id,
+            environment_generation: instance.generation,
+            trace_id: instance.operation.trace_id.clone(),
+        };
+        let response = allocator
+            .activate_resource_reservation(&request)
+            .await
+            .map_err(ReconcileError::Resource)?;
+        if response.state != EnvironmentResourceReservationState::Reserved
+            || response.environment_generation != instance.generation
+            || response.allocation != instance.gpu_allocation
+        {
+            return Err(ReconcileError::ResourceFence);
+        }
+        Ok(())
+    }
+
+    async fn suspend_experiment_reservation(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), ReconcileError> {
+        let Some(allocator) = self.resource_reservations.as_ref() else {
+            return Ok(());
+        };
+        let request = SuspendEnvironmentResourceReservationRequest {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            owner_actor_id: instance.owner_id,
+            operation_id: instance.operation.id,
+            environment_generation: instance.generation,
+            trace_id: instance.operation.trace_id.clone(),
+        };
+        let response = allocator
+            .suspend_resource_reservation(&request)
+            .await
+            .map_err(ReconcileError::ResourceSuspension)?;
+        if response.state != EnvironmentResourceReservationState::Suspended
+            || response.environment_generation != instance.generation
+        {
+            return Err(ReconcileError::ResourceFence);
+        }
+        Ok(())
     }
 }
 
@@ -500,6 +595,14 @@ pub enum ReconcileError {
     OperationTerminal,
     #[error("LW_ENVIRONMENT_RECONCILE_ACTION_INVALID")]
     NoAction,
+    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_UNAVAILABLE")]
+    ResourceUnavailable,
+    #[error("LW_ENVIRONMENT_RESOURCE_RESERVATION_FENCE")]
+    ResourceFence,
+    #[error("{0}")]
+    Resource(crate::metering::ResourceUsageClientError),
+    #[error("{0}")]
+    ResourceSuspension(crate::metering::ResourceUsageClientError),
     #[error("{0:?}")]
     Provider(ProviderFailure),
 }
@@ -514,6 +617,9 @@ impl ReconcileError {
             Self::ProviderTimeout => "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
             Self::OperationTerminal => "LW_ENVIRONMENT_OPERATION_TERMINAL",
             Self::NoAction => "LW_ENVIRONMENT_RECONCILE_ACTION_INVALID",
+            Self::ResourceUnavailable => "LW_ENVIRONMENT_RESOURCE_RESERVATION_UNAVAILABLE",
+            Self::ResourceFence => "LW_ENVIRONMENT_RESOURCE_RESERVATION_FENCE",
+            Self::Resource(error) | Self::ResourceSuspension(error) => error.diagnostic_code(),
             Self::Provider(failure) => failure.code.diagnostic_code(),
         }
     }
@@ -526,7 +632,22 @@ impl ReconcileError {
             Self::InvalidProviderRegistry
             | Self::InvalidTimeout
             | Self::OperationTerminal
-            | Self::NoAction => false,
+            | Self::NoAction
+            | Self::ResourceUnavailable
+            | Self::ResourceFence => false,
+            Self::Resource(error) => matches!(
+                error,
+                crate::metering::ResourceUsageClientError::Transport
+                    | crate::metering::ResourceUsageClientError::TokenDiscovery
+                    | crate::metering::ResourceUsageClientError::TokenExchange
+            ),
+            Self::ResourceSuspension(error) => matches!(
+                error,
+                crate::metering::ResourceUsageClientError::Transport
+                    | crate::metering::ResourceUsageClientError::TokenDiscovery
+                    | crate::metering::ResourceUsageClientError::TokenExchange
+                    | crate::metering::ResourceUsageClientError::Rejected
+            ),
         }
     }
 }

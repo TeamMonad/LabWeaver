@@ -644,6 +644,22 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::environment::ResolveEnvironmentResourceReservationResponse
     );
     document!(
+        "schemas/contracts/v1/http/activate-environment-resource-reservation-request.schema.json",
+        crate::environment::ActivateEnvironmentResourceReservationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/activate-environment-resource-reservation-response.schema.json",
+        crate::environment::ActivateEnvironmentResourceReservationResponse
+    );
+    document!(
+        "schemas/contracts/v1/http/suspend-environment-resource-reservation-request.schema.json",
+        crate::environment::SuspendEnvironmentResourceReservationRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/suspend-environment-resource-reservation-response.schema.json",
+        crate::environment::SuspendEnvironmentResourceReservationResponse
+    );
+    document!(
         "schemas/contracts/v1/http/release-environment-resource-reservation-request.schema.json",
         crate::environment::ReleaseEnvironmentResourceReservationRequest
     );

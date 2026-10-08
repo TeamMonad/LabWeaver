@@ -12,15 +12,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
 use contracts::environment::{
+    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
     EnvironmentInstance, EnvironmentLeaseAuthorization, ObservedEnvironmentState,
     ReleaseEnvironmentResourceReservationRequest, ReleaseEnvironmentResourceReservationResponse,
     ResolveEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationResponse,
+    SuspendEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationResponse,
 };
 use contracts::http::RecordResourceUsageRequest;
 use contracts::resource::{
     GpuAllocation, ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement,
 };
-use contracts::{EventId, ResourceRequestId, UtcTimestamp};
+use contracts::{EventId, ProblemDetails, ResourceRequestId, UtcTimestamp};
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
@@ -968,6 +970,18 @@ pub trait ExperimentResourceAllocator: Send + Sync {
         &self,
         request: &ReleaseEnvironmentResourceReservationRequest,
     ) -> Result<bool, ResourceUsageClientError>;
+
+    /// Revalidates the original allocation and reserves capacity before provider start.
+    async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError>;
+
+    /// Releases capacity after a physical stop while retaining the reservation identity.
+    async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError>;
 }
 
 impl ResourceUsageClient {
@@ -1113,6 +1127,44 @@ impl ResourceUsageClient {
         Ok(body.released)
     }
 
+    pub(crate) async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        let response = self
+            .post_json(
+                "internal/v1/environment-resource-reservations/activate",
+                request,
+            )
+            .await?;
+        let body: ActivateEnvironmentResourceReservationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        body.validate_for(request)
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        Ok(body)
+    }
+
+    pub(crate) async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        let response = self
+            .post_json(
+                "internal/v1/environment-resource-reservations/suspend",
+                request,
+            )
+            .await?;
+        let body: SuspendEnvironmentResourceReservationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        body.validate_for(request)
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        Ok(body)
+    }
+
     async fn post_json<T: serde::Serialize>(
         &self,
         path: &str,
@@ -1136,6 +1188,12 @@ impl ResourceUsageClient {
             .await
             .map_err(|_| ResourceUsageClientError::Transport)?;
         if !response.status().is_success() {
+            let problem = response.json::<ProblemDetails>().await.ok();
+            if problem.as_ref().is_some_and(|value| {
+                value.diagnostic_code.as_str() == "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"
+            }) {
+                return Err(ResourceUsageClientError::CapacityExhausted);
+            }
             return Err(ResourceUsageClientError::Rejected);
         }
         Ok(response)
@@ -1156,6 +1214,20 @@ impl ExperimentResourceAllocator for ResourceUsageClient {
         request: &ReleaseEnvironmentResourceReservationRequest,
     ) -> Result<bool, ResourceUsageClientError> {
         Self::release_resource_reservation(self, request).await
+    }
+
+    async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        Self::activate_resource_reservation(self, request).await
+    }
+
+    async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        Self::suspend_resource_reservation(self, request).await
     }
 }
 
@@ -1255,6 +1327,8 @@ pub enum ResourceUsageClientError {
     Transport,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED")]
     Rejected,
+    #[error("LW_ENVIRONMENT_RESOURCE_GPU_CAPACITY_EXHAUSTED")]
+    CapacityExhausted,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID")]
     InvalidResponse,
 }
@@ -1267,6 +1341,7 @@ impl ResourceUsageClientError {
             Self::TokenExchange => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_EXCHANGE_FAILED",
             Self::Transport => "LW_ENVIRONMENT_RESOURCE_USAGE_TRANSPORT_FAILED",
             Self::Rejected => "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED",
+            Self::CapacityExhausted => "LW_ENVIRONMENT_RESOURCE_GPU_CAPACITY_EXHAUSTED",
             Self::InvalidResponse => "LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID",
         }
     }

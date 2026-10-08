@@ -9,8 +9,10 @@ use axum::{
     routing::{get, post},
 };
 use contracts::environment::{
+    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
     ReleaseEnvironmentResourceReservationRequest, ReleaseEnvironmentResourceReservationResponse,
     ResolveEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationResponse,
+    SuspendEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationResponse,
 };
 use contracts::http::{
     AcknowledgeTaskResourceRequest, ApproveResourceRequest, CreateResourceAdjustmentRequest,
@@ -199,6 +201,14 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .route(
             "/internal/v1/environment-resource-reservations/release",
             post(release_environment_resource_reservation),
+        )
+        .route(
+            "/internal/v1/environment-resource-reservations/activate",
+            post(activate_environment_resource_reservation),
+        )
+        .route(
+            "/internal/v1/environment-resource-reservations/suspend",
+            post(suspend_environment_resource_reservation),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -908,6 +918,53 @@ async fn resolve_environment_resource_reservation(
         environment_id: input.environment_id,
         provider_binding: input.provider_binding,
         allocation,
+        state: contracts::environment::EnvironmentResourceReservationState::Reserved,
+        reservation_generation: 1,
+        environment_generation: input.environment_generation,
+    }))
+}
+
+/// Revalidates and activates an existing Experiment reservation before provider start.
+async fn activate_environment_resource_reservation(
+    State(state): State<ResourceApiState>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
+    Json(input): Json<ActivateEnvironmentResourceReservationRequest>,
+) -> Result<Json<ActivateEnvironmentResourceReservationResponse>, ResourceApiError> {
+    require_environment_service(&state, &identity)?;
+    let result = state
+        .store
+        .activate_environment_resource_reservation(&input)
+        .await?;
+    Ok(Json(ActivateEnvironmentResourceReservationResponse {
+        version: 1,
+        environment_id: input.environment_id,
+        state: result.state,
+        reservation_generation: result.reservation_generation,
+        environment_generation: result.environment_generation,
+        allocation: result.allocation,
+        applied: result.applied,
+    }))
+}
+
+/// Suspends GPU capacity after the provider has physically stopped an Experiment.
+async fn suspend_environment_resource_reservation(
+    State(state): State<ResourceApiState>,
+    Extension(identity): Extension<auth::ServiceIdentity>,
+    Json(input): Json<SuspendEnvironmentResourceReservationRequest>,
+) -> Result<Json<SuspendEnvironmentResourceReservationResponse>, ResourceApiError> {
+    require_environment_service(&state, &identity)?;
+    let result = state
+        .store
+        .suspend_environment_resource_reservation(&input)
+        .await?;
+    Ok(Json(SuspendEnvironmentResourceReservationResponse {
+        version: 1,
+        environment_id: input.environment_id,
+        state: result.state,
+        reservation_generation: result.reservation_generation,
+        environment_generation: result.environment_generation,
+        allocation: result.allocation,
+        applied: result.applied,
     }))
 }
 
@@ -1298,6 +1355,12 @@ fn internal_route_permission(path: &str) -> Option<&'static str> {
         return Some("resource.environment.resolve");
     }
     if path == "/internal/v1/environment-resource-reservations/release" {
+        return Some("resource.environment.release");
+    }
+    if path == "/internal/v1/environment-resource-reservations/activate" {
+        return Some("resource.environment.resolve");
+    }
+    if path == "/internal/v1/environment-resource-reservations/suspend" {
         return Some("resource.environment.release");
     }
     if path == "/internal/v1/task-resources" {
@@ -1747,6 +1810,14 @@ mod tests {
         );
         assert_eq!(
             internal_route_permission("/internal/v1/environment-resource-reservations/release"),
+            Some("resource.environment.release")
+        );
+        assert_eq!(
+            internal_route_permission("/internal/v1/environment-resource-reservations/activate"),
+            Some("resource.environment.resolve")
+        );
+        assert_eq!(
+            internal_route_permission("/internal/v1/environment-resource-reservations/suspend"),
             Some("resource.environment.release")
         );
         assert_eq!(

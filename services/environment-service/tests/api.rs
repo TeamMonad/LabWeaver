@@ -21,9 +21,11 @@ use axum::{
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
 use contracts::environment::{
+    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
     EndpointHealth, EndpointProtocol, EnvironmentEndpoint, EnvironmentInstance,
-    EnvironmentOperationKind, ReleaseEnvironmentResourceReservationRequest,
-    ResolveEnvironmentResourceReservationRequest,
+    EnvironmentOperationKind, EnvironmentResourceReservationState,
+    ReleaseEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationRequest,
+    SuspendEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationResponse,
 };
 use contracts::events::ReleasePublished;
 use contracts::http::{SnapshotPage, StrongEtag};
@@ -106,6 +108,36 @@ impl ExperimentResourceAllocator for CountingGpuAllocator {
         self.release_count.fetch_add(1, Ordering::SeqCst);
         let _ = request;
         Ok(true)
+    }
+
+    async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        Ok(ActivateEnvironmentResourceReservationResponse {
+            version: 1,
+            environment_id: request.environment_id,
+            state: EnvironmentResourceReservationState::Reserved,
+            reservation_generation: 1,
+            environment_generation: request.environment_generation,
+            allocation: request.expected_allocation.clone(),
+            applied: true,
+        })
+    }
+
+    async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        Ok(SuspendEnvironmentResourceReservationResponse {
+            version: 1,
+            environment_id: request.environment_id,
+            state: EnvironmentResourceReservationState::Suspended,
+            reservation_generation: 1,
+            environment_generation: request.environment_generation,
+            allocation: Some(self.allocation.clone()),
+            applied: true,
+        })
     }
 }
 

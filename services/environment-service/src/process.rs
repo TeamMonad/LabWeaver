@@ -306,7 +306,8 @@ impl EnvironmentProcessRuntime {
         }
         let worker = ReconcileWorker::new(
             store.clone(),
-            Reconciler::new(registry, PROVIDER_TIMEOUT)?,
+            Reconciler::new(registry, PROVIDER_TIMEOUT)?
+                .with_resource_allocator(resource_usage_client.clone()),
             RECONCILE_LEASE,
             RETRY_DELAY,
         )?;
@@ -550,6 +551,8 @@ async fn release_deleted_resource_environments(
             environment_id: instance.id,
             project_id: instance.project_id,
             owner_actor_id: instance.owner_id,
+            operation_id: instance.operation.id,
+            environment_generation: instance.generation,
             trace_id: format!("environment-gpu-release-{}", instance.id),
         };
         match client.release_resource_reservation(&request).await {
