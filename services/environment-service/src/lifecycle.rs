@@ -226,6 +226,7 @@ pub fn apply_provider_observation(
 ) -> Result<EnvironmentInstance, LifecycleError> {
     current.validate()?;
     ensure_current_operation(current, operation_id)?;
+    let observation = normalize_reset_to_stop(current, observation);
     validate_provider_observation(current, &observation)?;
     if current.observed_state != observation.next_state {
         EnvironmentInstance::ensure_transition(current.observed_state, observation.next_state)?;
@@ -267,6 +268,28 @@ pub fn apply_provider_observation(
         .validate()
         .map_err(|_| LifecycleError::ProviderObservationInvalid)?;
     Ok(updated)
+}
+
+fn normalize_reset_to_stop(
+    current: &EnvironmentInstance,
+    mut observation: AppliedProviderObservation,
+) -> AppliedProviderObservation {
+    if matches!(
+        current.operation.kind,
+        EnvironmentOperationKind::Reset
+            | EnvironmentOperationKind::Retry
+            | EnvironmentOperationKind::Recover
+    ) && current.desired_state == DesiredEnvironmentState::Stopped
+        && current.observed_state == ObservedEnvironmentState::Provisioning
+        && observation.next_state == ObservedEnvironmentState::Ready
+    {
+        // Reset/Provision creates the replacement runtime first. A stopped target must pass
+        // through Stopping so the next provider step can physically stop it and only then
+        // release Resource capacity.
+        observation.next_state = ObservedEnvironmentState::Stopping;
+        observation.operation_complete = false;
+    }
+    observation
 }
 
 /// Moves an expired operation into fenced cleanup before any Provider cleanup call.
@@ -425,35 +448,34 @@ fn validate_provider_observation(
             State::Building,
             State::Provisioning
         ) | (
-            Operation::Create
-                | Operation::Retry
-                | Operation::Recover
-                | Operation::Start
-                | Operation::Restart
-                | Operation::Reset,
+            Operation::Create | Operation::Start | Operation::Restart,
             State::Provisioning,
             State::Provisioning | State::Ready | State::Stopped,
+        ) | (
+            Operation::Retry | Operation::Recover | Operation::Reset,
+            State::Provisioning,
+            State::Provisioning | State::Ready | State::Stopped | State::Stopping,
         ) | (
             Operation::Start,
             State::Stopped,
             State::Provisioning | State::Ready
-        ) | (Operation::Stop, State::Stopping, State::Stopped)
-            | (
-                Operation::Freeze | Operation::Retry | Operation::Recover,
-                State::Updating,
-                State::Ready
-            )
-            | (
-                Operation::Expire,
-                State::Expiring,
-                State::Stopped | State::Deleting
-            )
-            | (
-                Operation::Retry | Operation::Recover,
-                State::Stopping | State::Expiring,
-                State::Stopped | State::Deleting
-            )
-            | (_, State::Deleting, State::Deleted)
+        ) | (
+            Operation::Stop | Operation::Reset,
+            State::Stopping,
+            State::Stopped
+        ) | (
+            Operation::Freeze | Operation::Retry | Operation::Recover,
+            State::Updating,
+            State::Ready
+        ) | (
+            Operation::Expire,
+            State::Expiring,
+            State::Stopped | State::Deleting
+        ) | (
+            Operation::Retry | Operation::Recover,
+            State::Stopping | State::Expiring,
+            State::Stopped | State::Deleting
+        ) | (_, State::Deleting, State::Deleted)
     ) || (current.desired_state
         == DesiredEnvironmentState::Deleted
         && matches!(

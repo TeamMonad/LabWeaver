@@ -29,6 +29,12 @@ struct RecordingAllocator {
     events: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
+fn test_allocator() -> RecordingAllocator {
+    RecordingAllocator {
+        events: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }
+}
+
 #[async_trait]
 impl environment_service::ExperimentResourceAllocator for RecordingAllocator {
     async fn resolve_resource_reservation(
@@ -180,7 +186,8 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
         binding: "container-primary-v1",
         delay: Duration::ZERO,
     }))?;
-    let reconciler = Reconciler::new(exact, Duration::from_secs(1))?;
+    let reconciler =
+        Reconciler::new(exact, Duration::from_secs(1))?.with_resource_allocator(test_allocator());
     let observation = reconciler
         .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
         .await?
@@ -193,7 +200,8 @@ async fn exact_binding_executes_and_missing_binding_never_falls_back()
         binding: "different-provider-v1",
         delay: Duration::ZERO,
     }))?;
-    let reconciler = Reconciler::new(wrong, Duration::from_secs(1))?;
+    let reconciler =
+        Reconciler::new(wrong, Duration::from_secs(1))?.with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
             .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
@@ -218,7 +226,8 @@ async fn duplicate_binding_and_provider_timeout_fail_closed()
         })),
         Err(ReconcileError::InvalidProviderRegistry)
     ));
-    let reconciler = Reconciler::new(registry, Duration::from_millis(1))?;
+    let reconciler = Reconciler::new(registry, Duration::from_millis(1))?
+        .with_resource_allocator(test_allocator());
     assert!(matches!(
         reconciler
             .execute_once(&planned_restart()?, timestamp("2026-07-14T01:00:01.000Z"))
@@ -270,6 +279,72 @@ async fn experiment_resource_fence_wraps_provider_start_and_stop_in_order()
     assert_eq!(
         *events.lock().expect("event mutex"),
         vec!["provider_stop", "suspend"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn experiment_reset_and_recovered_provision_require_resource_activation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(RecordingProvider {
+        events: Arc::clone(&events),
+    }))?;
+    let mut instance = ready_instance();
+    instance.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
+    instance.observed_state = ObservedEnvironmentState::Provisioning;
+    instance.operation.kind = EnvironmentOperationKind::Reset;
+    instance.operation.state = contracts::environment::OperationState::Accepted;
+    instance.operation.id = OperationId::new();
+    instance.generation = 2;
+
+    let without_resource = Reconciler::new(registry, Duration::from_secs(1))?;
+    assert!(matches!(
+        without_resource
+            .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+            .await,
+        Err(ReconcileError::ResourceUnavailable)
+    ));
+
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(RecordingProvider {
+        events: Arc::clone(&events),
+    }))?;
+    let reconciler = Reconciler::new(registry, Duration::from_secs(1))?.with_resource_allocator(
+        RecordingAllocator {
+            events: Arc::clone(&events),
+        },
+    );
+    reconciler
+        .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_other"]
+    );
+
+    events.lock().expect("event mutex").clear();
+    instance.operation.kind = EnvironmentOperationKind::Retry;
+    instance.operation.id = OperationId::new();
+    reconciler
+        .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_other"]
+    );
+
+    events.lock().expect("event mutex").clear();
+    instance.operation.kind = EnvironmentOperationKind::Create;
+    instance.desired_state = contracts::environment::DesiredEnvironmentState::Running;
+    instance.operation.id = OperationId::new();
+    reconciler
+        .execute_once(&instance, timestamp("2026-07-14T01:00:01.000Z"))
+        .await?;
+    assert_eq!(
+        *events.lock().expect("event mutex"),
+        vec!["activate", "provider_other"]
     );
     Ok(())
 }
@@ -327,6 +402,12 @@ fn reset_build_and_expire_cleanup_have_durable_next_actions()
     assert_eq!(
         next_action(&expire, timestamp("2026-07-14T01:00:01.000Z"))?,
         ReconcileAction::Cleanup
+    );
+    reset.observed_state = ObservedEnvironmentState::Stopping;
+    reset.desired_state = contracts::environment::DesiredEnvironmentState::Stopped;
+    assert_eq!(
+        next_action(&reset, timestamp("2026-07-14T01:00:01.000Z"))?,
+        ReconcileAction::Stop
     );
     Ok(())
 }

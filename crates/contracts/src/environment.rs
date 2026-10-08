@@ -1324,7 +1324,7 @@ impl EnvironmentInstance {
                 State::Provisioning | State::Failed | State::Deleting
             ) | (
                 State::Provisioning,
-                State::Ready | State::Stopped | State::Failed | State::Deleting
+                State::Ready | State::Stopping | State::Stopped | State::Failed | State::Deleting
             ) | (
                 State::Ready,
                 State::Provisioning
@@ -1992,7 +1992,11 @@ mod tests {
                         State::Provisioning | State::Failed | State::Deleting
                     ) | (
                         State::Provisioning,
-                        State::Ready | State::Stopped | State::Failed | State::Deleting
+                        State::Ready
+                            | State::Stopping
+                            | State::Stopped
+                            | State::Failed
+                            | State::Deleting
                     ) | (
                         State::Ready,
                         State::Provisioning

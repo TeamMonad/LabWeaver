@@ -909,7 +909,7 @@ async fn resolve_environment_resource_reservation(
     Json(input): Json<ResolveEnvironmentResourceReservationRequest>,
 ) -> Result<Json<ResolveEnvironmentResourceReservationResponse>, ResourceApiError> {
     require_environment_service(&state, &identity)?;
-    let allocation = state
+    let result = state
         .store
         .resolve_environment_resource_reservation(&input)
         .await?;
@@ -917,10 +917,10 @@ async fn resolve_environment_resource_reservation(
         version: 1,
         environment_id: input.environment_id,
         provider_binding: input.provider_binding,
-        allocation,
-        state: contracts::environment::EnvironmentResourceReservationState::Reserved,
-        reservation_generation: 1,
-        environment_generation: input.environment_generation,
+        state: result.state,
+        reservation_generation: result.reservation_generation,
+        environment_generation: result.environment_generation,
+        allocation: result.allocation,
     }))
 }
 

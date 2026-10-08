@@ -1189,10 +1189,14 @@ impl ResourceUsageClient {
             .map_err(|_| ResourceUsageClientError::Transport)?;
         if !response.status().is_success() {
             let problem = response.json::<ProblemDetails>().await.ok();
-            if problem.as_ref().is_some_and(|value| {
-                value.diagnostic_code.as_str() == "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"
-            }) {
-                return Err(ResourceUsageClientError::CapacityExhausted);
+            if let Some(problem) = problem {
+                if problem.diagnostic_code.as_str() == "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED" {
+                    return Err(ResourceUsageClientError::CapacityExhausted);
+                }
+                return Err(ResourceUsageClientError::Problem {
+                    diagnostic_code: problem.diagnostic_code.as_str().to_owned(),
+                    retryable: problem.retryable,
+                });
             }
             return Err(ResourceUsageClientError::Rejected);
         }
@@ -1327,6 +1331,11 @@ pub enum ResourceUsageClientError {
     Transport,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED")]
     Rejected,
+    #[error("{diagnostic_code}")]
+    Problem {
+        diagnostic_code: String,
+        retryable: bool,
+    },
     #[error("LW_ENVIRONMENT_RESOURCE_GPU_CAPACITY_EXHAUSTED")]
     CapacityExhausted,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID")]
@@ -1334,15 +1343,27 @@ pub enum ResourceUsageClientError {
 }
 
 impl ResourceUsageClientError {
-    pub(crate) const fn diagnostic_code(&self) -> &'static str {
+    pub(crate) fn diagnostic_code(&self) -> &str {
         match self {
             Self::Configuration => "LW_ENVIRONMENT_RESOURCE_USAGE_CONFIGURATION_INVALID",
             Self::TokenDiscovery => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_DISCOVERY_FAILED",
             Self::TokenExchange => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_EXCHANGE_FAILED",
             Self::Transport => "LW_ENVIRONMENT_RESOURCE_USAGE_TRANSPORT_FAILED",
             Self::Rejected => "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED",
+            Self::Problem {
+                diagnostic_code, ..
+            } => diagnostic_code.as_str(),
             Self::CapacityExhausted => "LW_ENVIRONMENT_RESOURCE_GPU_CAPACITY_EXHAUSTED",
             Self::InvalidResponse => "LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn retryable(&self) -> bool {
+        match self {
+            Self::TokenDiscovery | Self::TokenExchange | Self::Transport => true,
+            Self::Problem { retryable, .. } => *retryable,
+            _ => false,
         }
     }
 }
@@ -1354,9 +1375,9 @@ impl ResourceUsageClientError {
 )]
 mod tests {
     use super::{
-        MeteringState, compute_unknown_boundary, compute_unknown_recovery_boundary,
-        compute_unknown_until, quantities, storage_quantities, storage_ready_boundary,
-        storage_unknown_segment,
+        MeteringState, ResourceUsageClientError, compute_unknown_boundary,
+        compute_unknown_recovery_boundary, compute_unknown_until, quantities, storage_quantities,
+        storage_ready_boundary, storage_unknown_segment,
     };
     use contracts::resource::{GpuAllocation, GpuAllocationMode, WorkloadResources};
     use contracts::{
@@ -1520,6 +1541,26 @@ mod tests {
         assert!(state.storage_known);
         assert_eq!(state.compute_started_at, Some(restarted));
         assert!(stopped > first_ready);
+    }
+
+    #[test]
+    fn resource_problem_preserves_diagnostic_and_retryability() {
+        let retryable = ResourceUsageClientError::Problem {
+            diagnostic_code: "LW_RESOURCE_RESERVATION_STALE".to_owned(),
+            retryable: true,
+        };
+        assert_eq!(retryable.diagnostic_code(), "LW_RESOURCE_RESERVATION_STALE");
+        assert!(retryable.retryable());
+
+        let rejected = ResourceUsageClientError::Problem {
+            diagnostic_code: "LW_RESOURCE_RESERVATION_REJECTED".to_owned(),
+            retryable: false,
+        };
+        assert_eq!(
+            rejected.diagnostic_code(),
+            "LW_RESOURCE_RESERVATION_REJECTED"
+        );
+        assert!(!rejected.retryable());
     }
 
     #[test]

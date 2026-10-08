@@ -1583,16 +1583,21 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
         .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 1))
         .await?;
     assert_eq!(
-        first.as_ref().map(|value| value.class.as_str()),
+        first.allocation.as_ref().map(|value| value.class.as_str()),
         Some("a100-exclusive")
     );
-    assert_eq!(first.as_ref().map(|value| value.count), Some(1));
+    assert_eq!(first.allocation.as_ref().map(|value| value.count), Some(1));
 
     // The same Environment identity replays the durable reservation instead of double counting.
     let replayed = store
         .resolve_environment_resource_reservation(&resolve(first_environment, "a100-exclusive", 1))
         .await?;
-    assert_eq!(replayed, first);
+    assert_eq!(replayed.allocation, first.allocation);
+    assert_eq!(
+        replayed.reservation_generation,
+        first.reservation_generation
+    );
+    assert!(!replayed.applied);
 
     // Rotate the live catalog row after admission.  Settlement must use the immutable
     // allocation captured in the Environment reservation, including its original class/mode.
@@ -1751,7 +1756,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
 
     // Stop the first provider before releasing capacity.  The original allocation remains fixed
     // on the suspended row for usage accounting and a later fenced resume.
-    let first_allocation = first.clone();
+    let first_allocation = first.allocation.clone();
     let suspend_request = SuspendEnvironmentResourceReservationRequest {
         version: 1,
         environment_id: first_environment,
@@ -1812,7 +1817,7 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     let second = store
         .resolve_environment_resource_reservation(&resolve(second_environment, "a100-exclusive", 1))
         .await?;
-    assert_eq!(second.as_ref().map(|value| value.count), Some(1));
+    assert_eq!(second.allocation.as_ref().map(|value| value.count), Some(1));
 
     // Resume must use the fixed original allocation and deny while the other Environment owns
     // the only observed unit.
@@ -1872,6 +1877,22 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
     assert_eq!(resumed.state, EnvironmentResourceReservationState::Reserved);
     assert!(resumed.applied);
 
+    // A later resolve replay returns the persisted reservation generation rather than an
+    // endpoint-local default after the fenced resume.
+    let mut resolve_after_resume = resolve(first_environment, "a100-exclusive", 1);
+    resolve_after_resume.environment_generation = activate_request.environment_generation;
+    let resumed_resolution = store
+        .resolve_environment_resource_reservation(&resolve_after_resume)
+        .await?;
+    assert_eq!(
+        resumed_resolution.reservation_generation,
+        resumed.reservation_generation
+    );
+    assert_eq!(
+        resumed_resolution.environment_generation,
+        activate_request.environment_generation
+    );
+
     // A delayed stop from the previous generation cannot suspend the resumed reservation.
     let stale_stop = store
         .suspend_environment_resource_reservation(&suspend_request)
@@ -1910,7 +1931,10 @@ async fn environment_gpu_reservation_is_idempotent_exhausts_and_releases()
             1,
         ))
         .await?;
-    assert_eq!(admitted.as_ref().map(|value| value.count), Some(1));
+    assert_eq!(
+        admitted.allocation.as_ref().map(|value| value.count),
+        Some(1)
+    );
     Ok(())
 }
 
@@ -2099,7 +2123,8 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     assert_eq!(
         store
             .resolve_environment_resource_reservation(&resolve_request)
-            .await?,
+            .await?
+            .allocation,
         None
     );
 

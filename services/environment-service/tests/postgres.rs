@@ -456,7 +456,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     registry.register(Arc::new(CleanupFailureProvider))?;
     let worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(registry, Duration::from_secs(1))?,
+        Reconciler::new(registry, Duration::from_secs(1))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
     )?;
@@ -465,8 +466,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .run_once("environment-worker-cleanup-failure", accepted_at)
             .await?,
         ReconcileWorkerOutcome::Failed {
-            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
-        }
+            ref diagnostic_code,
+        } if diagnostic_code == "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
     ));
     let cleanup_failed = store.load(inbox_target.id).await?;
     assert_eq!(
@@ -494,8 +495,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
             .run_once("environment-worker-command-identity-cleanup", accepted_at)
             .await?,
         ReconcileWorkerOutcome::Failed {
-            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
-        }
+            ref diagnostic_code,
+        } if diagnostic_code == "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED"
     ));
     assert_eq!(
         store.load(idempotency_target.id).await?.observed_state,
@@ -521,7 +522,8 @@ async fn durable_command_and_lease_path_is_atomic_and_recoverable()
     crash_registry.register(crash_provider.clone())?;
     let restarted_worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(crash_registry, Duration::from_millis(100))?,
+        Reconciler::new(crash_registry, Duration::from_millis(100))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
     )?;
@@ -688,7 +690,8 @@ async fn stale_reconcile_lease_is_reported_without_failing_the_worker()
     }))?;
     let worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(registry, Duration::from_secs(1))?,
+        Reconciler::new(registry, Duration::from_secs(1))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_secs(1),
     )?;
@@ -2655,7 +2658,8 @@ fn success_worker_with_restart_ready_observation(
     }))?;
     Ok(ReconcileWorker::new(
         store,
-        Reconciler::new(registry, Duration::from_millis(100))?,
+        Reconciler::new(registry, Duration::from_millis(100))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_millis(1_100),
         Duration::from_millis(100),
     )?)
@@ -3131,7 +3135,8 @@ async fn pending_reconcile_changes_only_schedule_without_retry_event_or_usage()
     registry.register(Arc::new(PendingProvider))?;
     let worker = ReconcileWorker::new(
         store.clone(),
-        Reconciler::new(registry, Duration::from_secs(1))?,
+        Reconciler::new(registry, Duration::from_secs(1))?
+            .with_resource_allocator(support::TestResourceAllocator),
         Duration::from_secs(2),
         Duration::from_millis(10),
     )?;

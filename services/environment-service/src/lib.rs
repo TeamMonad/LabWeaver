@@ -5,6 +5,9 @@
     reason = "the public contract crate and focused contract document own field-level wire documentation"
 )]
 
+#[cfg(test)]
+extern crate self as environment_service;
+
 mod api;
 mod cdi_import;
 mod container_provider;

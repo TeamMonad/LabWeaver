@@ -243,7 +243,8 @@ impl ReconcileWorker {
                             return Ok(ReconcileWorkerOutcome::LeaseLost);
                         }
                         return Ok(ReconcileWorkerOutcome::Failed {
-                            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID",
+                            diagnostic_code: "LW_ENVIRONMENT_PROVIDER_OBSERVATION_INVALID"
+                                .to_owned(),
                         });
                     }
                     Err(error) => return Err(error.into()),
@@ -269,7 +270,7 @@ impl ReconcileWorker {
                 })
             }
             Err(error) => {
-                let diagnostic_code = error.diagnostic_code();
+                let diagnostic_code = error.diagnostic_code().to_owned();
                 if error.retryable()
                     && lease.instance.operation.attempt < lease.instance.operation.max_attempts
                 {
@@ -278,7 +279,7 @@ impl ReconcileWorker {
                         let updated = apply_retry(
                             &lease.instance,
                             lease.instance.operation.id,
-                            diagnostic_code,
+                            &diagnostic_code,
                             retry_at,
                         )?;
                         if !self.persist_reconciled(&lease, &updated).await? {
@@ -292,7 +293,7 @@ impl ReconcileWorker {
                 let updated = apply_provider_failure(
                     &lease.instance,
                     lease.instance.operation.id,
-                    diagnostic_code,
+                    &diagnostic_code,
                 )?;
                 if !self.persist_reconciled(&lease, &updated).await? {
                     return Ok(ReconcileWorkerOutcome::LeaseLost);
@@ -361,7 +362,7 @@ impl ReconcileWorker {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconcileWorkerOutcome {
     Pending,
     Idle,
@@ -375,7 +376,7 @@ pub enum ReconcileWorkerOutcome {
         attempt: u32,
     },
     Failed {
-        diagnostic_code: &'static str,
+        diagnostic_code: String,
     },
 }
 
@@ -435,9 +436,7 @@ impl Reconciler {
         now: UtcTimestamp,
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
-        if matches!(action, ReconcileAction::Start | ReconcileAction::Restart)
-            && instance.class == EnvironmentClass::Experiment
-        {
+        if requires_experiment_activation(instance, action) {
             self.activate_experiment_reservation(instance).await?;
         }
         let provider = self.registry.resolve(&instance.provider_binding)?;
@@ -445,8 +444,7 @@ impl Reconciler {
             .await
             .map_err(|_| ReconcileError::ProviderTimeout)?;
         let outcome = result.map_err(ReconcileError::Provider)?;
-        if matches!(action, ReconcileAction::Stop)
-            && instance.class == EnvironmentClass::Experiment
+        if instance.class == EnvironmentClass::Experiment
             && instance.desired_state != contracts::environment::DesiredEnvironmentState::Deleted
             && let ProviderOutcome::Completed(observation) = &outcome
             && observation.next_state == ObservedEnvironmentState::Stopped
@@ -461,11 +459,10 @@ impl Reconciler {
         &self,
         instance: &EnvironmentInstance,
     ) -> Result<(), ReconcileError> {
-        let Some(allocator) = self.resource_reservations.as_ref() else {
-            // Unit-level provider tests may construct a reconciler without the production
-            // Resource boundary. The process runtime always installs it before serving.
-            return Ok(());
-        };
+        let allocator = self
+            .resource_reservations
+            .as_ref()
+            .ok_or(ReconcileError::ResourceUnavailable)?;
         let request = ActivateEnvironmentResourceReservationRequest {
             version: 1,
             environment_id: instance.id,
@@ -497,9 +494,10 @@ impl Reconciler {
         &self,
         instance: &EnvironmentInstance,
     ) -> Result<(), ReconcileError> {
-        let Some(allocator) = self.resource_reservations.as_ref() else {
-            return Ok(());
-        };
+        let allocator = self
+            .resource_reservations
+            .as_ref()
+            .ok_or(ReconcileError::ResourceUnavailable)?;
         let request = SuspendEnvironmentResourceReservationRequest {
             version: 1,
             environment_id: instance.id,
@@ -520,6 +518,19 @@ impl Reconciler {
         }
         Ok(())
     }
+}
+
+fn requires_experiment_activation(instance: &EnvironmentInstance, action: ReconcileAction) -> bool {
+    if instance.class != EnvironmentClass::Experiment {
+        return false;
+    }
+    matches!(
+        action,
+        ReconcileAction::Provision
+            | ReconcileAction::Start
+            | ReconcileAction::Restart
+            | ReconcileAction::Reset
+    )
 }
 
 /// Selects the next action solely from the persisted operation and lifecycle state.
@@ -562,7 +573,10 @@ pub fn next_action(
             Ok(ReconcileAction::Provision)
         }
         (Operation::Start, State::Stopped) => Ok(ReconcileAction::Start),
-        (Operation::Stop | Operation::Retry | Operation::Recover, State::Stopping)
+        (
+            Operation::Stop | Operation::Reset | Operation::Retry | Operation::Recover,
+            State::Stopping,
+        )
         | (Operation::Expire | Operation::Retry | Operation::Recover, State::Expiring) => {
             Ok(ReconcileAction::Stop)
         }
@@ -609,7 +623,7 @@ pub enum ReconcileError {
 
 impl ReconcileError {
     #[must_use]
-    pub const fn diagnostic_code(&self) -> &'static str {
+    pub fn diagnostic_code(&self) -> &str {
         match self {
             Self::InvalidProviderRegistry => "LW_ENVIRONMENT_PROVIDER_REGISTRY_INVALID",
             Self::ProviderUnavailable => "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
@@ -635,19 +649,7 @@ impl ReconcileError {
             | Self::NoAction
             | Self::ResourceUnavailable
             | Self::ResourceFence => false,
-            Self::Resource(error) => matches!(
-                error,
-                crate::metering::ResourceUsageClientError::Transport
-                    | crate::metering::ResourceUsageClientError::TokenDiscovery
-                    | crate::metering::ResourceUsageClientError::TokenExchange
-            ),
-            Self::ResourceSuspension(error) => matches!(
-                error,
-                crate::metering::ResourceUsageClientError::Transport
-                    | crate::metering::ResourceUsageClientError::TokenDiscovery
-                    | crate::metering::ResourceUsageClientError::TokenExchange
-                    | crate::metering::ResourceUsageClientError::Rejected
-            ),
+            Self::Resource(error) | Self::ResourceSuspension(error) => error.retryable(),
         }
     }
 }

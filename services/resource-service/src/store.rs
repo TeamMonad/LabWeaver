@@ -1394,7 +1394,7 @@ impl PgResourceStore {
     pub async fn resolve_environment_resource_reservation(
         &self,
         request: &contracts::environment::ResolveEnvironmentResourceReservationRequest,
-    ) -> Result<Option<GpuAllocation>, ResourceStoreError> {
+    ) -> Result<EnvironmentResourceReservationResult, ResourceStoreError> {
         request
             .validate()
             .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
@@ -1425,8 +1425,9 @@ impl PgResourceStore {
                 if !matches_request {
                     return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
                 }
+                let result = reservation_result(&reservation, false);
                 transaction.commit().await?;
-                return Ok(reservation.allocation);
+                return Ok(result);
             }
             // An Environment identity is single-use. Once its reservation is released, a late
             // retry must not resurrect capacity or overwrite the historical owner/snapshot.
@@ -1473,7 +1474,13 @@ impl PgResourceStore {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(allocation)
+        Ok(EnvironmentResourceReservationResult {
+            state: ContractReservationState::Reserved,
+            reservation_generation: 1,
+            environment_generation: request.environment_generation,
+            allocation,
+            applied: true,
+        })
     }
 
     /// Revalidates the exact original allocation and reserves capacity before an Experiment
@@ -1527,6 +1534,11 @@ impl PgResourceStore {
             request.environment_generation,
             request.operation_id,
         );
+        if same_fence && reservation.state == EnvironmentResourceReservationState::Reserved {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
         if let Some(expected) = request.expected_allocation.as_ref() {
             validate_existing_gpu_allocation(
                 &mut transaction,
@@ -1534,11 +1546,6 @@ impl PgResourceStore {
                 Some(request.environment_id),
             )
             .await?;
-        }
-        if same_fence && reservation.state == EnvironmentResourceReservationState::Reserved {
-            let result = reservation_result(&reservation, false);
-            transaction.commit().await?;
-            return Ok(result);
         }
         let mut activated = reservation;
         activated.state = EnvironmentResourceReservationState::Reserved;
