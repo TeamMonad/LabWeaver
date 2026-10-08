@@ -3404,6 +3404,156 @@ impl PgResourceStore {
         Ok(next_lease)
     }
 
+    /// Fails and releases a pre-handoff Environment claim when the owner rejects the request as
+    /// invalid. This path is terminal: a deterministic 4xx must not consume the transient retry
+    /// budget or leave an active Lease waiting for cleanup.
+    #[allow(clippy::too_many_lines)]
+    pub async fn fail_pre_handoff_capacity_handoff(
+        &self,
+        claim_id: contracts::CapacityClaimId,
+        expected_claim_revision: contracts::Revision,
+        lease_id: LeaseId,
+        expected_lease_revision: contracts::Revision,
+        diagnostic_code: &str,
+        actor: contracts::ActorId,
+        trace_id: &str,
+    ) -> Result<(), ResourceStoreError> {
+        validate_trace(trace_id)?;
+        if !valid_diagnostic(diagnostic_code) {
+            return Err(ResourceStoreError::DiagnosticInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
+        if claim.revision != expected_claim_revision
+            || !matches!(
+                claim.state,
+                CapacityClaimState::Provisioning | CapacityClaimState::Ready
+            )
+            || lease.revision != expected_lease_revision
+            || lease.state != ResourceLeaseState::Active
+            || lease.claim_id != claim.id
+            || claim.request_id != request.id
+            || request.state != ResourceRequestState::Active
+            || !matches!(request.target, ResourceTarget::Environment { .. })
+        {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+
+        let now = database_now(&mut transaction).await?;
+        let expiring_lease = ResourceLifecycle::begin_lease_expiry(
+            &lease,
+            expected_lease_revision,
+            now,
+            Some(diagnostic_code.to_owned()),
+        )?;
+        let revoked_lease = ResourceLifecycle::complete_lease_expiry(
+            &expiring_lease,
+            expiring_lease.revision,
+            now,
+        )?;
+        let expiring_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
+        let mut expired_request =
+            ResourceLifecycle::complete_expiry(&expiring_request, expiring_request.revision, now)?;
+        expired_request.diagnostic_code = Some(diagnostic_code.to_owned());
+        let releasing_claim = transition_claim(&claim, CapacityClaimState::Releasing)?;
+        let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;
+
+        let attempt: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint + 1
+             FROM resource.capacity_attempts
+             WHERE claim_id=$1 AND step='handoff_environment'",
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resource.capacity_attempts
+             (claim_id,attempt,step,state,next_attempt_at,diagnostic_code)
+             VALUES ($1,$2,'handoff_environment','failed',clock_timestamp(),$3)",
+        )
+        .bind(claim.id.as_uuid())
+        .bind(attempt)
+        .bind(diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+
+        update_claim(&mut transaction, &claim, &released_claim, None, None, None).await?;
+        sqlx::query(
+            "UPDATE resource.capacity_claims
+             SET last_diagnostic_code=$2,updated_at=clock_timestamp()
+             WHERE claim_id=$1",
+        )
+        .bind(claim.id.as_uuid())
+        .bind(diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE resource.gpu_capacity_reservations
+             SET state='released',released_at=clock_timestamp()
+             WHERE claim_id=$1 AND state='reserved'",
+        )
+        .bind(claim.id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+
+        update_lease(&mut transaction, &lease, &expiring_lease).await?;
+        update_lease(&mut transaction, &expiring_lease, &revoked_lease).await?;
+        update_request(&mut transaction, &request, &expiring_request).await?;
+        update_request(&mut transaction, &expiring_request, &expired_request).await?;
+        insert_transition(
+            &mut transaction,
+            &expiring_request,
+            expiring_request.revision.get(),
+            Some(request.state),
+            Some(actor),
+            trace_id,
+        )
+        .await?;
+        insert_transition(
+            &mut transaction,
+            &expired_request,
+            expired_request.revision.get(),
+            Some(expiring_request.state),
+            Some(actor),
+            trace_id,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &expiring_lease,
+            &expiring_request,
+            LEASE_EXPIRING_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &expiring_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &revoked_lease,
+            &expired_request,
+            LEASE_REVOKED_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &expired_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            trace_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Completes a claim that never crossed the Environment handoff boundary.
     ///
     /// No external Environment cleanup readback is required here because the claim is only
@@ -4514,6 +4664,7 @@ fn transition_claim(
         ) | (
             CapacityClaimState::Reserved
                 | CapacityClaimState::Provisioning
+                | CapacityClaimState::Ready
                 | CapacityClaimState::Blocked
                 | CapacityClaimState::HandedOff,
             CapacityClaimState::Releasing

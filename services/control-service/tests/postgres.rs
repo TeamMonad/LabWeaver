@@ -2864,7 +2864,8 @@ fn vm_environment_candidate(
         "storage_class_binding":base.storage_class_binding,
         "ssh_port":22
     });
-    value["spec"]["retention"]["retainUntil"] = serde_json::to_value(now)?;
+    value["spec"]["retention"]["retainUntil"] =
+        serde_json::to_value(UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?)?;
     candidate.spec = serde_json::from_value(value["spec"].clone())?;
     candidate.validate()?;
     Ok(candidate)

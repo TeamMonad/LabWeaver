@@ -3346,6 +3346,84 @@ async fn work_handoff_publishes_only_the_third_failure_as_one_consistent_request
 }
 
 #[tokio::test]
+async fn invalid_work_handoff_releases_the_pre_handoff_claim_without_retry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let (store, request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
+    store
+        .fail_pre_handoff_capacity_handoff(
+            claim.id,
+            claim.revision,
+            lease.id,
+            lease.revision,
+            "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+            actor,
+            "trace-invalid-handoff",
+        )
+        .await?;
+
+    let expired = store.load(request.id).await?;
+    assert_eq!(expired.state, ResourceRequestState::Expired);
+    assert_eq!(
+        expired.diagnostic_code.as_deref(),
+        Some("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")
+    );
+    let revoked = store.load_lease(lease.id).await?;
+    assert_eq!(
+        revoked.state,
+        contracts::resource::ResourceLeaseState::Revoked
+    );
+    assert_eq!(
+        revoked.revoke_reason_code.as_deref(),
+        Some("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")
+    );
+    let (claim_state, claim_diagnostic): (String, String) = sqlx::query_as(
+        "SELECT state,last_diagnostic_code FROM resource.capacity_claims WHERE claim_id=$1",
+    )
+    .bind(claim.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(claim_state, "released");
+    assert_eq!(claim_diagnostic, "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED");
+    let reservation_state: String = sqlx::query_scalar(
+        "SELECT state FROM resource.gpu_capacity_reservations WHERE claim_id=$1",
+    )
+    .bind(claim.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reservation_state, "released");
+    let attempts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT state,diagnostic_code FROM resource.capacity_attempts
+         WHERE claim_id=$1 AND step='handoff_environment' ORDER BY attempt",
+    )
+    .bind(claim.id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        attempts,
+        vec![(
+            "failed".to_owned(),
+            "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED".to_owned()
+        )]
+    );
+    assert!(
+        store
+            .fail_pre_handoff_capacity_handoff(
+                claim.id,
+                claim.revision,
+                lease.id,
+                lease.revision,
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+                actor,
+                "trace-invalid-duplicate",
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn work_handoff_does_not_reactivate_a_request_when_revoke_has_won()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;

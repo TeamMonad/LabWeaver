@@ -809,8 +809,13 @@ impl EnvironmentHandoffClient {
                     .json(&handoff),
             )
             .await?;
-        if response.status() == StatusCode::ACCEPTED {
+        let status = response.status();
+        if status == StatusCode::ACCEPTED {
             Ok(())
+        } else if (status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT)
+            && status != StatusCode::TOO_MANY_REQUESTS
+        {
+            Err(CapacityProviderError::HandoffInvalid)
         } else {
             Err(CapacityProviderError::HandoffRejected)
         }
@@ -1062,15 +1067,29 @@ impl CapacityReconcileWorker {
                 claim_id = %item.claim.id,
                 diagnostic_code = %error.diagnostic()
             );
-            self.store
-                .retry_or_block_capacity_handoff(
-                    item.claim.id,
-                    item.claim.revision,
-                    error.diagnostic(),
-                    self.environment_handoff.system_actor_id,
-                    &format!("resource-handoff-failed-{}", item.claim.id),
-                )
-                .await?;
+            if matches!(&error, CapacityProviderError::HandoffInvalid) {
+                self.store
+                    .fail_pre_handoff_capacity_handoff(
+                        item.claim.id,
+                        item.claim.revision,
+                        item.lease.id,
+                        item.lease.revision,
+                        error.diagnostic(),
+                        self.environment_handoff.system_actor_id,
+                        &format!("resource-handoff-rejected-{}", item.claim.id),
+                    )
+                    .await?;
+            } else {
+                self.store
+                    .retry_or_block_capacity_handoff(
+                        item.claim.id,
+                        item.claim.revision,
+                        error.diagnostic(),
+                        self.environment_handoff.system_actor_id,
+                        &format!("resource-handoff-failed-{}", item.claim.id),
+                    )
+                    .await?;
+            }
         } else {
             self.store
                 .mark_capacity_handed_off(
@@ -1105,15 +1124,29 @@ impl CapacityReconcileWorker {
                     claim_id = %item.claim.id,
                     diagnostic_code = %error.diagnostic()
                 );
-                self.store
-                    .retry_or_block_capacity_handoff(
-                        item.claim.id,
-                        item.claim.revision,
-                        error.diagnostic(),
-                        self.environment_handoff.system_actor_id,
-                        &format!("resource-handoff-failed-{}", item.claim.id),
-                    )
-                    .await?;
+                if matches!(&error, CapacityProviderError::HandoffInvalid) {
+                    self.store
+                        .fail_pre_handoff_capacity_handoff(
+                            item.claim.id,
+                            item.claim.revision,
+                            item.lease.id,
+                            item.lease.revision,
+                            error.diagnostic(),
+                            self.environment_handoff.system_actor_id,
+                            &format!("resource-handoff-rejected-{}", item.claim.id),
+                        )
+                        .await?;
+                } else {
+                    self.store
+                        .retry_or_block_capacity_handoff(
+                            item.claim.id,
+                            item.claim.revision,
+                            error.diagnostic(),
+                            self.environment_handoff.system_actor_id,
+                            &format!("resource-handoff-failed-{}", item.claim.id),
+                        )
+                        .await?;
+                }
             }
         }
         Ok(true)
@@ -1326,6 +1359,8 @@ pub enum CapacityProviderError {
     HandoffFence,
     #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
     HandoffRejected,
+    #[error("LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED")]
+    HandoffInvalid,
     #[error("LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED")]
     LeaseSyncRejected,
     #[error("LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED")]
@@ -1357,6 +1392,7 @@ impl CapacityProviderError {
             Self::Unavailable => "LW_RESOURCE_CAPACITY_UNAVAILABLE",
             Self::HandoffFence => "LW_RESOURCE_ENVIRONMENT_HANDOFF_FENCE_INVALID",
             Self::HandoffRejected => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+            Self::HandoffInvalid => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
             Self::LeaseSyncRejected => "LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED",
             Self::CleanupRejected => "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
             Self::TaskOwnerRequired => "LW_RESOURCE_TASK_OWNER_REQUIRED",

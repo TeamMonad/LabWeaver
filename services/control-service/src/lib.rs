@@ -3491,6 +3491,7 @@ impl ControlService {
             if candidate.spec.runtime.kind() == RuntimeKind::VirtualMachine {
                 resolve_candidate_image_artifact(&candidate, None, &self.config, catalog)?;
             }
+            ensure_retention_active(&candidate.spec.retention, now)?;
         }
         let expected_schema = match kind.as_str() {
             "environment" => self.config.environment_schema_sha256,
@@ -4379,6 +4380,7 @@ impl ControlService {
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
+        ensure_retention_active(&environment.spec.retention, now)?;
         let environment_policy_revision =
             revision_from_i64(environment_row.try_get("policy_revision").map_err(db)?)?;
         let environment_schema: Sha256Digest = environment_row
@@ -5117,6 +5119,7 @@ impl ControlService {
         {
             return Err(ControlError::ReleaseCandidateMismatch);
         }
+        ensure_retention_active(&environment_candidate.spec.retention, now)?;
         let approval: CandidateApproval = load_contract_tx(
             &mut transaction,
             "SELECT contract FROM control.candidate_approvals WHERE approval_id=$1 AND candidate_id=$2",
@@ -8031,6 +8034,17 @@ fn add_seconds(now: UtcTimestamp, seconds: u64) -> Result<UtcTimestamp, ControlE
     UtcTimestamp::from_utc(now.get() + duration).map_err(|_| ControlError::ContractInvalid)
 }
 
+fn ensure_retention_active(
+    retention: &RetentionSnapshot,
+    now: UtcTimestamp,
+) -> Result<(), ControlError> {
+    if retention.retain_until <= now {
+        Err(ControlError::MaterialRetentionExpired)
+    } else {
+        Ok(())
+    }
+}
+
 fn revision_from_i64(value: i64) -> Result<Revision, ControlError> {
     Revision::new(u64::try_from(value).map_err(|_| ControlError::PersistenceIdentityMismatch)?)
         .map_err(|_| ControlError::PersistenceIdentityMismatch)
@@ -8232,6 +8246,8 @@ pub enum ControlError {
     ReleaseEvidenceInvalid,
     #[error("LW_RELEASE_EVIDENCE_STALE")]
     ReleaseEvidenceStale,
+    #[error("LW_MATERIAL_RETENTION_EXPIRED")]
+    MaterialRetentionExpired,
     #[error("LW_RELEASE_ARTIFACT_NOT_AUTHORITATIVE")]
     ArtifactNotAuthoritative,
     #[error("LW_EVALUATION_RUNNER_ARTIFACT_REQUIRED")]
@@ -8265,7 +8281,10 @@ mod tests {
     use contracts::evaluation::EvaluationSpec;
     use contracts::http::{CreateProblemPackageUploadRequest, ProblemPackageUploadFile};
     use contracts::supply_chain::{ImageArtifact, VirtualMachineBaseDisk};
-    use contracts::{CourseId, PolicyId, ProjectId, Revision};
+    use contracts::{
+        CourseId, PolicyId, ProjectId, RetentionClass, RetentionDisposition, RetentionSnapshot,
+        Revision, UtcTimestamp,
+    };
     use persistence_sqlx::Sha256Digest;
 
     use contracts::supply_chain::BuildNetworkPolicy;
@@ -8273,7 +8292,8 @@ mod tests {
     use super::{
         ContainerBuildPolicy, ControlConfig, ControlError, EvaluationRuntimePolicy,
         VirtualMachineBaseCatalog, VirtualMachineBasePolicy, authoring_submission_manifest,
-        reject_sensitive_payload, resolve_candidate_image_artifact, validate_upload_request,
+        ensure_retention_active, reject_sensitive_payload, resolve_candidate_image_artifact,
+        validate_upload_request,
     };
 
     fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
@@ -8335,6 +8355,23 @@ mod tests {
                 max_in_flight_per_worker: 2,
             },
         })
+    }
+
+    #[test]
+    fn expired_retention_is_material_retention_expired() -> Result<(), Box<dyn std::error::Error>> {
+        let now: UtcTimestamp = "2026-10-08T00:00:00.000Z".parse()?;
+        let retention = RetentionSnapshot {
+            policy_id: PolicyId::new(),
+            policy_revision: Revision::new(1)?,
+            class: RetentionClass::CourseMaterial,
+            retain_until: now,
+            disposition: RetentionDisposition::Delete,
+        };
+        assert!(matches!(
+            ensure_retention_active(&retention, now),
+            Err(ControlError::MaterialRetentionExpired)
+        ));
+        Ok(())
     }
 
     #[test]

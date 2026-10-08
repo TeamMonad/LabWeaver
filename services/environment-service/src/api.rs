@@ -1429,6 +1429,7 @@ impl IntoResponse for EnvironmentApiError {
             ) => StatusCode::PRECONDITION_FAILED,
             Self::ReleaseDenied
             | Self::ResourceReservationRejected
+            | Self::Store(EnvironmentStoreError::InvalidCreateAggregate)
             | Self::WorkExecution(WorkExecutionError::EnvironmentNotEligible)
             | Self::FreezeBinding(FreezeBindingError::EnvironmentNotEligible) => {
                 StatusCode::UNPROCESSABLE_ENTITY
