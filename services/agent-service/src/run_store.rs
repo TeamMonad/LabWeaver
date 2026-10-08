@@ -1204,6 +1204,17 @@ impl PostgresAgentRunStore {
         if updated.rows_affected() != 1 {
             return Err(AgentRunStoreError::StateConflict);
         }
+        // The selected attempt is terminal before an explicit revisioned retry can reach this
+        // transaction. The retry starts a new generation, so any old run-level cancellation
+        // fence must not cancel its newly claimed attempt.
+        sqlx::query(
+            "UPDATE agent.agent_runs SET cancellation_requested_at=NULL,updated_at=now() \
+             WHERE run_id=$1 AND cancellation_requested_at IS NOT NULL",
+        )
+        .bind(run_id.as_uuid())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         run.revision = next_revision(run.revision)?;
         run.validate()
             .map_err(|_| AgentRunStoreError::InvalidContract)?;
@@ -3295,6 +3306,9 @@ impl AgentRunService {
         command: ExecuteAgentRun<'_>,
         run: AgentRun,
     ) -> Result<AgentRunDispatch, AgentRunStoreError> {
+        // A failed aggregate is retained while a revisioned retry queues the track for its next
+        // attempt.  Scope and immutable input identity are checked here; claim_track owns the
+        // requested-state, retry-due, and fencing decision before a new attempt can be appended.
         validate_reserved_run(&command, &run)?;
         if !matches!(run.purpose, AgentRunPurpose::Authoring { .. }) {
             return Err(AgentRunStoreError::IdentityMismatch);
@@ -3736,8 +3750,6 @@ fn validate_reserved_run(
         || run.course_id != command.course_id
         || run.package_id != command.request.package_id
         || run.policy_id != command.request.policy_id
-        || run.state == AgentRunState::Failed
-        || run.state == AgentRunState::Cancelled
     {
         return Err(AgentRunStoreError::IdentityMismatch);
     }

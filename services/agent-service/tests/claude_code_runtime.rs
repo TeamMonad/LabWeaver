@@ -1647,6 +1647,35 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
 #[tokio::test]
 #[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
 #[allow(clippy::large_futures)]
+async fn postgres_authoring_retry_starts_a_new_fenced_attempt() -> Result<(), Box<dyn Error>> {
+    let mut container = None;
+    let database_url = if let Ok(database_url) = std::env::var("LABWEAVER_TEST_DATABASE_URL") {
+        database_url
+    } else {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let database_url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        container = Some(postgres);
+        database_url
+    };
+    let (admin_pool, pool, database_name) = isolated_agent_database(&database_url).await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let now = "2026-07-14T08:00:00.000Z".parse::<UtcTimestamp>()?;
+
+    assert_failed_authoring_retry_dispatch_executes(&store, now).await?;
+    assert_durable_cancellation(&store, now).await?;
+
+    drop(store);
+    remove_isolated_database(admin_pool, pool, &database_name).await?;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
+#[allow(clippy::large_futures)]
 async fn postgres_work_configuration_lifecycle_fences_generation_approval_and_execution()
 -> Result<(), Box<dyn Error>> {
     let mut container = None;
@@ -2611,6 +2640,169 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     Ok(())
 }
 
+async fn assert_failed_authoring_retry_dispatch_executes(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = b"failed authoring retry must execute the next attempt".to_vec();
+    let policy = valid_policy()?;
+    let package = package(policy.project_id, policy.course_id, &bytes)?;
+    let gate = ProblemPackageEgressGate::new(
+        Arc::new(StaticPackageReader {
+            bytes: bytes.clone(),
+        }),
+        Arc::new(StaticClassifier {
+            revision: Revision::new(1)?,
+            denied: BTreeSet::new(),
+        }),
+    );
+    let prepared = gate.prepare(&package, &policy).await?;
+    let mut request = run_request(&prepared, &policy);
+    request.environment_class = EnvironmentClass::Work;
+    let object = package
+        .files
+        .first()
+        .ok_or("package file missing")?
+        .object
+        .clone();
+    let command = InternalCreateAgentRunRequest {
+        project_id: policy.project_id,
+        course_id: policy.course_id,
+        actor_id: ActorId::new(),
+        request: InternalAgentRunRequest::Authoring(request.clone()),
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Work,
+        },
+        package: package.clone(),
+        object_locators: BTreeMap::from([(
+            object.artifact_id,
+            "problem-packages/failed-retry".to_owned(),
+        )]),
+        policy: policy.clone(),
+        preauthorization: None,
+    };
+    let key = IdempotencyKey::parse("agent-dispatch-failed-retry-0001")?;
+    let reservation = store
+        .reserve_internal_dispatch(&command, &key, now, "trace-agent-failed-retry")
+        .await?;
+    let AgentRunReservation::Created(created) = reservation else {
+        return Err("failed retry dispatch was unexpectedly replayed".into());
+    };
+    let dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("failed retry dispatch was not claimable")?;
+    assert_eq!(dispatch.run.id, created.id);
+    store
+        .bind_prepared_dispatch(&dispatch, prepared.sha256())
+        .await?;
+
+    let failed_process = Arc::new(FakeProcess::new(FakeMode::ProcessFailure));
+    let failed_runtime = ClaudeCodeRuntime::new(policy.clone(), failed_process.clone())?;
+    let failed_service = AgentRunService::new(
+        store.clone(),
+        failed_runtime,
+        "failed-retry-worker".to_owned(),
+        Duration::from_secs(30),
+    )?;
+    let failed_result = failed_service
+        .execute_reserved_dispatch(dispatch, prepared.clone(), RunCancellation::new(), now)
+        .await?;
+    let AgentRunDispatch::Executed(failed_result) = failed_result else {
+        return Err("initial failure did not persist a failed authoring run".into());
+    };
+    let failed = failed_result.run;
+    assert_eq!(failed.state, AgentRunState::Failed);
+    assert_eq!(failed.tracks[0].attempts.len(), 1);
+    assert_eq!(
+        failed.tracks[0].attempts[0].state,
+        contracts::authoring::AgentAttemptState::Failed
+    );
+    assert_eq!(failed_process.commands().len(), 1);
+
+    let retried = store
+        .retry_track_revisioned(
+            failed.project_id,
+            failed.course_id,
+            failed.id,
+            AgentTrackKind::Environment,
+            failed.revision,
+            &IdempotencyKey::parse("agent-dispatch-failed-retry-command-0001")?,
+        )
+        .await?;
+    assert_eq!(retried.state, AgentRunState::Failed);
+    assert_eq!(retried.revision.get(), failed.revision.get() + 1);
+
+    let retry_dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("retried dispatch was not claimable")?;
+    assert_eq!(retry_dispatch.run.id, failed.id);
+    store
+        .bind_prepared_dispatch(&retry_dispatch, prepared.sha256())
+        .await?;
+
+    let success_process = Arc::new(FakeProcess::new(FakeMode::WorkFullSuccess));
+    let success_runtime = ClaudeCodeRuntime::new(policy.clone(), success_process.clone())?;
+    let success_service = AgentRunService::new(
+        store.clone(),
+        success_runtime,
+        "failed-retry-success-worker".to_owned(),
+        Duration::from_secs(30),
+    )?;
+    let scope_mismatch = success_service
+        .execute_reserved(
+            ExecuteAgentRun {
+                actor_id: retry_dispatch.actor_id,
+                project_id: ProjectId::new(),
+                course_id: retry_dispatch.run.course_id,
+                expected_environment_class: EnvironmentClass::Work,
+                request: match &retry_dispatch.request {
+                    InternalAgentRunRequest::Authoring(request) => request,
+                    InternalAgentRunRequest::WorkConfiguration(_) => {
+                        return Err("retry dispatch was not an authoring request".into());
+                    }
+                },
+                idempotency_key: &retry_dispatch.idempotency_key,
+                input: prepared.clone(),
+                cancellation: RunCancellation::new(),
+                now,
+                trace_id: &retry_dispatch.trace_id,
+            },
+            retry_dispatch.run.clone(),
+        )
+        .await;
+    assert!(matches!(
+        scope_mismatch,
+        Err(AgentRunStoreError::IdentityMismatch)
+    ));
+
+    let result = success_service
+        .execute_reserved_dispatch(retry_dispatch, prepared, RunCancellation::new(), now)
+        .await?;
+    let AgentRunDispatch::Executed(result) = result else {
+        return Err("retried dispatch did not complete the second attempt".into());
+    };
+    assert_eq!(result.run.state, AgentRunState::Succeeded);
+    assert_eq!(result.run.tracks[0].attempts.len(), 2);
+    assert_eq!(
+        result.run.tracks[0].attempts[0].state,
+        contracts::authoring::AgentAttemptState::Failed
+    );
+    assert_eq!(
+        result.run.tracks[0].attempts[1].state,
+        contracts::authoring::AgentAttemptState::Succeeded
+    );
+    assert_eq!(success_process.commands().len(), 1);
+    assert!(
+        store
+            .claim_dispatch(Duration::from_secs(1))
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
 fn work_dispatch_command(
     policy: &ProjectLlmEgressPolicy,
     package: &ProblemPackage,
@@ -3282,8 +3474,79 @@ async fn assert_durable_cancellation(
             .complete_track(lease, outcome, now, "trace-agent-cross-worker-cancel")
             .await?;
     }
-    assert_eq!(store.load(run.id).await?.state, AgentRunState::Cancelled);
+    let cancelled = store.load(run.id).await?;
+    assert_eq!(cancelled.state, AgentRunState::Cancelled);
     assert!(process.commands().is_empty());
+
+    // An explicit retry starts a new generation and clears only the old run-level cancellation
+    // fence. The terminal leases from the cancelled generation remain fenced out.
+    let retried = store
+        .retry_track_revisioned(
+            cancelled.project_id,
+            cancelled.course_id,
+            cancelled.id,
+            AgentTrackKind::Environment,
+            cancelled.revision,
+            &IdempotencyKey::parse("agent-run-cancel-retry-0001")?,
+        )
+        .await?;
+    assert_eq!(retried.state, AgentRunState::Cancelled);
+    assert_eq!(retried.revision.get(), cancelled.revision.get() + 1);
+    assert_eq!(
+        retried
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Environment)
+            .ok_or("retried environment track missing")?
+            .attempts
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .heartbeat_track(&environment, Duration::from_secs(1))
+            .await,
+        Err(AgentRunStoreError::LeaseLost)
+    );
+    let retry_lease = store
+        .claim_track(
+            retried.id,
+            AgentTrackKind::Environment,
+            prepared.sha256(),
+            "cancel-retry-worker",
+            Duration::from_secs(1),
+        )
+        .await?
+        .ok_or("cancelled environment retry was not claimable")?;
+    assert_eq!(retry_lease.attempt, 2);
+    assert!(
+        !store
+            .heartbeat_track(&retry_lease, Duration::from_secs(1))
+            .await?
+    );
+    let retry_outcome = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            prepared.clone(),
+            RunCancellation::new(),
+        )
+        .await;
+    store
+        .complete_track(&retry_lease, retry_outcome, now, "trace-agent-cancel-retry")
+        .await?;
+    let resumed = store.load(run.id).await?;
+    assert_eq!(resumed.state, AgentRunState::PartiallySucceeded);
+    let environment = resumed
+        .tracks
+        .iter()
+        .find(|track| track.kind == AgentTrackKind::Environment)
+        .ok_or("resumed environment track missing")?;
+    assert_eq!(environment.attempts.len(), 2);
+    assert_eq!(
+        environment.attempts[1].state,
+        contracts::authoring::AgentAttemptState::Succeeded
+    );
+    assert_eq!(process.commands().len(), 1);
     Ok(())
 }
 
