@@ -478,6 +478,12 @@ function resourceRequestLabel(request) {
   return `${request.id ?? 'id-missing'}:${request.requestKey ?? 'request-key-missing'}:${request.state ?? 'state-missing'}`
 }
 
+function adminTechnicalDetailValue(detail, label) {
+  return detail.locator('.advanced-detail-grid .meta-label')
+    .filter({ hasText: new RegExp(`^${label}$`) })
+    .locator('xpath=following-sibling::code[1]')
+}
+
 export async function assertNoPendingEvaluationTaskResourceRequests(request, projectId, studentActorId) {
   const requests = await readResourceRequests(request)
   const pending = requests.filter((item) =>
@@ -516,15 +522,19 @@ export async function approveEvaluationTaskResourceRequestByUi(page, request, pr
   await page.goto('/admin/resource-approval', { waitUntil: 'domcontentloaded' })
   const row = page.locator('tbody tr').filter({ hasText: request.requestKey })
   await expect(row).toHaveCount(1, { timeout: 120_000 })
-  await expect(row).toContainText(`TaskRun ${taskRunId}`)
   await row.click()
 
   const detail = page.locator('.request-detail')
   await expect(detail).toBeVisible()
-  await expect(detail).toContainText(request.id)
-  await expect(detail).toContainText(projectId)
-  await expect(detail).toContainText(studentActorId)
-  await expect(detail).toContainText(`TaskRun ${taskRunId}`)
+  const technicalDetails = detail.locator('details.advanced-details')
+  await expect(technicalDetails).toBeVisible()
+  if ((await technicalDetails.getAttribute('open')) === null) await technicalDetails.locator('summary').click()
+  await expect(technicalDetails.locator('.advanced-detail-grid')).toBeVisible()
+  await expect(adminTechnicalDetailValue(detail, '申请 ID')).toHaveText(request.id)
+  await expect(adminTechnicalDetailValue(detail, 'Request Key')).toHaveText(request.requestKey)
+  await expect(adminTechnicalDetailValue(detail, '项目 ID')).toHaveText(projectId)
+  await expect(adminTechnicalDetailValue(detail, '申请人 Actor ID')).toHaveText(studentActorId)
+  await expect(adminTechnicalDetailValue(detail, '目标标识')).toHaveText(`TaskRun ${taskRunId}`)
 
   const reason = detail.locator('textarea.reason-input')
   await expect(reason).toHaveCount(1)
