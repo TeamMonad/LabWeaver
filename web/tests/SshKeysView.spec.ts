@@ -18,7 +18,7 @@ const mockKey = {
   id: 'key-1',
   actorId: 'actor-1',
   algorithm: 'ed25519',
-  fingerprintSha256: 'a'.repeat(64),
+  fingerprintSha256: `SHA256:${'A'.repeat(43)}`,
   createdAt: '2026-07-11T10:00:00.000Z',
   revision: 1,
 }
@@ -50,6 +50,9 @@ describe('SshKeysView', () => {
     const wrapper = mount(SshKeysView)
     await vi.waitFor(() => expect(wrapper.text()).toContain('ed25519'))
     expect(wrapper.text()).toContain(mockKey.fingerprintSha256.slice(0, 8))
+    const fingerprintCode = wrapper.get(`code[title="${mockKey.fingerprintSha256}"]`)
+    expect(fingerprintCode.attributes('title')).toBe(mockKey.fingerprintSha256)
+    expect(fingerprintCode.text()).toBe('SHA256:A…AAAAAAAA')
   })
 
   it('creates a new SSH key and refreshes the list', async () => {

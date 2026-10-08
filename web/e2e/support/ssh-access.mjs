@@ -35,14 +35,16 @@ export async function addSshPublicKeyByUi(page, identity, onAccepted = () => {})
     algorithm: 'ed25519',
     fingerprintSha256: identity.fingerprintSha256,
   })
-  const fingerprintRow = page.locator('code[title]').filter({ hasText: identity.fingerprintSha256.slice(0, 16) })
+  const fingerprintRow = page.locator(`code[title="${identity.fingerprintSha256}"]`)
+  await expect(fingerprintRow).toBeVisible({ timeout: 30_000 })
   await expect(fingerprintRow).toHaveAttribute('title', identity.fingerprintSha256, { timeout: 30_000 })
   return created
 }
 
 export async function deleteSshPublicKeyByUi(page, key) {
   await page.goto('/student/ssh-keys', { waitUntil: 'domcontentloaded' })
-  const fingerprintCell = page.locator('code[title]').filter({ hasText: key.fingerprintSha256.slice(0, 16) })
+  const fingerprintCell = page.locator(`code[title="${key.fingerprintSha256}"]`)
+  await expect(fingerprintCell).toBeVisible({ timeout: 30_000 })
   await expect(fingerprintCell).toHaveAttribute('title', key.fingerprintSha256, { timeout: 30_000 })
   const row = fingerprintCell.locator('xpath=ancestor::tr[1]')
   await row.getByRole('button', { name: '删除', exact: true }).click()
