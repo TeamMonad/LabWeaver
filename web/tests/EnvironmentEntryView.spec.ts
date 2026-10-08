@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { h } from 'vue'
 import { createRouter, createWebHistory, RouterView } from 'vue-router'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
@@ -183,12 +183,12 @@ async function mountAt(
   })
   await router.push({ path: entryPath, query })
   await router.isReady()
-  const component = defineComponent({
+  const component = {
     setup: () => () => h('div', [
       ...(withProjectSelector ? [h(GcpProjectSelector)] : []),
       h(RouterView),
     ]),
-  })
+  }
   const wrapper = mount(component, {
     global: { plugins: [router] },
   })
@@ -231,7 +231,7 @@ describe('EnvironmentEntryView', () => {
 
     let releaseGuard!: () => void
     const guardReady = new Promise<void>((resolve) => { releaseGuard = resolve })
-    const RootView = defineComponent({
+    const RootView = {
       setup() {
         const projects = useProjects()
         projects.projects = { kind: 'idle' }
@@ -239,7 +239,7 @@ describe('EnvironmentEntryView', () => {
         return { projects }
       },
       template: '<RouterLink to="/student/environments" data-testid="student-environment-link">环境控制台</RouterLink>',
-    })
+    }
     const router = createRouter({
       history: createWebHistory(),
       routes: [
@@ -252,7 +252,7 @@ describe('EnvironmentEntryView', () => {
     })
     await router.push('/')
     await router.isReady()
-    const wrapper = mount(defineComponent({ setup: () => () => h(RouterView) }), {
+    const wrapper = mount({ setup: () => () => h(RouterView) }, {
       global: { plugins: [router] },
     })
     mountedWrappers.push(wrapper)
