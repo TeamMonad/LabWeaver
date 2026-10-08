@@ -1099,7 +1099,7 @@ fn ensure_offline_pkg_closure(
         if !present {
             let output_path = path.to_string_lossy().into_owned();
 
-            run_checked(
+            let download_result = run_checked(
                 Command::new("curl").args([
                     "--fail",
                     "--silent",
@@ -1114,7 +1114,33 @@ fn ensure_offline_pkg_closure(
                     url,
                 ]),
                 "download vendored offline package",
-            )?;
+            );
+            if let Err(error) = download_result {
+                let cleanup_detail = match fs::remove_file(&path) {
+                    Ok(()) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(format!("partial package cleanup failed: {error}")),
+                };
+                return Err(match error {
+                    AppError::ExternalCommand { role, code, detail } => {
+                        let mut detail = detail.unwrap_or_default();
+                        if !detail.is_empty() {
+                            detail.push_str("; ");
+                        }
+                        detail.push_str(&format!("package file {file}; source URL {url}"));
+                        if let Some(cleanup_detail) = cleanup_detail {
+                            detail.push_str("; ");
+                            detail.push_str(&cleanup_detail);
+                        }
+                        AppError::ExternalCommand {
+                            role,
+                            code,
+                            detail: Some(detail),
+                        }
+                    }
+                    error => error,
+                });
+            }
         }
         let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
             code: "LW_PACKAGE_INPUT_MISSING",
