@@ -105,6 +105,12 @@ function runIsFullyTerminal(run) {
   return terminalRunState(run.state) && !runHasActiveAttempt(run)
 }
 
+function runHasManualRetry(run) {
+  return run.tracks.some((track) => (track.attempts ?? []).some((attempt) => (
+    Number.isInteger(attempt.number) && attempt.number >= 2
+  )))
+}
+
 async function configureLabPackageCopy(packageCopy) {
   if (process.env.LABWEAVER_E2E_LAB !== 'cuda') return
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(LAB.gpuClass)) {
@@ -172,18 +178,18 @@ async function waitForTerminalExperimentRun(
   projectId,
   runId,
   onPendingResourceRequests = null,
-  { minimumRevision = 0, requiredEnvironmentAttemptNumber = null } = {},
+  { minimumRevision = 0, requiredTrackKind = 'environment', requiredTrackAttemptNumber = null } = {},
 ) {
   return await pollJson(
     request,
     `/api/v1/projects/${projectId}/agent-runs/${runId}`,
     async (value) => {
       const revisionIsFresh = Number.isInteger(value.revision) && value.revision >= minimumRevision
-      const requiredAttempt = requiredEnvironmentAttemptNumber === null
+      const requiredAttempt = requiredTrackAttemptNumber === null
         ? null
-        : value.tracks.find((track) => track.kind === 'environment')?.attempts
-          ?.find((attempt) => attempt.number === requiredEnvironmentAttemptNumber)
-      const requiredAttemptIsTerminal = requiredEnvironmentAttemptNumber === null
+        : value.tracks.find((track) => track.kind === requiredTrackKind)?.attempts
+          ?.find((attempt) => attempt.number === requiredTrackAttemptNumber)
+      const requiredAttemptIsTerminal = requiredTrackAttemptNumber === null
         || ['succeeded', 'failed', 'cancelled'].includes(requiredAttempt?.state)
       const complete = runIsFullyTerminal(value) && revisionIsFresh && requiredAttemptIsTerminal
       if (!complete) await onPendingResourceRequests?.()
@@ -194,9 +200,10 @@ async function waitForTerminalExperimentRun(
   )
 }
 
-function isFirstFailedEnvironmentAttempt(run) {
+function isFirstFailedTrackAttempt(run, trackKind) {
   if (run.state !== 'failed' && run.state !== 'partially_succeeded') return false
-  const track = run.tracks.find((item) => item.kind === 'environment')
+  if (runHasActiveAttempt(run)) return false
+  const track = run.tracks.find((item) => item.kind === trackKind)
   const attempts = track?.attempts ?? []
   const last = attempts[attempts.length - 1]
   return attempts.length === 1
@@ -204,29 +211,25 @@ function isFirstFailedEnvironmentAttempt(run) {
     && (last.state === 'failed' || last.state === 'cancelled')
 }
 
-function environmentRetryAlreadyUsed(run) {
-  if (run.state !== 'failed' && run.state !== 'partially_succeeded') return false
-  const track = run.tracks.find((item) => item.kind === 'environment')
-  const attempts = track?.attempts ?? []
-  const last = attempts[attempts.length - 1]
-  return (last?.state === 'failed' || last?.state === 'cancelled')
-    && (attempts.length > 1 || last.number > 1)
-}
-
-async function retryFailedEnvironmentTrackByUi(page, projectId, run) {
+async function retryFailedTrackByUi(page, projectId, run, trackKind) {
+  if (runHasManualRetry(run)) throw new Error('LAB_EXPERIMENT_RESUME_MANUAL_RETRY_ALREADY_USED')
+  if (!isFirstFailedTrackAttempt(run, trackKind)) {
+    throw new Error(`LAB_EXPERIMENT_RESUME_${trackKind.toUpperCase()}_RETRY_TARGET_INVALID`)
+  }
+  const label = trackKind === 'environment' ? '环境' : '评测'
   await page.goto(
     `/teacher/materials?projectId=${encodeURIComponent(projectId)}&packageId=${encodeURIComponent(run.packageId)}&runId=${encodeURIComponent(run.id)}`,
     { waitUntil: 'domcontentloaded' },
   )
   await selectProjectByUi(page, projectId)
-  const retry = page.getByRole('button', { name: '重试环境轨道', exact: true })
+  const retry = page.getByRole('button', { name: `重试${label}轨道`, exact: true })
   await expect(retry).toBeVisible({ timeout: 120_000 })
   await expect(retry).toBeEnabled()
 
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
-      && url.pathname === `/api/v1/projects/${projectId}/agent-runs/${run.id}/tracks/environment/retry`
+      && url.pathname === `/api/v1/projects/${projectId}/agent-runs/${run.id}/tracks/${trackKind}/retry`
   })
   await retry.click()
   const response = await responsePromise
@@ -547,9 +550,19 @@ test('student completes a published lab experiment through the browser terminal'
   if (RETAIN_CUDA_SAMPLE && resumeExistingRun) {
     throw new Error('LAB_EXPERIMENT_RETAIN_CUDA_SAMPLE_REQUIRES_NEW_PROJECT')
   }
+  const resumeRetryTrack = process.env.LABWEAVER_E2E_LAB_RESUME_RETRY_TRACK?.trim() ?? ''
+  if (resumeRetryTrack && !['environment', 'evaluation'].includes(resumeRetryTrack)) {
+    throw new Error('LAB_EXPERIMENT_RESUME_RETRY_TRACK_INVALID')
+  }
+  if (resumeRetryTrack && !resumeExistingRun) {
+    throw new Error('LAB_EXPERIMENT_RESUME_RETRY_TRACK_REQUIRES_TARGET')
+  }
   const resumeApprovalId = process.env.LABWEAVER_E2E_LAB_RESUME_APPROVAL_ID?.trim() ?? ''
   if (resumeApprovalId && !resumeExistingRun) {
     throw new Error('LAB_EXPERIMENT_RESUME_APPROVAL_REQUIRES_TARGET')
+  }
+  if (resumeRetryTrack && resumeApprovalId) {
+    throw new Error('LAB_EXPERIMENT_RESUME_RETRY_TRACK_CONFLICTS_WITH_APPROVAL')
   }
   const packageCopy = resumeExistingRun ? null : await mkdtemp(join(tmpdir(), 'labweaver-lab-'))
   let projectId = resumeProjectId || null
@@ -613,13 +626,16 @@ test('student completes a published lab experiment through the browser terminal'
           )
         }
         let retryWaitOptions = {}
-        if (isFirstFailedEnvironmentAttempt(run)) {
-          const acceptedRetry = await retryFailedEnvironmentTrackByUi(page, project.id, run)
+        const automaticEnvironmentRetry = !resumeRetryTrack && isFirstFailedTrackAttempt(run, 'environment')
+        const requestedRetryTrack = resumeRetryTrack || (automaticEnvironmentRetry ? 'environment' : '')
+        if (requestedRetryTrack) {
+          const acceptedRetry = await retryFailedTrackByUi(page, project.id, run, requestedRetryTrack)
           retryWaitOptions = {
             minimumRevision: acceptedRetry.revision,
-            requiredEnvironmentAttemptNumber: 2,
+            requiredTrackKind: requestedRetryTrack,
+            requiredTrackAttemptNumber: 2,
           }
-        } else if (environmentRetryAlreadyUsed(run)) {
+        } else if (runHasManualRetry(run)) {
           throw new Error('LAB_EXPERIMENT_RESUME_ENVIRONMENT_RETRY_ALREADY_USED')
         }
         completed = await waitForExperimentRun(
