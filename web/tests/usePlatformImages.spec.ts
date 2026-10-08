@@ -284,6 +284,38 @@ describe('usePlatformImages', () => {
     expect(images.state).toMatchObject({ kind: 'error', diagnostic: { code: 'LW_PLATFORM_IMAGE_UPLOAD_INVALID' } })
   })
 
+  it('keeps the creation key when the server reports an in-progress operation', async () => {
+    vi.mocked(createPlatformImageUpload)
+      .mockResolvedValueOnce({
+        error: {
+          diagnosticCode: 'LW_OPERATION_IN_PROGRESS',
+          detail: '�����ϴ�����������',
+          retryable: true,
+          status: 409,
+        },
+        response: { status: 409 },
+      } as never)
+      .mockResolvedValueOnce({ error: new Error('request timed out') } as never)
+    const input = {
+      kind: 'container' as const,
+      binding: 'ubuntu-24.04-v1',
+      targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+      trustRevision: 3,
+      reason: '�������ϴ�',
+    }
+    const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
+    const images = usePlatformImages()
+
+    await expect(images.upload(file, input)).resolves.toBe(false)
+    const firstKey = createPlatformImageUpload.mock.calls[0][0].headers['Idempotency-Key']
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload:create')).toContain(firstKey)
+
+    await expect(images.upload(file, input)).resolves.toBe(false)
+    expect(createPlatformImageUpload).toHaveBeenCalledTimes(2)
+    expect(createPlatformImageUpload.mock.calls[1][0].headers['Idempotency-Key']).toBe(firstKey)
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload:create')).toContain(firstKey)
+  })
+
   it('uploads at most three missing parts and completes with the server manifest', async () => {
     const partSize = 64 * 1024 * 1024
     const uploadId = '0197f0e0-0000-7000-8000-000000000040'

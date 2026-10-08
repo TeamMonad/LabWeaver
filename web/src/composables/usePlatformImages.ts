@@ -58,6 +58,12 @@ const UPLOAD_STATES = new Set<PlatformImageUploadState>([
   'failed',
   'cancelled',
 ])
+const TERMINAL_UPLOAD_CREATION_DIAGNOSTICS = new Set([
+  'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
+  'LW_PLATFORM_IMAGE_UPLOAD_INVALID',
+  'LW_PLATFORM_IMAGE_UPLOAD_NOT_FOUND',
+  'LW_PLATFORM_IMAGE_UPLOAD_STATE_CONFLICT',
+])
 
 type UploadPhase = 'uploading' | 'completing'
 
@@ -874,7 +880,12 @@ export function usePlatformImages() {
     if (session.error) {
       const problem = extractProblemDetails(session.error)
       const responseStatus = session.response?.status ?? problem?.status
-      if (responseStatus !== undefined && responseStatus >= 400 && responseStatus < 500) {
+      const deterministicRejection = responseStatus !== undefined
+        && responseStatus >= 400
+        && responseStatus < 500
+        && problem?.retryable !== true
+        && (responseStatus !== 409 || TERMINAL_UPLOAD_CREATION_DIAGNOSTICS.has(problem?.diagnosticCode ?? ''))
+      if (deterministicRejection) {
         persistPendingUploadCreation(null)
       }
       failure(session.error, 'PLATFORM_IMAGE_UPLOAD_FAILED', '创建镜像上传会话失败。')
