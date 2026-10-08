@@ -4,6 +4,7 @@ import { expectJson, navigateFromHomeByUi, pollJson } from '../support/live.mjs'
 import {
   assertAcceptedVgpuImageCompletion,
   matchesVgpuImageCatalogRow,
+  raceVgpuImageCompletionWithDiagnostic,
   validateVgpuImageImport,
 } from '../support/vgpu-image-import.mjs'
 
@@ -85,6 +86,131 @@ function waitForResponseSafely(page, predicate, options) {
   const responsePromise = page.waitForResponse(predicate, options)
   void responsePromise.catch(() => undefined)
   return responsePromise
+}
+
+function waitForCompletionResponse(page, predicate, timeout) {
+  let settled = false
+  let timeoutId
+  let resolveResponse
+  let rejectResponse
+  const cleanup = () => {
+    page.off('response', onResponse)
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+  }
+  const onResponse = (response) => {
+    if (settled) return
+    try {
+      if (!predicate(response)) return
+    } catch (error) {
+      settled = true
+      cleanup()
+      rejectResponse(error)
+      return
+    }
+    settled = true
+    cleanup()
+    resolveResponse(response)
+  }
+  const promise = new Promise((resolve, reject) => {
+    resolveResponse = resolve
+    rejectResponse = reject
+  })
+  void promise.catch(() => undefined)
+  page.on('response', onResponse)
+  timeoutId = setTimeout(() => {
+    if (settled) return
+    settled = true
+    cleanup()
+    rejectResponse(new Error('LW_VGPU_IMAGE_COMPLETION_RESPONSE_TIMEOUT'))
+  }, timeout)
+  return {
+    promise,
+    cancel() {
+      if (settled) return
+      settled = true
+      cleanup()
+    },
+  }
+}
+
+async function readUploadUiDiagnostic(page) {
+  const status = page.locator('.upload-status')
+  const codeLocator = status.locator('.upload-diagnostic-code')
+  if (await codeLocator.count() === 0) return null
+  const code = (await codeLocator.first().textContent())?.trim()
+  if (!code) return null
+  return {
+    code,
+    message: (await status.locator('p').first().textContent())?.trim() || '',
+  }
+}
+
+function waitForUploadUiDiagnostic(page, previousDiagnostic = null) {
+  let cancelled = false
+  let timerId
+  let resolveDiagnostic
+  let rejectDiagnostic
+  let intervalIndex = 0
+  const intervals = [500, 1000, 2000]
+  const poll = async () => {
+    if (cancelled) return
+    try {
+      const diagnostic = await readUploadUiDiagnostic(page)
+      if (cancelled) return
+      if (
+        previousDiagnostic
+        && diagnostic
+        && diagnostic.code === previousDiagnostic.code
+        && diagnostic.message === previousDiagnostic.message
+      ) {
+        const delay = intervals[Math.min(intervalIndex, intervals.length - 1)]
+        intervalIndex += 1
+        timerId = setTimeout(() => { void poll() }, delay)
+        return
+      }
+      if (diagnostic) {
+        resolveDiagnostic(diagnostic)
+        return
+      }
+      const delay = intervals[Math.min(intervalIndex, intervals.length - 1)]
+      intervalIndex += 1
+      timerId = setTimeout(() => { void poll() }, delay)
+    } catch (error) {
+      if (!cancelled) rejectDiagnostic(error)
+    }
+  }
+  const promise = new Promise((resolve, reject) => {
+    resolveDiagnostic = resolve
+    rejectDiagnostic = reject
+  })
+  void promise.catch(() => undefined)
+  void poll()
+  return {
+    promise,
+    cancel() {
+      cancelled = true
+      if (timerId !== undefined) clearTimeout(timerId)
+    },
+  }
+}
+
+async function waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, previousDiagnostic = null) {
+  const diagnosticWaiter = waitForUploadUiDiagnostic(page, previousDiagnostic)
+  try {
+    const outcome = await raceVgpuImageCompletionWithDiagnostic(
+      completionResponseWaiter.promise,
+      diagnosticWaiter.promise,
+    )
+    if (outcome.kind === 'diagnostic') {
+      const error = new Error(`LW_VGPU_IMAGE_UPLOAD_UI_FAILED:${outcome.failure.code}:${outcome.failure.message}`)
+      error.code = outcome.failure.code
+      throw error
+    }
+    return outcome.response
+  } finally {
+    completionResponseWaiter.cancel()
+    diagnosticWaiter.cancel()
+  }
 }
 
 async function waitForUploadSession(page, input) {
@@ -242,12 +368,12 @@ test('platform administrator refreshes a real VM upload and cancels it through t
   let cleanupError
   try {
     ({ session } = await waitForUploadSession(page, input))
-    const completionResponsePromise = waitForResponseSafely(page, (response) => {
+    const completionResponseWaiter = waitForCompletionResponse(page, (response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
-    }, { timeout: 1_200_000 })
-    const completionResponse = await completionResponsePromise
+    }, 1_200_000)
+    const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter)
     const completion = {
       status: completionResponse.status(),
       body: await completionResponse.json().catch(() => null),
@@ -364,13 +490,14 @@ test('platform administrator retries a real VM import after a network failure th
     const retryButton = page.locator('.upload-status').getByRole('button', { name: '重试导入', exact: true })
     await expect(retryButton).toBeVisible({ timeout: 120_000 })
     await expect(retryButton).toBeEnabled()
-    const completionResponsePromise = waitForResponseSafely(page, (response) => {
+    const previousDiagnostic = await readUploadUiDiagnostic(page)
+    const completionResponseWaiter = waitForCompletionResponse(page, (response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
-    }, { timeout: 120_000 })
+    }, 120_000)
     await retryButton.click()
-    const completionResponse = await completionResponsePromise
+    const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, previousDiagnostic)
     const completion = {
       status: completionResponse.status(),
       body: await completionResponse.json().catch(() => null),
@@ -461,13 +588,13 @@ test('platform administrator imports one requested vGPU guest image through the 
 
   const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
   await expect(importButton).toBeEnabled()
-  const completionResponsePromise = waitForResponseSafely(page, (response) => {
+  const completionResponseWaiter = waitForCompletionResponse(page, (response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
       && /^\/api\/v1\/admin\/images\/uploads\/[^/]+\/complete$/.test(url.pathname)
-  }, { timeout: 1_200_000 })
+  }, 1_200_000)
   await importButton.click()
-  const completionResponse = await completionResponsePromise
+  const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter)
   const completionBody = await completionResponse.json().catch(() => null)
   const completion = { status: completionResponse.status(), body: completionBody }
   const imported = await assertImportedUpload(page, INPUT, completion)

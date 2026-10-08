@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { validateVgpuImageImport } from '../e2e/support/vgpu-image-import.mjs'
+import {
+  raceVgpuImageCompletionWithDiagnostic,
+  validateVgpuImageImport,
+} from '../e2e/support/vgpu-image-import.mjs'
 
 const input = {
   binding: 'ubuntu-24.04-vgpu-v1',
@@ -34,6 +37,30 @@ const entry = {
 }
 
 describe('vGPU image import result validation', () => {
+  it('returns an observed UI diagnostic before a pending completion response', async () => {
+    let resolveCompletion
+    const completion = new Promise((resolve) => { resolveCompletion = resolve })
+    const diagnostic = Promise.resolve({ code: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED', message: '上传会话已过期' })
+
+    await expect(raceVgpuImageCompletionWithDiagnostic(completion, diagnostic)).resolves.toEqual({
+      kind: 'diagnostic',
+      failure: { code: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED', message: '上传会话已过期' },
+    })
+    resolveCompletion({ status: 202 })
+  })
+
+  it('returns the completion response when it resolves before a pending UI diagnostic', async () => {
+    let resolveDiagnostic
+    const diagnostic = new Promise((resolve) => { resolveDiagnostic = resolve })
+    const completion = Promise.resolve({ status: 202 })
+
+    await expect(raceVgpuImageCompletionWithDiagnostic(completion, diagnostic)).resolves.toEqual({
+      kind: 'completion',
+      response: { status: 202 },
+    })
+    resolveDiagnostic({ code: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED', message: '上传会话已过期' })
+  })
+
   it('accepts the numeric 202 completion response only after matching catalog readback', () => {
     expect(validateVgpuImageImport({ completion, status, entries: [entry], input })).toEqual({
       uploadId: status.uploadId,

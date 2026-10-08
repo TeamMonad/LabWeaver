@@ -1,6 +1,20 @@
 const TRUST_REVISION = 1
 const DISK_FORMAT = 'qcow2'
 
+export function raceVgpuImageCompletionWithDiagnostic(completionPromise, diagnosticPromise) {
+  const completion = Promise.resolve(completionPromise).then((response) => ({
+    kind: 'completion',
+    response,
+  }))
+  const diagnostic = Promise.resolve(diagnosticPromise).then((failure) => ({
+    kind: 'diagnostic',
+    failure,
+  }))
+  void completion.catch(() => undefined)
+  void diagnostic.catch(() => undefined)
+  return Promise.race([completion, diagnostic])
+}
+
 function formatBytes(bytes) {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   if (bytes === 0) return '0 B'
