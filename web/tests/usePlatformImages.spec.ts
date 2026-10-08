@@ -223,7 +223,8 @@ describe('usePlatformImages', () => {
       },
       error: undefined as never,
     })
-    vi.mocked(putFileWithProgress).mockRejectedValue(new Error('上传失败：403 Forbidden'))
+    const uploadError = '对象存储上传失败：HTTP 403；对象存储错误 AccessDenied：Forbidden'
+    vi.mocked(putFileWithProgress).mockRejectedValue(new Error(uploadError))
     const images = usePlatformImages()
 
     await expect(images.upload(new File(['archive'], 'layout.tar'), {
@@ -238,7 +239,7 @@ describe('usePlatformImages', () => {
     expect(images.state.kind).toBe('error')
     if (images.state.kind === 'error') {
       expect(images.state.diagnostic.code).toBe('PLATFORM_IMAGE_UPLOAD_FAILED')
-      expect(images.state.diagnostic.message).toBe('归档上传失败。请检查网络后重新选择文件。')
+      expect(images.state.diagnostic.message).toBe(uploadError)
       expect(images.state.diagnostic.retryable).toBe(false)
     }
   })
