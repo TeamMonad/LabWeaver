@@ -1070,13 +1070,15 @@ impl CapacityReconcileWorker {
             if matches!(&error, CapacityProviderError::HandoffInvalid) {
                 self.store
                     .fail_pre_handoff_capacity_handoff(
-                        item.claim.id,
-                        item.claim.revision,
-                        item.lease.id,
-                        item.lease.revision,
-                        error.diagnostic(),
-                        self.environment_handoff.system_actor_id,
-                        &format!("resource-handoff-rejected-{}", item.claim.id),
+                        crate::store::FailPreHandoffCapacityHandoff {
+                            claim_id: item.claim.id,
+                            expected_claim_revision: item.claim.revision,
+                            lease_id: item.lease.id,
+                            expected_lease_revision: item.lease.revision,
+                            diagnostic_code: error.diagnostic().to_owned(),
+                            actor: self.environment_handoff.system_actor_id,
+                            trace_id: format!("resource-handoff-rejected-{}", item.claim.id),
+                        },
                     )
                     .await?;
             } else {
@@ -1127,13 +1129,15 @@ impl CapacityReconcileWorker {
                 if matches!(&error, CapacityProviderError::HandoffInvalid) {
                     self.store
                         .fail_pre_handoff_capacity_handoff(
-                            item.claim.id,
-                            item.claim.revision,
-                            item.lease.id,
-                            item.lease.revision,
-                            error.diagnostic(),
-                            self.environment_handoff.system_actor_id,
-                            &format!("resource-handoff-rejected-{}", item.claim.id),
+                            crate::store::FailPreHandoffCapacityHandoff {
+                                claim_id: item.claim.id,
+                                expected_claim_revision: item.claim.revision,
+                                lease_id: item.lease.id,
+                                expected_lease_revision: item.lease.revision,
+                                diagnostic_code: error.diagnostic().to_owned(),
+                                actor: self.environment_handoff.system_actor_id,
+                                trace_id: format!("resource-handoff-rejected-{}", item.claim.id),
+                            },
                         )
                         .await?;
                 } else {
@@ -1391,8 +1395,9 @@ impl CapacityProviderError {
             Self::Readback => "LW_RESOURCE_CAPACITY_READBACK_INVALID",
             Self::Unavailable => "LW_RESOURCE_CAPACITY_UNAVAILABLE",
             Self::HandoffFence => "LW_RESOURCE_ENVIRONMENT_HANDOFF_FENCE_INVALID",
-            Self::HandoffRejected => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
-            Self::HandoffInvalid => "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+            Self::HandoffRejected | Self::HandoffInvalid => {
+                "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED"
+            }
             Self::LeaseSyncRejected => "LW_RESOURCE_ENVIRONMENT_LEASE_SYNC_REJECTED",
             Self::CleanupRejected => "LW_RESOURCE_ENVIRONMENT_CLEANUP_REJECTED",
             Self::TaskOwnerRequired => "LW_RESOURCE_TASK_OWNER_REQUIRED",

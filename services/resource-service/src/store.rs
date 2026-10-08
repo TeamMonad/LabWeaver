@@ -76,6 +76,18 @@ pub struct ProvisioningCapacityClaim {
     pub lease_synced_revision: Option<Revision>,
 }
 
+/// Exact fence used when a pre-handoff Environment claim is failed and released.
+#[derive(Clone, Debug)]
+pub struct FailPreHandoffCapacityHandoff {
+    pub claim_id: contracts::CapacityClaimId,
+    pub expected_claim_revision: Revision,
+    pub lease_id: LeaseId,
+    pub expected_lease_revision: Revision,
+    pub diagnostic_code: String,
+    pub actor: contracts::ActorId,
+    pub trace_id: String,
+}
+
 /// Workload identity that owns a durable GPU reservation.
 #[derive(Clone, Debug)]
 pub(crate) enum ActiveReservationTarget {
@@ -3410,28 +3422,22 @@ impl PgResourceStore {
     #[allow(clippy::too_many_lines)]
     pub async fn fail_pre_handoff_capacity_handoff(
         &self,
-        claim_id: contracts::CapacityClaimId,
-        expected_claim_revision: contracts::Revision,
-        lease_id: LeaseId,
-        expected_lease_revision: contracts::Revision,
-        diagnostic_code: &str,
-        actor: contracts::ActorId,
-        trace_id: &str,
+        input: FailPreHandoffCapacityHandoff,
     ) -> Result<(), ResourceStoreError> {
-        validate_trace(trace_id)?;
-        if !valid_diagnostic(diagnostic_code) {
+        validate_trace(&input.trace_id)?;
+        if !valid_diagnostic(&input.diagnostic_code) {
             return Err(ResourceStoreError::DiagnosticInvalid);
         }
         let mut transaction = self.pool.begin().await?;
-        let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let lease = load_locked_lease(&mut transaction, input.lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
-        if claim.revision != expected_claim_revision
+        let claim = load_locked_claim(&mut transaction, input.claim_id).await?;
+        if claim.revision != input.expected_claim_revision
             || !matches!(
                 claim.state,
                 CapacityClaimState::Provisioning | CapacityClaimState::Ready
             )
-            || lease.revision != expected_lease_revision
+            || lease.revision != input.expected_lease_revision
             || lease.state != ResourceLeaseState::Active
             || lease.claim_id != claim.id
             || claim.request_id != request.id
@@ -3444,9 +3450,9 @@ impl PgResourceStore {
         let now = database_now(&mut transaction).await?;
         let expiring_lease = ResourceLifecycle::begin_lease_expiry(
             &lease,
-            expected_lease_revision,
+            input.expected_lease_revision,
             now,
-            Some(diagnostic_code.to_owned()),
+            Some(input.diagnostic_code.clone()),
         )?;
         let revoked_lease = ResourceLifecycle::complete_lease_expiry(
             &expiring_lease,
@@ -3456,7 +3462,7 @@ impl PgResourceStore {
         let expiring_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
         let mut expired_request =
             ResourceLifecycle::complete_expiry(&expiring_request, expiring_request.revision, now)?;
-        expired_request.diagnostic_code = Some(diagnostic_code.to_owned());
+        expired_request.diagnostic_code = Some(input.diagnostic_code.clone());
         let releasing_claim = transition_claim(&claim, CapacityClaimState::Releasing)?;
         let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;
 
@@ -3475,7 +3481,7 @@ impl PgResourceStore {
         )
         .bind(claim.id.as_uuid())
         .bind(attempt)
-        .bind(diagnostic_code)
+        .bind(&input.diagnostic_code)
         .execute(&mut *transaction)
         .await?;
 
@@ -3486,7 +3492,7 @@ impl PgResourceStore {
              WHERE claim_id=$1",
         )
         .bind(claim.id.as_uuid())
-        .bind(diagnostic_code)
+        .bind(&input.diagnostic_code)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -3507,8 +3513,8 @@ impl PgResourceStore {
             &expiring_request,
             expiring_request.revision.get(),
             Some(request.state),
-            Some(actor),
-            trace_id,
+            Some(input.actor),
+            &input.trace_id,
         )
         .await?;
         insert_transition(
@@ -3516,8 +3522,8 @@ impl PgResourceStore {
             &expired_request,
             expired_request.revision.get(),
             Some(expiring_request.state),
-            Some(actor),
-            trace_id,
+            Some(input.actor),
+            &input.trace_id,
         )
         .await?;
         enqueue_lease_event(
@@ -3525,14 +3531,14 @@ impl PgResourceStore {
             &expiring_lease,
             &expiring_request,
             LEASE_EXPIRING_SUBJECT,
-            trace_id,
+            &input.trace_id,
         )
         .await?;
         enqueue_request_event(
             &mut transaction,
             &expiring_request,
             REQUEST_STATE_CHANGED_SUBJECT,
-            trace_id,
+            &input.trace_id,
         )
         .await?;
         enqueue_lease_event(
@@ -3540,14 +3546,14 @@ impl PgResourceStore {
             &revoked_lease,
             &expired_request,
             LEASE_REVOKED_SUBJECT,
-            trace_id,
+            &input.trace_id,
         )
         .await?;
         enqueue_request_event(
             &mut transaction,
             &expired_request,
             REQUEST_STATE_CHANGED_SUBJECT,
-            trace_id,
+            &input.trace_id,
         )
         .await?;
         transaction.commit().await?;

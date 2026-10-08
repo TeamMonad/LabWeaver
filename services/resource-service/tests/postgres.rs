@@ -3351,15 +3351,15 @@ async fn invalid_work_handoff_releases_the_pre_handoff_claim_without_retry()
     let (_container, pool) = migrated_pool().await?;
     let (store, request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
     store
-        .fail_pre_handoff_capacity_handoff(
-            claim.id,
-            claim.revision,
-            lease.id,
-            lease.revision,
-            "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
+        .fail_pre_handoff_capacity_handoff(resource_service::store::FailPreHandoffCapacityHandoff {
+            claim_id: claim.id,
+            expected_claim_revision: claim.revision,
+            lease_id: lease.id,
+            expected_lease_revision: lease.revision,
+            diagnostic_code: "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED".to_owned(),
             actor,
-            "trace-invalid-handoff",
-        )
+            trace_id: "trace-invalid-handoff".to_owned(),
+        })
         .await?;
 
     let expired = store.load(request.id).await?;
@@ -3409,13 +3409,15 @@ async fn invalid_work_handoff_releases_the_pre_handoff_claim_without_retry()
     assert!(
         store
             .fail_pre_handoff_capacity_handoff(
-                claim.id,
-                claim.revision,
-                lease.id,
-                lease.revision,
-                "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED",
-                actor,
-                "trace-invalid-duplicate",
+                resource_service::store::FailPreHandoffCapacityHandoff {
+                    claim_id: claim.id,
+                    expected_claim_revision: claim.revision,
+                    lease_id: lease.id,
+                    expected_lease_revision: lease.revision,
+                    diagnostic_code: "LW_RESOURCE_ENVIRONMENT_HANDOFF_REJECTED".to_owned(),
+                    actor,
+                    trace_id: "trace-invalid-duplicate".to_owned(),
+                },
             )
             .await
             .is_err()
