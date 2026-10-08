@@ -12,6 +12,7 @@ import {
 } from '../support/live.mjs'
 import {
   addProjectStudentByUi,
+  copyAuthoritativePackage,
   readActorId,
   snapshotProjectResourceRequestIds,
   startExperimentRunByUi,
@@ -19,7 +20,7 @@ import {
   waitForFrozenSubmission,
   waitForProjectEvaluationResultWithResourceApproval,
 } from '../support/real-experiment.mjs'
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -695,7 +696,7 @@ test('student completes a published lab experiment through its browser entry', a
         )
       }
     } else {
-      await cp(LAB.root, packageCopy, { recursive: true })
+      await copyAuthoritativePackage(LAB.root, packageCopy)
       await configureLabPackageCopy(packageCopy)
       if (process.env.LABWEAVER_E2E_LAB === 'xv6') {
         const sourcePath = join(packageCopy, LAB.frozenPath)

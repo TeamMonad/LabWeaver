@@ -64,17 +64,18 @@ def main() -> int:
                 "CTF_DB_PATH": str(db_path),
                 "CTF_PROOF_PATH": str(proof_path),
                 "CTF_PORT": str(port),
+                "PYTHONDONTWRITEBYTECODE": "1",
             }
         )
         subprocess.run(
-            [sys.executable, str(seed_path())],
+            [sys.executable, "-B", str(seed_path())],
             env=environment,
             check=True,
             stdout=subprocess.DEVNULL,
         )
 
         server = subprocess.Popen(
-            [sys.executable, str(server_path())],
+            [sys.executable, "-B", str(server_path())],
             env=environment,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

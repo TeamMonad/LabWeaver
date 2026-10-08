@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { cp, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +27,52 @@ const RESOURCE_REQUEST_TERMINAL_STATES = new Set(['expired', 'rejected', 'cancel
 const AUTHORING_ACTIVE_ATTEMPT_STATES = new Set(['pending', 'running', 'repairing', 'awaiting_approval'])
 const AUTHORING_REQUEST_KEY = /^authoring-([0-9a-f]{32})-(environment|evaluation)-([1-9][0-9]*)-([0-9a-f]{32})$/i
 const RESOURCE_APPROVAL_POLL_INTERVAL_MS = 1000
+
+function validatePackageRelativePath(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\\') || value.startsWith('/')) {
+    throw new Error('REAL_EXPERIMENT_PACKAGE_MANIFEST_PATH_INVALID')
+  }
+  const parts = value.split('/')
+  if (parts.some((part) => part.length === 0 || part === '.' || part === '..')) {
+    throw new Error('REAL_EXPERIMENT_PACKAGE_MANIFEST_PATH_INVALID')
+  }
+  return value
+}
+
+/**
+ * Copy only the checked-in package payload and its manifest into the transient
+ * upload directory. README.md remains available when present because the
+ * example Dockerfiles use it as build-context input even though it is package
+ * documentation rather than an evaluator file.
+ */
+export async function copyAuthoritativePackage(source, destination) {
+  const manifestPath = join(source, 'manifest.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  const entries = manifest?.spec?.files
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('REAL_EXPERIMENT_PACKAGE_MANIFEST_FILES_MISSING')
+  }
+  const paths = new Set(['manifest.json'])
+  for (const entry of entries) {
+    const path = validatePackageRelativePath(entry?.path)
+    if (!paths.add(path)) throw new Error('REAL_EXPERIMENT_PACKAGE_MANIFEST_PATH_DUPLICATE')
+  }
+  const readmePath = join(source, 'README.md')
+  try {
+    if ((await lstat(readmePath)).isFile()) paths.add('README.md')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+
+  await mkdir(destination, { recursive: true })
+  for (const path of paths) {
+    const sourcePath = join(source, ...path.split('/'))
+    const destinationPath = join(destination, ...path.split('/'))
+    await mkdir(dirname(destinationPath), { recursive: true })
+    await cp(sourcePath, destinationPath)
+  }
+  return manifest
+}
 
 /**
  * Resolve the explicit opt-in settings for a billable provider run.

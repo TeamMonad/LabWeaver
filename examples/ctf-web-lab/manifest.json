@@ -61,7 +61,7 @@
       {
         "path": "scripts/local_test.py",
         "role": "public",
-        "sha256": "618a7fca842f3756be834eb7f60a3ecda4c70cdb9c9dc3620d7df88863c3186f"
+        "sha256": "35bdfabbca6a5e99af66a8e5094b33a6b559452848cb27a0139be7ac23f6ce91"
       },
       {
         "path": "seed/seed.py",
