@@ -294,35 +294,33 @@ export async function openPinnedSshSession(endpointGrant, identity) {
     resolveClosed(closeResult)
   })
 
-  let readyTimer
   try {
+    const readyDeadline = AbortSignal.timeout(30_000)
     await Promise.race([
       readyPromise,
       new Promise((_, reject) => {
-        readyTimer = setTimeout(() => reject(new Error('WORK_SSH_SESSION_CONNECT_TIMEOUT')), 30_000)
+        const onAbort = () => reject(new Error('WORK_SSH_SESSION_CONNECT_TIMEOUT'))
+        readyDeadline.addEventListener('abort', onAbort, { once: true })
+        if (readyDeadline.aborted) onAbort()
       }),
     ])
   } catch (error) {
     if (!closed) child.kill('SIGKILL')
     await closePromise
     throw error
-  } finally {
-    if (readyTimer) clearTimeout(readyTimer)
   }
 
   async function waitForClose(timeoutMs = 90_000) {
     if (closed) return closeResult
-    let closeTimer
-    try {
-      return await Promise.race([
-        closePromise,
-        new Promise((_, reject) => {
-          closeTimer = setTimeout(() => reject(new Error('WORK_SSH_SESSION_CLOSE_TIMEOUT')), timeoutMs)
-        }),
-      ])
-    } finally {
-      if (closeTimer) clearTimeout(closeTimer)
-    }
+    const closeDeadline = AbortSignal.timeout(timeoutMs)
+    return await Promise.race([
+      closePromise,
+      new Promise((_, reject) => {
+        const onAbort = () => reject(new Error('WORK_SSH_SESSION_CLOSE_TIMEOUT'))
+        closeDeadline.addEventListener('abort', onAbort, { once: true })
+        if (closeDeadline.aborted) onAbort()
+      }),
+    ])
   }
 
   async function close() {
