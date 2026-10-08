@@ -569,53 +569,6 @@ async function assertConnectionBlockedAfterLeaseRevoke(page, projectId, environm
   if (await createButton.count() > 0) await expect(createButton).toBeDisabled()
 }
 
-async function approveResourceRequest(browser, baseURL, requestBody) {
-  const context = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
-  const page = await context.newPage()
-  try {
-    await page.goto('/admin/resource-approval', { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: '资源审批与资源使用授权管理', exact: true })).toBeVisible()
-    const row = page.locator('tbody tr').filter({ hasText: requestBody.requestKey })
-    await expect(row).toHaveCount(1, { timeout: 120_000 })
-    await row.click()
-    const targetEnvironmentValue = page
-      .locator('.request-detail .meta-row')
-      .filter({ has: page.locator('.meta-label', { hasText: /^目标$/ }) })
-      .locator('code.meta-value')
-    await expect(targetEnvironmentValue).toHaveCount(1)
-    await expect(targetEnvironmentValue).toHaveText(requestBody.target.environmentId)
-    await page.getByLabel('资源申请操作理由', { exact: true }).fill('已确认项目 Work 发布版本与 CPU 容量申请。')
-    if (requestBody.resources?.gpu) {
-      const provider = page.getByRole('combobox', { name: 'GPU Provider Binding', exact: true })
-      await expect(provider).toBeEnabled()
-      await provider.selectOption(WORK_PROVIDER_BINDING)
-    } else {
-      await page.getByRole('textbox', { name: '执行后端绑定', exact: true }).fill(WORK_PROVIDER_BINDING)
-    }
-    await page.getByLabel('批准时长（秒）', { exact: true }).fill(String(requestBody.durationSeconds))
-    const approveButton = page.getByRole('button', { name: '批准', exact: true })
-    await expect(approveButton).toBeEnabled()
-    const responsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'POST'
-        && url.pathname === `/api/v1/resource-requests/${requestBody.requestId}/approve`
-    })
-    await approveButton.click()
-    await page.getByRole('alertdialog').getByRole('button', { name: '确认', exact: true }).click()
-    const response = await responsePromise
-    expect(response.request().postDataJSON()).toMatchObject({
-      providerBinding: WORK_PROVIDER_BINDING,
-      durationSeconds: requestBody.durationSeconds,
-      resources: requestBody.resources,
-    })
-    const approval = await expectJson(response, 'RESOURCE_REQUEST_APPROVAL_FAILED')
-    expect(approval).toMatchObject({ requestId: requestBody.requestId, leaseId: expect.any(String) })
-    return approval
-  } finally {
-    await context.close()
-  }
-}
-
 function realContainerArtifact(candidate) {
   const artifact = candidate?.imageArtifact ?? candidate?.build?.artifact
   if (!artifact || artifact.kind !== 'container') throw new Error('REAL_WORK_CONTAINER_ARTIFACT_MISSING')
@@ -822,7 +775,15 @@ test('student provisions a Work environment, configures it, and releases its cap
     const environmentId = requestBody.target.environmentId
     trackedEnvironmentId = environmentId
 
-    const approval = await approveResourceRequest(browser, baseURL, requestBody)
+    const approval = await approveResourceRequestByUi(adminPage, {
+      requestKey: requestBody.requestKey,
+      projectId: project.id,
+      requestId: requestBody.requestId,
+      environmentId,
+      requesterId: studentActorId,
+      durationSeconds: requestBody.durationSeconds,
+      providerBinding: WORK_PROVIDER_BINDING,
+    })
     trackedLeaseId = approval.leaseId
     const activeRequest = await waitForResourceRequest(page.request, project.id, accepted.requestId)
     expect(activeRequest).toMatchObject({ id: accepted.requestId, projectId: project.id, state: 'active' })
