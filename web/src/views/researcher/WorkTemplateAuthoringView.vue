@@ -511,13 +511,8 @@ watch(
     candidateKey = ''
     environmentCandidate.value = { kind: 'idle' }
     candidateOutcome.value = null
-    releaseOutcome.value = null
     approvedCandidate.value = null
     candidateReviewAcknowledged.value = false
-    release.value = { kind: 'idle' }
-    releaseWithdrawal.value = null
-    withdrawalConfirmationOpen.value = false
-    releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     stopCandidatePolling()
     if (previousProjectId || previousRunId) upload.clear()
     loadedRouteRunId = runId
@@ -533,11 +528,15 @@ watch(
     releaseGeneration += 1
     if (!projectId || !releaseId) {
       releaseRouteState.value = 'none'
+      releaseOutcome.value = null
+      release.value = { kind: 'idle' }
       releaseWithdrawal.value = null
       withdrawalConfirmationOpen.value = false
-      if (!releaseId) release.value = { kind: 'idle' }
       return
     }
+    releaseRouteState.value = 'loading'
+    releaseOutcome.value = null
+    release.value = { kind: 'loading', message: '加载发布状态…' }
     releaseWithdrawal.value = null
     withdrawalConfirmationOpen.value = false
     void loadRelease(releaseId)
@@ -549,17 +548,11 @@ watch(
   () => props.projectId,
   () => {
     candidateGeneration += 1
-    releaseGeneration += 1
     candidateKey = ''
     environmentCandidate.value = { kind: 'idle' }
     candidateOutcome.value = null
-    releaseOutcome.value = null
     approvedCandidate.value = null
     candidateReviewAcknowledged.value = false
-    release.value = { kind: 'idle' }
-    releaseWithdrawal.value = null
-    withdrawalConfirmationOpen.value = false
-    releaseRouteState.value = releaseIdRef.value ? 'loading' : 'none'
     approvalReason.value = ''
     approvalRequestKey = null
     releaseRequestKey = null
@@ -683,7 +676,7 @@ async function loadRelease(id: string, silent = false) {
   releaseRouteState.value = 'loading'
   if (!silent) release.value = { kind: 'loading', message: '加载发布状态…' }
   const result = await getEnvironmentTemplateRelease({ path: { projectId, releaseId: id } })
-  if (generation !== releaseGeneration || props.projectId !== projectId) return
+  if (generation !== releaseGeneration || props.projectId !== projectId || releaseIdRef.value !== id) return
   if (result.error) {
     const problem = extractProblemDetails(result.error)
     const diagnostic = makeDiagnostic(problem?.diagnosticCode ?? 'WORK_TEMPLATE_RELEASE_LOAD_FAILED', problem?.detail ?? '加载 Work 模板发布状态失败', problem?.retryable ?? true)

@@ -438,6 +438,59 @@ describe('WorkTemplateAuthoringView', () => {
     wrapper.unmount()
   })
 
+  it('reloads the exact release after a project change while the initial release request is pending', async () => {
+    let resolveFirstRelease!: (value: { data: unknown; error: undefined }) => void
+    const firstRelease = new Promise<{ data: unknown; error: undefined }>((resolve) => {
+      resolveFirstRelease = resolve
+    })
+    let resolveSecondRelease!: (value: { data: unknown; error: undefined }) => void
+    const secondRelease = new Promise<{ data: unknown; error: undefined }>((resolve) => {
+      resolveSecondRelease = resolve
+    })
+    vi.mocked(getEnvironmentTemplateRelease).mockImplementation(async ({ path }) => {
+      if (path.releaseId === 'release-1') return firstRelease as never
+      return secondRelease as never
+    })
+    vi.mocked(getProjectAgentRun).mockImplementation(async ({ path }) => ({
+      data: {
+        ...run,
+        id: path.runId,
+        projectId: path.projectId,
+        tracks: [
+          { ...run.tracks[0], candidateId: `candidate-${path.projectId}` },
+          run.tracks[1],
+        ],
+      } as never,
+      error: undefined as never,
+    }))
+    vi.mocked(getProjectEnvironmentCandidate).mockImplementation(async ({ path }) => {
+      const candidateId = path.candidateId
+      return {
+        data: makeCandidate({
+          candidate: { ...makeCandidate().candidate, id: candidateId, projectId: path.projectId, runId: `run-${path.projectId}` },
+          approvals: [{ ...approval, candidateId }],
+        }) as never,
+        error: undefined as never,
+      }
+    })
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-project-1', releaseId: 'release-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(getEnvironmentTemplateRelease).toHaveBeenCalledWith({ path: { projectId: 'project-1', releaseId: 'release-1' } }))
+    await wrapper.setProps({ projectId: 'project-2', runId: 'run-project-2', releaseId: 'release-2' })
+    await vi.waitFor(() => expect(getEnvironmentTemplateRelease).toHaveBeenCalledWith({ path: { projectId: 'project-2', releaseId: 'release-2' } }))
+    expect(getEnvironmentTemplateRelease).toHaveBeenCalledTimes(2)
+
+    resolveFirstRelease({ data: { id: 'release-1', version: 1 }, error: undefined })
+    resolveSecondRelease({ data: { id: 'release-2', version: 2 }, error: undefined })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('release-2'))
+    expect(wrapper.text()).not.toContain('release-1')
+    wrapper.unmount()
+  })
+
   it('requires confirmation before withdrawing a restored Work release', async () => {
     candidate = makeCandidate({ approvals: [approval] })
     vi.mocked(getProjectAgentRun).mockResolvedValue({ data: run as never, error: undefined as never })
