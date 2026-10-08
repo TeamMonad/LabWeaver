@@ -3839,7 +3839,8 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("fixture apiVersion missing"))?;
         let error =
             serde_json::from_value::<contracts::evaluation::EvaluationSpec>(evaluation.clone())
-                .expect_err("the evaluation document must be rejected");
+                .err()
+                .ok_or_else(|| std::io::Error::other("the evaluation document must be rejected"))?;
 
         let diagnostic = evaluation_schema_diagnostic(&evaluation, &error);
         assert_eq!(diagnostic.schema_path, "/evaluation/apiVersion");
