@@ -295,7 +295,7 @@
         />
         <div>
           <strong>材料包已归档</strong>
-          <span>可以启动实验候选生成。保留策略：{{ packageRetentionLabel(uploadedPackage) }}。</span>
+          <span>可以启动实验候选生成。保留策略：{{ packageRetentionLabel(uploadedPackage.retention) }}。</span>
         </div>
         <details class="technical-details package-technical-details">
           <summary>查看材料包引用</summary>
@@ -533,8 +533,13 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import type { AgentRunHistoryItem, AgentRunSchema } from '@/generated/contracts'
-import type { ProblemPackageRetentionChoice, UploadFile } from '@/composables/useProjectProblemPackageUpload'
+import type {
+  AgentRunHistoryItem,
+  AgentRunSchema,
+  ProblemPackageRetentionChoice,
+  ProblemPackageSchemaRetentionSnapshot,
+} from '@/generated/contracts'
+import type { UploadFile } from '@/composables/useProjectProblemPackageUpload'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
 const route = useRoute()
@@ -652,15 +657,14 @@ function clearAuthoring() {
   updateAuthoringRoute({})
 }
 
-function packageRetentionLabel(packageData: NonNullable<typeof uploadedPackage.value>): string {
-  const retention = packageData.retention as unknown as { disposition?: string; retainUntil?: string | null }
+function packageRetentionLabel(retention: ProblemPackageSchemaRetentionSnapshot): string {
   return retention.retainUntil === null && retention.disposition === 'retain_until_revoked'
     ? '不过期'
     : '有限保留'
 }
 
 function packageRetentionChoice(packageData: NonNullable<typeof uploadedPackage.value>): ProblemPackageRetentionChoice {
-  return packageRetentionLabel(packageData) === '不过期' ? 'permanent' : 'finite'
+  return packageRetentionLabel(packageData.retention) === '不过期' ? 'permanent' : 'finite'
 }
 
 function attemptDiagnostic(track: AgentRunSchema['tracks'][number]): string | null {
