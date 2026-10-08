@@ -404,8 +404,22 @@ async function runTerminalCudaProbeFromWorkspace(page, environmentId) {
     )
     await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
     const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
-    if (await reconnect.count() > 0) {
-      await expect(reconnect).toBeEnabled({ timeout: 120_000 })
+    let consoleState = null
+    await expect.poll(async () => {
+      if (await reconnect.count() > 0
+        && await reconnect.first().isVisible()
+        && await reconnect.first().isEnabled()) {
+        consoleState = 'reconnect'
+        return consoleState
+      }
+      const consolePanel = page.locator('.console-panel')
+      if (await consolePanel.count() > 0 && await consolePanel.first().isVisible()) {
+        consoleState = 'panel'
+        return consoleState
+      }
+      return null
+    }, { timeout: 120_000, intervals: [250, 500, 1000] }).not.toBeNull()
+    if (consoleState === 'reconnect') {
       await reconnect.click()
     }
     const consolePanel = page.locator('.console-panel')
