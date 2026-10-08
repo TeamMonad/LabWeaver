@@ -903,7 +903,7 @@ const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
     (
         "libexpat1_2.5.0-1+deb12u3_amd64.deb",
         "04405c19b977d19c5e0fd7210e452b8044a065cb45a82012d45046738920ca75",
-        "http://deb.debian.org/debian-security/pool/updates/main/e/expat/libexpat1_2.5.0-1%2bdeb12u3_amd64.deb",
+        "https://security.debian.org/debian-security/pool/updates/main/e/expat/libexpat1_2.5.0-1%2bdeb12u3_amd64.deb",
     ),
     (
         "libgdbm-compat4_1.23-3_amd64.deb",
