@@ -362,6 +362,16 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('ssh')
   })
 
+  it('shows permanent material retention without inventing a deadline', async () => {
+    mockEnvironmentInstance({ eligibilityExpiresAt: null })
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('材料保留至'))
+    expect(wrapper.text()).toContain('不过期，直到明确撤回')
+    expect(wrapper.text()).not.toContain('Invalid Date')
+  })
+
   it('keeps a researcher Work console pending while the approved environment handoff appears', async () => {
     vi.useFakeTimers()
     try {

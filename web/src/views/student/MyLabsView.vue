@@ -116,7 +116,7 @@
             </template>
 
             <template #eligibilityExpiresAt="{ row }">
-              {{ formatTimestamp(row.eligibilityExpiresAt) }}
+              {{ environmentMaterialDeadlineLabel(row.eligibilityExpiresAt) }}
             </template>
 
             <template #actions="{ row }">
@@ -206,8 +206,8 @@
             <span class="prop-value">{{ environmentClassLabel(inspectedEnv.class) }}</span>
           </div>
           <div class="prop-row">
-            <span class="prop-label">到期时间</span>
-            <span class="prop-value">{{ formatTimestamp(inspectedEnv.eligibilityExpiresAt) }}</span>
+            <span class="prop-label">材料保留至</span>
+            <span class="prop-value">{{ environmentMaterialDeadlineLabel(inspectedEnv.eligibilityExpiresAt) }}</span>
           </div>
           <p class="inspect-next-action" role="status">{{ nextActionLabel(inspectedEnv) }}</p>
         </div>
@@ -400,7 +400,7 @@ const columns: DataTableColumn<EnvironmentSummary & { actions?: never }>[] = [
   { key: 'displayLabel', title: '项目环境名称 / ID' },
   { key: 'observedState', title: '状态' },
   { key: 'runtimeKind', title: 'Runtime' },
-  { key: 'eligibilityExpiresAt', title: '到期时间' },
+  { key: 'eligibilityExpiresAt', title: '材料保留至' },
   { key: 'actions', title: '操作' },
 ]
 
@@ -441,6 +441,10 @@ function selectRowForInspect(env: EnvironmentSummary) {
 
 function environmentClassLabel(environmentClass: EnvironmentSummary['class']): string {
   return environmentClass === 'work' ? 'Work 项目环境' : '课程实验环境'
+}
+
+function environmentMaterialDeadlineLabel(deadline: string | null): string {
+  return deadline === null ? '不过期，直到明确撤回' : formatTimestamp(deadline)
 }
 
 function hasActiveOperation(env: EnvironmentSummary): boolean {

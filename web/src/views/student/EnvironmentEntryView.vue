@@ -363,8 +363,8 @@
                       <span class="meta-item__value">{{ desiredEnvironmentStateLabel(data.desiredState) }}</span>
                     </div>
                     <div class="meta-item">
-                      <span class="meta-item__label">过期时间</span>
-                      <span class="meta-item__value">{{ formatTimestamp(data.eligibilityExpiresAt) }}</span>
+                      <span class="meta-item__label">材料保留至</span>
+                      <span class="meta-item__value">{{ environmentMaterialDeadlineLabel(data.eligibilityExpiresAt) }}</span>
                     </div>
                   </div>
                   <details class="environment-id-details">
@@ -1601,6 +1601,10 @@ function desiredEnvironmentStateLabel(value: string): string {
     stopped: '已停止',
     deleted: '已删除',
   } as Record<string, string>)[value] ?? environmentStateLabel(value)
+}
+
+function environmentMaterialDeadlineLabel(deadline: string | null): string {
+  return deadline === null ? '不过期，直到明确撤回' : formatTimestamp(deadline)
 }
 
 function accessGrantRequestEnvironment(): EnvironmentInstanceSchema | null {

@@ -151,6 +151,26 @@ describe('MyLabsView', () => {
     expect(vi.mocked(listEnvironments)).toHaveBeenCalledWith({ query: { projectId: 'project-1', courseId: 'course-1' } })
   })
 
+  it('shows permanent material retention without inventing a deadline', async () => {
+    vi.mocked(listEnvironments).mockResolvedValue({
+      data: { items: [environment('permanent-material', { eligibilityExpiresAt: null })] } as never,
+      error: undefined as never,
+    })
+
+    const { wrapper } = await mountAt('project-1')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('permanent-material'))
+
+    expect(wrapper.text()).toContain('材料保留至')
+    expect(wrapper.text()).toContain('不过期，直到明确撤回')
+    expect(wrapper.text()).not.toContain('Invalid Date')
+
+    const detailsButton = wrapper.findAll('button').find((button) => button.text() === '详情')
+    expect(detailsButton).toBeDefined()
+    await detailsButton!.trigger('click')
+    await vi.waitFor(() => expect(document.body.querySelector('.inspect-properties')).not.toBeNull())
+    expect(document.body.querySelector('.inspect-properties')?.textContent).toContain('不过期，直到明确撤回')
+  })
+
   it('opens failed cleanup in the same project while keeping its console disabled', async () => {
     vi.mocked(listEnvironments).mockResolvedValue({
       data: { items: [environment('failed-cleanup', {
