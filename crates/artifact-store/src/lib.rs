@@ -1555,14 +1555,16 @@ mod tests {
     use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
     use aws_smithy_runtime_api::http::{Response, StatusCode};
     use aws_smithy_types::body::SdkBody;
+    use contracts::http::PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES;
     use contracts::{ArtifactRef, UtcTimestamp};
     use sha2::{Digest, Sha256};
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::{GenericImage, ImageExt, bollard::Docker, runners::AsyncRunner};
 
     use super::{
-        BehaviorVersion, Credentials, ImmutableObjectStore, Region, S3ConfigBuilder,
-        S3ImmutableObjectStore, S3StoreConfig, s3_upload_diagnostics,
+        BehaviorVersion, Credentials, ImmutableObjectStore, ObjectStoreError,
+        PlatformImageMultipartPartInput, Region, S3ConfigBuilder, S3ImmutableObjectStore,
+        S3StoreConfig, s3_upload_diagnostics,
     };
 
     async fn local_minio_image() -> Result<GenericImage, Box<dyn std::error::Error>> {
@@ -1807,6 +1809,134 @@ mod tests {
         assert_eq!(streamed.sha256(), format!("{:x}", Sha256::digest(bytes)));
         drop(streamed);
         assert!(!streamed_path.exists());
+
+        // Platform image archives use the real S3 multipart path.  Keep one non-final part at the
+        // production 64 MiB boundary so MinIO enforces the same minimum-part behavior as S3.
+        let mut image_config = store.config.clone();
+        image_config.upload_ttl_seconds = 600;
+        image_config.max_object_bytes = PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES * 2;
+        let image_store = S3ImmutableObjectStore {
+            config: image_config,
+            client: client.clone(),
+        };
+        let image_key = "problem-packages/platform-image-uploads/multipart-e2e.tar";
+        let image_part_size = PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES;
+        let image_tail = b"platform-image-tail".to_vec();
+        let image_tail_size = u64::try_from(image_tail.len())?;
+        let image_size = image_part_size + image_tail_size;
+        let observed_now = time::OffsetDateTime::now_utc();
+        let observed_now =
+            observed_now.replace_nanosecond(observed_now.nanosecond() / 1_000_000 * 1_000_000)?;
+        let image_now = UtcTimestamp::from_utc(observed_now)?;
+        let image_upload = image_store
+            .create_platform_image_multipart_upload(
+                image_key,
+                image_size,
+                "application/x-tar",
+                image_now,
+            )
+            .await?;
+        assert_eq!(image_upload.part_count, 2);
+        assert_eq!(image_upload.parts.len(), 2);
+        let http = reqwest::Client::builder().no_proxy().build()?;
+        let image_head = vec![0xA5; usize::try_from(image_part_size)?];
+        let mut part_inputs = Vec::with_capacity(image_upload.parts.len());
+        for (part, bytes) in image_upload.parts.iter().zip([image_head, image_tail]) {
+            let mut request = http.put(&part.url);
+            for (name, value) in &part.required_headers {
+                request = request.header(name, value);
+            }
+            let response = request.body(bytes).send().await?;
+            if !response.status().is_success() {
+                return Err(format!("multipart part upload returned {}", response.status()).into());
+            }
+            let etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .ok_or("multipart part response omitted ETag")?
+                .to_str()?
+                .to_owned();
+            part_inputs.push(PlatformImageMultipartPartInput {
+                part_number: part.part_number,
+                etag,
+            });
+        }
+        let observed_parts = image_store
+            .list_platform_image_multipart_parts(image_key, &image_upload.upload_id)
+            .await?;
+        assert_eq!(observed_parts.len(), 2);
+        assert_eq!(observed_parts[0].size_bytes, image_part_size);
+        assert_eq!(observed_parts[1].size_bytes, image_tail_size);
+
+        let resumed = image_store
+            .presign_platform_image_multipart_upload(
+                image_key,
+                &image_upload.upload_id,
+                image_size,
+                UtcTimestamp::from_utc(image_now.get() + time::Duration::seconds(1))?,
+                image_upload.expires_at,
+            )
+            .await?;
+        assert_eq!(resumed.expires_at, image_upload.expires_at);
+        assert_eq!(resumed.part_count, image_upload.part_count);
+
+        let mut wrong_parts = part_inputs.clone();
+        wrong_parts[0].etag.push('x');
+        assert_eq!(
+            image_store
+                .complete_platform_image_multipart_upload(
+                    image_key,
+                    &image_upload.upload_id,
+                    image_size,
+                    &wrong_parts,
+                )
+                .await,
+            Err(ObjectStoreError::ObjectIdentityMismatch)
+        );
+        image_store
+            .complete_platform_image_multipart_upload(
+                image_key,
+                &image_upload.upload_id,
+                image_size,
+                &part_inputs,
+            )
+            .await?;
+        assert!(
+            image_store
+                .find_platform_image_multipart_uploads(image_key)
+                .await?
+                .is_empty()
+        );
+        let image_reference = image_store
+            .freeze_current_reference(image_key, image_size, "application/x-tar")
+            .await?;
+        assert!(!image_reference.object_version.is_empty());
+
+        let abort_key = "problem-packages/platform-image-uploads/multipart-abort-e2e.tar";
+        let abort_upload = image_store
+            .create_platform_image_multipart_upload(
+                abort_key,
+                image_part_size + 1,
+                "application/x-tar",
+                image_now,
+            )
+            .await?;
+        image_store
+            .abort_platform_image_multipart_upload(abort_key, &abort_upload.upload_id)
+            .await?;
+        image_store
+            .abort_platform_image_multipart_upload(abort_key, &abort_upload.upload_id)
+            .await?;
+        assert!(
+            image_store
+                .find_platform_image_multipart_uploads(abort_key)
+                .await?
+                .is_empty()
+        );
+        assert!(image_store.list_key_versions(abort_key).await?.is_empty());
+        image_store
+            .delete_orphan(image_key, &image_reference.object_version)
+            .await?;
 
         let package_bytes = b"approved package playbook";
         let package_key = "problem-packages/course/package/playbook";

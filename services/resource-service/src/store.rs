@@ -542,6 +542,26 @@ impl PgResourceStore {
                 request_id,
                 lease_id,
             } => {
+                // Cleanup transitions lock Lease -> Request before releasing capacity.  A usage
+                // insert takes KEY SHARE locks for both foreign keys, so acquire the optional
+                // Lease lock first and keep every request/lease transaction in the same order.
+                let locked_lease = if let Some(lease_id) = lease_id {
+                    let lease_row = sqlx::query(
+                        "SELECT request_id, state
+                         FROM resource.resource_leases
+                         WHERE lease_id=$1 FOR UPDATE",
+                    )
+                    .bind(lease_id.as_uuid())
+                    .fetch_optional(&mut *transaction)
+                    .await?
+                    .ok_or(ResourceStoreError::LeaseNotFound)?;
+                    Some((
+                        lease_row.try_get::<uuid::Uuid, _>("request_id")?,
+                        lease_row.try_get::<String, _>("state")?,
+                    ))
+                } else {
+                    None
+                };
                 let request_scope = sqlx::query(
                     "SELECT project_id, course_id, target_kind, task_run_id
                      FROM resource.resource_requests
@@ -591,25 +611,15 @@ impl PgResourceStore {
                         return Err(ResourceStoreError::ScopeConflict);
                     }
                 }
-                if let Some(lease_id) = lease_id {
-                    let lease_row = sqlx::query(
-                        "SELECT request_id, state FROM resource.resource_leases WHERE lease_id=$1",
-                    )
-                    .bind(lease_id.as_uuid())
-                    .fetch_optional(&mut *transaction)
-                    .await?
-                    .ok_or(ResourceStoreError::LeaseNotFound)?;
-                    let lease_request: uuid::Uuid = lease_row.try_get("request_id")?;
-                    let lease_state: String = lease_row.try_get("state")?;
-                    if lease_request != request_id.as_uuid()
+                if let Some((lease_request, lease_state)) = locked_lease
+                    && (lease_request != request_id.as_uuid()
                         || (authority.is_some()
                             && !matches!(
                                 lease_state.as_str(),
                                 "active" | "expiring" | "expired" | "revoked"
-                            ))
-                    {
-                        return Err(ResourceStoreError::ScopeConflict);
-                    }
+                            )))
+                {
+                    return Err(ResourceStoreError::ScopeConflict);
                 }
                 (
                     project,
@@ -5443,6 +5453,20 @@ pub(crate) fn safe_sqlstate_detail(error: &sqlx::Error) -> String {
     safe_sqlstate_value(code.as_deref())
 }
 
+pub(crate) fn is_retryable_database_error(error: &ResourceStoreError) -> bool {
+    let ResourceStoreError::Database(error) = error else {
+        return false;
+    };
+    let code = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code);
+    is_retryable_database_sqlstate(code.as_deref())
+}
+
+fn is_retryable_database_sqlstate(code: Option<&str>) -> bool {
+    matches!(code, Some("40P01"))
+}
+
 fn safe_sqlstate_value(code: Option<&str>) -> String {
     let Some(code) = code
         .filter(|code| code.len() == 5)
@@ -5580,7 +5604,7 @@ mod tests {
     use contracts::resource::{CapacityClaim, CapacityClaimState, WorkloadResources};
     use contracts::{CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision};
 
-    use super::{safe_sqlstate_value, transition_claim};
+    use super::{is_retryable_database_sqlstate, safe_sqlstate_value, transition_claim};
 
     #[test]
     fn blocked_pre_handoff_claim_can_enter_release_readback() {
@@ -5622,5 +5646,13 @@ mod tests {
             "redacted_unclassified"
         );
         assert_eq!(safe_sqlstate_value(None), "redacted_unclassified");
+    }
+
+    #[test]
+    fn only_postgres_deadlocks_are_retryable_database_errors() {
+        assert!(is_retryable_database_sqlstate(Some("40P01")));
+        assert!(!is_retryable_database_sqlstate(Some("40001")));
+        assert!(!is_retryable_database_sqlstate(Some("23505")));
+        assert!(!is_retryable_database_sqlstate(None));
     }
 }

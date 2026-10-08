@@ -1343,7 +1343,24 @@ impl CapacityReconcileWorker {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                 }
-                _ = interval.tick() => { let _ = self.reconcile_once().await?; }
+                _ = interval.tick() => {
+                    match self.reconcile_once().await {
+                        Ok(_) => {}
+                        Err(error) if crate::store::is_retryable_database_error(&error) => {
+                            let safe_detail = crate::store::resource_error_safe_detail(&error);
+                            tracing::warn!(
+                                event = "resource.capacity.reconcile_deadlock",
+                                operation = "capacity_reconcile_iteration",
+                                outcome = "retry_next_iteration",
+                                error_kind = crate::store::resource_error_kind(&error),
+                                failure_stage = "capacity.worker",
+                                safe_detail = safe_detail.as_str(),
+                                retryable = true,
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
             }
         }
     }

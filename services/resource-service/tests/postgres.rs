@@ -3024,6 +3024,62 @@ async fn ending_resource_rates_is_idempotent_and_preserves_settled_charges()
 }
 
 #[tokio::test]
+async fn concurrent_usage_and_lease_revoke_keep_foreign_key_lock_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let store = PgResourceStore::new(pool);
+    let now = store.current_time().await?;
+    let project_id = ProjectId::new();
+    let actor_id = ActorId::new();
+    let (request, lease) =
+        create_active_request(&store, now, project_id, actor_id, "usage-revoke-lock-order").await?;
+    let measured_until = UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
+    let usage_input = RecordResourceUsageRequest {
+        kind: ResourceUsageKind::Compute,
+        target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+            request_id: request.id,
+            lease_id: Some(lease.id),
+        },
+        source_event_id: EventId::new(),
+        measured_from: now,
+        measured_until,
+        measurement: UsageMeasurement::Known {
+            quantities: ResourceUsageQuantities {
+                cpu_millicore_seconds: 1,
+                memory_byte_seconds: 0,
+                storage_byte_seconds: 0,
+                gpu_unit_seconds: 0,
+            },
+        },
+    };
+    let usage_store = store.clone();
+    let revoke_store = store.clone();
+    let (usage_result, revoked_result) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            usage_store.record_usage(&usage_input, measured_until),
+            revoke_store.revoke_lease(
+                "usage-revoke-lock-order",
+                lease.id,
+                lease.revision,
+                "owner stopped the workload".to_owned(),
+                actor_id,
+                "usage-revoke-lock-order-trace",
+            ),
+        )
+    })
+    .await?;
+    let usage = usage_result?;
+    let revoked = revoked_result?;
+    assert_eq!(usage.target, usage_input.target);
+    assert_eq!(revoked.id, lease.id);
+    assert_eq!(
+        revoked.state,
+        contracts::resource::ResourceLeaseState::Expiring
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_rate_end_and_settlement_preserve_the_rate_boundary()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
