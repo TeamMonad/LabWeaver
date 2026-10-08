@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { defineComponent, h } from 'vue'
+import { mount } from '@vue/test-utils'
 import { usePlatformImages } from '@/composables/usePlatformImages'
 import {
   cancelPlatformImageUpload,
@@ -241,6 +243,173 @@ describe('usePlatformImages', () => {
       expect(images.state.diagnostic.code).toBe('PLATFORM_IMAGE_UPLOAD_FAILED')
       expect(images.state.diagnostic.message).toBe(uploadError)
       expect(images.state.diagnostic.retryable).toBe(false)
+    }
+  })
+
+  it('aborts an in-flight archive PUT when the upload session expires', async () => {
+    vi.useFakeTimers()
+    try {
+      const uploadId = '0197f0e0-0000-7000-8000-000000000030'
+      vi.mocked(createPlatformImageUpload).mockResolvedValue({
+        data: {
+          uploadId,
+          kind: 'virtual_machine' as const,
+          binding: 'ubuntu-24.04-vm-v1',
+          targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+          archiveBytes: 2048,
+          archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+          uploadTarget: {
+            uploadUrl: 'https://objects.example.test/staged-template',
+            requiredHeaders: {},
+            expiresAt: '2026-10-09T04:00:00.000Z',
+          },
+          expiresAt: '2026-10-09T04:00:00.000Z',
+          revision: 1,
+        },
+        error: undefined as never,
+      })
+      vi.mocked(getPlatformImageUpload).mockResolvedValue({
+        data: { uploadId, revision: 2, state: 'failed', diagnostic: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED' },
+        error: undefined as never,
+      })
+      vi.mocked(putFileWithProgress).mockImplementation(async (_file, _url, _headers, _onProgress, signal) => {
+        await new Promise<void>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('上传已取消。')), { once: true })
+        })
+      })
+      const images = usePlatformImages()
+      const uploadPromise = images.upload(new File(['archive'], 'template.tar'), {
+        kind: 'virtual_machine',
+        binding: 'ubuntu-24.04-vm-v1',
+        targetReference: 'harbor.lab.lan/labweaver-system/ubuntu-vm:24.04',
+        trustRevision: 1,
+        reason: '导入已评审虚拟机模板',
+        diskFormat: 'qcow2',
+        diskPath: 'disk/disk.img',
+        capacityBytes: 10737418240,
+      })
+
+      await vi.advanceTimersByTimeAsync(1000)
+      await expect(uploadPromise).resolves.toBe(false)
+      expect(completePlatformImageUpload).not.toHaveBeenCalled()
+      expect(images.state).toMatchObject({
+        kind: 'terminal',
+        uploadId,
+        state: 'failed',
+        diagnostic: {
+          code: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
+          message: '上传会话已过期，请重新选择归档文件上传。',
+          retryable: false,
+        },
+      })
+      expect(window.sessionStorage.getItem('labweaver.platform-image-upload')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not let the transfer monitor replace a user cancellation race', async () => {
+    vi.useFakeTimers()
+    try {
+      const uploadId = '0197f0e0-0000-7000-8000-000000000031'
+      vi.mocked(createPlatformImageUpload).mockResolvedValue({
+        data: {
+          uploadId,
+          kind: 'container' as const,
+          binding: 'ubuntu-24.04-v1',
+          targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+          archiveBytes: 7,
+          archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+          uploadTarget: {
+            uploadUrl: 'https://objects.example.test/staged-archive',
+            requiredHeaders: {},
+            expiresAt: '2026-10-09T04:00:00.000Z',
+          },
+          expiresAt: '2026-10-09T04:00:00.000Z',
+          revision: 1,
+        },
+        error: undefined as never,
+      })
+      vi.mocked(cancelPlatformImageUpload).mockResolvedValue({ data: {}, error: undefined as never })
+      vi.mocked(getPlatformImageUpload).mockResolvedValue({
+        data: { uploadId, revision: 2, state: 'cancelled' },
+        error: undefined as never,
+      })
+      vi.mocked(putFileWithProgress).mockImplementation(async (_file, _url, _headers, _onProgress, signal) => {
+        await new Promise<void>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('上传已取消。')), { once: true })
+        })
+      })
+      const images = usePlatformImages()
+      const uploadPromise = images.upload(new File(['archive'], 'layout.tar'), {
+        kind: 'container',
+        binding: 'ubuntu-24.04-v1',
+        targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+        trustRevision: 3,
+        reason: '导入已评审归档',
+      })
+
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(images.cancelUpload()).resolves.toBe(true)
+      await expect(uploadPromise).resolves.toBe(false)
+      expect(images.state).toMatchObject({ kind: 'terminal', uploadId, state: 'cancelled' })
+      expect(getPlatformImageUpload).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(getPlatformImageUpload).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears transfer status polling when the owner unmounts', async () => {
+    vi.useFakeTimers()
+    try {
+      const uploadId = '0197f0e0-0000-7000-8000-000000000032'
+      vi.mocked(createPlatformImageUpload).mockResolvedValue({
+        data: {
+          uploadId,
+          kind: 'container' as const,
+          binding: 'ubuntu-24.04-v1',
+          targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+          archiveBytes: 7,
+          archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
+          uploadTarget: {
+            uploadUrl: 'https://objects.example.test/staged-archive',
+            requiredHeaders: {},
+            expiresAt: '2026-10-09T04:00:00.000Z',
+          },
+          expiresAt: '2026-10-09T04:00:00.000Z',
+          revision: 1,
+        },
+        error: undefined as never,
+      })
+      vi.mocked(putFileWithProgress).mockImplementation(async (_file, _url, _headers, _onProgress, signal) => {
+        await new Promise<void>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('上传已取消。')), { once: true })
+        })
+      })
+      let images!: ReturnType<typeof usePlatformImages>
+      const wrapper = mount(defineComponent({
+        setup() {
+          images = usePlatformImages()
+          return () => h('div')
+        },
+      }))
+      const uploadPromise = images.upload(new File(['archive'], 'layout.tar'), {
+        kind: 'container',
+        binding: 'ubuntu-24.04-v1',
+        targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
+        trustRevision: 3,
+        reason: '导入已评审归档',
+      })
+
+      await vi.advanceTimersByTimeAsync(0)
+      wrapper.unmount()
+      await expect(uploadPromise).resolves.toBe(false)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(getPlatformImageUpload).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
     }
   })
 

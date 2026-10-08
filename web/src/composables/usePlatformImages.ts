@@ -137,8 +137,50 @@ export function usePlatformImages() {
   let uploadPoll: Promise<boolean> | null = null
   let uploadTask: Promise<void> | null = null
   let uploadAbortController: AbortController | null = null
+  let uploadStatusMonitorStop: (() => void) | null = null
   let uploadCancelRequested = false
   let disposed = false
+
+  function stopUploadStatusMonitor(): void {
+    uploadStatusMonitorStop?.()
+    uploadStatusMonitorStop = null
+  }
+
+  function monitorUploadStatusDuringTransfer(
+    uploadId: string,
+    onTerminal: (status: PlatformImageUploadStatus) => void,
+  ): void {
+    stopUploadStatusMonitor()
+    let stopped = false
+    let timer: number | null = null
+    const stop = () => {
+      stopped = true
+      if (timer !== null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+    }
+    const waitForNextRead = () => new Promise<void>((resolve) => {
+      timer = window.setTimeout(() => {
+        timer = null
+        resolve()
+      }, UPLOAD_POLL_INTERVAL_MS)
+    })
+    const run = (async () => {
+      while (!stopped && !disposed && !uploadCancelRequested && activeUpload.value?.uploadId === uploadId) {
+        await waitForNextRead()
+        if (stopped || disposed || uploadCancelRequested || activeUpload.value?.uploadId !== uploadId) return
+        const result = await getPlatformImageUpload({ path: { uploadId } })
+        if (stopped || disposed || uploadCancelRequested || activeUpload.value?.uploadId !== uploadId) return
+        if (!result.error && ['imported', 'failed', 'cancelled'].includes(result.data.state)) {
+          onTerminal(result.data)
+          return
+        }
+      }
+    })()
+    uploadStatusMonitorStop = stop
+    void run.catch(() => undefined)
+  }
 
   function failure(
     error: unknown,
@@ -467,6 +509,7 @@ export function usePlatformImages() {
 
     uploadAbortController = new AbortController()
     const signal = uploadAbortController.signal
+    let transferTerminalStatus: PlatformImageUploadStatus | null = null
     const uploadTaskForSession = putFileWithProgress(
       file,
       session.data.uploadTarget.uploadUrl,
@@ -477,9 +520,19 @@ export function usePlatformImages() {
       signal,
     )
     uploadTask = uploadTaskForSession
+    monitorUploadStatusDuringTransfer(active.uploadId, (status) => {
+      if (disposed || uploadCancelRequested || activeUpload.value?.uploadId !== active.uploadId) return
+      transferTerminalStatus = status
+      const next = applyStatus(status)
+      if (next?.kind === 'terminal') {
+        state.value = next
+        uploadAbortController?.abort()
+      }
+    })
     try {
       await uploadTaskForSession
     } catch (error) {
+      if (transferTerminalStatus) return false
       if (!disposed && !uploadCancelRequested) {
         const detail = error instanceof Error && error.message.trim().length > 0
           ? error.message
@@ -488,6 +541,7 @@ export function usePlatformImages() {
       }
       return false
     } finally {
+      stopUploadStatusMonitor()
       uploadTask = null
       uploadAbortController = null
     }
@@ -583,6 +637,7 @@ export function usePlatformImages() {
   if (getCurrentInstance()) {
     onUnmounted(() => {
       disposed = true
+      stopUploadStatusMonitor()
       uploadAbortController?.abort()
     })
   }

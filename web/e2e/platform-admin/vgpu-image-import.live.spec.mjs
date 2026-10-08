@@ -18,6 +18,9 @@ const INPUT_ENV = Object.freeze({
 const REQUIRED_INPUT_FIELDS = Object.keys(INPUT_ENV)
 const TRUST_REVISION = 1
 const DISK_FORMAT = 'qcow2'
+const UPLOAD_EXPIRY_GRACE_MS = 2 * 60 * 1000
+const IMPORT_PROCESSING_TIMEOUT_MS = 15 * 60 * 1000
+const IMAGE_IMPORT_TEST_TIMEOUT_MS = 60 * 60 * 1000 + IMPORT_PROCESSING_TIMEOUT_MS + UPLOAD_EXPIRY_GRACE_MS
 
 function inputError(detail) {
   throw new Error(`LW_VGPU_IMAGE_INPUT_INVALID:${detail}`)
@@ -204,7 +207,18 @@ async function waitForUploadSession(page, input) {
   if (typeof session.uploadId !== 'string' || session.uploadId.length === 0) {
     throw new Error('LW_VGPU_IMAGE_UPLOAD_SESSION_INVALID')
   }
+  if (typeof session.uploadTarget?.expiresAt !== 'string' || !Number.isFinite(Date.parse(session.uploadTarget.expiresAt))) {
+    throw new Error('LW_VGPU_IMAGE_UPLOAD_EXPIRY_INVALID')
+  }
   return { uploadCard, importButton, session }
+}
+
+function uploadCompletionTimeout(session) {
+  const expiresAt = Date.parse(session.uploadTarget?.expiresAt ?? '')
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error('LW_VGPU_IMAGE_UPLOAD_EXPIRY_INVALID')
+  }
+  return expiresAt - Date.now() + UPLOAD_EXPIRY_GRACE_MS + IMPORT_PROCESSING_TIMEOUT_MS
 }
 
 async function waitForUploadStatus(page, uploadId, state) {
@@ -259,7 +273,7 @@ async function waitForImportReadback(page, input) {
     const rows = await readRowsForBinding(page, input.binding)
     if (rows.length > 1) throw new Error('LW_VGPU_IMAGE_READBACK_DUPLICATE_BINDING')
     return rows.length === 1 && matchesVgpuImageCatalogRow(rows[0], input)
-  }, { timeout: 900_000, intervals: [1000, 2000, 3000] }).toBe(true)
+  }, { timeout: IMPORT_PROCESSING_TIMEOUT_MS, intervals: [1000, 2000, 3000] }).toBe(true)
 }
 
 async function readCatalogEntries(page) {
@@ -278,7 +292,7 @@ async function assertImportedUpload(page, input, completion) {
     `/api/v1/admin/images/uploads/${accepted.uploadId}`,
     (value) => ['imported', 'failed', 'cancelled'].includes(value.state),
     'LW_VGPU_IMAGE_UPLOAD_STATUS_READ_FAILED',
-    900_000,
+    IMPORT_PROCESSING_TIMEOUT_MS,
   )
   const entries = await readCatalogEntries(page)
   return validateVgpuImageImport({ completion, status, entries, input })
@@ -291,6 +305,20 @@ async function cleanupCancelledUploadThroughUi(page, input, uploadId) {
   )
   if (status.uploadId !== uploadId) throw new Error('LW_VGPU_IMAGE_CANCEL_CLEANUP_UPLOAD_ID_MISMATCH')
 
+  if (status.state === 'failed' && status.diagnostic === 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED') {
+    const terminal = await expectJson(
+      await page.request.get(`/api/v1/admin/images/uploads/${encodeURIComponent(uploadId)}`),
+      'LW_VGPU_IMAGE_EXPIRED_CLEANUP_STATUS_READ_FAILED',
+    )
+    if (terminal.uploadId !== uploadId || terminal.state !== 'failed' || terminal.diagnostic !== 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED') {
+      throw new Error('LW_VGPU_IMAGE_EXPIRED_CLEANUP_STATUS_CHANGED')
+    }
+    await waitForCatalogSettled(page, 'EXPIRED_CLEANUP_READBACK')
+    if ((await readRowsForBinding(page, input.binding)).length !== 0) {
+      throw new Error('LW_VGPU_IMAGE_EXPIRED_CLEANUP_BINDING_PUBLISHED')
+    }
+    return
+  }
   if (status.state === 'imported' || status.state === 'failed') {
     throw new Error(`LW_VGPU_IMAGE_CANCEL_CLEANUP_UNSAFE_STATE:${status.state}`)
   }
@@ -326,7 +354,7 @@ async function cleanupCancelledUploadThroughUi(page, input, uploadId) {
 test.skip(INPUT === null, 'set the five LABWEAVER_E2E_VGPU_IMAGE_* variables to run this scenario')
 
 test('platform administrator refreshes a real VM upload and cancels it through the UI', async ({ page }) => {
-  test.setTimeout(1_200_000)
+  test.setTimeout(IMAGE_IMPORT_TEST_TIMEOUT_MS)
   test.skip(!RUN_LIFECYCLE, 'set LABWEAVER_E2E_VGPU_IMAGE_LIFECYCLE=1 for the real upload lifecycle scenarios')
   if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
   await assertArchiveReadable(INPUT)
@@ -348,7 +376,7 @@ test('platform administrator refreshes a real VM upload and cancels it through t
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
-    }, 1_200_000)
+    }, uploadCompletionTimeout(session))
     const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter)
     const completion = {
       status: completionResponse.status(),
@@ -408,7 +436,7 @@ test('platform administrator refreshes a real VM upload and cancels it through t
 })
 
 test('platform administrator retries a real VM import after a network failure through the UI', async ({ page }) => {
-  test.setTimeout(1_200_000)
+  test.setTimeout(IMAGE_IMPORT_TEST_TIMEOUT_MS)
   test.skip(!RUN_LIFECYCLE, 'set LABWEAVER_E2E_VGPU_IMAGE_LIFECYCLE=1 for the real upload lifecycle scenarios')
   if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
   await assertArchiveReadable(INPUT)
@@ -471,7 +499,7 @@ test('platform administrator retries a real VM import after a network failure th
       const url = new URL(response.url())
       return response.request().method() === 'POST'
         && url.pathname === `/api/v1/admin/images/uploads/${session.uploadId}/complete`
-    }, 120_000)
+    }, uploadCompletionTimeout(session))
     await retryButton.click()
     const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter, previousDiagnostic)
     const completion = {
@@ -530,7 +558,7 @@ test('platform administrator retries a real VM import after a network failure th
 })
 
 test('platform administrator imports one requested vGPU guest image through the UI', async ({ page }) => {
-  test.setTimeout(1_200_000)
+  test.setTimeout(IMAGE_IMPORT_TEST_TIMEOUT_MS)
   if (!INPUT) throw new Error('LW_VGPU_IMAGE_INPUT_REQUIRED')
 
   await assertArchiveReadable(INPUT)
@@ -551,24 +579,12 @@ test('platform administrator imports one requested vGPU guest image through the 
     return
   }
 
-  const uploadCard = page.locator('section.upload-card')
-  await uploadCard.getByLabel('类型', { exact: true }).selectOption('virtual_machine')
-  await uploadCard.getByLabel('binding', { exact: true }).fill(INPUT.binding)
-  await uploadCard.getByLabel('目标引用（host/repo:tag）', { exact: true }).fill(INPUT.targetReference)
-  await uploadCard.getByLabel('信任版本', { exact: true }).fill(String(TRUST_REVISION))
-  await uploadCard.getByLabel('磁盘格式', { exact: true }).selectOption(DISK_FORMAT)
-  await uploadCard.getByLabel('容量（字节）', { exact: true }).fill(String(INPUT.capacityBytes))
-  await uploadCard.getByLabel('归档内磁盘路径', { exact: true }).fill(INPUT.diskPath)
-  await uploadCard.getByLabel('原因', { exact: true }).fill('导入已评审的 vGPU guest image。')
-  await uploadCard.locator('input[type="file"]').setInputFiles(INPUT.archivePath)
-
-  const importButton = uploadCard.getByRole('button', { name: '上传并导入', exact: true })
-  await expect(importButton).toBeEnabled()
+  const { importButton, session } = await waitForUploadSession(page, INPUT)
   const completionResponseWaiter = waitForCompletionResponse(page, (response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST'
       && /^\/api\/v1\/admin\/images\/uploads\/[^/]+\/complete$/.test(url.pathname)
-  }, 1_200_000)
+  }, uploadCompletionTimeout(session))
   await importButton.click()
   const completionResponse = await waitForUploadCompletionOrUiFailure(page, completionResponseWaiter)
   const completionBody = await completionResponse.json().catch(() => null)
