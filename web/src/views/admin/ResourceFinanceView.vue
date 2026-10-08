@@ -455,6 +455,28 @@
           @retry="finance.load"
         >
           <template #success="{ data }">
+            <div
+              v-if="budgetNotice?.warningReached"
+              data-testid="budget-threshold-warning"
+            >
+              <DiagnosticBanner
+                code="RESOURCE_BUDGET_WARNING_THRESHOLD_REACHED"
+                severity="warning"
+                :retryable="false"
+                :message="`已花费 ${data.spent.amount} ${data.spent.currency}，已达到提醒阈值 ${data.warningAt.amount} ${data.warningAt.currency}。这是预算提醒，不会自动停止已批准的计划或资源。`"
+              />
+            </div>
+            <div
+              v-if="budgetNotice?.limitReached"
+              data-testid="budget-limit-warning"
+            >
+              <DiagnosticBanner
+                code="RESOURCE_BUDGET_LIMIT_REACHED"
+                severity="warning"
+                :retryable="false"
+                :message="`已花费 ${data.spent.amount} ${data.spent.currency}，已达到预算上限 ${data.limit.amount} ${data.limit.currency}。这只是预算提醒，不会自动停止已批准的计划或资源。`"
+              />
+            </div>
             <div class="budget-summary">
               <div><span>已花费</span><strong>{{ data.spent.amount }} {{ data.spent.currency }}</strong></div>
               <div><span>预算上限</span><strong>{{ data.limit.amount }} {{ data.limit.currency }}</strong></div>
@@ -774,10 +796,39 @@ const selectedCharge = computed(() => finance.charges.kind === 'success'
   : null)
 const usageContextData = computed(() => finance.usageContext.kind === 'success' ? finance.usageContext.data : null)
 const budgetEditable = computed(() => finance.budget.kind === 'success' || finance.budget.kind === 'empty')
+const fixedDecimalPattern = /^(0|[1-9][0-9]*)\.[0-9]{6}$/
+const fixedDecimalScale = 1_000_000n
+function fixedDecimalScaled(value: string): bigint | null {
+  if (!fixedDecimalPattern.test(value)) return null
+  const [whole, fraction] = value.split('.')
+  return BigInt(whole) * fixedDecimalScale + BigInt(fraction)
+}
+function compareFixedDecimalAmounts(left: string, right: string): number | null {
+  const leftScaled = fixedDecimalScaled(left)
+  const rightScaled = fixedDecimalScaled(right)
+  if (leftScaled === null || rightScaled === null) return null
+  return leftScaled < rightScaled ? -1 : leftScaled > rightScaled ? 1 : 0
+}
+const budgetNotice = computed(() => {
+  if (finance.budget.kind !== 'success') return null
+  const { spent, warningAt, limit } = finance.budget.data
+  if (spent.currency !== warningAt.currency || spent.currency !== limit.currency) return null
+  const spentVsWarning = compareFixedDecimalAmounts(spent.amount, warningAt.amount)
+  const spentVsLimit = compareFixedDecimalAmounts(spent.amount, limit.amount)
+  if (spentVsWarning === null || spentVsLimit === null) return null
+  return {
+    warningReached: spentVsWarning >= 0,
+    limitReached: spentVsLimit >= 0,
+  }
+})
 const canSaveBudget = computed(() => {
   if (!budgetEditable.value || !selectedProjectId.value) return false
-  const valid = (value: string) => /^(0|[1-9][0-9]*)\.[0-9]{6}$/.test(value)
-  return /^[A-Za-z0-9_-]{1,32}$/.test(budgetCurrency.value) && valid(limitAmount.value) && valid(warningAmount.value) && Number(warningAmount.value) <= Number(limitAmount.value)
+  const warningVsLimit = compareFixedDecimalAmounts(warningAmount.value, limitAmount.value)
+  return /^[A-Za-z0-9_-]{1,32}$/.test(budgetCurrency.value)
+    && fixedDecimalScaled(limitAmount.value) !== null
+    && fixedDecimalScaled(warningAmount.value) !== null
+    && warningVsLimit !== null
+    && warningVsLimit <= 0
 })
 const canSubmitAdjustment = computed(() => Boolean(selectedCharge.value && /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/.test(adjustmentAmount.value) && adjustmentReason.value.trim()))
 const canSubmitRate = computed(() => Boolean(

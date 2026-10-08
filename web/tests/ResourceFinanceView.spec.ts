@@ -675,6 +675,38 @@ describe('ResourceFinanceView', () => {
     expect(wrapper.get('.budget-card').text()).toContain('RESOURCE_BUDGET_LOAD_FAILED')
   })
 
+  it.each([
+    { spent: '0.099999', warningAt: '0.100000', limit: '1.000000', threshold: false, limitReached: false },
+    { spent: '0.100000', warningAt: '0.100000', limit: '1.000000', threshold: true, limitReached: false },
+    { spent: '1.000000', warningAt: '0.100000', limit: '1.000000', threshold: true, limitReached: true },
+  ])('shows budget notices at exact six-decimal boundaries (%s)', async ({ spent, warningAt, limit, threshold, limitReached }) => {
+    api.get.mockImplementation(({ url }: { url: string }) => Promise.resolve(
+      url.endsWith('/resource-budget')
+        ? {
+            data: {
+              id: 'budget-new', projectId: 'project-new', courseId: null,
+              limit: { currency: 'USD', amount: limit },
+              warningAt: { currency: 'USD', amount: warningAt },
+              spent: { currency: 'USD', amount: spent },
+              revision: 1, updatedAt: '2026-10-06T03:00:00Z',
+            },
+          }
+        : url.endsWith('/charges')
+          ? { data: [] }
+          : { data: { items: [], page: 1, pageSize: 25, hasMore: false } },
+    ))
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="budget-threshold-warning"]').exists()).toBe(threshold)
+    expect(wrapper.find('[data-testid="budget-limit-warning"]').exists()).toBe(limitReached)
+    if (threshold) expect(wrapper.get('[data-testid="budget-threshold-warning"]').text()).toContain(`${spent} USD`)
+    if (limitReached) {
+      const notice = wrapper.get('[data-testid="budget-limit-warning"]').text()
+      expect(notice).toContain(`${limit} USD`)
+      expect(notice).toContain('不会自动停止已批准的计划或资源')
+    }
+  })
+
   it('offers rate and catalog navigation only to actual platform admin roles', () => {
     const admin = navigationGroupsForRoles(['admin']).flatMap((group) => group.items)
     const finance = admin.find((item) => item.id === 'admin-finance')!
