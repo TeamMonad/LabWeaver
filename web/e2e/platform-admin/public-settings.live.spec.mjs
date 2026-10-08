@@ -207,7 +207,7 @@ test('platform administrator reads public project settings and resource pages', 
   await expect(page.locator('.project-detail')).toContainText(PROJECT_ID)
   await searchExistingMember(page)
 
-  await page.getByRole('link', { name: '项目 AI 设置', exact: true }).click()
+  await page.locator('.project-detail').getByRole('link', { name: '项目 AI 设置', exact: true }).click()
   await readAndRefreshProjectPolicy(page)
 
   await navigateFromHomeByUi(page, 'GPU 目录')
