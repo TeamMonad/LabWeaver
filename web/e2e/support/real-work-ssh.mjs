@@ -249,6 +249,15 @@ export function classifyPinnedSshCommandFailure({ code, signal, stderr = '' }) {
   return `WORK_SSH_COMMAND_FAILED_${exitStatus}`
 }
 
+export function classifyPinnedSshCommandStage(command, input = undefined) {
+  if (command === 'nvidia-smi -q') return 'GPU_LICENSE'
+  if (command === 'python3 -' && input === CUDA_DRIVER_PROBE) return 'CUDA_PROBE'
+  if (command === 'python3 -') return 'GUEST_SCRIPT'
+  if (typeof command === 'string' && command.startsWith('cat -- "$HOME/workspace/')) return 'WORKSPACE_READ'
+  if (command === 'printf WORK_SSH_OLD_ALIAS_ACCEPTED') return 'REVOKED_ACCESS_CHECK'
+  return 'COMMAND'
+}
+
 export function classifyPinnedSshGuestFailure(stderr = '') {
   for (const line of String(stderr).split(/\r?\n/)) {
     const trimmed = line.trim()
@@ -272,12 +281,13 @@ export function classifyPinnedSshGuestFailure(stderr = '') {
 
 export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
   const endpoint = await preparePinnedSsh(endpointGrant, identity)
+  const commandStage = classifyPinnedSshCommandStage(command, input)
   const result = await runProcess('ssh', pinnedSshArgs(endpoint, identity, command), {
     input,
     timeoutMs: 120_000,
     outputCode: 'WORK_SSH_COMMAND',
   })
-  if (result.timedOut) throw new Error('WORK_SSH_COMMAND_TIMEOUT')
+  if (result.timedOut) throw new Error(`WORK_SSH_COMMAND_TIMEOUT_${commandStage}`)
   if (result.outputExceeded) throw new Error('WORK_SSH_COMMAND_OUTPUT_LIMIT')
   if (result.code !== 0) {
     const guestDiagnostic = classifyPinnedSshGuestFailure(result.stderr)

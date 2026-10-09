@@ -1067,7 +1067,7 @@ test('student provisions a Work environment, configures it, and releases its cap
 
       await expect(
         runPinnedSsh(revokedEndpointGrant, vmSshIdentity, 'printf WORK_SSH_OLD_ALIAS_ACCEPTED'),
-      ).rejects.toThrow(/^WORK_SSH_COMMAND_FAILED:(?:\d+|signal)$/)
+      ).rejects.toThrow(/^WORK_SSH_COMMAND_LW_GATEWAY_AUTHORITY_FAILED_STAGE_GATEWAY_ACCESS_AUTHORITY_EXIT_1$/)
 
       const reissued = await issueWorkAccessGrantByUi(
         page,
