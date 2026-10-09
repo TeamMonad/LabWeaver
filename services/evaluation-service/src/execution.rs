@@ -457,6 +457,8 @@ pub enum ExecutionError {
     IdentityMismatch,
     #[error("LW_EVALUATION_STEP_LEASE_LOST")]
     LeaseLost,
+    #[error("LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED")]
+    EnvironmentBindingRejected,
     #[error("LW_EVALUATION_EXECUTION_BACKEND_FAILED: {0}")]
     Backend(String),
     #[error(transparent)]

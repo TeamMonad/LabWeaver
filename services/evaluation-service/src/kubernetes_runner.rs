@@ -470,7 +470,7 @@ impl KubernetesEvaluationRunner {
                     &admission,
                     checker,
                 )
-                .await?
+                .await
             }
             StepExecutionPlan::AnsibleProbe {
                 playbook_profile,
@@ -485,7 +485,7 @@ impl KubernetesEvaluationRunner {
                     &assertions,
                     &admission,
                 )
-                .await?
+                .await
             }
             StepExecutionPlan::Advisory { .. } => {
                 return Err(ExecutionError::Backend(
@@ -497,6 +497,34 @@ impl KubernetesEvaluationRunner {
                     "file_assertion_resource_mismatch".to_owned(),
                 ));
             }
+        };
+        let started = match started {
+            Ok(started) => started,
+            Err(ExecutionError::EnvironmentBindingRejected) => {
+                let released = lifecycle
+                    .release(&resource_status)
+                    .await
+                    .map_err(|error| map_task_resource(error, "release_after_binding_rejection"))?;
+                if !released.cleanup_confirmed {
+                    return Err(ExecutionError::Backend(
+                        "resource_cleanup_not_confirmed".to_owned(),
+                    ));
+                }
+                tracing::warn!(
+                    event = "evaluation.execution.binding_rejected",
+                    run_id = %context.lease.run_id,
+                    step_run_id = %context.lease.step_run_id,
+                    task_run_id = %context.lease.task_run_id,
+                    diagnostic_code = "LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED",
+                    cleanup_verified = true,
+                    "Environment rejected the execution binding after Resource admission"
+                );
+                return TerminalResult::Failed(
+                    "LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED".to_owned(),
+                )
+                .into_completion();
+            }
+            Err(error) => return Err(error),
         };
         let recovery = started.recovery().clone();
         self.control
@@ -2243,6 +2271,9 @@ fn attempt_ssh_secret_names(attempt_id: Uuid) -> (String, String) {
 
 fn map_environment_binding_error(error: EnvironmentExecutionBindingClientError) -> ExecutionError {
     match error {
+        EnvironmentExecutionBindingClientError::Rejected => {
+            ExecutionError::EnvironmentBindingRejected
+        }
         EnvironmentExecutionBindingClientError::Configuration
         | EnvironmentExecutionBindingClientError::CredentialGeneration
         | EnvironmentExecutionBindingClientError::Clock => {
@@ -3062,8 +3093,8 @@ mod probe_recovery_tests {
 
     use super::{
         EvaluationAttemptContext, EvaluationAttemptRunner, EvaluationExecutionConfiguration,
-        EvaluationExecutionKind, KubernetesEvaluationRunner, PgEvaluationControlStore,
-        PgFreezeStore, StepExecutionPlan,
+        EvaluationExecutionKind, FROZEN_ARCHIVE_MEDIA_TYPE, KubernetesEvaluationRunner,
+        PgEvaluationControlStore, PgFreezeStore, StepExecutionPlan,
     };
     use crate::{
         EvaluationReleaseReservation, EvaluationRunReservation, EvaluationStepLease,
@@ -3144,10 +3175,19 @@ mod probe_recovery_tests {
     #[derive(Default)]
     struct MockHttpState {
         objects: BTreeMap<String, Value>,
+        s3_objects: BTreeMap<String, MockS3Object>,
         pods: Option<Value>,
+        resource_request: Option<Value>,
         resource_status: Option<Value>,
+        environment_binding_status: Option<StatusCode>,
         deleted: BTreeSet<String>,
         calls: Vec<(Method, String)>,
+    }
+
+    struct MockS3Object {
+        body: Vec<u8>,
+        content_type: String,
+        version_id: String,
     }
 
     struct MockCluster {
@@ -3328,6 +3368,123 @@ mod probe_recovery_tests {
                 .await,
             Err(crate::execution::ExecutionError::IdentityMismatch)
         ));
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_environment_binding_releases_resource_and_finishes_step()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("binding-rejection-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("probe step was not claimable")?;
+        let context = context(&fixture, &lease)?;
+        let status = resource_status(&lease, &fixture, false)?;
+        let binding = fixture
+            .store
+            .load_release_execution_binding(fixture.release.id)
+            .await?;
+        let package_file = binding
+            .package
+            .files
+            .first()
+            .ok_or("probe package file missing")?;
+        let archive = serde_json::to_vec(&json!({
+            "apiVersion": "evaluation.labweaver.io/frozen-submission-archive/v1",
+            "files": [{"path": "answer.txt", "contentBase64": "eA=="}],
+        }))?;
+        let content_sha256 = Sha256Digest::of_bytes(&archive).to_string();
+        let frozen_contract: Value = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1",
+        )
+        .bind(fixture.run.frozen_submission_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?;
+        let mut frozen_contract = frozen_contract;
+        frozen_contract["contentSha256"] = json!(content_sha256);
+        frozen_contract["object"]["sizeBytes"] = json!(archive.len());
+        frozen_contract["object"]["mediaType"] = json!(FROZEN_ARCHIVE_MEDIA_TYPE);
+        sqlx::query(
+            "UPDATE evaluation.frozen_submissions SET content_sha256=$2, contract=$3 WHERE frozen_submission_id=$1",
+        )
+        .bind(fixture.run.frozen_submission_id.as_uuid())
+        .bind(&content_sha256)
+        .bind(&frozen_contract)
+        .execute(&fixture.pool)
+        .await?;
+        {
+            let mut state = cluster.state.lock().await;
+            state.resource_request = Some(serde_json::to_value(&status.request)?);
+            state.resource_status = Some(serde_json::to_value(&status)?);
+            state.environment_binding_status = Some(StatusCode::UNPROCESSABLE_ENTITY);
+            state.s3_objects.insert(
+                format!("/test-bucket/frozen/{}", fixture.run.frozen_submission_id),
+                MockS3Object {
+                    body: archive,
+                    content_type: FROZEN_ARCHIVE_MEDIA_TYPE.to_owned(),
+                    version_id: "v1".to_owned(),
+                },
+            );
+            state.s3_objects.insert(
+                format!(
+                    "/test-package-bucket/{}",
+                    binding.object_locators[&package_file.object.artifact_id]
+                ),
+                MockS3Object {
+                    body: b"x".to_vec(),
+                    content_type: package_file.object.media_type.clone(),
+                    version_id: package_file.object.object_version.clone(),
+                },
+            );
+        }
+
+        let completion = runner.execute(context).await?;
+        assert_eq!(
+            completion.state,
+            EvaluationStepRunState::Failed,
+            "binding rejection must complete the step instead of escaping the worker"
+        );
+        assert_eq!(
+            completion
+                .diagnostic_code
+                .as_ref()
+                .map(contracts::DiagnosticCode::as_str),
+            Some("LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED")
+        );
+        assert!(completion.cleanup_verified);
+        let calls = cluster.calls().await;
+        let release_path = format!("/internal/v1/task-resources/{}/release", lease.task_run_id);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && path == &release_path)
+                .count(),
+            1,
+            "the acknowledged Resource claim must be released exactly once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| {
+                    *method == Method::POST && path.ends_with("/execution-binding/evaluation")
+                })
+                .count(),
+            1,
+            "the Environment binding must be requested once"
+        );
+        assert!(
+            calls.iter().all(|(_method, path)| {
+                !path.starts_with("/api/") && !path.starts_with("/apis/")
+            }),
+            "a rejected binding must not create a Kubernetes Job"
+        );
         cluster.stop().await;
         Ok(())
     }
@@ -3881,6 +4038,31 @@ mod probe_recovery_tests {
         }
         let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
         if segments.first() == Some(&"internal") {
+            if method == Method::POST && segments.as_slice() == ["internal", "v1", "task-resources"]
+            {
+                return state.resource_request.clone().map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    |request| (StatusCode::OK, Json(request)).into_response(),
+                );
+            }
+            if method == Method::GET && segments.last() == Some(&"request") {
+                return state.resource_request.clone().map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    |request| (StatusCode::OK, Json(request)).into_response(),
+                );
+            }
+            if method == Method::POST && matches!(segments.last(), Some(&("claim" | "ack"))) {
+                return state.resource_status.clone().map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    |status| (StatusCode::OK, Json(status)).into_response(),
+                );
+            }
+            if method == Method::POST && segments.last() == Some(&"evaluation") {
+                return state.environment_binding_status.map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    IntoResponse::into_response,
+                );
+            }
             if method == Method::GET && segments.len() == 4 {
                 return state.resource_status.clone().map_or_else(
                     || StatusCode::NOT_FOUND.into_response(),
@@ -3899,6 +4081,15 @@ mod probe_recovery_tests {
         if method == Method::GET {
             if state.deleted.contains(&path) {
                 return StatusCode::NOT_FOUND.into_response();
+            }
+            if let Some(object) = state.s3_objects.get(&path) {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", &object.content_type)
+                    .header("content-length", object.body.len())
+                    .header("x-amz-version-id", &object.version_id)
+                    .body(Body::from(object.body.clone()))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
             return state.objects.get(&path).cloned().map_or_else(
                 || StatusCode::NOT_FOUND.into_response(),
