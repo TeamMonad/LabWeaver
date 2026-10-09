@@ -37,7 +37,10 @@ const MAIN_CONTAINER: &str = "ansible-probe";
 const DEADLINE_DIAGNOSTIC_CODE: &str = "LW_AP_TIMEOUT";
 const FAILED_DIAGNOSTIC_CODE: &str = "LW_AP_INFRASTRUCTURE_ERROR";
 const OOM_DIAGNOSTIC_CODE: &str = "LW_AP_INFRASTRUCTURE_ERROR";
-const STABLE_DIAGNOSTIC_PREFIX: &str = "LW_AP_";
+// The controlled evaluation image writes only bounded LW_* diagnostic codes to the
+// termination log. This includes the artifact materializer's LW_ARTIFACT_* codes;
+// no student process output is copied into this field.
+const STABLE_DIAGNOSTIC_PREFIX: &str = "LW_";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -641,8 +644,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AnsibleProbeCancellationObservation, attempt_job_name, cancellation_observation,
-        recovery_cleanup_plan,
+        AnsibleProbeCancellationObservation, STABLE_DIAGNOSTIC_PREFIX, attempt_job_name,
+        cancellation_observation, recovery_cleanup_plan,
     };
     use crate::ansible_probe::{
         ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeExecutionLimits,
@@ -721,7 +724,7 @@ mod tests {
             deadline_diagnostic_code: "LW_AP_TIMEOUT",
             failed_diagnostic_code: "LW_AP_INFRASTRUCTURE_ERROR",
             oom_diagnostic_code: "LW_AP_INFRASTRUCTURE_ERROR",
-            stable_diagnostic_prefix: "LW_AP_",
+            stable_diagnostic_prefix: STABLE_DIAGNOSTIC_PREFIX,
             ownership: ownership(&request()),
             trace_id: "trace".to_owned(),
         }
@@ -1041,6 +1044,13 @@ mod tests {
                 &test_identity()
             ),
             "LW_AP_PROFILE_INVALID"
+        );
+        assert_eq!(
+            failed_container_diagnostic(
+                &json!({"reason":"Error","message":"LW_ARTIFACT_MATERIALIZER_DOWNLOAD_UNAVAILABLE"}),
+                &test_identity()
+            ),
+            "LW_ARTIFACT_MATERIALIZER_DOWNLOAD_UNAVAILABLE"
         );
         // Untrusted pod output never becomes a stable diagnostic.
         assert_eq!(

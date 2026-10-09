@@ -573,9 +573,11 @@ impl KubernetesApiClient {
                 observation,
             });
         }
-        let diagnostic_code = terminated.map_or(identity.failed_diagnostic_code, |terminated| {
-            failed_container_diagnostic(terminated, identity)
-        });
+        let diagnostic_terminated = terminated.or_else(|| init_container_termination(pod));
+        let diagnostic_code = diagnostic_terminated
+            .map_or(identity.failed_diagnostic_code, |terminated| {
+                failed_container_diagnostic(terminated, identity)
+            });
         Ok(KubernetesJobObservation::Failed {
             diagnostic_code: diagnostic_code.to_owned(),
             observation,
@@ -1322,6 +1324,18 @@ fn main_container_status<'a>(
         return Err(KubernetesJobError::ObservationInvalid);
     }
     Ok(matches.into_iter().next())
+}
+
+fn init_container_termination(pod: &Value) -> Option<&Value> {
+    pod.pointer("/status/initContainerStatuses")
+        .and_then(Value::as_array)
+        .and_then(|statuses| {
+            statuses.iter().find_map(|status| {
+                let terminated = status.pointer("/state/terminated")?;
+                (terminated.pointer("/exitCode").and_then(Value::as_i64) != Some(0))
+                    .then_some(terminated)
+            })
+        })
 }
 
 pub fn execution_timing(
@@ -2317,6 +2331,47 @@ mod tests {
             );
             assert_eq!(observation.pod_name.as_deref(), Some("pod-1"));
         }
+        {
+            let mut state = cluster.objects.lock().map_err(|_| "fake state poisoned")?;
+            state.insert(
+                pod_path.clone(),
+                json!({
+                    "apiVersion":"v1",
+                    "kind":"Pod",
+                    "metadata":{
+                        "name":"pod-1",
+                        "namespace":NAMESPACE,
+                        "labels":{
+                            "labweaver.io/managed-by":"evaluation-service",
+                            "labweaver.io/run-id":ownership.run_id.to_string(),
+                            "labweaver.io/step-run-id":ownership.step_run_id.to_string(),
+                            "labweaver.io/attempt-id":ownership.attempt_id.to_string(),
+                        },
+                        "annotations":{"labweaver.io/request-sha256":"request-sha"},
+                    },
+                    "status":{
+                        "containerStatuses":[],
+                        "initContainerStatuses":[{
+                            "name":"materialize-input",
+                            "state":{"terminated":{
+                                "exitCode":1,
+                                "reason":"Error",
+                                "message":"LW_ARTIFACT_MATERIALIZER_ARCHIVE_INVALID"
+                            }}
+                        }]
+                    }
+                }),
+            );
+        }
+        let mut init_identity = bundle.identity.clone();
+        init_identity.stable_diagnostic_prefix = "LW_";
+        let KubernetesJobObservation::Failed {
+            diagnostic_code, ..
+        } = cluster.api.observe(&init_identity, None).await?
+        else {
+            return Err("expected terminal materializer failure".into());
+        };
+        assert_eq!(diagnostic_code, "LW_ARTIFACT_MATERIALIZER_ARCHIVE_INVALID");
         cluster
             .objects
             .lock()

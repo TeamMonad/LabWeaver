@@ -3425,7 +3425,10 @@ mod probe_recovery_tests {
             state.resource_status = Some(serde_json::to_value(&status)?);
             state.environment_binding_status = Some(StatusCode::UNPROCESSABLE_ENTITY);
             state.s3_objects.insert(
-                format!("/test-bucket/frozen/{}", fixture.run.frozen_submission_id),
+                format!(
+                    "/test-bucket/evaluation-tests/frozen/{}",
+                    fixture.run.frozen_submission_id
+                ),
                 MockS3Object {
                     body: archive,
                     content_type: FROZEN_ARCHIVE_MEDIA_TYPE.to_owned(),
@@ -4323,7 +4326,7 @@ mod probe_recovery_tests {
             oj_service_account_name: "oj-runner".to_owned(),
             ansible_probe_service_account_name: "ansible-probe".to_owned(),
             image_pull_secret_name: "pull-secret".to_owned(),
-            object_store_egress: vec!["10.96.0.0/12:443".to_owned()],
+            object_store_egress: vec!["10.96.0.0/12:9000".to_owned()],
             resource_poll_interval_milliseconds: 100,
             resource_approval_timeout_seconds: 10,
             execution_observe_poll_interval_milliseconds: 100,
@@ -4714,7 +4717,7 @@ mod probe_recovery_tests {
         .bind(now)
         .bind(format!("freeze:{}", frozen.id))
         .bind(Sha256Digest::of_bytes(b"source-identity").to_string())
-        .bind(format!("frozen/{}", frozen.id))
+        .bind(format!("evaluation-tests/frozen/{}", frozen.id))
         .bind(&frozen.object.object_version)
         .execute(pool)
         .await?;
