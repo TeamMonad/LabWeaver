@@ -51,6 +51,12 @@ class PrepareVgpuGuestImageTests(unittest.TestCase):
         self.assertIn("apt-get install --yes --no-install-recommends ./driver.deb", script)
         self.assertIn("gridd-unlock-patcher", script)
         self.assertIn("/usr/local/bin/gridd-unlock-patcher", script)
+        self.assertIn("grub-install --target=i386-pc --recheck /dev/sda", script)
+        self.assertIn("--run-command 'update-grub'", script)
+        self.assertLess(
+            script.index("grub-install --target=i386-pc --recheck /dev/sda"),
+            script.index("virt-sysprep"),
+        )
         self.assertIn("virt-sysprep", script)
         self.assertIn("qemu-img convert -p -f qcow2 -O qcow2 -c", script)
         self.assertIn("cp --reflink=auto --sparse=never", script)

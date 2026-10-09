@@ -31,7 +31,11 @@ kernel headers and image, the reviewed driver package, and the patcher under
 `/usr/local/bin/gridd-unlock-patcher`. It removes temporary package files
 before creating the output. `virt-sysprep` clears machine IDs, network hardware
 addresses, and SSH host keys so a VM does not inherit an identity from the
-source disk.
+source disk. Because `virt-resize` copies boot sectors without repairing an
+embedded GRUB partition reference after a GPT layout change, the builder also
+reinstalls the guest BIOS GRUB target and regenerates its configuration before
+the disk is exported. KubeVirt uses its default SeaBIOS path for this image;
+the repair does not change the shared source disk or the VM firmware mode.
 
 The disposable builder includes the `iproute2`, `dhcpcd-base`, and
 `isc-dhcp-client` packages required by the libguestfs appliance's normal DHCP

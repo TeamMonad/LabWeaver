@@ -210,7 +210,9 @@ virt-customize --format=qcow2 --network -a "$stage/guest.qcow2" \\
     --run-command "install -D -m 0755 $guest_patcher {GUEST_PATCHER_PATH}" \\
     --run-command "command -v nvidia-gridd >/dev/null" \\
     --run-command "printf '%s' $marker_b64 | base64 --decode > /etc/labweaver-vgpu-image.json" \\
-    --run-command 'DEBIAN_FRONTEND=noninteractive apt-get clean && rm -rf /var/tmp/labweaver-vgpu /var/lib/apt/lists/* /var/cache/apt/archives/*'
+    --run-command 'DEBIAN_FRONTEND=noninteractive apt-get clean && rm -rf /var/tmp/labweaver-vgpu /var/lib/apt/lists/* /var/cache/apt/archives/*' \\
+    --run-command 'grub-install --target=i386-pc --recheck /dev/sda' \\
+    --run-command 'update-grub'
 
 virt-sysprep --format=qcow2 -a "$stage/guest.qcow2" \\
     --operations machine-id,net-hwaddr,ssh-hostkeys
