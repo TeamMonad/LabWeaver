@@ -285,8 +285,7 @@ impl EnvironmentExecutionBindingClient {
         }
         let body = read_bounded_body(response, self.max_response_bytes).await?;
         let binding: EnvironmentExecutionBinding = decode_response(&body)?;
-        let now = UtcTimestamp::from_utc(time::OffsetDateTime::now_utc())
-            .map_err(|_| EnvironmentExecutionBindingClientError::Clock)?;
+        let now = utc_timestamp_from_clock(time::OffsetDateTime::now_utc())?;
         binding
             .validate_for(environment_id, &request, now)
             .map_err(|_| EnvironmentExecutionBindingClientError::ResponseInvalid)?;
@@ -317,6 +316,15 @@ fn validate_scopes(
         return Err(EnvironmentExecutionBindingClientError::Configuration);
     }
     Ok(())
+}
+
+fn utc_timestamp_from_clock(
+    value: time::OffsetDateTime,
+) -> Result<UtcTimestamp, EnvironmentExecutionBindingClientError> {
+    let value = value
+        .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
+        .map_err(|_| EnvironmentExecutionBindingClientError::Clock)?;
+    UtcTimestamp::from_utc(value).map_err(|_| EnvironmentExecutionBindingClientError::Clock)
 }
 
 fn validate_execution_certificate(
@@ -449,4 +457,65 @@ pub enum EnvironmentExecutionBindingClientError {
     CredentialGeneration,
     #[error("LW_EVALUATION_ENVIRONMENT_BINDING_CLOCK_INVALID")]
     Clock,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{utc_timestamp_from_clock, validate_execution_certificate};
+    use contracts::{
+        EnvironmentId, ReleaseId, Revision, UtcTimestamp, authoring::RuntimeKind,
+        environment::EnvironmentExecutionSourceBinding, submission::FrozenEnvironmentIdentity,
+    };
+    use russh::keys::ssh_key::{PrivateKey, certificate, private::Ed25519Keypair};
+
+    #[test]
+    fn clock_is_truncated_to_milliseconds_before_certificate_validation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let clock = time::OffsetDateTime::parse(
+            "2026-09-09T00:00:00.123456789Z",
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        let now = utc_timestamp_from_clock(clock)?;
+        assert_eq!(now.get().nanosecond(), 123_000_000);
+
+        let ca = PrivateKey::from(Ed25519Keypair::from_seed(&[0x41; 32]));
+        let subject = PrivateKey::from(Ed25519Keypair::from_seed(&[0x42; 32]));
+        let valid_after = u64::try_from(now.get().unix_timestamp())? - 1;
+        let valid_before = valid_after + 299;
+        let mut builder = certificate::Builder::new(
+            vec![0x44; certificate::Builder::RECOMMENDED_NONCE_SIZE],
+            subject.public_key(),
+            valid_after,
+            valid_before,
+        )?;
+        builder
+            .cert_type(certificate::CertType::User)?
+            .valid_principal("labweaver-evaluation")?;
+        let certificate = builder.sign(&ca)?.to_openssh()?;
+        let expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::seconds(300))?;
+        let binding = contracts::environment::EnvironmentExecutionBinding {
+            environment: FrozenEnvironmentIdentity {
+                environment_id: EnvironmentId::new(),
+                environment_revision: Revision::new(1)?,
+                release_id: ReleaseId::new(),
+                release_version: 1,
+                runtime_kind: RuntimeKind::VirtualMachine,
+                build_request_id: None,
+            },
+            source: EnvironmentExecutionSourceBinding::VirtualMachine {
+                namespace: "lw-env-test".to_owned(),
+                host: "10.0.0.1".to_owned(),
+                port: 22,
+                username: "labweaver".to_owned(),
+                workspace_root: "/workspace".to_owned(),
+                expected_host_key_sha256: "a".repeat(64),
+                source_identity: "b".repeat(64),
+                execution_certificate_openssh: certificate,
+                expires_at,
+            },
+        };
+
+        validate_execution_certificate(&binding, &subject, now)?;
+        Ok(())
+    }
 }

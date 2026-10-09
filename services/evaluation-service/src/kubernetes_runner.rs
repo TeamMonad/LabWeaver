@@ -4276,7 +4276,7 @@ mod probe_recovery_tests {
                     upload_ttl_seconds: 60,
                     max_object_bytes: 1024 * 1024,
                     force_path_style: true,
-                    ca_bundle_file: None,
+                    ca_bundle_file: Some(ca_file.display().to_string()),
                 },
                 S3Credential {
                     access_key_id: "test-access".to_owned(),
@@ -4297,7 +4297,7 @@ mod probe_recovery_tests {
                     upload_ttl_seconds: 60,
                     max_object_bytes: 1024 * 1024,
                     force_path_style: true,
-                    ca_bundle_file: None,
+                    ca_bundle_file: Some(ca_file.display().to_string()),
                 },
                 S3Credential {
                     access_key_id: "test-access".to_owned(),
