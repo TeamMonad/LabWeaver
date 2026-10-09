@@ -27,6 +27,13 @@ const SAFE_GATEWAY_STAGES = new Set([
   'AUTHORIZED_KEYS_TIMESTAMP',
   'AUTHORIZED_KEYS_KEY_SERIALIZE',
 ])
+const SAFE_CONFIG_PROBE_GUEST_FAILURES = new Set([
+  'CONFIG_PROBE_PYTHON_UNSUPPORTED',
+  'CONFIG_PROBE_GUEST_WORKSPACE_MISMATCH',
+  'CONFIG_PROBE_OPENSSH_MISSING',
+  'CONFIG_PROBE_SSH_INACTIVE',
+])
+const SAFE_GUEST_MODULES = new Set(['apt'])
 
 function opensshFingerprint(keyType, encodedKey) {
   if (!/^[A-Za-z0-9@._+-]+$/.test(keyType) || !/^[A-Za-z0-9+/]+={0,2}$/.test(encodedKey)) {
@@ -240,6 +247,27 @@ export function classifyPinnedSshCommandFailure({ code, signal, stderr = '' }) {
   return `WORK_SSH_COMMAND_FAILED_${exitStatus}`
 }
 
+export function classifyPinnedSshGuestFailure(stderr = '') {
+  for (const line of String(stderr).split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (/^(?:CUDA_DRIVER_[A-Z0-9_:.-]+|CUDA_DRIVER_LIBRARY_UNAVAILABLE)$/.test(trimmed)) {
+      return trimmed
+    }
+    const configProbeCode = trimmed.match(/\b(CONFIG_PROBE_[A-Z0-9_]+)\b/)?.[1]
+    if (configProbeCode && SAFE_CONFIG_PROBE_GUEST_FAILURES.has(configProbeCode)) {
+      return configProbeCode
+    }
+  }
+
+  const missingModule = String(stderr)
+    .match(/\b(?:ModuleNotFoundError|ImportError):\s+No module named\s+['"]?([A-Za-z0-9_]+)['"]?/i)?.[1]
+    ?.toLowerCase()
+  if (missingModule && SAFE_GUEST_MODULES.has(missingModule)) {
+    return `WORK_SSH_GUEST_MODULE_MISSING_${missingModule.toUpperCase()}`
+  }
+  return null
+}
+
 export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
   const endpoint = await preparePinnedSsh(endpointGrant, identity)
   const result = await runProcess('ssh', pinnedSshArgs(endpoint, identity, command), {
@@ -250,14 +278,7 @@ export async function runPinnedSsh(endpointGrant, identity, command, input = und
   if (result.timedOut) throw new Error('WORK_SSH_COMMAND_TIMEOUT')
   if (result.outputExceeded) throw new Error('WORK_SSH_COMMAND_OUTPUT_LIMIT')
   if (result.code !== 0) {
-    const guestDiagnostic = result.stderr
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .map((line) => {
-        if (/^(?:CUDA_DRIVER_[A-Z0-9_:.-]+|CUDA_DRIVER_LIBRARY_UNAVAILABLE)$/.test(line)) return line
-        return line.match(/^AssertionError\b.*?\b(CONFIG_PROBE_[A-Z0-9_]+)\b/)?.[1] ?? null
-      })
-      .find(Boolean)
+    const guestDiagnostic = classifyPinnedSshGuestFailure(result.stderr)
     throw new Error(guestDiagnostic ?? classifyPinnedSshCommandFailure(result))
   }
   return result.stdout

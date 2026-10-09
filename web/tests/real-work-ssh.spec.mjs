@@ -13,6 +13,7 @@ import {
 import {
   classifyPinnedSshSessionClose,
   classifyPinnedSshCommandFailure,
+  classifyPinnedSshGuestFailure,
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
   pinnedSshArgs,
@@ -215,6 +216,18 @@ GPU 00000000:01:00.0
       signal: 'SIGKILL',
       stderr: '',
     })).toBe('WORK_SSH_COMMAND_FAILED_SIGNAL_SIGKILL')
+  })
+
+  it('preserves known guest diagnostics before gateway failure tokens', () => {
+    const stderr = `Traceback (most recent call last):
+AssertionError: CONFIG_PROBE_SSH_INACTIVE
+{"diagnostic_code":"LW_GATEWAY_TARGET_SESSION_FAILED","failure_stage":"gateway.target_session"}`
+    expect(classifyPinnedSshGuestFailure(stderr)).toBe('CONFIG_PROBE_SSH_INACTIVE')
+    expect(classifyPinnedSshGuestFailure(
+      "ModuleNotFoundError: No module named 'apt' (/guest/private/config-probe.py)\nLW_GATEWAY_TARGET_SESSION_FAILED",
+    )).toBe('WORK_SSH_GUEST_MODULE_MISSING_APT')
+    expect(classifyPinnedSshGuestFailure("ModuleNotFoundError: No module named 'yaml'"))
+      .toBeNull()
   })
 })
 
