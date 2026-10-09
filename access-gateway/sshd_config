@@ -1,5 +1,7 @@
 Port 2222
 Protocol 2
+# Prefer curve25519 for Windows OpenSSH host-key discovery; retain default algorithms.
+KexAlgorithms ^curve25519-sha256
 HostKey /etc/labweaver/secrets/ssh_host_ed25519_key
 PasswordAuthentication no
 KbdInteractiveAuthentication no
