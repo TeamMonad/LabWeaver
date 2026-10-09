@@ -1,6 +1,40 @@
 import { expect } from '@playwright/test'
 import { expectJson, navigateFromHomeByUi, pollJson } from './live.mjs'
 
+function clipboardMismatchDiagnostic(expected, actual, alias, pageHasFocus) {
+  const firstDifference = (() => {
+    const limit = Math.min(expected.length, actual.length)
+    for (let index = 0; index < limit; index += 1) {
+      if (expected[index] !== actual[index]) return index
+    }
+    return expected.length === actual.length ? 'none' : limit
+  })()
+  const normalizedExpected = expected.replace(/\r\n/g, '\n')
+  const normalizedActual = actual.replace(/\r\n/g, '\n')
+  const category = expected === actual
+    ? 'none'
+    : !expected
+      ? 'expected-empty'
+      : !actual
+        ? 'actual-empty'
+        : normalizedExpected === normalizedActual
+          ? 'line-ending'
+          : expected.trim() === actual.trim()
+            ? 'outer-whitespace'
+            : 'content'
+  const categoryToken = category.toUpperCase().replaceAll('-', '_')
+  const firstDifferenceToken = firstDifference === 'none' ? 'NONE' : String(firstDifference)
+  return [
+    `WORK_SSH_CLIPBOARD_CATEGORY_${categoryToken}`,
+    `WORK_SSH_CLIPBOARD_FOCUS_${pageHasFocus ? 'TRUE' : 'FALSE'}`,
+    `WORK_SSH_CLIPBOARD_EXPECTED_LENGTH_${expected.length}`,
+    `WORK_SSH_CLIPBOARD_ACTUAL_LENGTH_${actual.length}`,
+    `WORK_SSH_CLIPBOARD_FIRST_DIFFERENCE_${firstDifferenceToken}`,
+    `WORK_SSH_CLIPBOARD_EXPECTED_ALIAS_${expected.includes(alias) ? 'TRUE' : 'FALSE'}`,
+    `WORK_SSH_CLIPBOARD_ACTUAL_ALIAS_${actual.includes(alias) ? 'TRUE' : 'FALSE'}`,
+  ].join(':')
+}
+
 export async function waitForActiveAccessGrant(request, grantId) {
   const grant = await pollJson(
     request,
@@ -132,12 +166,18 @@ export async function issueEnvironmentAccessGrantByUi(page, projectId, environme
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
       origin: new URL(page.url()).origin,
     })
+    await page.bringToFront()
+    const pageHasFocus = await page.evaluate(() => document.hasFocus())
     const copyButton = page.getByRole('button', { name: '复制 SSH 命令', exact: true })
     await expect(copyButton).toBeEnabled({ timeout: 30_000 })
     await copyButton.click()
     await expect(copyButton).toContainText('已复制', { timeout: 5_000 })
     const copiedCommand = await page.evaluate(() => navigator.clipboard.readText())
-    if (copiedCommand !== command) throw new Error('WORK_SSH_COMMAND_CLIPBOARD_MISMATCH')
+    if (copiedCommand !== command) {
+      throw new Error(
+        `WORK_SSH_COMMAND_CLIPBOARD_MISMATCH:${clipboardMismatchDiagnostic(command, copiedCommand, endpointGrants[0].alias, pageHasFocus)}`,
+      )
+    }
   }
   return { grant, endpointGrant: endpointGrants[0] }
 }
