@@ -188,6 +188,43 @@ export function pinnedSshArgs(endpoint, identity, command) {
   ]
 }
 
+function sshExitStatusToken(code, signal) {
+  if (Number.isInteger(code) && code >= 0 && code <= 255) return `EXIT_${code}`
+  if (typeof signal === 'string' && /^[A-Za-z0-9]+$/.test(signal)) {
+    return `SIGNAL_${signal.toUpperCase()}`
+  }
+  return 'EXIT_UNKNOWN'
+}
+
+function safeGatewayFailureToken(stderr) {
+  const token = stderr.match(/\b(LW_GATEWAY_[A-Z0-9_]+)\b/i)?.[1]?.toUpperCase()
+  if (!token) return null
+  const stage = stderr.match(/\b(?:failure[_ ]stage|stage)\b["']?\s*[:=]\s*["']?([A-Za-z0-9_.-]+)/i)?.[1]
+  const safeStage = stage
+    ? stage.toUpperCase().replace(/[.-]/g, '_').replace(/[^A-Z0-9_]/g, '')
+    : ''
+  return safeStage ? `${token}_STAGE_${safeStage}` : token
+}
+
+export function classifyPinnedSshCommandFailure({ code, signal, stderr = '' }) {
+  const exitStatus = sshExitStatusToken(code, signal)
+  const gatewayToken = safeGatewayFailureToken(stderr)
+  if (gatewayToken) return `WORK_SSH_COMMAND_${gatewayToken}_${exitStatus}`
+  if (/Permission denied \(publickey\)/i.test(stderr)) {
+    return `WORK_SSH_COMMAND_PERMISSION_DENIED_PUBLICKEY_${exitStatus}`
+  }
+  if (/Host key verification failed\.?/i.test(stderr)) {
+    return `WORK_SSH_COMMAND_HOST_KEY_VERIFICATION_FAILED_${exitStatus}`
+  }
+  if (/Connection refused/i.test(stderr)) {
+    return `WORK_SSH_COMMAND_CONNECTION_REFUSED_${exitStatus}`
+  }
+  if (/(?:Connection timed out|Operation timed out|connect to .* timed out)/i.test(stderr)) {
+    return `WORK_SSH_COMMAND_CONNECTION_TIMEOUT_${exitStatus}`
+  }
+  return `WORK_SSH_COMMAND_FAILED_${exitStatus}`
+}
+
 export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
   const endpoint = await preparePinnedSsh(endpointGrant, identity)
   const result = await runProcess('ssh', pinnedSshArgs(endpoint, identity, command), {
@@ -206,7 +243,7 @@ export async function runPinnedSsh(endpointGrant, identity, command, input = und
         return line.match(/^AssertionError\b.*?\b(CONFIG_PROBE_[A-Z0-9_]+)\b/)?.[1] ?? null
       })
       .find(Boolean)
-    throw new Error(guestDiagnostic ?? `WORK_SSH_COMMAND_FAILED:${result.code ?? 'signal'}`)
+    throw new Error(guestDiagnostic ?? classifyPinnedSshCommandFailure(result))
   }
   return result.stdout
 }

@@ -12,6 +12,7 @@ import {
 } from '../e2e/support/real-gpu.mjs'
 import {
   classifyPinnedSshSessionClose,
+  classifyPinnedSshCommandFailure,
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
   pinnedSshArgs,
@@ -167,6 +168,48 @@ GPU 00000000:01:00.0
     })).toBe('remote_terminated')
     expect(classifyPinnedSshSessionClose({ code: null, signal: 'SIGKILL', stderr: '' }))
       .toBe('process_signaled')
+  })
+
+  it('classifies explicit OpenSSH failures without exposing stderr details', () => {
+    expect(classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: 'Permission denied (publickey).\nPlease try again.',
+    })).toBe('WORK_SSH_COMMAND_PERMISSION_DENIED_PUBLICKEY_EXIT_255')
+    expect(classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: 'Host key verification failed. /home/private/id_ed25519',
+    })).toBe('WORK_SSH_COMMAND_HOST_KEY_VERIFICATION_FAILED_EXIT_255')
+    expect(classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: 'ssh: connect to host 10.0.0.8 port 2222: Connection refused',
+    })).toBe('WORK_SSH_COMMAND_CONNECTION_REFUSED_EXIT_255')
+    expect(classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: 'ssh: connect to host 10.0.0.8 port 2222: Connection timed out',
+    })).toBe('WORK_SSH_COMMAND_CONNECTION_TIMEOUT_EXIT_255')
+  })
+
+  it('keeps only the gateway diagnostic token and safe stage with the exit status', () => {
+    const classified = classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: '{"diagnostic_code":"LW_GATEWAY_TARGET_SESSION_FAILED","failure_stage":"gateway.target_session","safe_detail":"redacted"}',
+    })
+    expect(classified).toBe('WORK_SSH_COMMAND_LW_GATEWAY_TARGET_SESSION_FAILED_STAGE_GATEWAY_TARGET_SESSION_EXIT_255')
+    expect(classified).not.toContain('redacted')
+    expect(classified).not.toContain('10.0.0.8')
+  })
+
+  it('retains signal status when a process has no numeric exit code', () => {
+    expect(classifyPinnedSshCommandFailure({
+      code: null,
+      signal: 'SIGKILL',
+      stderr: '',
+    })).toBe('WORK_SSH_COMMAND_FAILED_SIGNAL_SIGKILL')
   })
 })
 
