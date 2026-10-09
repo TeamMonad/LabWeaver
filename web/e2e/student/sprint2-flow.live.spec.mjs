@@ -70,6 +70,8 @@ const VM_PERSISTENCE_MARKER_PATH = 'workspace/persistence-marker.txt'
 const FULL_CHAIN_TIMEOUT_MS = 14_400_000
 const AUTHORING_RUN_TIMEOUT_MS = 9_000_000
 const CANDIDATE_BUILD_TIMEOUT_MS = 3_600_000
+const ENVIRONMENT_READY_TIMEOUT_MS = 240_000
+const VM_ENVIRONMENT_READY_TIMEOUT_MS = 960_000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EXISTING_PROJECT_ID = process.env.LABWEAVER_E2E_WORK_PROJECT_ID?.trim() ?? ''
 const EXISTING_PROJECT_MODE = Boolean(EXISTING_PROJECT_ID)
@@ -566,13 +568,15 @@ async function waitForLease(request, projectId, requestId) {
   return item
 }
 
-async function waitForEnvironment(request, environmentId, expectedState) {
+async function waitForEnvironment(request, environmentId, expectedState, runtimeKind = null) {
   const value = await pollJson(
     request,
     `/api/v1/environments/${environmentId}`,
     (item) => item.observedState === expectedState || ['failed', 'deleted'].includes(item.observedState),
     `ENVIRONMENT_${expectedState.toUpperCase()}_STATUS_FAILED`,
-    240_000,
+    expectedState === 'ready' && runtimeKind === 'virtual_machine'
+      ? VM_ENVIRONMENT_READY_TIMEOUT_MS
+      : ENVIRONMENT_READY_TIMEOUT_MS,
   )
   if (value.observedState !== expectedState) throw new Error(`ENVIRONMENT_STATE_INVALID:${value.observedState}:${value.lastDiagnosticCode ?? 'diagnostic missing'}`)
   return value
@@ -910,7 +914,12 @@ test('student provisions a Work environment, configures it, and releases its cap
       page.locator('.resource-title-row').getByRole('heading', { name: environmentId }),
     ).toBeVisible({ timeout: 120_000 })
     await expect(page.locator('.env-meta-grid')).toContainText(REAL_WORK_VM ? '虚拟机' : '容器')
-    const environment = await waitForEnvironment(page.request, environmentId, 'ready')
+    const environment = await waitForEnvironment(
+      page.request,
+      environmentId,
+      'ready',
+      REAL_WORK_VM ? 'virtual_machine' : 'container',
+    )
     expect(environment.class).toBe('work')
     expect(environment.projectId).toBe(project.id)
     expect(environment.providerBinding).toBe(WORK_PROVIDER_BINDING)
@@ -1193,7 +1202,12 @@ test('student provisions a Work environment, configures it, and releases its cap
     if (completedConfigurationRun.state !== 'succeeded') throw new Error(`WORK_CONFIGURATION_RUN_FAILED:${completedConfigurationRun.state}`)
 
     if (REAL_WORK_MODE) {
-      const configuredEnvironment = await waitForEnvironment(page.request, environmentId, 'ready')
+      const configuredEnvironment = await waitForEnvironment(
+        page.request,
+        environmentId,
+        'ready',
+        REAL_WORK_VM ? 'virtual_machine' : 'container',
+      )
       if (REAL_WORK_VM) {
         const configuredConnection = await issueWorkAccessGrantByUi(page, project.id, configuredEnvironment)
         revocationTargetGrant = configuredConnection.grant
@@ -1266,7 +1280,12 @@ test('student provisions a Work environment, configures it, and releases its cap
         kind: 'restart',
         state: 'succeeded',
       })
-      const restartedEnvironment = await waitForEnvironment(page.request, environmentId, 'ready')
+      const restartedEnvironment = await waitForEnvironment(
+        page.request,
+        environmentId,
+        'ready',
+        REAL_WORK_VM ? 'virtual_machine' : 'container',
+      )
       if (REAL_WORK_VM) {
         const restartedConnection = await issueWorkAccessGrantByUi(page, project.id, restartedEnvironment)
         revocationTargetGrant = restartedConnection.grant

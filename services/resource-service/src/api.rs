@@ -407,7 +407,7 @@ async fn list_requests_for_project(
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
     Query(query): Query<ProjectListQuery>,
-) -> Result<Json<Vec<ResourceRequest>>, ResourceApiError> {
+) -> Result<Response, ResourceApiError> {
     authorize(&principal);
     let course_id = query.course_id;
     let requests = if is_admin(&principal)? {
@@ -418,7 +418,12 @@ async fn list_requests_for_project(
             .list_owned(principal.actor_id, project_id, course_id)
             .await?
     };
-    Ok(Json(requests))
+    let mut response = Json(requests).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 async fn get_request(
@@ -648,7 +653,7 @@ async fn list_leases_for_project(
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
     Query(query): Query<ProjectListQuery>,
-) -> Result<Json<Vec<contracts::resource::ResourceLease>>, ResourceApiError> {
+) -> Result<Response, ResourceApiError> {
     authorize(&principal);
     let leases = if is_admin(&principal)? {
         state
@@ -661,7 +666,12 @@ async fn list_leases_for_project(
             .list_owned_leases(principal.actor_id, project_id, query.course_id)
             .await?
     };
-    Ok(Json(leases))
+    let mut response = Json(leases).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 async fn renew_lease(

@@ -4281,6 +4281,7 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
         &["resource.api.invoke"],
     )?;
     let public_response = router
+        .clone()
         .oneshot(public_list_request(&access_token, &delegation)?)
         .await
         .expect("resource router is infallible");
@@ -4296,6 +4297,50 @@ async fn resource_http_auth_binds_task_routes_to_task_owner_clients()
         keys,
         std::collections::BTreeSet::from(["agent-authorized", "evaluation-authorized"])
     );
+
+    let project_requests_response = router
+        .clone()
+        .oneshot(public_project_list_request(
+            &access_token,
+            &delegation,
+            project_id,
+            "resource-requests",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(project_requests_response.status(), StatusCode::OK);
+    assert_eq!(
+        project_requests_response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let project_requests: Vec<ResourceRequest> = serde_json::from_slice(
+        &to_bytes(project_requests_response.into_body(), 1024 * 1024).await?,
+    )?;
+    assert_eq!(project_requests.len(), 2);
+
+    let project_leases_response = router
+        .oneshot(public_project_list_request(
+            &access_token,
+            &delegation,
+            project_id,
+            "resource-leases",
+        )?)
+        .await
+        .expect("resource router is infallible");
+    assert_eq!(project_leases_response.status(), StatusCode::OK);
+    assert_eq!(
+        project_leases_response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let project_leases: Vec<contracts::resource::ResourceLease> =
+        serde_json::from_slice(&to_bytes(project_leases_response.into_body(), 1024 * 1024).await?)?;
+    assert!(project_leases.is_empty());
     Ok(())
 }
 
@@ -4499,6 +4544,20 @@ fn public_list_request(
     Ok(Request::builder()
         .method(Method::GET)
         .uri("/api/v1/resource-requests")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("x-labweaver-resource-delegation", delegation)
+        .body(Body::empty())?)
+}
+
+fn public_project_list_request(
+    token: &str,
+    delegation: &str,
+    project_id: ProjectId,
+    resource_path: &str,
+) -> Result<Request<Body>, Box<dyn std::error::Error>> {
+    Ok(Request::builder()
+        .method(Method::GET)
+        .uri(format!("/api/v1/projects/{project_id}/{resource_path}"))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header("x-labweaver-resource-delegation", delegation)
         .body(Body::empty())?)
