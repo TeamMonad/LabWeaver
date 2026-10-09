@@ -296,7 +296,6 @@ workloads:
     gateway: true
     env:
       LABWEAVER_ACCESS_URL: https://access-service:9443
-      LABWEAVER_GATEWAY_IDENTITY: spiffe://labweaver/openssh-gateway
       LABWEAVER_ACCESS_CA_FILE: /etc/labweaver/secrets/mtls-ca.pem
       LABWEAVER_SERVICE_OIDC_ISSUER: https://keycloak.labweaver.internal/realms/workloads
       LABWEAVER_SERVICE_OIDC_CA: /etc/labweaver/secrets/service-oidc-ca.pem

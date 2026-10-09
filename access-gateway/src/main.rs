@@ -75,7 +75,7 @@ impl GatewayError {
 #[derive(Clone)]
 struct GatewayConfig {
     access_url: String,
-    gateway_identity: String,
+    service_client_id: String,
     client: Client,
     service_token_client: ServiceTokenClient,
     context: telemetry::RequestContext,
@@ -84,7 +84,7 @@ struct GatewayConfig {
 impl GatewayConfig {
     async fn load(context: telemetry::RequestContext) -> Result<Self, GatewayError> {
         let access_url = required_env("LABWEAVER_ACCESS_URL")?;
-        let gateway_identity = required_env("LABWEAVER_GATEWAY_IDENTITY")?;
+        let service_client_id = required_env("LABWEAVER_SERVICE_CLIENT_ID")?;
         let ca_path = required_env("LABWEAVER_ACCESS_CA_FILE")?;
         let oidc_ca_path = PathBuf::from(required_env("LABWEAVER_SERVICE_OIDC_CA")?);
         let oidc_ca = std::fs::read(oidc_ca_path).map_err(|_| GatewayError::Configuration)?;
@@ -100,7 +100,7 @@ impl GatewayConfig {
             .map_err(|_| GatewayError::Configuration)?;
         let service_token_config = ServiceTokenClientConfig::new(
             &required_env("LABWEAVER_SERVICE_OIDC_ISSUER")?,
-            required_env("LABWEAVER_SERVICE_CLIENT_ID")?,
+            service_client_id.clone(),
             read_secret_file("LABWEAVER_SERVICE_CLIENT_SECRET_FILE")?,
             required_env("LABWEAVER_SERVICE_AUDIENCE")?,
             required_scopes("LABWEAVER_SERVICE_SCOPES")?,
@@ -114,7 +114,7 @@ impl GatewayConfig {
                 .map_err(|_| GatewayError::Configuration)?;
         Ok(Self {
             access_url: access_url.trim_end_matches('/').to_owned(),
-            gateway_identity,
+            service_client_id,
             client,
             service_token_client,
             context,
@@ -312,7 +312,7 @@ async fn authorized_keys(
         .map_err(|_| GatewayError::InputStage("authorized_keys.key_parse"))?;
     let request = SshAuthorizationRequest {
         presented_key_fingerprint_sha256: key.fingerprint(HashAlg::Sha256).to_string(),
-        gateway_identity: config.gateway_identity.clone(),
+        gateway_identity: config.service_client_id.clone(),
         connection_id: connection_id.to_owned(),
         source_address_hash: source_address_hash(source_address)
             .map_err(|_| GatewayError::InputStage("authorized_keys.source_address"))?,
@@ -384,7 +384,7 @@ async fn force_command(
         authorization_id: authorization_id.to_owned(),
         force_command_token: token.to_owned(),
         alias: connect_command.alias.to_owned(),
-        gateway_identity: config.gateway_identity.clone(),
+        gateway_identity: config.service_client_id.clone(),
         connection_id: connection_id.to_owned(),
         opened_at: now()?,
     };
@@ -435,7 +435,7 @@ async fn force_command(
             status = child.wait() => break status.map_err(|_| GatewayError::Target).and_then(|status| status.success().then_some(()).ok_or(GatewayError::Target)),
             _ = heartbeat.tick() => {
                 let body = HeartbeatGatewaySessionRequest {
-                    gateway_identity: config.gateway_identity.clone(),
+                    gateway_identity: config.service_client_id.clone(),
                     connection_id: connection_id.to_owned(),
                     expected_revision: session.revision,
                     observed_at: now()?,
@@ -559,7 +559,7 @@ async fn close_session(
     clean: bool,
 ) -> Result<(), GatewayError> {
     let body = CloseGatewaySessionRequest {
-        gateway_identity: config.gateway_identity.clone(),
+        gateway_identity: config.service_client_id.clone(),
         connection_id: connection_id.to_owned(),
         expected_revision: session.revision,
         closed_at: now()?,
