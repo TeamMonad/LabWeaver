@@ -231,19 +231,21 @@ function safeGatewayFailureToken(stderr) {
 export function classifyPinnedSshCommandFailure({ code, signal, stderr = '' }) {
   const exitStatus = sshExitStatusToken(code, signal)
   const gatewayToken = safeGatewayFailureToken(stderr)
-  if (gatewayToken) return `WORK_SSH_COMMAND_${gatewayToken}_${exitStatus}`
+  let specificFailure = null
   if (/Permission denied \(publickey\)/i.test(stderr)) {
-    return `WORK_SSH_COMMAND_PERMISSION_DENIED_PUBLICKEY_${exitStatus}`
+    specificFailure = 'PERMISSION_DENIED_PUBLICKEY'
+  } else if (/Host key verification failed\.?/i.test(stderr)) {
+    specificFailure = 'HOST_KEY_VERIFICATION_FAILED'
+  } else if (/Connection refused/i.test(stderr)) {
+    specificFailure = 'CONNECTION_REFUSED'
+  } else if (/(?:Connection timed out|Operation timed out|connect to .* timed out)/i.test(stderr)) {
+    specificFailure = 'CONNECTION_TIMEOUT'
   }
-  if (/Host key verification failed\.?/i.test(stderr)) {
-    return `WORK_SSH_COMMAND_HOST_KEY_VERIFICATION_FAILED_${exitStatus}`
+  if (specificFailure) {
+    const gatewaySuffix = gatewayToken ? `_GATEWAY_${gatewayToken}` : ''
+    return `WORK_SSH_COMMAND_${specificFailure}${gatewaySuffix}_${exitStatus}`
   }
-  if (/Connection refused/i.test(stderr)) {
-    return `WORK_SSH_COMMAND_CONNECTION_REFUSED_${exitStatus}`
-  }
-  if (/(?:Connection timed out|Operation timed out|connect to .* timed out)/i.test(stderr)) {
-    return `WORK_SSH_COMMAND_CONNECTION_TIMEOUT_${exitStatus}`
-  }
+  if (gatewayToken) return `WORK_SSH_COMMAND_${gatewayToken}_${exitStatus}`
   return `WORK_SSH_COMMAND_FAILED_${exitStatus}`
 }
 

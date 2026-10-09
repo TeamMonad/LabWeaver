@@ -210,6 +210,17 @@ GPU 00000000:01:00.0
     })).toBe('WORK_SSH_COMMAND_LW_GATEWAY_TARGET_SESSION_FAILED_EXIT_255')
   })
 
+  it('keeps a specific OpenSSH failure when gateway diagnostics are also present', () => {
+    const classified = classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: 'Permission denied (publickey).\n{"diagnostic_code":"LW_GATEWAY_TARGET_SESSION_FAILED","failure_stage":"gateway.target_session","username":"redacted"}',
+    })
+    expect(classified).toBe('WORK_SSH_COMMAND_PERMISSION_DENIED_PUBLICKEY_GATEWAY_LW_GATEWAY_TARGET_SESSION_FAILED_STAGE_GATEWAY_TARGET_SESSION_EXIT_255')
+    expect(classified).not.toContain('username')
+    expect(classified).not.toContain('redacted')
+  })
+
   it('retains signal status when a process has no numeric exit code', () => {
     expect(classifyPinnedSshCommandFailure({
       code: null,
