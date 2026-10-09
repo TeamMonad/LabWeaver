@@ -12,6 +12,21 @@ const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SSH_HOSTNAME = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/
 const VM_WORKSPACE_FILE = /^workspace(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
+const SAFE_GATEWAY_STAGES = new Set([
+  'GATEWAY_CONFIGURATION',
+  'GATEWAY_INPUT',
+  'GATEWAY_ACCESS_AUTHORITY',
+  'GATEWAY_TARGET_SESSION',
+  'AUTHORIZED_KEYS_LOCAL_USER',
+  'AUTHORIZED_KEYS_PRESENTED_KEY',
+  'AUTHORIZED_KEYS_CONNECTION',
+  'AUTHORIZED_KEYS_EXTRA_ARGUMENT',
+  'AUTHORIZED_KEYS_SOURCE_ADDRESS',
+  'AUTHORIZED_KEYS_CONNECTION_ID',
+  'AUTHORIZED_KEYS_KEY_PARSE',
+  'AUTHORIZED_KEYS_TIMESTAMP',
+  'AUTHORIZED_KEYS_KEY_SERIALIZE',
+])
 
 function opensshFingerprint(keyType, encodedKey) {
   if (!/^[A-Za-z0-9@._+-]+$/.test(keyType) || !/^[A-Za-z0-9+/]+={0,2}$/.test(encodedKey)) {
@@ -203,7 +218,7 @@ function safeGatewayFailureToken(stderr) {
   const safeStage = stage
     ? stage.toUpperCase().replace(/[.-]/g, '_').replace(/[^A-Z0-9_]/g, '')
     : ''
-  return safeStage ? `${token}_STAGE_${safeStage}` : token
+  return SAFE_GATEWAY_STAGES.has(safeStage) ? `${token}_STAGE_${safeStage}` : token
 }
 
 export function classifyPinnedSshCommandFailure({ code, signal, stderr = '' }) {

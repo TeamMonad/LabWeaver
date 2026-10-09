@@ -202,6 +202,11 @@ GPU 00000000:01:00.0
     expect(classified).toBe('WORK_SSH_COMMAND_LW_GATEWAY_TARGET_SESSION_FAILED_STAGE_GATEWAY_TARGET_SESSION_EXIT_255')
     expect(classified).not.toContain('redacted')
     expect(classified).not.toContain('10.0.0.8')
+    expect(classifyPinnedSshCommandFailure({
+      code: 255,
+      signal: null,
+      stderr: '{"diagnostic_code":"LW_GATEWAY_TARGET_SESSION_FAILED","failure_stage":"user-content"}',
+    })).toBe('WORK_SSH_COMMAND_LW_GATEWAY_TARGET_SESSION_FAILED_EXIT_255')
   })
 
   it('retains signal status when a process has no numeric exit code', () => {
