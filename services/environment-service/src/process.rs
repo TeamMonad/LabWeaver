@@ -1175,6 +1175,19 @@ mod deployment_contract_tests {
             .iter()
             .find(|binding| binding.provider_kind.as_deref() == Some("kubevirt"))
             .expect("kubevirt provider example");
+        let evaluation_service: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/evaluation-service.yaml.example"
+        ))
+        .expect("evaluation service example must deserialize");
+        let evaluation_runner_namespace = evaluation_service
+            .get("execution")
+            .and_then(|execution| execution.get("runnerNamespace"))
+            .and_then(serde_yaml::Value::as_str)
+            .expect("evaluation service runner namespace");
+        assert_eq!(
+            kubevirt.evaluation_namespace.as_deref(),
+            Some(evaluation_runner_namespace)
+        );
         let runtime = kubevirt
             .runtime_vm_base_policy()
             .expect("valid runtime vm base policy")
