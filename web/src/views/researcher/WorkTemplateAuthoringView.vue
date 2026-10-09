@@ -279,7 +279,7 @@
       </AsyncStateView>
     </section>
 
-    <section v-if="approvedCandidate" class="template-card md-card" aria-labelledby="release-heading" data-testid="work-template-release">
+    <section v-if="approvedCandidate || release.kind === 'success'" class="template-card md-card" aria-labelledby="release-heading" data-testid="work-template-release">
       <div class="section-heading section-heading--compact">
         <div>
           <h4 id="release-heading">发布 Work 模板</h4>
@@ -289,7 +289,7 @@
       <div v-if="environmentCandidate.kind === 'success'" class="release-summary">
         <div><span>候选</span><code>{{ environmentCandidate.data.candidate.id }}</code></div>
         <div><span>运行时</span><code>{{ environmentCandidate.data.candidate.spec.runtime.kind }}</code></div>
-        <div><span>审批</span><code>{{ approvedCandidate.id }}</code></div>
+        <div v-if="approvedCandidate"><span>审批</span><code>{{ approvedCandidate.id }}</code></div>
       </div>
       <DiagnosticBanner
         v-if="releaseOutcome"

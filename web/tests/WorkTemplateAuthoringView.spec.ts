@@ -537,6 +537,45 @@ describe('WorkTemplateAuthoringView', () => {
     wrapper.unmount()
   })
 
+  it('keeps a restored release withdrawable when its candidate projection rejects the artifact', async () => {
+    vi.mocked(getProjectAgentRun).mockResolvedValue({ data: run as never, error: undefined as never })
+    vi.mocked(getEnvironmentTemplateRelease).mockResolvedValue({
+      data: { id: 'release-1', version: 2, withdrawal: null } as never,
+      error: undefined as never,
+    })
+    vi.mocked(getProjectEnvironmentCandidate).mockResolvedValue({
+      data: undefined as never,
+      response: { status: 409 } as never,
+      error: { diagnosticCode: 'LW_RELEASE_ARTIFACT_MISMATCH', detail: '候选运行时产物已不可用。', retryable: false } as never,
+    })
+    vi.mocked(withdrawEnvironmentTemplateRelease).mockResolvedValue({
+      data: {
+        releaseId: 'release-1',
+        releaseVersion: 2,
+        actorId: 'teacher-1',
+        reasonCode: 'TEACHER_WITHDRAWN',
+        withdrawnAt: '2026-09-12T10:00:00.000Z',
+      } as never,
+      error: undefined as never,
+    })
+
+    const wrapper = mount(WorkTemplateAuthoringView, {
+      props: { projectId: 'project-1', courseId: 'course-1', runId: 'run-1', releaseId: 'release-1' },
+      global: { stubs: { RouterLink: true, CandidateBuildTask: true } },
+    })
+
+    await vi.waitFor(() => expect(getEnvironmentTemplateRelease).toHaveBeenCalledWith({ path: { projectId: 'project-1', releaseId: 'release-1' } }))
+    await vi.waitFor(() => expect(getProjectEnvironmentCandidate).toHaveBeenCalledWith({ path: { projectId: 'project-1', candidateId: 'candidate-1' } }))
+    expect(wrapper.get('[data-testid="work-template-release"]').exists()).toBe(true)
+    const withdrawButton = wrapper.get('[data-testid="work-template-withdraw-release-button"]')
+    await withdrawButton.trigger('click')
+    const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
+    await dialog.vm.$emit('confirm')
+    await vi.waitFor(() => expect(withdrawEnvironmentTemplateRelease).toHaveBeenCalledTimes(1))
+    expect(wrapper.text()).toContain('Work 模板已撤回')
+    wrapper.unmount()
+  })
+
   it('restores the archived package for a failed route run and keeps its track retry available', async () => {
     const failedRun = {
       ...run,
