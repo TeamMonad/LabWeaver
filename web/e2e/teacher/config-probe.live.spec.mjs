@@ -418,6 +418,7 @@ test('teacher publishes a configuration experiment and student repairs live VM f
   const adminPage = await adminContext.newPage()
   let project, environmentId, run, key, identity
   let primaryFailure
+  const clipboardFailures = []
   const cleanupFailures = []
   try {
     const teacherActorId = await readActorId(page.request)
@@ -454,7 +455,12 @@ test('teacher publishes a configuration experiment and student repairs live VM f
       publication.environmentReleaseId, studentActorId, environmentSpec.runtime.provider_binding,
       (accepted) => { environmentId = accepted })
     expect(environment.gpuAllocation ?? null).toBeNull()
-    const connection = await issueEnvironmentSshAccessGrantByUi(studentPage, project.id, environment)
+    const connection = await issueEnvironmentSshAccessGrantByUi(
+      studentPage,
+      project.id,
+      environment,
+      (error) => { clipboardFailures.push(error) },
+    )
     await runPinnedSsh(connection.endpointGrant, identity, 'python3 -', guestProgram(workspace, 'enabled=false\n', '0600', true))
     const beforeRequests = await snapshotProjectResourceRequestIds(adminPage.request, project.id)
     const before = await freezeReport(studentPage, project.id, environment)
@@ -467,6 +473,7 @@ test('teacher publishes a configuration experiment and student repairs live VM f
     expect(after.contentSha256).toBe(before.contentSha256)
     const afterResult = await assertResult(studentPage, adminPage, project.id, studentActorId, after, publication.evaluationReleaseId, 100, afterRequests)
     expect(afterResult.runId).not.toBe(beforeResult.runId)
+    console.info('CONFIG_PROBE_CORE_JOURNEY_COMPLETE')
   } catch (error) {
     primaryFailure = error
   } finally {
@@ -495,8 +502,8 @@ test('teacher publishes a configuration experiment and student repairs live VM f
     }
     await Promise.all([studentContext.close(), adminContext.close()])
   }
-  if (primaryFailure || cleanupFailures.length) {
-    const failures = [...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures]
+  if (primaryFailure || clipboardFailures.length || cleanupFailures.length) {
+    const failures = [...(primaryFailure ? [primaryFailure] : []), ...clipboardFailures, ...cleanupFailures]
     const diagnostics = [...new Set(failures.flatMap(safeFailureDiagnostics))]
     throw new AggregateError(
       failures,

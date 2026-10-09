@@ -95,7 +95,13 @@ export async function deleteSshPublicKeyByUi(page, key) {
   await expect(fingerprintCell).toHaveCount(0, { timeout: 30_000 })
 }
 
-export async function issueEnvironmentAccessGrantByUi(page, projectId, environment, protocol = 'ssh') {
+export async function issueEnvironmentAccessGrantByUi(
+  page,
+  projectId,
+  environment,
+  protocol = 'ssh',
+  onClipboardFailure,
+) {
   if (!['ssh', 'http', 'https'].includes(protocol)) throw new Error(`WORK_ACCESS_GRANT_PROTOCOL_UNSUPPORTED:${protocol}`)
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environment.id)}`, {
     waitUntil: 'domcontentloaded',
@@ -174,16 +180,18 @@ export async function issueEnvironmentAccessGrantByUi(page, projectId, environme
     await expect(copyButton).toContainText('已复制', { timeout: 5_000 })
     const copiedCommand = await page.evaluate(() => navigator.clipboard.readText())
     if (copiedCommand !== command) {
-      throw new Error(
+      const clipboardError = new Error(
         `WORK_SSH_COMMAND_CLIPBOARD_MISMATCH:${clipboardMismatchDiagnostic(command, copiedCommand, endpointGrants[0].alias, pageHasFocus)}`,
       )
+      if (typeof onClipboardFailure === 'function') onClipboardFailure(clipboardError)
+      else throw clipboardError
     }
   }
   return { grant, endpointGrant: endpointGrants[0] }
 }
 
-export async function issueEnvironmentSshAccessGrantByUi(page, projectId, environment) {
-  return await issueEnvironmentAccessGrantByUi(page, projectId, environment, 'ssh')
+export async function issueEnvironmentSshAccessGrantByUi(page, projectId, environment, onClipboardFailure) {
+  return await issueEnvironmentAccessGrantByUi(page, projectId, environment, 'ssh', onClipboardFailure)
 }
 
 /** Revoke the currently rendered access grant through the environment page. */

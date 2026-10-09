@@ -781,6 +781,7 @@ test('student provisions a Work environment, configures it, and releases its cap
   let baselineChargeIds = new Set()
   let existingResourceBudget = null
   let primaryFailure = null
+  const clipboardFailures = []
   const cleanupFailures = []
   try {
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
@@ -940,7 +941,12 @@ test('student provisions a Work environment, configures it, and releases its cap
       await addStudentSshKeyByUi(page, vmSshIdentity, (acceptedKey) => {
         vmSshKey = acceptedKey
       })
-      const issued = await issueWorkAccessGrantByUi(page, project.id, environment)
+      const issued = await issueWorkAccessGrantByUi(
+        page,
+        project.id,
+        environment,
+        (error) => { clipboardFailures.push(error) },
+      )
       accessGrant = issued.grant
       expectedAccessGrantId = accessGrant.id
       sshEndpointGrant = issued.endpointGrant
@@ -1063,7 +1069,12 @@ test('student provisions a Work environment, configures it, and releases its cap
         runPinnedSsh(revokedEndpointGrant, vmSshIdentity, 'printf WORK_SSH_OLD_ALIAS_ACCEPTED'),
       ).rejects.toThrow(/^WORK_SSH_COMMAND_FAILED:(?:\d+|signal)$/)
 
-      const reissued = await issueWorkAccessGrantByUi(page, project.id, environment)
+      const reissued = await issueWorkAccessGrantByUi(
+        page,
+        project.id,
+        environment,
+        (error) => { clipboardFailures.push(error) },
+      )
       expect(reissued.grant.id).not.toBe(revokedGrant.id)
       accessGrant = reissued.grant
       expectedAccessGrantId = accessGrant.id
@@ -1209,7 +1220,12 @@ test('student provisions a Work environment, configures it, and releases its cap
         REAL_WORK_VM ? 'virtual_machine' : 'container',
       )
       if (REAL_WORK_VM) {
-        const configuredConnection = await issueWorkAccessGrantByUi(page, project.id, configuredEnvironment)
+        const configuredConnection = await issueWorkAccessGrantByUi(
+          page,
+          project.id,
+          configuredEnvironment,
+          (error) => { clipboardFailures.push(error) },
+        )
         revocationTargetGrant = configuredConnection.grant
         sshEndpointGrant = configuredConnection.endpointGrant
         const configuredPersistenceBody = await readRealWorkVmWorkspaceFile(
@@ -1287,7 +1303,12 @@ test('student provisions a Work environment, configures it, and releases its cap
         REAL_WORK_VM ? 'virtual_machine' : 'container',
       )
       if (REAL_WORK_VM) {
-        const restartedConnection = await issueWorkAccessGrantByUi(page, project.id, restartedEnvironment)
+        const restartedConnection = await issueWorkAccessGrantByUi(
+          page,
+          project.id,
+          restartedEnvironment,
+          (error) => { clipboardFailures.push(error) },
+        )
         revocationTargetGrant = restartedConnection.grant
         sshEndpointGrant = restartedConnection.endpointGrant
         const restartedPersistenceBody = await readRealWorkVmWorkspaceFile(
@@ -1490,6 +1511,9 @@ test('student provisions a Work environment, configures it, and releases its cap
       }
     }
     await assertConnectionBlockedAfterLeaseRevoke(page, project.id, stoppedEnvironment)
+    console.info(REAL_WORK_VM && REAL_WORK_GPU?.mode === 'vm_vgpu'
+      ? 'WORK_VGPU_CORE_JOURNEY_COMPLETE'
+      : 'REAL_WORK_CORE_JOURNEY_COMPLETE')
   } catch (error) {
     primaryFailure = error
     if (REAL_WORK_MODE) {
@@ -1498,7 +1522,11 @@ test('student provisions a Work environment, configures it, and releases its cap
       } catch (cleanupError) {
         const primaryMessage = error instanceof Error ? error.message : String(error)
         const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-        primaryFailure = new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_CLEANUP_FAILED:${cleanupMessage}`, { cause: error })
+        primaryFailure = new AggregateError(
+          [error, cleanupError],
+          `REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_CLEANUP_FAILED:${cleanupMessage}`,
+          { cause: error },
+        )
       }
     }
   } finally {
@@ -1528,15 +1556,24 @@ test('student provisions a Work environment, configures it, and releases its cap
       cleanupFailures.push(error)
     }
   }
-  if (primaryFailure && cleanupFailures.length > 0) {
-    const primaryMessage = primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
-    const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
-    throw new Error(`REAL_WORK_PRIMARY_FAILURE:${primaryMessage};REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: primaryFailure })
-  }
-  if (primaryFailure) throw primaryFailure
-  if (cleanupFailures.length > 0) {
-    const cleanupMessages = cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')
-    throw new Error(`REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupMessages}`, { cause: cleanupFailures[0] })
+  if (primaryFailure || clipboardFailures.length > 0 || cleanupFailures.length > 0) {
+    const failures = [...(primaryFailure ? [primaryFailure] : []), ...clipboardFailures, ...cleanupFailures]
+    const failureMessages = [
+      ...(primaryFailure
+        ? [`REAL_WORK_PRIMARY_FAILURE:${primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)}`]
+        : []),
+      ...(clipboardFailures.length > 0
+        ? [`REAL_WORK_CLIPBOARD_FAILURE:${clipboardFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')}`]
+        : []),
+      ...(cleanupFailures.length > 0
+        ? [`REAL_WORK_FINAL_CLEANUP_FAILED:${cleanupFailures.map((error) => error instanceof Error ? error.message : String(error)).join(';')}`]
+        : []),
+    ]
+    throw new AggregateError(
+      failures,
+      failureMessages.join(';'),
+      { cause: primaryFailure ?? clipboardFailures[0] ?? cleanupFailures[0] },
+    )
   }
 })
 
