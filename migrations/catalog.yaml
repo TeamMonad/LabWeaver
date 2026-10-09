@@ -62,7 +62,7 @@ domains:
         sha256: 0c3b55c0426b48457075665f7fe4ffc19a13adbfdf1d0bfd5c8c6c1088009b6e
       - id: 5
         file: access/0005_gateway_service_client_identity.sql
-        sha256: 30375a8073b1c7a3206836aa1009aceaaef96c8a395244c9c354e36602c121ed
+        sha256: de4db24883b329d64ccced38655e18f8a0106dc4824fea9a343156e729a3005a
   - name: environment
     migrations:
       - id: 1

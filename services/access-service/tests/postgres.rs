@@ -66,6 +66,22 @@ async fn access_schema_enforces_unique_keys_single_live_grant_and_hashed_tokens(
         .bind(key_id)
         .bind("c".repeat(64))
         .execute(&pool).await?;
+    assert!(sqlx::query("INSERT INTO access.ssh_authorizations (authorization_id,token_sha256,actor_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) VALUES ($1,$2,$3,$4,$5,'connection-invalid-space',$6,now(),now()+interval '30 seconds')")
+        .bind(Uuid::now_v7())
+        .bind("d".repeat(64))
+        .bind(actor)
+        .bind(key_id)
+        .bind(" ".repeat(128))
+        .bind("e".repeat(64))
+        .execute(&pool).await.is_err());
+    assert!(sqlx::query("INSERT INTO access.ssh_authorizations (authorization_id,token_sha256,actor_id,key_id,gateway_identity,connection_id,source_address_sha256,issued_at,expires_at) VALUES ($1,$2,$3,$4,$5,'connection-invalid-length',$6,now(),now()+interval '30 seconds')")
+        .bind(Uuid::now_v7())
+        .bind("f".repeat(64))
+        .bind(actor)
+        .bind(key_id)
+        .bind("a".repeat(129))
+        .bind("g".repeat(64))
+        .execute(&pool).await.is_err());
     let session_id = Uuid::now_v7();
     let first = sqlx::query("UPDATE access.ssh_authorizations SET consumed_at=now(),session_id=$2 WHERE authorization_id=$1 AND consumed_at IS NULL")
         .bind(authorization_id).bind(session_id).execute(&pool).await?.rows_affected();

@@ -4,4 +4,7 @@
 ALTER TABLE access.ssh_authorizations
     DROP CONSTRAINT ssh_authorizations_gateway_identity_check,
     ADD CONSTRAINT ssh_authorizations_gateway_identity_check
-        CHECK (length(btrim(gateway_identity)) BETWEEN 1 AND 128);
+        CHECK (
+            length(gateway_identity) BETWEEN 1 AND 128
+            AND gateway_identity = btrim(gateway_identity)
+        );
