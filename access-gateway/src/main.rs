@@ -22,6 +22,7 @@ use tracing::{error, info, warn};
 
 const AUTHORIZE_PATH: &str = "/internal/v1/ssh/authorize";
 const SESSION_PATH: &str = "/internal/v1/sessions";
+const MAX_GUEST_COMMAND_BYTES: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 enum GatewayError {
@@ -345,15 +346,29 @@ async fn authorized_keys(
         connection_id,
     );
     println!(
-        "restrict,command=\"/usr/local/bin/labweaver-gateway-command force-command {} {} {}\" {}",
-        shell_token(&authorization.authorization_id)
-            .map_err(|_| GatewayError::InputStage("authorized_keys.authorization_id"))?,
-        shell_token(&authorization.force_command_token)
-            .map_err(|_| GatewayError::InputStage("authorized_keys.force_command_token"))?,
-        connection_id,
-        authorization.normalized_authorized_key
+        "{}",
+        authorized_key_line(
+            &authorization.authorization_id,
+            &authorization.force_command_token,
+            connection_id,
+            &authorization.normalized_authorized_key,
+        )?
     );
     Ok(())
+}
+
+fn authorized_key_line(
+    authorization_id: &str,
+    force_command_token: &str,
+    connection_id: &str,
+    normalized_authorized_key: &str,
+) -> Result<String, GatewayError> {
+    validate_connection_id(connection_id)?;
+    let authorization_id = shell_token(authorization_id)?;
+    let force_command_token = shell_token(force_command_token)?;
+    Ok(format!(
+        "restrict,pty,command=\"/usr/local/bin/labweaver-gateway-command force-command {authorization_id} {force_command_token} {connection_id}\" {normalized_authorized_key}"
+    ))
 }
 
 async fn force_command(
@@ -364,11 +379,11 @@ async fn force_command(
 ) -> Result<(), GatewayError> {
     validate_connection_id(connection_id)?;
     let original_command = required_env("SSH_ORIGINAL_COMMAND")?;
-    let alias = parse_connect_command(&original_command)?;
+    let connect_command = parse_connect_command(&original_command)?;
     let request = CreateGatewaySessionRequest {
         authorization_id: authorization_id.to_owned(),
         force_command_token: token.to_owned(),
-        alias: alias.to_owned(),
+        alias: connect_command.alias.to_owned(),
         gateway_identity: config.gateway_identity.clone(),
         connection_id: connection_id.to_owned(),
         opened_at: now()?,
@@ -384,6 +399,7 @@ async fn force_command(
         .json::<GatewaySession>()
         .await
         .map_err(|_| GatewayError::Authority)?;
+    session.validate().map_err(|_| GatewayError::Authority)?;
     info!(
         schema = telemetry::LOG_SCHEMA,
         event = "gateway.session.started",
@@ -398,16 +414,17 @@ async fn force_command(
         connection_id,
         revision = session.revision.get(),
     );
-    let mut child = Command::new("/usr/bin/ssh")
-        .args([
-            "-F",
-            "/etc/labweaver/target-ssh.conf",
-            "-o",
-            &format!("HostName={}", session.target_host),
-            "-o",
-            &format!("HostKeyAlias={alias}"),
-            &format!("lab@{alias}"),
-        ])
+    let host_name = format!("HostName={}", session.target_host);
+    let host_key_alias = format!("HostKeyAlias={}", session.target_alias);
+    let target = format!("lab@{}", session.target_alias);
+    let mut ssh = Command::new("/usr/bin/ssh");
+    ssh.args(target_ssh_arguments(
+        &host_name,
+        &host_key_alias,
+        &target,
+        connect_command.remote_command,
+    ));
+    let mut child = ssh
         .env("LABWEAVER_TARGET_ALIAS", &session.target_alias)
         .kill_on_drop(true)
         .spawn()
@@ -436,6 +453,9 @@ async fn force_command(
                     break Err(GatewayError::Authority);
                 }
                 session = response.json::<GatewaySession>().await.map_err(|_| GatewayError::Authority)?;
+                session
+                    .validate()
+                    .map_err(|_| GatewayError::Authority)?;
                 if session.state != GatewaySessionState::Active {
                     child.kill().await.map_err(|_| GatewayError::Target)?;
                     break Err(GatewayError::Authority);
@@ -644,17 +664,82 @@ fn validate_alias(value: &str) -> Result<(), GatewayError> {
     valid.then_some(()).ok_or(GatewayError::InvalidInput)
 }
 
-fn parse_connect_command(value: &str) -> Result<&str, GatewayError> {
-    let mut tokens = value.split_ascii_whitespace();
-    if tokens.next() != Some("connect") {
+#[derive(Debug, Eq, PartialEq)]
+struct ConnectCommand<'a> {
+    alias: &'a str,
+    remote_command: Option<&'a str>,
+}
+
+fn parse_connect_command(value: &str) -> Result<ConnectCommand<'_>, GatewayError> {
+    let value = value.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let keyword_end = value
+        .find(|character: char| character.is_ascii_whitespace())
+        .ok_or(GatewayError::InvalidInput)?;
+    if &value[..keyword_end] != "connect" {
         return Err(GatewayError::InvalidInput);
     }
-    let alias = tokens.next().ok_or(GatewayError::InvalidInput)?;
-    if tokens.next().is_some() {
-        return Err(GatewayError::InvalidInput);
-    }
+
+    let remainder =
+        value[keyword_end..].trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let alias_end = remainder
+        .find(|character: char| character.is_ascii_whitespace())
+        .unwrap_or(remainder.len());
+    let alias = &remainder[..alias_end];
     validate_alias(alias)?;
-    Ok(alias)
+
+    let remainder = remainder[alias_end..]
+        .trim_start_matches(|character: char| character.is_ascii_whitespace());
+    if remainder.is_empty() {
+        return Ok(ConnectCommand {
+            alias,
+            remote_command: None,
+        });
+    }
+    if !remainder.starts_with("--")
+        || remainder
+            .as_bytes()
+            .get(2)
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        return Err(GatewayError::InvalidInput);
+    }
+
+    let remote_command =
+        remainder[2..].trim_start_matches(|character: char| character.is_ascii_whitespace());
+    if remote_command.is_empty()
+        || remote_command.len() > MAX_GUEST_COMMAND_BYTES
+        || remote_command.contains('\0')
+    {
+        return Err(GatewayError::InvalidInput);
+    }
+    Ok(ConnectCommand {
+        alias,
+        remote_command: Some(remote_command),
+    })
+}
+
+fn target_ssh_arguments(
+    host_name: &str,
+    host_key_alias: &str,
+    target: &str,
+    remote_command: Option<&str>,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "-F".to_owned(),
+        "/etc/labweaver/target-ssh.conf".to_owned(),
+        "-o".to_owned(),
+        host_name.to_owned(),
+        "-o".to_owned(),
+        host_key_alias.to_owned(),
+    ];
+    if remote_command.is_some() {
+        arguments.push("-T".to_owned());
+    }
+    arguments.push(target.to_owned());
+    if let Some(remote_command) = remote_command {
+        arguments.push(remote_command.to_owned());
+    }
+    arguments
 }
 
 fn validate_connection_id(value: &str) -> Result<(), GatewayError> {
@@ -691,21 +776,119 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_command_accepts_only_one_server_alias() {
-        assert!(matches!(
-            parse_connect_command("connect lw-abcdefghijklmnopqrst"),
-            Ok("lw-abcdefghijklmnopqrst")
-        ));
+    fn fixed_command_accepts_interactive_connection() -> Result<(), GatewayError> {
+        assert_eq!(
+            parse_connect_command("connect lw-abcdefghijklmnopqrst")?,
+            ConnectCommand {
+                alias: "lw-abcdefghijklmnopqrst",
+                remote_command: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_command_preserves_guest_command_spaces_and_quotes() -> Result<(), GatewayError> {
+        assert_eq!(
+            parse_connect_command(
+                "connect lw-abcdefghijklmnopqrst -- python3 -c 'print(\"hello world\")'"
+            )?,
+            ConnectCommand {
+                alias: "lw-abcdefghijklmnopqrst",
+                remote_command: Some("python3 -c 'print(\"hello world\")'"),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn target_ssh_arguments_keep_interactive_and_exec_modes_separate() {
+        let interactive = target_ssh_arguments(
+            "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+            "HostKeyAlias=lw-abcdefghijklmnopqrst",
+            "lab@lw-abcdefghijklmnopqrst",
+            None,
+        );
+        assert_eq!(
+            interactive,
+            vec![
+                "-F",
+                "/etc/labweaver/target-ssh.conf",
+                "-o",
+                "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+                "-o",
+                "HostKeyAlias=lw-abcdefghijklmnopqrst",
+                "lab@lw-abcdefghijklmnopqrst",
+            ]
+        );
+
+        let remote_command = "python3 -c 'print(\"hello world\")'";
+        let exec = target_ssh_arguments(
+            "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+            "HostKeyAlias=lw-abcdefghijklmnopqrst",
+            "lab@lw-abcdefghijklmnopqrst",
+            Some(remote_command),
+        );
+        assert_eq!(
+            exec,
+            vec![
+                "-F",
+                "/etc/labweaver/target-ssh.conf",
+                "-o",
+                "HostName=ssh.lw-env-00000000-0000-4000-8000-000000000000.svc",
+                "-o",
+                "HostKeyAlias=lw-abcdefghijklmnopqrst",
+                "-T",
+                "lab@lw-abcdefghijklmnopqrst",
+                remote_command,
+            ]
+        );
+    }
+
+    #[test]
+    fn authorized_key_line_allows_pty_only_for_the_forced_gateway_command()
+    -> Result<(), GatewayError> {
+        let connection_id = format!("ssh-{}", "a5".repeat(32));
+        let line = authorized_key_line(
+            "authorization-1",
+            "force-token-1",
+            &connection_id,
+            "ssh-ed25519 AAAA",
+        )?;
+        assert_eq!(
+            line,
+            format!(
+                "restrict,pty,command=\"/usr/local/bin/labweaver-gateway-command force-command authorization-1 force-token-1 {connection_id}\" ssh-ed25519 AAAA"
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_command_rejects_invalid_alias_and_undelimited_extra_arguments() {
         for invalid in [
             "",
             "connect",
-            "connect lw-abcdefghijklmnopqrst extra",
+            "connect lw-invalid -- echo",
+            "connect lw-abcdefghijklmnopqrst echo",
+            "connect lw-abcdefghijklmnopqrst extra words",
             "ssh lw-abcdefghijklmnopqrst",
             "connect lw-abcdefghijklmnopqrs;id",
             "scp file lw-abcdefghijklmnopqrst:/tmp",
         ] {
             assert!(parse_connect_command(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn fixed_command_rejects_empty_nul_and_overlong_guest_commands() {
+        assert!(parse_connect_command("connect lw-abcdefghijklmnopqrst --   ").is_err());
+        assert!(parse_connect_command("connect lw-abcdefghijklmnopqrst -- echo\0x").is_err());
+        let overlong = format!(
+            "connect lw-abcdefghijklmnopqrst -- {}",
+            "x".repeat(MAX_GUEST_COMMAND_BYTES + 1)
+        );
+        assert!(parse_connect_command(&overlong).is_err());
     }
 
     #[test]
