@@ -162,7 +162,7 @@ async function preparePinnedSsh(endpointGrant, identity) {
   return { ...endpoint, knownHostsPath, sshConfigPath }
 }
 
-function pinnedSshArgs(endpoint, identity, command) {
+export function pinnedSshArgs(endpoint, identity, command) {
   return [
     '-F', endpoint.sshConfigPath,
     '-T',
@@ -183,8 +183,8 @@ function pinnedSshArgs(endpoint, identity, command) {
     '-o', 'ProxyCommand=none',
     '-o', 'ProxyJump=none',
     '-o', 'ConnectTimeout=20',
-    `${endpoint.alias}@${endpoint.hostname}`,
-    command,
+    `gateway@${endpoint.hostname}`,
+    `connect ${endpoint.alias} -- ${command}`,
   ]
 }
 

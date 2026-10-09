@@ -14,12 +14,30 @@ import {
   classifyPinnedSshSessionClose,
   openSshPublicKeyFingerprint,
   parseRealWorkVmLicenseStatus,
+  pinnedSshArgs,
   realWorkVmWorkspaceRelativePath,
   runProcess,
   VM_CUDA_PROBE_PTX_TARGET,
 } from '../e2e/support/real-work-ssh.mjs'
 
 describe('real Work SSH helper', () => {
+  it('uses the gateway relay account and connect protocol for interactive and guest commands', () => {
+    const args = pinnedSshArgs(
+      {
+        hostname: 'gateway.example',
+        port: 2222,
+        alias: 'lw-abcdefghijklmnopqrst',
+        knownHostsPath: 'known_hosts',
+        sshConfigPath: 'ssh_config',
+      },
+      { privateKeyPath: 'id_ed25519' },
+      'printf READY',
+    )
+
+    expect(args.at(-2)).toBe('gateway@gateway.example')
+    expect(args.at(-1)).toBe('connect lw-abcdefghijklmnopqrst -- printf READY')
+  })
+
   it('uses PTX supported by the current P40 and V100 worker GPUs', () => {
     expect(VM_CUDA_PROBE_PTX_TARGET).toBe('sm_60')
   })
