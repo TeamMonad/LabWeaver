@@ -1593,6 +1593,7 @@ impl KubernetesEvaluationRunner {
             .await?;
         let binding = AnsibleProbeJobBinding {
             namespace: self.configuration.runner_namespace.clone(),
+            environment_id: frozen.environment.environment_id,
             service_account_name: self
                 .configuration
                 .ansible_probe_service_account_name

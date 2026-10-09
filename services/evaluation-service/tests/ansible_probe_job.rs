@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, net::Ipv4Addr, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use contracts::evaluation::FactAssertion;
+use contracts::{EnvironmentId, evaluation::FactAssertion};
 use evaluation_service::ansible_probe::{
     ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeExecutionLimits,
     AnsibleProbeExecutionRequest, AnsibleProbeSshIdentity, AnsibleProbeTarget,
@@ -71,8 +71,13 @@ const OBJECT_STORE_EGRESS: &str = "10.96.0.0/12:9000";
 const OBJECT_STORE_POD_EGRESS: &str = "10.202.0.0/16:9000";
 
 fn binding() -> AnsibleProbeJobBinding {
+    let environment_id = match "01900000-0000-7000-8000-000000000001".parse::<EnvironmentId>() {
+        Ok(environment_id) => environment_id,
+        Err(error) => unreachable!("fixture environment id must parse: {error}"),
+    };
     AnsibleProbeJobBinding {
         namespace: "labweaver-evaluation-runs".to_owned(),
+        environment_id,
         service_account_name: "evaluation-ansible-probe".to_owned(),
         image_pull_secret_name: "harbor-labweaver-system-pull".to_owned(),
         worker_image: format!(
@@ -282,11 +287,12 @@ fn assert_probe_container_mounts(job: &Value) {
 
 #[test]
 fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::error::Error>> {
-    let resources = AnsibleProbeJobResources::build(&binding())?;
+    let binding = binding();
+    let resources = AnsibleProbeJobResources::build(&binding)?;
     let policy = &resources.network_policy;
 
     // The materializer needs DNS and exactly the reviewed object-store CIDR;
-    // SSH remains scoped to the exact target IPv4.
+    // SSH is scoped to the exact frozen environment namespace and VM label.
     assert_eq!(pointer(policy, "/spec/policyTypes/0"), "Ingress");
     assert_eq!(pointer(policy, "/spec/policyTypes/1"), "Egress");
     assert_eq!(pointer(policy, "/spec/ingress"), &json!([]));
@@ -305,8 +311,34 @@ fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::err
                 "to":[{"ipBlock":{"cidr":"10.202.0.0/16"}}],
                 "ports":[{"protocol":"TCP","port":9000}],
             },
-            {"to":[{"ipBlock":{"cidr":"192.168.56.10/32"}}],"ports":[{"protocol":"TCP","port":22}]},
+            {
+                "to":[{
+                    "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"lw-env-01900000-0000-7000-8000-000000000001"}},
+                    "podSelector":{"matchLabels":{"labweaver.io/environment-id":"01900000-0000-7000-8000-000000000001"}},
+                }],
+                "ports":[{"protocol":"TCP","port":22}],
+            },
         ])
+    );
+    let target_peer = pointer(policy, "/spec/egress/3/to/0");
+    assert!(target_peer.pointer("/ipBlock").is_none());
+    assert_ne!(
+        pointer(
+            target_peer,
+            "/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
+        ),
+        &json!("lw-env-01900000-0000-7000-8000-000000000002")
+    );
+    assert_ne!(
+        pointer(
+            target_peer,
+            "/podSelector/matchLabels/labweaver.io~1environment-id"
+        ),
+        &json!("01900000-0000-7000-8000-000000000002")
+    );
+    assert_eq!(
+        pointer(policy, "/spec/egress/3/ports"),
+        &json!([{"protocol":"TCP","port":22}])
     );
     Ok(())
 }

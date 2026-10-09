@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use contracts::EnvironmentId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use task_execution::SANDBOX_RUNTIME_CLASS;
@@ -38,14 +39,18 @@ const SECRET_VOLUME_MODE: u32 = 256;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnsibleProbeJobBinding {
     pub namespace: String,
+    /// Trusted frozen environment identity used to scope SSH egress to the
+    /// environment VM's Kubernetes endpoint labels.
+    pub environment_id: EnvironmentId,
     pub service_account_name: String,
     pub image_pull_secret_name: String,
     pub worker_image: String,
     pub request: AnsibleProbeExecutionRequest,
     /// Reviewed `"<cidr>:<port>"` destination of the object store the materializer downloads from.
     ///
-    /// The per-attempt policy admits DNS, this destination and the reviewed SSH
-    /// target only, so a probe script cannot reach any other network.
+    /// The per-attempt policy admits DNS, this destination and only the
+    /// frozen environment's SSH endpoint, so a probe script cannot reach any
+    /// other network.
     pub object_store_egress: Vec<String>,
     /// Signed package files mounted only into the input materializer init
     /// container; the probe worker sees only the resulting read-only root.
@@ -136,7 +141,7 @@ impl AnsibleProbeJobResources {
             .wall_time_seconds
             .checked_add(ACTIVE_DEADLINE_MARGIN_SECONDS)
             .ok_or(AnsibleProbeJobError::BindingInvalid)?;
-        let target_egress_cidr = format!("{}/32", binding.request.target.host);
+        let target_environment_namespace = format!("lw-env-{}", binding.environment_id);
         let config_map = json!({
             "apiVersion":"v1",
             "kind":"ConfigMap",
@@ -190,7 +195,10 @@ impl AnsibleProbeJobResources {
         })];
         egress_rules.extend(object_store_rules);
         egress_rules.push(json!({
-            "to":[{"ipBlock":{"cidr":target_egress_cidr}}],
+            "to":[{
+                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":target_environment_namespace}},
+                "podSelector":{"matchLabels":{"labweaver.io/environment-id":binding.environment_id.to_string()}},
+            }],
             "ports":[{"protocol":"TCP","port":SSH_PORT}],
         }));
         let network_policy = json!({
@@ -203,7 +211,7 @@ impl AnsibleProbeJobResources {
                 "ingress":[],
                 // The init materializer needs DNS and HTTPS to the exact
                 // object-store CIDR reviewed for this deployment. The probe's
-                // SSH exception remains exact, and the namespace default deny
+                // SSH exception remains exact to the frozen environment VM identity, and the namespace default deny
                 // admits nothing on its own, so this policy is the only egress
                 // the attempt can use.
                 "egress":egress_rules,
