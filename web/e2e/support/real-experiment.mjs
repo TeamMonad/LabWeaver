@@ -304,6 +304,15 @@ export async function approveAuthoringResourceRequestsByUi(
       requesterId,
       durationSeconds: request.requestedDurationSeconds,
       providerBinding,
+      onTaskOwnerRelease: async ({ requestId, leaseId }) => {
+        // Task-owned leases may be released before the same authoring run advances to its next
+        // attempt. The resource helper only calls this callback after it has verified the
+        // task_owner_release reason and lease DTO scope; keep the run's request fence here.
+        if (requestId !== request.id || typeof leaseId !== 'string' || leaseId.trim() === '') {
+          throw new Error('REAL_EXPERIMENT_AUTHORING_RESOURCE_LEASE_SCOPE_INVALID')
+        }
+        return true
+      },
     })
   }
 }

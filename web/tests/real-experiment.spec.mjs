@@ -112,7 +112,26 @@ describe('real authoring resource approval recovery', () => {
       requesterId: REQUESTER_ID,
       durationSeconds: repairedRequest.requestedDurationSeconds,
       providerBinding: 'container-primary-v1',
+      onTaskOwnerRelease: expect.any(Function),
     }))
+  })
+
+  it('accepts only the captured task-owner lease release', async () => {
+    const run = activeRun()
+    const request = taskRequest()
+    let releaseCallback
+    approvalUi.approve.mockImplementation(async (_page, options) => {
+      releaseCallback = options.onTaskOwnerRelease
+      return { requestId: request.id, leaseId: 'lease' }
+    })
+
+    await approveAuthoringResourceRequestsByUi(adminPageFor(run, [request]), run, REQUESTER_ID)
+
+    await expect(releaseCallback({ requestId: request.id, leaseId: 'lease' })).resolves.toBe(true)
+    await expect(releaseCallback({ requestId: 'other-request', leaseId: 'lease' }))
+      .rejects.toThrow('REAL_EXPERIMENT_AUTHORING_RESOURCE_LEASE_SCOPE_INVALID')
+    await expect(releaseCallback({ requestId: request.id, leaseId: '  ' }))
+      .rejects.toThrow('REAL_EXPERIMENT_AUTHORING_RESOURCE_LEASE_SCOPE_INVALID')
   })
 
   it.each([
