@@ -3207,7 +3207,8 @@ mod project_scope_tests {
         assert_eq!(terminating_body["currentRevision"], 2);
         assert_eq!(terminating_body["state"], "terminating");
 
-        let closed_at = utc_timestamp(OffsetDateTime::now_utc())?;
+        let closed_at = utc_timestamp(OffsetDateTime::now_utc())
+            .map_err(|error| std::io::Error::other(format!("closed timestamp: {error:?}")))?;
         let close_request = CloseGatewaySessionRequest {
             gateway_identity: "gateway-a".to_owned(),
             connection_id: "connection-a".to_owned(),
@@ -3233,7 +3234,7 @@ mod project_scope_tests {
             "gateway-a",
             &close_request,
             close_request.expected_revision,
-            closed_at,
+            closed_at.get(),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("close: {error:?}")))?;
