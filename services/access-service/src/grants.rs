@@ -3207,12 +3207,12 @@ mod project_scope_tests {
         assert_eq!(terminating_body["currentRevision"], 2);
         assert_eq!(terminating_body["state"], "terminating");
 
-        let closed_at = OffsetDateTime::now_utc();
+        let closed_at = utc_timestamp(OffsetDateTime::now_utc())?;
         let close_request = CloseGatewaySessionRequest {
             gateway_identity: "gateway-a".to_owned(),
             connection_id: "connection-a".to_owned(),
             expected_revision: Revision::new(2)?,
-            closed_at: UtcTimestamp::from_utc(closed_at)?,
+            closed_at,
             reason_code: "target_failed".to_owned(),
         };
         let wrong_close = close_gateway_session_owned(
@@ -3221,7 +3221,7 @@ mod project_scope_tests {
             "gateway-b",
             &close_request,
             close_request.expected_revision,
-            closed_at,
+            closed_at.get(),
         )
         .await
         .err()
