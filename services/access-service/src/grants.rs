@@ -2811,7 +2811,7 @@ mod project_scope_tests {
         tx.commit().await?;
 
         sqlx::query(
-            "UPDATE access.access_grants SET state='revoked',revoked_at=$2 WHERE grant_id=$1",
+            "UPDATE access.access_grants SET state='revoked',revoked_at=$2,reason_code='user_revoked' WHERE grant_id=$1",
         )
         .bind(grant_with_course)
         .bind(now)
@@ -2826,7 +2826,7 @@ mod project_scope_tests {
         tx.rollback().await?;
 
         sqlx::query(
-            "UPDATE access.access_grants SET state='active',revoked_at=NULL WHERE grant_id=$1",
+            "UPDATE access.access_grants SET state='active',revoked_at=NULL,reason_code=NULL WHERE grant_id=$1",
         )
         .bind(grant_with_course)
         .execute(&pool)
