@@ -1061,7 +1061,8 @@ test('student completes a published lab experiment through its browser entry', a
       await expect(studentPage.locator('#lifecycle-action-hint')).toContainText('工作目录和磁盘仍保留', { timeout: 120_000 })
 
       retainedCudaSampleCompleted = true
-      console.log(`[LABWEAVER_CUDA_SAMPLE_READY] name=${project.name} project=${project.id} environment=${retainedCudaSampleEnvironmentId} release=${published.publication.environmentReleaseId}`)
+      const retainedSampleEntry = `/student/environments?projectId=${encodeURIComponent(project.id)}&environmentId=${encodeURIComponent(retainedCudaSampleEnvironmentId)}`
+      console.log(`[LABWEAVER_CUDA_SAMPLE_READY] name=${project.name} project=${project.id} environment=${retainedCudaSampleEnvironmentId} release=${published.publication.environmentReleaseId} entry=${retainedSampleEntry} restart=启动`)
     }
   } catch (error) {
     primaryFailure = error
