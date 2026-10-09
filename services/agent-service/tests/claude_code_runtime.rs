@@ -93,6 +93,8 @@ enum FakeMode {
     FullSuccess,
     TerminalSuccessThenCancel,
     ContainerFullSuccess,
+    VmEvaluationNoRunner,
+    VmEvaluationUnexpectedRunner,
     WorkFullSuccess,
     InvalidSession,
     InvalidResultType,
@@ -492,6 +494,10 @@ impl ClaudeCodeProcess for FakeProcess {
                 | FakeMode::EvaluationSchemaRepair
         ) && evaluation_track
         {
+            evaluation_track_candidate()?
+        } else if matches!(self.mode, FakeMode::VmEvaluationNoRunner) && evaluation_track {
+            json!({"evaluation": evaluation_candidate()?})
+        } else if matches!(self.mode, FakeMode::VmEvaluationUnexpectedRunner) && evaluation_track {
             evaluation_track_candidate()?
         } else if work_configuration_track {
             work_configuration_candidate()
@@ -927,6 +933,17 @@ fn package(
 
 async fn input(policy: &ProjectLlmEgressPolicy) -> Result<ImmutableEgressInput, Box<dyn Error>> {
     prepare_input(policy, BTreeSet::new()).await
+}
+
+async fn vm_evaluation_input(
+    policy: &ProjectLlmEgressPolicy,
+) -> Result<ImmutableEgressInput, Box<dyn Error>> {
+    prepare_input_bytes(
+        policy,
+        include_bytes!("../../../examples/linux-config-probe/environment.yaml").to_vec(),
+        BTreeSet::new(),
+    )
+    .await
 }
 
 fn run_request(
@@ -4520,6 +4537,80 @@ async fn evaluation_track_materializes_exactly_one_runner_context_alongside_envi
         materializer.runner_plans()[0]["files"][0]["path"],
         "evaluation/Dockerfile"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_machine_evaluation_skips_runner_materialization() -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy, materializer) =
+        materializing_runtime(FakeMode::VmEvaluationNoRunner)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            vm_evaluation_input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    let CandidateDocument::Evaluation(document) = execution.document else {
+        return Err("evaluation track did not return an Evaluation candidate".into());
+    };
+    assert!(document.runner_build_context.is_none());
+    assert!(materializer.runner_plans().is_empty());
+    assert_eq!(materializer.artifact_count(), 0);
+    let commands = process.commands();
+    let prompt = commands[0]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    assert!(prompt.contains("virtual_machine"));
+    assert!(prompt.contains("Omit runnerBuildRecipe"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_machine_evaluation_rejects_an_unexpected_runner_recipe()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy, materializer) =
+        materializing_runtime(FakeMode::VmEvaluationUnexpectedRunner)?;
+    let failure = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            vm_evaluation_input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await
+        .expect_err("VM evaluation runner recipe must be rejected");
+
+    assert!(failure.is_schema_invalid());
+    assert_eq!(process.total_calls(), 3);
+    assert!(materializer.runner_plans().is_empty());
+    assert_eq!(materializer.artifact_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_environment_declaration_keeps_runner_requirement() -> Result<(), Box<dyn Error>>
+{
+    let (runtime, _process, policy, materializer) =
+        materializing_runtime(FakeMode::VmEvaluationNoRunner)?;
+    let failure = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            prepare_input_bytes(
+                &policy,
+                br#"{"kind":"EnvironmentSpec","resources":{},"runtime":{"kind":"virtual_machine"}}"#.to_vec(),
+                BTreeSet::new(),
+            )
+            .await?,
+            RunCancellation::new(),
+        )
+        .await
+        .expect_err("malformed runtime declaration must not enable VM evaluation mode");
+
+    assert!(!failure.is_schema_invalid());
+    assert!(materializer.runner_plans().is_empty());
+    assert_eq!(materializer.artifact_count(), 0);
     Ok(())
 }
 
