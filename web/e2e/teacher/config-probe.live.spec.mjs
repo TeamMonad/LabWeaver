@@ -20,6 +20,7 @@ import { createRealWorkSshIdentity, runPinnedSsh } from '../support/real-work-ss
 import {
   addSshPublicKeyByUi, deleteSshPublicKeyByUi, issueEnvironmentSshAccessGrantByUi,
 } from '../support/ssh-access.mjs'
+import { validateConfigProbeBaseDiskCatalogEntry } from '../support/config-probe-catalog.mjs'
 import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 
 const PACKAGE_ROOT = (() => {
@@ -61,14 +62,7 @@ async function assertConfigProbeBaseDiskCatalog(request, environmentSpec) {
   const catalog = await expectJson(await request.get('/api/v1/admin/images'), 'CONFIG_PROBE_CATALOG_READ_FAILED')
   const disk = catalog.entries.filter((entry) => entry.binding === baseDisk.binding)
   expect(disk).toHaveLength(1)
-  expect(disk[0]).toMatchObject({
-    kind: 'virtual_machine',
-    status: 'active',
-    format: 'qcow2',
-    capacityBytes: baseDisk.capacityBytes,
-  })
-  expect(`docker://${disk[0].sourceReference.split('@')[0].replace(/:[^/:]+$/, '')}@${disk[0].resolvedDigest}`)
-    .toBe(baseDisk.sourceRegistryDigest)
+  validateConfigProbeBaseDiskCatalogEntry(disk[0], baseDisk)
 }
 
 async function readResumableConfigProbePublication(page, resume, environmentSpec, evaluationSpec, teacherActorId) {
