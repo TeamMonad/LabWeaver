@@ -12,6 +12,7 @@ import {
 } from '../support/live.mjs'
 import {
   addProjectStudentByUi,
+  approveAuthoringResourceRequestsByUi,
   copyAuthoritativePackage,
   readActorId,
   snapshotProjectResourceRequestIds,
@@ -200,7 +201,7 @@ async function waitForTerminalExperimentRun(
       const requiredAttemptIsTerminal = requiredTrackAttemptNumber === null
         || ['succeeded', 'failed', 'cancelled'].includes(requiredAttempt?.state)
       const complete = runIsFullyTerminal(value) && revisionIsFresh && requiredAttemptIsTerminal
-      if (!complete) await onPendingResourceRequests?.()
+      if (!complete) await onPendingResourceRequests?.(value)
       return complete
     },
     'LAB_EXPERIMENT_AGENT_RUN_STATUS_FAILED',
@@ -248,36 +249,6 @@ async function retryFailedTrackByUi(page, projectId, run, trackKind) {
   expect(accepted).toMatchObject({ id: run.id, projectId })
   expect(accepted.revision).toBeGreaterThan(run.revision)
   return accepted
-}
-
-async function approveAuthoringResourceRequestsByUi(adminPage, projectId, runId, requesterId) {
-  const response = await adminPage.request.get(`/api/v1/projects/${projectId}/resource-requests`)
-  const requests = await expectJson(response, 'LAB_EXPERIMENT_AUTHORING_RESOURCE_REQUESTS_READ_FAILED')
-  if (!Array.isArray(requests)) throw new Error('LAB_EXPERIMENT_AUTHORING_RESOURCE_REQUESTS_INVALID')
-
-  const prefix = `authoring-${runId.replaceAll('-', '')}-`
-  const pending = requests.filter((item) => (
-    item?.projectId === projectId
-    && item?.requesterId === requesterId
-    && item?.target?.kind === 'task'
-    && typeof item.requestKey === 'string'
-    && item.requestKey.startsWith(prefix)
-    && item.state === 'reviewing'
-  ))
-
-  for (const request of pending) {
-    if (!Number.isInteger(request.requestedDurationSeconds) || request.requestedDurationSeconds <= 0) {
-      throw new Error(`LAB_EXPERIMENT_AUTHORING_RESOURCE_DURATION_INVALID:${request.id ?? 'missing'}`)
-    }
-    await approveResourceRequestByUi(adminPage, {
-      requestKey: request.requestKey,
-      projectId,
-      requestId: request.id,
-      requesterId,
-      durationSeconds: request.requestedDurationSeconds,
-      providerBinding: AUTHORING_RESOURCE_PROVIDER_BINDING,
-    })
-  }
 }
 
 async function waitForStudentEnvironmentWithResourceApproval(request, adminPage, projectId, environmentId, requesterId) {
@@ -671,7 +642,12 @@ test('student completes a published lab experiment through its browser entry', a
             request,
             project.id,
             run.id,
-            () => approveAuthoringResourceRequestsByUi(adminPage, project.id, run.id, teacherActorId),
+            (currentRun) => approveAuthoringResourceRequestsByUi(
+              adminPage,
+              currentRun,
+              teacherActorId,
+              AUTHORING_RESOURCE_PROVIDER_BINDING,
+            ),
           )
         }
         let retryWaitOptions = {}
@@ -691,7 +667,12 @@ test('student completes a published lab experiment through its browser entry', a
           request,
           project.id,
           run.id,
-          () => approveAuthoringResourceRequestsByUi(adminPage, project.id, run.id, teacherActorId),
+          (currentRun) => approveAuthoringResourceRequestsByUi(
+            adminPage,
+            currentRun,
+            teacherActorId,
+            AUTHORING_RESOURCE_PROVIDER_BINDING,
+          ),
           retryWaitOptions,
         )
       }
@@ -731,7 +712,12 @@ test('student completes a published lab experiment through its browser entry', a
         request,
         project.id,
         run.id,
-        () => approveAuthoringResourceRequestsByUi(adminPage, project.id, run.id, teacherActorId),
+        (currentRun) => approveAuthoringResourceRequestsByUi(
+          adminPage,
+          currentRun,
+          teacherActorId,
+          AUTHORING_RESOURCE_PROVIDER_BINDING,
+        ),
       )
     }
     const built = await waitForBuiltCandidate(
@@ -740,7 +726,12 @@ test('student completes a published lab experiment through its browser entry', a
       completed.environmentCandidateId,
       resumeApprovalId
         ? null
-        : () => approveAuthoringResourceRequestsByUi(adminPage, project.id, completed.run.id, teacherActorId),
+        : () => approveAuthoringResourceRequestsByUi(
+          adminPage,
+          completed.run,
+          teacherActorId,
+          AUTHORING_RESOURCE_PROVIDER_BINDING,
+        ),
     )
     const published = resumeApprovalId
       ? await readExistingPublishedApproval(
