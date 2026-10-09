@@ -1085,7 +1085,14 @@ pub async fn heartbeat_gateway_session(
     ensure_gateway_request(&identity, &request.gateway_identity)?;
     let expected = if_match(&headers)?;
     if expected != request.expected_revision {
-        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
+        let error = gateway_session_revision_conflict(
+            &state.pool,
+            session_id,
+            &identity.client_id,
+            &request.connection_id,
+        )
+        .await?;
+        return Err(error);
     }
     let now = OffsetDateTime::now_utc();
     let rows = sqlx::query(
@@ -1095,7 +1102,14 @@ pub async fn heartbeat_gateway_session(
       .bind(i64::try_from(expected.get()).map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?)
       .execute(&state.pool).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?.rows_affected();
     if rows != 1 {
-        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
+        let error = gateway_session_revision_conflict(
+            &state.pool,
+            session_id,
+            &identity.client_id,
+            &request.connection_id,
+        )
+        .await?;
+        return Err(error);
     }
     Ok(Json(load_session(&state.pool, session_id).await?))
 }
@@ -1111,35 +1125,27 @@ pub async fn close_gateway_session(
     ensure_gateway_request(&identity, &request.gateway_identity)?;
     let expected = if_match(&headers)?;
     if expected != request.expected_revision || request.reason_code.trim().is_empty() {
+        if expected != request.expected_revision {
+            let error = gateway_session_revision_conflict(
+                &state.pool,
+                session_id,
+                &identity.client_id,
+                &request.connection_id,
+            )
+            .await?;
+            return Err(error);
+        }
         return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
     }
-    let now = OffsetDateTime::now_utc();
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
-    let rows = sqlx::query(
-        "UPDATE access.gateway_sessions SET state='closed',terminated_at=$4,close_reason_code=$5,revision=revision+1 \
-         WHERE session_id=$1 AND gateway_identity=$2 AND connection_id=$3 AND revision=$6 AND state IN ('active','terminating','termination_overdue')",
-    ).bind(session_id.as_uuid()).bind(&identity.client_id).bind(&request.connection_id).bind(now).bind(&request.reason_code)
-      .bind(i64::try_from(expected.get()).map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?)
-      .execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?.rows_affected();
-    if rows != 1 {
-        return Err(ApiError::precondition("LW_REVISION_CONFLICT"));
-    }
-    let session = load_session_tx(&mut tx, session_id).await?;
-    enqueue_session_event(
-        &mut tx,
-        &session,
-        subjects::ACCESS_SESSION_CLOSED,
-        now,
-        &request.reason_code,
+    let session = close_gateway_session_owned(
+        &state.pool,
+        session_id,
+        &identity.client_id,
+        &request,
+        expected,
+        OffsetDateTime::now_utc(),
     )
     .await?;
-    tx.commit()
-        .await
-        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     Ok(Json(session))
 }
 
@@ -2041,6 +2047,75 @@ async fn load_session(pool: &PgPool, id: GatewaySessionId) -> Result<GatewaySess
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
     let session = load_session_tx(&mut tx, id).await?;
+    tx.commit()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    Ok(session)
+}
+
+/// Returns the authoritative revision only to the Gateway connection that owns
+/// the session.  A stale revision must remain a precondition failure; the
+/// bounded state hint lets that same owner retry close after a concurrent
+/// termination request without weakening revision or ownership checks.
+async fn gateway_session_revision_conflict(
+    pool: &PgPool,
+    session_id: GatewaySessionId,
+    gateway_identity: &str,
+    connection_id: &str,
+) -> Result<ApiError, ApiError> {
+    let session = load_session(pool, session_id).await?;
+    if session.gateway_identity == gateway_identity && session.connection_id == connection_id {
+        return Ok(ApiError::precondition_with_body(
+            "LW_REVISION_CONFLICT",
+            json!({
+                "diagnosticCode": "LW_REVISION_CONFLICT",
+                "currentRevision": session.revision,
+                "state": session.state,
+            }),
+        ));
+    }
+    Ok(ApiError::precondition("LW_REVISION_CONFLICT"))
+}
+
+async fn close_gateway_session_owned(
+    pool: &PgPool,
+    session_id: GatewaySessionId,
+    gateway_identity: &str,
+    request: &CloseGatewaySessionRequest,
+    expected: Revision,
+    now: OffsetDateTime,
+) -> Result<GatewaySession, ApiError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+    let rows = sqlx::query(
+        "UPDATE access.gateway_sessions SET state='closed',terminated_at=$4,close_reason_code=$5,revision=revision+1 \
+         WHERE session_id=$1 AND gateway_identity=$2 AND connection_id=$3 AND revision=$6 AND state IN ('active','terminating','termination_overdue')",
+    ).bind(session_id.as_uuid()).bind(gateway_identity).bind(&request.connection_id).bind(now).bind(&request.reason_code)
+      .bind(i64::try_from(expected.get()).map_err(|_| ApiError::precondition("LW_REVISION_CONFLICT"))?)
+      .execute(&mut *tx).await.map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?.rows_affected();
+    if rows != 1 {
+        tx.rollback()
+            .await
+            .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
+        return Err(gateway_session_revision_conflict(
+            pool,
+            session_id,
+            gateway_identity,
+            &request.connection_id,
+        )
+        .await?);
+    }
+    let session = load_session_tx(&mut tx, session_id).await?;
+    enqueue_session_event(
+        &mut tx,
+        &session,
+        subjects::ACCESS_SESSION_CLOSED,
+        now,
+        &request.reason_code,
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_STORE_UNAVAILABLE"))?;
@@ -2981,6 +3056,199 @@ mod project_scope_tests {
         assert_eq!(event.1, 2);
         assert_eq!(event.2["data"]["state"], "denied");
         assert_eq!(event.2["data"]["revision"], 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test covers owner-scoped revision recovery through termination and close"
+    )]
+    async fn gateway_session_revision_conflict_is_owner_scoped_through_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await?;
+        let migrations = format!(
+            "CREATE ROLE lw_control_runtime NOLOGIN; CREATE SCHEMA access; SET search_path TO access;\n{}\n{}\n{}\n{}\n{}",
+            include_str!("../../../migrations/access/0001_platform_baseline.sql"),
+            include_str!("../../../migrations/access/0002_console_capabilities_and_sessions.sql"),
+            include_str!("../../../migrations/access/0003_independent_project_memberships.sql"),
+            include_str!("../../../migrations/access/0004_actor_identity_metadata.sql"),
+            include_str!("../../../migrations/access/0005_gateway_service_client_identity.sql")
+        );
+        sqlx::raw_sql(&migrations).execute(&pool).await?;
+
+        let actor = Uuid::now_v7();
+        let grant_id = Uuid::now_v7();
+        let endpoint_grant_id = Uuid::now_v7();
+        let endpoint_id = Uuid::now_v7();
+        let key_id = Uuid::now_v7();
+        let session_id = GatewaySessionId::new();
+        let environment_id = Uuid::now_v7();
+        let now = OffsetDateTime::now_utc();
+        sqlx::query(
+            "INSERT INTO access.actors (actor_id,issuer,subject_sha256) \
+             VALUES ($1,'https://issuer.example.test',$2)",
+        )
+        .bind(actor)
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.access_grants \
+             (grant_id,actor_id,project_id,course_id,environment_id,revision,state,not_before,expires_at,contract) \
+             VALUES ($1,$2,$3,NULL,$4,1,'active',$5,$6,'{}')",
+        )
+        .bind(grant_id)
+        .bind(actor)
+        .bind(Uuid::now_v7())
+        .bind(environment_id)
+        .bind(now - time::Duration::minutes(1))
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.endpoint_grants \
+             (endpoint_grant_id,grant_id,endpoint_id,endpoint_revision,protocol,health,alias,expires_at,contract) \
+             VALUES ($1,$2,$3,1,'ssh','healthy','lw-abcdefghijklmnopqrst',$4,'{}')",
+        )
+        .bind(endpoint_grant_id)
+        .bind(grant_id)
+        .bind(endpoint_id)
+        .bind(now + time::Duration::minutes(30))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.ssh_public_keys \
+             (key_id,actor_id,fingerprint_sha256,algorithm,normalized_openssh) \
+             VALUES ($1,$2,'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','ed25519',\
+                     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')",
+        )
+        .bind(key_id)
+        .bind(actor)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO access.gateway_sessions \
+             (session_id,grant_id,grant_revision,actor_id,endpoint_id,endpoint_grant_id,key_id,state,\
+              started_at,expires_at,contract,gateway_identity,connection_id,revision,last_heartbeat_at) \
+             VALUES ($1,$2,1,$3,$4,$5,$6,'active',$7,$8,$9,$10,$11,1,$7)",
+        )
+        .bind(session_id.as_uuid())
+        .bind(grant_id)
+        .bind(actor)
+        .bind(endpoint_id)
+        .bind(endpoint_grant_id)
+        .bind(key_id)
+        .bind(now)
+        .bind(now + time::Duration::minutes(30))
+        .bind(json!({
+            "alias": "lw-abcdefghijklmnopqrst",
+            "targetHost": format!("ssh.lw-env-{environment_id}.svc"),
+        }))
+        .bind("gateway-a")
+        .bind("connection-a")
+        .execute(&pool)
+        .await?;
+
+        let owner_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("owner lookup: {error:?}")))?;
+        assert_eq!(owner_conflict.diagnostic, "LW_REVISION_CONFLICT");
+        let body = owner_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive current revision"))?;
+        assert_eq!(body["currentRevision"], 1);
+        assert_eq!(body["state"], "active");
+
+        let wrong_gateway =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-b", "connection-a")
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("gateway ownership lookup: {error:?}"))
+                })?;
+        assert!(wrong_gateway.body.is_none());
+        let wrong_connection =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-b")
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("connection ownership lookup: {error:?}"))
+                })?;
+        assert!(wrong_connection.body.is_none());
+
+        let requested_at = OffsetDateTime::now_utc();
+        let mut termination_tx = pool.begin().await?;
+        terminate_sessions_for_grant(
+            &mut termination_tx,
+            AccessGrantId::from_str(&grant_id.to_string())?,
+            requested_at,
+            requested_at + time::Duration::seconds(60),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("terminate: {error:?}")))?;
+        termination_tx.commit().await?;
+        let terminating_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("termination lookup: {error:?}")))?;
+        let terminating_body = terminating_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive terminating revision"))?;
+        assert_eq!(terminating_body["currentRevision"], 2);
+        assert_eq!(terminating_body["state"], "terminating");
+
+        let closed_at = OffsetDateTime::now_utc();
+        let close_request = CloseGatewaySessionRequest {
+            gateway_identity: "gateway-a".to_owned(),
+            connection_id: "connection-a".to_owned(),
+            expected_revision: Revision::new(2)?,
+            closed_at: UtcTimestamp::from_utc(closed_at)?,
+            reason_code: "target_failed".to_owned(),
+        };
+        let wrong_close = close_gateway_session_owned(
+            &pool,
+            session_id,
+            "gateway-b",
+            &close_request,
+            close_request.expected_revision,
+            closed_at,
+        )
+        .await
+        .err()
+        .ok_or_else(|| std::io::Error::other("wrong gateway must not close the session"))?;
+        assert!(wrong_close.body.is_none());
+        let closed = close_gateway_session_owned(
+            &pool,
+            session_id,
+            "gateway-a",
+            &close_request,
+            close_request.expected_revision,
+            closed_at,
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("close: {error:?}")))?;
+        assert_eq!(closed.state, GatewaySessionState::Closed);
+        assert!(closed.closed_at.is_some());
+        let closed_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("closed lookup: {error:?}")))?;
+        let closed_body = closed_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive closed revision"))?;
+        assert_eq!(closed_body["currentRevision"], 3);
+        assert_eq!(closed_body["state"], "closed");
         Ok(())
     }
 }

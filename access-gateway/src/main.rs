@@ -7,13 +7,13 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
-use contracts::UtcTimestamp;
 use contracts::access::{
     CloseGatewaySessionRequest, CreateGatewaySessionRequest, GatewaySession, GatewaySessionState,
     HeartbeatGatewaySessionRequest, SshAuthorization, SshAuthorizationRequest,
 };
+use contracts::{Revision, UtcTimestamp};
 use reqwest::{Certificate, Client, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh_key::{HashAlg, PublicKey};
 use time::OffsetDateTime;
@@ -79,6 +79,19 @@ struct GatewayConfig {
     client: Client,
     service_token_client: ServiceTokenClient,
     context: telemetry::RequestContext,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionRevisionConflict {
+    diagnostic_code: String,
+    current_revision: Revision,
+    state: GatewaySessionState,
+}
+
+enum HeartbeatUpdate {
+    Active(Box<GatewaySession>),
+    Stop(Revision),
 }
 
 impl GatewayConfig {
@@ -424,47 +437,130 @@ async fn force_command(
         &target,
         connect_command.remote_command,
     ));
-    let mut child = ssh
+    let Ok(mut child) = ssh
         .env("LABWEAVER_TARGET_ALIAS", &session.target_alias)
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| GatewayError::Target)?;
+    else {
+        close_session(config, &mut session, connection_id, false).await?;
+        return Err(GatewayError::Target);
+    };
+    let (result, target_stopped) =
+        run_target(config, &mut session, connection_id, &mut child).await;
+    if !target_stopped {
+        return Err(match result {
+            Ok(()) => GatewayError::Target,
+            Err(error) => error,
+        });
+    }
+    close_session(config, &mut session, connection_id, result.is_ok()).await?;
+    result
+}
+
+async fn run_target(
+    config: &GatewayConfig,
+    session: &mut GatewaySession,
+    connection_id: &str,
+    child: &mut tokio::process::Child,
+) -> (Result<(), GatewayError>, bool) {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    let target_stopped;
     let result = loop {
         tokio::select! {
-            status = child.wait() => break status.map_err(|_| GatewayError::Target).and_then(|status| status.success().then_some(()).ok_or(GatewayError::Target)),
-            _ = heartbeat.tick() => {
-                let body = HeartbeatGatewaySessionRequest {
-                    gateway_identity: config.service_client_id.clone(),
-                    connection_id: connection_id.to_owned(),
-                    expected_revision: session.revision,
-                    observed_at: now()?,
-                };
-                let response = config
-                    .post(
-                        &format!("{SESSION_PATH}/{}/heartbeat", session.id),
-                        &body,
-                        None,
-                        Some(session.revision),
-                    )
-                    .await?;
-                if response.status() != StatusCode::OK {
-                    child.kill().await.map_err(|_| GatewayError::Target)?;
-                    break Err(GatewayError::Authority);
+            status = child.wait() => {
+                if let Ok(status) = status {
+                    target_stopped = true;
+                    break status.success().then_some(()).ok_or(GatewayError::Target);
                 }
-                session = response.json::<GatewaySession>().await.map_err(|_| GatewayError::Authority)?;
-                session
-                    .validate()
-                    .map_err(|_| GatewayError::Authority)?;
-                if session.state != GatewaySessionState::Active {
-                    child.kill().await.map_err(|_| GatewayError::Target)?;
-                    break Err(GatewayError::Authority);
+                let stop_result = stop_target(child).await;
+                target_stopped = stop_result.is_ok();
+                break match stop_result {
+                    Ok(()) => Err(GatewayError::Target),
+                    Err(error) => Err(error),
+                };
+            }
+            _ = heartbeat.tick() => {
+                let heartbeat_result = heartbeat_session(config, session, connection_id).await;
+                match heartbeat_result {
+                    Ok(HeartbeatUpdate::Active(updated)) => *session = *updated,
+                    Ok(HeartbeatUpdate::Stop(revision)) => {
+                        session.revision = revision;
+                        let stop_result = stop_target(child).await;
+                        target_stopped = stop_result.is_ok();
+                        break match stop_result {
+                            Ok(()) => Err(GatewayError::Authority),
+                            Err(error) => Err(error),
+                        };
+                    }
+                    Err(error) => {
+                        let stop_result = stop_target(child).await;
+                        target_stopped = stop_result.is_ok();
+                        break match stop_result {
+                            Ok(()) => Err(error),
+                            Err(stop_error) => Err(stop_error),
+                        };
+                    }
                 }
             }
         }
     };
-    close_session(config, &session, connection_id, result.is_ok()).await?;
-    result
+    (result, target_stopped)
+}
+
+async fn heartbeat_session(
+    config: &GatewayConfig,
+    session: &GatewaySession,
+    connection_id: &str,
+) -> Result<HeartbeatUpdate, GatewayError> {
+    let body = HeartbeatGatewaySessionRequest {
+        gateway_identity: config.service_client_id.clone(),
+        connection_id: connection_id.to_owned(),
+        expected_revision: session.revision,
+        observed_at: now()?,
+    };
+    let response = config
+        .post(
+            &format!("{SESSION_PATH}/{}/heartbeat", session.id),
+            &body,
+            None,
+            Some(session.revision),
+        )
+        .await?;
+    if response.status() == StatusCode::OK {
+        let updated = response
+            .json::<GatewaySession>()
+            .await
+            .map_err(|_| GatewayError::Authority)?;
+        updated.validate().map_err(|_| GatewayError::Authority)?;
+        return Ok(if updated.state == GatewaySessionState::Active {
+            HeartbeatUpdate::Active(Box::new(updated))
+        } else {
+            HeartbeatUpdate::Stop(updated.revision)
+        });
+    }
+    if response.status() != StatusCode::PRECONDITION_FAILED {
+        return Err(GatewayError::Authority);
+    }
+    let conflict = response
+        .json::<SessionRevisionConflict>()
+        .await
+        .map_err(|_| GatewayError::Authority)?;
+    if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
+        || conflict.current_revision <= session.revision
+    {
+        return Err(GatewayError::Authority);
+    }
+    Ok(HeartbeatUpdate::Stop(conflict.current_revision))
+}
+
+async fn stop_target(child: &mut tokio::process::Child) -> Result<(), GatewayError> {
+    match child.kill().await {
+        Ok(()) => Ok(()),
+        Err(_) => match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) | Err(_) => Err(GatewayError::Target),
+        },
+    }
 }
 
 fn known_host(
@@ -554,49 +650,66 @@ const fn private_ip(address: std::net::IpAddr) -> bool {
 
 async fn close_session(
     config: &GatewayConfig,
-    session: &GatewaySession,
+    session: &mut GatewaySession,
     connection_id: &str,
     clean: bool,
 ) -> Result<(), GatewayError> {
-    let body = CloseGatewaySessionRequest {
-        gateway_identity: config.service_client_id.clone(),
-        connection_id: connection_id.to_owned(),
-        expected_revision: session.revision,
-        closed_at: now()?,
-        reason_code: if clean {
-            "client_closed"
-        } else {
-            "target_failed"
+    for attempt in 0..=1 {
+        let body = CloseGatewaySessionRequest {
+            gateway_identity: config.service_client_id.clone(),
+            connection_id: connection_id.to_owned(),
+            expected_revision: session.revision,
+            closed_at: now()?,
+            reason_code: if clean {
+                "client_closed"
+            } else {
+                "target_failed"
+            }
+            .to_owned(),
+        };
+        let response = config
+            .post(
+                &format!("{SESSION_PATH}/{}/close", session.id),
+                &body,
+                None,
+                Some(session.revision),
+            )
+            .await?;
+        if response.status().is_success() {
+            info!(
+                schema = telemetry::LOG_SCHEMA,
+                event = "gateway.session.closed",
+                service = "access-gateway",
+                component = "ssh-session",
+                operation = "gateway.session.close",
+                outcome = "succeeded",
+                duration_ms = 0_u64,
+                request_id = config.context.request_id(),
+                trace_id = config.context.trace_id(),
+                session_id = %session.id,
+                connection_id,
+                revision = session.revision.get(),
+            );
+            return Ok(());
         }
-        .to_owned(),
-    };
-    let response = config
-        .post(
-            &format!("{SESSION_PATH}/{}/close", session.id),
-            &body,
-            None,
-            Some(session.revision),
-        )
-        .await?;
-    if response.status().is_success() {
-        info!(
-            schema = telemetry::LOG_SCHEMA,
-            event = "gateway.session.closed",
-            service = "access-gateway",
-            component = "ssh-session",
-            operation = "gateway.session.close",
-            outcome = "succeeded",
-            duration_ms = 0_u64,
-            request_id = config.context.request_id(),
-            trace_id = config.context.trace_id(),
-            session_id = %session.id,
-            connection_id,
-            revision = session.revision.get(),
-        );
-        Ok(())
-    } else {
-        Err(GatewayError::Authority)
+        if response.status() != StatusCode::PRECONDITION_FAILED || attempt == 1 {
+            return Err(GatewayError::Authority);
+        }
+        let conflict = response
+            .json::<SessionRevisionConflict>()
+            .await
+            .map_err(|_| GatewayError::Authority)?;
+        if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
+            || conflict.current_revision <= session.revision
+        {
+            return Err(GatewayError::Authority);
+        }
+        session.revision = conflict.current_revision;
+        if conflict.state == GatewaySessionState::Closed {
+            return Ok(());
+        }
     }
+    Err(GatewayError::Authority)
 }
 
 fn required_env(name: &str) -> Result<String, GatewayError> {
@@ -974,6 +1087,30 @@ mod tests {
             Some(format!("10.101.251.15 ssh-ed25519 {encoded_key}").as_str())
         );
         assert!(verified_host_key_line("10.101.251.15", "SHA256:wrong", encoded_key).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn revision_conflict_requires_a_newer_authoritative_revision() -> Result<(), GatewayError> {
+        let conflict: SessionRevisionConflict = serde_json::from_value(serde_json::json!({
+            "diagnosticCode": "LW_REVISION_CONFLICT",
+            "currentRevision": 2,
+            "state": "terminating",
+        }))
+        .map_err(|_| GatewayError::Authority)?;
+        assert_eq!(conflict.diagnostic_code, "LW_REVISION_CONFLICT");
+        assert_eq!(
+            conflict.current_revision,
+            Revision::new(2).map_err(|_| GatewayError::Authority)?
+        );
+        assert_eq!(conflict.state, GatewaySessionState::Terminating);
+        assert!(conflict.current_revision > Revision::new(1).map_err(|_| GatewayError::Authority)?);
+        assert!(
+            serde_json::from_value::<SessionRevisionConflict>(serde_json::json!({
+                "diagnosticCode": "LW_REVISION_CONFLICT",
+            }))
+            .is_err()
+        );
         Ok(())
     }
 }

@@ -1681,6 +1681,7 @@ fn deployment_duration(seconds: u64) -> Result<Duration, ApiError> {
 struct ApiError {
     status: StatusCode,
     diagnostic: &'static str,
+    body: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -1688,54 +1689,73 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             diagnostic,
+            body: None,
         }
     }
     fn unauthorized(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             diagnostic,
+            body: None,
         }
     }
     fn unavailable(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             diagnostic,
+            body: None,
         }
     }
     fn forbidden(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             diagnostic,
+            body: None,
         }
     }
     fn internal(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             diagnostic,
+            body: None,
         }
     }
     fn conflict(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             diagnostic,
+            body: None,
         }
     }
     fn precondition(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::PRECONDITION_FAILED,
             diagnostic,
+            body: None,
+        }
+    }
+    pub(crate) fn precondition_with_body(
+        diagnostic: &'static str,
+        body: serde_json::Value,
+    ) -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
+            diagnostic,
+            body: Some(body),
         }
     }
     fn unprocessable(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             diagnostic,
+            body: None,
         }
     }
     fn not_found(diagnostic: &'static str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             diagnostic,
+            body: None,
         }
     }
 }
@@ -1781,11 +1801,10 @@ impl IntoResponse for ApiError {
             "status" => self.status.as_u16().to_string()
         )
         .increment(1);
-        (
-            self.status,
-            Json(serde_json::json!({"diagnosticCode": self.diagnostic})),
-        )
-            .into_response()
+        let body = self
+            .body
+            .unwrap_or_else(|| serde_json::json!({"diagnosticCode": self.diagnostic}));
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -1878,6 +1897,7 @@ impl From<auth::CsrfError> for ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             diagnostic: "LW_AUTH_CSRF_REJECTED",
+            body: None,
         }
     }
 }
