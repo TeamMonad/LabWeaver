@@ -31,6 +31,10 @@ const PACKAGE_ROOT = (() => {
 })()
 const TASK_PROVIDER = process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim()
   || process.env.LABWEAVER_E2E_PROVIDER_BINDING?.trim() || 'container-primary-v1'
+// The production environment operation deadline is 900 seconds. Keep a
+// bounded poll margin so a slow VM import is not cancelled by the harness
+// before the backend operation reaches its own deadline.
+const ENVIRONMENT_READY_TIMEOUT_MS = 960_000
 const TERMINAL_STATES = ['succeeded', 'partially_succeeded', 'failed', 'cancelled']
 test.describe.configure({ timeout: 3_600_000, retries: 0 })
 test.skip(process.env.LABWEAVER_E2E_CONFIG_PROBE !== '1', 'Opt in to the real VM configuration experiment.')
@@ -302,7 +306,7 @@ async function startStudentEnvironment(page, adminPage, projectId, releaseId, ac
       })
     }
     return false
-  }, 'CONFIG_PROBE_ENVIRONMENT_STATUS_FAILED', 600_000)
+  }, 'CONFIG_PROBE_ENVIRONMENT_STATUS_FAILED', ENVIRONMENT_READY_TIMEOUT_MS)
 }
 
 async function freezeReport(page, projectId, environment) {
