@@ -37,8 +37,26 @@ const TASK_PROVIDER = process.env.LABWEAVER_E2E_AUTHORING_PROVIDER_BINDING?.trim
 // before the backend operation reaches its own deadline.
 const ENVIRONMENT_READY_TIMEOUT_MS = 960_000
 const TERMINAL_STATES = ['succeeded', 'partially_succeeded', 'failed', 'cancelled']
+const SAFE_FAILURE_CODE = /\b(?:LW|LABWEAVER|CONFIG_PROBE|REAL_EXPERIMENT|REAL_RESOURCE|REAL_WORK|WORK|PW)_[A-Z0-9_]+\b/g
 test.describe.configure({ timeout: 3_600_000, retries: 0 })
 test.skip(process.env.LABWEAVER_E2E_CONFIG_PROBE !== '1', 'Opt in to the real VM configuration experiment.')
+
+function safeFailureDiagnostics(error) {
+  const diagnostics = []
+  const visit = (value) => {
+    if (value instanceof AggregateError) {
+      for (const nested of value.errors) visit(nested)
+      return
+    }
+    const message = value instanceof Error ? value.message : String(value)
+    const codes = message.match(SAFE_FAILURE_CODE)
+    if (codes) diagnostics.push(...codes)
+    else if (value instanceof Error && value.name === 'TimeoutError') diagnostics.push('PW_TIMEOUT')
+    else diagnostics.push('UNCLASSIFIED_FAILURE')
+  }
+  visit(error)
+  return [...new Set(diagnostics)]
+}
 
 function configProbeResumeConfig() {
   const projectId = process.env.LABWEAVER_E2E_RESUME_PROJECT_ID?.trim() ?? ''
@@ -477,6 +495,12 @@ test('teacher publishes a configuration experiment and student repairs live VM f
     }
     await Promise.all([studentContext.close(), adminContext.close()])
   }
-  if (primaryFailure || cleanupFailures.length) throw new AggregateError(
-    [...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], 'CONFIG_PROBE_JOURNEY_OR_CLEANUP_FAILED')
+  if (primaryFailure || cleanupFailures.length) {
+    const failures = [...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures]
+    const diagnostics = [...new Set(failures.flatMap(safeFailureDiagnostics))]
+    throw new AggregateError(
+      failures,
+      `CONFIG_PROBE_JOURNEY_OR_CLEANUP_FAILED:${diagnostics.join(',') || 'UNCLASSIFIED_FAILURE'}`,
+    )
+  }
 })
