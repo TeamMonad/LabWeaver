@@ -3170,7 +3170,7 @@ mod probe_recovery_tests {
     use crate::resource_client::{ResourceClient, ResourceClientConfiguration};
 
     const NAMESPACE: &str = "evaluation-tests";
-    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOiJyZXNvdXJjZSJ9.sig";
+    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsicmVzb3VyY2UiLCJlbnZpcm9ubWVudCIsImNvbnRyb2wiLCJhZ2VudCJdfQ.sig";
 
     #[derive(Default)]
     struct MockHttpState {

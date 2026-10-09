@@ -12,8 +12,8 @@ use evaluation_service::ansible_probe_job::{
     AnsibleProbeJobBinding, AnsibleProbeJobError, AnsibleProbeJobResources,
 };
 use evaluation_service::{
-    ARTIFACT_MATERIALIZER_SCHEMA_VERSION, MaterializeArtifact, MaterializeCommand,
-    MaterializeContent, MaterializeDestination,
+    ARTIFACT_MATERIALIZER_SCHEMA_VERSION, FROZEN_ARCHIVE_MEDIA_TYPE, MaterializeArtifact,
+    MaterializeCommand, MaterializeContent, MaterializeDestination,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
@@ -86,17 +86,28 @@ fn binding() -> AnsibleProbeJobBinding {
         ],
         materializer: MaterializeCommand {
             schema_version: ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
-            artifacts: vec![MaterializeArtifact {
-                url: "https://objects.example.test/evaluator".to_owned(),
-                required_headers: BTreeMap::new(),
-                expected_sha256: Sha256Digest::of_bytes(b"approved-evaluator"),
-                expected_size_bytes: b"approved-evaluator".len() as u64,
-                media_type: "application/json".to_owned(),
-                destination: MaterializeDestination::Evaluator,
-                content: MaterializeContent::RawFile {
-                    path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
+            artifacts: vec![
+                MaterializeArtifact {
+                    url: "https://objects.example.test/evaluator".to_owned(),
+                    required_headers: BTreeMap::new(),
+                    expected_sha256: Sha256Digest::of_bytes(b"approved-evaluator"),
+                    expected_size_bytes: b"approved-evaluator".len() as u64,
+                    media_type: "application/json".to_owned(),
+                    destination: MaterializeDestination::Evaluator,
+                    content: MaterializeContent::RawFile {
+                        path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
+                    },
                 },
-            }],
+                MaterializeArtifact {
+                    url: "https://objects.example.test/submission".to_owned(),
+                    required_headers: BTreeMap::new(),
+                    expected_sha256: Sha256Digest::of_bytes(b"approved-submission"),
+                    expected_size_bytes: b"approved-submission".len() as u64,
+                    media_type: FROZEN_ARCHIVE_MEDIA_TYPE.to_owned(),
+                    destination: MaterializeDestination::Submission,
+                    content: MaterializeContent::FrozenArchive,
+                },
+            ],
         },
         materializer_ca_bundle: Some(Arc::from(b"test-ca-bundle".as_slice())),
     }
@@ -216,7 +227,8 @@ fn job_plan_is_non_root_bounded_and_read_only() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-/// Asserts the probe container mounts only the read-only command and evaluator volumes.
+/// Asserts the worker sees immutable materialized inputs while the init container
+/// gets the two writable destinations required by the materializer command.
 fn assert_probe_container_mounts(job: &Value) {
     assert_eq!(
         pointer(job, "/spec/template/spec/containers/0/volumeMounts/0/name"),
@@ -225,6 +237,46 @@ fn assert_probe_container_mounts(job: &Value) {
     assert_eq!(
         pointer(job, "/spec/template/spec/containers/0/volumeMounts/1/name"),
         "evaluator"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/containers/0/volumeMounts/6/name"),
+        "submission"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/6/mountPath"
+        ),
+        "/input/submission"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/6/readOnly"
+        ),
+        &Value::Bool(true)
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/initContainers/0/volumeMounts/1/name"
+        ),
+        "evaluator"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/initContainers/0/volumeMounts/2/name"
+        ),
+        "submission"
+    );
+    assert!(
+        pointer(
+            job,
+            "/spec/template/spec/initContainers/0/volumeMounts/2/readOnly"
+        )
+        .is_null(),
+        "materializer submission destination must remain writable"
     );
 }
 
@@ -314,6 +366,14 @@ fn ssh_identity_volumes_are_read_only_and_bounded() -> Result<(), Box<dyn std::e
     assert_eq!(
         pointer(job, "/spec/template/spec/volumes/6/emptyDir/sizeLimit"),
         "16Mi"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/volumes/7/name"),
+        "submission"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/volumes/7/emptyDir/sizeLimit"),
+        "96Mi"
     );
     Ok(())
 }

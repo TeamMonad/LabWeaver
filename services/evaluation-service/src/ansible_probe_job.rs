@@ -255,6 +255,7 @@ impl AnsibleProbeJobResources {
                             "volumeMounts":[
                                 {"name":"materializer","mountPath":"/run/secrets/materializer","readOnly":true},
                                 {"name":"evaluator","mountPath":"/input/evaluator"},
+                                {"name":"submission","mountPath":"/input/submission"},
                             ],
                         }],
                         "containers":[{
@@ -282,6 +283,7 @@ impl AnsibleProbeJobResources {
                                 {"name":"ssh-certificate","mountPath":"/run/secrets/probe/certificate","readOnly":true},
                                 {"name":"work","mountPath":"/work"},
                                 {"name":"evidence","mountPath":"/evidence"},
+                                {"name":"submission","mountPath":"/input/submission","readOnly":true},
                             ],
                         }],
                         "volumes":[
@@ -300,6 +302,7 @@ impl AnsibleProbeJobResources {
                             }},
                             {"name":"work","emptyDir":{"sizeLimit":WORK_VOLUME_SIZE_LIMIT}},
                             {"name":"evidence","emptyDir":{"sizeLimit":EVIDENCE_VOLUME_SIZE_LIMIT}},
+                            {"name":"submission","emptyDir":{"sizeLimit":INPUT_VOLUME_SIZE_LIMIT}},
                         ],
                     },
                 },
