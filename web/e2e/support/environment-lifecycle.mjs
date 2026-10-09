@@ -30,7 +30,7 @@ async function waitForDeleted(page, environmentId, label) {
   return latest ?? { id: environmentId, observedState: 'deleted' }
 }
 
-async function waitForOperation(page, accepted, label) {
+async function waitForOperation(page, accepted, label, { allowCancelled = false } = {}) {
   const operation = await pollJson(
     page.request,
     accepted.statusUrl,
@@ -38,7 +38,7 @@ async function waitForOperation(page, accepted, label) {
     `${label}_STATUS_FAILED`,
     OPERATION_TIMEOUT_MS,
   )
-  if (operation.state !== 'succeeded') {
+  if (operation.state !== 'succeeded' && !(allowCancelled && operation.state === 'cancelled')) {
     throw new Error(`${label}_OPERATION_FAILED:${operation.state}`)
   }
   return operation
@@ -79,7 +79,10 @@ async function waitForSettledEnvironment(page, routePrefix, projectId, environme
       await cancelButton.click()
       const accepted = await expectJson(await responsePromise, `${label}_CANCEL_ACCEPT_FAILED`)
       expect(accepted).toMatchObject({ environmentId, operationId: expect.any(String), statusUrl: expect.any(String) })
-      await waitForOperation(page, accepted, `${label}_CANCEL`)
+      // A cancellation operation reaches its own terminal `cancelled` state
+      // after the provider has completed the requested cleanup. The
+      // environment poll below remains authoritative for physical release.
+      await waitForOperation(page, accepted, `${label}_CANCEL`, { allowCancelled: true })
     } catch (error) {
       // The control is intentionally optional: an operation may already be
       // past its cancellation window. Only a missing/hidden control falls
