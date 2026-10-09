@@ -347,15 +347,21 @@ impl RuntimeVmBasePolicy {
     ///
     /// The reviewed raw-disk SHA-256 is unknown on this path, so the declared registry manifest
     /// digest is both the durable identity and the catalog-independent stand-in the binding type
-    /// requires. The CDI `DataSource` name is derived from that digest so one imported disk is
-    /// reused across environments regardless of the release-declared binding string.
+    /// requires. The CDI `DataSource` name is derived from the complete runtime import identity
+    /// so a source repository change cannot collide with an existing imported disk while the same
+    /// exact source can still be reused across environments.
     fn runtime_binding(
         &self,
         base_disk: &VirtualMachineBaseDisk,
         format: VirtualMachineDiskFormat,
     ) -> Option<KubeVirtBaseDiskBinding> {
         let manifest_digest = declared_manifest_digest(&base_disk.source_registry_digest)?;
-        let short = manifest_digest.get(..32).unwrap_or(manifest_digest);
+        let data_source_name = runtime_base_data_source_name(
+            &base_disk.source_registry_digest,
+            base_disk.capacity_bytes,
+            format,
+            &self.storage_class_name,
+        )?;
         KubeVirtBaseDiskBinding::new(
             base_disk.binding.clone(),
             base_disk.source_registry_digest.clone(),
@@ -365,12 +371,39 @@ impl RuntimeVmBasePolicy {
             self.storage_class_binding.clone(),
             self.storage_class_name.clone(),
             self.data_source_namespace.clone(),
-            format!("vm-base-{short}"),
+            data_source_name,
             self.guest_user.clone(),
             self.ssh_port,
         )
         .ok()
     }
+}
+
+const RUNTIME_BASE_DATA_SOURCE_PREFIX: &str = "vm-base-";
+const RUNTIME_BASE_DATA_SOURCE_HASH_LENGTH: usize = 48;
+
+/// Builds the DNS-safe CDI identity shared by the runtime import and every VM clone reference.
+///
+/// The source reference is intentionally hashed in full, including its repository and manifest
+/// digest. Capacity, format, storage class and identity are part of the canonical tuple because
+/// they constrain the imported CDI object or the resource plan that consumes it.
+fn runtime_base_data_source_name(
+    source_registry_digest: &str,
+    capacity_bytes: u64,
+    format: VirtualMachineDiskFormat,
+    storage_class_name: &str,
+) -> Option<String> {
+    let identity = json!({
+        "sourceRegistryDigest": source_registry_digest,
+        "capacityBytes": capacity_bytes,
+        "format": format,
+        "storageClassName": storage_class_name,
+        "identity": KubeVirtBaseDiskIdentity::RuntimeRegistryDigest.as_str(),
+    });
+    let digest = Sha256Digest::of_canonical(&identity).ok()?.to_string();
+    let suffix = digest.get(..RUNTIME_BASE_DATA_SOURCE_HASH_LENGTH)?;
+    let name = format!("{RUNTIME_BASE_DATA_SOURCE_PREFIX}{suffix}");
+    valid_dns_label(&name).then_some(name)
 }
 
 /// Extracts the lowercase `sha256:` hex payload from an immutable `docker://` registry digest.
@@ -3532,6 +3565,99 @@ mod tests {
             json!("licenses.example.test")
         );
         assert_eq!(egress[1]["toPorts"][0]["ports"][0]["port"], json!("8443"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_base_name_separates_full_registry_source_and_stays_dns_safe() {
+        let digest = "a".repeat(64);
+        let source_a = format!("docker://harbor.example/guest-a@sha256:{digest}");
+        let source_b = format!("docker://harbor.example/guest-b@sha256:{digest}");
+        let name_a = runtime_base_data_source_name(
+            &source_a,
+            16_u64 << 30,
+            VirtualMachineDiskFormat::Qcow2,
+            "local-path",
+        );
+        let name_b = runtime_base_data_source_name(
+            &source_b,
+            16_u64 << 30,
+            VirtualMachineDiskFormat::Qcow2,
+            "local-path",
+        );
+
+        assert!(name_a.is_some());
+        assert!(name_b.is_some());
+        let name_a = name_a.unwrap_or_default();
+        let name_b = name_b.unwrap_or_default();
+        assert_ne!(name_a, name_b);
+        assert_eq!(name_a.len(), 56);
+        assert!(valid_dns_label(&name_a));
+        assert!(valid_dns_label(&format!("{name_a}-seed")));
+    }
+
+    #[test]
+    fn runtime_base_name_covers_strict_import_identity_fields() {
+        let source = "docker://harbor.example/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let name = |capacity, format, storage_class| {
+            runtime_base_data_source_name(source, capacity, format, storage_class)
+                .unwrap_or_default()
+        };
+
+        assert_eq!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path")
+        );
+        assert_ne!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(32_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path")
+        );
+        assert_ne!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(16_u64 << 30, VirtualMachineDiskFormat::Raw, "local-path")
+        );
+        assert_ne!(
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "local-path"),
+            name(16_u64 << 30, VirtualMachineDiskFormat::Qcow2, "fast-local")
+        );
+    }
+
+    #[test]
+    fn runtime_binding_and_clone_reference_share_one_data_source_name() -> Result<(), String> {
+        let policy = RuntimeVmBasePolicy::new(
+            "local-path".to_owned(),
+            "local-path".to_owned(),
+            "labweaver-system".to_owned(),
+            "student".to_owned(),
+            22,
+            2,
+            32_u64 << 30,
+        )
+        .map_err(|error| format!("policy: {error:?}"))?;
+        let base_disk = VirtualMachineBaseDisk {
+            binding: "runtime-vm".to_owned(),
+            source_registry_digest:
+                "docker://harbor.example/guest@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            capacity_bytes: 16_u64 << 30,
+        };
+        let format = VirtualMachineDiskFormat::Qcow2;
+        let binding = policy
+            .runtime_binding(&base_disk, format)
+            .ok_or_else(|| "runtime binding rejected".to_owned())?;
+        let expected = runtime_base_data_source_name(
+            &base_disk.source_registry_digest,
+            base_disk.capacity_bytes,
+            format,
+            "local-path",
+        )
+        .ok_or_else(|| "runtime identity rejected".to_owned())?;
+        if binding.data_source_name != expected {
+            return Err(format!(
+                "binding name {} differs from expected {expected}",
+                binding.data_source_name
+            ));
+        }
         Ok(())
     }
 }

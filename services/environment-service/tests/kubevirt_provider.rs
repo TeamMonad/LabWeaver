@@ -1876,7 +1876,9 @@ fn runtime_registered_base_resolves_by_declared_digest() {
         KubeVirtBaseDiskIdentity::RuntimeRegistryDigest
     );
     assert_eq!(plan.base_disk_disk_sha256, RUNTIME_MANIFEST_HEX);
-    assert_eq!(
+    assert!(plan.base_disk_data_source_name.starts_with("vm-base-"));
+    assert_eq!(plan.base_disk_data_source_name.len(), 56);
+    assert_ne!(
         plan.base_disk_data_source_name,
         format!("vm-base-{}", &RUNTIME_MANIFEST_HEX[..32])
     );
