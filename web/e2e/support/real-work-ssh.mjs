@@ -201,7 +201,11 @@ export async function runPinnedSsh(endpointGrant, identity, command, input = und
     const guestDiagnostic = result.stderr
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .find((line) => /^(?:CUDA_DRIVER_[A-Z0-9_:.-]+|CUDA_DRIVER_LIBRARY_UNAVAILABLE)$/.test(line))
+      .map((line) => {
+        if (/^(?:CUDA_DRIVER_[A-Z0-9_:.-]+|CUDA_DRIVER_LIBRARY_UNAVAILABLE)$/.test(line)) return line
+        return line.match(/^AssertionError\b.*?\b(CONFIG_PROBE_[A-Z0-9_]+)\b/)?.[1] ?? null
+      })
+      .find(Boolean)
     throw new Error(guestDiagnostic ?? `WORK_SSH_COMMAND_FAILED:${result.code ?? 'signal'}`)
   }
   return result.stdout
