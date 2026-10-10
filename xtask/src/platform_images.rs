@@ -470,7 +470,7 @@ fn package_linux(
         role: "parse component lock",
         detail: error.to_string(),
     })?;
-    verify_tools(&lock)?;
+    verify_package_tools(&lock)?;
     verify_rust_toolchain(root, &lock.platform_images)?;
     prepare_inputs(root, &lock.platform_images)?;
     let registry = required_env("LABWEAVER_PLATFORM_REGISTRY")?;
@@ -1480,17 +1480,28 @@ fn platform_digest_from_manifest(
 }
 
 #[cfg(target_os = "linux")]
-fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
+fn verify_cli_identities(lock: &VersionLock, role: &'static str) -> Result<(), AppError> {
+    verify_cli_identities_with_path(lock, role, None)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_cli_identities_with_path(
+    lock: &VersionLock,
+    role: &'static str,
+    path: Option<&Path>,
+) -> Result<(), AppError> {
     let platform = &lock.platform_images;
     let checks = [
         ("docker-buildx", vec!["version"], platform.buildx.as_str()),
         ("helm", vec!["version", "--short"], platform.helm.as_str()),
     ];
     for (program, arguments, expected) in checks {
-        let output = run_checked(
-            Command::new(program).args(arguments),
-            "verify locked tool identity",
-        )?;
+        let mut command = Command::new(program);
+        command.args(arguments);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = run_checked(&mut command, role)?;
         if !output.contains(expected) {
             return Err(AppError::PlatformImage {
                 code: "LW_PACKAGE_TOOL_IDENTITY_MISMATCH",
@@ -1498,6 +1509,13 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
             });
         }
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_package_tools(lock: &VersionLock) -> Result<(), AppError> {
+    verify_cli_identities(lock, "verify locked tool identity")?;
+    let platform = &lock.platform_images;
     let buildkit = run_checked(
         Command::new("docker-buildx").args(["inspect", "--bootstrap"]),
         "verify BuildKit daemon identity",
@@ -1513,6 +1531,11 @@ fn verify_tools(lock: &VersionLock) -> Result<(), AppError> {
     }
 
     verify_remote_buildkit_deployment(&lock.platform_foundation.buildkit_rootless)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_deploy_tools(lock: &VersionLock) -> Result<(), AppError> {
+    verify_cli_identities(lock, "verify deploy tool identity")
 }
 
 #[cfg(target_os = "linux")]
@@ -1642,8 +1665,7 @@ fn connected_validate(manifest: &PackageManifest, root: &Path) -> Result<(), App
         role: "parse component lock",
         detail: error.to_string(),
     })?;
-    verify_tools(&lock)?;
-    verify_rust_toolchain(root, &lock.platform_images)?;
+    verify_deploy_tools(&lock)?;
     if sha256(&lock_bytes) != manifest.component_lock_hash {
         return manifest_invalid("component lock identity changed");
     }
@@ -1669,6 +1691,14 @@ fn deploy_linux(
     manifest: &PackageManifest,
     root: &Path,
 ) -> Result<(), AppError> {
+    let run_id = std::env::var("LABWEAVER_RUN_ID").map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_MISSING",
+        detail: "LABWEAVER_RUN_ID is required".to_owned(),
+    })?;
+    uuid::Uuid::parse_str(&run_id).map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_INVALID",
+        detail: "LABWEAVER_RUN_ID must be a UUID".to_owned(),
+    })?;
     connected_validate(manifest, root)?;
     let kubeconfig = required_env("LABWEAVER_KUBECONFIG")?;
     let values = root.join("deploy/helm/labweaver/values.yaml");
@@ -1713,14 +1743,6 @@ fn deploy_linux(
     let revision = helm_revision(&kubeconfig)?;
     let manifest_bytes =
         fs::read(manifest_path).map_err(|error| io_error("read package manifest", error))?;
-    let run_id = std::env::var("LABWEAVER_RUN_ID").map_err(|_| AppError::PlatformImage {
-        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_MISSING",
-        detail: "LABWEAVER_RUN_ID is required".to_owned(),
-    })?;
-    uuid::Uuid::parse_str(&run_id).map_err(|_| AppError::PlatformImage {
-        code: "LW_PACKAGE_DEPLOYMENT_RUN_ID_INVALID",
-        detail: "LABWEAVER_RUN_ID must be a UUID".to_owned(),
-    })?;
     let migration_catalog = fs::read(root.join("migrations/catalog.yaml"))
         .map_err(|error| io_error("read migration catalog", error))?;
     let deployment = DeploymentManifest {
@@ -1820,6 +1842,10 @@ fn git_output<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -1863,6 +1889,57 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deploy_tool_validation_does_not_probe_a_buildkit_daemon() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let buildx = root.path().join("docker-buildx");
+        let helm = root.path().join("helm");
+        fs::write(
+            &buildx,
+            "#!/bin/sh\n[ \"$1\" = \"version\" ] || exit 42\necho 'github.com/docker/buildx v0.35.0'\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(&helm, "#!/bin/sh\necho 'v3.21.3'\n").map_err(|error| error.to_string())?;
+        for path in [&buildx, &helm] {
+            let mut permissions = fs::metadata(path)
+                .map_err(|error| error.to_string())?
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).map_err(|error| error.to_string())?;
+        }
+        let lock = VersionLock {
+            platform_images: PlatformImageLock {
+                platform: "linux/amd64".to_owned(),
+                rust_toolchain: String::new(),
+                buildkit: String::new(),
+                buildkit_image: String::new(),
+                buildx: "v0.35.0".to_owned(),
+                helm: "v3.21.3".to_owned(),
+                pnpm: String::new(),
+                claude_code: String::new(),
+                claude_code_linux_x64_sha512: String::new(),
+                bases: BaseImageLock {
+                    rust_builder: String::new(),
+                    rust_runtime: String::new(),
+                    node_builder: String::new(),
+                    web_runtime: String::new(),
+                    gateway_builder: String::new(),
+                    gateway_runtime: String::new(),
+                },
+            },
+            platform_foundation: PlatformFoundationLock {
+                buildkit_rootless: String::new(),
+            },
+        };
+        let result = verify_cli_identities_with_path(
+            &lock,
+            "verify deploy tool identity",
+            Some(root.path()),
+        );
+        result.map_err(|error| error.to_string())
     }
 
     #[test]
