@@ -35,6 +35,30 @@ function clipboardMismatchDiagnostic(expected, actual, alias, pageHasFocus) {
   ].join(':')
 }
 
+async function pasteClipboardThroughUi(page) {
+  const selector = '[data-work-clipboard-verification]'
+  await page.evaluate((targetSelector) => {
+    document.querySelector(targetSelector)?.remove()
+    const target = document.createElement('textarea')
+    target.dataset.workClipboardVerification = 'true'
+    target.setAttribute('aria-label', '剪贴板验证')
+    target.style.position = 'fixed'
+    target.style.left = '-10000px'
+    target.style.top = '0'
+    document.body.append(target)
+  }, selector)
+  const target = page.locator(selector)
+  try {
+    await target.focus()
+    await target.press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V')
+    return await target.inputValue()
+  } finally {
+    await page.evaluate((targetSelector) => {
+      document.querySelector(targetSelector)?.remove()
+    }, selector)
+  }
+}
+
 export async function waitForActiveAccessGrant(request, grantId) {
   const grant = await pollJson(
     request,
@@ -177,8 +201,15 @@ export async function issueEnvironmentAccessGrantByUi(
     const copyButton = page.getByRole('button', { name: '复制 SSH 命令', exact: true })
     await expect(copyButton).toBeEnabled({ timeout: 30_000 })
     await copyButton.click()
-    await expect(copyButton).toContainText('已复制', { timeout: 5_000 })
-    const copiedCommand = await page.evaluate(() => navigator.clipboard.readText())
+    try {
+      await expect(copyButton).toContainText('已复制', { timeout: 5_000 })
+    } catch (error) {
+      const manualCopy = page.getByRole('textbox', { name: '手动复制内容', exact: true })
+      if (!(await manualCopy.isVisible())) throw error
+      await manualCopy.focus()
+      await manualCopy.press(process.platform === 'darwin' ? 'Meta+C' : 'Control+C')
+    }
+    const copiedCommand = await pasteClipboardThroughUi(page)
     if (copiedCommand !== command) {
       const clipboardError = new Error(
         `WORK_SSH_COMMAND_CLIPBOARD_MISMATCH:${clipboardMismatchDiagnostic(command, copiedCommand, endpointGrants[0].alias, pageHasFocus)}`,
