@@ -522,6 +522,10 @@ function isLicenseNotGranted(error) {
   return error instanceof Error && /^WORK_VM_VGPU_LICENSE_NOT_GRANTED:[a-z0-9_-]+$/.test(error.message)
 }
 
+function isDeadlineScanTimeout(error) {
+  return error instanceof Error && error.message === 'WORK_SSH_GATEWAY_SCAN_TIMEOUT'
+}
+
 function licenseFailureStatus(error) {
   return error instanceof Error
     ? error.message.match(/^WORK_VM_VGPU_LICENSE_NOT_GRANTED:([a-z0-9_-]+)$/)?.[1] ?? 'unknown'
@@ -549,13 +553,16 @@ export async function readRealWorkVmLicenseStatus(
   try {
     await expect.poll(
       async () => {
-        const remaining = Math.max(1, Math.ceil(deadlineAt - now()))
+        const remaining = Math.ceil(deadlineAt - now())
+        if (remaining <= 0 && lastFailure) return 'deadline'
+        const timeoutMs = Math.max(1, remaining)
         try {
-          const output = await runSsh(endpointGrant, identity, 'nvidia-smi -q', undefined, { timeoutMs: remaining })
+          const output = await runSsh(endpointGrant, identity, 'nvidia-smi -q', undefined, { timeoutMs })
           licensedResult = parseRealWorkVmLicenseStatus(output)
           return 'licensed'
         } catch (error) {
           if (!isLicenseNotGranted(error)) {
+            if (lastFailure && now() >= deadlineAt && isDeadlineScanTimeout(error)) return 'deadline'
             terminalError = error
             return 'terminal'
           }
@@ -567,7 +574,7 @@ export async function readRealWorkVmLicenseStatus(
         timeout: deadlineMs,
         intervals: [retryDelayMs, Math.max(retryDelayMs, retryDelayMs * 2), Math.max(retryDelayMs, retryDelayMs * 4)],
       },
-    ).toMatch(/^(licensed|terminal)$/)
+    ).toMatch(/^(licensed|terminal|deadline)$/)
   } catch (error) {
     if (terminalError) throw terminalError
     if (lastFailure) throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${licenseFailureStatus(lastFailure)}`)

@@ -135,6 +135,39 @@ GPU 00000000:01:00.0
     expect(calls.every(([, , , , options]) => options.timeoutMs <= 50)).toBe(true)
   })
 
+  it('keeps the last license status when the final gateway scan reaches the deadline', async () => {
+    let clock = 0
+    const calls = []
+    const unlicensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        License Status : Unlicensed\n'
+    await expect(readRealWorkVmLicenseStatus({}, {}, {
+      deadlineMs: 50,
+      retryDelayMs: 1,
+      now: () => clock,
+      runSsh: async (...args) => {
+        calls.push(args)
+        if (calls.length === 1) {
+          clock = 49
+          return unlicensed
+        }
+        clock = 50
+        throw new Error('WORK_SSH_GATEWAY_SCAN_TIMEOUT')
+      },
+    })).rejects.toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
+    expect(calls).toHaveLength(2)
+  })
+
+  it('keeps a gateway scan failure before the deadline terminal', async () => {
+    const calls = []
+    await expect(readRealWorkVmLicenseStatus({}, {}, {
+      deadlineMs: 100,
+      runSsh: async (...args) => {
+        calls.push(args)
+        throw new Error('WORK_SSH_GATEWAY_SCAN_TIMEOUT')
+      },
+    })).rejects.toThrow('WORK_SSH_GATEWAY_SCAN_TIMEOUT')
+    expect(calls).toHaveLength(1)
+  })
+
   it('does not retry malformed license output or an SSH failure', async () => {
     const calls = []
     await expect(readRealWorkVmLicenseStatus({}, {}, {
