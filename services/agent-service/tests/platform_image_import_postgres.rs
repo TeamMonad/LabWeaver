@@ -30,6 +30,11 @@ use support::{FakeObjects, FakeRegistry, apply_agent_migrations};
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
+// The production importer admits one VM disk conversion per process. Keep disk-shaped fixture
+// jobs serial within this integration binary as well, so an unrelated VM case cannot leave the
+// capacity rejection waiting behind its conversion when the terminal-state deadline is checked.
+static VM_IMPORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Verified OCI layout archive plus the identity the importer must derive from it.
 struct LayoutArchive {
     bytes: Vec<u8>,
@@ -299,6 +304,14 @@ async fn run_import(
     ),
     Box<dyn std::error::Error>,
 > {
+    let _vm_import_guard = if request.get("diskPath").is_some()
+        || request.get("diskFormat").is_some()
+        || request.get("capacityBytes").is_some()
+    {
+        Some(VM_IMPORT_TEST_LOCK.lock().await)
+    } else {
+        None
+    };
     let upload_id = UploadSessionId::new();
     let client = reqwest::Client::builder().no_proxy().build()?;
     let mut enqueued = client
