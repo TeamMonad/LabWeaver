@@ -336,25 +336,13 @@ fn validate_environment(value: &str) -> Result<(), AppError> {
 }
 
 fn validate_release(value: &str) -> Result<(), AppError> {
-    if release_identifier(value, 64) {
+    if portable_identifier(value, 64) {
         Ok(())
     } else {
         Err(AppError::InvalidArgument {
             role: "platform image release",
         })
     }
-}
-
-fn release_identifier(value: &str, maximum: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= maximum
-        && value
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn validate_registry(value: &str) -> Result<(), AppError> {
@@ -2038,12 +2026,6 @@ mod tests {
         assert!(validate_registry("harbor.internal.example:5443").is_ok());
         assert!(validate_registry("https://harbor.internal.example").is_err());
         assert!(validate_registry("harbor.internal.example/project").is_err());
-    }
-
-    #[test]
-    fn release_accepts_a_numeric_prefix() {
-        assert!(validate_release("127-final-20261010").is_ok());
-        assert!(validate_release("127-FINAL").is_err());
     }
 
     #[test]
