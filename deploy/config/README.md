@@ -32,7 +32,7 @@ deployable bundle and must not contain credentials.
 The Control upload lifetime is configured only by the reviewed
 `control-service-config/config.yaml` document in the bundle. Keep
 `object_store.uploadTtlSeconds` and `control.uploadTtlSeconds` equal; the checked-in Control
-profile uses `3600` seconds (one hour) for new signed archive uploads. This is the maximum session
+profile uses `14400` seconds (four hours) for new signed archive uploads. This is the maximum session
 age and does not extend sessions that were already persisted. The Helm chart does not provide a
 second upload-TTL override: `deploymentIdentity.configurationBundleSha256` is the chart key that
 rolls workloads after the bundle changes, and the Ansible application role applies the supplied

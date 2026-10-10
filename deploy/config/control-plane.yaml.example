@@ -31,9 +31,9 @@ object_store:
   bucket: "labweaver-artifacts"
   region: "labweaver-internal-1"
   objectPrefix: "problem-packages"
-  # New signed uploads remain valid for at most one hour. Existing sessions
+  # New signed uploads remain valid for at most four hours. Existing sessions
   # retain the expires_at value persisted when they were created.
-  uploadTtlSeconds: 3600
+  uploadTtlSeconds: 14400
   maxObjectBytes: 67108864
   forcePathStyle: true
 object_store_access_key_file: "/etc/labweaver/secrets/minio-access-key"
@@ -43,7 +43,7 @@ control:
   packageObjectPrefix: "problem-packages"
   # Keep the Control session lifetime equal to object_store.uploadTtlSeconds so
   # the persisted session and its signed object-store URL expire together.
-  uploadTtlSeconds: 3600
+  uploadTtlSeconds: 14400
   completionLeaseSeconds: 300
   maxPackageFiles: 1000
   maxPackageBytes: 268435456

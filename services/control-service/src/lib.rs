@@ -215,7 +215,7 @@ impl ControlConfig {
     /// Rejects unsafe or unbounded configuration.
     pub fn validate(&self) -> Result<(), ControlError> {
         let package_prefix_valid = !self.package_object_prefix.trim_matches('/').is_empty();
-        let upload_ttl_valid = (1..=3_600).contains(&self.upload_ttl_seconds);
+        let upload_ttl_valid = (1..=14_400).contains(&self.upload_ttl_seconds);
         let completion_lease_valid = (30..=3_600).contains(&self.completion_lease_seconds);
         let package_files_valid = (1..=10_000).contains(&self.max_package_files);
         let package_bytes_valid = self.max_package_bytes != 0;
@@ -9244,6 +9244,28 @@ mod tests {
                 max_in_flight_per_worker: 2,
             },
         })
+    }
+
+    #[test]
+    fn configuration_accepts_four_hour_upload_ttl_and_rejects_out_of_range_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = config()?;
+
+        config.upload_ttl_seconds = 14_400;
+        config.validate()?;
+
+        config.upload_ttl_seconds = 14_401;
+        assert!(matches!(
+            config.validate(),
+            Err(ControlError::ConfigurationInvalid)
+        ));
+
+        config.upload_ttl_seconds = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(ControlError::ConfigurationInvalid)
+        ));
+        Ok(())
     }
 
     #[test]

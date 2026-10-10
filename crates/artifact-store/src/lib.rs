@@ -62,7 +62,7 @@ impl S3StoreConfig {
             || self.region.trim().is_empty()
             || self.object_prefix.trim_matches('/').is_empty()
             || self.upload_ttl_seconds == 0
-            || self.upload_ttl_seconds > 3_600
+            || self.upload_ttl_seconds > 14_400
             || self.max_object_bytes == 0
             || self.endpoint.scheme() != "https"
             || self.endpoint.host_str().is_none()
@@ -1613,6 +1613,30 @@ mod tests {
         };
         config.validate()?;
         config.endpoint = "http://minio.internal.example".parse()?;
+        assert!(config.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn configuration_accepts_four_hour_ttl_and_rejects_out_of_range_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = S3StoreConfig {
+            binding: "minio-primary".to_owned(),
+            endpoint: "https://minio.internal.example".parse()?,
+            bucket: "labweaver-materials".to_owned(),
+            region: "labweaver".to_owned(),
+            object_prefix: "problem-packages".to_owned(),
+            upload_ttl_seconds: 14_400,
+            max_object_bytes: 64 * 1024 * 1024,
+            force_path_style: true,
+            ca_bundle_file: None,
+        };
+        config.validate()?;
+
+        config.upload_ttl_seconds = 14_401;
+        assert!(config.validate().is_err());
+
+        config.upload_ttl_seconds = 0;
         assert!(config.validate().is_err());
         Ok(())
     }
