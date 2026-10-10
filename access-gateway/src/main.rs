@@ -94,6 +94,24 @@ enum HeartbeatUpdate {
     Stop(Revision),
 }
 
+#[cfg(target_os = "linux")]
+fn arm_parent_death_signal() -> Result<(), GatewayError> {
+    use nix::sys::prctl::set_pdeathsig;
+    use nix::sys::signal::Signal;
+    use nix::unistd::getppid;
+
+    let parent = getppid();
+    if parent.as_raw() <= 1 {
+        return Err(GatewayError::Configuration);
+    }
+    set_pdeathsig(Some(Signal::SIGHUP)).map_err(|_| GatewayError::Configuration)?;
+    let current_parent = getppid();
+    if current_parent != parent || current_parent.as_raw() <= 1 {
+        return Err(GatewayError::Configuration);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 struct GatewaySignals {
     hangup: tokio::signal::unix::Signal,
@@ -329,6 +347,8 @@ async fn run(context: &telemetry::RequestContext) -> Result<(), GatewayError> {
             let mut signals = GatewaySignals::new()?;
             #[cfg(not(unix))]
             let mut signals = GatewaySignals::new();
+            #[cfg(target_os = "linux")]
+            arm_parent_death_signal()?;
             force_command(
                 &GatewayConfig::load(context.clone()).await?,
                 &authorization_id,
