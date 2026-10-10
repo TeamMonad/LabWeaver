@@ -34,6 +34,10 @@ enum GatewayError {
     InputStage(&'static str),
     #[error("access authority rejected or failed the request")]
     Authority,
+    #[error("access authority transport failed")]
+    Transport,
+    #[error("gateway session close retries exhausted")]
+    CloseRetriesExhausted,
     #[error("target session failed")]
     Target,
 }
@@ -44,6 +48,8 @@ impl GatewayError {
             Self::Configuration => "LW_GATEWAY_CONFIGURATION_INVALID",
             Self::InvalidInput | Self::InputStage(_) => "LW_GATEWAY_INPUT_INVALID",
             Self::Authority => "LW_GATEWAY_AUTHORITY_FAILED",
+            Self::Transport => "LW_GATEWAY_AUTHORITY_TRANSPORT_FAILED",
+            Self::CloseRetriesExhausted => "LW_GATEWAY_SESSION_CLOSE_RETRIES_EXHAUSTED",
             Self::Target => "LW_GATEWAY_TARGET_SESSION_FAILED",
         }
     }
@@ -53,6 +59,8 @@ impl GatewayError {
             Self::Configuration => "configuration_invalid",
             Self::InvalidInput | Self::InputStage(_) => "input_rejected",
             Self::Authority => "access_authority_failed",
+            Self::Transport => "access_authority_transport_failed",
+            Self::CloseRetriesExhausted => "session_close_retries_exhausted",
             Self::Target => "target_session_failed",
         }
     }
@@ -62,13 +70,14 @@ impl GatewayError {
             Self::InputStage(stage) => stage,
             Self::Configuration => "gateway.configuration",
             Self::InvalidInput => "gateway.input",
-            Self::Authority => "gateway.access_authority",
+            Self::Authority | Self::Transport => "gateway.access_authority",
+            Self::CloseRetriesExhausted => "gateway.session.close",
             Self::Target => "gateway.target_session",
         }
     }
 
     const fn retryable(&self) -> bool {
-        matches!(self, Self::Authority | Self::Target)
+        matches!(self, Self::Authority | Self::Transport | Self::Target)
     }
 }
 
@@ -87,6 +96,40 @@ struct SessionRevisionConflict {
     diagnostic_code: String,
     current_revision: Revision,
     state: GatewaySessionState,
+}
+
+const CLOSE_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+const CLOSE_RETRY_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseResponseAction {
+    Success,
+    RevisionConflict,
+    Retry,
+    Reject,
+}
+
+fn close_response_action(status: StatusCode) -> CloseResponseAction {
+    match status {
+        status if status.is_success() => CloseResponseAction::Success,
+        StatusCode::PRECONDITION_FAILED => CloseResponseAction::RevisionConflict,
+        StatusCode::TOO_MANY_REQUESTS => CloseResponseAction::Retry,
+        status if status.is_server_error() => CloseResponseAction::Retry,
+        _ => CloseResponseAction::Reject,
+    }
+}
+
+fn close_retry_delay(attempt: usize) -> Option<Duration> {
+    CLOSE_RETRY_DELAYS.get(attempt).copied()
+}
+
+const fn close_error_is_retryable(error: &GatewayError) -> bool {
+    matches!(error, GatewayError::Transport)
 }
 
 enum HeartbeatUpdate {
@@ -226,7 +269,7 @@ impl GatewayConfig {
         } else {
             "gateway.session.create"
         };
-        let response = request.send().await.map_err(|_| GatewayError::Authority)?;
+        let response = request.send().await.map_err(|_| GatewayError::Transport)?;
         let outcome = if response.status().is_success() {
             "succeeded"
         } else {
@@ -727,7 +770,24 @@ async fn close_session(
     connection_id: &str,
     clean: bool,
 ) -> Result<(), GatewayError> {
-    for attempt in 0..=1 {
+    match tokio::time::timeout(
+        CLOSE_RETRY_DEADLINE,
+        close_session_with_retries(config, session, connection_id, clean),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(GatewayError::CloseRetriesExhausted),
+    }
+}
+
+async fn close_session_with_retries(
+    config: &GatewayConfig,
+    session: &mut GatewaySession,
+    connection_id: &str,
+    clean: bool,
+) -> Result<(), GatewayError> {
+    for attempt in 0..=CLOSE_RETRY_DELAYS.len() {
         let body = CloseGatewaySessionRequest {
             gateway_identity: config.service_client_id.clone(),
             connection_id: connection_id.to_owned(),
@@ -747,42 +807,61 @@ async fn close_session(
                 None,
                 Some(session.revision),
             )
-            .await?;
-        if response.status().is_success() {
-            info!(
-                schema = telemetry::LOG_SCHEMA,
-                event = "gateway.session.closed",
-                service = "access-gateway",
-                component = "ssh-session",
-                operation = "gateway.session.close",
-                outcome = "succeeded",
-                duration_ms = 0_u64,
-                request_id = config.context.request_id(),
-                trace_id = config.context.trace_id(),
-                session_id = %session.id,
-                connection_id,
-                revision = session.revision.get(),
-            );
-            return Ok(());
-        }
-        if response.status() != StatusCode::PRECONDITION_FAILED || attempt == 1 {
-            return Err(GatewayError::Authority);
-        }
-        let conflict = response
-            .json::<SessionRevisionConflict>()
-            .await
-            .map_err(|_| GatewayError::Authority)?;
-        if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
-            || conflict.current_revision <= session.revision
-        {
-            return Err(GatewayError::Authority);
-        }
-        session.revision = conflict.current_revision;
-        if conflict.state == GatewaySessionState::Closed {
-            return Ok(());
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) if close_error_is_retryable(&error) => {
+                let Some(delay) = close_retry_delay(attempt) else {
+                    return Err(GatewayError::CloseRetriesExhausted);
+                };
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match close_response_action(response.status()) {
+            CloseResponseAction::Success => {
+                info!(
+                    schema = telemetry::LOG_SCHEMA,
+                    event = "gateway.session.closed",
+                    service = "access-gateway",
+                    component = "ssh-session",
+                    operation = "gateway.session.close",
+                    outcome = "succeeded",
+                    duration_ms = 0_u64,
+                    request_id = config.context.request_id(),
+                    trace_id = config.context.trace_id(),
+                    session_id = %session.id,
+                    connection_id,
+                    revision = session.revision.get(),
+                );
+                return Ok(());
+            }
+            CloseResponseAction::Retry => {
+                let Some(delay) = close_retry_delay(attempt) else {
+                    return Err(GatewayError::CloseRetriesExhausted);
+                };
+                tokio::time::sleep(delay).await;
+            }
+            CloseResponseAction::RevisionConflict => {
+                let conflict = response
+                    .json::<SessionRevisionConflict>()
+                    .await
+                    .map_err(|_| GatewayError::Authority)?;
+                if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
+                    || conflict.current_revision <= session.revision
+                {
+                    return Err(GatewayError::Authority);
+                }
+                session.revision = conflict.current_revision;
+                if conflict.state == GatewaySessionState::Closed {
+                    return Ok(());
+                }
+            }
+            CloseResponseAction::Reject => return Err(GatewayError::Authority),
         }
     }
-    Err(GatewayError::Authority)
+    Err(GatewayError::CloseRetriesExhausted)
 }
 
 fn required_env(name: &str) -> Result<String, GatewayError> {
@@ -960,6 +1039,274 @@ fn elapsed_millis(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Arc;
+
+    use serde_json::Value;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
+    use tokio::task::JoinHandle;
+
+    #[derive(Clone, Debug)]
+    struct MockResponse {
+        status: u16,
+        body: String,
+        drop_connection: bool,
+    }
+
+    impl MockResponse {
+        fn json(status: u16, body: &Value) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                drop_connection: false,
+            }
+        }
+
+        fn drop_connection() -> Self {
+            Self {
+                status: 0,
+                body: String::new(),
+                drop_connection: true,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct MockCloseRequest {
+        if_match: Option<String>,
+        body: String,
+    }
+
+    struct MockAuthorityState {
+        token_status: u16,
+        close_responses: Mutex<VecDeque<MockResponse>>,
+        close_requests: Mutex<Vec<MockCloseRequest>>,
+    }
+
+    struct MockAuthority {
+        base_url: String,
+        state: Arc<MockAuthorityState>,
+        task: JoinHandle<()>,
+    }
+
+    impl MockAuthority {
+        async fn start(
+            token_status: u16,
+            close_responses: Vec<MockResponse>,
+        ) -> Result<Self, std::io::Error> {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let address = listener.local_addr()?;
+            let base_url = format!("http://{address}");
+            let state = Arc::new(MockAuthorityState {
+                token_status,
+                close_responses: Mutex::new(close_responses.into()),
+                close_requests: Mutex::new(Vec::new()),
+            });
+            let task_state = state.clone();
+            let task_base_url = base_url.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let state = task_state.clone();
+                    let base_url = task_base_url.clone();
+                    tokio::spawn(async move {
+                        serve_mock_request(stream, state, &base_url).await;
+                    });
+                }
+            });
+            Ok(Self {
+                base_url,
+                state,
+                task,
+            })
+        }
+
+        async fn close_requests(&self) -> Vec<MockCloseRequest> {
+            self.state.close_requests.lock().await.clone()
+        }
+    }
+
+    impl Drop for MockAuthority {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    struct MockHttpRequest {
+        path: String,
+        headers: BTreeMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    async fn read_mock_request(mut stream: TcpStream) -> Option<(TcpStream, MockHttpRequest)> {
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            if bytes.len() > 64 * 1024 {
+                return None;
+            }
+        };
+        let header = std::str::from_utf8(&bytes[..header_end - 4]).ok()?;
+        let mut lines = header.lines();
+        let path = lines.next()?.split_ascii_whitespace().nth(1)?.to_owned();
+        let headers = lines
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.to_ascii_lowercase(), value.trim().to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while bytes.len() - header_end < content_length {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if bytes.len() > header_end + content_length + 64 * 1024 {
+                return None;
+            }
+        }
+        Some((
+            stream,
+            MockHttpRequest {
+                path,
+                headers,
+                body: bytes[header_end..header_end + content_length].to_vec(),
+            },
+        ))
+    }
+
+    async fn serve_mock_request(stream: TcpStream, state: Arc<MockAuthorityState>, base_url: &str) {
+        let Some((mut stream, request)) = read_mock_request(stream).await else {
+            return;
+        };
+        let (status, body) = if request.path.ends_with("/.well-known/openid-configuration") {
+            (
+                200,
+                serde_json::json!({
+                    "issuer": format!("{base_url}/issuer"),
+                    "authorization_endpoint": format!("{base_url}/authorize"),
+                    "token_endpoint": format!("{base_url}/token"),
+                    "jwks_uri": format!("{base_url}/jwks"),
+                    "response_types_supported": ["code"],
+                    "subject_types_supported": ["public"],
+                    "id_token_signing_alg_values_supported": ["RS256"],
+                    "grant_types_supported": ["authorization_code", "client_credentials"],
+                })
+                .to_string(),
+            )
+        } else if request.path == "/jwks" {
+            (200, serde_json::json!({"keys": []}).to_string())
+        } else if request.path == "/token" {
+            let status = state.token_status;
+            let body = if status == 200 {
+                serde_json::json!({
+                    "access_token": "eyJhbGciOiJub25lIn0.eyJhdWQiOiJhdWRpZW5jZSJ9.signature",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                })
+                .to_string()
+            } else {
+                serde_json::json!({"error": "temporarily_unavailable"}).to_string()
+            };
+            (status, body)
+        } else if request.path.ends_with("/close") {
+            state.close_requests.lock().await.push(MockCloseRequest {
+                if_match: request.headers.get("if-match").cloned(),
+                body: String::from_utf8_lossy(&request.body).into_owned(),
+            });
+            let response = state
+                .close_responses
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_else(|| MockResponse::json(500, &serde_json::json!({})));
+            if response.drop_connection {
+                return;
+            }
+            (response.status, response.body)
+        } else {
+            (404, serde_json::json!({"error": "not_found"}).to_string())
+        };
+        let reason = match status {
+            200 => "OK",
+            400 => "Bad Request",
+            403 => "Forbidden",
+            412 => "Precondition Failed",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "Test Response",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    }
+
+    async fn test_gateway_config(authority: &MockAuthority) -> Result<GatewayConfig, GatewayError> {
+        let token_config = ServiceTokenClientConfig::new(
+            &format!("{}/issuer", authority.base_url),
+            "gateway-test".to_owned(),
+            "secret".to_owned(),
+            "audience".to_owned(),
+            BTreeSet::from(["access.session.manage".to_owned()]),
+            30,
+            TransportSecurityMode::InsecureTestOnly,
+        )
+        .map_err(|_| GatewayError::Configuration)?;
+        let service_token_client = ServiceTokenClient::discover_with_trust(token_config, None)
+            .await
+            .map_err(|_| GatewayError::Configuration)?;
+        Ok(GatewayConfig {
+            access_url: authority.base_url.clone(),
+            service_client_id: "gateway-test".to_owned(),
+            client: reqwest::Client::new(),
+            service_token_client,
+            context: telemetry::RequestContext::generate(),
+        })
+    }
+
+    fn test_gateway_session() -> Result<GatewaySession, GatewayError> {
+        let timestamp = now()?;
+        Ok(GatewaySession {
+            id: contracts::GatewaySessionId::new(),
+            access_grant_id: contracts::AccessGrantId::new(),
+            access_grant_revision: Revision::new(1).map_err(|_| GatewayError::Configuration)?,
+            endpoint_grant_id: contracts::EndpointGrantId::new(),
+            ssh_public_key_id: contracts::SshPublicKeyId::new(),
+            target_alias: "lw-abcdefghijklmnopqrst".to_owned(),
+            target_host: format!("ssh.lw-env-{}.svc", contracts::EnvironmentId::new()),
+            gateway_identity: "gateway-test".to_owned(),
+            connection_id: "connection-a".to_owned(),
+            revision: Revision::new(1).map_err(|_| GatewayError::Configuration)?,
+            state: GatewaySessionState::Active,
+            opened_at: timestamp,
+            last_heartbeat_at: timestamp,
+            termination_requested_at: None,
+            terminate_by: None,
+            closed_at: None,
+            close_reason_code: None,
+        })
+    }
 
     #[test]
     fn fixed_command_accepts_interactive_connection() -> Result<(), GatewayError> {
@@ -1184,6 +1531,122 @@ mod tests {
             }))
             .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_retries_transient_responses_then_succeeds() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            vec![
+                MockResponse::drop_connection(),
+                MockResponse::json(503, &serde_json::json!({})),
+                MockResponse::json(429, &serde_json::json!({})),
+                MockResponse::json(200, &serde_json::json!({})),
+            ],
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", true).await;
+        assert!(result.is_ok());
+
+        let requests = authority.close_requests().await;
+        assert_eq!(requests.len(), 4);
+        for request in &requests {
+            assert_eq!(request.if_match.as_deref(), Some("\"rev-1\""));
+            let body: Value =
+                serde_json::from_str(&request.body).map_err(|_| GatewayError::Authority)?;
+            assert_eq!(body["expectedRevision"], 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_rejects_permanent_response_without_retry() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            vec![MockResponse::json(
+                403,
+                &serde_json::json!({"error": "forbidden"}),
+            )],
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(matches!(result, Err(GatewayError::Authority)));
+        assert_eq!(authority.close_requests().await.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_reports_bounded_retry_exhaustion() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            (0..=CLOSE_RETRY_DELAYS.len())
+                .map(|_| MockResponse::json(503, &serde_json::json!({})))
+                .collect(),
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(matches!(result, Err(GatewayError::CloseRetriesExhausted)));
+        assert_eq!(
+            authority.close_requests().await.len(),
+            CLOSE_RETRY_DELAYS.len() + 1
+        );
+        assert!(CLOSE_RETRY_DEADLINE < Duration::from_mins(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_applies_authoritative_revision_before_retrying()
+    -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(
+            200,
+            vec![
+                MockResponse::json(
+                    412,
+                    &serde_json::json!({
+                        "diagnosticCode": "LW_REVISION_CONFLICT",
+                        "currentRevision": 2,
+                        "state": "termination_overdue",
+                    }),
+                ),
+                MockResponse::json(200, &serde_json::json!({})),
+            ],
+        )
+        .await
+        .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(result.is_ok());
+
+        let requests = authority.close_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].if_match.as_deref(), Some("\"rev-1\""));
+        assert_eq!(requests[1].if_match.as_deref(), Some("\"rev-2\""));
+        assert_eq!(session.revision.get(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_session_does_not_retry_bearer_auth_failure() -> Result<(), GatewayError> {
+        let authority =
+            MockAuthority::start(401, vec![MockResponse::json(200, &serde_json::json!({}))])
+                .await
+                .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        let mut session = test_gateway_session()?;
+        let result = close_session(&config, &mut session, "connection-a", false).await;
+        assert!(matches!(result, Err(GatewayError::Authority)));
+        assert!(authority.close_requests().await.is_empty());
         Ok(())
     }
 }

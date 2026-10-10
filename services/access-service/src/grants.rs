@@ -3062,9 +3062,9 @@ mod project_scope_tests {
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
-        reason = "the test covers owner-scoped revision recovery through termination and close"
+        reason = "the test covers owner-scoped revision recovery through termination, overdue, and close"
     )]
-    async fn gateway_session_revision_conflict_is_owner_scoped_through_close()
+    async fn gateway_session_revision_conflict_is_owner_scoped_through_overdue_close()
     -> Result<(), Box<dyn std::error::Error>> {
         let container = Postgres::default().with_tag("17.5-alpine").start().await?;
         let url = format!(
@@ -3196,10 +3196,11 @@ mod project_scope_tests {
         .await
         .map_err(|error| std::io::Error::other(format!("terminate: {error:?}")))?;
         termination_tx.commit().await?;
+
         let terminating_conflict =
             gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
                 .await
-                .map_err(|error| std::io::Error::other(format!("termination lookup: {error:?}")))?;
+                .map_err(|error| std::io::Error::other(format!("terminating lookup: {error:?}")))?;
         let terminating_body = terminating_conflict
             .body
             .as_ref()
@@ -3207,12 +3208,32 @@ mod project_scope_tests {
         assert_eq!(terminating_body["currentRevision"], 2);
         assert_eq!(terminating_body["state"], "terminating");
 
+        sqlx::query(
+            "UPDATE access.gateway_sessions SET terminate_by=now()-interval '1 second' \
+             WHERE session_id=$1",
+        )
+        .bind(session_id.as_uuid())
+        .execute(&pool)
+        .await?;
+        mark_overdue(&pool).await?;
+
+        let overdue_conflict =
+            gateway_session_revision_conflict(&pool, session_id, "gateway-a", "connection-a")
+                .await
+                .map_err(|error| std::io::Error::other(format!("overdue lookup: {error:?}")))?;
+        let overdue_body = overdue_conflict
+            .body
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("owner must receive overdue revision"))?;
+        assert_eq!(overdue_body["currentRevision"], 3);
+        assert_eq!(overdue_body["state"], "termination_overdue");
+
         let closed_at = utc_timestamp(OffsetDateTime::now_utc())
             .map_err(|error| std::io::Error::other(format!("closed timestamp: {error:?}")))?;
         let close_request = CloseGatewaySessionRequest {
             gateway_identity: "gateway-a".to_owned(),
             connection_id: "connection-a".to_owned(),
-            expected_revision: Revision::new(2)?,
+            expected_revision: Revision::new(3)?,
             closed_at,
             reason_code: "target_failed".to_owned(),
         };
@@ -3248,7 +3269,7 @@ mod project_scope_tests {
             .body
             .as_ref()
             .ok_or_else(|| std::io::Error::other("owner must receive closed revision"))?;
-        assert_eq!(closed_body["currentRevision"], 3);
+        assert_eq!(closed_body["currentRevision"], 4);
         assert_eq!(closed_body["state"], "closed");
         Ok(())
     }
