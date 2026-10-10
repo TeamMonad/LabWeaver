@@ -106,7 +106,6 @@ GPU 00000000:01:00.0
     const result = await readRealWorkVmLicenseStatus({}, {}, {
       deadlineMs: 100,
       retryDelayMs: 1,
-      sleep: async () => {},
       runSsh: async (...args) => {
         calls.push(args)
         return calls.length === 1 ? unlicensed : licensed
@@ -126,7 +125,6 @@ GPU 00000000:01:00.0
       deadlineMs: 50,
       retryDelayMs: 10,
       now: () => clock,
-      sleep: async (delay) => { clock += delay },
       runSsh: async (...args) => {
         calls.push(args)
         clock += 3

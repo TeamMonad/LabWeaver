@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { expect } from '@playwright/test'
 import { CUDA_DRIVER_PROBE, parseCudaProbeResult } from './real-gpu.mjs'
 export { CUDA_PROBE_PTX_TARGET as VM_CUDA_PROBE_PTX_TARGET } from './real-gpu.mjs'
 
@@ -527,10 +528,6 @@ function licenseFailureStatus(error) {
     : 'unknown'
 }
 
-function sleepForLicenseRetry(delayMs) {
-  return new Promise((resolve) => setTimeout(resolve, delayMs))
-}
-
 /** Confirm the guest reports an active vGPU license, independently of device visibility. */
 export async function readRealWorkVmLicenseStatus(
   endpointGrant,
@@ -538,7 +535,6 @@ export async function readRealWorkVmLicenseStatus(
   {
     runSsh = runPinnedSsh,
     now = () => performance.now(),
-    sleep = sleepForLicenseRetry,
     deadlineMs = REAL_WORK_VM_LICENSE_DEADLINE_MS,
     retryDelayMs = REAL_WORK_VM_LICENSE_RETRY_DELAY_MS,
   } = {},
@@ -548,22 +544,39 @@ export async function readRealWorkVmLicenseStatus(
 
   const deadlineAt = now() + deadlineMs
   let lastFailure = null
-  while (now() < deadlineAt) {
-    const timeoutMs = Math.max(1, Math.ceil(deadlineAt - now()))
-    try {
-      const output = await runSsh(endpointGrant, identity, 'nvidia-smi -q', undefined, { timeoutMs })
-      return parseRealWorkVmLicenseStatus(output)
-    } catch (error) {
-      if (!isLicenseNotGranted(error)) throw error
-      lastFailure = error
-      const remaining = Math.max(0, deadlineAt - now())
-      if (remaining <= 0) break
-      await sleep(Math.min(retryDelayMs, remaining))
-    }
+  let terminalError = null
+  let licensedResult = null
+  try {
+    await expect.poll(
+      async () => {
+        const remaining = Math.max(1, Math.ceil(deadlineAt - now()))
+        try {
+          const output = await runSsh(endpointGrant, identity, 'nvidia-smi -q', undefined, { timeoutMs: remaining })
+          licensedResult = parseRealWorkVmLicenseStatus(output)
+          return 'licensed'
+        } catch (error) {
+          if (!isLicenseNotGranted(error)) {
+            terminalError = error
+            return 'terminal'
+          }
+          lastFailure = error
+          return 'unlicensed'
+        }
+      },
+      {
+        timeout: deadlineMs,
+        intervals: [retryDelayMs, Math.max(retryDelayMs, retryDelayMs * 2), Math.max(retryDelayMs, retryDelayMs * 4)],
+      },
+    ).toMatch(/^(licensed|terminal)$/)
+  } catch (error) {
+    if (terminalError) throw terminalError
+    if (lastFailure) throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${licenseFailureStatus(lastFailure)}`)
+    throw error
   }
 
-  const status = licenseFailureStatus(lastFailure)
-  throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${status}`)
+  if (terminalError) throw terminalError
+  if (!licensedResult) throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${licenseFailureStatus(lastFailure)}`)
+  return licensedResult
 }
 
 /** Read a workspace file relative to the authorized SSH account's home. */
