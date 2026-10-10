@@ -34,6 +34,8 @@ const SAFE_CONFIG_PROBE_GUEST_FAILURES = new Set([
   'CONFIG_PROBE_SSH_INACTIVE',
 ])
 const SAFE_GUEST_MODULES = new Set(['apt'])
+export const REAL_WORK_VM_LICENSE_DEADLINE_MS = 180_000
+const REAL_WORK_VM_LICENSE_RETRY_DELAY_MS = 5_000
 
 function opensshFingerprint(keyType, encodedKey) {
   if (!/^[A-Za-z0-9@._+-]+$/.test(keyType) || !/^[A-Za-z0-9+/]+={0,2}$/.test(encodedKey)) {
@@ -145,13 +147,19 @@ function validateSshEndpoint(endpointGrant) {
   return { hostname, port, alias, fingerprint }
 }
 
-async function preparePinnedSsh(endpointGrant, identity) {
+async function preparePinnedSsh(endpointGrant, identity, { deadlineAt = null } = {}) {
   const endpoint = validateSshEndpoint(endpointGrant)
+  const scanTimeoutMs = deadlineAt === null
+    ? 20_000
+    : Math.max(1, Math.min(20_000, Math.ceil(deadlineAt - performance.now())))
   const scan = await runProcess('ssh-keyscan', [
     '-p', String(endpoint.port), '-T', '15', endpoint.hostname,
-  ], { timeoutMs: 20_000, outputCode: 'WORK_SSH_GATEWAY_SCAN' })
+  ], { timeoutMs: scanTimeoutMs, outputCode: 'WORK_SSH_GATEWAY_SCAN' })
   if (scan.timedOut) throw new Error('WORK_SSH_GATEWAY_SCAN_TIMEOUT')
   if (scan.outputExceeded) throw new Error('WORK_SSH_GATEWAY_SCAN_OUTPUT_LIMIT')
+  if (deadlineAt !== null && performance.now() >= deadlineAt) {
+    throw new Error('WORK_SSH_COMMAND_TIMEOUT')
+  }
   const knownHost = `[${endpoint.hostname}]:${endpoint.port}`
   const matchingKeys = scan.stdout
     .split(/\r?\n/)
@@ -279,12 +287,15 @@ export function classifyPinnedSshGuestFailure(stderr = '') {
   return null
 }
 
-export async function runPinnedSsh(endpointGrant, identity, command, input = undefined) {
-  const endpoint = await preparePinnedSsh(endpointGrant, identity)
+export async function runPinnedSsh(endpointGrant, identity, command, input = undefined, { timeoutMs = 120_000 } = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error('WORK_SSH_COMMAND_TIMEOUT_INVALID')
+  const deadlineAt = performance.now() + timeoutMs
+  const endpoint = await preparePinnedSsh(endpointGrant, identity, { deadlineAt })
   const commandStage = classifyPinnedSshCommandStage(command, input)
+  const commandTimeoutMs = Math.max(1, Math.ceil(deadlineAt - performance.now()))
   const result = await runProcess('ssh', pinnedSshArgs(endpoint, identity, command), {
     input,
-    timeoutMs: 120_000,
+    timeoutMs: commandTimeoutMs,
     outputCode: 'WORK_SSH_COMMAND',
   })
   if (result.timedOut) throw new Error(`WORK_SSH_COMMAND_TIMEOUT_${commandStage}`)
@@ -488,7 +499,8 @@ export function parseRealWorkVmLicenseStatus(output) {
     if (!statusMatch) throw new Error('WORK_VM_VGPU_LICENSE_STATUS_MISSING')
     const licenseStatus = statusMatch[1].trim()
     if (licenseStatus.toLowerCase() !== 'licensed') {
-      throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${licenseStatus.toLowerCase()}`)
+      const safeStatus = licenseStatus.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64)
+      throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${safeStatus || 'unknown'}`)
     }
     return { licenseStatus, expiry: statusMatch[2]?.trim() || null }
   })
@@ -505,10 +517,53 @@ export function parseRealWorkVmLicenseStatus(output) {
   }
 }
 
+function isLicenseNotGranted(error) {
+  return error instanceof Error && /^WORK_VM_VGPU_LICENSE_NOT_GRANTED:[a-z0-9_-]+$/.test(error.message)
+}
+
+function licenseFailureStatus(error) {
+  return error instanceof Error
+    ? error.message.match(/^WORK_VM_VGPU_LICENSE_NOT_GRANTED:([a-z0-9_-]+)$/)?.[1] ?? 'unknown'
+    : 'unknown'
+}
+
+function sleepForLicenseRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
 /** Confirm the guest reports an active vGPU license, independently of device visibility. */
-export async function readRealWorkVmLicenseStatus(endpointGrant, identity) {
-  const output = await runPinnedSsh(endpointGrant, identity, 'nvidia-smi -q')
-  return parseRealWorkVmLicenseStatus(output)
+export async function readRealWorkVmLicenseStatus(
+  endpointGrant,
+  identity,
+  {
+    runSsh = runPinnedSsh,
+    now = () => performance.now(),
+    sleep = sleepForLicenseRetry,
+    deadlineMs = REAL_WORK_VM_LICENSE_DEADLINE_MS,
+    retryDelayMs = REAL_WORK_VM_LICENSE_RETRY_DELAY_MS,
+  } = {},
+) {
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1) throw new Error('WORK_VM_VGPU_LICENSE_DEADLINE_INVALID')
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 1) throw new Error('WORK_VM_VGPU_LICENSE_RETRY_DELAY_INVALID')
+
+  const deadlineAt = now() + deadlineMs
+  let lastFailure = null
+  while (now() < deadlineAt) {
+    const timeoutMs = Math.max(1, Math.ceil(deadlineAt - now()))
+    try {
+      const output = await runSsh(endpointGrant, identity, 'nvidia-smi -q', undefined, { timeoutMs })
+      return parseRealWorkVmLicenseStatus(output)
+    } catch (error) {
+      if (!isLicenseNotGranted(error)) throw error
+      lastFailure = error
+      const remaining = Math.max(0, deadlineAt - now())
+      if (remaining <= 0) break
+      await sleep(Math.min(retryDelayMs, remaining))
+    }
+  }
+
+  const status = licenseFailureStatus(lastFailure)
+  throw new Error(`WORK_VM_VGPU_LICENSE_NOT_GRANTED:${status}`)
 }
 
 /** Read a workspace file relative to the authorized SSH account's home. */

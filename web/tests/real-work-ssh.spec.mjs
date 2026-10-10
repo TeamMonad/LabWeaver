@@ -18,6 +18,7 @@ import {
   parseRealWorkVmLicenseStatus,
   pinnedSshArgs,
   realWorkVmWorkspaceRelativePath,
+  readRealWorkVmLicenseStatus,
   runProcess,
   VM_CUDA_PROBE_PTX_TARGET,
 } from '../e2e/support/real-work-ssh.mjs'
@@ -96,6 +97,66 @@ GPU 00000000:01:00.0
         License Status : Unlicensed
 `
     expect(() => parseRealWorkVmLicenseStatus(output)).toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
+  })
+
+  it('retries an explicit unlicensed result until the same guest becomes licensed', async () => {
+    const unlicensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        License Status : Unlicensed\n'
+    const licensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        Product Name : NVIDIA RTX vWS\n        License Status : Licensed (Expiry: Never)\n'
+    const calls = []
+    const result = await readRealWorkVmLicenseStatus({}, {}, {
+      deadlineMs: 100,
+      retryDelayMs: 1,
+      sleep: async () => {},
+      runSsh: async (...args) => {
+        calls.push(args)
+        return calls.length === 1 ? unlicensed : licensed
+      },
+    })
+    expect(result).toMatchObject({ licenseStatus: 'Licensed', driverVersion: '580.159.03' })
+    expect(calls).toHaveLength(2)
+    expect(calls.every(([, , command]) => command === 'nvidia-smi -q')).toBe(true)
+    expect(calls.every(([, , , , options]) => options.timeoutMs <= 100)).toBe(true)
+  })
+
+  it('keeps the last license status when the bounded wait expires', async () => {
+    let clock = 0
+    const calls = []
+    const unlicensed = 'Driver Version : 580.159.03\nGPU 00000000:00:00.0\n    vGPU Software Licensed Product\n        License Status : Unlicensed\n'
+    await expect(readRealWorkVmLicenseStatus({}, {}, {
+      deadlineMs: 50,
+      retryDelayMs: 10,
+      now: () => clock,
+      sleep: async (delay) => { clock += delay },
+      runSsh: async (...args) => {
+        calls.push(args)
+        clock += 3
+        return unlicensed
+      },
+    })).rejects.toThrow('WORK_VM_VGPU_LICENSE_NOT_GRANTED:unlicensed')
+    expect(calls.every(([, , command]) => command === 'nvidia-smi -q')).toBe(true)
+    expect(calls.every(([, , , , options]) => options.timeoutMs <= 50)).toBe(true)
+  })
+
+  it('does not retry malformed license output or an SSH failure', async () => {
+    const calls = []
+    await expect(readRealWorkVmLicenseStatus({}, {}, {
+      deadlineMs: 100,
+      runSsh: async (...args) => {
+        calls.push(args)
+        return 'Driver Version : 580.159.03\n'
+      },
+    })).rejects.toThrow('WORK_VM_VGPU_LICENSE_STATUS_MISSING')
+    expect(calls).toHaveLength(1)
+
+    calls.length = 0
+    await expect(readRealWorkVmLicenseStatus({}, {}, {
+      deadlineMs: 100,
+      runSsh: async (...args) => {
+        calls.push(args)
+        throw new Error('WORK_SSH_COMMAND_TIMEOUT_GPU_LICENSE')
+      },
+    })).rejects.toThrow('WORK_SSH_COMMAND_TIMEOUT_GPU_LICENSE')
+    expect(calls).toHaveLength(1)
   })
 
   it('resolves VM workspace files beneath the authorized SSH account home', () => {
