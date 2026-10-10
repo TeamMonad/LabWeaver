@@ -270,8 +270,13 @@ try:
     while re.search(rb'(?:^|\n)TEST_DONE:\d+\r?\n',captured) is None and time.monotonic()<deadline:
         drain(.1)
     text=captured.replace(b'\r',b'').decode('utf8',errors='replace')
-    digest=re.search(r'(?:^|\n)PAYLOAD_SHA256=([a-f0-9]{64})\n',text)
-    size=re.search(r'(?:^|\n)PAYLOAD_BYTES=(\d+)\n',text)
+    # A canonical PTY may echo the here-document terminator with only a
+    # carriage return. After normalization that leaves the first diagnostic
+    # token adjacent to the echo, while subsequent lines still start cleanly.
+    # Match the unique diagnostic tokens themselves, while retaining the
+    # complete hash and byte-count assertions below.
+    digest=re.search(r'PAYLOAD_SHA256=([a-f0-9]{64})(?:\n|$)',text)
+    size=re.search(r'PAYLOAD_BYTES=(\d+)(?:\n|$)',text)
     exit_code=re.findall(r'(?:^|\n)TEST_DONE:(\d+)\n',text)
     print(json.dumps({'canonical':canonical,'sha256':digest.group(1) if digest else None,'bytes':int(size.group(1)) if size else None,'exit':exit_code,'shellAlive':bool(re.search(r'(?:^|\n)SHELL_ALIVE\n',text))}))
 finally:
