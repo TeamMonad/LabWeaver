@@ -94,6 +94,44 @@ enum HeartbeatUpdate {
     Stop(Revision),
 }
 
+#[cfg(unix)]
+struct GatewaySignals {
+    hangup: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(not(unix))]
+struct GatewaySignals;
+
+#[cfg(unix)]
+impl GatewaySignals {
+    fn new() -> Result<Self, GatewayError> {
+        let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .map_err(|_| GatewayError::Configuration)?;
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|_| GatewayError::Configuration)?;
+        Ok(Self { hangup, terminate })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.hangup.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl GatewaySignals {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn recv(&mut self) {
+        std::future::pending::<()>().await;
+    }
+}
+
 impl GatewayConfig {
     async fn load(context: telemetry::RequestContext) -> Result<Self, GatewayError> {
         let access_url = required_env("LABWEAVER_ACCESS_URL")?;
@@ -287,11 +325,16 @@ async fn run(context: &telemetry::RequestContext) -> Result<(), GatewayError> {
             if args.next().is_some() {
                 return Err(GatewayError::InvalidInput);
             }
+            #[cfg(unix)]
+            let mut signals = GatewaySignals::new()?;
+            #[cfg(not(unix))]
+            let mut signals = GatewaySignals::new();
             force_command(
                 &GatewayConfig::load(context.clone()).await?,
                 &authorization_id,
                 &token,
                 &connection_id,
+                &mut signals,
             )
             .await
         }
@@ -389,6 +432,7 @@ async fn force_command(
     authorization_id: &str,
     token: &str,
     connection_id: &str,
+    signals: &mut GatewaySignals,
 ) -> Result<(), GatewayError> {
     validate_connection_id(connection_id)?;
     let original_command = required_env("SSH_ORIGINAL_COMMAND")?;
@@ -446,7 +490,7 @@ async fn force_command(
         return Err(GatewayError::Target);
     };
     let (result, target_stopped) =
-        run_target(config, &mut session, connection_id, &mut child).await;
+        run_target(config, &mut session, connection_id, &mut child, signals).await;
     if !target_stopped {
         return Err(match result {
             Ok(()) => GatewayError::Target,
@@ -462,6 +506,7 @@ async fn run_target(
     session: &mut GatewaySession,
     connection_id: &str,
     child: &mut tokio::process::Child,
+    signals: &mut GatewaySignals,
 ) -> (Result<(), GatewayError>, bool) {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let target_stopped;
@@ -501,6 +546,14 @@ async fn run_target(
                         };
                     }
                 }
+            }
+            () = signals.recv() => {
+                let stop_result = stop_target(child).await;
+                target_stopped = stop_result.is_ok();
+                break match stop_result {
+                    Ok(()) => Err(GatewayError::Target),
+                    Err(error) => Err(error),
+                };
             }
         }
     };
