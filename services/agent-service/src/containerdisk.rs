@@ -7,13 +7,18 @@
 //! digest is computed from the bytes built here, so the published manifest identity can only
 //! describe content the importer actually received.
 
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{Cursor, Read, Write};
+use std::path::Path;
 
 use contracts::http::PLATFORM_IMAGE_DISK_PATH_MAX_BYTES;
 use persistence_sqlx::Sha256Digest;
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 
 use crate::oci_import::{OciBlob, OciImage, OciImportError};
+use crate::oci_registry::{OciFileBlob, OciFileImage};
 
 /// Media type of the containerdisk manifest.
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -92,6 +97,99 @@ pub fn wrap_containerdisk(disk: &[u8], disk_path: &str) -> Result<OciImage, OciI
     })
 }
 
+/// Wraps one file-backed virtual-machine disk without retaining its bytes in memory.
+///
+/// The caller runs this synchronous tar operation on a blocking worker.  The returned temporary
+/// files own cleanup until the registry has confirmed the manifest and tag.
+pub fn wrap_containerdisk_file(
+    disk_file: &Path,
+    disk_path: &str,
+) -> Result<OciFileImage, OciImportError> {
+    if !valid_disk_path(disk_path) {
+        return Err(OciImportError::Invalid);
+    }
+    let disk_size = File::open(disk_file)
+        .and_then(|file| file.metadata())
+        .map_err(|_| OciImportError::Invalid)?
+        .len();
+    if disk_size == 0 {
+        return Err(OciImportError::Invalid);
+    }
+    let entry_name = format!(
+        "{DISK_DIRECTORY}/{}",
+        disk_path.rsplit('/').next().unwrap_or_default()
+    );
+    let layer = NamedTempFile::new().map_err(|_| OciImportError::Invalid)?;
+    {
+        let output = layer.reopen().map_err(|_| OciImportError::Invalid)?;
+        let mut builder = tar::Builder::new(output);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(disk_size);
+        header.set_mode(0o444);
+        header.set_mtime(0);
+        header.set_cksum();
+        let mut input = File::open(disk_file).map_err(|_| OciImportError::Invalid)?;
+        builder
+            .append_data(&mut header, entry_name, &mut input)
+            .map_err(|_| OciImportError::Invalid)?;
+        builder
+            .into_inner()
+            .map_err(|_| OciImportError::Invalid)?
+            .sync_all()
+            .map_err(|_| OciImportError::Invalid)?;
+    }
+    let (layer_size, layer_digest) = hash_file(layer.path())?;
+    let config = serde_json::to_vec(&json!({
+        "architecture": "amd64",
+        "os": "linux",
+        "rootfs": {"type": "layers", "diff_ids": [layer_digest.clone()]},
+    }))
+    .map_err(|_| OciImportError::Invalid)?;
+    let config_digest = digest_reference(&config);
+    let config_file = NamedTempFile::new().map_err(|_| OciImportError::Invalid)?;
+    config_file
+        .as_file()
+        .write_all(&config)
+        .and_then(|()| config_file.as_file().sync_all())
+        .map_err(|_| OciImportError::Invalid)?;
+    let manifest = serde_json::to_vec(&json!({
+        "schemaVersion": 2,
+        "mediaType": MANIFEST_MEDIA_TYPE,
+        "config": {
+            "mediaType": CONFIG_MEDIA_TYPE,
+            "digest": config_digest,
+            "size": config.len(),
+        },
+        "layers": [{
+            "mediaType": LAYER_MEDIA_TYPE,
+            "digest": layer_digest,
+            "size": layer_size,
+        }],
+    }))
+    .map_err(|_| OciImportError::Invalid)?;
+    let manifest_digest = digest_reference(&manifest);
+    Ok(OciFileImage {
+        manifest_digest,
+        manifest_media_type: MANIFEST_MEDIA_TYPE.to_owned(),
+        manifest_bytes: manifest,
+        blobs: vec![
+            OciFileBlob {
+                digest: config_digest,
+                media_type: CONFIG_MEDIA_TYPE.to_owned(),
+                size_bytes: u64::try_from(config.len()).map_err(|_| OciImportError::TooLarge)?,
+                path: config_file.into_temp_path(),
+            },
+            OciFileBlob {
+                digest: layer_digest,
+                media_type: LAYER_MEDIA_TYPE.to_owned(),
+                size_bytes: layer_size,
+                path: layer.into_temp_path(),
+            },
+        ],
+    })
+}
+
 /// Builds the single-entry uncompressed tar layer.
 fn tar_layer(entry_name: &str, disk: &[u8]) -> Result<Vec<u8>, OciImportError> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -122,6 +220,26 @@ fn valid_disk_path(value: &str) -> bool {
 
 fn digest_reference(bytes: &[u8]) -> String {
     format!("sha256:{}", Sha256Digest::of_bytes(bytes))
+}
+
+fn hash_file(path: &Path) -> Result<(u64, String), OciImportError> {
+    let mut file = File::open(path).map_err(|_| OciImportError::Invalid)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| OciImportError::Invalid)?;
+        if read == 0 {
+            break;
+        }
+        size = size
+            .checked_add(u64::try_from(read).map_err(|_| OciImportError::TooLarge)?)
+            .ok_or(OciImportError::TooLarge)?;
+        hasher.update(&buffer[..read]);
+    }
+    Ok((size, format!("sha256:{:x}", hasher.finalize())))
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ function makeEndpointGrant(overrides: Partial<EndpointGrant> = {}): EndpointGran
     protocol: 'ssh',
     expiresAt: '2026-07-16T09:00:00.000Z',
     health: 'healthy',
-    alias: 'lw-0123456789abcdef0123',
+    alias: 'lw-abcdefghijklmnopqrst',
     sshGatewayHostname: 'gateway.labweaver.local',
     sshGatewayPort: 2222,
     sshGatewayHostKeyFingerprint: `SHA256:${'A'.repeat(43)}`,
@@ -23,7 +23,7 @@ function makeEndpointGrant(overrides: Partial<EndpointGrant> = {}): EndpointGran
 describe('buildSshCommand', () => {
   it('builds the single-line command', () => {
     const command = buildSshCommand(makeEndpointGrant())
-    expect(command).toBe('ssh -p 2222 lw-0123456789abcdef0123@gateway.labweaver.local')
+    expect(command).toBe('ssh -t -p 2222 gateway@gateway.labweaver.local connect lw-abcdefghijklmnopqrst')
   })
 
   it('returns null when alias is missing', () => {

@@ -8,11 +8,16 @@
       ],
       "type": "string"
     },
-    "PlatformImageUploadTarget": {
-      "description": "Short-lived per-object upload authority for one OCI archive.",
+    "PlatformImageUploadPartTarget": {
+      "description": "One short-lived presigned multipart part authority for one OCI archive.",
       "properties": {
         "expiresAt": {
           "$ref": "#/$defs/UtcTimestamp"
+        },
+        "partNumber": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
         "requiredHeaders": {
           "additionalProperties": {
@@ -25,9 +30,60 @@
         }
       },
       "required": [
+        "partNumber",
         "uploadUrl",
         "requiredHeaders",
         "expiresAt"
+      ],
+      "type": "object"
+    },
+    "PlatformImageUploadTarget": {
+      "description": "Short-lived multipart upload authority for one OCI archive.",
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "partSizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/PlatformImageUploadPartTarget"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "partSizeBytes",
+        "parts",
+        "expiresAt"
+      ],
+      "type": "object"
+    },
+    "PlatformImageUploadedPart": {
+      "additionalProperties": false,
+      "description": "Actual part observed by the object store during upload status refresh.",
+      "properties": {
+        "etag": {
+          "type": "string"
+        },
+        "partNumber": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "partNumber",
+        "etag",
+        "sizeBytes"
       ],
       "type": "object"
     },
@@ -109,6 +165,12 @@
     },
     "uploadTarget": {
       "$ref": "#/$defs/PlatformImageUploadTarget"
+    },
+    "uploadedParts": {
+      "items": {
+        "$ref": "#/$defs/PlatformImageUploadedPart"
+      },
+      "type": "array"
     }
   },
   "required": [
@@ -119,6 +181,7 @@
     "archiveBytes",
     "archiveMediaType",
     "uploadTarget",
+    "uploadedParts",
     "expiresAt",
     "revision"
   ],

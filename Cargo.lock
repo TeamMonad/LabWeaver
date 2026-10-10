@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "auth",
  "contracts",
+ "nix",
  "reqwest",
  "serde",
  "serde_json",
@@ -37,6 +38,7 @@ dependencies = [
  "metrics",
  "persistence-sqlx",
  "rand 0.9.5",
+ "rcgen",
  "reqwest",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
@@ -130,7 +132,9 @@ dependencies = [
  "flate2",
  "futures",
  "futures-util",
+ "http-auth",
  "hyper-util",
+ "jsonschema",
  "jsonwebtoken",
  "persistence-sqlx",
  "rand 0.9.5",
@@ -144,6 +148,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "sqlx",
  "tar",
  "task-execution",
@@ -310,6 +315,7 @@ dependencies = [
  "rustls-pemfile 2.2.0",
  "serde",
  "sha2 0.10.9",
+ "tempfile",
  "testcontainers",
  "thiserror 2.0.18",
  "time",
@@ -2902,6 +2908,15 @@ checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
+]
+
+[[package]]
+name = "http-auth"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "150fa4a9462ef926824cf4519c84ed652ca8f4fbae34cb8af045b5cbcaf98822"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

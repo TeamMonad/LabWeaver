@@ -1,0 +1,178 @@
+---
+- name: Validate the explicit GPU device-plugin configuration
+  ansible.builtin.assert:
+    that:
+      - gpu_device_plugin_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - gpu_device_plugin_node_label is match('^[a-z0-9]([-a-z0-9./]*[a-z0-9])?$')
+      - gpu_device_plugin_exclusive_nodes is sequence
+      - gpu_device_plugin_exclusive_nodes is not string
+      - gpu_device_plugin_shared_nodes is sequence
+      - gpu_device_plugin_shared_nodes is not string
+      - gpu_device_plugin_shared_replicas | int >= 2
+      - gpu_device_plugin_exclusive_resource_name == 'nvidia.com/gpu'
+      - gpu_device_plugin_shared_resource_name == 'nvidia.com/gpu.shared'
+      - gpu_device_plugin_device_discovery_strategy in ['nvml', 'auto']
+      - gpu_device_plugin_device_list_strategy in ['envvar', 'volume-mounts', 'cdi-annotations']
+      - gpu_device_plugin_cdi_path is match('^/')
+      - gpu_device_plugin_driver_root is match('^/')
+      - gpu_device_plugin_termination_message_path is match('^/')
+      - >-
+        (gpu_device_plugin_exclusive_nodes | intersect(gpu_device_plugin_shared_nodes) | length) == 0
+  when: gpu_device_plugin_enabled | bool
+
+- name: Require at least one selected GPU node when the plugin is enabled
+  ansible.builtin.assert:
+    that:
+      - (gpu_device_plugin_exclusive_nodes | length) + (gpu_device_plugin_shared_nodes | length) > 0
+    fail_msg: GPU_DEVICE_PLUGIN_NODES_REQUIRED
+  when: gpu_device_plugin_enabled | bool
+
+- name: Remove the legacy single-mode NVIDIA device-plugin DaemonSet
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: absent
+    api_version: apps/v1
+    kind: DaemonSet
+    namespace: "{{ gpu_device_plugin_namespace }}"
+    name: nvidia-gpu-device-plugin
+  when:
+    - gpu_device_plugin_enabled | bool
+    - gpu_device_plugin_remove_legacy_daemonset | bool
+
+- name: Compute the selected GPU node set owned by this role
+  ansible.builtin.set_fact:
+    gpu_device_plugin_selected_nodes: >-
+      {{ (gpu_device_plugin_exclusive_nodes + gpu_device_plugin_shared_nodes) | unique | list }}
+  when: gpu_device_plugin_enabled | bool
+
+- name: Read nodes previously labelled by this GPU device-plugin role
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - labweaver.io/gpu-plugin-managed=true
+  register: gpu_device_plugin_managed_nodes
+  when: gpu_device_plugin_enabled | bool
+
+- name: Remove stale GPU mode labels owned by this role
+  kubernetes.core.k8s_json_patch:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    api_version: v1
+    kind: Node
+    name: "{{ item.metadata.name }}"
+    patch:
+      - op: remove
+        path: "/metadata/labels/{{ gpu_device_plugin_node_label | replace('~', '~0') | replace('/', '~1') }}"
+      - op: remove
+        path: /metadata/labels/labweaver.io~1gpu-plugin-managed
+  loop: "{{ gpu_device_plugin_managed_nodes.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when:
+    - gpu_device_plugin_enabled | bool
+    - item.metadata.name not in gpu_device_plugin_selected_nodes
+    - item.metadata.labels[gpu_device_plugin_node_label] is defined
+
+- name: Label nodes selected for exclusive GPU allocation
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Node
+      metadata:
+        name: "{{ item }}"
+        labels: "{{ {gpu_device_plugin_node_label: 'exclusive', 'labweaver.io/gpu-plugin-managed': 'true'} }}"
+  loop: "{{ gpu_device_plugin_exclusive_nodes }}"
+  when: gpu_device_plugin_enabled | bool
+
+- name: Label nodes selected for shared GPU allocation
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Node
+      metadata:
+        name: "{{ item }}"
+        labels: "{{ {gpu_device_plugin_node_label: 'shared', 'labweaver.io/gpu-plugin-managed': 'true'} }}"
+  loop: "{{ gpu_device_plugin_shared_nodes }}"
+  when: gpu_device_plugin_enabled | bool
+
+- name: Reconcile exclusive NVIDIA device-plugin configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: nvidia-gpu-device-plugin-exclusive-config
+        namespace: "{{ gpu_device_plugin_namespace }}"
+        labels:
+          app.kubernetes.io/name: nvidia-gpu-device-plugin
+          labweaver.io/gpu-mode: exclusive
+      data:
+        config.yaml: |-
+          version: v1
+  when:
+    - gpu_device_plugin_enabled | bool
+    - gpu_device_plugin_exclusive_nodes | length > 0
+
+- name: Reconcile shared NVIDIA device-plugin configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: nvidia-gpu-device-plugin-shared-config
+        namespace: "{{ gpu_device_plugin_namespace }}"
+        labels:
+          app.kubernetes.io/name: nvidia-gpu-device-plugin
+          labweaver.io/gpu-mode: shared
+      data:
+        config.yaml: |-
+          version: v1
+          sharing:
+            timeSlicing:
+              renameByDefault: true
+              failRequestsGreaterThanOne: true
+              resources:
+                - name: {{ gpu_device_plugin_exclusive_resource_name }}
+                  replicas: {{ gpu_device_plugin_shared_replicas }}
+  when:
+    - gpu_device_plugin_enabled | bool
+    - gpu_device_plugin_shared_nodes | length > 0
+
+- name: Reconcile exclusive NVIDIA device-plugin DaemonSet
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ lookup('template', 'device-plugin-daemonset.yml.j2') | from_yaml }}"
+  vars:
+    gpu_device_plugin_mode: exclusive
+    gpu_device_plugin_config_name: nvidia-gpu-device-plugin-exclusive-config
+  when:
+    - gpu_device_plugin_enabled | bool
+    - gpu_device_plugin_exclusive_nodes | length > 0
+
+- name: Reconcile shared NVIDIA device-plugin DaemonSet
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    state: present
+    apply: true
+    definition: "{{ lookup('template', 'device-plugin-daemonset.yml.j2') | from_yaml }}"
+  vars:
+    gpu_device_plugin_mode: shared
+    gpu_device_plugin_config_name: nvidia-gpu-device-plugin-shared-config
+  when:
+    - gpu_device_plugin_enabled | bool
+    - gpu_device_plugin_shared_nodes | length > 0

@@ -1,5 +1,24 @@
 ---
+- name: Load the reviewed Cilium chart and image lock
+  tags: [cilium]
+  ansible.builtin.set_fact:
+    cluster_network_cilium_lock: >-
+      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../versions.lock.yml') | from_yaml).cilium }}
+
+- name: Require the locked Cilium image to match the chart release
+  tags: [cilium]
+  ansible.builtin.assert:
+    that:
+      - cluster_network_cilium_lock.chart is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+      - >-
+        cluster_network_cilium_lock.image is match(
+          '^quay[.]io/cilium/cilium:v'
+          ~ (cluster_network_cilium_lock.chart | regex_escape)
+          ~ '@sha256:[0-9a-f]{64}$')
+    fail_msg: CILIUM_RELEASE_LOCK_INVALID
+
 - name: Assert Helm is available on the control plane
+  tags: [cilium]
   ansible.builtin.command: helm version --short
   changed_when: false
 
@@ -12,6 +31,7 @@
                    ~ gateway_api_version ~ '/experimental-install.yaml') }}
 
 - name: Add pinned Helm repositories
+  tags: [cilium]
   kubernetes.core.helm_repository:
     name: "{{ item.name }}"
     repo_url: "{{ item.url }}"
@@ -21,16 +41,24 @@
   environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Install Cilium with kube-proxy replacement and Gateway API
+  tags: [cilium]
   kubernetes.core.helm:
     name: cilium
     chart_ref: cilium/cilium
-    chart_version: "{{ cilium_chart_version }}"
+    chart_version: "{{ cluster_network_cilium_lock.chart }}"
+    update_repo_cache: true
     release_namespace: kube-system
     create_namespace: false
     values:
+      image:
+        override: "{{ cluster_network_cilium_lock.image }}"
       kubeProxyReplacement: true
       k8sServiceHost: "{{ kubernetes_api_advertise_address }}"
       k8sServicePort: 6443
+      # KubeVirt and similar Pods need Service translation at tc, as documented
+      # by Cilium, rather than socket rewriting inside their Pod namespaces.
+      socketLB:
+        hostNamespaceOnly: true
       # Keep the datapath in eBPF instead of iptables-nft. firewalld flushes
       # the nftables ruleset when it starts, which removes Cilium's legacy
       # iptables chains and breaks pod/gateway traffic until the agent is

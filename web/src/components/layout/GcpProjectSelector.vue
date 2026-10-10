@@ -12,7 +12,6 @@
       <SvgIcon name="folder_open" size="sm" class="trigger-icon" aria-hidden="true" />
       <span class="trigger-label">
         <span class="trigger-primary">{{ activeProject?.name ?? '选择项目' }}</span>
-        <span v-if="activeProject" class="trigger-secondary">{{ activeProject.id }}</span>
       </span>
       <SvgIcon name="expand_more" size="sm" class="trigger-arrow" aria-hidden="true" />
     </button>
@@ -24,14 +23,14 @@
       </div>
       <div class="menu-search">
         <SvgIcon name="search" size="sm" class="search-icon" aria-hidden="true" />
-        <input ref="searchInputRef" v-model="searchQuery" type="search" class="search-input" placeholder="搜索项目名称或 ID…" aria-label="搜索项目" />
+        <input ref="searchInputRef" v-model="searchQuery" type="search" class="search-input" placeholder="搜索项目名称…" aria-label="搜索项目" />
       </div>
       <AsyncStateView :state="projects.projects" empty-text="没有可访问的项目。请先创建项目或联系项目 Owner。" @retry="projects.load">
         <template #success="{ data }">
           <div class="menu-body" role="listbox" aria-label="项目列表">
             <button v-for="project in filteredProjects(data)" :key="project.id" type="button" class="project-item" :class="{ 'project-item--selected': project.id === projects.selectedProjectId }" role="option" :aria-selected="project.id === projects.selectedProjectId" @click="selectProject(project.id)">
-              <span class="project-info"><strong>{{ project.name }}</strong><small>{{ project.id }}</small></span>
-              <span class="project-state">{{ project.state === 'active' ? '运行中' : '已归档' }}</span>
+              <span class="project-info"><strong>{{ project.name }}</strong></span>
+              <span class="project-state">{{ project.state === 'active' ? '可用' : '已归档' }}</span>
             </button>
             <p v-if="filteredProjects(data).length === 0" class="empty-results">未找到匹配项目</p>
           </div>
@@ -42,18 +41,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onScopeDispose, ref } from 'vue'
+import { computed, inject, nextTick, onMounted, onScopeDispose, ref } from 'vue'
+import { routeLocationKey, routerKey, type LocationQueryRaw } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjects } from '@/composables/useProjects'
 import type { ProjectSchema } from '@/generated/contracts'
+import { NAVIGATION_GROUPS } from '@/utils/navigation'
 
 const projects = useProjects()
+const route = inject(routeLocationKey, null)
+const router = inject(routerKey, null)
 const isOpen = ref(false)
 const searchQuery = ref('')
 const containerRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const activeProject = computed(() => projects.selectedProject)
+const projectScopedPaths = NAVIGATION_GROUPS.flatMap((group) => group.items)
+  .filter((item) => item.projectScoped)
+  .map((item) => item.path)
 
 function filteredProjects(items: ProjectSchema[]) {
   const query = searchQuery.value.trim().toLowerCase()
@@ -64,10 +70,32 @@ function toggleOpen() {
   isOpen.value = !isOpen.value
   if (isOpen.value) void nextTick(() => searchInputRef.value?.focus())
 }
+
+function projectScopedBasePath(path: string) {
+  return projectScopedPaths.find((itemPath) => path === itemPath || path.startsWith(`${itemPath}/`)) ?? null
+}
+
+const PROJECT_CONTEXT_QUERY_KEYS = ['environmentId', 'releaseId', 'runId', 'packageId', 'approvalId'] as const
+
 function selectProject(id: string) {
+  const routeProjectId = typeof route?.query.projectId === 'string' ? route.query.projectId : undefined
+  const currentProjectId = routeProjectId ?? projects.selectedProjectId
+  const routeProjectChanged = routeProjectId !== id
+  const projectChanged = currentProjectId !== id
   projects.select(id)
   isOpen.value = false
   searchQuery.value = ''
+  const basePath = route ? projectScopedBasePath(route.path) : null
+  if (router && route && (basePath || route.query.projectId !== undefined) && (projectChanged || routeProjectChanged)) {
+    const query: LocationQueryRaw = { ...route.query, projectId: id }
+    if (projectChanged) {
+      for (const key of PROJECT_CONTEXT_QUERY_KEYS) query[key] = undefined
+    }
+    void router.replace({
+      ...(projectChanged && basePath && basePath !== route.path ? { path: basePath } : {}),
+      query,
+    })
+  }
 }
 function handleClickOutside(event: MouseEvent) {
   if (containerRef.value && !containerRef.value.contains(event.target as Node)) isOpen.value = false
@@ -92,7 +120,6 @@ onScopeDispose(() => {
 .trigger-icon { flex-shrink: 0; color: var(--md-sys-color-primary); }
 .trigger-label { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; text-align: left; line-height: 1.2; }
 .trigger-primary { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--md-sys-label-medium); }
-.trigger-secondary { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); font-family: monospace; }
 .trigger-arrow { flex-shrink: 0; color: var(--md-sys-color-on-surface-variant); }
 .selector-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 1300; display: flex; width: 360px; max-width: calc(100vw - 24px); flex-direction: column; overflow: hidden; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-medium); background: var(--md-sys-color-surface); box-shadow: var(--md-sys-elevation-3); }
 .menu-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 8px; border-bottom: 1px solid var(--md-sys-color-outline-variant); }
@@ -106,7 +133,7 @@ onScopeDispose(() => {
 .project-item:hover, .project-item--selected { background: var(--md-sys-color-primary-container); }
 .project-info { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .project-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--md-sys-body-medium); }
-.project-info small, .project-state, .empty-results { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
+.project-state, .empty-results { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .project-state { flex-shrink: 0; }
 .empty-results { padding: 22px; text-align: center; }
 </style>

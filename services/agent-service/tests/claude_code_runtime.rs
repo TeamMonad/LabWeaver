@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use agent_service::candidate_materializer::{
     CandidateMaterializationError, EnvironmentCandidateMaterializer,
-    WorkConfigurationArtifactMaterializer,
+    S3EnvironmentCandidateMaterializer, WorkConfigurationArtifactMaterializer,
 };
 use agent_service::classifier::DeterministicEgressClassifier;
 use agent_service::claude_code::{
@@ -91,6 +91,10 @@ enum FakeMode {
     SlowSuccess,
     SlowFullSuccess,
     FullSuccess,
+    TerminalSuccessThenCancel,
+    ContainerFullSuccess,
+    VmEvaluationNoRunner,
+    VmEvaluationUnexpectedRunner,
     WorkFullSuccess,
     InvalidSession,
     InvalidResultType,
@@ -100,6 +104,7 @@ enum FakeMode {
     ProtectedField,
     BudgetExceeded,
     EvaluationFails,
+    EvaluationSchemaRepair,
     RepairThenSuccess,
     ReviewRepairThenSuccess,
     ReviewRepairThenCancel,
@@ -110,6 +115,11 @@ enum FakeMode {
     RateLimited,
     UpstreamUnavailable,
     Refused,
+    CopyRepair {
+        invalid_calls: usize,
+        next_error: Option<ClaudeCodeProcessError>,
+        delay: Duration,
+    },
 }
 
 struct FakeProcess {
@@ -118,6 +128,14 @@ struct FakeProcess {
     active: AtomicUsize,
     max_active: AtomicUsize,
     total_calls: AtomicUsize,
+    authoring_scopes: Mutex<Vec<agent_service::claude_code::AuthoringAttemptScope>>,
+    cached_outputs: Mutex<
+        Vec<(
+            agent_service::claude_code::AuthoringAttemptScope,
+            ClaudeCodeProcessOutput,
+        )>,
+    >,
+    recovered_generations: Mutex<Vec<u64>>,
 }
 
 struct StaticPackageReader {
@@ -144,7 +162,9 @@ struct FakeMaterializer {
     calls: AtomicUsize,
     artifacts: Mutex<Vec<ArtifactRef>>,
     plans: Mutex<Vec<Value>>,
+    runner_plans: Mutex<Vec<Value>>,
     scripts: Mutex<Vec<(String, Option<String>)>>,
+    recipe_validator: Option<S3EnvironmentCandidateMaterializer>,
 }
 
 impl FakeMaterializer {
@@ -153,7 +173,9 @@ impl FakeMaterializer {
             calls: AtomicUsize::new(0),
             artifacts: Mutex::new(Vec::new()),
             plans: Mutex::new(Vec::new()),
+            runner_plans: Mutex::new(Vec::new()),
             scripts: Mutex::new(Vec::new()),
+            recipe_validator: None,
         }
     }
 
@@ -187,6 +209,13 @@ impl FakeMaterializer {
             .clone()
     }
 
+    fn runner_plans(&self) -> Vec<Value> {
+        self.runner_plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn scripts(&self) -> Vec<(String, Option<String>)> {
         self.scripts
             .lock()
@@ -197,6 +226,16 @@ impl FakeMaterializer {
 
 #[async_trait]
 impl EnvironmentCandidateMaterializer for FakeMaterializer {
+    fn validate_recipe_plan(
+        &self,
+        plan: &Value,
+        dockerfile_path: &str,
+    ) -> Result<(), CandidateMaterializationError> {
+        match &self.recipe_validator {
+            Some(validator) => validator.validate_recipe_plan(plan, dockerfile_path),
+            None => Ok(()),
+        }
+    }
     async fn materialize(
         &self,
         _project_id: ProjectId,
@@ -210,6 +249,21 @@ impl EnvironmentCandidateMaterializer for FakeMaterializer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(plan.clone());
         Ok(self.artifact("fake build context", "application/gzip"))
+    }
+
+    async fn materialize_runner(
+        &self,
+        _project_id: ProjectId,
+        _course_id: Option<CourseId>,
+        _package_id: contracts::ProblemPackageId,
+        _package_revision: Revision,
+        plan: &Value,
+    ) -> Result<ArtifactRef, CandidateMaterializationError> {
+        self.runner_plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(plan.clone());
+        Ok(self.artifact("fake runner build context", "application/gzip"))
     }
 }
 
@@ -262,6 +316,9 @@ impl FakeProcess {
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
             total_calls: AtomicUsize::new(0),
+            authoring_scopes: Mutex::new(Vec::new()),
+            cached_outputs: Mutex::new(Vec::new()),
+            recovered_generations: Mutex::new(Vec::new()),
         }
     }
 
@@ -287,6 +344,34 @@ impl FakeProcess {
 
 #[async_trait]
 impl ClaudeCodeProcess for FakeProcess {
+    async fn recover_authoring_terminal(
+        &self,
+        scope: &agent_service::claude_code::AuthoringAttemptScope,
+        cancellation: RunCancellation,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        if cancellation.is_cancelled() {
+            return Err(ClaudeCodeProcessError::Cancelled);
+        }
+        let output = self
+            .cached_outputs
+            .lock()
+            .expect("cached output lock poisoned")
+            .iter()
+            .find(|(saved, _)| {
+                saved.run_id == scope.run_id
+                    && saved.track == scope.track
+                    && saved.attempt == scope.attempt
+                    && saved.execution_generation == scope.execution_generation
+            })
+            .map(|(_, output)| output.clone())
+            .ok_or(ClaudeCodeProcessError::TimedOut)?;
+        self.recovered_generations
+            .lock()
+            .expect("recovery generation lock poisoned")
+            .push(scope.execution_generation);
+        Ok(output)
+    }
+
     async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
         if matches!(self.mode, FakeMode::VersionMismatch) {
             Ok("2.1.158".to_owned())
@@ -297,7 +382,7 @@ impl ClaudeCodeProcess for FakeProcess {
 
     async fn execute(
         &self,
-        _scope: &agent_service::claude_code::ExecutionScope,
+        scope: &agent_service::claude_code::ExecutionScope,
         command: ClaudeCodeCommand,
         cancellation: RunCancellation,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
@@ -316,6 +401,25 @@ impl ClaudeCodeProcess for FakeProcess {
             .is_some_and(|prompt| prompt.contains("GoalReview"));
         self.commands().push(command);
         let call_number = self.next_call_number();
+        if let agent_service::claude_code::ExecutionScope::Authoring(scope) = scope {
+            self.authoring_scopes
+                .lock()
+                .expect("authoring scope lock poisoned")
+                .push(scope.clone());
+        }
+        if let FakeMode::CopyRepair {
+            invalid_calls,
+            next_error,
+            delay,
+        } = self.mode
+        {
+            tokio::time::sleep(delay).await;
+            if call_number > invalid_calls {
+                if let Some(error) = next_error {
+                    return Err(error);
+                }
+            }
+        }
 
         if matches!(self.mode, FakeMode::ReviewRepairThenCancel) && call_number == 2 {
             while !cancellation.is_cancelled() {
@@ -382,17 +486,51 @@ impl ClaudeCodeProcess for FakeProcess {
             }
         } else if matches!(
             self.mode,
-            FakeMode::FullSuccess | FakeMode::SlowFullSuccess | FakeMode::WorkFullSuccess
+            FakeMode::FullSuccess
+                | FakeMode::TerminalSuccessThenCancel
+                | FakeMode::SlowFullSuccess
+                | FakeMode::WorkFullSuccess
+                | FakeMode::ContainerFullSuccess
+                | FakeMode::EvaluationSchemaRepair
         ) && evaluation_track
         {
-            evaluation_candidate()?
+            evaluation_track_candidate()?
+        } else if matches!(self.mode, FakeMode::VmEvaluationNoRunner) && evaluation_track {
+            json!({"evaluation": evaluation_candidate()?})
+        } else if matches!(self.mode, FakeMode::VmEvaluationUnexpectedRunner) && evaluation_track {
+            evaluation_track_candidate()?
         } else if work_configuration_track {
             work_configuration_candidate()
+        } else if matches!(self.mode, FakeMode::ContainerFullSuccess) {
+            container_environment_candidate()
         } else {
             environment_candidate()
         };
         if work_environment && !evaluation_track && !work_configuration_track {
             output["class"] = json!("work");
+        }
+        if let FakeMode::CopyRepair { invalid_calls, .. } = self.mode {
+            output = evaluation_track_candidate()?;
+            let files = output["runnerBuildRecipe"]["files"]
+                .as_array_mut()
+                .expect("fixture runner files missing");
+            let dockerfile = files[0]["content"]
+                .as_str()
+                .expect("fixture Dockerfile content missing")
+                .to_owned();
+            files[0]["content"] = json!(format!(
+                "{dockerfile}\nCOPY requirements.txt /input/requirements.txt\n"
+            ));
+            if call_number > invalid_calls {
+                files
+                    .push(json!({"path": "requirements.txt", "content": "ansible-core==2.20.5\n"}));
+            }
+        }
+        if matches!(self.mode, FakeMode::EvaluationSchemaRepair)
+            && evaluation_track
+            && call_number == 1
+        {
+            output["evaluation"]["spec"]["steps"] = json!([]);
         }
         if matches!(self.mode, FakeMode::ProtectedField) {
             output["metadata"] = json!({"Final_Score": 100});
@@ -431,8 +569,17 @@ impl ClaudeCodeProcess for FakeProcess {
         });
         let output =
             ClaudeCodeProcessOutput::from_raw(Some(0), stream_output(Some(result), envelope)?, &[]);
+        if let agent_service::claude_code::ExecutionScope::Authoring(scope) = scope {
+            self.cached_outputs
+                .lock()
+                .expect("cached output lock poisoned")
+                .push((scope.clone(), output.clone()));
+        }
         if slow {
             self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+        if matches!(self.mode, FakeMode::TerminalSuccessThenCancel) {
+            cancellation.cancel();
         }
         Ok(output)
     }
@@ -599,6 +746,23 @@ fn evaluation_candidate() -> Result<Value, ClaudeCodeProcessError> {
     serde_json::to_value(spec).map_err(|_| ClaudeCodeProcessError::Io)
 }
 
+fn runner_build_recipe() -> Value {
+    json!({
+        "mode": "generated",
+        "files": [{
+            "path": "evaluation/Dockerfile",
+            "content": "ARG LABWEAVER_SERVICE_IMAGE\nFROM alpine:3.20\nCOPY --from=${LABWEAVER_SERVICE_IMAGE} /usr/local/bin/labweaver-service /usr/local/bin/labweaver-service\nUSER 65532:65532\nENTRYPOINT [\"/usr/local/bin/labweaver-service\"]\n"
+        }]
+    })
+}
+
+fn evaluation_track_candidate() -> Result<Value, ClaudeCodeProcessError> {
+    Ok(json!({
+        "evaluation": evaluation_candidate()?,
+        "runnerBuildRecipe": runner_build_recipe(),
+    }))
+}
+
 fn review_candidate(path: &str) -> Value {
     json!({
         "schema_version": "goal-review/v1",
@@ -712,6 +876,28 @@ fn work_runtime_with_policy(
     Ok((runtime, process, policy))
 }
 
+fn materializing_runtime(
+    mode: FakeMode,
+) -> Result<
+    (
+        ClaudeCodeRuntime,
+        Arc<FakeProcess>,
+        ProjectLlmEgressPolicy,
+        Arc<FakeMaterializer>,
+    ),
+    Box<dyn Error>,
+> {
+    let process = Arc::new(FakeProcess::new(mode));
+    let policy = valid_policy()?;
+    let materializer = Arc::new(FakeMaterializer::new());
+    let runtime = ClaudeCodeRuntime::new_with_materializer(
+        policy.clone(),
+        process.clone(),
+        Arc::clone(&materializer),
+    )?;
+    Ok((runtime, process, policy, materializer))
+}
+
 fn package(
     project_id: ProjectId,
     course_id: Option<CourseId>,
@@ -738,7 +924,7 @@ fn package(
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: "2026-08-14T08:00:00.000Z".parse::<UtcTimestamp>()?,
+            retain_until: Some("2026-08-14T08:00:00.000Z".parse::<UtcTimestamp>()?),
             disposition: RetentionDisposition::Delete,
         },
         completed_at: "2026-07-14T08:00:00.000Z".parse::<UtcTimestamp>()?,
@@ -747,6 +933,17 @@ fn package(
 
 async fn input(policy: &ProjectLlmEgressPolicy) -> Result<ImmutableEgressInput, Box<dyn Error>> {
     prepare_input(policy, BTreeSet::new()).await
+}
+
+async fn vm_evaluation_input(
+    policy: &ProjectLlmEgressPolicy,
+) -> Result<ImmutableEgressInput, Box<dyn Error>> {
+    prepare_input_bytes(
+        policy,
+        include_bytes!("../../../examples/linux-config-probe/environment.yaml").to_vec(),
+        BTreeSet::new(),
+    )
+    .await
 }
 
 fn run_request(
@@ -845,22 +1042,26 @@ async fn live_claude_code_generates_evaluation_candidate() -> Result<(), Box<dyn
     let policy = live_provider_policy(&model, &version)?;
 
     let teacher_material = serde_json::to_vec(&json!({
-        "instruction": "Return this approved EvaluationSpec template exactly.",
+        "instruction": "Return this approved EvaluationSpec as the evaluation member and this runnerBuildRecipe exactly.",
         "evaluationSpec": evaluation_candidate()?,
+        "runnerBuildRecipe": runner_build_recipe(),
         "publicFiles": [{
             "path": "student/auth.c",
             "content": include_str!("../../../examples/security-controlled/student/auth.c")
         }]
     }))?;
     let input = prepare_input_bytes(&policy, teacher_material, BTreeSet::new()).await?;
-    let runtime = ClaudeCodeRuntime::new(policy, process)?;
+    let materializer = Arc::new(FakeMaterializer::new());
+    let runtime =
+        ClaudeCodeRuntime::new_with_materializer(policy, process, Arc::clone(&materializer))?;
     let evaluation = runtime
         .generate(AgentTrackKind::Evaluation, input, RunCancellation::new())
         .await?;
-    assert!(matches!(
-        evaluation.document,
-        CandidateDocument::Evaluation(_)
-    ));
+    let CandidateDocument::Evaluation(document) = evaluation.document else {
+        return Err("live Evaluation response was not an Evaluation candidate".into());
+    };
+    assert!(document.runner_build_context.is_some());
+    assert_eq!(materializer.runner_plans().len(), 1);
     eprintln!(
         "live Claude Code evaluation cost: {} microusd",
         evaluation.audit.usage.cost_microusd
@@ -1240,6 +1441,164 @@ async fn known_runtime_failures_are_classified_without_leaking_stderr() -> Resul
 #[tokio::test]
 #[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
 #[allow(clippy::large_futures)]
+async fn postgres_cancel_after_terminal_success_preserves_usage_and_completed_track()
+-> Result<(), Box<dyn Error>> {
+    let mut container = None;
+    let database_url = if let Ok(database_url) = std::env::var("LABWEAVER_TEST_DATABASE_URL") {
+        database_url
+    } else {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let database_url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        container = Some(postgres);
+        database_url
+    };
+    let (admin_pool, pool, database_name) = isolated_agent_database(&database_url).await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let now = "2026-07-14T08:00:00.000Z".parse::<UtcTimestamp>()?;
+    let (runtime, process, policy) = work_runtime(FakeMode::FullSuccess)?;
+    let prepared = input(&policy).await?;
+    let mut request = run_request(&prepared, &policy);
+    request.environment_class = EnvironmentClass::Experiment;
+    let reservation = store
+        .reserve(ReserveAgentRun {
+            project_id: policy.project_id,
+            course_id: policy.course_id,
+            request: &request,
+            idempotency_key: &IdempotencyKey::parse("agent-terminal-cancel-reserve")?,
+            input: &prepared,
+            policy: &policy,
+            now,
+            trace_id: "trace-terminal-cancel-reserve",
+        })
+        .await?;
+    let AgentRunReservation::Created(run) = reservation else {
+        return Err("terminal cancellation run was not newly reserved".into());
+    };
+    let evaluation_lease = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Evaluation,
+            prepared.sha256(),
+            "terminal-cancel-worker",
+            Duration::from_secs(30),
+        )
+        .await?
+        .ok_or("evaluation track was not claimable")?;
+    let evaluation_outcome = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            prepared.clone(),
+            RunCancellation::new(),
+        )
+        .await;
+    assert!(evaluation_outcome.is_ok());
+    let completed_evaluation = store
+        .complete_track(
+            &evaluation_lease,
+            evaluation_outcome,
+            now,
+            "trace-terminal-cancel-evaluation",
+        )
+        .await?;
+    let retained_evaluation = completed_evaluation
+        .run
+        .tracks
+        .iter()
+        .find(|track| track.kind == AgentTrackKind::Evaluation)
+        .ok_or("completed evaluation track missing")?
+        .clone();
+    assert!(retained_evaluation.candidate_id.is_some());
+    let environment_lease = store
+        .claim_track(
+            run.id,
+            AgentTrackKind::Environment,
+            prepared.sha256(),
+            "terminal-cancel-worker",
+            Duration::from_secs(30),
+        )
+        .await?
+        .ok_or("environment track was not claimable")?;
+    // The provider has already succeeded. No token or heartbeat can turn this outcome
+    // into a cancellation; only the durable cancellation fence in complete_track can.
+    let environment = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            prepared,
+            RunCancellation::new(),
+        )
+        .await?;
+    let observed_usage = environment.audit.usage;
+    assert!(environment.audit.usage_observed);
+    assert!(observed_usage.requests > 0);
+    let current = store.load(run.id).await?;
+    store
+        .request_cancellation_revisioned(
+            current.project_id,
+            current.course_id,
+            current.id,
+            current.revision,
+            &IdempotencyKey::parse("agent-terminal-cancel-request")?,
+            now,
+        )
+        .await?;
+    let completed = store
+        .complete_track(
+            &environment_lease,
+            Ok(environment),
+            now,
+            "trace-terminal-cancel-completion",
+        )
+        .await?;
+    assert_eq!(
+        completed.checkpoint.audit.outcome,
+        RuntimeAuditOutcome::Cancelled
+    );
+    assert_eq!(completed.checkpoint.audit.usage, observed_usage);
+    assert!(completed.checkpoint.audit.usage_observed);
+    assert!(completed.checkpoint.candidate.is_none());
+    assert!(completed.run.plan.is_none());
+    let environment_track = completed
+        .run
+        .tracks
+        .iter()
+        .find(|track| track.kind == AgentTrackKind::Environment)
+        .ok_or("cancelled environment track missing")?;
+    assert!(environment_track.candidate_id.is_none());
+    let attempt = environment_track
+        .attempts
+        .last()
+        .ok_or("cancelled attempt missing")?;
+    assert_eq!(
+        attempt.state,
+        contracts::authoring::AgentAttemptState::Cancelled
+    );
+    assert_eq!(attempt.usage, observed_usage);
+    assert!(attempt.usage_observed);
+    assert_eq!(
+        completed
+            .run
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Evaluation),
+        Some(&retained_evaluation),
+    );
+    assert_eq!(store.load(run.id).await?, completed.run);
+    let checkpoints = store.load_checkpoints(run.id).await?;
+    assert!(checkpoints.contains(&completed_evaluation.checkpoint));
+    assert!(checkpoints.contains(&completed.checkpoint));
+    assert_eq!(process.commands().len(), 2);
+    drop(store);
+    remove_isolated_database(admin_pool, pool, &database_name).await?;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
+#[allow(clippy::large_futures)]
 async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result<(), Box<dyn Error>>
 {
     let mut container = None;
@@ -1303,6 +1662,35 @@ async fn postgres_run_is_atomic_and_exact_replay_is_not_billed_twice() -> Result
         .map_err(|error| {
             std::io::Error::other(format!("assert_concurrent_idempotency failed: {error}"))
         })?;
+
+    drop(store);
+    remove_isolated_database(admin_pool, pool, &database_name).await?;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires LABWEAVER_TEST_DATABASE_URL or a real PostgreSQL Docker container"]
+#[allow(clippy::large_futures)]
+async fn postgres_authoring_retry_starts_a_new_fenced_attempt() -> Result<(), Box<dyn Error>> {
+    let mut container = None;
+    let database_url = if let Ok(database_url) = std::env::var("LABWEAVER_TEST_DATABASE_URL") {
+        database_url
+    } else {
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let database_url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        container = Some(postgres);
+        database_url
+    };
+    let (admin_pool, pool, database_name) = isolated_agent_database(&database_url).await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+    let now = "2026-07-14T08:00:00.000Z".parse::<UtcTimestamp>()?;
+
+    assert_failed_authoring_retry_dispatch_executes(&store, now).await?;
+    assert_durable_cancellation(&store, now).await?;
 
     drop(store);
     remove_isolated_database(admin_pool, pool, &database_name).await?;
@@ -2164,7 +2552,7 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
     } else {
         FakeMode::FullSuccess
     };
-    let (runtime, process, policy) = runtime(mode)?;
+    let (runtime, process, policy, _materializer) = materializing_runtime(mode)?;
     let bytes = b"reserved dispatch must execute exactly once".to_vec();
     let package = package(policy.project_id, policy.course_id, &bytes)?;
     let gate = ProblemPackageEgressGate::new(
@@ -2273,6 +2661,169 @@ async fn assert_reserved_dispatch_executes_without_second_reservation(
         } else {
             1
         }
+    );
+    Ok(())
+}
+
+async fn assert_failed_authoring_retry_dispatch_executes(
+    store: &PostgresAgentRunStore,
+    now: UtcTimestamp,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = b"failed authoring retry must execute the next attempt".to_vec();
+    let policy = valid_policy()?;
+    let package = package(policy.project_id, policy.course_id, &bytes)?;
+    let gate = ProblemPackageEgressGate::new(
+        Arc::new(StaticPackageReader {
+            bytes: bytes.clone(),
+        }),
+        Arc::new(StaticClassifier {
+            revision: Revision::new(1)?,
+            denied: BTreeSet::new(),
+        }),
+    );
+    let prepared = gate.prepare(&package, &policy).await?;
+    let mut request = run_request(&prepared, &policy);
+    request.environment_class = EnvironmentClass::Work;
+    let object = package
+        .files
+        .first()
+        .ok_or("package file missing")?
+        .object
+        .clone();
+    let command = InternalCreateAgentRunRequest {
+        project_id: policy.project_id,
+        course_id: policy.course_id,
+        actor_id: ActorId::new(),
+        request: InternalAgentRunRequest::Authoring(request.clone()),
+        purpose: AgentRunPurpose::Authoring {
+            environment_class: EnvironmentClass::Work,
+        },
+        package: package.clone(),
+        object_locators: BTreeMap::from([(
+            object.artifact_id,
+            "problem-packages/failed-retry".to_owned(),
+        )]),
+        policy: policy.clone(),
+        preauthorization: None,
+    };
+    let key = IdempotencyKey::parse("agent-dispatch-failed-retry-0001")?;
+    let reservation = store
+        .reserve_internal_dispatch(&command, &key, now, "trace-agent-failed-retry")
+        .await?;
+    let AgentRunReservation::Created(created) = reservation else {
+        return Err("failed retry dispatch was unexpectedly replayed".into());
+    };
+    let dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("failed retry dispatch was not claimable")?;
+    assert_eq!(dispatch.run.id, created.id);
+    store
+        .bind_prepared_dispatch(&dispatch, prepared.sha256())
+        .await?;
+
+    let failed_process = Arc::new(FakeProcess::new(FakeMode::ProcessFailure));
+    let failed_runtime = ClaudeCodeRuntime::new(policy.clone(), failed_process.clone())?;
+    let failed_service = AgentRunService::new(
+        store.clone(),
+        failed_runtime,
+        "failed-retry-worker".to_owned(),
+        Duration::from_secs(30),
+    )?;
+    let failed_result = failed_service
+        .execute_reserved_dispatch(dispatch, prepared.clone(), RunCancellation::new(), now)
+        .await?;
+    let AgentRunDispatch::Executed(failed_result) = failed_result else {
+        return Err("initial failure did not persist a failed authoring run".into());
+    };
+    let failed = failed_result.run;
+    assert_eq!(failed.state, AgentRunState::Failed);
+    assert_eq!(failed.tracks[0].attempts.len(), 1);
+    assert_eq!(
+        failed.tracks[0].attempts[0].state,
+        contracts::authoring::AgentAttemptState::Failed
+    );
+    assert_eq!(failed_process.commands().len(), 1);
+
+    let retried = store
+        .retry_track_revisioned(
+            failed.project_id,
+            failed.course_id,
+            failed.id,
+            AgentTrackKind::Environment,
+            failed.revision,
+            &IdempotencyKey::parse("agent-dispatch-failed-retry-command-0001")?,
+        )
+        .await?;
+    assert_eq!(retried.state, AgentRunState::Failed);
+    assert_eq!(retried.revision.get(), failed.revision.get() + 1);
+
+    let retry_dispatch = store
+        .claim_dispatch(Duration::from_secs(1))
+        .await?
+        .ok_or("retried dispatch was not claimable")?;
+    assert_eq!(retry_dispatch.run.id, failed.id);
+    store
+        .bind_prepared_dispatch(&retry_dispatch, prepared.sha256())
+        .await?;
+
+    let success_process = Arc::new(FakeProcess::new(FakeMode::WorkFullSuccess));
+    let success_runtime = ClaudeCodeRuntime::new(policy.clone(), success_process.clone())?;
+    let success_service = AgentRunService::new(
+        store.clone(),
+        success_runtime,
+        "failed-retry-success-worker".to_owned(),
+        Duration::from_secs(30),
+    )?;
+    let scope_mismatch = success_service
+        .execute_reserved(
+            ExecuteAgentRun {
+                actor_id: retry_dispatch.actor_id,
+                project_id: ProjectId::new(),
+                course_id: retry_dispatch.run.course_id,
+                expected_environment_class: EnvironmentClass::Work,
+                request: match &retry_dispatch.request {
+                    InternalAgentRunRequest::Authoring(request) => request,
+                    InternalAgentRunRequest::WorkConfiguration(_) => {
+                        return Err("retry dispatch was not an authoring request".into());
+                    }
+                },
+                idempotency_key: &retry_dispatch.idempotency_key,
+                input: prepared.clone(),
+                cancellation: RunCancellation::new(),
+                now,
+                trace_id: &retry_dispatch.trace_id,
+            },
+            retry_dispatch.run.clone(),
+        )
+        .await;
+    assert!(matches!(
+        scope_mismatch,
+        Err(AgentRunStoreError::IdentityMismatch)
+    ));
+
+    let result = success_service
+        .execute_reserved_dispatch(retry_dispatch, prepared, RunCancellation::new(), now)
+        .await?;
+    let AgentRunDispatch::Executed(result) = result else {
+        return Err("retried dispatch did not complete the second attempt".into());
+    };
+    assert_eq!(result.run.state, AgentRunState::Succeeded);
+    assert_eq!(result.run.tracks[0].attempts.len(), 2);
+    assert_eq!(
+        result.run.tracks[0].attempts[0].state,
+        contracts::authoring::AgentAttemptState::Failed
+    );
+    assert_eq!(
+        result.run.tracks[0].attempts[1].state,
+        contracts::authoring::AgentAttemptState::Succeeded
+    );
+    assert_eq!(success_process.commands().len(), 1);
+    assert!(
+        store
+            .claim_dispatch(Duration::from_secs(1))
+            .await?
+            .is_none()
     );
     Ok(())
 }
@@ -2776,7 +3327,7 @@ async fn assert_track_recovery(
     store: &PostgresAgentRunStore,
     now: UtcTimestamp,
 ) -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy) = work_runtime(FakeMode::FullSuccess)?;
     let prepared = input(&policy).await?;
     let mut request = run_request(&prepared, &policy);
     request.environment_class = EnvironmentClass::Experiment;
@@ -2895,7 +3446,7 @@ async fn assert_durable_cancellation(
     store: &PostgresAgentRunStore,
     now: UtcTimestamp,
 ) -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy) = work_runtime(FakeMode::FullSuccess)?;
     let prepared = input(&policy).await?;
     let mut request = run_request(&prepared, &policy);
     request.environment_class = EnvironmentClass::Experiment;
@@ -2948,8 +3499,79 @@ async fn assert_durable_cancellation(
             .complete_track(lease, outcome, now, "trace-agent-cross-worker-cancel")
             .await?;
     }
-    assert_eq!(store.load(run.id).await?.state, AgentRunState::Cancelled);
+    let cancelled = store.load(run.id).await?;
+    assert_eq!(cancelled.state, AgentRunState::Cancelled);
     assert!(process.commands().is_empty());
+
+    // An explicit retry starts a new generation and clears only the old run-level cancellation
+    // fence. The terminal leases from the cancelled generation remain fenced out.
+    let retried = store
+        .retry_track_revisioned(
+            cancelled.project_id,
+            cancelled.course_id,
+            cancelled.id,
+            AgentTrackKind::Environment,
+            cancelled.revision,
+            &IdempotencyKey::parse("agent-run-cancel-retry-0001")?,
+        )
+        .await?;
+    assert_eq!(retried.state, AgentRunState::Cancelled);
+    assert_eq!(retried.revision.get(), cancelled.revision.get() + 1);
+    assert_eq!(
+        retried
+            .tracks
+            .iter()
+            .find(|track| track.kind == AgentTrackKind::Environment)
+            .ok_or("retried environment track missing")?
+            .attempts
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .heartbeat_track(&environment, Duration::from_secs(1))
+            .await,
+        Err(AgentRunStoreError::LeaseLost)
+    );
+    let retry_lease = store
+        .claim_track(
+            retried.id,
+            AgentTrackKind::Environment,
+            prepared.sha256(),
+            "cancel-retry-worker",
+            Duration::from_secs(1),
+        )
+        .await?
+        .ok_or("cancelled environment retry was not claimable")?;
+    assert_eq!(retry_lease.attempt, 2);
+    assert!(
+        !store
+            .heartbeat_track(&retry_lease, Duration::from_secs(1))
+            .await?
+    );
+    let retry_outcome = runtime
+        .generate(
+            AgentTrackKind::Environment,
+            prepared.clone(),
+            RunCancellation::new(),
+        )
+        .await;
+    store
+        .complete_track(&retry_lease, retry_outcome, now, "trace-agent-cancel-retry")
+        .await?;
+    let resumed = store.load(run.id).await?;
+    assert_eq!(resumed.state, AgentRunState::PartiallySucceeded);
+    let environment = resumed
+        .tracks
+        .iter()
+        .find(|track| track.kind == AgentTrackKind::Environment)
+        .ok_or("resumed environment track missing")?;
+    assert_eq!(environment.attempts.len(), 2);
+    assert_eq!(
+        environment.attempts[1].state,
+        contracts::authoring::AgentAttemptState::Succeeded
+    );
+    assert_eq!(process.commands().len(), 1);
     Ok(())
 }
 
@@ -2968,7 +3590,11 @@ async fn assert_concurrent_idempotency(
     for worker in 0..4 {
         workers.push(AgentRunService::new(
             store.clone(),
-            ClaudeCodeRuntime::new(policy.clone(), process.clone())?,
+            ClaudeCodeRuntime::new_with_materializer(
+                policy.clone(),
+                process.clone(),
+                Arc::new(FakeMaterializer::new()),
+            )?,
             format!("concurrent-worker-{worker}"),
             Duration::from_secs(1),
         )?);
@@ -3247,6 +3873,12 @@ async fn authoring_invocation_runs_with_tools_inside_the_sandbox_scope()
         actor_id: ActorId::new(),
         track: AgentTrackKind::Environment,
         attempt: 1,
+        execution_generation: 1,
+        started_at: contracts::UtcTimestamp::from_utc(
+            time::OffsetDateTime::now_utc().replace_nanosecond(0)?,
+        )?,
+        worker_id: "test-worker".to_owned(),
+        lease_token: uuid::Uuid::now_v7(),
         trace_id: "trace-authoring-scope".to_owned(),
         claude_code_version: policy.binding.claude_code_version.clone(),
     };
@@ -3331,10 +3963,509 @@ async fn virtual_machine_schema_repair_recovers_from_the_first_invalid_response(
     Ok(())
 }
 
+// Use the production synchronous COPY validator, while retaining the existing
+// external process and artifact-write boundaries. These lazy clients do no I/O.
+async fn copy_repair_runtime(
+    policy: ProjectLlmEgressPolicy,
+    invalid_calls: usize,
+    next_error: Option<ClaudeCodeProcessError>,
+    delay: Duration,
+) -> Result<(ClaudeCodeRuntime, Arc<FakeProcess>), Box<dyn Error>> {
+    let objects = Arc::new(
+        S3ImmutableObjectStore::new(
+            S3StoreConfig {
+                binding: "test-generated-artifacts".to_owned(),
+                endpoint: "https://localhost:1/".parse()?,
+                bucket: "test-bucket".to_owned(),
+                region: "test-region".to_owned(),
+                object_prefix: "generated".to_owned(),
+                upload_ttl_seconds: 60,
+                max_object_bytes: 1_024 * 1_024,
+                force_path_style: true,
+                ca_bundle_file: None,
+            },
+            S3Credential {
+                access_key_id: "test-access-key".to_owned(),
+                secret_access_key: "test-secret-key".to_owned(),
+                session_token: None,
+            },
+        )
+        .await?,
+    );
+    let pool = PgPoolOptions::new().connect_lazy("postgres://test:test@localhost:1/test")?;
+    let mut materializer = FakeMaterializer::new();
+    materializer.recipe_validator = Some(S3EnvironmentCandidateMaterializer::new(
+        objects,
+        package(policy.project_id, policy.course_id, b"assignment")?,
+        GeneratedArtifactStore::new(pool),
+        BTreeMap::new(),
+    ));
+    let process = Arc::new(FakeProcess::new(FakeMode::CopyRepair {
+        invalid_calls,
+        next_error,
+        delay,
+    }));
+    let runtime =
+        ClaudeCodeRuntime::new_with_materializer(policy, process.clone(), Arc::new(materializer))?;
+    Ok((runtime, process))
+}
+
+fn repair_timestamp(value: OffsetDateTime) -> Result<UtcTimestamp, Box<dyn Error>> {
+    Ok(UtcTimestamp::from_utc(value.replace_nanosecond(
+        u32::from(value.millisecond()) * 1_000_000,
+    )?)?)
+}
+
+fn repair_scope(
+    policy: &ProjectLlmEgressPolicy,
+) -> Result<agent_service::claude_code::AuthoringAttemptScope, Box<dyn Error>> {
+    Ok(agent_service::claude_code::AuthoringAttemptScope {
+        run_id: AgentRunId::new(),
+        project_id: policy.project_id,
+        course_id: policy.course_id,
+        actor_id: ActorId::new(),
+        track: AgentTrackKind::Evaluation,
+        attempt: 1,
+        execution_generation: 1,
+        started_at: repair_timestamp(OffsetDateTime::now_utc())?,
+        worker_id: "repair-test-worker".to_owned(),
+        lease_token: Uuid::now_v7(),
+        trace_id: "trace-repair-test".to_owned(),
+        claude_code_version: policy.binding.claude_code_version.clone(),
+    })
+}
+
+fn assert_repair_scopes(
+    process: &FakeProcess,
+    scope: &agent_service::claude_code::AuthoringAttemptScope,
+    generations: &[u64],
+) {
+    let scopes = process
+        .authoring_scopes
+        .lock()
+        .expect("authoring scope lock poisoned");
+    assert_eq!(
+        scopes
+            .iter()
+            .map(|s| s.execution_generation)
+            .collect::<Vec<_>>(),
+        generations
+    );
+    for invocation in scopes.iter() {
+        assert_eq!(invocation.run_id, scope.run_id);
+        assert_eq!(invocation.track, scope.track);
+        assert_eq!(invocation.attempt, scope.attempt);
+        assert_eq!(invocation.started_at, scope.started_at);
+        assert_eq!(invocation.lease_token, scope.lease_token);
+    }
+}
+
+fn assert_repair_usage(
+    audit: &agent_service::claude_code::ClaudeCodeAudit,
+    calls: u64,
+    observed: bool,
+) {
+    assert_eq!(u64::from(audit.usage.requests), calls);
+    assert_eq!(audit.usage.input_tokens, 1_000 * calls);
+    assert_eq!(audit.usage.output_tokens, 500 * calls);
+    assert_eq!(audit.usage.cost_microusd, 125_000 * calls);
+    assert_eq!(audit.usage_observed, observed);
+}
+
+#[tokio::test]
+async fn authoring_repair_terminal_output_cancellation_retains_current_generation_usage()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy) = work_runtime(FakeMode::TerminalSuccessThenCancel)?;
+    let scope = repair_scope(&policy)?;
+    let cancellation = RunCancellation::new();
+    let failure = runtime
+        .generate_authoring(
+            &scope,
+            input(&policy).await?,
+            cancellation.clone(),
+            EnvironmentClass::Experiment,
+            &[],
+        )
+        .await
+        .expect_err("terminal output read after cancellation cannot accept a candidate");
+    assert!(cancellation.is_cancelled());
+    assert_eq!(
+        failure.diagnostic_code(),
+        agent_service::claude_code::ClaudeCodeRuntimeError::Cancelled.diagnostic_code()
+    );
+    assert_eq!(failure.audit().outcome, RuntimeAuditOutcome::Cancelled);
+    assert_repair_usage(failure.audit(), 1, true);
+    assert_eq!(process.total_calls(), 1);
+    assert_eq!(process.commands().len(), 1);
+    assert_repair_scopes(&process, &scope, &[1]);
+    let cached = process
+        .cached_outputs
+        .lock()
+        .expect("cached output lock poisoned");
+    assert_eq!(cached.len(), 1);
+    assert!(
+        cached[0].1.is_success(),
+        "external boundary returned success, not a cancellation error"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_missing_copy_source_advances_scope_and_accumulates_usage()
+-> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let (runtime, process) =
+        copy_repair_runtime(policy.clone(), 1, None, Duration::from_millis(20)).await?;
+    let scope = repair_scope(&policy)?;
+    let execution = runtime
+        .generate_authoring(
+            &scope,
+            input(&policy).await?,
+            RunCancellation::new(),
+            EnvironmentClass::Experiment,
+            &[],
+        )
+        .await?;
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Evaluation(_)
+    ));
+    assert_eq!(execution.audit.outcome, RuntimeAuditOutcome::Succeeded);
+    assert_repair_usage(&execution.audit, 2, true);
+    assert_repair_scopes(&process, &scope, &[1, 2]);
+    let commands = process.commands();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(
+        commands[1].env().get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"),
+        Some(&(policy.budget.max_output_tokens - 500).to_string())
+    );
+    assert!(commands[1].timeout() + Duration::from_millis(10) < commands[0].timeout());
+    assert!(
+        commands[1]
+            .args()
+            .last()
+            .expect("repair prompt missing")
+            .contains("LLM_SCHEMA_INVALID")
+    );
+    assert!(
+        commands[1]
+            .args()
+            .last()
+            .expect("repair prompt missing")
+            .contains("COPY or ADD")
+    );
+    assert!(
+        commands[1]
+            .args()
+            .last()
+            .expect("repair prompt missing")
+            .contains("Missing local COPY/ADD source \"requirements.txt\"")
+    );
+    assert_eq!(commands[0].stdin_sha256(), commands[1].stdin_sha256());
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_exhausted_original_budget_never_executes_third_generation()
+-> Result<(), Box<dyn Error>> {
+    for boundary in ["requests", "input", "output", "cost"] {
+        let mut policy = valid_policy()?;
+        match boundary {
+            "requests" => policy.budget.max_requests = 2,
+            "input" => policy.budget.max_input_tokens = 2_000,
+            "output" => policy.budget.max_output_tokens = 1_000,
+            "cost" => policy.budget.max_cost_microusd = 250_000,
+            _ => unreachable!(),
+        }
+        let (runtime, process) =
+            copy_repair_runtime(policy.clone(), 3, None, Duration::ZERO).await?;
+        let scope = repair_scope(&policy)?;
+        let failure = expected_failure(
+            runtime
+                .generate_authoring(
+                    &scope,
+                    input(&policy).await?,
+                    RunCancellation::new(),
+                    EnvironmentClass::Experiment,
+                    &[],
+                )
+                .await,
+            "exhausted repair budget must fail",
+        )?;
+        assert_eq!(
+            failure.diagnostic_code(),
+            agent_service::claude_code::ClaudeCodeRuntimeError::BudgetExceeded.diagnostic_code(),
+            "{boundary}"
+        );
+        assert_repair_usage(failure.audit(), 2, true);
+        assert_eq!(process.total_calls(), 2, "{boundary}");
+        assert_repair_scopes(&process, &scope, &[1, 2]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_schema_limit_retains_all_three_generations_usage()
+-> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let (runtime, process) = copy_repair_runtime(policy.clone(), 4, None, Duration::ZERO).await?;
+    let scope = repair_scope(&policy)?;
+    let failure = expected_failure(
+        runtime
+            .generate_authoring(
+                &scope,
+                input(&policy).await?,
+                RunCancellation::new(),
+                EnvironmentClass::Experiment,
+                &[],
+            )
+            .await,
+        "COPY sources remain missing",
+    )?;
+    assert!(failure.is_schema_invalid());
+    assert_repair_usage(failure.audit(), 3, true);
+    assert_repair_scopes(&process, &scope, &[1, 2, 3]);
+    assert_eq!(process.total_calls(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_process_failure_preserves_known_usage_and_error_class()
+-> Result<(), Box<dyn Error>> {
+    use agent_service::claude_code::ClaudeCodeRuntimeError;
+    for (error, expected, outcome) in [
+        (
+            ClaudeCodeProcessError::Io,
+            ClaudeCodeRuntimeError::ExecutionFailed,
+            RuntimeAuditOutcome::Failed,
+        ),
+        (
+            ClaudeCodeProcessError::Cancelled,
+            ClaudeCodeRuntimeError::Cancelled,
+            RuntimeAuditOutcome::Cancelled,
+        ),
+        (
+            ClaudeCodeProcessError::TimedOut,
+            ClaudeCodeRuntimeError::TimedOut,
+            RuntimeAuditOutcome::Failed,
+        ),
+    ] {
+        let policy = valid_policy()?;
+        let (runtime, process) =
+            copy_repair_runtime(policy.clone(), 1, Some(error), Duration::ZERO).await?;
+        let scope = repair_scope(&policy)?;
+        let failure = expected_failure(
+            runtime
+                .generate_authoring(
+                    &scope,
+                    input(&policy).await?,
+                    RunCancellation::new(),
+                    EnvironmentClass::Experiment,
+                    &[],
+                )
+                .await,
+            "second generation process failed",
+        )?;
+        assert_eq!(failure.diagnostic_code(), expected.diagnostic_code());
+        if expected == ClaudeCodeRuntimeError::TimedOut {
+            assert_eq!(failure.diagnostic_code(), "LW_PROVIDER_TIMEOUT");
+        }
+        assert_eq!(failure.audit().outcome, outcome);
+        assert_repair_usage(failure.audit(), 1, false);
+        assert_repair_scopes(&process, &scope, &[1, 2]);
+        assert_eq!(process.total_calls(), 2);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_expired_persisted_start_never_invokes_process()
+-> Result<(), Box<dyn Error>> {
+    let policy = valid_policy()?;
+    let (runtime, process) = copy_repair_runtime(policy.clone(), 0, None, Duration::ZERO).await?;
+    let mut scope = repair_scope(&policy)?;
+    scope.started_at = repair_timestamp(OffsetDateTime::now_utc() - time::Duration::minutes(3))?;
+    let failure = expected_failure(
+        runtime
+            .generate_authoring(
+                &scope,
+                input(&policy).await?,
+                RunCancellation::new(),
+                EnvironmentClass::Experiment,
+                &[],
+            )
+            .await,
+        "expired attempt cannot invoke model",
+    )?;
+    assert_eq!(
+        failure.diagnostic_code(),
+        agent_service::claude_code::ClaudeCodeRuntimeError::TimedOut.diagnostic_code()
+    );
+    assert_eq!(process.total_calls(), 0);
+    assert_repair_usage(failure.audit(), 0, false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_shared_deadline_expires_before_second_invocation()
+-> Result<(), Box<dyn Error>> {
+    let mut policy = valid_policy()?;
+    policy.budget.timeout_milliseconds = 100;
+    let (runtime, process) =
+        copy_repair_runtime(policy.clone(), 1, None, Duration::from_millis(150)).await?;
+    let scope = repair_scope(&policy)?;
+    let failure = expected_failure(
+        runtime
+            .generate_authoring(
+                &scope,
+                input(&policy).await?,
+                RunCancellation::new(),
+                EnvironmentClass::Experiment,
+                &[],
+            )
+            .await,
+        "repairs share the original deadline",
+    )?;
+    assert_eq!(
+        failure.diagnostic_code(),
+        agent_service::claude_code::ClaudeCodeRuntimeError::TimedOut.diagnostic_code()
+    );
+    assert_eq!(process.total_calls(), 1);
+    // The first terminal is known; the recovery boundary has no second receipt.
+    assert_repair_usage(failure.audit(), 1, false);
+    assert_repair_scopes(&process, &scope, &[1]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_expired_cached_generations_recover_without_new_execution()
+-> Result<(), Box<dyn Error>> {
+    let mut policy = valid_policy()?;
+    policy.budget.timeout_milliseconds = 1_000;
+    let (runtime, process) = copy_repair_runtime(policy.clone(), 1, None, Duration::ZERO).await?;
+    let scope = repair_scope(&policy)?;
+    let frozen_input = input(&policy).await?;
+    let original = runtime
+        .generate_authoring(
+            &scope,
+            frozen_input.clone(),
+            RunCancellation::new(),
+            EnvironmentClass::Experiment,
+            &[],
+        )
+        .await?;
+    assert_repair_usage(&original.audit, 2, true);
+    assert_eq!(process.total_calls(), 2);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let recovered = runtime
+        .generate_authoring(
+            &scope,
+            frozen_input.clone(),
+            RunCancellation::new(),
+            EnvironmentClass::Experiment,
+            &[],
+        )
+        .await?;
+    assert_repair_usage(&recovered.audit, 2, true);
+    let (
+        CandidateDocument::Evaluation(recovered_spec),
+        CandidateDocument::Evaluation(original_spec),
+    ) = (&recovered.document, &original.document)
+    else {
+        return Err("cached terminal must retain the evaluation candidate".into());
+    };
+    assert_eq!(recovered_spec.spec, original_spec.spec);
+    // The output audit includes the artifact-write boundary's newly allocated ID;
+    // the terminal session and full evaluation conditions must stay unchanged.
+    assert_eq!(recovered.audit.session_id, original.audit.session_id);
+    assert_eq!(recovered.audit.input_sha256, original.audit.input_sha256);
+    assert_eq!(process.total_calls(), 2);
+    assert_eq!(process.commands().len(), 2);
+    assert_eq!(
+        *process
+            .recovered_generations
+            .lock()
+            .expect("recovery generation lock poisoned"),
+        vec![1, 2]
+    );
+    assert_repair_scopes(&process, &scope, &[1, 2]);
+    let cancellation = RunCancellation::new();
+    cancellation.cancel();
+    let failure = expected_failure(
+        runtime
+            .generate_authoring(
+                &scope,
+                frozen_input,
+                cancellation,
+                EnvironmentClass::Experiment,
+                &[],
+            )
+            .await,
+        "cancelled recovery cannot accept cached output",
+    )?;
+    assert_eq!(failure.audit().outcome, RuntimeAuditOutcome::Cancelled);
+    assert_eq!(process.total_calls(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authoring_repair_semaphore_wait_consumes_persisted_deadline() -> Result<(), Box<dyn Error>>
+{
+    let mut policy = valid_policy()?;
+    policy.binding.max_in_flight_per_worker = 1;
+    let (runtime, process) =
+        copy_repair_runtime(policy.clone(), 0, None, Duration::from_millis(300)).await?;
+    let runtime = Arc::new(runtime);
+    let blocker_input = input(&policy).await?;
+    let blocker_scope = repair_scope(&policy)?;
+    let blocker = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .generate_authoring(
+                    &blocker_scope,
+                    blocker_input,
+                    RunCancellation::new(),
+                    EnvironmentClass::Experiment,
+                    &[],
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while process.total_calls() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await?;
+    let mut scope = repair_scope(&policy)?;
+    scope.started_at =
+        repair_timestamp(OffsetDateTime::now_utc() - time::Duration::milliseconds(119_950))?;
+    let result = runtime
+        .generate_authoring(
+            &scope,
+            input(&policy).await?,
+            RunCancellation::new(),
+            EnvironmentClass::Experiment,
+            &[],
+        )
+        .await;
+    let blocker_result = blocker.await?;
+    blocker_result?;
+    let failure = expected_failure(result, "queue wait cannot reset the deadline")?;
+    assert_eq!(
+        failure.diagnostic_code(),
+        agent_service::claude_code::ClaudeCodeRuntimeError::TimedOut.diagnostic_code()
+    );
+    assert_repair_usage(failure.audit(), 0, false);
+    assert_eq!(process.total_calls(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
 -> Result<(), Box<dyn Error>> {
-    let (runtime, process, policy) = runtime(FakeMode::FullSuccess)?;
+    let (runtime, process, policy, materializer) = materializing_runtime(FakeMode::FullSuccess)?;
     let execution = runtime
         .generate(
             AgentTrackKind::Evaluation,
@@ -3343,10 +4474,13 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
         )
         .await?;
 
-    assert!(matches!(
-        execution.document,
-        CandidateDocument::Evaluation(_)
-    ));
+    let CandidateDocument::Evaluation(document) = &execution.document else {
+        return Err("evaluation track did not return an Evaluation candidate".into());
+    };
+    assert!(document.runner_build_context.is_some());
+    assert!(materializer.plans().is_empty());
+    assert_eq!(materializer.runner_plans().len(), 1);
+    assert_eq!(materializer.artifact_count(), 1);
     let commands = process.commands();
     assert_eq!(commands.len(), 1);
     let prompt = commands[0]
@@ -3371,6 +4505,141 @@ async fn evaluation_prompt_enforces_supported_schema_variants_and_semantics()
             "missing prompt invariant: {required}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn evaluation_track_materializes_exactly_one_runner_context_alongside_environment()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, _process, policy, materializer) =
+        materializing_runtime(FakeMode::ContainerFullSuccess)?;
+    let outcome = runtime
+        .generate_both(input(&policy).await?, RunCancellation::new())
+        .await;
+    let environment = outcome.environment?;
+    let evaluation = outcome.evaluation?;
+
+    let CandidateDocument::Environment(environment_spec) = environment.document else {
+        return Err("environment track did not return an Environment candidate".into());
+    };
+    assert_eq!(environment_spec.runtime.kind(), RuntimeKind::Container);
+    let environment_json = serde_json::to_value(&environment_spec)?;
+    assert!(environment_json.pointer("/runtime/build_context").is_some());
+
+    let CandidateDocument::Evaluation(evaluation_document) = evaluation.document else {
+        return Err("evaluation track did not return an Evaluation candidate".into());
+    };
+    assert!(evaluation_document.runner_build_context.is_some());
+    assert_eq!(materializer.plans().len(), 1);
+    assert_eq!(materializer.runner_plans().len(), 1);
+    assert_eq!(materializer.artifact_count(), 2);
+    assert_eq!(
+        materializer.runner_plans()[0]["files"][0]["path"],
+        "evaluation/Dockerfile"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_machine_evaluation_skips_runner_materialization() -> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy, materializer) =
+        materializing_runtime(FakeMode::VmEvaluationNoRunner)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            vm_evaluation_input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+
+    let CandidateDocument::Evaluation(document) = execution.document else {
+        return Err("evaluation track did not return an Evaluation candidate".into());
+    };
+    assert!(document.runner_build_context.is_none());
+    assert!(materializer.runner_plans().is_empty());
+    assert_eq!(materializer.artifact_count(), 0);
+    let commands = process.commands();
+    let prompt = commands[0]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("candidate prompt is missing"))?;
+    assert!(prompt.contains("virtual_machine"));
+    assert!(prompt.contains("Omit runnerBuildRecipe"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_machine_evaluation_rejects_an_unexpected_runner_recipe()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy, materializer) =
+        materializing_runtime(FakeMode::VmEvaluationUnexpectedRunner)?;
+    let failure = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            vm_evaluation_input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await
+        .expect_err("VM evaluation runner recipe must be rejected");
+
+    assert!(failure.is_schema_invalid());
+    assert_eq!(process.total_calls(), 3);
+    assert!(materializer.runner_plans().is_empty());
+    assert_eq!(materializer.artifact_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_environment_declaration_keeps_runner_requirement() -> Result<(), Box<dyn Error>>
+{
+    let (runtime, _process, policy, materializer) =
+        materializing_runtime(FakeMode::VmEvaluationNoRunner)?;
+    let failure = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            prepare_input_bytes(
+                &policy,
+                br#"{"kind":"EnvironmentSpec","resources":{},"runtime":{"kind":"virtual_machine"}}"#.to_vec(),
+                BTreeSet::new(),
+            )
+            .await?,
+            RunCancellation::new(),
+        )
+        .await
+        .expect_err("malformed runtime declaration must not enable VM evaluation mode");
+
+    assert!(!failure.is_schema_invalid());
+    assert!(materializer.runner_plans().is_empty());
+    assert_eq!(materializer.artifact_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn evaluation_schema_repair_reports_contract_path_before_materialization()
+-> Result<(), Box<dyn Error>> {
+    let (runtime, process, policy, materializer) =
+        materializing_runtime(FakeMode::EvaluationSchemaRepair)?;
+    let execution = runtime
+        .generate(
+            AgentTrackKind::Evaluation,
+            input(&policy).await?,
+            RunCancellation::new(),
+        )
+        .await?;
+    assert!(matches!(
+        execution.document,
+        CandidateDocument::Evaluation(_)
+    ));
+    assert_eq!(process.total_calls(), 2);
+    assert_eq!(materializer.runner_plans().len(), 1);
+    let commands = process.commands();
+    let repair_prompt = commands[1]
+        .args()
+        .last()
+        .ok_or_else(|| std::io::Error::other("evaluation repair prompt missing"))?;
+    assert!(repair_prompt.contains("/evaluation/spec/steps"));
+    assert!(repair_prompt.contains("LW_EVAL_STEPS_EMPTY"));
+    assert!(repair_prompt.contains("spec.steps must contain at least one step"));
     Ok(())
 }
 
@@ -3504,6 +4773,8 @@ async fn environment_prompt_preserves_mixed_case_variant_contract() -> Result<()
         "runtime variant properties are exactly provider_binding",
         "Container security requires rootFilesystemPolicy read_only_required",
         "virtual_machine requires rootFilesystemPolicy mutable_required",
+        "retainUntil must either be null only for class course_material with disposition retain_until_revoked",
+        "Preserve the materials' legal retention form exactly",
         "\"build_recipe\"",
         "\"source_path\"",
         "\"service_port\"",

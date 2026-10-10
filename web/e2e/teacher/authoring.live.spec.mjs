@@ -1,15 +1,16 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { expect, test } from '@playwright/test'
 import {
   createProjectByUi,
-  createProjectPolicy,
-  csrfHeaders,
-  expectJson,
+  configureProjectPolicyByUi,
   pollEnvironmentCandidate,
   pollJson,
   selectProjectByUi,
-  uploadPackage,
   uuidv7,
 } from '../support/live.mjs'
+import { startExperimentRunByUi, uploadPackageDirectoryByUi } from '../support/real-experiment.mjs'
 
 const AUTHORING_CHAIN_TIMEOUT_MS = 1_800_000
 
@@ -21,26 +22,6 @@ function diagnosticCodes(run) {
     .map((attempt) => attempt.diagnosticCode)
     .filter(Boolean)
     .join(',') || 'no attempt diagnostic'
-}
-
-async function startAuthoringRun(request, baseURL, projectId, packageData, policy) {
-  const response = await request.post(`/api/v1/projects/${projectId}/agent-runs`, {
-    headers: await csrfHeaders(request, baseURL, { 'Idempotency-Key': uuidv7() }),
-    data: {
-      projectId,
-      courseId: null,
-      packageId: packageData.id,
-      packageRevision: packageData.revision,
-      policyId: policy.id,
-      policyRevision: policy.revision,
-      environmentClass: 'experiment',
-    },
-  })
-  const run = await expectJson(response, 'AUTHORING_RUN_CREATE_FAILED')
-  if (run.projectId !== projectId || run.purpose?.kind !== 'authoring' || run.purpose.environmentClass !== 'experiment') {
-    throw new Error(`AUTHORING_RUN_CONTRACT_INVALID:${JSON.stringify(run).slice(0, 2000)}`)
-  }
-  return run
 }
 
 async function waitForCompletedAuthoringRun(request, projectId, runId) {
@@ -95,9 +76,18 @@ test('teacher authors an independent project and publishes its complete experime
 
   const project = await createProjectByUi(page, `live-authoring-${Date.now()}-${uuidv7().slice(0, 8)}`)
   await selectProjectByUi(page, project.id)
-  const policy = await createProjectPolicy(page.context().request, baseURL, project.id)
-  const packageData = await uploadPackage(page.context().request, baseURL, project.id, policy.revision)
-  const initialRun = await startAuthoringRun(page.context().request, baseURL, project.id, packageData, policy)
+  await configureProjectPolicyByUi(page, project.id)
+  const packageDirectory = await mkdtemp(join(tmpdir(), 'labweaver-authoring-'))
+  await writeFile(join(packageDirectory, 'README.md'), '# LabWeaver authoring fixture\n', 'utf8')
+  let initialRun
+  try {
+    await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
+    await selectProjectByUi(page, project.id)
+    await uploadPackageDirectoryByUi(page, packageDirectory, 'README.md')
+    initialRun = await startExperimentRunByUi(page, project.id)
+  } finally {
+    await rm(packageDirectory, { recursive: true, force: true })
+  }
   const completed = await waitForCompletedAuthoringRun(page.context().request, project.id, initialRun.id)
   await waitForBuiltEnvironmentCandidate(page.context().request, project.id, completed.environmentCandidateId)
 

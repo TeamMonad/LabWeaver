@@ -5,7 +5,11 @@ import { extractProblemDetails, makeDiagnostic, type AsyncState, type Diagnostic
 
 export class ProjectWorkEnvironmentPaginationError extends Error {
   constructor(
-    readonly diagnosticCode: 'PROJECT_WORK_ENVIRONMENTS_INVALID' | 'PROJECT_WORK_ENVIRONMENTS_CURSOR_REPEATED',
+    readonly diagnosticCode:
+      | 'PROJECT_WORK_ENVIRONMENTS_INVALID'
+      | 'PROJECT_WORK_ENVIRONMENTS_CURSOR_REPEATED'
+      | 'PROJECT_ENVIRONMENTS_INVALID'
+      | 'PROJECT_ENVIRONMENTS_CURSOR_REPEATED',
     message: string,
   ) {
     super(message)
@@ -13,18 +17,31 @@ export class ProjectWorkEnvironmentPaginationError extends Error {
   }
 }
 
-/** Reads every Work environment page using the server's bounded cursor contract. */
-export async function fetchProjectWorkEnvironments(projectId: string): Promise<EnvironmentSummary[]> {
+export type ProjectEnvironmentListQuery = {
+  projectId: string
+  courseId?: string
+  runtimeKind?: 'container' | 'virtual_machine'
+  class?: 'experiment' | 'work'
+  desiredState?: 'running' | 'stopped' | 'deleted'
+  observedState?: 'requested' | 'validating' | 'building' | 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'updating' | 'expiring' | 'deleting' | 'deleted' | 'failed'
+  releaseId?: string
+  limit?: number
+}
+
+/** Reads every project environment page using the server's bounded cursor contract. */
+export async function fetchProjectEnvironments(
+  query: ProjectEnvironmentListQuery,
+  options: { diagnosticPrefix?: 'PROJECT_ENVIRONMENTS' | 'PROJECT_WORK_ENVIRONMENTS' } = {},
+): Promise<EnvironmentSummary[]> {
   const items: EnvironmentSummary[] = []
   const seenCursors = new Set<string>()
   let cursor: string | undefined
+  const prefix = options.diagnosticPrefix ?? 'PROJECT_ENVIRONMENTS'
 
   for (;;) {
     const result = await listEnvironments({
       query: {
-        projectId,
-        class: 'work',
-        limit: 100,
+        ...query,
         ...(cursor ? { cursor } : {}),
       },
     })
@@ -33,8 +50,10 @@ export async function fetchProjectWorkEnvironments(projectId: string): Promise<E
     const page = result.data
     if (!page || !Array.isArray(page.items)) {
       throw new ProjectWorkEnvironmentPaginationError(
-        'PROJECT_WORK_ENVIRONMENTS_INVALID',
-        '环境服务返回了无法识别的 Work 列表。',
+        prefix === 'PROJECT_WORK_ENVIRONMENTS' ? 'PROJECT_WORK_ENVIRONMENTS_INVALID' : 'PROJECT_ENVIRONMENTS_INVALID',
+        prefix === 'PROJECT_WORK_ENVIRONMENTS'
+          ? '环境服务返回了无法识别的 Work 列表。'
+          : '环境服务返回了无法识别的项目环境列表。',
       )
     }
     items.push(...page.items)
@@ -43,13 +62,23 @@ export async function fetchProjectWorkEnvironments(projectId: string): Promise<E
     if (!nextCursor) return items
     if (seenCursors.has(nextCursor)) {
       throw new ProjectWorkEnvironmentPaginationError(
-        'PROJECT_WORK_ENVIRONMENTS_CURSOR_REPEATED',
-        'Work 环境列表分页游标重复，无法继续加载。',
+        prefix === 'PROJECT_WORK_ENVIRONMENTS' ? 'PROJECT_WORK_ENVIRONMENTS_CURSOR_REPEATED' : 'PROJECT_ENVIRONMENTS_CURSOR_REPEATED',
+        prefix === 'PROJECT_WORK_ENVIRONMENTS'
+          ? 'Work 环境列表分页游标重复，无法继续加载。'
+          : '项目环境列表分页游标重复，无法继续加载。',
       )
     }
     seenCursors.add(nextCursor)
     cursor = nextCursor
   }
+}
+
+/** Reads every Work environment page using the server's bounded cursor contract. */
+export async function fetchProjectWorkEnvironments(projectId: string): Promise<EnvironmentSummary[]> {
+  return fetchProjectEnvironments(
+    { projectId, class: 'work', limit: 100 },
+    { diagnosticPrefix: 'PROJECT_WORK_ENVIRONMENTS' },
+  )
 }
 
 function errorDiagnostic(error: unknown): DiagnosticViewModel {

@@ -102,12 +102,13 @@ const SUBMISSION_READ_PATHS: [&str; 11] = [
     "/dev/null",
     "/dev/urandom",
 ];
-const COMPILER_READ_PATHS: [&str; 13] = [
+const COMPILER_READ_PATHS: [&str; 14] = [
     "/usr/bin",
     "/usr/include",
     "/usr/lib",
     "/usr/libexec",
     "/usr/lib64",
+    "/usr/local/cuda",
     "/usr/x86_64-pc-linux-gnu",
     "/usr/share",
     "/lib",
@@ -123,8 +124,6 @@ const MAX_SUPPORT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SUPPORT_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MAX_SUBMISSION_PROCESSES: u64 = 64;
-#[cfg(target_os = "linux")]
-const MAX_SUBMISSION_CGROUP_PROCESSES: u64 = 128;
 
 /// Executes one validated OJ request inside the isolated Kubernetes Job.
 ///
@@ -160,6 +159,10 @@ pub async fn run_oj_worker() -> Result<OjEvidenceReceipt, OjWorkerError> {
     .map_err(|_| OjWorkerError::ProfileInvalid)?;
     let compile = Box::pin(compile_program(&request, &profile, &paths, &support_paths)).await?;
     if !compile.status.success() || compile.capture.timed_out || compile.capture.output_exceeded {
+        // The evidence records only hashes and sizes, and it is written into this container's
+        // `/evidence` volume, so the actual compiler output would otherwise be unrecoverable once
+        // the Job is cleaned up. Mirror it into the container log (bounded) for diagnosis.
+        emit_compile_output(&compile.capture);
         let evidence = compile_failure_evidence(&request, request_sha256, &compile)?;
         return persist_evidence(&request, &evidence);
     }
@@ -545,8 +548,16 @@ fn compiler_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 fn execution_read_paths(support_paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = canonical_system_read_paths(&SUBMISSION_READ_PATHS);
+    // Test profiles may inspect the materialized submission directly (for example a
+    // deterministic checker that reads `{source}`), so keep the immutable submission tree
+    // readable while leaving the evaluator tree restricted to staged support files.
+    paths.push(PathBuf::from(SUBMISSION_ROOT));
     let _ = support_paths;
     paths.push(PathBuf::from(SUPPORT_ROOT));
+    // The case program consumes the compiled artifacts (the runner reads
+    // program, kernel/kernel and fs.img from the build tree), so the build
+    // root joins the read set. Writes stay confined to the per-case directory.
+    paths.push(PathBuf::from(BUILD_ROOT));
     paths
 }
 
@@ -583,6 +594,11 @@ async fn compile_program(
         argv,
         PathBuf::from(BUILD_ROOT),
         compiler_read_paths(support_paths),
+        // The helper validates this list with exact equality, so the writable
+        // set stays the build root alone; the helper-side sandbox application
+        // additionally grants /dev/null write access (see
+        // apply_compiler_filesystem_sandbox) for `command -v … >/dev/null`
+        // style probes made by compile scripts such as xv6's Makefile.
         vec![PathBuf::from(BUILD_ROOT)],
     )?;
     write_invocation(Path::new(COMPILE_INVOCATION_PATH), &invocation)?;
@@ -908,7 +924,11 @@ fn apply_submission_filesystem_sandbox(
     read_paths: &[String],
     write_paths: &[String],
 ) -> Result<(), OjWorkerError> {
-    validate_sandbox_paths(read_paths, write_paths)?;
+    let mut writable = write_paths.to_vec();
+    if !writable.iter().any(|path| path == "/dev/null") {
+        writable.push("/dev/null".to_owned());
+    }
+    validate_sandbox_paths(read_paths, &writable)?;
     let abi = ABI::V3;
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
@@ -927,7 +947,7 @@ fn apply_submission_filesystem_sandbox(
         EVALUATOR_ROOT,
         (AccessFs::Execute | AccessFs::ReadDir).into(),
     )?;
-    let ruleset = add_sandbox_path_rules(ruleset, write_paths, abi, true)?;
+    let ruleset = add_sandbox_path_rules(ruleset, &writable, abi, true)?;
     let ruleset = add_sandbox_path_rules(ruleset, &[CASE_HELPER_READY_PATH.to_owned()], abi, true)?;
     let status = ruleset
         .restrict_self()
@@ -950,6 +970,13 @@ fn apply_submission_process_limit() -> Result<(), OjWorkerError> {
 
 #[cfg(target_os = "linux")]
 fn require_submission_cgroup_process_limit() -> Result<(), OjWorkerError> {
+    // The submission must run inside a cgroup that actually bounds its process
+    // count, so a runaway student program cannot drain the node's pid space.
+    // The per-run cap is RLIMIT_NPROC (MAX_SUBMISSION_PROCESSES); the cgroup
+    // bound only has to be finite and leave headroom. Clusters differ in the
+    // bound they configure (kubelet podPidsLimit, containerd pids_limit, or
+    // the systemd slice's TasksMax the pod inherits), so any finite value >= 2
+    // is accepted; an unbounded "max" sentinel is rejected by the parser.
     let membership =
         fs::read_to_string("/proc/self/cgroup").map_err(|_| OjWorkerError::LimitApply)?;
     let path = membership
@@ -982,7 +1009,7 @@ fn require_submission_cgroup_process_limit() -> Result<(), OjWorkerError> {
             .ok_or(OjWorkerError::LimitApply)?;
     }
     effective_limit
-        .filter(|limit| (2..=MAX_SUBMISSION_CGROUP_PROCESSES).contains(limit))
+        .filter(|limit| *limit >= 2)
         .map(|_| ())
         .ok_or(OjWorkerError::LimitApply)
 }
@@ -1085,7 +1112,18 @@ fn apply_compiler_filesystem_sandbox(
     read_paths: &[String],
     write_paths: &[String],
 ) -> Result<(), OjWorkerError> {
-    validate_sandbox_paths(read_paths, write_paths)?;
+    // The compile scripts (for example xv6's Makefile) probe the toolchain with
+    // `command -v … >/dev/null` redirections. The declared read paths include
+    // `/dev/null` read-only, which makes every such probe fail with `cannot
+    // create /dev/null: Permission denied` and the compile collapse with a bogus
+    // "toolchain not found". `/dev/null` discards writes, so it always joins the
+    // writable set here on the helper side; the invocation's write-path list is
+    // validated exactly and therefore stays the declared build root.
+    let mut writable = write_paths.to_vec();
+    if !writable.iter().any(|path| path == "/dev/null") {
+        writable.push("/dev/null".to_owned());
+    }
+    validate_sandbox_paths(read_paths, &writable)?;
     let abi = ABI::V3;
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
@@ -1096,7 +1134,7 @@ fn apply_compiler_filesystem_sandbox(
     let ruleset = add_sandbox_path_rule(ruleset, WORK_ROOT, AccessFs::Execute.into())?;
     let ruleset = add_sandbox_path_rules(ruleset, read_paths, abi, false)?;
     let ruleset = add_sandbox_path_rule(ruleset, "/input", AccessFs::Execute.into())?;
-    let ruleset = add_sandbox_path_rules(ruleset, write_paths, abi, true)?;
+    let ruleset = add_sandbox_path_rules(ruleset, &writable, abi, true)?;
     let ruleset =
         add_sandbox_path_rules(ruleset, &[COMPILE_HELPER_READY_PATH.to_owned()], abi, true)?;
     let status = ruleset
@@ -1255,6 +1293,20 @@ fn compile_success_evidence(
     Ok(evidence)
 }
 
+/// Writes the bounded compiler output to the container log.
+fn emit_compile_output(capture: &ProcessCapture) {
+    const MAX_LOGGED_BYTES: usize = 8 * 1024;
+    for (stream, bytes) in [("stdout", &capture.stdout), ("stderr", &capture.stderr)] {
+        let truncated = bytes.len() > MAX_LOGGED_BYTES;
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_LOGGED_BYTES)]);
+        eprintln!(
+            "oj compile {stream} ({} bytes{}):\n{text}",
+            bytes.len(),
+            if truncated { ", truncated" } else { "" }
+        );
+    }
+}
+
 fn persist_evidence(
     request: &OjExecutionRequest,
     evidence: &OjExecutionEvidence,
@@ -1279,6 +1331,10 @@ fn persist_evidence(
         diagnostic_code: evidence.diagnostic_code.clone(),
         awarded_points: evidence.aggregate.awarded_points,
         max_points: evidence.aggregate.max_points,
+        compile_exit_code: evidence.compile.exit_code,
+        compile_signal: evidence.compile.signal,
+        compile_timed_out: evidence.compile.timed_out,
+        compile_output_exceeded: evidence.compile.output_exceeded,
     };
     receipt.validate_for(request)?;
     Ok(receipt)
@@ -1565,13 +1621,14 @@ impl OjWorkerError {
 mod tests {
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
+    use std::path::PathBuf;
     use std::process::Command as StdCommand;
 
     use super::{
         COMMAND_PATH_ENV, COMPILER_READ_PATHS, CompletedProcess, EVALUATOR_ROOT,
-        OJ_HELPER_FAILURE_EXIT_CODE, ProcessCapture, SUBMISSION_READ_PATHS, classify_case,
-        consume_helper_ready, create_helper_ready, ensure_helper_started, execute_process,
-        mark_helper_ready,
+        OJ_HELPER_FAILURE_EXIT_CODE, ProcessCapture, SUBMISSION_READ_PATHS, SUBMISSION_ROOT,
+        classify_case, consume_helper_ready, create_helper_ready, ensure_helper_started,
+        execute_process, execution_read_paths, mark_helper_ready,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1699,6 +1756,13 @@ mod tests {
                 .iter()
                 .any(|path| path.starts_with("/input"))
         );
+    }
+
+    #[test]
+    fn execution_filesystem_allowlist_reads_submission_without_evaluator_root() {
+        let paths = execution_read_paths(&[]);
+        assert!(paths.contains(&PathBuf::from(SUBMISSION_ROOT)));
+        assert!(!paths.contains(&PathBuf::from(EVALUATOR_ROOT)));
     }
 
     #[test]

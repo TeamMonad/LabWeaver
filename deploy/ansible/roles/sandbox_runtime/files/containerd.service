@@ -1,0 +1,27 @@
+# containerd systemd unit for the reviewed release tarball.
+#
+# The upstream release ships binaries only, so the unit is part of this role.
+# `KillMode=process` and the explicit delegate settings match upstream: containerd
+# must not be killed with its containers when the unit restarts.
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target local-fs.target dbus.service
+
+[Service]
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/containerd
+
+Type=notify
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=5
+LimitNPROC=infinity
+LimitCORE=infinity
+LimitNOFILE=infinity
+TasksMax=infinity
+OOMScoreAdjust=-999
+
+[Install]
+WantedBy=multi-user.target

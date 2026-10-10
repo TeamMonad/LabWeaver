@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "AgentRunHistoryItem": {
+      "additionalProperties": false,
+      "description": "Bounded project-scoped history item.  Full run details remain available\nthrough the existing `getProjectAgentRun` operation.",
+      "properties": {
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Course association copied from the Agent-owned run row so Control can\nenforce the same project/course binding as the detail endpoint."
+        },
+        "createdAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/AgentRunId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "purpose": {
+          "$ref": "#/$defs/AgentRunPurpose"
+        },
+        "state": {
+          "$ref": "#/$defs/AgentRunState"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "purpose",
+        "state",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "AgentRunId": {
+      "description": "Strongly typed UUIDv7 identifier for `AgentRunId`.",
+      "type": "string"
+    },
+    "AgentRunPurpose": {
+      "description": "Immutable purpose selected by Control for one Agent run.\n\nThe purpose is authoritative: callers cannot substitute an environment class, target\nenvironment, actor, or runtime through an untyped request field. Experiment Authoring creates\na new Environment/Evaluation package, Work Authoring creates one Environment candidate, while\nWorkConfiguration targets one existing Work environment and produces one configuration plan.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "environmentClass": {
+              "$ref": "#/$defs/EnvironmentClass"
+            },
+            "kind": {
+              "const": "authoring",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "environmentClass"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actorId": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "environmentId": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "environmentRevision": {
+              "$ref": "#/$defs/Revision"
+            },
+            "kind": {
+              "const": "work_configuration",
+              "type": "string"
+            },
+            "runtimeKind": {
+              "$ref": "#/$defs/RuntimeKind",
+              "description": "Runtime selected by the authoritative Work environment.\n\nControl resolves this value from the environment instance before dispatching the\nrun. Agent uses it as the immutable execution routing key, so a missing or altered\nruntime cannot silently select a different executor."
+            }
+          },
+          "required": [
+            "kind",
+            "environmentId",
+            "environmentRevision",
+            "actorId",
+            "runtimeKind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AgentRunState": {
+      "description": "Aggregate AgentRun state derived from both tracks.",
+      "enum": [
+        "requested",
+        "running",
+        "partially_succeeded",
+        "succeeded",
+        "awaiting_approval",
+        "failed",
+        "cancelling",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "EnvironmentClass": {
+      "description": "Environment business class retained from the v2.1 architecture.",
+      "enum": [
+        "experiment",
+        "work"
+      ],
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Page of Agent-owned project run history.",
+  "properties": {
+    "hasMore": {
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/AgentRunHistoryItem"
+      },
+      "type": "array"
+    },
+    "page": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pageSize": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "items",
+    "page",
+    "pageSize",
+    "hasMore"
+  ],
+  "title": "AgentRunHistoryPage",
+  "type": "object"
+}

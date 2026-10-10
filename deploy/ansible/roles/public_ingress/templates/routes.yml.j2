@@ -17,7 +17,24 @@ spec:
     - {{ hostname }}
 {% endfor %}
   rules:
-    - backendRefs:
-        - name: {{ route.service }}
-          port: {{ route.port }}
+{% if route.redirect is defined %}
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: {{ route.redirect.scheme }}
+            hostname: {{ route.redirect.hostname }}
+            statusCode: {{ route.redirect.status_code }}
+{% else %}
+{% for rule in route.rules %}
+    - matches:
+{% for path in rule.paths %}
+        - path:
+            type: PathPrefix
+            value: {{ path }}
+{% endfor %}
+      backendRefs:
+        - name: {{ rule.service }}
+          port: {{ rule.port }}
+{% endfor %}
+{% endif %}
 {% endfor %}

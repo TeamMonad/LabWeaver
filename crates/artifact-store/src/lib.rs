@@ -1,7 +1,7 @@
 //! Immutable S3-compatible object storage used for versioned platform artifacts.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -11,11 +11,15 @@ use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Region};
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, DateTime};
-use aws_sdk_s3::types::ObjectLockMode;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, ObjectLockMode};
+use contracts::http::PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES;
 use contracts::{ArtifactId, ArtifactRef, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
+
+mod stream;
+pub use stream::VerifiedObjectFile;
 
 /// Non-secret S3 binding. Credentials are supplied separately from Secret locators.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,7 +62,7 @@ impl S3StoreConfig {
             || self.region.trim().is_empty()
             || self.object_prefix.trim_matches('/').is_empty()
             || self.upload_ttl_seconds == 0
-            || self.upload_ttl_seconds > 3_600
+            || self.upload_ttl_seconds > 14_400
             || self.max_object_bytes == 0
             || self.endpoint.scheme() != "https"
             || self.endpoint.host_str().is_none()
@@ -95,6 +99,54 @@ pub struct PresignedUpload {
     pub required_headers: BTreeMap<String, String>,
     /// Server-side expiry.
     pub expires_at: UtcTimestamp,
+}
+
+/// One presigned part upload for a platform image archive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresignedPlatformImagePart {
+    /// Consecutive multipart part number starting at one.
+    pub part_number: u32,
+    /// Signed URL for this exact part.
+    pub url: String,
+    /// Headers that must be supplied byte-for-byte by the client.
+    pub required_headers: BTreeMap<String, String>,
+    /// Server-side expiry shared with the upload session.
+    pub expires_at: UtcTimestamp,
+}
+
+/// Server-side multipart upload authority for one platform image archive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformImageMultipartUpload {
+    /// Opaque S3 multipart upload identity. It never crosses the HTTP contract.
+    pub upload_id: String,
+    /// Fixed part size used for every non-final part.
+    pub part_size_bytes: u64,
+    /// Number of parts required by the reviewed archive size.
+    pub part_count: u32,
+    /// Presigned part upload authorities.
+    pub parts: Vec<PresignedPlatformImagePart>,
+    /// Session expiry for all authorities.
+    pub expires_at: UtcTimestamp,
+}
+
+/// A part reported by S3 for one active multipart upload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformImageMultipartPart {
+    /// Consecutive multipart part number.
+    pub part_number: u32,
+    /// S3 `ETag` for the uploaded part.
+    pub etag: String,
+    /// Actual bytes stored by S3 for this part.
+    pub size_bytes: u64,
+}
+
+/// Part identity supplied by Control when completing a platform image upload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformImageMultipartPartInput {
+    /// Consecutive multipart part number.
+    pub part_number: u32,
+    /// `ETag` returned by the browser's successful part upload.
+    pub etag: String,
 }
 
 /// Short-lived GET URL for one exact immutable object version.
@@ -137,12 +189,84 @@ pub trait ImmutableObjectStore: Send + Sync {
         now: UtcTimestamp,
     ) -> Result<PresignedUpload, ObjectStoreError>;
 
+    /// Creates the fixed-size multipart upload used only for platform image archives.
+    async fn create_platform_image_multipart_upload(
+        &self,
+        _key: &str,
+        _size_bytes: u64,
+        _media_type: &str,
+        _now: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Reissues the remaining short-lived part authorities for an existing upload identity.
+    async fn presign_platform_image_multipart_upload(
+        &self,
+        _key: &str,
+        _upload_id: &str,
+        _size_bytes: u64,
+        _now: UtcTimestamp,
+        _expires_at: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Finds active multipart uploads for one exact platform-image key during creation recovery.
+    async fn find_platform_image_multipart_uploads(
+        &self,
+        _key: &str,
+    ) -> Result<Vec<String>, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Lists the actual parts of one exact active multipart upload.
+    async fn list_platform_image_multipart_parts(
+        &self,
+        _key: &str,
+        _upload_id: &str,
+    ) -> Result<Vec<PlatformImageMultipartPart>, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Verifies the exact S3 part manifest and completes one multipart upload.
+    async fn complete_platform_image_multipart_upload(
+        &self,
+        _key: &str,
+        _upload_id: &str,
+        _size_bytes: u64,
+        _parts: &[PlatformImageMultipartPartInput],
+    ) -> Result<(), ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Aborts one exact active multipart upload. Repeating the call is safe.
+    async fn abort_platform_image_multipart_upload(
+        &self,
+        _key: &str,
+        _upload_id: &str,
+    ) -> Result<(), ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
     /// Downloads one exact object version and verifies raw bytes.
     async fn read_verified(
         &self,
         key: &str,
         expected: &ArtifactRef,
     ) -> Result<VerifiedObject, ObjectStoreError>;
+
+    /// Streams one large immutable object into a temporary file owned by the returned guard.
+    ///
+    /// Implementations that do not support file-backed reads retain the byte-oriented contract
+    /// and return a stable unsupported error.
+    async fn read_verified_file(
+        &self,
+        _key: &str,
+        _expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
 
     /// Resolves the current upload version once, then verifies and freezes that exact version.
     async fn freeze_current(
@@ -152,14 +276,47 @@ pub trait ImmutableObjectStore: Send + Sync {
         media_type: &str,
     ) -> Result<VerifiedObject, ObjectStoreError>;
 
-    /// Writes bytes once under Governance Object Lock and verifies the exact retained version.
-    async fn put_governance_locked(
+    /// Resolves and verifies the current object version without downloading its body.
+    ///
+    /// This is used by durable import workers that persist the immutable reference before doing
+    /// the long-running Agent-side download. Implementations must verify size and media type from
+    /// the versioned metadata before returning the reference.
+    async fn freeze_current_reference(
+        &self,
+        _key: &str,
+        _expected_size: u64,
+        _media_type: &str,
+    ) -> Result<ArtifactRef, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Resolves and streams one current version into a temporary file.
+    async fn freeze_current_file(
+        &self,
+        _key: &str,
+        _expected_size: u64,
+        _media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Lists immutable versions and delete markers for one validated, exact object key.
+    /// Implementations must filter returned keys for equality and follow all version pages.
+    async fn list_key_versions(&self, _key: &str) -> Result<Vec<String>, ObjectStoreError> {
+        Err(ObjectStoreError::StreamingUnsupported)
+    }
+
+    /// Writes bytes once under the validated retention decision and verifies the exact version.
+    ///
+    /// `Some(deadline)` uses Governance Object Lock. `None` is reserved for the already validated
+    /// permanent `CourseMaterial` form and uses versioned conditional storage without Object Lock.
+    async fn put_immutable(
         &self,
         _key: &str,
         _bytes: &[u8],
         _media_type: &str,
         _now: UtcTimestamp,
-        _retain_until: UtcTimestamp,
+        _retain_until: Option<UtcTimestamp>,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         Err(ObjectStoreError::ObjectLockRequired)
     }
@@ -386,6 +543,149 @@ impl S3ImmutableObjectStore {
         self.read_verified(key, &expected).await
     }
 
+    async fn stream_read_verified_file(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.validate_key(key)?;
+        if expected.store_binding != self.config.binding
+            || expected.object_version.trim().is_empty()
+            || expected.size_bytes == 0
+            || expected.size_bytes > self.config.max_object_bytes
+            || expected.media_type.trim().is_empty()
+            || expected
+                .media_type
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .version_id(&expected.object_version)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        stream::response_to_tempfile(response, expected.clone(), self.config.max_object_bytes).await
+    }
+
+    async fn stream_freeze_current_file(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.validate_key(key)?;
+        if expected_size == 0
+            || expected_size > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+        let version = head
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        let expected = ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes: expected_size,
+            media_type: media_type.to_owned(),
+        };
+        self.stream_read_verified_file(key, &expected).await
+    }
+
+    async fn presign_platform_image_multipart_parts(
+        &self,
+        key: &str,
+        upload_id: &str,
+        size_bytes: u64,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        self.validate_key(key)?;
+        if upload_id.trim().is_empty()
+            || size_bytes == 0
+            || size_bytes > self.config.max_object_bytes
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let part_count = size_bytes
+            .checked_add(PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES - 1)
+            .and_then(|value| value.checked_div(PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(ObjectStoreError::ObjectTooLarge)?;
+        let remaining = expires_at.get() - now.get();
+        let remaining_seconds = remaining.whole_seconds();
+        if remaining_seconds <= 0 {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let expires = Duration::from_secs(
+            u64::try_from(remaining_seconds).map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+        );
+        let start_time = system_time_from_utc(now)?;
+        let mut parts = Vec::with_capacity(usize::try_from(part_count).unwrap_or_default());
+        for part_number in 1..=part_count {
+            let request = self
+                .client
+                .upload_part()
+                .bucket(&self.config.bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(
+                    i32::try_from(part_number)
+                        .map_err(|_| ObjectStoreError::ObjectIdentityInvalid)?,
+                )
+                .presigned(
+                    PresigningConfig::builder()
+                        .start_time(start_time)
+                        .expires_in(expires)
+                        .build()
+                        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+                )
+                .await
+                .map_err(|error| {
+                    log_upload_failure(
+                        &self.config.binding,
+                        "artifact.platform_image.multipart_presign_part",
+                        &error,
+                    );
+                    ObjectStoreError::SigningFailed
+                })?;
+            parts.push(PresignedPlatformImagePart {
+                part_number,
+                url: request.uri().to_string(),
+                required_headers: request
+                    .headers()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+                expires_at,
+            });
+        }
+        Ok(PlatformImageMultipartUpload {
+            upload_id: upload_id.to_owned(),
+            part_size_bytes: PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES,
+            part_count,
+            parts,
+            expires_at,
+        })
+    }
+
     fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
         let prefix = self.config.object_prefix.trim_matches('/');
         if key.is_empty()
@@ -399,10 +699,314 @@ impl S3ImmutableObjectStore {
     }
 }
 
+fn system_time_from_utc(timestamp: UtcTimestamp) -> Result<SystemTime, ObjectStoreError> {
+    let value = timestamp.get();
+    let seconds = value.unix_timestamp();
+    if seconds < 0 {
+        return Err(ObjectStoreError::ConfigurationInvalid);
+    }
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(
+            u64::try_from(seconds).map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+        ))
+        .and_then(|time| time.checked_add(Duration::from_nanos(u64::from(value.nanosecond()))))
+        .ok_or(ObjectStoreError::ConfigurationInvalid)
+}
+
 #[async_trait]
 impl ImmutableObjectStore for S3ImmutableObjectStore {
     fn binding(&self) -> &str {
         S3ImmutableObjectStore::binding(self)
+    }
+
+    async fn create_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        media_type: &str,
+        now: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        self.validate_key(key)?;
+        if size_bytes == 0
+            || size_bytes > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let upload = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .content_type(media_type)
+            .send()
+            .await
+            .map_err(|error| {
+                log_upload_failure(
+                    &self.config.binding,
+                    "artifact.platform_image.multipart_create",
+                    &error,
+                );
+                ObjectStoreError::UploadFailed
+            })?;
+        let upload_id = upload
+            .upload_id()
+            .filter(|value| !value.is_empty())
+            .ok_or(ObjectStoreError::UploadFailed)?
+            .to_owned();
+        let expires_at = UtcTimestamp::from_utc(
+            now.get()
+                + time::Duration::seconds(
+                    i64::try_from(self.config.upload_ttl_seconds)
+                        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?,
+                ),
+        )
+        .map_err(|_| ObjectStoreError::ConfigurationInvalid)?;
+        match self
+            .presign_platform_image_multipart_parts(key, &upload_id, size_bytes, now, expires_at)
+            .await
+        {
+            Ok(upload) => Ok(upload),
+            Err(error) => {
+                let _ = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&self.config.bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn presign_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        size_bytes: u64,
+        now: UtcTimestamp,
+        expires_at: UtcTimestamp,
+    ) -> Result<PlatformImageMultipartUpload, ObjectStoreError> {
+        self.presign_platform_image_multipart_parts(key, upload_id, size_bytes, now, expires_at)
+            .await
+    }
+
+    async fn find_platform_image_multipart_uploads(
+        &self,
+        key: &str,
+    ) -> Result<Vec<String>, ObjectStoreError> {
+        self.validate_key(key)?;
+        let mut key_marker = None;
+        let mut upload_id_marker = None;
+        let mut uploads = Vec::new();
+        loop {
+            let mut request = self
+                .client
+                .list_multipart_uploads()
+                .bucket(&self.config.bucket)
+                .prefix(key);
+            if let Some(marker) = key_marker.as_deref() {
+                request = request.key_marker(marker);
+            }
+            if let Some(marker) = upload_id_marker.as_deref() {
+                request = request.upload_id_marker(marker);
+            }
+            let output = request
+                .send()
+                .await
+                .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+            uploads.extend(
+                output
+                    .uploads()
+                    .iter()
+                    .filter(|upload| upload.key() == Some(key))
+                    .filter_map(|upload| upload.upload_id().map(ToOwned::to_owned)),
+            );
+            if !output.is_truncated().unwrap_or(false) {
+                break;
+            }
+            key_marker = Some(
+                output
+                    .next_key_marker()
+                    .filter(|value| !value.is_empty())
+                    .ok_or(ObjectStoreError::ObjectUnavailable)?
+                    .to_owned(),
+            );
+            upload_id_marker = Some(
+                output
+                    .next_upload_id_marker()
+                    .filter(|value| !value.is_empty())
+                    .ok_or(ObjectStoreError::ObjectUnavailable)?
+                    .to_owned(),
+            );
+        }
+        Ok(uploads)
+    }
+
+    async fn list_platform_image_multipart_parts(
+        &self,
+        key: &str,
+        upload_id: &str,
+    ) -> Result<Vec<PlatformImageMultipartPart>, ObjectStoreError> {
+        self.validate_key(key)?;
+        if upload_id.trim().is_empty() {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let mut marker = None;
+        let mut result = Vec::new();
+        loop {
+            let mut request = self
+                .client
+                .list_parts()
+                .bucket(&self.config.bucket)
+                .key(key)
+                .upload_id(upload_id);
+            if let Some(marker) = marker.as_deref() {
+                request = request.part_number_marker(marker);
+            }
+            let output = request
+                .send()
+                .await
+                .map_err(|error| map_multipart_sdk_error(&error))?;
+            for part in output.parts() {
+                let part_number = part
+                    .part_number()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(ObjectStoreError::ObjectIdentityMismatch)?;
+                let etag = part
+                    .e_tag()
+                    .filter(|value| !value.is_empty())
+                    .ok_or(ObjectStoreError::ObjectIdentityMismatch)?
+                    .to_owned();
+                let size_bytes = part
+                    .size()
+                    .and_then(|value| u64::try_from(value).ok())
+                    .ok_or(ObjectStoreError::ObjectIdentityMismatch)?;
+                result.push(PlatformImageMultipartPart {
+                    part_number,
+                    etag,
+                    size_bytes,
+                });
+            }
+            if !output.is_truncated().unwrap_or(false) {
+                break;
+            }
+            marker = Some(
+                output
+                    .next_part_number_marker()
+                    .filter(|value| !value.is_empty())
+                    .ok_or(ObjectStoreError::ObjectUnavailable)?
+                    .to_owned(),
+            );
+        }
+        result.sort_by_key(|part| part.part_number);
+        Ok(result)
+    }
+
+    async fn complete_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        size_bytes: u64,
+        parts: &[PlatformImageMultipartPartInput],
+    ) -> Result<(), ObjectStoreError> {
+        self.validate_key(key)?;
+        if upload_id.trim().is_empty() || size_bytes == 0 {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let expected_part_count = size_bytes
+            .checked_add(PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES - 1)
+            .and_then(|value| value.checked_div(PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES))
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(ObjectStoreError::ObjectTooLarge)?;
+        if parts.len() != expected_part_count
+            || parts.iter().enumerate().any(|(index, part)| {
+                part.part_number != u32::try_from(index + 1).unwrap_or_default()
+                    || part.etag.trim().is_empty()
+                    || part.etag.bytes().any(|byte| byte.is_ascii_control())
+            })
+        {
+            return Err(ObjectStoreError::ObjectIdentityMismatch);
+        }
+        let observed = self
+            .list_platform_image_multipart_parts(key, upload_id)
+            .await?;
+        if observed.len() != parts.len()
+            || observed.iter().enumerate().any(|(index, observed)| {
+                let expected_size = if index + 1 == expected_part_count {
+                    size_bytes
+                        - PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES
+                            * u64::try_from(expected_part_count - 1).unwrap_or_default()
+                } else {
+                    PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES
+                };
+                observed.part_number != parts[index].part_number
+                    || observed.etag != parts[index].etag
+                    || observed.size_bytes != expected_size
+            })
+        {
+            return Err(ObjectStoreError::ObjectIdentityMismatch);
+        }
+        let completed_parts = parts
+            .iter()
+            .map(|part| {
+                Ok::<_, ObjectStoreError>(
+                    CompletedPart::builder()
+                        .part_number(
+                            i32::try_from(part.part_number)
+                                .map_err(|_| ObjectStoreError::ObjectIdentityMismatch)?,
+                        )
+                        .e_tag(&part.etag)
+                        .build(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed_parts))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|error| map_multipart_sdk_error(&error))?;
+        Ok(())
+    }
+
+    async fn abort_platform_image_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+    ) -> Result<(), ObjectStoreError> {
+        self.validate_key(key)?;
+        if upload_id.trim().is_empty() {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        match self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error.as_service_error().and_then(|service| service.code())
+                    == Some("NoSuchUpload") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(map_multipart_sdk_error(&error)),
+        }
     }
 
     /// Presigns one write once object.
@@ -556,6 +1160,14 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         })
     }
 
+    async fn read_verified_file(
+        &self,
+        key: &str,
+        expected: &ArtifactRef,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.stream_read_verified_file(key, expected).await
+    }
+
     async fn freeze_current(
         &self,
         key: &str,
@@ -586,14 +1198,136 @@ impl ImmutableObjectStore for S3ImmutableObjectStore {
         self.read_verified(key, &expected).await
     }
 
-    async fn put_governance_locked(
+    async fn freeze_current_reference(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<ArtifactRef, ObjectStoreError> {
+        self.validate_key(key)?;
+        if expected_size == 0
+            || expected_size > self.config.max_object_bytes
+            || media_type.trim().is_empty()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ObjectStoreError::ObjectIdentityInvalid);
+        }
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                if error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 404)
+                {
+                    ObjectStoreError::ObjectNotFound
+                } else {
+                    ObjectStoreError::ObjectUnavailable
+                }
+            })?;
+        let version = head
+            .version_id()
+            .filter(|value| !value.is_empty() && *value != "null")
+            .ok_or(ObjectStoreError::VersioningRequired)?
+            .to_owned();
+        let observed_size = head
+            .content_length()
+            .and_then(|observed| u64::try_from(observed).ok());
+        if head.version_id().is_none_or(|observed| observed != version)
+            || observed_size != Some(expected_size)
+            || head
+                .content_type()
+                .is_none_or(|observed| observed != media_type)
+        {
+            return Err(ObjectStoreError::ObjectIdentityMismatch);
+        }
+        Ok(ArtifactRef {
+            artifact_id: ArtifactId::new(),
+            store_binding: self.config.binding.clone(),
+            object_version: version,
+            size_bytes: expected_size,
+            media_type: media_type.to_owned(),
+        })
+    }
+
+    async fn list_key_versions(&self, key: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.validate_key(key)?;
+        let mut key_marker = None;
+        let mut version_marker = None;
+        let mut versions = std::collections::BTreeSet::new();
+        loop {
+            let page = self
+                .client
+                .list_object_versions()
+                .bucket(&self.config.bucket)
+                .prefix(key)
+                .max_keys(1000)
+                .set_key_marker(key_marker.clone())
+                .set_version_id_marker(version_marker.clone())
+                .send()
+                .await
+                .map_err(|_| ObjectStoreError::ObjectUnavailable)?;
+            for version in page.versions() {
+                if version.key() == Some(key) {
+                    let id = version
+                        .version_id()
+                        .filter(|id| !id.is_empty() && *id != "null")
+                        .ok_or(ObjectStoreError::VersioningRequired)?;
+                    versions.insert(id.to_owned());
+                }
+            }
+            for marker in page.delete_markers() {
+                if marker.key() == Some(key) {
+                    let id = marker
+                        .version_id()
+                        .filter(|id| !id.is_empty() && *id != "null")
+                        .ok_or(ObjectStoreError::VersioningRequired)?;
+                    versions.insert(id.to_owned());
+                }
+            }
+            if page.is_truncated() != Some(true) {
+                break;
+            }
+            let next_key = page
+                .next_key_marker()
+                .ok_or(ObjectStoreError::ObjectUnavailable)?;
+            let next_version = page.next_version_id_marker().map(str::to_owned);
+            if !next_key.starts_with(key)
+                || (key_marker.as_deref() == Some(next_key) && version_marker == next_version)
+            {
+                return Err(ObjectStoreError::ObjectUnavailable);
+            }
+            key_marker = Some(next_key.to_owned());
+            version_marker = next_version;
+        }
+        Ok(versions.into_iter().collect())
+    }
+
+    async fn freeze_current_file(
+        &self,
+        key: &str,
+        expected_size: u64,
+        media_type: &str,
+    ) -> Result<VerifiedObjectFile, ObjectStoreError> {
+        self.stream_freeze_current_file(key, expected_size, media_type)
+            .await
+    }
+
+    async fn put_immutable(
         &self,
         key: &str,
         bytes: &[u8],
         media_type: &str,
         now: UtcTimestamp,
-        retain_until: UtcTimestamp,
+        retain_until: Option<UtcTimestamp>,
     ) -> Result<VerifiedObject, ObjectStoreError> {
+        let Some(retain_until) = retain_until else {
+            return self.put_versioned_immutable(key, bytes, media_type).await;
+        };
         self.validate_key(key)?;
         let size_bytes =
             u64::try_from(bytes.len()).map_err(|_| ObjectStoreError::ObjectTooLarge)?;
@@ -714,6 +1448,17 @@ where
     }
 }
 
+fn map_multipart_sdk_error<E>(error: &SdkError<E>) -> ObjectStoreError
+where
+    E: ProvideErrorMetadata,
+{
+    if error.as_service_error().and_then(|service| service.code()) == Some("NoSuchUpload") {
+        ObjectStoreError::ObjectNotFound
+    } else {
+        ObjectStoreError::ObjectUnavailable
+    }
+}
+
 fn log_upload_failure<E>(binding: &str, operation: &'static str, error: &SdkError<E>)
 where
     E: ProvideErrorMetadata,
@@ -758,6 +1503,9 @@ pub enum ObjectStoreError {
     /// Object could not be read.
     #[error("LW_OBJECT_UNAVAILABLE")]
     ObjectUnavailable,
+    /// A metadata lookup confirmed that the exact key does not exist.
+    #[error("LW_OBJECT_NOT_FOUND")]
+    ObjectNotFound,
     /// Stored bytes or metadata differ from the immutable manifest.
     #[error("LW_OBJECT_IDENTITY_MISMATCH")]
     ObjectIdentityMismatch,
@@ -773,6 +1521,9 @@ pub enum ObjectStoreError {
     /// Stored retention mode, deadline, metadata, or version differs from the request.
     #[error("LW_OBJECT_LOCK_IDENTITY_MISMATCH")]
     ObjectLockIdentityMismatch,
+    /// This object-store binding exposes only the byte-oriented API.
+    #[error("LW_OBJECT_STREAMING_UNSUPPORTED")]
+    StreamingUnsupported,
 }
 
 impl ObjectStoreError {
@@ -786,11 +1537,13 @@ impl ObjectStoreError {
             Self::SigningFailed => "LW_OBJECT_UPLOAD_SIGNING_FAILED",
             Self::UploadFailed => "LW_OBJECT_UPLOAD_FAILED",
             Self::ObjectUnavailable => "LW_OBJECT_UNAVAILABLE",
+            Self::ObjectNotFound => "LW_OBJECT_NOT_FOUND",
             Self::ObjectIdentityMismatch => "LW_OBJECT_IDENTITY_MISMATCH",
             Self::DeleteFailed => "LW_OBJECT_CLEANUP_FAILED",
             Self::VersioningRequired => "LW_OBJECT_VERSIONING_REQUIRED",
             Self::ObjectLockRequired => "LW_OBJECT_LOCK_REQUIRED",
             Self::ObjectLockIdentityMismatch => "LW_OBJECT_LOCK_IDENTITY_MISMATCH",
+            Self::StreamingUnsupported => "LW_OBJECT_STREAMING_UNSUPPORTED",
         }
     }
 }
@@ -802,14 +1555,29 @@ mod tests {
     use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
     use aws_smithy_runtime_api::http::{Response, StatusCode};
     use aws_smithy_types::body::SdkBody;
+    use contracts::http::PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES;
     use contracts::{ArtifactRef, UtcTimestamp};
+    use sha2::{Digest, Sha256};
     use testcontainers::core::{IntoContainerPort, WaitFor};
-    use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
+    use testcontainers::{GenericImage, ImageExt, bollard::Docker, runners::AsyncRunner};
 
     use super::{
-        BehaviorVersion, Credentials, ImmutableObjectStore, Region, S3ConfigBuilder,
-        S3ImmutableObjectStore, S3StoreConfig, s3_upload_diagnostics,
+        BehaviorVersion, Credentials, ImmutableObjectStore, ObjectStoreError,
+        PlatformImageMultipartPartInput, Region, S3ConfigBuilder, S3ImmutableObjectStore,
+        S3StoreConfig, s3_upload_diagnostics,
     };
+
+    async fn local_minio_image() -> Result<GenericImage, Box<dyn std::error::Error>> {
+        let descriptor = std::env::var("LABWEAVER_TEST_MINIO_IMAGE")
+            .map_err(|_| "LABWEAVER_TEST_MINIO_IMAGE must name a locally prepared image")?;
+        let (name, tag) = descriptor
+            .rsplit_once(':')
+            .filter(|(name, tag)| !name.is_empty() && !tag.is_empty() && !tag.contains('/'))
+            .ok_or("LABWEAVER_TEST_MINIO_IMAGE must be a local name:tag reference")?;
+        let docker = Docker::connect_with_local_defaults()?;
+        docker.inspect_image(&descriptor).await?;
+        Ok(GenericImage::new(name.to_owned(), tag.to_owned()))
+    }
 
     #[test]
     fn upload_diagnostics_extract_service_metadata() -> Result<(), Box<dyn std::error::Error>> {
@@ -849,6 +1617,30 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn configuration_accepts_four_hour_ttl_and_rejects_out_of_range_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = S3StoreConfig {
+            binding: "minio-primary".to_owned(),
+            endpoint: "https://minio.internal.example".parse()?,
+            bucket: "labweaver-materials".to_owned(),
+            region: "labweaver".to_owned(),
+            object_prefix: "problem-packages".to_owned(),
+            upload_ttl_seconds: 14_400,
+            max_object_bytes: 64 * 1024 * 1024,
+            force_path_style: true,
+            ca_bundle_file: None,
+        };
+        config.validate()?;
+
+        config.upload_ttl_seconds = 14_401;
+        assert!(config.validate().is_err());
+
+        config.upload_ttl_seconds = 0;
+        assert!(config.validate().is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -856,10 +1648,8 @@ mod tests {
     )]
     async fn minio_versioning_object_lock_and_cleanup_are_fail_closed()
     -> Result<(), Box<dyn std::error::Error>> {
-        let minio = GenericImage::new(
-            "quay.io/minio/minio",
-            "RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
-        )
+        let minio = local_minio_image()
+            .await?
             .with_exposed_port(9000.tcp())
             .with_wait_for(WaitFor::message_on_stderr("API:"))
             .with_env_var("MINIO_ROOT_USER", "labweaver-test")
@@ -917,6 +1707,7 @@ mod tests {
             config,
             client: client.clone(),
         };
+        verify_exact_key_version_cleanup(&store).await?;
         let package_config = S3StoreConfig {
             binding: "minio-package-e2-v1".to_owned(),
             endpoint: endpoint.parse()?,
@@ -1035,6 +1826,141 @@ mod tests {
         let reread = store.read_verified(key, &frozen.reference).await?;
         assert_eq!(reread.reference, frozen.reference);
         assert_eq!(reread.bytes, bytes);
+        let streamed = store.read_verified_file(key, &frozen.reference).await?;
+        let streamed_path = streamed.path().to_owned();
+        assert_eq!(streamed.reference(), &frozen.reference);
+        assert_eq!(std::fs::read(&streamed_path)?, bytes);
+        assert_eq!(streamed.sha256(), format!("{:x}", Sha256::digest(bytes)));
+        drop(streamed);
+        assert!(!streamed_path.exists());
+
+        // Platform image archives use the real S3 multipart path.  Keep one non-final part at the
+        // production 64 MiB boundary so MinIO enforces the same minimum-part behavior as S3.
+        let mut image_config = store.config.clone();
+        image_config.upload_ttl_seconds = 600;
+        image_config.max_object_bytes = PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES * 2;
+        let image_store = S3ImmutableObjectStore {
+            config: image_config,
+            client: client.clone(),
+        };
+        let image_key = "problem-packages/platform-image-uploads/multipart-e2e.tar";
+        let image_part_size = PLATFORM_IMAGE_UPLOAD_PART_SIZE_BYTES;
+        let image_tail = b"platform-image-tail".to_vec();
+        let image_tail_size = u64::try_from(image_tail.len())?;
+        let image_size = image_part_size + image_tail_size;
+        let observed_now = time::OffsetDateTime::now_utc();
+        let observed_now =
+            observed_now.replace_nanosecond(observed_now.nanosecond() / 1_000_000 * 1_000_000)?;
+        let image_now = UtcTimestamp::from_utc(observed_now)?;
+        let image_upload = image_store
+            .create_platform_image_multipart_upload(
+                image_key,
+                image_size,
+                "application/x-tar",
+                image_now,
+            )
+            .await?;
+        assert_eq!(image_upload.part_count, 2);
+        assert_eq!(image_upload.parts.len(), 2);
+        let http = reqwest::Client::builder().no_proxy().build()?;
+        let image_head = vec![0xA5; usize::try_from(image_part_size)?];
+        let mut part_inputs = Vec::with_capacity(image_upload.parts.len());
+        for (part, bytes) in image_upload.parts.iter().zip([image_head, image_tail]) {
+            let mut request = http.put(&part.url);
+            for (name, value) in &part.required_headers {
+                request = request.header(name, value);
+            }
+            let response = request.body(bytes).send().await?;
+            if !response.status().is_success() {
+                return Err(format!("multipart part upload returned {}", response.status()).into());
+            }
+            let etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .ok_or("multipart part response omitted ETag")?
+                .to_str()?
+                .to_owned();
+            part_inputs.push(PlatformImageMultipartPartInput {
+                part_number: part.part_number,
+                etag,
+            });
+        }
+        let observed_parts = image_store
+            .list_platform_image_multipart_parts(image_key, &image_upload.upload_id)
+            .await?;
+        assert_eq!(observed_parts.len(), 2);
+        assert_eq!(observed_parts[0].size_bytes, image_part_size);
+        assert_eq!(observed_parts[1].size_bytes, image_tail_size);
+
+        let resumed = image_store
+            .presign_platform_image_multipart_upload(
+                image_key,
+                &image_upload.upload_id,
+                image_size,
+                UtcTimestamp::from_utc(image_now.get() + time::Duration::seconds(1))?,
+                image_upload.expires_at,
+            )
+            .await?;
+        assert_eq!(resumed.expires_at, image_upload.expires_at);
+        assert_eq!(resumed.part_count, image_upload.part_count);
+
+        let mut wrong_parts = part_inputs.clone();
+        wrong_parts[0].etag.push('x');
+        assert_eq!(
+            image_store
+                .complete_platform_image_multipart_upload(
+                    image_key,
+                    &image_upload.upload_id,
+                    image_size,
+                    &wrong_parts,
+                )
+                .await,
+            Err(ObjectStoreError::ObjectIdentityMismatch)
+        );
+        image_store
+            .complete_platform_image_multipart_upload(
+                image_key,
+                &image_upload.upload_id,
+                image_size,
+                &part_inputs,
+            )
+            .await?;
+        assert!(
+            image_store
+                .find_platform_image_multipart_uploads(image_key)
+                .await?
+                .is_empty()
+        );
+        let image_reference = image_store
+            .freeze_current_reference(image_key, image_size, "application/x-tar")
+            .await?;
+        assert!(!image_reference.object_version.is_empty());
+
+        let abort_key = "problem-packages/platform-image-uploads/multipart-abort-e2e.tar";
+        let abort_upload = image_store
+            .create_platform_image_multipart_upload(
+                abort_key,
+                image_part_size + 1,
+                "application/x-tar",
+                image_now,
+            )
+            .await?;
+        image_store
+            .abort_platform_image_multipart_upload(abort_key, &abort_upload.upload_id)
+            .await?;
+        image_store
+            .abort_platform_image_multipart_upload(abort_key, &abort_upload.upload_id)
+            .await?;
+        assert!(
+            image_store
+                .find_platform_image_multipart_uploads(abort_key)
+                .await?
+                .is_empty()
+        );
+        assert!(image_store.list_key_versions(abort_key).await?.is_empty());
+        image_store
+            .delete_orphan(image_key, &image_reference.object_version)
+            .await?;
 
         let package_bytes = b"approved package playbook";
         let package_key = "problem-packages/course/package/playbook";
@@ -1112,28 +2038,111 @@ mod tests {
         let locked_bytes = b"immutable frozen submission";
         let locked_key = "problem-packages/course/submissions/frozen";
         let locked = store
-            .put_governance_locked(
+            .put_immutable(
                 locked_key,
                 locked_bytes,
                 "application/vnd.labweaver.frozen-submission.v1+json",
                 now,
-                retain_until,
+                Some(retain_until),
             )
             .await?;
         assert_eq!(locked.bytes, locked_bytes);
         assert!(!locked.reference.object_version.is_empty());
         assert!(
             store
-                .put_governance_locked(
+                .put_immutable(
                     locked_key,
                     locked_bytes,
                     "application/vnd.labweaver.frozen-submission.v1+json",
                     now,
-                    retain_until,
+                    Some(retain_until),
                 )
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    async fn verify_exact_key_version_cleanup(
+        store: &S3ImmutableObjectStore,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let key = "problem-packages/platform-image-uploads/paged-versions.tar";
+        let neighbor = format!("{key}.another-upload");
+        let unrelated = "problem-packages/another-upload/archive.tar";
+        for other_key in [&neighbor, unrelated] {
+            store
+                .client
+                .put_object()
+                .bucket(&store.config.bucket)
+                .key(other_key)
+                .content_type("application/x-tar")
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+                .send()
+                .await?;
+        }
+        let mut expected = std::collections::BTreeSet::new();
+        for _ in 0..1001 {
+            let response = store
+                .client
+                .put_object()
+                .bucket(&store.config.bucket)
+                .key(key)
+                .content_type("application/x-tar")
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+                .send()
+                .await?;
+            expected.insert(response.version_id().ok_or("version missing")?.to_owned());
+        }
+        let reference = store
+            .freeze_current_reference(key, 1, "application/x-tar")
+            .await?;
+        assert!(expected.contains(&reference.object_version));
+        assert_eq!(
+            store
+                .freeze_current_reference(key, 2, "application/x-tar")
+                .await,
+            Err(super::ObjectStoreError::ObjectIdentityMismatch)
+        );
+        let marker = store
+            .client
+            .delete_object()
+            .bucket(&store.config.bucket)
+            .key(key)
+            .send()
+            .await?;
+        expected.insert(
+            marker
+                .version_id()
+                .ok_or("delete marker missing")?
+                .to_owned(),
+        );
+        assert_eq!(
+            store
+                .freeze_current_reference(key, 1, "application/x-tar")
+                .await,
+            Err(super::ObjectStoreError::ObjectNotFound)
+        );
+        let versions = store.list_key_versions(key).await?;
+        let observed = versions
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(observed.len(), expected.len(), "version count differs");
+        assert!(
+            expected.difference(&observed).next().is_none(),
+            "reviewed version missing from enumeration"
+        );
+        assert_eq!(
+            store.list_key_versions("unowned-key").await,
+            Err(super::ObjectStoreError::ObjectIdentityInvalid)
+        );
+        for version in versions {
+            store.delete_orphan(key, &version).await?;
+        }
+        assert!(store.list_key_versions(key).await?.is_empty());
+        for other_key in [&neighbor, unrelated] {
+            assert_eq!(store.list_key_versions(other_key).await?.len(), 1);
+        }
         Ok(())
     }
 }

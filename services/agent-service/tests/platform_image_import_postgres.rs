@@ -12,9 +12,13 @@ use agent_service::build_store::PgBuildStore;
 use agent_service::generated_artifacts::GeneratedArtifactStore;
 use agent_service::llm_review::LlmReviewStore;
 use agent_service::oci_registry::RegistryCredentials;
+use agent_service::platform_image_jobs::{PlatformImageImportJobStore, PlatformImageImportWorker};
 use agent_service::platform_images::{PgPlatformImageCatalog, PlatformImageRegistry};
 use agent_service::run_store::PostgresAgentRunStore;
-use contracts::{ActorId, ArtifactId};
+use contracts::http::{
+    InternalPlatformImageImportJobStatus, PlatformImageEntry, PlatformImageImportJobState,
+};
+use contracts::{ActorId, ArtifactId, UploadSessionId};
 use persistence_sqlx::Sha256Digest;
 use reqwest::StatusCode;
 use sqlx::postgres::PgPoolOptions;
@@ -25,6 +29,11 @@ mod support;
 use support::{FakeObjects, FakeRegistry, apply_agent_migrations};
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+// The production importer admits one import per process before it distinguishes OCI and VM
+// archives. Keep fixture jobs serial within this integration binary as well, so an unrelated
+// import cannot leave a terminal-state assertion waiting behind the shared admission gate.
+static IMPORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Verified OCI layout archive plus the identity the importer must derive from it.
 struct LayoutArchive {
@@ -234,23 +243,158 @@ async fn spawn_api(
     pool: sqlx::PgPool,
     registry: Option<PlatformImageRegistry>,
     staged: Vec<u8>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<ImportApi, Box<dyn std::error::Error>> {
     let state = Arc::new(AgentApiState {
         store: PostgresAgentRunStore::new(pool.clone()),
         build_store: PgBuildStore::new(pool.clone()),
         generated_artifacts: GeneratedArtifactStore::new(pool.clone()),
         llm_reviews: LlmReviewStore::new(pool.clone()),
-        platform_images: PgPlatformImageCatalog::new(pool),
+        platform_images: PgPlatformImageCatalog::new(pool.clone()),
+        platform_image_import_jobs: PlatformImageImportJobStore::new(pool),
         platform_registry: registry,
         objects: Arc::new(FakeObjects::new(staged)),
     });
+    let worker = PlatformImageImportWorker {
+        jobs: state.platform_image_import_jobs.clone(),
+        catalog: state.platform_images.clone(),
+        registry: state.platform_registry.clone(),
+        objects: Arc::clone(&state.objects),
+        worker_id: "import-test".to_owned(),
+        lease_duration: std::time::Duration::from_secs(10),
+        poll_interval: std::time::Duration::from_millis(10),
+    };
     let router = router(state).layer(axum::middleware::from_fn(inject_control_identity));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    Ok(format!("http://{address}"))
+    Ok(ImportApi {
+        url: format!("http://{address}"),
+        server,
+        worker,
+    })
+}
+
+struct ImportApi {
+    url: String,
+    server: tokio::task::JoinHandle<()>,
+    worker: PlatformImageImportWorker,
+}
+
+impl std::fmt::Display for ImportApi {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.url.fmt(formatter)
+    }
+}
+
+impl Drop for ImportApi {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn run_import(
+    api: &ImportApi,
+    request: serde_json::Value,
+) -> Result<
+    (
+        InternalPlatformImageImportJobStatus,
+        Option<PlatformImageEntry>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let _import_guard = IMPORT_TEST_LOCK.lock().await;
+    let upload_id = UploadSessionId::new();
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let mut enqueued = client
+        .post(format!("{api}/internal/v1/platform-images/import-jobs"))
+        .header("Idempotency-Key", format!("import:{upload_id}"))
+        .json(&serde_json::json!({"uploadId": upload_id, "request": request}))
+        .send()
+        .await?;
+    let status = enqueued.status();
+    let json_content_type = enqueued
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            matches!(
+                value.trim(),
+                "application/json" | "application/problem+json"
+            )
+        });
+    let mut body = Vec::new();
+    while let Some(chunk) = enqueued.chunk().await? {
+        assert!(
+            body.len() + chunk.len() <= 16 * 1024,
+            "import enqueue response exceeds fixture bound"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    let response_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let diagnostic = response_json
+        .as_ref()
+        .and_then(|value| value.get("diagnosticCode"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            matches!(
+                *value,
+                "LW_PLATFORM_IMAGE_IMPORT_NOT_FOUND"
+                    | "LW_PLATFORM_IMAGE_IMPORT_STATE_CONFLICT"
+                    | "LW_PLATFORM_IMAGE_IMPORT_REQUEST_INVALID"
+                    | "LW_AGENT_PERSISTENCE_FAILED"
+                    | "LW_AUTH_SERVICE_IDENTITY_DENIED"
+                    | "LW_CONTRACT_DOCUMENT_INVALID"
+            )
+        });
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "enqueue response: json_content_type={json_content_type}, json_object={}, diagnostic={diagnostic:?}",
+        response_json
+            .as_ref()
+            .is_some_and(serde_json::Value::is_object)
+    );
+    let initial: InternalPlatformImageImportJobStatus = serde_json::from_slice(&body)?;
+    assert_eq!(initial.upload_id, upload_id);
+    assert_eq!(initial.state, PlatformImageImportJobState::Queued);
+    let _worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(api.worker.clone().run()));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let response = client
+            .get(format!(
+                "{api}/internal/v1/platform-images/import-jobs/{upload_id}"
+            ))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let status: InternalPlatformImageImportJobStatus = response.json().await?;
+        if matches!(
+            status.state,
+            PlatformImageImportJobState::Succeeded
+                | PlatformImageImportJobState::Failed
+                | PlatformImageImportJobState::Cancelled
+        ) {
+            let catalog: contracts::http::PlatformImageCatalog = client
+                .get(format!("{api}/internal/v1/platform-images"))
+                .send()
+                .await?
+                .json()
+                .await?;
+            let entry = catalog
+                .entries
+                .into_iter()
+                .find(|entry| Some(entry.catalog_id) == status.catalog_id);
+            return Ok((status, entry));
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "import did not reach a terminal state: {status:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 async fn postgres() -> Result<(sqlx::PgPool, ContainerAsync<Postgres>), Box<dyn std::error::Error>>
@@ -284,19 +428,15 @@ async fn import_publishes_every_blob_tags_the_reference_and_pins_the_digest()
         archive.bytes.clone(),
     )
     .await?;
-    let client = reqwest::Client::new();
 
-    let imported = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&import_request(
-            "ubuntu-24.04",
-            &target,
-            u64::try_from(archive.bytes.len())?,
-        ))
-        .send()
-        .await?;
-    assert_eq!(imported.status(), StatusCode::CREATED);
-    let imported: serde_json::Value = imported.json().await?;
+    let imported = run_import(
+        &api,
+        import_request("ubuntu-24.04", &target, u64::try_from(archive.bytes.len())?),
+    )
+    .await?;
+    assert_eq!(imported.0.state, PlatformImageImportJobState::Succeeded);
+    let imported =
+        serde_json::to_value(imported.1.ok_or("successful import has no catalog entry")?)?;
     assert_eq!(imported["resolvedDigest"], archive.manifest_digest);
     assert_eq!(imported["mediaType"], archive.manifest_media_type);
     assert_eq!(imported["sizeBytes"], archive.size_bytes);
@@ -313,23 +453,21 @@ async fn import_publishes_every_blob_tags_the_reference_and_pins_the_digest()
         Some(archive.manifest_digest.clone())
     );
 
-    let duplicate = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&import_request(
-            "ubuntu-24.04",
-            &target,
-            u64::try_from(archive.bytes.len())?,
-        ))
-        .send()
-        .await?;
-    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
-    let duplicate: serde_json::Value = duplicate.json().await?;
+    let duplicate = run_import(
+        &api,
+        import_request("ubuntu-24.04", &target, u64::try_from(archive.bytes.len())?),
+    )
+    .await?;
+    assert_eq!(duplicate.0.state, PlatformImageImportJobState::Failed);
+    let duplicate = serde_json::json!({"diagnosticCode": duplicate.0.diagnostic});
     assert_eq!(
         duplicate["diagnosticCode"],
         "LW_PLATFORM_IMAGE_STATE_CONFLICT"
     );
 
-    let listed: serde_json::Value = client
+    let listed: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
         .await?
@@ -345,7 +483,6 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
     let (pool, _container) = postgres().await?;
     let (registry, base) = FakeRegistry::spawn().await?;
     let host = FakeRegistry::authority(&base);
-    let client = reqwest::Client::new();
 
     let config = br#"{"architecture":"amd64","os":"linux"}"#.to_vec();
     let layer = b"labweaver-platform-image-layer-payload".to_vec();
@@ -357,17 +494,17 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
         corrupted.bytes.clone(),
     )
     .await?;
-    let mismatched = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&import_request(
+    let mismatched = run_import(
+        &api,
+        import_request(
             "corrupted",
             &format!("{host}/labweaver-system/admin-import:24.04"),
             u64::try_from(corrupted.bytes.len())?,
-        ))
-        .send()
-        .await?;
-    assert_eq!(mismatched.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let mismatched: serde_json::Value = mismatched.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(mismatched.0.state, PlatformImageImportJobState::Failed);
+    let mismatched = serde_json::json!({"diagnosticCode": mismatched.0.diagnostic});
     assert_eq!(mismatched["diagnosticCode"], "LW_AGENT_OCI_BLOB_MISMATCH");
 
     let api = spawn_api(
@@ -376,17 +513,17 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
         b"not an OCI layout archive".to_vec(),
     )
     .await?;
-    let malformed = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&import_request(
+    let malformed = run_import(
+        &api,
+        import_request(
             "malformed",
             &format!("{host}/labweaver-system/admin-import:24.04"),
             25,
-        ))
-        .send()
-        .await?;
-    assert_eq!(malformed.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let malformed: serde_json::Value = malformed.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(malformed.0.state, PlatformImageImportJobState::Failed);
+    let malformed = serde_json::json!({"diagnosticCode": malformed.0.diagnostic});
     assert_eq!(malformed["diagnosticCode"], "LW_AGENT_OCI_LAYOUT_INVALID");
 
     let trusted = oci_layout_archive(&config, &layer, None);
@@ -396,17 +533,17 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
         trusted.bytes.clone(),
     )
     .await?;
-    let foreign = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&import_request(
+    let foreign = run_import(
+        &api,
+        import_request(
             "foreign",
             "quay.io/labweaver-system/admin-import:24.04",
             u64::try_from(trusted.bytes.len())?,
-        ))
-        .send()
-        .await?;
-    assert_eq!(foreign.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let foreign: serde_json::Value = foreign.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(foreign.0.state, PlatformImageImportJobState::Failed);
+    let foreign = serde_json::json!({"diagnosticCode": foreign.0.diagnostic});
     assert_eq!(
         foreign["diagnosticCode"],
         "LW_PLATFORM_IMAGE_REFERENCE_INVALID"
@@ -414,7 +551,9 @@ async fn import_fails_closed_before_publishing_or_pinning() -> Result<(), Box<dy
 
     assert!(registry.blob_digests().is_empty());
     assert!(registry.manifest_digest("24.04").is_none());
-    let listed: serde_json::Value = client
+    let listed: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
         .await?
@@ -437,17 +576,17 @@ async fn import_requires_a_configured_platform_registry() -> Result<(), Box<dyn 
     );
     let api = spawn_api(pool.clone(), None, archive.bytes.clone()).await?;
 
-    let refused = reqwest::Client::new()
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&import_request(
+    let refused = run_import(
+        &api,
+        import_request(
             "ubuntu-24.04",
             &format!("{host}/labweaver-system/admin-import:24.04"),
             u64::try_from(archive.bytes.len())?,
-        ))
-        .send()
-        .await?;
-    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let refused: serde_json::Value = refused.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(refused.0.state, PlatformImageImportJobState::Failed);
+    let refused = serde_json::json!({"diagnosticCode": refused.0.diagnostic});
     assert_eq!(
         refused["diagnosticCode"],
         "LW_PLATFORM_IMAGE_REGISTRY_NOT_CONFIGURED"
@@ -455,11 +594,10 @@ async fn import_requires_a_configured_platform_registry() -> Result<(), Box<dyn 
     Ok(())
 }
 
-async fn listed_entries(
-    client: &reqwest::Client,
-    api: &str,
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let listed: serde_json::Value = client
+async fn listed_entries(api: &str) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    let listed: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .get(format!("{api}/internal/v1/platform-images"))
         .send()
         .await?
@@ -484,22 +622,22 @@ async fn vm_disk_import_wraps_the_disk_publishes_it_and_pins_the_reviewed_identi
         archive.clone(),
     )
     .await?;
-    let client = reqwest::Client::new();
 
-    let imported = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&vm_import_request(
+    let imported = run_import(
+        &api,
+        vm_import_request(
             "fedora-41-qcow2",
             &target,
             u64::try_from(archive.len())?,
             "qcow2",
             "disk/disk.img",
             capacity_bytes,
-        ))
-        .send()
-        .await?;
-    assert_eq!(imported.status(), StatusCode::CREATED);
-    let imported: serde_json::Value = imported.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(imported.0.state, PlatformImageImportJobState::Succeeded);
+    let imported =
+        serde_json::to_value(imported.1.ok_or("successful import has no catalog entry")?)?;
     assert_eq!(imported["kind"], "virtual_machine");
     assert_eq!(imported["sourceReference"], target);
     assert_eq!(imported["status"], "active");
@@ -519,7 +657,7 @@ async fn vm_disk_import_wraps_the_disk_publishes_it_and_pins_the_reviewed_identi
     );
     assert_ne!(resolved, format!("sha256:{}", digest_hex(&disk)));
 
-    let entries = listed_entries(&client, &api).await?;
+    let entries = listed_entries(&api.url).await?;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["diskSha256"], digest_hex(&disk));
     Ok(())
@@ -539,22 +677,21 @@ async fn vm_disk_import_fails_closed_when_the_disk_exceeds_the_declared_capacity
         archive.clone(),
     )
     .await?;
-    let client = reqwest::Client::new();
 
-    let oversized = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&vm_import_request(
+    let oversized = run_import(
+        &api,
+        vm_import_request(
             "oversized-disk",
             &format!("{host}/labweaver-system/vm-base:oversized"),
             u64::try_from(archive.len())?,
             "raw",
             "disk/disk.img",
             4_095,
-        ))
-        .send()
-        .await?;
-    assert_eq!(oversized.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let oversized: serde_json::Value = oversized.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(oversized.0.state, PlatformImageImportJobState::Failed);
+    let oversized = serde_json::json!({"diagnosticCode": oversized.0.diagnostic});
     assert_eq!(
         oversized["diagnosticCode"],
         "LW_PLATFORM_IMAGE_CAPACITY_INVALID"
@@ -567,20 +704,20 @@ async fn vm_disk_import_fails_closed_when_the_disk_exceeds_the_declared_capacity
         empty_archive.clone(),
     )
     .await?;
-    let empty = client
-        .post(format!("{empty_api}/internal/v1/platform-images/imports"))
-        .json(&vm_import_request(
+    let empty = run_import(
+        &empty_api,
+        vm_import_request(
             "empty-disk",
             &format!("{host}/labweaver-system/vm-base:empty"),
             u64::try_from(empty_archive.len())?,
             "raw",
             "disk/disk.img",
             1,
-        ))
-        .send()
-        .await?;
-    assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let empty: serde_json::Value = empty.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(empty.0.state, PlatformImageImportJobState::Failed);
+    let empty = serde_json::json!({"diagnosticCode": empty.0.diagnostic});
     assert_eq!(
         empty["diagnosticCode"],
         "LW_PLATFORM_IMAGE_CAPACITY_INVALID"
@@ -588,7 +725,7 @@ async fn vm_disk_import_fails_closed_when_the_disk_exceeds_the_declared_capacity
 
     assert!(registry.blob_digests().is_empty());
     assert!(registry.manifest_digest("oversized").is_none());
-    assert!(listed_entries(&client, &api).await?.is_empty());
+    assert!(listed_entries(&api.url).await?.is_empty());
     Ok(())
 }
 
@@ -606,22 +743,21 @@ async fn vm_disk_import_rejects_an_archive_that_is_not_the_declared_disk()
         misnamed_archive.clone(),
     )
     .await?;
-    let client = reqwest::Client::new();
 
-    let misnamed = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&vm_import_request(
+    let misnamed = run_import(
+        &api,
+        vm_import_request(
             "misnamed-disk",
             &format!("{host}/labweaver-system/vm-base:misnamed"),
             u64::try_from(misnamed_archive.len())?,
             "qcow2",
             "disk/disk.img",
             4_096,
-        ))
-        .send()
-        .await?;
-    assert_eq!(misnamed.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let misnamed: serde_json::Value = misnamed.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(misnamed.0.state, PlatformImageImportJobState::Failed);
+    let misnamed = serde_json::json!({"diagnosticCode": misnamed.0.diagnostic});
     assert_eq!(misnamed["diagnosticCode"], "LW_PLATFORM_IMAGE_DISK_INVALID");
 
     let mut partial = vm_import_request(
@@ -633,13 +769,9 @@ async fn vm_disk_import_rejects_an_archive_that_is_not_the_declared_disk()
         4_096,
     );
     partial["capacityBytes"] = serde_json::Value::Null;
-    let partial = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&partial)
-        .send()
-        .await?;
-    assert_eq!(partial.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let partial: serde_json::Value = partial.json().await?;
+    let partial = run_import(&api, partial).await?;
+    assert_eq!(partial.0.state, PlatformImageImportJobState::Failed);
+    let partial = serde_json::json!({"diagnosticCode": partial.0.diagnostic});
     assert_eq!(partial["diagnosticCode"], "LW_PLATFORM_IMAGE_DISK_INVALID");
 
     let mut builder = tar::Builder::new(Vec::new());
@@ -652,27 +784,25 @@ async fn vm_disk_import_rejects_an_archive_that_is_not_the_declared_disk()
         additional.clone(),
     )
     .await?;
-    let extra = client
-        .post(format!(
-            "{additional_api}/internal/v1/platform-images/imports"
-        ))
-        .json(&vm_import_request(
+    let extra = run_import(
+        &additional_api,
+        vm_import_request(
             "extra-entry",
             &format!("{host}/labweaver-system/vm-base:extra"),
             u64::try_from(additional.len())?,
             "qcow2",
             "disk/disk.img",
             4_096,
-        ))
-        .send()
-        .await?;
-    assert_eq!(extra.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let extra: serde_json::Value = extra.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(extra.0.state, PlatformImageImportJobState::Failed);
+    let extra = serde_json::json!({"diagnosticCode": extra.0.diagnostic});
     assert_eq!(extra["diagnosticCode"], "LW_PLATFORM_IMAGE_DISK_INVALID");
 
     assert!(registry.blob_digests().is_empty());
     assert!(registry.manifest_digest("misnamed").is_none());
-    assert!(listed_entries(&client, &api).await?.is_empty());
+    assert!(listed_entries(&api.url).await?.is_empty());
     Ok(())
 }
 
@@ -690,7 +820,6 @@ async fn container_registrations_never_carry_a_disk_descriptor()
         archive.clone(),
     )
     .await?;
-    let client = reqwest::Client::new();
 
     let mut container_with_disk = vm_import_request(
         "container-with-disk",
@@ -701,35 +830,32 @@ async fn container_registrations_never_carry_a_disk_descriptor()
         4_096,
     );
     container_with_disk["kind"] = serde_json::Value::String("container".to_owned());
-    let container_with_disk = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&container_with_disk)
-        .send()
-        .await?;
+    let container_with_disk = run_import(&api, container_with_disk).await?;
     assert_eq!(
-        container_with_disk.status(),
-        StatusCode::UNPROCESSABLE_ENTITY
+        container_with_disk.0.state,
+        PlatformImageImportJobState::Failed
     );
-    let container_with_disk: serde_json::Value = container_with_disk.json().await?;
+    let container_with_disk =
+        serde_json::json!({"diagnosticCode": container_with_disk.0.diagnostic});
     assert_eq!(
         container_with_disk["diagnosticCode"],
         "LW_PLATFORM_IMAGE_DISK_INVALID"
     );
 
-    let zero_capacity = client
-        .post(format!("{api}/internal/v1/platform-images/imports"))
-        .json(&vm_import_request(
+    let zero_capacity = run_import(
+        &api,
+        vm_import_request(
             "zero-capacity",
             &format!("{host}/labweaver-system/vm-base:zero"),
             u64::try_from(archive.len())?,
             "qcow2",
             "disk/disk.img",
             0,
-        ))
-        .send()
-        .await?;
-    assert_eq!(zero_capacity.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let zero_capacity: serde_json::Value = zero_capacity.json().await?;
+        ),
+    )
+    .await?;
+    assert_eq!(zero_capacity.0.state, PlatformImageImportJobState::Failed);
+    let zero_capacity = serde_json::json!({"diagnosticCode": zero_capacity.0.diagnostic});
     assert_eq!(
         zero_capacity["diagnosticCode"],
         "LW_PLATFORM_IMAGE_DISK_INVALID"
@@ -737,6 +863,6 @@ async fn container_registrations_never_carry_a_disk_descriptor()
 
     assert!(registry.blob_digests().is_empty());
     assert!(registry.manifest_digest("24.04").is_none());
-    assert!(listed_entries(&client, &api).await?.is_empty());
+    assert!(listed_entries(&api.url).await?.is_empty());
     Ok(())
 }

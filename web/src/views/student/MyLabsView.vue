@@ -2,10 +2,14 @@
   <div class="my-labs">
     <header class="page-header">
       <div class="header-title-row">
-        <h2>我的项目环境</h2>
+        <h2>{{ props.teacherMode ? '项目环境' : '我的项目环境' }}</h2>
         <span class="header-badge" v-if="state.kind === 'success'">{{ state.data.length }} 个环境</span>
       </div>
-      <p class="page-subtitle">查看当前项目创建的环境；进入终端控制台或提交评测材料。</p>
+      <p class="page-subtitle">
+        {{ props.teacherMode
+          ? '查看当前项目下的课程实验和 Work 环境；进入控制台管理运行状态与访问授权。'
+          : '查看当前项目创建的环境；进入终端控制台或提交评测材料。' }}
+      </p>
     </header>
 
     <DiagnosticBanner
@@ -19,10 +23,21 @@
     <DiagnosticBanner
       v-else-if="isContextMissing"
       code="PROJECT_CONTEXT_MISSING"
-      message="项目上下文未绑定，无法加载你的实验列表。请通过顶栏项目选择器选择项目或联系管理员。"
+      :message="props.teacherMode
+        ? '项目上下文未绑定，无法加载项目环境。请通过顶栏项目选择器选择项目或联系管理员。'
+        : '项目上下文未绑定，无法加载你的实验列表。请通过顶栏项目选择器选择项目或联系管理员。'"
       :retryable="false"
       severity="error"
     />
+
+    <div
+      v-else-if="isProjectContextLoading"
+      class="project-context-loading"
+      role="status"
+      aria-live="polite"
+    >
+      正在同步项目上下文，请稍候…
+    </div>
 
     <template v-else>
       <!-- GCP Action Bar -->
@@ -36,6 +51,7 @@
       >
         <template #leading>
           <button
+            v-if="!props.teacherMode"
             type="button"
             class="filled-button"
             @click="openCreateDrawer"
@@ -71,7 +87,7 @@
             :rows="filteredRows"
             empty-text="没有匹配过滤条件的项目环境"
             interactive
-            aria-label="我的项目环境列表"
+            :aria-label="props.teacherMode ? '项目环境列表' : '我的项目环境列表'"
             @row-click="(row) => selectRowForInspect(row as unknown as EnvironmentSummary)"
           >
             <template #displayLabel="{ row }">
@@ -100,7 +116,7 @@
             </template>
 
             <template #eligibilityExpiresAt="{ row }">
-              {{ formatTimestamp(row.eligibilityExpiresAt) }}
+              {{ environmentMaterialDeadlineLabel(row.eligibilityExpiresAt) }}
             </template>
 
             <template #actions="{ row }">
@@ -117,6 +133,14 @@
                   <span>{{ canOpenConsole(row) ? '控制台' : '控制台不可用' }}</span>
                 </button>
                 <button
+                  v-if="failedCleanup(row)"
+                  type="button"
+                  class="outlined-button small"
+                  @click="openCleanup(row)"
+                >
+                  处理回收
+                </button>
+                <button
                   type="button"
                   class="outlined-button small"
                   @click="selectRowForInspect(row)"
@@ -128,7 +152,9 @@
           </DataTable>
 
           <p class="labs-hint" role="status">
-            点击行可原地查看项目环境规格与端点详情；点击「创建项目环境」从已发布模板快速启动新环境。
+            {{ props.teacherMode
+              ? '点击行可查看项目环境规格与端点详情；进入控制台后可管理生命周期和访问授权。'
+              : '点击行可原地查看项目环境规格与端点详情；点击「创建项目环境」从已发布模板快速启动新环境。' }}
           </p>
         </template>
 
@@ -136,8 +162,9 @@
           <div class="empty-labs-pane">
             <SvgIcon name="science" size="xl" aria-hidden="true" />
             <h3>暂无项目环境</h3>
-            <p>当前项目还没有环境。可从教师已发布的模板创建一个项目环境。</p>
+            <p>{{ props.teacherMode ? '当前项目还没有可管理的环境。' : '当前项目还没有环境。可从教师已发布的模板创建一个项目环境。' }}</p>
             <button
+              v-if="!props.teacherMode"
               type="button"
               class="filled-button"
               @click="openCreateDrawer"
@@ -170,19 +197,19 @@
               <CopyButton :text="inspectedEnv.id" label="复制环境 ID" />
             </div>
           </div>
-            <div class="prop-row">
-              <span class="prop-label">Runtime 类型</span>
-              <span class="prop-value">{{ inspectedEnv.runtimeKind === 'container' ? '容器环境 (Container)' : '虚拟机环境 (KubeVirt VM)' }}</span>
-            </div>
-            <div class="prop-row">
-              <span class="prop-label">用途</span>
-              <span class="prop-value">{{ environmentClassLabel(inspectedEnv.class) }}</span>
-            </div>
-            <div class="prop-row">
-              <span class="prop-label">到期时间</span>
-              <span class="prop-value">{{ formatTimestamp(inspectedEnv.eligibilityExpiresAt) }}</span>
-            </div>
-            <p class="inspect-next-action" role="status">{{ nextActionLabel(inspectedEnv) }}</p>
+          <div class="prop-row">
+            <span class="prop-label">Runtime 类型</span>
+            <span class="prop-value">{{ inspectedEnv.runtimeKind === 'container' ? '容器环境 (Container)' : '虚拟机环境 (KubeVirt VM)' }}</span>
+          </div>
+          <div class="prop-row">
+            <span class="prop-label">用途</span>
+            <span class="prop-value">{{ environmentClassLabel(inspectedEnv.class) }}</span>
+          </div>
+          <div class="prop-row">
+            <span class="prop-label">材料保留至</span>
+            <span class="prop-value">{{ environmentMaterialDeadlineLabel(inspectedEnv.eligibilityExpiresAt) }}</span>
+          </div>
+          <p class="inspect-next-action" role="status">{{ nextActionLabel(inspectedEnv) }}</p>
         </div>
 
         <div class="inspect-actions">
@@ -196,13 +223,21 @@
             <SvgIcon name="terminal" size="sm" aria-hidden="true" />
             <span>{{ canOpenConsole(inspectedEnv) ? '进入终端控制台' : '终端控制台不可用' }}</span>
           </button>
+          <button
+            v-if="failedCleanup(inspectedEnv)"
+            type="button"
+            class="outlined-button full-width"
+            @click="openCleanup(inspectedEnv)"
+          >
+            处理回收
+          </button>
         </div>
       </div>
     </EvidenceSideSheet>
 
     <!-- Create Environment Modal (GCP Style Template Selector) -->
     <div
-      v-if="showCreateModal"
+      v-if="showCreateModal && !props.teacherMode"
       class="create-modal-overlay"
       role="dialog"
       aria-label="创建项目环境"
@@ -275,8 +310,8 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useEnvironmentTemplateReleases } from '@/composables/useEnvironmentTemplateReleases'
 import { useEnvironmentLifecycle } from '@/composables/useEnvironmentLifecycle'
+import { fetchProjectEnvironments } from '@/composables/useProjectWorkEnvironments'
 import { useProjects } from '@/composables/useProjects'
-import { listEnvironments } from '@/generated/contracts'
 import type { EnvironmentSummary, EnvironmentTemplateReleaseViewSchema } from '@/generated/contracts'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DataTable from '@/components/common/DataTable.vue'
@@ -291,6 +326,16 @@ import { formatTimestamp, idempotencyKey } from '@/utils/format'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import { environmentStateLabel } from '@/utils/stateLabels'
+
+const props = withDefaults(defineProps<{
+  /** Route used to open the shared environment control console. */
+  environmentPath?: string
+  /** Teacher inventory shows all classes in the selected project and does not create environments. */
+  teacherMode?: boolean
+}>(), {
+  environmentPath: '/student/environments',
+  teacherMode: false,
+})
 
 const projects = useProjects()
 const route = useRoute()
@@ -311,8 +356,14 @@ const projectContextBlocked = computed(() => projects.projects.kind !== 'success
 const projectId = computed(() => projectContextBlocked.value ? undefined : projects.selectedProjectId ?? undefined)
 const selectedProject = computed(() => projectContextBlocked.value ? null : projects.selectedProject)
 const courseId = computed(() => selectedProject.value?.courseId ?? undefined)
-const isContextMissing = computed(() => !projectId.value)
 const isInvalidProjectContext = computed(() => routeProjectInvalid.value)
+const isProjectContextLoading = computed(() => {
+  if (projects.projects.kind === 'idle' || projects.projects.kind === 'loading') return true
+  if (projects.projects.kind !== 'success') return false
+  if (routeProjectPending.value) return true
+  return projects.projects.data.length > 0 && !projects.selectedProjectId
+})
+const isContextMissing = computed(() => !isInvalidProjectContext.value && !isProjectContextLoading.value && !projectId.value)
 
 const router = useRouter()
 const releases = useEnvironmentTemplateReleases(projectId, courseId)
@@ -321,11 +372,18 @@ const lifecycle = useEnvironmentLifecycle(projectId, courseId)
 const state = ref<AsyncState<EnvironmentSummary[]>>({ kind: 'idle' })
 const autoRefreshEnabled = ref(true)
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let loadGeneration = 0
 
 const inspectedEnv = ref<EnvironmentSummary | null>(null)
 const showCreateModal = ref(false)
 const createDiagnostic = ref<DiagnosticViewModel | null>(null)
 const pendingRelease = ref<EnvironmentTemplateReleaseViewSchema | null>(null)
+const createIntentKey = ref<string | null>(null)
+const createIntentReleaseId = ref<string | null>(null)
+const createIntentReleaseVersion = ref<number | null>(null)
+const createIntentProjectId = ref<string | null>(null)
+const createIntentCourseId = ref<string | null>(null)
+let createIntentSequence = 0
 
 const filterSearch = ref('')
 const activeFilterChips = ref<FilterChip[]>([])
@@ -342,7 +400,7 @@ const columns: DataTableColumn<EnvironmentSummary & { actions?: never }>[] = [
   { key: 'displayLabel', title: '项目环境名称 / ID' },
   { key: 'observedState', title: '状态' },
   { key: 'runtimeKind', title: 'Runtime' },
-  { key: 'eligibilityExpiresAt', title: '到期时间' },
+  { key: 'eligibilityExpiresAt', title: '材料保留至' },
   { key: 'actions', title: '操作' },
 ]
 
@@ -385,6 +443,10 @@ function environmentClassLabel(environmentClass: EnvironmentSummary['class']): s
   return environmentClass === 'work' ? 'Work 项目环境' : '课程实验环境'
 }
 
+function environmentMaterialDeadlineLabel(deadline: string | null): string {
+  return deadline === null ? '不过期，直到明确撤回' : formatTimestamp(deadline)
+}
+
 function hasActiveOperation(env: EnvironmentSummary): boolean {
   const operation = env.currentOperation
   return Boolean(operation && ['accepted', 'running', 'cancelling'].includes(operation.state))
@@ -394,6 +456,21 @@ function canOpenConsole(env: EnvironmentSummary): boolean {
   return env.desiredState !== 'deleted' && env.observedState !== 'deleting' && env.observedState !== 'deleted'
 }
 
+function failedCleanup(env: EnvironmentSummary): boolean {
+  return env.desiredState === 'deleted'
+    && env.observedState === 'failed'
+    && env.currentOperation?.state === 'failed'
+    && ['delete', 'expire', 'cleanup', 'cancel'].includes(env.currentOperation.kind)
+}
+
+function openCleanup(env: EnvironmentSummary) {
+  if (!failedCleanup(env)) return
+  void router.push({
+    path: props.environmentPath,
+    query: { environmentId: env.id, projectId: env.projectId },
+  })
+}
+
 function consoleActionReason(env: EnvironmentSummary): string {
   if (env.observedState === 'deleted') return '此项目环境已删除，无法打开控制台。请创建新的项目环境。'
   if (env.observedState === 'deleting' || env.desiredState === 'deleted') return '删除已请求/正在回收，完成后将无法打开控制台。'
@@ -401,6 +478,7 @@ function consoleActionReason(env: EnvironmentSummary): string {
 }
 
 function nextActionLabel(env: EnvironmentSummary): string {
+  if (failedCleanup(env)) return '环境回收失败，资源释放尚未确认；请进入环境页重试回收'
   if (env.observedState === 'deleted') return '已删除；请创建新的项目环境'
   if (env.observedState === 'deleting' || env.desiredState === 'deleted') return '删除已请求/正在回收；请等待清理完成'
   if (hasActiveOperation(env)) return '正在处理；请等待当前操作完成'
@@ -417,21 +495,56 @@ function openCreateDrawer() {
 }
 
 async function handleCreate(rel: EnvironmentTemplateReleaseViewSchema) {
+  const targetProjectId = projectId.value
+  if (!targetProjectId) {
+    createDiagnostic.value = makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法创建环境。', false)
+    return
+  }
+  const operationId = `create:${rel.id}`
+  if (lifecycle.operating.has(operationId)) return
+
+  const targetCourseId = courseId.value ?? null
+  const targetChanged = createIntentReleaseId.value !== rel.id
+    || createIntentReleaseVersion.value !== rel.version
+    || createIntentProjectId.value !== targetProjectId
+    || createIntentCourseId.value !== targetCourseId
+  if (targetChanged || !createIntentKey.value) {
+    createIntentKey.value = idempotencyKey()
+    createIntentReleaseId.value = rel.id
+    createIntentReleaseVersion.value = rel.version
+    createIntentProjectId.value = targetProjectId
+    createIntentCourseId.value = targetCourseId
+    createIntentSequence += 1
+  }
+  const requestSequence = createIntentSequence
+  const intentKey = createIntentKey.value
+  if (!intentKey) return
   createDiagnostic.value = null
   pendingRelease.value = rel
-  const result = await lifecycle.create(
-    {
-      releaseId: rel.id,
-      releaseVersion: rel.version,
-    },
-    idempotencyKey(),
-  )
-  if (result.ok) {
-    pendingRelease.value = null
-    showCreateModal.value = false
-    await load()
-  } else {
-    createDiagnostic.value = result.diagnostic
+  lifecycle.operating.add(operationId)
+  try {
+    const result = await lifecycle.create(
+      {
+        releaseId: rel.id,
+        releaseVersion: rel.version,
+      },
+      intentKey,
+    )
+    if (requestSequence !== createIntentSequence || projectId.value !== targetProjectId) return
+    if (result.ok) {
+      createIntentKey.value = null
+      createIntentReleaseId.value = null
+      createIntentReleaseVersion.value = null
+      createIntentProjectId.value = null
+      createIntentCourseId.value = null
+      pendingRelease.value = null
+      showCreateModal.value = false
+      await load()
+    } else {
+      createDiagnostic.value = result.diagnostic
+    }
+  } finally {
+    lifecycle.operating.delete(operationId)
   }
 }
 
@@ -441,22 +554,26 @@ function retryCreate() {
 
 async function load() {
   const id = projectId.value
+  const generation = ++loadGeneration
   if (!id) {
-    state.value = {
-      kind: 'blocked',
-      diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法加载实验列表。', false),
-    }
+    state.value = isProjectContextLoading.value
+      ? { kind: 'loading', message: '正在同步项目上下文…' }
+      : {
+          kind: 'blocked',
+          diagnostic: makeDiagnostic('PROJECT_CONTEXT_MISSING', '项目上下文缺失，无法加载实验列表。', false),
+        }
     return
   }
   state.value = { kind: 'loading', message: '加载实验列表…' }
-  const result = await listEnvironments({
-    query: {
+  let items: EnvironmentSummary[]
+  try {
+    items = await fetchProjectEnvironments({
       projectId: id,
-      ...(courseId.value ? { courseId: courseId.value } : {}),
-    },
-  })
-  if (result.error) {
-    const problem = extractProblemDetails(result.error)
+      ...(!props.teacherMode && courseId.value ? { courseId: courseId.value } : {}),
+    })
+  } catch (error) {
+    if (generation !== loadGeneration || projectId.value !== id) return
+    const problem = extractProblemDetails(error)
     state.value = {
       kind: 'error',
       diagnostic: makeDiagnostic(
@@ -467,7 +584,7 @@ async function load() {
     }
     return
   }
-  const items = result.data.items ?? []
+  if (generation !== loadGeneration || projectId.value !== id) return
   state.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
   scheduleRefresh()
 }
@@ -513,6 +630,17 @@ watch(
   },
 )
 
+watch(projectId, () => {
+  createIntentSequence += 1
+  createIntentKey.value = null
+  createIntentReleaseId.value = null
+  createIntentReleaseVersion.value = null
+  createIntentProjectId.value = null
+  createIntentCourseId.value = null
+  pendingRelease.value = null
+  createDiagnostic.value = null
+})
+
 watch(projectId, load, { immediate: true })
 watch(autoRefreshEnabled, (enabled) => {
   if (enabled) scheduleRefresh()
@@ -539,7 +667,7 @@ function openEnvironment(environmentId: string) {
     return
   }
   void router.push({
-    path: '/student/environments',
+    path: props.environmentPath,
     query: {
       environmentId,
       ...(projectId.value ? { projectId: projectId.value } : {}),
@@ -569,6 +697,15 @@ function openEnvironment(environmentId: string) {
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   font: var(--md-sys-label-small);
+}
+
+.project-context-loading {
+  padding: 20px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
 }
 
 .env-name-cell {

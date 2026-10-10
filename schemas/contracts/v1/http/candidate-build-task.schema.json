@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "BuildRequestId": {
+      "description": "Strongly typed UUIDv7 identifier for `BuildRequestId`.",
+      "type": "string"
+    },
+    "CandidateBuildTarget": {
+      "description": "One existing build target attached to an immutable candidate.",
+      "enum": [
+        "environment",
+        "evaluation_runner"
+      ],
+      "type": "string"
+    },
+    "CandidateId": {
+      "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "DiagnosticCode": {
+      "description": "Stable machine-readable diagnostic code.\n\nConsumers must treat an unknown `LW_*` code as blocking. The newtype is intentionally open so\nadditive diagnostics do not force a wire-version change.",
+      "type": "string"
+    },
+    "InternalAgentBuildCancellationResult": {
+      "additionalProperties": false,
+      "description": "Durable result returned for an accepted or exactly replayed build cancellation.",
+      "properties": {
+        "buildRequestId": {
+          "$ref": "#/$defs/BuildRequestId"
+        },
+        "cancellationRequested": {
+          "type": "boolean"
+        },
+        "cleanupVerified": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "courseId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CourseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnosticCode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projectId": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "state": {
+          "$ref": "#/$defs/InternalAgentBuildState"
+        }
+      },
+      "required": [
+        "projectId",
+        "buildRequestId",
+        "state",
+        "revision",
+        "cancellationRequested"
+      ],
+      "type": "object"
+    },
+    "InternalAgentBuildState": {
+      "description": "Agent-owned durable state used as an optimistic precondition for build cancellation.",
+      "enum": [
+        "requested",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Authoritative Agent task state for one project-scoped candidate build.",
+  "properties": {
+    "candidateId": {
+      "$ref": "#/$defs/CandidateId"
+    },
+    "status": {
+      "$ref": "#/$defs/InternalAgentBuildCancellationResult"
+    },
+    "target": {
+      "$ref": "#/$defs/CandidateBuildTarget"
+    }
+  },
+  "required": [
+    "candidateId",
+    "target",
+    "status"
+  ],
+  "title": "CandidateBuildTask",
+  "type": "object"
+}

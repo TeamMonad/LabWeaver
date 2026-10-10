@@ -36,9 +36,10 @@ use environment_service::{
     KubeVirtBaseDiskIdentity, KubeVirtBaseDiskImport, KubeVirtCleanupPlan,
     KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
     KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResourceBudget,
-    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, ProviderFailure, ReconcileAction, ReleaseProjectionError,
-    ResolvedContainerRelease, RuntimeVmBasePolicy, ensure_base_disk,
+    KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSecretRef, KubeVirtSshBootstrap,
+    KubeVirtStoppedObservation, KubeVirtVmVgpuLicenseMode, KubeVirtVmVgpuLicensingConfiguration,
+    ProviderFailure, ReconcileAction, ReleaseProjectionError, ResolvedContainerRelease,
+    RuntimeVmBasePolicy, ensure_base_disk,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::json;
@@ -47,6 +48,7 @@ use uuid::Uuid;
 const VM_UID: Uuid = Uuid::from_u128(1);
 const VMI_UID: Uuid = Uuid::from_u128(2);
 const ROOT_DISK_UID: Uuid = Uuid::from_u128(3);
+const PLATFORM_APPLICATION_NAMESPACE: &str = "labweaver-system";
 
 #[derive(Clone)]
 struct FixtureResolver {
@@ -108,7 +110,7 @@ impl KubeVirtObservationStore for FixtureObservationStore {
     async fn record_stopped(
         &self,
         _fence: &KubeVirtBackendFence,
-        _plan: &KubeVirtResourcePlan,
+        _plan: &KubeVirtCleanupPlan,
         _observation: &KubeVirtStoppedObservation,
     ) -> Result<(), KubeVirtObservationStoreError> {
         self.states
@@ -193,75 +195,105 @@ impl KubeVirtProviderBackend for FixtureBackend {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("apply", fence);
-        self.apply_objects(plan);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("apply", fence);
+            self.apply_objects(plan);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn observe(
         &self,
         fence: &KubeVirtBackendFence,
         _plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("observe", fence);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("observe", fence);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn start(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("start", fence);
-        self.apply_objects(plan);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("start", fence);
+            self.apply_objects(plan);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn stop(
         &self,
         fence: &KubeVirtBackendFence,
-        _plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtStoppedObservation, ProviderFailure> {
-        self.record("stop", fence);
-        Ok(KubeVirtStoppedObservation {
-            observed_environment_generation: fence.environment_generation,
-            vm_uid: VM_UID,
-            root_disk_uid: ROOT_DISK_UID,
-            vmi_absent: true,
-            observed_at: timestamp("2026-07-16T08:02:00.000Z"),
-        })
+        _plan: &KubeVirtCleanupPlan,
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtStoppedObservation>, ProviderFailure>
+    {
+        async {
+            self.record("stop", fence);
+            Ok(KubeVirtStoppedObservation {
+                observed_environment_generation: fence.environment_generation,
+                vm_uid: VM_UID,
+                root_disk_uid: ROOT_DISK_UID,
+                vmi_absent: true,
+                observed_at: timestamp("2026-07-16T08:02:00.000Z"),
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn restart(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtResourcePlan,
-    ) -> Result<KubeVirtRunningObservation, ProviderFailure> {
-        self.record("restart", fence);
-        self.apply_objects(plan);
-        Ok(self.running(fence))
+    ) -> Result<environment_service::ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure>
+    {
+        async {
+            self.record("restart", fence);
+            self.apply_objects(plan);
+            Ok(self.running(fence))
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 
     async fn delete_namespace(
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
-    ) -> Result<ArtifactRef, ProviderFailure> {
-        self.record("delete", fence);
-        self.objects
-            .lock()
-            .expect("objects lock")
-            .retain(|(kind, namespace, name)| {
-                namespace != &plan.namespace && !(kind == "Namespace" && name == &plan.namespace)
-            });
-        Ok(ArtifactRef {
-            artifact_id: ArtifactId::new(),
-            store_binding: "environment-cleanup-evidence-v1".to_owned(),
-            object_version: plan.plan_sha256.to_string(),
-            size_bytes: 1,
-            media_type: "application/json".to_owned(),
-        })
+    ) -> Result<environment_service::ProviderOutcome<ArtifactRef>, ProviderFailure> {
+        async {
+            self.record("delete", fence);
+            self.objects
+                .lock()
+                .expect("objects lock")
+                .retain(|(kind, namespace, name)| {
+                    namespace != &plan.namespace
+                        && !(kind == "Namespace" && name == &plan.namespace)
+                });
+            Ok(ArtifactRef {
+                artifact_id: ArtifactId::new(),
+                store_binding: "environment-cleanup-evidence-v1".to_owned(),
+                object_version: plan.plan_sha256.to_string(),
+                size_bytes: 1,
+                media_type: "application/json".to_owned(),
+            })
+        }
+        .await
+        .map(environment_service::ProviderOutcome::Completed)
     }
 }
 
@@ -330,6 +362,10 @@ fn plan_is_deterministic_private_and_digest_bound() {
     );
 
     let data_volume = resource(&first, "DataVolume");
+    assert_eq!(
+        data_volume.document.pointer("/spec/storage/volumeMode"),
+        Some(&json!("Filesystem"))
+    );
     assert_eq!(
         data_volume.document.pointer("/spec/sourceRef/kind"),
         Some(&json!("DataSource"))
@@ -522,7 +558,7 @@ fn plan_is_deterministic_private_and_digest_bound() {
         ingress.document.pointer(
             "/spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
         ),
-        Some(&json!("access-system"))
+        Some(&json!(PLATFORM_APPLICATION_NAMESPACE))
     );
     assert_eq!(
         ingress
@@ -574,7 +610,7 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
     let lease_id = LeaseId::new();
     let capacity_binding = "vm-vgpu-capacity-1".to_owned();
     let gpu_class = "nvidia-vgpu".to_owned();
-    let allocation_binding = "nvidia.com/grid-t4-4c".to_owned();
+    let allocation_binding = "nvidia.com/GRID_V100DX-2Q".to_owned();
     let gpu_allocation = GpuAllocation {
         entry_id: GpuCatalogEntryId::new(),
         class: gpu_class.clone(),
@@ -628,22 +664,163 @@ fn plan_renders_each_approved_vm_vgpu_and_resource_quantity() {
         );
         assert_eq!(
             gpu.pointer("/deviceName"),
-            Some(&json!("nvidia.com/grid-t4-4c"))
+            Some(&json!("nvidia.com/GRID_V100DX-2Q"))
         );
     }
     assert_eq!(
         virtual_machine
             .document
-            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1grid-t4-4c"),
+            .pointer("/spec/template/spec/domain/resources/limits/nvidia.com~1GRID_V100DX-2Q"),
         Some(&json!("2"))
+    );
+    let quota = resource(&plan, "ResourceQuota");
+    let escaped_binding = allocation_binding.replace('~', "~0").replace('/', "~1");
+    assert_eq!(
+        quota
+            .document
+            .pointer(&format!("/spec/hard/requests.{escaped_binding}")),
+        Some(&json!("2"))
+    );
+    assert_eq!(
+        quota
+            .document
+            .pointer(&format!("/spec/hard/limits.{escaped_binding}")),
+        None
+    );
+    assert_vgpu_license_projection(&plan);
+}
+
+fn assert_vgpu_license_projection(plan: &KubeVirtResourcePlan) {
+    let virtual_machine = resource(plan, "VirtualMachine");
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/metadata/labels/labweaver.io~1gpu-mode"),
+        Some(&json!("vm_vgpu"))
+    );
+    assert_eq!(
+        virtual_machine
+            .document
+            .pointer("/spec/template/metadata/labels/labweaver.io~1gpu-mode"),
+        Some(&json!("vm_vgpu"))
+    );
+    let license_policy = named_resource(plan, "CiliumNetworkPolicy", "vm-vgpu-license-egress");
+    assert_eq!(
+        license_policy
+            .document
+            .pointer("/spec/egress/0/toEndpoints/0/matchLabels/k8s:io.kubernetes.pod.namespace"),
+        Some(&json!("kube-system"))
+    );
+    assert_eq!(
+        license_policy
+            .document
+            .pointer("/spec/egress/1/toEndpoints/0/matchLabels/app.kubernetes.io~1name"),
+        Some(&json!("fastapi-dls"))
+    );
+    let serialized_plan = serde_json::to_string(plan).expect("serialize VM vGPU plan");
+    assert!(!serialized_plan.contains("secret-token"));
+}
+
+#[test]
+fn vm_vgpu_without_deployment_licensing_configuration_fails_closed() {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(GpuRequest {
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU VM projection");
+    let mut instance = instance_for(&projection);
+    instance.gpu_allocation = Some(GpuAllocation {
+        entry_id: GpuCatalogEntryId::new(),
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::VmVgpu,
+        provider_binding: "kubevirt-primary-v1".to_owned(),
+        allocation_binding: "nvidia.com/grid-t4-4c".to_owned(),
+        catalog_revision: revision(1),
+    });
+    let provider =
+        provider_without_vgpu_licensing(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
+}
+
+#[test]
+fn experiment_vm_gpu_allocation_renders_vgpu_devices_and_limits() {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(GpuRequest {
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU VM projection");
+    let mut instance = instance_for(&projection);
+    let allocation_binding = "nvidia.com/grid-t4-4c".to_owned();
+    instance.gpu_allocation = Some(GpuAllocation {
+        entry_id: GpuCatalogEntryId::new(),
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+        mode: GpuAllocationMode::VmVgpu,
+        provider_binding: "kubevirt-primary-v1".to_owned(),
+        allocation_binding: allocation_binding.clone(),
+        catalog_revision: revision(1),
+    });
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    let plan = provider
+        .plan(&instance, &resolved(projection), ReconcileAction::Provision)
+        .expect("resolved Experiment VM vGPU allocation is rendered");
+    let virtual_machine = resource(&plan, "VirtualMachine");
+    let gpus = virtual_machine
+        .document
+        .pointer("/spec/template/spec/domain/devices/gpus")
+        .and_then(serde_json::Value::as_array)
+        .expect("VM GPU devices");
+    assert_eq!(gpus.len(), 1);
+    assert_eq!(
+        gpus[0].pointer("/deviceName"),
+        Some(&json!(allocation_binding))
+    );
+    let escaped_binding = allocation_binding.replace('~', "~0").replace('/', "~1");
+    assert_eq!(
+        virtual_machine.document.pointer(&format!(
+            "/spec/template/spec/domain/resources/limits/{escaped_binding}"
+        )),
+        Some(&json!("1"))
     );
     let quota = resource(&plan, "ResourceQuota");
     assert_eq!(
         quota
             .document
-            .pointer("/spec/hard/limits.nvidia.com~1grid-t4-4c"),
-        Some(&json!("2"))
+            .pointer(&format!("/spec/hard/requests.{escaped_binding}")),
+        Some(&json!("1"))
     );
+    assert_eq!(
+        quota
+            .document
+            .pointer(&format!("/spec/hard/limits.{escaped_binding}")),
+        None
+    );
+}
+
+#[test]
+fn experiment_vm_gpu_without_a_durable_allocation_fails_closed() {
+    let mut projection = projection();
+    projection.environment_spec.resources.gpu = Some(GpuRequest {
+        class: "t4-vgpu".to_owned(),
+        count: 1,
+    });
+    projection.validate().expect("GPU VM projection");
+    let instance = instance_for(&projection);
+    assert!(instance.gpu_allocation.is_none());
+    let provider = provider(projection.clone(), Arc::new(FixtureBackend::default()));
+
+    assert!(matches!(
+        provider.plan(&instance, &resolved(projection), ReconcileAction::Provision),
+        Err(ReleaseProjectionError::SecurityPostureInvalid)
+    ));
 }
 
 #[tokio::test]
@@ -660,7 +837,9 @@ async fn readiness_requires_vm_ssh_and_current_generation() {
     let observation = incomplete_provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("incomplete readiness is retryable progress");
+        .expect("incomplete readiness is retryable progress")
+        .completed()
+        .expect("provider completed");
     assert_eq!(
         observation.next_state,
         ObservedEnvironmentState::Provisioning
@@ -676,7 +855,9 @@ async fn readiness_requires_vm_ssh_and_current_generation() {
     let observation = public_route_provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("public addresses remain incomplete readiness");
+        .expect("public addresses remain incomplete readiness")
+        .completed()
+        .expect("provider completed");
     assert_eq!(
         observation.next_state,
         ObservedEnvironmentState::Provisioning
@@ -698,7 +879,9 @@ async fn readiness_accepts_ssh_proof_without_guest_agent() {
     let observation = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("SSH readiness is authoritative without a guest agent");
+        .expect("SSH readiness is authoritative without a guest agent")
+        .completed()
+        .expect("provider completed");
     assert_eq!(observation.next_state, ObservedEnvironmentState::Ready);
     assert!(observation.operation_complete);
     assert_eq!(observation.endpoints.len(), 1);
@@ -715,11 +898,15 @@ async fn duplicate_reconcile_is_idempotent_and_fenced() {
     let first = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("provision succeeds");
+        .expect("provision succeeds")
+        .completed()
+        .expect("provider completed");
     let replay = provider
         .execute(ReconcileAction::Provision, &instance)
         .await
-        .expect("same reconcile is idempotent");
+        .expect("same reconcile is idempotent")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(first.endpoints, replay.endpoints);
     assert_eq!(first.endpoints.len(), 1);
@@ -754,17 +941,22 @@ async fn start_stop_start_preserves_vm_disk_host_key_and_endpoint_identity() {
     let first = provider
         .execute(ReconcileAction::Provision, &provision)
         .await
-        .expect("initial provision");
+        .expect("initial provision")
+        .completed()
+        .expect("provider completed");
 
     let mut stop = provision.clone();
     stop.observed_state = ObservedEnvironmentState::Stopping;
     stop.desired_state = DesiredEnvironmentState::Stopped;
+    stop.release_id = ReleaseId::new(); // The release no longer resolves; Stop uses runtime identity.
     stop.generation = 2;
     stop.operation.id = contracts::OperationId::new();
     let stopped = provider
         .execute(ReconcileAction::Stop, &stop)
         .await
-        .expect("stop preserves disk");
+        .expect("stop preserves disk")
+        .completed()
+        .expect("provider completed");
     assert_eq!(stopped.next_state, ObservedEnvironmentState::Stopped);
     assert!(stopped.endpoints.is_empty());
 
@@ -775,7 +967,9 @@ async fn start_stop_start_preserves_vm_disk_host_key_and_endpoint_identity() {
     let second = provider
         .execute(ReconcileAction::Start, &start)
         .await
-        .expect("start reuses VM disk");
+        .expect("start reuses VM disk")
+        .completed()
+        .expect("provider completed");
 
     assert_eq!(second.next_state, ObservedEnvironmentState::Ready);
     assert_eq!(first.endpoints[0].id, second.endpoints[0].id);
@@ -808,7 +1002,9 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     provider
         .execute(ReconcileAction::Provision, &provision)
         .await
-        .expect("fixture materializes owned resources");
+        .expect("fixture materializes owned resources")
+        .completed()
+        .expect("provider completed");
     assert_eq!(backend.count_kind("VirtualMachine"), 1);
     assert_eq!(backend.count_kind("DataVolume"), 1);
 
@@ -822,7 +1018,9 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     let checkpoint = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup enters deleting state");
+        .expect("cleanup enters deleting state")
+        .completed()
+        .expect("provider completed");
     assert_eq!(checkpoint.next_state, ObservedEnvironmentState::Deleting);
     assert!(!checkpoint.operation_complete);
     assert!(checkpoint.cleanup_evidence.is_none());
@@ -832,7 +1030,9 @@ async fn cleanup_deletes_the_owned_namespace_and_requires_evidence() {
     let observation = provider
         .execute(ReconcileAction::Cleanup, &instance)
         .await
-        .expect("cleanup succeeds");
+        .expect("cleanup succeeds")
+        .completed()
+        .expect("provider completed");
     assert_eq!(observation.next_state, ObservedEnvironmentState::Deleted);
     assert!(observation.operation_complete);
     assert!(observation.endpoints.is_empty());
@@ -855,15 +1055,26 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
     instance.observed_state = ObservedEnvironmentState::Expiring;
     instance.desired_state = DesiredEnvironmentState::Deleted;
     instance.operation.kind = EnvironmentOperationKind::Expire;
+    instance.operation.access_revocation_revision = Some(instance.revision);
+    instance.release_id = ReleaseId::new();
     let backend = Arc::new(FixtureBackend::default());
     let provider = provider(projection, backend.clone());
 
     let observation = provider
         .execute(ReconcileAction::Stop, &instance)
         .await
-        .expect("expire stop succeeds");
+        .expect("expire stop succeeds")
+        .completed()
+        .expect("provider completed");
 
-    assert_eq!(observation.next_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(observation.next_state, ObservedEnvironmentState::Deleting);
+    let deleting = environment_service::apply_provider_observation(
+        &instance,
+        instance.operation.id,
+        observation.clone(),
+    )
+    .expect("expire advances through the real deletion state");
+    assert_eq!(deleting.observed_state, ObservedEnvironmentState::Deleting);
     assert!(!observation.operation_complete);
     assert!(observation.endpoints.is_empty());
     assert_eq!(
@@ -872,7 +1083,7 @@ async fn expire_stop_returns_a_non_terminal_checkpoint_for_cleanup() {
             .lock()
             .expect("operations lock")
             .as_slice(),
-        ["stop"]
+        [] as [&str; 0]
     );
 }
 
@@ -893,7 +1104,7 @@ fn invalid_release_storage_or_ssh_bootstrap_fails_closed() {
     assert!(ubuntu_base_disk("INVALID".to_owned()).is_err());
     assert!(
         KubeVirtSshBootstrap::new(
-            "access-system".to_owned(),
+            PLATFORM_APPLICATION_NAMESPACE.to_owned(),
             "openssh-gateway".to_owned(),
             "labweaver-evaluation".to_owned(),
             "evaluation-freeze-worker".to_owned(),
@@ -980,6 +1191,40 @@ fn provider_with_budget(
     backend: Arc<FixtureBackend>,
     resource_budget: KubeVirtResourceBudget,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    provider_with_budget_and_licensing(
+        projection,
+        backend,
+        resource_budget,
+        Some(test_vgpu_licensing()),
+    )
+}
+
+fn provider_without_vgpu_licensing(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    provider_with_budget_and_licensing(
+        projection,
+        backend,
+        KubeVirtResourceBudget::new(
+            536_870_912,
+            1_000,
+            4_000,
+            262_144_000,
+            1_073_741_824,
+            10_737_418_240,
+        )
+        .expect("KubeVirt resource budget"),
+        None,
+    )
+}
+
+fn provider_with_budget_and_licensing(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+    resource_budget: KubeVirtResourceBudget,
+    licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
     KubeVirtProvider::new(
         "kubevirt-primary-v1".to_owned(),
         backend,
@@ -994,7 +1239,7 @@ fn provider_with_budget(
             vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
             None,
             KubeVirtSshBootstrap::new(
-                "access-system".to_owned(),
+                PLATFORM_APPLICATION_NAMESPACE.to_owned(),
                 "openssh-gateway".to_owned(),
                 "labweaver-evaluation".to_owned(),
                 "evaluation-freeze-worker".to_owned(),
@@ -1003,9 +1248,34 @@ fn provider_with_budget(
             .expect("SSH bootstrap"),
             resource_budget,
         )
+        .and_then(|configuration| configuration.with_vm_vgpu_licensing(licensing))
         .expect("provider configuration"),
     )
     .expect("provider configuration")
+}
+
+fn test_vgpu_licensing() -> KubeVirtVmVgpuLicensingConfiguration {
+    KubeVirtVmVgpuLicensingConfiguration {
+        mode: KubeVirtVmVgpuLicenseMode::FastapiDls,
+        license_url: "https://fastapi-dls.labweaver-gpu-license.svc.cluster.local/"
+            .parse()
+            .expect("license URL"),
+        token_secret_ref: KubeVirtSecretRef {
+            namespace: "labweaver-gpu-license".to_owned(),
+            name: "fastapi-dls-client-token".to_owned(),
+            key: "client-token".to_owned(),
+        },
+        tls_ca_secret_ref: KubeVirtSecretRef {
+            namespace: "labweaver-gpu-license".to_owned(),
+            name: "fastapi-dls-tls".to_owned(),
+            key: "ca.crt".to_owned(),
+        },
+        fastapi_dls_signing_root_ca_secret_ref: Some(KubeVirtSecretRef {
+            namespace: "labweaver-gpu-license".to_owned(),
+            name: "fastapi-dls-signing-root".to_owned(),
+            key: "ca.crt".to_owned(),
+        }),
+    }
 }
 
 fn ubuntu_base_disk(
@@ -1562,7 +1832,7 @@ fn provider_with_runtime_policy(
             vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
             Some(policy),
             KubeVirtSshBootstrap::new(
-                "access-system".to_owned(),
+                PLATFORM_APPLICATION_NAMESPACE.to_owned(),
                 "openssh-gateway".to_owned(),
                 "labweaver-evaluation".to_owned(),
                 "evaluation-freeze-worker".to_owned(),
@@ -1606,7 +1876,9 @@ fn runtime_registered_base_resolves_by_declared_digest() {
         KubeVirtBaseDiskIdentity::RuntimeRegistryDigest
     );
     assert_eq!(plan.base_disk_disk_sha256, RUNTIME_MANIFEST_HEX);
-    assert_eq!(
+    assert!(plan.base_disk_data_source_name.starts_with("vm-base-"));
+    assert_eq!(plan.base_disk_data_source_name.len(), 56);
+    assert_ne!(
         plan.base_disk_data_source_name,
         format!("vm-base-{}", &RUNTIME_MANIFEST_HEX[..32])
     );

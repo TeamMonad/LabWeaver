@@ -109,6 +109,8 @@ describe('useProjectAgentRun', () => {
     })).resolves.toBe(true)
 
     expect(agent.run.kind).toBe('success')
+    expect(agent.outcome?.message).toBe('生成任务已受理。')
+    expect(agent.outcome?.message).not.toContain('run-1')
     expect(createProjectAgentRun).toHaveBeenCalledWith(expect.objectContaining({
       path: { projectId: 'project-1' },
       body: expect.objectContaining({ projectId: 'project-1' }),
@@ -192,5 +194,19 @@ describe('useProjectAgentRun', () => {
 
     expect(agent.run.kind).toBe('error')
     if (agent.run.kind === 'error') expect(agent.run.diagnostic.code).toBe('PROJECT_RUN_STALE_CONTEXT')
+  })
+
+  it('explains missing project context in readable Chinese', async () => {
+    const projectId = ref<string | null>('project-1')
+    const agent = useProjectAgentRun(projectId)
+
+    projectId.value = null
+    await nextTick()
+
+    expect(agent.run.kind).toBe('blocked')
+    if (agent.run.kind === 'blocked') {
+      expect(agent.run.diagnostic.code).toBe('PROJECT_CONTEXT_MISSING')
+      expect(agent.run.diagnostic.message).toBe('缺少项目上下文，无法读取生成任务。')
+    }
   })
 })

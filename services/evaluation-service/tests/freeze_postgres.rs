@@ -374,13 +374,13 @@ impl ImmutableObjectStore for LockedStore {
         Err(ObjectStoreError::ObjectUnavailable)
     }
 
-    async fn put_governance_locked(
+    async fn put_immutable(
         &self,
         _key: &str,
         bytes: &[u8],
         media_type: &str,
         _now: UtcTimestamp,
-        _retain_until: UtcTimestamp,
+        _retain_until: Option<UtcTimestamp>,
     ) -> Result<VerifiedObject, ObjectStoreError> {
         let put = self.puts.fetch_add(1, Ordering::AcqRel) + 1;
         if self
@@ -621,7 +621,7 @@ impl TestContext {
                 policy_id: PolicyId::new(),
                 policy_revision: Revision::new(2)?,
                 class: RetentionClass::StudentSubmission,
-                retain_until: UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?,
+                retain_until: Some(UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?),
                 disposition: RetentionDisposition::Delete,
             },
             idempotency_key: format!("freeze:{environment_id}:1"),

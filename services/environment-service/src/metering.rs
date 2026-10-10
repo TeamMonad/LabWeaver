@@ -9,13 +9,20 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use auth::{ServiceTokenClient, ServiceTokenClientConfig, TransportSecurityMode};
 use contracts::environment::{
+    ActivateEnvironmentResourceReservationRequest, ActivateEnvironmentResourceReservationResponse,
     EnvironmentInstance, EnvironmentLeaseAuthorization, ObservedEnvironmentState,
+    ReleaseEnvironmentResourceReservationRequest, ReleaseEnvironmentResourceReservationResponse,
+    ResolveEnvironmentResourceReservationRequest, ResolveEnvironmentResourceReservationResponse,
+    SuspendEnvironmentResourceReservationRequest, SuspendEnvironmentResourceReservationResponse,
 };
 use contracts::http::RecordResourceUsageRequest;
-use contracts::resource::{ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement};
-use contracts::{EventId, ResourceRequestId, UtcTimestamp};
+use contracts::resource::{
+    GpuAllocation, ResourceUsageKind, ResourceUsageQuantities, UsageMeasurement,
+};
+use contracts::{EventId, ProblemDetails, ResourceRequestId, UtcTimestamp};
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
@@ -60,12 +67,19 @@ struct MeteringState {
     project_id: contracts::ProjectId,
     course_id: Option<contracts::CourseId>,
     owner_actor_id: contracts::ActorId,
-    request_id: ResourceRequestId,
-    lease_id: contracts::LeaseId,
-    lease_revision: contracts::Revision,
-    capacity_binding: String,
+    target: contracts::resource::ResourceUsageTarget,
+    #[serde(default)]
+    request_id: Option<ResourceRequestId>,
+    #[serde(default)]
+    lease_id: Option<contracts::LeaseId>,
+    #[serde(default)]
+    lease_revision: Option<contracts::Revision>,
+    #[serde(default)]
+    capacity_binding: Option<String>,
     approved_resources: contracts::resource::WorkloadResources,
+    #[serde(default)]
     gpu_allocation: Option<contracts::resource::GpuAllocation>,
+    #[serde(default)]
     compute_started_at: Option<UtcTimestamp>,
     /// Start of a compute interval whose end is unknown after a failed stop or cleanup.
     ///
@@ -74,10 +88,12 @@ struct MeteringState {
     /// rows written before this field existed.
     #[serde(default)]
     compute_unknown_started_at: Option<UtcTimestamp>,
+    #[serde(default)]
     storage_started_at: Option<UtcTimestamp>,
     /// Whether the active storage interval has been confirmed by a successful provider
     /// observation. An interval created while cleanup is uncertain remains explicitly unknown
     /// until a later Ready observation confirms a new storage boundary.
+    #[serde(default)]
     storage_known: bool,
 }
 
@@ -102,12 +118,48 @@ impl MeteringState {
             project_id: instance.project_id,
             course_id: instance.course_id,
             owner_actor_id: instance.owner_id,
-            request_id: authorization.resource_request_id,
-            lease_id,
-            lease_revision: authorization.lease_revision,
-            capacity_binding,
+            target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id: authorization.resource_request_id,
+                lease_id: Some(lease_id),
+            },
+            request_id: Some(authorization.resource_request_id),
+            lease_id: Some(lease_id),
+            lease_revision: Some(authorization.lease_revision),
+            capacity_binding: Some(capacity_binding),
             approved_resources: authorization.approved_resources.clone(),
             gpu_allocation: authorization.gpu_allocation.clone(),
+            compute_started_at: None,
+            compute_unknown_started_at: None,
+            storage_started_at: None,
+            storage_known: false,
+        })
+    }
+
+    fn from_experiment(instance: &EnvironmentInstance) -> Result<Self, EnvironmentStoreError> {
+        instance
+            .approved_resources
+            .validate()
+            .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        if let Some(allocation) = &instance.gpu_allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        }
+        Ok(Self {
+            version: 1,
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            course_id: instance.course_id,
+            owner_actor_id: instance.owner_id,
+            target: contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                environment_id: instance.id,
+            },
+            request_id: None,
+            lease_id: None,
+            lease_revision: None,
+            capacity_binding: None,
+            approved_resources: instance.approved_resources.clone(),
+            gpu_allocation: instance.gpu_allocation.clone(),
             compute_started_at: None,
             compute_unknown_started_at: None,
             storage_started_at: None,
@@ -124,13 +176,10 @@ impl MeteringState {
             || self.project_id != instance.project_id
             || self.course_id != instance.course_id
             || self.owner_actor_id != instance.owner_id
-            || self.lease_id
-                != instance
-                    .lease_id
-                    .ok_or(EnvironmentStoreError::MeteringInvalid)?
-            || Some(self.capacity_binding.as_str()) != instance.capacity_binding.as_deref()
-            || self.lease_revision.get() == 0
-            || self.capacity_binding.trim().is_empty()
+            || self.lease_id != instance.lease_id
+            || self.capacity_binding.as_deref() != instance.capacity_binding.as_deref()
+            || self.lease_revision.is_some_and(|value| value.get() == 0)
+            || self.capacity_binding.as_deref().is_some_and(str::is_empty)
             || self.storage_started_at.is_none() && self.compute_started_at.is_some()
             || self.compute_started_at.is_some() && self.compute_unknown_started_at.is_some()
             || self.storage_known && self.storage_started_at.is_none()
@@ -141,9 +190,46 @@ impl MeteringState {
         {
             return Err(EnvironmentStoreError::MeteringInvalid);
         }
+        match instance.class {
+            contracts::authoring::EnvironmentClass::Work => {
+                let authorization = instance
+                    .operation
+                    .lease_authorization
+                    .as_ref()
+                    .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
+                if !matches!(
+                    &self.target,
+                    contracts::resource::ResourceUsageTarget::ResourceRequest {
+                        request_id,
+                        lease_id: Some(target_lease_id),
+                    } if *request_id == authorization.resource_request_id
+                        && Some(*target_lease_id) == self.lease_id
+                        && Some(*target_lease_id) == instance.lease_id
+                ) {
+                    return Err(EnvironmentStoreError::MeteringInvalid);
+                }
+            }
+            contracts::authoring::EnvironmentClass::Experiment => {
+                if self.lease_id.is_some()
+                    || self.lease_revision.is_some()
+                    || self.capacity_binding.is_some()
+                    || !matches!(
+                        &self.target,
+                        contracts::resource::ResourceUsageTarget::ExperimentEnvironment {
+                            environment_id,
+                        } if *environment_id == instance.id
+                    )
+                {
+                    return Err(EnvironmentStoreError::MeteringInvalid);
+                }
+            }
+        }
         self.approved_resources
             .validate()
             .map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
+        if self.approved_resources != instance.approved_resources {
+            return Err(EnvironmentStoreError::MeteringInvalid);
+        }
         if let Some(allocation) = &self.gpu_allocation {
             allocation
                 .validate()
@@ -174,26 +260,31 @@ fn validate_authorization(
         .map_err(|_| EnvironmentStoreError::LeaseAuthorizationInvalid)
 }
 
-/// Creates the durable Work metering state in the same transaction as the aggregate.
+/// Creates the durable meter state in the same transaction as the aggregate.
 pub(crate) async fn initialize(
     transaction: &mut Transaction<'_, Postgres>,
     instance: &EnvironmentInstance,
 ) -> Result<(), EnvironmentStoreError> {
-    if instance.class != contracts::authoring::EnvironmentClass::Work {
-        return Ok(());
-    }
-    let state = MeteringState::from_authorization(instance)?;
+    let contract = match instance.class {
+        contracts::authoring::EnvironmentClass::Work => {
+            serde_json::to_value(MeteringState::from_authorization(instance)?)?
+        }
+        contracts::authoring::EnvironmentClass::Experiment => {
+            serde_json::to_value(MeteringState::from_experiment(instance)?)?
+        }
+    };
     sqlx::query(
         "INSERT INTO environment.resource_metering_state (environment_id, contract) \
          VALUES ($1, $2)",
     )
     .bind(instance.id.as_uuid())
-    .bind(serde_json::to_value(state)?)
+    .bind(contract)
     .execute(&mut **transaction)
     .await?;
     Ok(())
 }
 
+/// Records Experiment CPU, memory, storage, and optional GPU boundaries.
 /// Records actual lifecycle observations and appends pending usage deliveries atomically with
 /// the Environment aggregate update.
 #[allow(
@@ -206,9 +297,6 @@ pub(crate) async fn record_transition(
     updated: &EnvironmentInstance,
     occurred_at: UtcTimestamp,
 ) -> Result<(), EnvironmentStoreError> {
-    if updated.class != contracts::authoring::EnvironmentClass::Work {
-        return Ok(());
-    }
     let row = sqlx::query(
         "SELECT contract FROM environment.resource_metering_state \
          WHERE environment_id=$1 FOR UPDATE",
@@ -283,6 +371,21 @@ pub(crate) async fn record_transition(
             },
         )?;
         enqueue_delivery(transaction, updated.id, request, occurred_at).await?;
+    }
+    if previous.observed_state != ObservedEnvironmentState::Stopped
+        && updated.observed_state == ObservedEnvironmentState::Stopped
+        && let Some((measured_from, measured_until)) =
+            compute_unknown_until(&mut state, occurred_at)
+    {
+        enqueue_compute_unknown(
+            transaction,
+            updated.id,
+            &state,
+            measured_from,
+            measured_until,
+            "environment stop closed an uncertain compute interval",
+        )
+        .await?;
     }
 
     // A failed cleanup is represented by the authoritative Failed observation. A later Deleted
@@ -616,12 +719,10 @@ fn usage_request(
     if measured_until <= measured_from {
         return Err(EnvironmentStoreError::MeteringInvalid);
     }
+    let target = state.target.clone();
     let request = RecordResourceUsageRequest {
-        project_id: state.project_id,
-        course_id: state.course_id,
         kind,
-        request_id: state.request_id,
-        lease_id: Some(state.lease_id),
+        target,
         source_event_id: EventId::new(),
         measured_from,
         measured_until,
@@ -851,6 +952,38 @@ pub(crate) struct ResourceUsageClient {
     token_client: ServiceTokenClient,
 }
 
+/// Resource boundary used by Environment to reserve and release Experiment GPU capacity.
+///
+/// The production implementation is [`ResourceUsageClient`]. Keeping the external Resource
+/// call behind this boundary also lets API integration tests use a deterministic Resource fake
+/// while retaining the real `PostgreSQL` and NATS paths around it.
+#[async_trait]
+pub trait ExperimentResourceAllocator: Send + Sync {
+    /// Resolves and reserves a Resource-authoritative Environment resource reservation.
+    async fn resolve_resource_reservation(
+        &self,
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError>;
+
+    /// Releases a previously reserved Environment resource reservation.
+    async fn release_resource_reservation(
+        &self,
+        request: &ReleaseEnvironmentResourceReservationRequest,
+    ) -> Result<bool, ResourceUsageClientError>;
+
+    /// Revalidates the original allocation and reserves capacity before provider start.
+    async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError>;
+
+    /// Releases capacity after a physical stop while retaining the reservation identity.
+    async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError>;
+}
+
 impl ResourceUsageClient {
     pub(crate) async fn from_env() -> Result<Self, ResourceUsageClientError> {
         let base_uri = parse_base_uri(&required(RESOURCE_USAGE_BASE_URI)?)?;
@@ -879,7 +1012,14 @@ impl ResourceUsageClient {
                 .map_err(|_| ResourceUsageClientError::Configuration)?;
         let audience = required(SERVICE_AUDIENCE)?;
         let scopes = parse_scopes(&required(SERVICE_SCOPES)?)?;
-        if !scopes.contains("resource.usage.record") {
+        if ![
+            "resource.usage.record",
+            "resource.environment.resolve",
+            "resource.environment.release",
+        ]
+        .iter()
+        .all(|scope| scopes.contains(*scope))
+        {
             return Err(ResourceUsageClientError::Configuration);
         }
         let token_config = ServiceTokenClientConfig::new(
@@ -924,7 +1064,9 @@ impl ResourceUsageClient {
             .await
             .map_err(|_| ResourceUsageClientError::Transport)?;
         if response.status() != StatusCode::OK && response.status() != StatusCode::CREATED {
-            return Err(ResourceUsageClientError::Rejected);
+            return Err(ResourceUsageClientError::rejected_for_status(
+                response.status(),
+            ));
         }
         let record: contracts::resource::ResourceUsageRecord = response
             .json()
@@ -934,10 +1076,7 @@ impl ResourceUsageClient {
             .validate()
             .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
         if record.source_event_id != request.source_event_id
-            || record.project_id != request.project_id
-            || record.course_id != request.course_id
-            || record.request_id != request.request_id
-            || record.lease_id != request.lease_id
+            || record.target != request.target
             || record.kind != request.kind
             || record.measured_from != request.measured_from
             || record.measured_until != request.measured_until
@@ -946,6 +1085,156 @@ impl ResourceUsageClient {
             return Err(ResourceUsageClientError::InvalidResponse);
         }
         Ok(())
+    }
+
+    /// Resolves and reserves one Experiment resource reservation through the Resource authority.
+    ///
+    /// Resource selects the exact allocation binding, mode, and provider binding from its active
+    /// catalog and current capacity observation. An unknown class, exhausted pool, or stale
+    /// observation is surfaced as a rejection so the environment never renders a GPU it does not own.
+    pub(crate) async fn resolve_resource_reservation(
+        &self,
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
+        let response = self
+            .post_json("internal/v1/environment-resource-reservations", request)
+            .await?;
+        let body: ResolveEnvironmentResourceReservationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        body.validate_for(request)
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        Ok(body.allocation)
+    }
+
+    /// Releases the durable Experiment resource reservation through the Resource authority.
+    pub(crate) async fn release_resource_reservation(
+        &self,
+        request: &ReleaseEnvironmentResourceReservationRequest,
+    ) -> Result<bool, ResourceUsageClientError> {
+        let response = self
+            .post_json(
+                "internal/v1/environment-resource-reservations/release",
+                request,
+            )
+            .await?;
+        let body: ReleaseEnvironmentResourceReservationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        if body.version != 1 || body.environment_id != request.environment_id {
+            return Err(ResourceUsageClientError::InvalidResponse);
+        }
+        Ok(body.released)
+    }
+
+    pub(crate) async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        let response = self
+            .post_json(
+                "internal/v1/environment-resource-reservations/activate",
+                request,
+            )
+            .await?;
+        let body: ActivateEnvironmentResourceReservationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        body.validate_for(request)
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        Ok(body)
+    }
+
+    pub(crate) async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        let response = self
+            .post_json(
+                "internal/v1/environment-resource-reservations/suspend",
+                request,
+            )
+            .await?;
+        let body: SuspendEnvironmentResourceReservationResponse = response
+            .json()
+            .await
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        body.validate_for(request)
+            .map_err(|_| ResourceUsageClientError::InvalidResponse)?;
+        Ok(body)
+    }
+
+    async fn post_json<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        self.token_client
+            .bearer_auth(&mut headers)
+            .await
+            .map_err(|_| ResourceUsageClientError::TokenExchange)?;
+        let response = self
+            .client
+            .post(
+                self.base_uri
+                    .join(path)
+                    .map_err(|_| ResourceUsageClientError::Configuration)?,
+            )
+            .headers(headers)
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| ResourceUsageClientError::Transport)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let problem = response.json::<ProblemDetails>().await.ok();
+            if let Some(problem) = problem {
+                if problem.diagnostic_code.as_str() == "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED" {
+                    return Err(ResourceUsageClientError::CapacityExhausted);
+                }
+                return Err(ResourceUsageClientError::Problem {
+                    diagnostic_code: problem.diagnostic_code.as_str().to_owned(),
+                    retryable: problem.retryable,
+                });
+            }
+            return Err(ResourceUsageClientError::rejected_for_status(status));
+        }
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl ExperimentResourceAllocator for ResourceUsageClient {
+    async fn resolve_resource_reservation(
+        &self,
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<Option<GpuAllocation>, ResourceUsageClientError> {
+        Self::resolve_resource_reservation(self, request).await
+    }
+
+    async fn release_resource_reservation(
+        &self,
+        request: &ReleaseEnvironmentResourceReservationRequest,
+    ) -> Result<bool, ResourceUsageClientError> {
+        Self::release_resource_reservation(self, request).await
+    }
+
+    async fn activate_resource_reservation(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<ActivateEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        Self::activate_resource_reservation(self, request).await
+    }
+
+    async fn suspend_resource_reservation(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<SuspendEnvironmentResourceReservationResponse, ResourceUsageClientError> {
+        Self::suspend_resource_reservation(self, request).await
     }
 }
 
@@ -1032,8 +1321,9 @@ fn parse_scopes(value: &str) -> Result<BTreeSet<String>, ResourceUsageClientErro
     Ok(scopes)
 }
 
+/// Failure returned by the Environment to Resource boundary.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ResourceUsageClientError {
+pub enum ResourceUsageClientError {
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_CONFIGURATION_INVALID")]
     Configuration,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_DISCOVERY_FAILED")]
@@ -1043,20 +1333,49 @@ pub(crate) enum ResourceUsageClientError {
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_TRANSPORT_FAILED")]
     Transport,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED")]
-    Rejected,
+    Rejected { retryable: bool },
+    #[error("{diagnostic_code}")]
+    Problem {
+        diagnostic_code: String,
+        retryable: bool,
+    },
+    #[error("LW_ENVIRONMENT_RESOURCE_GPU_CAPACITY_EXHAUSTED")]
+    CapacityExhausted,
     #[error("LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID")]
     InvalidResponse,
 }
 
 impl ResourceUsageClientError {
-    pub(crate) const fn diagnostic_code(&self) -> &'static str {
+    fn rejected_for_status(status: StatusCode) -> Self {
+        Self::Rejected {
+            retryable: matches!(
+                status,
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+            ) || status.is_server_error(),
+        }
+    }
+
+    pub(crate) fn diagnostic_code(&self) -> &str {
         match self {
             Self::Configuration => "LW_ENVIRONMENT_RESOURCE_USAGE_CONFIGURATION_INVALID",
             Self::TokenDiscovery => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_DISCOVERY_FAILED",
             Self::TokenExchange => "LW_ENVIRONMENT_RESOURCE_USAGE_TOKEN_EXCHANGE_FAILED",
             Self::Transport => "LW_ENVIRONMENT_RESOURCE_USAGE_TRANSPORT_FAILED",
-            Self::Rejected => "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED",
+            Self::Rejected { .. } => "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED",
+            Self::Problem {
+                diagnostic_code, ..
+            } => diagnostic_code.as_str(),
+            Self::CapacityExhausted => "LW_ENVIRONMENT_RESOURCE_GPU_CAPACITY_EXHAUSTED",
             Self::InvalidResponse => "LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn retryable(&self) -> bool {
+        match self {
+            Self::TokenDiscovery | Self::TokenExchange | Self::Transport => true,
+            Self::Rejected { retryable } | Self::Problem { retryable, .. } => *retryable,
+            _ => false,
         }
     }
 }
@@ -1068,9 +1387,9 @@ impl ResourceUsageClientError {
 )]
 mod tests {
     use super::{
-        MeteringState, compute_unknown_boundary, compute_unknown_recovery_boundary,
-        compute_unknown_until, quantities, storage_quantities, storage_ready_boundary,
-        storage_unknown_segment,
+        MeteringState, ResourceUsageClientError, compute_unknown_boundary,
+        compute_unknown_recovery_boundary, compute_unknown_until, quantities, storage_quantities,
+        storage_ready_boundary, storage_unknown_segment,
     };
     use contracts::resource::{GpuAllocation, GpuAllocationMode, WorkloadResources};
     use contracts::{
@@ -1099,10 +1418,14 @@ mod tests {
             project_id: ProjectId::new(),
             course_id: None,
             owner_actor_id: ActorId::new(),
-            request_id: ResourceRequestId::new(),
-            lease_id: LeaseId::new(),
-            lease_revision: Revision::new(1).expect("fixed revision"),
-            capacity_binding: "workspace".to_owned(),
+            target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id: ResourceRequestId::new(),
+                lease_id: Some(LeaseId::new()),
+            },
+            request_id: Some(ResourceRequestId::new()),
+            lease_id: Some(LeaseId::new()),
+            lease_revision: Some(Revision::new(1).expect("fixed revision")),
+            capacity_binding: Some("workspace".to_owned()),
             approved_resources: WorkloadResources {
                 cpu_millicores: 1,
                 memory_bytes: 1,
@@ -1230,6 +1553,59 @@ mod tests {
         assert!(state.storage_known);
         assert_eq!(state.compute_started_at, Some(restarted));
         assert!(stopped > first_ready);
+    }
+
+    #[test]
+    fn resource_problem_preserves_diagnostic_and_retryability() {
+        let retryable = ResourceUsageClientError::Problem {
+            diagnostic_code: "LW_RESOURCE_RESERVATION_STALE".to_owned(),
+            retryable: true,
+        };
+        assert_eq!(retryable.diagnostic_code(), "LW_RESOURCE_RESERVATION_STALE");
+        assert!(retryable.retryable());
+
+        let rejected = ResourceUsageClientError::Problem {
+            diagnostic_code: "LW_RESOURCE_RESERVATION_REJECTED".to_owned(),
+            retryable: false,
+        };
+        assert_eq!(
+            rejected.diagnostic_code(),
+            "LW_RESOURCE_RESERVATION_REJECTED"
+        );
+        assert!(!rejected.retryable());
+    }
+
+    #[test]
+    fn plain_resource_http_failures_follow_status_retryability() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let error = ResourceUsageClientError::rejected_for_status(status);
+            assert_eq!(
+                error.diagnostic_code(),
+                "LW_ENVIRONMENT_RESOURCE_USAGE_REJECTED"
+            );
+            assert!(error.retryable(), "status {status} should be retryable");
+        }
+
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::CONFLICT,
+        ] {
+            let error = ResourceUsageClientError::rejected_for_status(status);
+            assert!(
+                !error.retryable(),
+                "status {status} should not be retried without ProblemDetails"
+            );
+        }
     }
 
     #[test]

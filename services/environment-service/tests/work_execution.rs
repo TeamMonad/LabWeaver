@@ -606,7 +606,7 @@ fn eligible_work_instance() -> contracts::environment::EnvironmentInstance {
     instance.class = contracts::authoring::EnvironmentClass::Work;
     instance.lease_id = Some(lease_id);
     instance.capacity_binding = Some("cpu-standard-v1".to_owned());
-    instance.eligibility_expires_at = timestamp("2099-01-01T00:00:00.000Z");
+    instance.eligibility_expires_at = Some(timestamp("2099-01-01T00:00:00.000Z"));
     instance.operation.lease_authorization = Some(EnvironmentLeaseAuthorization {
         resource_request_id: ResourceRequestId::new(),
         lease_id,

@@ -1,7 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
+import path from 'node:path'
 import { ROLE_PROJECTS } from './e2e/config/role-projects.mjs'
 
 export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
+  const authDir = process.env.LABWEAVER_AUTH_DIR
   const projects = ROLE_PROJECTS.map((project) => {
     const base = {
       name: project.name,
@@ -13,10 +15,13 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
     }
 
     if (project.storageState) {
+      const storageState = authDir
+        ? path.join(authDir, path.basename(project.storageState))
+        : project.storageState
       return {
         ...base,
         dependencies: ['setup'],
-        use: { storageState: project.storageState },
+        use: { storageState },
       }
     }
 
@@ -31,24 +36,32 @@ export function createPlaywrightConfig({ ci = Boolean(process.env.CI) } = {}) {
 
   return {
     testDir: './e2e',
-    outputDir: './test-results',
+    outputDir: process.env.LABWEAVER_PLAYWRIGHT_OUTPUT_DIR || './test-results',
     timeout: 120_000,
     snapshotPathTemplate: `{testDir}/{testFileDir}/{testFileName}-snapshots/{arg}-{projectName}{ext}`,
     forbidOnly: ci,
-    retries: ci ? 2 : 0,
+    // A public acceptance run owns real projects, environments and charges;
+    // replaying the whole journey after an ambiguous failure can duplicate
+    // those business mutations. Keep ordinary CI fixture retries unchanged,
+    // but make every configured public run a single attempt.
+    retries: process.env.LABWEAVER_BASE_URL ? 0 : (ci ? 2 : 0),
     workers: ci ? 1 : undefined,
-    reporter: [
-      ['list'],
-      ['html', { outputFolder: 'playwright-report', open: 'never' }],
-      ['json', { outputFile: 'playwright-report/report.json' }],
-    ],
+    // Acceptance output is intentionally console-only. Browser state and any
+    // runner output live under the temporary directory supplied by the harness.
+    reporter: [['list']],
     use: {
       baseURL: process.env.LABWEAVER_BASE_URL || 'http://localhost:4173',
-      trace: 'retain-on-failure',
-      screenshot: 'only-on-failure',
-      video: 'retain-on-failure',
+      trace: 'off',
+      screenshot: 'off',
+      video: 'off',
       actionTimeout: 30_000,
       navigationTimeout: 60_000,
+      ...(process.env.LABWEAVER_BROWSER_CHANNEL
+        ? { channel: process.env.LABWEAVER_BROWSER_CHANNEL }
+        : {}),
+      ...(process.env.LABWEAVER_IGNORE_HTTPS_ERRORS === '1'
+        ? { ignoreHTTPSErrors: true }
+        : {}),
     },
     expect: {
       timeout: 30_000,

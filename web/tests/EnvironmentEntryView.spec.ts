@@ -1,19 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { h } from 'vue'
 import { createRouter, createWebHistory, RouterView } from 'vue-router'
 import EnvironmentEntryView from '@/views/student/EnvironmentEntryView.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
+import { useProjects } from '@/composables/useProjects'
 import {
   listEnvironmentTemplateReleases,
   listProjects,
+  listProjectResourceLeases,
+  listProjectResourceRequests,
   getEnvironment,
   listEnvironmentEndpoints,
   listEnvironmentAccessGrants,
+  getAccessGrant,
   listEnvironmentOperations,
   cancelEnvironmentOperation,
   startEnvironment,
+  deleteEnvironment,
+  retryEnvironment,
+  restartEnvironment,
   freezeSubmission,
   getFrozenSubmission,
 } from '@/generated/contracts'
@@ -24,10 +31,13 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     ...actual,
     listEnvironmentTemplateReleases: vi.fn(),
     listProjects: vi.fn(),
+    listProjectResourceLeases: vi.fn(),
+    listProjectResourceRequests: vi.fn(),
     createEnvironment: vi.fn(),
     getEnvironment: vi.fn(),
     listEnvironmentEndpoints: vi.fn(),
     listEnvironmentAccessGrants: vi.fn(),
+    getAccessGrant: vi.fn(),
     listEnvironmentOperations: vi.fn(),
     cancelEnvironmentOperation: vi.fn(),
     startEnvironment: vi.fn(),
@@ -36,6 +46,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     stopEnvironment: vi.fn(),
     restartEnvironment: vi.fn(),
     deleteEnvironment: vi.fn(),
+    retryEnvironment: vi.fn(),
   }
 })
 
@@ -158,19 +169,30 @@ function mockEnvironmentInstance(overrides: Record<string, unknown> = {}) {
   vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never })
 }
 
-async function mountAt(query: Record<string, string> = {}, withProjectSelector = false) {
+async function mountAt(
+  query: Record<string, string> = {},
+  withProjectSelector = false,
+  teacherMode = false,
+  entryPath: '/student/environments' | '/researcher/environments' | '/teacher/environments' = teacherMode
+    ? '/teacher/environments'
+    : '/student/environments',
+) {
   const router = createRouter({
     history: createWebHistory(),
-    routes: [{ path: '/student/environments', name: 'student-environments', component: EnvironmentEntryView }],
+    routes: [
+      { path: '/student/environments', name: 'student-environments', component: EnvironmentEntryView },
+      { path: '/researcher/environments', name: 'researcher-environments', component: EnvironmentEntryView },
+      { path: '/teacher/environments', name: 'teacher-environments', component: EnvironmentEntryView, props: { teacherMode } },
+    ],
   })
-  await router.push({ path: '/student/environments', query })
+  await router.push({ path: entryPath, query })
   await router.isReady()
-  const component = defineComponent({
+  const component = {
     setup: () => () => h('div', [
       ...(withProjectSelector ? [h(GcpProjectSelector)] : []),
       h(RouterView),
     ]),
-  })
+  }
   const wrapper = mount(component, {
     global: { plugins: [router] },
   })
@@ -187,7 +209,10 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(listProjects).mockResolvedValue({ data: [mockProject], error: undefined as never })
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [] }, error: undefined as never })
     vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({ data: { items: [] }, error: undefined as never } as never)
     vi.mocked(listEnvironmentOperations).mockResolvedValue({ data: { items: [] }, error: undefined as never })
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
     window.localStorage.clear()
   })
 
@@ -203,6 +228,70 @@ describe('EnvironmentEntryView', () => {
     })
     const { wrapper } = await mountAt()
     await vi.waitFor(() => expect(wrapper.text()).toContain('PROJECT_CONTEXT_MISSING'))
+  })
+
+  it('keeps a task navigation when the project list resolves during the auth guard', async () => {
+    let resolveProjects!: (value: unknown) => void
+    const projectsResponse = new Promise((resolve) => { resolveProjects = resolve })
+    vi.mocked(listProjects).mockImplementation(() => projectsResponse as never)
+
+    let releaseGuard!: () => void
+    const guardReady = new Promise<void>((resolve) => { releaseGuard = resolve })
+    const RootView = {
+      setup() {
+        const projects = useProjects()
+        projects.projects = { kind: 'idle' }
+        projects.selectedProjectId = null
+        return { projects }
+      },
+      template: '<RouterLink to="/student/environments" data-testid="student-environment-link">环境控制台</RouterLink>',
+    }
+    const router = createRouter({
+      history: createWebHistory(),
+      routes: [
+        { path: '/', component: RootView },
+        { path: '/student/environments', component: EnvironmentEntryView },
+      ],
+    })
+    router.beforeEach(async (to) => {
+      if (to.path === '/student/environments') await guardReady
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount({ setup: () => () => h(RouterView) }, {
+      global: { plugins: [router] },
+    })
+    mountedWrappers.push(wrapper)
+    await vi.waitFor(() => expect(vi.mocked(listProjects)).toHaveBeenCalledTimes(1))
+
+    const navigation = router.push('/student/environments')
+    await Promise.resolve()
+    expect(router.currentRoute.value.path).toBe('/')
+
+    resolveProjects({ data: [mockProject], error: undefined as never })
+    await Promise.resolve()
+    releaseGuard()
+    await navigation
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/student/environments')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('项目环境控制台'))
+    expect(router.currentRoute.value.query.projectId).toBe('project-1')
+  })
+
+  it('offers the project Work environment list before the advanced ID input', async () => {
+    const { wrapper } = await mountAt(
+      { projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('选择已有 Work 环境'))
+    const listLink = wrapper.get('a[href="/researcher/workspaces?projectId=project-1"]')
+    expect(listLink.text()).toContain('选择已有 Work 环境')
+    expect(wrapper.get('.environment-id-input-details').attributes('open')).toBeUndefined()
+    expect(wrapper.get('.environment-id-input-details summary').text()).toContain('高级')
   })
 
   it('loads environment template releases for the selected project', async () => {
@@ -266,10 +355,276 @@ describe('EnvironmentEntryView', () => {
     })
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
-    expect(wrapper.text()).toContain('运行中')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('运行中'))
     expect(wrapper.text()).toContain('启动')
+    expect(wrapper.get('#lifecycle-action-hint').text()).toContain('重启会中断当前运行')
     await vi.waitFor(() => expect(vi.mocked(listEnvironmentEndpoints)).toHaveBeenCalledWith({ path: { environmentId: 'env-1' } }))
     expect(wrapper.text()).toContain('ssh')
+  })
+
+  it('shows permanent material retention without inventing a deadline', async () => {
+    mockEnvironmentInstance({ eligibilityExpiresAt: null })
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('材料保留至'))
+    expect(wrapper.text()).toContain('不过期，直到明确撤回')
+    expect(wrapper.text()).not.toContain('Invalid Date')
+  })
+
+  it('keeps a researcher Work console pending while the approved environment handoff appears', async () => {
+    vi.useFakeTimers()
+    try {
+      mockEnvironmentInstance()
+      vi.mocked(getEnvironment).mockResolvedValueOnce({
+        response: { status: 404 },
+        error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+      } as never)
+      vi.mocked(listProjectResourceRequests).mockResolvedValue({
+        data: [{
+          id: 'request-1',
+          projectId: 'project-1',
+          target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+          state: 'active',
+        }],
+        error: undefined as never,
+      } as never)
+      vi.mocked(listProjectResourceLeases).mockResolvedValue({
+        data: [{ id: 'lease-1', requestId: 'request-1', state: 'active' }],
+        error: undefined as never,
+      } as never)
+      const { wrapper } = await mountAt(
+        { environmentId: 'env-1', projectId: 'project-1' },
+        false,
+        false,
+        '/researcher/environments',
+      )
+      await flushPromises()
+      expect(wrapper.text()).toContain('环境正在准备')
+
+      await vi.advanceTimersByTimeAsync(3000)
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('Environment 1')
+      expect(getEnvironment).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not wait for an unknown Work environment ID', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-unknown', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(listProjectResourceRequests).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectResourceLeases).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not wait when the matching Work request belongs to another project', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [{
+        id: 'request-other-project',
+        projectId: 'project-2',
+        target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+        state: 'active',
+      }],
+      error: undefined as never,
+    } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({
+      data: [{ id: 'lease-other-project', requestId: 'request-other-project', state: 'active' }],
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops immediately with the resource diagnostic after an approved request becomes terminal', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [{
+        id: 'request-1',
+        projectId: 'project-1',
+        diagnosticCode: 'LW_ENVIRONMENT_CREATE_AGGREGATE_INVALID',
+        target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+        state: 'rejected',
+      }],
+      error: undefined as never,
+    } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: [], error: undefined as never })
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_CREATE_AGGREGATE_INVALID')
+    expect(wrapper.text()).toContain('资源申请已拒绝')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops immediately when the approved Work lease is terminal', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      data: [{
+        id: 'request-1',
+        projectId: 'project-1',
+        target: { kind: 'environment', environmentId: 'env-1', releaseId: 'release-1', releaseVersion: 1 },
+        state: 'active',
+      }],
+      error: undefined as never,
+    } as never)
+    vi.mocked(listProjectResourceLeases).mockResolvedValue({
+      data: [{ id: 'lease-1', requestId: 'request-1', state: 'revoked', revokeReasonCode: 'task_owner_release' }],
+      error: undefined as never,
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('task_owner_release')
+    expect(wrapper.text()).toContain('资源授权已撤销')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a resource permission error instead of waiting on the environment 404', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境尚未同步', retryable: true },
+    } as never)
+    vi.mocked(listProjectResourceRequests).mockResolvedValue({
+      response: { status: 403 },
+      error: { diagnosticCode: 'LW_AUTH_SCOPE_DENIED', detail: '无权读取项目资源', retryable: false },
+    } as never)
+    const { wrapper } = await mountAt(
+      { environmentId: 'env-1', projectId: 'project-1' },
+      false,
+      false,
+      '/researcher/environments',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_AUTH_SCOPE_DENIED')
+    expect(wrapper.text()).toContain('无权读取项目资源')
+    expect(wrapper.text()).not.toContain('环境正在准备')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a direct student environment 404 as an error', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({
+      response: { status: 404 },
+      error: { diagnosticCode: 'LW_ENVIRONMENT_NOT_FOUND', detail: '环境不存在', retryable: true },
+    } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+    await flushPromises()
+    expect(wrapper.text()).toContain('LW_ENVIRONMENT_NOT_FOUND')
+    expect(getEnvironment).toHaveBeenCalledTimes(1)
+  })
+
+  it('explains retained storage and resource reservations while stopped', async () => {
+    mockEnvironmentInstance({
+      class: 'work',
+      desiredState: 'stopped',
+      observedState: 'stopped',
+      operation: { ...mockOperation('succeeded', { kind: 'stop' }) },
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
+    const hint = wrapper.get('#lifecycle-action-hint').text()
+    expect(hint).toContain('计算用量已停止计量')
+    expect(hint).toContain('工作目录和磁盘仍保留并继续按存储费率核算')
+    expect(hint).toContain('GPU 预留和 Work 资源租约会保留')
+    expect(hint).toContain('删除环境并完成回收后才归还容量')
+
+    await wrapper.find('button[aria-label="删除"]').trigger('click')
+    const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
+    expect(dialog.props('description')).toContain('工作目录及关联容器存储或虚拟机磁盘')
+    expect(dialog.props('description')).toContain('操作不可恢复')
+    expect(dialog.props('description')).toContain('项目材料、已冻结提交和评测记录不在本环境删除范围内')
+  })
+
+  it('explains that a stopped experiment releases GPU capacity for the next start', async () => {
+    mockEnvironmentInstance({
+      class: 'experiment',
+      desiredState: 'stopped',
+      observedState: 'stopped',
+      operation: { ...mockOperation('succeeded', { kind: 'stop' }) },
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.get('#lifecycle-action-hint').text()).toContain('环境已停止'))
+    const hint = wrapper.get('#lifecycle-action-hint').text()
+    expect(hint).toContain('GPU 预留已释放')
+    expect(hint).toContain('重新启动时会重新进行 GPU 资源准入')
+    expect(hint).not.toContain('Work 资源租约会保留')
+  })
+
+  it('keeps teacher console navigation in the teacher workbench and omits student submission controls', async () => {
+    mockEnvironmentInstance({ displayLabel: '教师可管理环境' })
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, true)
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('教师可管理环境'))
+    expect(wrapper.text()).toContain('教师项目环境')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('实验提交与凭据'))).toBe(false)
+    expect(wrapper.find('.freeze-section').exists()).toBe(false)
+    const backLink = wrapper.find('a[href^="/teacher/environments"]')
+    expect(backLink.exists()).toBe(true)
+    expect(backLink.attributes('href')).toContain('projectId=project-1')
+  })
+
+  it('keeps teacher freeze recovery in the operations timeline without exposing freeze controls', async () => {
+    mockEnvironmentInstance({ displayLabel: '教师可管理环境' })
+    vi.mocked(listEnvironmentOperations).mockResolvedValue({
+      data: { items: [mockOperation('running', { kind: 'freeze', operationId: 'freeze-running' })] },
+      error: undefined as never,
+    } as never)
+
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' }, false, true)
+    await vi.waitFor(() => expect(wrapper.text()).toContain('教师可管理环境'))
+
+    await wrapper.findAll('button').find((button) => button.text().includes('Web 控制台'))!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('冻结提交处理中，终端已暂时断开'))
+    expect(wrapper.find('.freeze-section').exists()).toBe(false)
+    expect(wrapper.text()).toContain('查看操作状态')
+    expect(wrapper.text()).not.toContain('查看提交状态')
+
+    await wrapper.findAll('button').find((button) => button.text() === '查看操作状态')!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('操作与诊断时间线'))
+    expect(wrapper.find('.freeze-section').exists()).toBe(false)
   })
 
   it('uses the environment display name and keeps the full ID in secondary details', async () => {
@@ -281,6 +636,9 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.find('.title-with-pill h2').text()).not.toContain('env-1')
     expect(wrapper.find('.breadcrumb-current').text()).not.toContain('env-1')
     expect(wrapper.get('.environment-id-details').text()).toContain('env-1')
+    expect(wrapper.get('.environment-id-details code').text()).toBe('env-1')
+    expect(wrapper.get('.environment-id-details').text()).toContain('rev-11')
+    expect(wrapper.get('.env-meta-grid').text()).not.toContain('修订版本')
     expect(wrapper.findAll('.resource-title-row > button')).toHaveLength(1)
 
     const toolsToggle = wrapper.find('.resource-title-row > button')
@@ -309,6 +667,84 @@ describe('EnvironmentEntryView', () => {
     expect(wrapper.text()).toContain('此项目环境已删除')
     expect(wrapper.find('.environment-selector').exists()).toBe(false)
     expect(wrapper.find('button[aria-expanded="false"]').exists()).toBe(true)
+  })
+
+  it.each(['experiment', 'work'])('reclaims failed cleanup with DELETE for a %s environment', async (environmentClass) => {
+    mockEnvironmentInstance({
+      class: environmentClass, desiredState: 'deleted', observedState: 'failed', failedPhase: 'expiring',
+      operation: { ...mockOperation('failed', { kind: 'expire' }), id: 'op-failed' },
+    })
+    vi.mocked(listEnvironmentOperations).mockResolvedValue({
+      data: { items: [mockOperation('failed', { kind: 'expire' })] }, error: undefined as never,
+    } as never)
+    let finishDelete!: (value: never) => void
+    vi.mocked(deleteEnvironment).mockImplementation(() => new Promise((resolve) => { finishDelete = resolve }))
+    const { wrapper } = await mountAt({ environmentId: 'env-1', projectId: 'project-1' })
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(true))
+    const reclaim = wrapper.find('button[aria-label="重试回收"]')
+    expect((reclaim.element as HTMLButtonElement).disabled).toBe(false)
+    expect(wrapper.text()).toContain('资源释放尚未确认')
+    expect(wrapper.findAll('button').some((button) => button.text() === '重试失败的操作')).toBe(false)
+    for (const action of ['启动', '重启']) expect((wrapper.find(`button[aria-label="${action}"]`).element as HTMLButtonElement).disabled).toBe(true)
+    await reclaim.trigger('click')
+    expect(wrapper.findComponent({ name: 'ConfirmDialog' }).props('description')).toContain('删除仍存在的工作目录及关联容器存储或虚拟机磁盘')
+    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(deleteEnvironment).toHaveBeenCalledTimes(1))
+    expect(deleteEnvironment).toHaveBeenCalledWith({
+      path: { environmentId: 'env-1' },
+      headers: { 'If-Match': '"rev-11"', 'Idempotency-Key': expect.any(String) },
+    })
+    expect((reclaim.element as HTMLButtonElement).disabled).toBe(true)
+    expect(retryEnvironment).not.toHaveBeenCalled()
+    expect(startEnvironment).not.toHaveBeenCalled()
+    expect(restartEnvironment).not.toHaveBeenCalled()
+    finishDelete({ data: { environmentId: 'env-1', operationId: 'new-delete', revision: 12, statusUrl: '/api/v1/environments/env-1' }, error: undefined } as never)
+    await vi.waitFor(() => expect(getEnvironment).toHaveBeenCalledTimes(2))
+    // The accepted revision fences another delete while the instance read is still stale.
+    expect((reclaim.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it.each(['accepted', 'running', 'cancelling'])('does not duplicate cleanup while the operation is %s', async (state) => {
+    mockEnvironmentInstance({
+      desiredState: 'deleted', observedState: 'failed',
+      operation: { ...mockOperation(state as OperationFixtureState, { kind: 'expire' }), id: `op-${state}` },
+    })
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="删除"]').exists()).toBe(true))
+    expect((wrapper.find('button[aria-label="删除"]').element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(false)
+    expect(deleteEnvironment).not.toHaveBeenCalled()
+  })
+
+  it('does not expose recovery actions when environment ownership is denied', async () => {
+    vi.mocked(getEnvironment).mockResolvedValue({ error: { diagnosticCode: 'LW_SCOPE_DENIED', detail: '无权访问此环境', status: 403 } } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('LW_SCOPE_DENIED'))
+    expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="删除"]').exists()).toBe(false)
+    expect(deleteEnvironment).not.toHaveBeenCalled()
+  })
+
+  it('shows a denied DELETE and releases the local pending state without pretending cleanup completed', async () => {
+    mockEnvironmentInstance({
+      desiredState: 'deleted', observedState: 'failed',
+      operation: { ...mockOperation('failed', { kind: 'delete' }), id: 'op-failed' },
+    })
+    vi.mocked(deleteEnvironment).mockResolvedValue({ error: { diagnosticCode: 'LW_SCOPE_DENIED', detail: '回收权限已撤销', status: 403 } } as never)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="重试回收"]').exists()).toBe(true))
+    await wrapper.find('button[aria-label="重试回收"]').trigger('click')
+    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('回收权限已撤销'))
+    expect(wrapper.findAll('button').some((button) => button.text() === '重试')).toBe(false)
+    expect(wrapper.text()).toContain('资源释放尚未确认')
+    expect((wrapper.find('button[aria-label="重试回收"]').element as HTMLButtonElement).disabled).toBe(false)
+    expect(deleteEnvironment).toHaveBeenCalledTimes(1)
+    const firstKey = vi.mocked(deleteEnvironment).mock.calls[0][0]?.headers?.['Idempotency-Key']
+    await wrapper.find('button[aria-label="重试回收"]').trigger('click')
+    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(deleteEnvironment).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(deleteEnvironment).mock.calls[1][0]?.headers?.['Idempotency-Key']).not.toBe(firstKey)
   })
 
   it('renders every public operation state and its optional cleanup and diagnostic details', async () => {
@@ -380,6 +816,55 @@ describe('EnvironmentEntryView', () => {
     if (!canIssue) expect(wrapper.text()).toContain(hint)
   })
 
+  it('opens an HTTP endpoint through its authorized same-origin connect URL', async () => {
+    mockEnvironmentInstance()
+    vi.mocked(listEnvironmentEndpoints).mockResolvedValue({
+      data: {
+        items: [{ id: 'ep-http', protocol: 'http', health: 'healthy', observedAt: '2026-07-11T10:00:00.000Z' }],
+      },
+      error: undefined as never,
+    } as never)
+    vi.mocked(listEnvironmentAccessGrants).mockResolvedValue({
+      data: { items: [{ id: 'grant-http' }] },
+      error: undefined as never,
+    } as never)
+    vi.mocked(getAccessGrant).mockResolvedValue({
+      data: {
+        id: 'grant-http',
+        actorId: 'student-1',
+        environmentId: 'env-1',
+        environmentRevision: 11,
+        projectId: 'project-1',
+        state: 'active',
+        revision: 1,
+        endpointGrants: [{
+          id: 'endpoint-grant-http',
+          accessGrantId: 'grant-http',
+          endpointId: 'ep-http',
+          endpointRevision: 1,
+          protocol: 'http',
+          action: 'connect',
+          health: 'healthy',
+          connectUrl: '/connect/endpoint-grant-http/',
+          expiresAt: '2026-07-12T10:00:00.000Z',
+        }],
+        issuedAt: '2026-07-11T10:00:00.000Z',
+        expiresAt: '2026-07-12T10:00:00.000Z',
+      },
+      error: undefined as never,
+    } as never)
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const { wrapper } = await mountAt({ environmentId: 'env-1' })
+
+    await vi.waitFor(() => expect(wrapper.find('.runtime-access').exists()).toBe(true))
+    expect(wrapper.find('.endpoint-grants').text()).toContain('http')
+    const openButton = wrapper.findAll('button').find((button) => button.text() === '打开容器实验')
+    expect(openButton).toBeDefined()
+    await openButton!.trigger('click')
+    expect(open).toHaveBeenCalledWith('/connect/endpoint-grant-http/', '_blank', 'noopener,noreferrer')
+    open.mockRestore()
+  })
+
   it.each([
     ['stopped', 'stopped', '环境已停止，启动后才能签发访问授权。'],
     ['failed', 'running', '环境处于失败状态，重试成功并恢复就绪后才能签发访问授权。'],
@@ -407,7 +892,7 @@ describe('EnvironmentEntryView', () => {
     })
 
     await vi.waitFor(() => expect(wrapper.find('.selector-trigger').text()).toContain('Second project'))
-    expect(wrapper.find('.selector-trigger').text()).toContain('project-2')
+    expect(wrapper.find('.selector-trigger').text()).not.toContain('project-2')
     expect(router.currentRoute.value.query.environmentId).toBe('env-2')
   })
 
@@ -580,8 +1065,8 @@ describe('EnvironmentEntryView', () => {
     const { wrapper } = await mountAt({ environmentId: 'env-1' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('env-1'))
 
+    await vi.waitFor(() => expect(wrapper.findAll('button').find((b) => b.text() === '启动')).toBeDefined())
     const startButton = wrapper.findAll('button').find((b) => b.text() === '启动')
-    expect(startButton).toBeDefined()
     await startButton!.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('ENVIRONMENT_LIFECYCLE_FAILED'))
     expect(wrapper.text()).toContain('环境 env-1 处于失败状态')

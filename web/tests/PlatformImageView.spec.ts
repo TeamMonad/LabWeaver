@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import PlatformImageView from '@/views/admin/PlatformImageView.vue'
 import {
+  cancelPlatformImageUpload,
   completePlatformImageUpload,
   createPlatformImageUpload,
   disablePlatformImage,
+  getPlatformImageUpload,
   listPlatformImages,
   registerPlatformImage,
   repinPlatformImage,
@@ -21,6 +23,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
     disablePlatformImage: vi.fn(),
     createPlatformImageUpload: vi.fn(),
     completePlatformImageUpload: vi.fn(),
+    getPlatformImageUpload: vi.fn(),
+    cancelPlatformImageUpload: vi.fn(),
   }
 })
 
@@ -64,11 +68,7 @@ const uploadSession = {
   targetReference: 'harbor.lab.lan/labweaver-system/ubuntu:24.04',
   archiveBytes: 7,
   archiveMediaType: 'application/vnd.oci.image.layout.v1+tar',
-  uploadTarget: {
-    uploadUrl: 'https://objects.example.test/staged-archive',
-    requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' },
-    expiresAt: '2026-07-16T09:00:00.000Z',
-  },
+  uploadTarget: { partSizeBytes: 64 * 1024 * 1024, parts: [{ partNumber: 1, uploadUrl: 'https://objects.example.test/staged-archive', requiredHeaders: { 'x-amz-server-side-encryption': 'AES256' }, expiresAt: '2026-07-16T09:00:00.000Z' }], expiresAt: '2026-07-16T09:00:00.000Z' }, uploadedParts: [],
   expiresAt: '2026-07-16T09:00:00.000Z',
   revision: 1,
 }
@@ -128,10 +128,15 @@ async function fillVmUploadForm(
 describe('PlatformImageView', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    window.sessionStorage.clear()
     vi.mocked(listPlatformImages).mockResolvedValue({ data: { entries: [entry] }, error: undefined as never })
-    vi.mocked(putFileWithProgress).mockResolvedValue(undefined)
+    vi.mocked(putFileWithProgress).mockResolvedValue({ etag: '"etag-default"' })
     vi.mocked(createPlatformImageUpload).mockResolvedValue({ data: uploadSession, error: undefined as never })
     vi.mocked(completePlatformImageUpload).mockResolvedValue({ data: entry, error: undefined as never })
+    vi.mocked(getPlatformImageUpload).mockResolvedValue({
+      data: { uploadId: uploadSession.uploadId, revision: 2, state: 'imported', catalogId: entry.catalogId },
+      error: undefined as never,
+    })
   })
 
   afterEach(() => {
@@ -141,12 +146,32 @@ describe('PlatformImageView', () => {
   it('renders the catalog rows with the Control release impact hint', async () => {
     const wrapper = await mountView()
 
-    expect(wrapper.text()).toContain('维护沙箱可用的容器与虚拟机基础镜像。digest 是权威身份，tag 仅作解析入口。')
+    expect(wrapper.text()).toContain('维护沙箱可用的容器与虚拟机基础镜像。digest 是权威身份，也是固定且不可变的镜像版本；tag 仅作解析入口。')
     expect(columnText(wrapper, 0, '类型')).toBe('容器')
     expect(columnText(wrapper, 0, 'binding')).toBe('ubuntu-24.04-v1')
     expect(columnText(wrapper, 0, 'digest')).toContain(entry.resolvedDigest.slice(0, 8))
     expect(columnText(wrapper, 0, '引用 release 数')).toBe('2')
     expect(columnText(wrapper, 0, '状态')).toBe('可用')
+  })
+
+  it('keeps field hints out of accessible names and associates them with their controls', async () => {
+    const wrapper = await mountView()
+
+    const registerTrust = wrapper.get('#register-trust-revision')
+    expect(wrapper.get('label[for="register-trust-revision"]').text()).toBe('信任版本')
+    expect(registerTrust.attributes('aria-describedby')).toBe('register-trust-revision-hint')
+    expect(wrapper.find('label[for="register-trust-revision"] .field-hint').exists()).toBe(false)
+
+    const uploadTrust = wrapper.get('#upload-trust-revision')
+    expect(wrapper.get('label[for="upload-trust-revision"]').text()).toBe('信任版本')
+    expect(uploadTrust.attributes('aria-describedby')).toBe('upload-trust-revision-hint')
+    expect(wrapper.find('label[for="upload-trust-revision"] .field-hint').exists()).toBe(false)
+
+    await wrapper.get('.upload-card select').setValue('virtual_machine')
+    const diskFormat = wrapper.get('#upload-disk-format')
+    expect(wrapper.get('label[for="upload-disk-format"]').text()).toBe('磁盘格式')
+    expect(diskFormat.attributes('aria-describedby')).toBe('upload-disk-format-hint')
+    expect(wrapper.find('label[for="upload-disk-format"] .field-hint').exists()).toBe(false)
   })
 
   it('disables the pinned digest only after the confirmation dialog is accepted', async () => {
@@ -251,10 +276,11 @@ describe('PlatformImageView', () => {
     expect(containerBody).not.toHaveProperty('diskPath')
     expect(containerBody).not.toHaveProperty('capacityBytes')
     expect(putFileWithProgress).toHaveBeenCalledWith(
-      file,
-      uploadSession.uploadTarget.uploadUrl,
-      uploadSession.uploadTarget.requiredHeaders,
+      expect.any(Blob),
+      uploadSession.uploadTarget.parts[0].uploadUrl,
+      uploadSession.uploadTarget.parts[0].requiredHeaders,
       expect.any(Function),
+      expect.any(AbortSignal),
     )
     const completion = vi.mocked(completePlatformImageUpload).mock.calls[0][0]
     expect(completion.path).toEqual({ uploadId: uploadSession.uploadId })
@@ -263,7 +289,7 @@ describe('PlatformImageView', () => {
   })
 
   it('keeps the selected file and stages a new session when the object upload fails', async () => {
-    vi.mocked(putFileWithProgress).mockRejectedValueOnce(new Error('上传失败：403 Forbidden'))
+    vi.mocked(putFileWithProgress).mockRejectedValueOnce(new Error('对象存储上传失败：HTTP 503'))
     const wrapper = await mountView()
     const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
     await fillUploadForm(wrapper, file)
@@ -272,9 +298,21 @@ describe('PlatformImageView', () => {
     await form.trigger('submit')
     await flushPromises()
 
-    expect(wrapper.get('.diagnostic-banner').text()).toContain('上传并导入 OCI 归档失败。')
+    expect(wrapper.get('.diagnostic-banner').text()).toContain('对象存储上传失败：HTTP 503')
     expect(completePlatformImageUpload).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('已选择：layout.tar')
+
+    vi.mocked(cancelPlatformImageUpload).mockResolvedValue({ data: {}, error: undefined as never })
+    vi.mocked(getPlatformImageUpload).mockResolvedValueOnce({
+      data: { uploadId: uploadSession.uploadId, revision: 2, state: 'cancelled' },
+      error: undefined as never,
+    })
+    vi.mocked(getPlatformImageUpload).mockResolvedValue({
+      data: { uploadId: uploadSession.uploadId, revision: 3, state: 'imported', catalogId: entry.catalogId },
+      error: undefined as never,
+    })
+    await wrapper.get('.upload-status button').trigger('click')
+    await flushPromises()
 
     await form.trigger('submit')
     await flushPromises()
@@ -282,6 +320,123 @@ describe('PlatformImageView', () => {
     expect(createPlatformImageUpload).toHaveBeenCalledTimes(2)
     expect(putFileWithProgress).toHaveBeenCalledTimes(2)
     expect(listPlatformImages).toHaveBeenCalledTimes(2)
+  })
+
+  it('resumes an interrupted upload after refresh from a reselected file', async () => {
+    const interruptedUploadId = '0197f0e0-0000-7000-8000-000000000011'
+    window.sessionStorage.setItem('labweaver.platform-image-upload', JSON.stringify({
+      uploadId: interruptedUploadId,
+      revision: 2,
+      completeIdempotencyKey: 'interrupted-complete-key',
+      cancelIdempotencyKey: 'interrupted-cancel-key',
+      phase: 'uploading',
+      state: 'pending',
+      archiveBytes: 7,
+    }))
+    vi.mocked(getPlatformImageUpload)
+      .mockResolvedValueOnce({
+        data: { uploadId: interruptedUploadId, revision: 2, state: 'pending', uploadTarget: uploadSession.uploadTarget, uploadedParts: [] },
+        error: undefined as never,
+      })
+      .mockResolvedValueOnce({
+        data: { uploadId: interruptedUploadId, revision: 2, state: 'pending', uploadTarget: uploadSession.uploadTarget, uploadedParts: [] },
+        error: undefined as never,
+      })
+      .mockResolvedValueOnce({
+        data: { uploadId: interruptedUploadId, revision: 3, state: 'imported', catalogId: entry.catalogId },
+        error: undefined as never,
+      })
+    const wrapper = await mountView()
+
+    expect(wrapper.get('.upload-status').text()).toContain('上传会话仍在等待归档。')
+    expect(wrapper.find('.upload-file').exists()).toBe(false)
+
+    const file = new File(['archive'], 'layout.tar', { type: 'application/vnd.oci.image.layout.v1+tar' })
+    await fillUploadForm(wrapper, file)
+    await wrapper.get('.upload-card .admin-form').trigger('submit')
+    await flushPromises()
+
+    expect(createPlatformImageUpload).not.toHaveBeenCalled()
+    expect(putFileWithProgress).toHaveBeenCalledWith(
+      expect.any(Blob),
+      uploadSession.uploadTarget.parts[0].uploadUrl,
+      uploadSession.uploadTarget.parts[0].requiredHeaders,
+      expect.any(Function),
+      expect.any(AbortSignal),
+    )
+    expect(vi.mocked(completePlatformImageUpload).mock.calls[0][0].path).toEqual({ uploadId: interruptedUploadId })
+    expect(wrapper.get('.upload-status').text()).toContain('已导入')
+  })
+
+  it('shows an expired session and lets the administrator reselect without completing it again', async () => {
+    const expiredUploadId = '0197f0e0-0000-7000-8000-000000000020'
+    const replacementUploadId = '0197f0e0-0000-7000-8000-000000000021'
+    window.sessionStorage.setItem('labweaver.platform-image-upload', JSON.stringify({
+      uploadId: expiredUploadId,
+      revision: 2,
+      completeIdempotencyKey: 'expired-complete-key',
+      cancelIdempotencyKey: 'expired-cancel-key',
+      phase: 'uploading',
+      state: 'pending',
+      archiveBytes: 7,
+    }))
+    vi.mocked(getPlatformImageUpload)
+      .mockResolvedValueOnce({
+        data: {
+          uploadId: expiredUploadId,
+          revision: 3,
+          state: 'failed',
+          diagnostic: 'LW_PLATFORM_IMAGE_UPLOAD_EXPIRED',
+        },
+        error: undefined as never,
+      })
+      .mockResolvedValue({
+        data: { uploadId: replacementUploadId, revision: 2, state: 'imported', catalogId: entry.catalogId },
+        error: undefined as never,
+      })
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({
+      data: { ...uploadSession, uploadId: replacementUploadId, archiveBytes: 13 },
+      error: undefined as never,
+    })
+    const wrapper = await mountView()
+
+    expect(wrapper.get('.upload-status').text()).toContain('上传会话已过期，请重新选择归档文件上传。')
+    expect(wrapper.get('.upload-diagnostic-code').text()).toBe('LW_PLATFORM_IMAGE_UPLOAD_EXPIRED')
+    expect(wrapper.get('.upload-card .admin-form button[type="submit"]').element.hasAttribute('disabled')).toBe(true)
+    expect(createPlatformImageUpload).not.toHaveBeenCalled()
+    expect(completePlatformImageUpload).not.toHaveBeenCalled()
+    expect(window.sessionStorage.getItem('labweaver.platform-image-upload')).toBeNull()
+
+    await fillUploadForm(wrapper, new File(['fresh archive'], 'layout.tar'))
+    expect(wrapper.get('.upload-card .admin-form button[type="submit"]').element.hasAttribute('disabled')).toBe(false)
+    await wrapper.get('.upload-card .admin-form').trigger('submit')
+    await flushPromises()
+
+    expect(createPlatformImageUpload).toHaveBeenCalledOnce()
+    expect(putFileWithProgress).toHaveBeenCalledOnce()
+    expect(completePlatformImageUpload).toHaveBeenCalledOnce()
+    expect(completePlatformImageUpload.mock.calls[0][0].path).toEqual({ uploadId: replacementUploadId })
+    expect(wrapper.get('.upload-status').text()).toContain('已导入')
+  })
+
+  it('does not start a file PUT when an in-flight session creation resolves after the view unmounts', async () => {
+    let resolveSession!: (value: unknown) => void
+    const sessionResponse = new Promise((resolve) => { resolveSession = resolve })
+    vi.mocked(createPlatformImageUpload).mockReturnValue(sessionResponse as never)
+    const wrapper = await mountView()
+    await fillUploadForm(wrapper, new File(['archive'], 'layout.tar'))
+    await wrapper.get('.upload-card .admin-form').trigger('submit')
+    await flushPromises()
+
+    wrapper.unmount()
+    resolveSession({ data: uploadSession, error: undefined as never })
+    await flushPromises()
+
+    expect(putFileWithProgress).not.toHaveBeenCalled()
+    const saved = JSON.parse(window.sessionStorage.getItem('labweaver.platform-image-upload')!)
+    expect(saved).toMatchObject({ uploadId: uploadSession.uploadId, phase: 'uploading', state: 'pending' })
+    expect(saved).not.toHaveProperty('uploadTarget')
+    expect(JSON.stringify(saved)).not.toContain(uploadSession.uploadTarget.parts[0].uploadUrl)
   })
 
   it('shows the upstream diagnostic code and keeps the catalog when a mutation conflicts', async () => {
@@ -312,6 +467,7 @@ describe('PlatformImageView', () => {
   })
 
   it('accepts a virtual-machine archive and submits its disk descriptor', async () => {
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({ data: { ...uploadSession, archiveBytes: 8 }, error: undefined as never })
     const wrapper = await mountView()
     const file = new File(['template'], 'template.tar')
 
@@ -319,7 +475,9 @@ describe('PlatformImageView', () => {
 
     await fillVmUploadForm(wrapper, file, { capacity: '10737418240', diskFormat: 'raw' })
 
-    expect(wrapper.get('.upload-card input[type="file"]').attributes('accept')).toBe('.tar,.qcow2,.raw,.img')
+    expect(wrapper.get('.upload-card input[type="file"]').attributes('accept')).toBe('.tar,.tar.gz,.tgz')
+    expect(wrapper.get('.upload-card').text()).toContain('包含单个 qcow2 或 raw 磁盘文件的归档')
+    expect(wrapper.get('.upload-card').text()).toContain('不能直接上传裸磁盘文件或 OCI 布局')
 
     await wrapper.get('.upload-card .admin-form').trigger('submit')
     await flushPromises()
@@ -362,18 +520,33 @@ describe('PlatformImageView', () => {
   })
 
   it('surfaces the Agent diagnostic when the virtual-machine import fails', async () => {
+    vi.mocked(createPlatformImageUpload).mockResolvedValue({ data: { ...uploadSession, archiveBytes: 8 }, error: undefined as never })
     vi.mocked(completePlatformImageUpload).mockResolvedValue({
       error: { diagnosticCode: 'LW_PLATFORM_IMAGE_DISK_INVALID', detail: '归档中的磁盘与声明的路径不一致。' },
     } as never)
+    vi.mocked(getPlatformImageUpload).mockResolvedValue({
+      data: {
+        uploadId: uploadSession.uploadId,
+        revision: 2,
+        state: 'failed',
+        diagnostic: 'LW_PLATFORM_IMAGE_DISK_INVALID',
+      },
+      error: undefined as never,
+    })
     const wrapper = await mountView()
     await fillVmUploadForm(wrapper, new File(['template'], 'template.tar'), { capacity: '4096' })
 
     await wrapper.get('.upload-card .admin-form').trigger('submit')
     await flushPromises()
 
-    const banner = wrapper.get('.diagnostic-banner').text()
-    expect(banner).toContain('LW_PLATFORM_IMAGE_DISK_INVALID')
-    expect(banner).toContain('归档中的磁盘与声明的路径不一致。')
+    expect(completePlatformImageUpload).toHaveBeenCalled()
+    expect(getPlatformImageUpload).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      const status = wrapper.get('.upload-status').text()
+      expect(status).toContain('镜像导入：导入失败')
+      expect(status).toContain('镜像导入失败，请检查归档后重新上传。')
+      expect(wrapper.get('.upload-diagnostic-code').text()).toContain('LW_PLATFORM_IMAGE_DISK_INVALID')
+    })
     expect(columnText(wrapper, 0, 'binding')).toBe('ubuntu-24.04-v1')
   })
 })

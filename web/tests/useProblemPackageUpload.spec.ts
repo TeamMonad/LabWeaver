@@ -13,11 +13,6 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   }
 })
 
-vi.mock('@/utils/crypto', () => ({
-  sha256File: vi.fn(async (file: File) => `sha256-${file.name}`),
-  computeManifestSha256: vi.fn(async () => 'manifest-sha256'),
-}))
-
 function makeFile(name: string, content: string): File {
   return new File([content], name, { type: 'text/plain' })
 }
@@ -115,7 +110,32 @@ describe('useProjectProblemPackageUpload', () => {
     )
   })
 
-  it('sorts files by package path regardless of arrival order so manifest hashing stays deterministic', async () => {
+  it('discards a directory selection when the project changes while files are collected', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
+    let provideFile!: (file: File) => void
+    const delayedEntry = {
+      name: 'README.md',
+      isDirectory: false,
+      isFile: true,
+      file: (success: (file: File) => void) => {
+        provideFile = success
+      },
+    } as unknown as FileSystemFileEntry
+
+    const pending = upload.addDirectoryItems([makeDataTransferItem(delayedEntry)] as unknown as DataTransferItemList)
+    projectId.value = 'project-2'
+    provideFile(makeFile('README.md', '# old project'))
+
+    await pending
+
+    expect(upload.files).toHaveLength(0)
+    expect(upload.state.kind).toBe('idle')
+  })
+
+  it('sorts files by package path regardless of arrival order', async () => {
     const projectId = ref<string | null>('project-1')
     const policyRevision = ref<number | undefined>(1)
     const courseId = ref<string | null | undefined>('course-1')
@@ -256,6 +276,45 @@ describe('useProjectProblemPackageUpload', () => {
     expect(completeProjectProblemPackageUpload).not.toHaveBeenCalled()
   })
 
+  it('sends the explicit retention choice when starting a package upload', async () => {
+    const projectId = ref<string | null>('project-1')
+    const policyRevision = ref<number | undefined>(1)
+    const courseId = ref<string | null | undefined>('course-1')
+    const retentionChoice = ref<'finite' | 'permanent'>('permanent')
+    const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice)
+    await upload.addFiles([makeFile('README.md', '# package')])
+    vi.mocked(createProjectProblemPackageUpload).mockResolvedValue({
+      data: {
+        id: 'upload-1',
+        projectId: 'project-1',
+        courseId: 'course-1',
+        expiresAt: '2026-07-16T10:00:00.000Z',
+        revision: 1,
+        files: [{ path: 'README.md', sizeBytes: 9, mediaType: 'text/plain' }],
+        uploadTargets: [],
+      } as never,
+      error: undefined as never,
+    })
+    vi.mocked(completeProjectProblemPackageUpload).mockResolvedValue({
+      data: {
+        id: 'package-1',
+        projectId: 'project-1',
+        courseId: 'course-1',
+        revision: 1,
+        files: [],
+        retention: { retainUntil: null, disposition: 'retain_until_revoked' },
+        completedAt: '2026-07-16T10:00:00.000Z',
+      } as never,
+      error: undefined as never,
+    })
+
+    await upload.createSession()
+
+    expect(createProjectProblemPackageUpload).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ retentionChoice: 'permanent' }),
+    }))
+  })
+
   it('marks object upload failure without throwing unhandled rejection', async () => {
     const projectId = ref<string | null>('project-1')
     const policyRevision = ref<number | undefined>(1)
@@ -317,6 +376,7 @@ describe('useProjectProblemPackageUpload', () => {
         projectId: 'project-1',
         courseId: 'course-1',
         retentionPolicyRevision: 1,
+        retentionChoice: 'finite',
       }),
     }))
   })

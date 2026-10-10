@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   releases: null as unknown,
   route: { query: {} as Record<string, string> },
   replace: vi.fn(),
+  withdrawRelease: vi.fn(),
 }))
 
 vi.mock('@/composables/useProjects', () => ({
@@ -16,6 +17,7 @@ vi.mock('@/composables/useProjects', () => ({
 
 vi.mock('@/composables/useEnvironmentTemplateReleases', () => ({
   useEnvironmentTemplateReleases: () => mocks.releases,
+  withdrawEnvironmentTemplateReleaseByUi: mocks.withdrawRelease,
 }))
 
 vi.mock('vue-router', async (importOriginal) => {
@@ -111,6 +113,7 @@ function mountView(
 describe('LabListView', () => {
   beforeEach(() => {
     mocks.replace.mockReset()
+    mocks.withdrawRelease.mockReset()
     mocks.route.query = {}
   })
 
@@ -166,5 +169,47 @@ describe('LabListView', () => {
 
     expect(state.selectedProjectId).toBe(project.id)
     expect(wrapper.get('a[data-path="/teacher/approvals"]').attributes('data-project-id')).toBe(project.id)
+  })
+
+  it('requires confirmation before withdrawing a published release and preserves project scope', async () => {
+    const wrapper = mountView()
+    const releaseButton = wrapper.get('button[aria-label="撤回环境模板 v2"]')
+    const withdrawal = {
+      releaseId: publishedRelease.id,
+      releaseVersion: publishedRelease.version,
+      actorId: project.ownerActorId,
+      reasonCode: 'TEACHER_WITHDRAWN',
+      withdrawnAt: '2026-09-12T10:00:00.000Z',
+    }
+    mocks.withdrawRelease.mockResolvedValue({ data: withdrawal, error: undefined })
+
+    await releaseButton.trigger('click')
+    const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
+    expect(dialog.props('description')).toContain('已有环境不会自动释放')
+    expect(dialog.props('description')).toContain('已建立连接不会因撤回自动断开')
+    await dialog.vm.$emit('cancel')
+    expect(mocks.withdrawRelease).not.toHaveBeenCalled()
+
+    await releaseButton.trigger('click')
+    await dialog.vm.$emit('confirm')
+    await vi.waitFor(() => expect(mocks.withdrawRelease).toHaveBeenCalledWith(project.id, publishedRelease.id, publishedRelease.version))
+    expect(wrapper.text()).toContain('环境模板 v2 已撤回')
+    expect(wrapper.text()).not.toContain(publishedRelease.id)
+    wrapper.unmount()
+  })
+
+  it('keeps the release visible and reports a withdrawal failure', async () => {
+    const wrapper = mountView()
+    mocks.withdrawRelease.mockResolvedValue({
+      data: undefined,
+      error: { diagnosticCode: 'REVISION_CONFLICT', detail: '版本已变化，请刷新后重试。', retryable: false },
+    })
+
+    await wrapper.get('button[aria-label="撤回环境模板 v2"]').trigger('click')
+    await wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await vi.waitFor(() => expect(mocks.withdrawRelease).toHaveBeenCalledTimes(1))
+    expect(wrapper.text()).toContain('版本已变化，请刷新后重试。')
+    expect(wrapper.text()).toContain(publishedRelease.id)
+    wrapper.unmount()
   })
 })

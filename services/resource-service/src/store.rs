@@ -8,30 +8,33 @@
 use contracts::environment::{
     EnvironmentLeaseAuthorization, EnvironmentLeaseState, EnvironmentLeaseVerificationRequest,
     EnvironmentLeaseVerificationResponse,
+    EnvironmentResourceReservationState as ContractReservationState,
 };
 use contracts::events::{
     CloudEvent, EVENT_CONTRACTS, ResourceLeaseChanged, ResourceRequestChanged, subjects,
 };
 use contracts::http::{
-    CreateResourceRateRequest, IdempotencyKey, RecordResourceUsageRequest, TaskResourceStatus,
-    UpsertResourceBudgetRequest,
+    CreateResourceRateRequest, EndResourceRateRequest, IdempotencyKey, RecordResourceUsageRequest,
+    TaskResourceStatus, UpsertResourceBudgetRequest,
 };
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, GpuAllocation, GpuAllocationMode,
     GpuCatalogEntry, Money, ResourceApproval, ResourceBillingUnit, ResourceBudget, ResourceCharge,
     ResourceChargeLine, ResourceLease, ResourceLeaseState, ResourceRate, ResourceRequest,
-    ResourceRequestState, ResourceTarget, ResourceUsageKind, ResourceUsageRecord, UsageMeasurement,
-    UsageSettlementState,
+    ResourceRequestState, ResourceTarget, ResourceUsageKind, ResourceUsageQuantities,
+    ResourceUsageRecord, ResourceUsageTarget, UsageMeasurement, UsageSettlementState,
+    WorkloadResources,
 };
 use contracts::{
-    BudgetId, ChargeId, EventId, GpuCatalogEntryId, LeaseId, ProjectId, RateId, ResourceRequestId,
-    Revision, Sequence, TaskRunId, UsageRecordId, UtcTimestamp,
+    BudgetId, ChargeId, EventId, GpuCatalogEntryId, LeaseId, OperationId, ProjectId, RateId,
+    ResourceRequestId, Revision, Sequence, TaskRunId, UsageRecordId, UtcTimestamp,
 };
 use persistence_sqlx::Sha256Digest; // internal persistence hash, not contract hash
 use persistence_sqlx::{
     Domain, IdempotencyDecision, IdempotencyStore, OutboxStore, PersistenceError,
 };
 use rust_decimal::{Decimal, RoundingStrategy};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::cmp::{max, min};
@@ -74,6 +77,29 @@ pub struct ProvisioningCapacityClaim {
     pub lease_synced_revision: Option<Revision>,
 }
 
+/// Exact fence used when a pre-handoff Environment claim is failed and released.
+#[derive(Clone, Debug)]
+pub struct FailPreHandoffCapacityHandoff {
+    pub claim_id: contracts::CapacityClaimId,
+    pub expected_claim_revision: Revision,
+    pub lease_id: LeaseId,
+    pub expected_lease_revision: Revision,
+    pub diagnostic_code: String,
+    pub actor: contracts::ActorId,
+    pub trace_id: String,
+}
+
+/// Workload identity that owns a durable GPU reservation.
+#[derive(Clone, Debug)]
+pub(crate) enum ActiveReservationTarget {
+    Environment {
+        environment_id: contracts::EnvironmentId,
+    },
+    Task {
+        task_run_id: TaskRunId,
+    },
+}
+
 /// A GPU reservation that is still authoritative in Resource.
 ///
 /// The capacity observer uses this projection to subtract only pods that can be
@@ -81,12 +107,74 @@ pub struct ProvisioningCapacityClaim {
 /// are never sufficient to classify provider occupancy as Resource-owned.
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveGpuReservation {
-    pub claim_id: contracts::CapacityClaimId,
     pub entry_id: GpuCatalogEntryId,
     pub units: u32,
     pub allocation_binding: String,
     pub namespace_name: Option<String>,
-    pub target: ResourceTarget,
+    pub target: ActiveReservationTarget,
+}
+
+/// Durable Environment resource reservation stored in
+/// `resource.environment_resource_reservations`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EnvironmentResourceReservationState {
+    Reserved,
+    Suspended,
+    Released,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnvironmentResourceReservationContract {
+    environment_id: contracts::EnvironmentId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    owner_actor_id: contracts::ActorId,
+    provider_binding: String,
+    approved_resources: WorkloadResources,
+    #[serde(default)]
+    allocation: Option<GpuAllocation>,
+    state: EnvironmentResourceReservationState,
+    reservation_generation: u64,
+    environment_generation: u64,
+    #[serde(default)]
+    operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnvironmentResourceReservationResult {
+    pub state: ContractReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+    pub allocation: Option<GpuAllocation>,
+    pub applied: bool,
+}
+
+impl EnvironmentResourceReservationContract {
+    fn validate(&self) -> Result<(), ResourceStoreError> {
+        if self.provider_binding.trim().is_empty() || self.provider_binding.len() > 120 {
+            return Err(ResourceStoreError::EnvironmentResourceReservationInvalid);
+        }
+        if self.reservation_generation == 0 || self.environment_generation == 0 {
+            return Err(ResourceStoreError::EnvironmentResourceReservationInvalid);
+        }
+        self.allocation.as_ref().map_or(Ok(()), |allocation| {
+            allocation
+                .validate()
+                .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)
+        })?;
+        self.approved_resources
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        match (&self.approved_resources.gpu, &self.allocation) {
+            (None, None) => {}
+            (Some(request), Some(allocation))
+                if request.class == allocation.class && request.count == allocation.count => {}
+            _ => return Err(ResourceStoreError::EnvironmentResourceReservationInvalid),
+        }
+        Ok(())
+    }
 }
 
 impl PendingAllocation {
@@ -448,95 +536,175 @@ impl PgResourceStore {
         observed_at: UtcTimestamp,
         authority: Option<&UsageAuthority<'_>>,
     ) -> Result<ResourceUsageRecord, ResourceStoreError> {
-        let settlement = match input.measurement {
+        let mut transaction = self.pool.begin().await?;
+        let (project_id, course_id, target) = match input.target.clone() {
+            ResourceUsageTarget::ResourceRequest {
+                request_id,
+                lease_id,
+            } => {
+                // Cleanup transitions lock Lease -> Request before releasing capacity.  A usage
+                // insert takes KEY SHARE locks for both foreign keys, so acquire the optional
+                // Lease lock first and keep every request/lease transaction in the same order.
+                let locked_lease = if let Some(lease_id) = lease_id {
+                    let lease_row = sqlx::query(
+                        "SELECT request_id, state
+                         FROM resource.resource_leases
+                         WHERE lease_id=$1 FOR UPDATE",
+                    )
+                    .bind(lease_id.as_uuid())
+                    .fetch_optional(&mut *transaction)
+                    .await?
+                    .ok_or(ResourceStoreError::LeaseNotFound)?;
+                    Some((
+                        lease_row.try_get::<uuid::Uuid, _>("request_id")?,
+                        lease_row.try_get::<String, _>("state")?,
+                    ))
+                } else {
+                    None
+                };
+                let request_scope = sqlx::query(
+                    "SELECT project_id, course_id, target_kind, task_run_id
+                     FROM resource.resource_requests
+                     WHERE request_id=$1 FOR UPDATE",
+                )
+                .bind(request_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ResourceStoreError::NotFound)?;
+                let project = ProjectId::from_str(
+                    &request_scope
+                        .try_get::<uuid::Uuid, _>("project_id")?
+                        .to_string(),
+                )
+                .map_err(|_| ResourceStoreError::ScopeConflict)?;
+                let course = request_scope
+                    .try_get::<Option<uuid::Uuid>, _>("course_id")?
+                    .map(|value| {
+                        contracts::CourseId::from_str(&value.to_string())
+                            .map_err(|_| ResourceStoreError::ScopeConflict)
+                    })
+                    .transpose()?;
+                let target_kind: String = request_scope.try_get("target_kind")?;
+                let task_run_id: Option<uuid::Uuid> = request_scope.try_get("task_run_id")?;
+                if let Some(authority) = authority {
+                    let authorized = match target_kind.as_str() {
+                        "environment" => {
+                            authority.caller.client_id == authority.environment_service_client_id
+                        }
+                        "task" => authority
+                            .task_service_client_ids
+                            .contains(&authority.caller.client_id),
+                        _ => false,
+                    };
+                    if !authorized
+                        || lease_id.is_none()
+                        || (target_kind == "task" && task_run_id.is_none())
+                        || (target_kind == "environment" && task_run_id.is_some())
+                    {
+                        tracing::warn!(
+                            event = "resource.usage.authority_mismatch",
+                            request_id = %request_id,
+                            target_kind,
+                            caller_client_id = authority.caller.client_id,
+                            diagnostic_code = "LW_AUTH_USAGE_OWNER_MISMATCH",
+                        );
+                        return Err(ResourceStoreError::ScopeConflict);
+                    }
+                }
+                if let Some((lease_request, lease_state)) = locked_lease
+                    && (lease_request != request_id.as_uuid()
+                        || (authority.is_some()
+                            && !matches!(
+                                lease_state.as_str(),
+                                "active" | "expiring" | "expired" | "revoked"
+                            )))
+                {
+                    return Err(ResourceStoreError::ScopeConflict);
+                }
+                (
+                    project,
+                    course,
+                    ResourceUsageTarget::ResourceRequest {
+                        request_id,
+                        lease_id,
+                    },
+                )
+            }
+            ResourceUsageTarget::ExperimentEnvironment { environment_id } => {
+                if let Some(authority) = authority
+                    && authority.caller.client_id != authority.environment_service_client_id
+                {
+                    return Err(ResourceStoreError::ScopeConflict);
+                }
+                let row = sqlx::query(
+                    "SELECT contract, project_id, course_id, state
+                     FROM resource.environment_resource_reservations
+                     WHERE environment_id=$1 FOR UPDATE",
+                )
+                .bind(environment_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ResourceStoreError::NotFound)?;
+                let reservation =
+                    decode_environment_resource_reservation(row.try_get("contract")?)?;
+                let state: String = row.try_get("state")?;
+                if reservation.environment_id != environment_id
+                    || !matches!(state.as_str(), "reserved" | "suspended" | "released")
+                {
+                    return Err(ResourceStoreError::ScopeConflict);
+                }
+                let project =
+                    ProjectId::from_str(&row.try_get::<uuid::Uuid, _>("project_id")?.to_string())
+                        .map_err(|_| ResourceStoreError::ScopeConflict)?;
+                let course = row
+                    .try_get::<Option<uuid::Uuid>, _>("course_id")?
+                    .map(|value| {
+                        contracts::CourseId::from_str(&value.to_string())
+                            .map_err(|_| ResourceStoreError::ScopeConflict)
+                    })
+                    .transpose()?;
+                if project != reservation.project_id || course != reservation.course_id {
+                    return Err(ResourceStoreError::ScopeConflict);
+                }
+                (
+                    project,
+                    course,
+                    ResourceUsageTarget::ExperimentEnvironment { environment_id },
+                )
+            }
+        };
+        let measurement = match (&target, &input.measurement) {
+            (ResourceUsageTarget::ExperimentEnvironment { environment_id }, measurement) => {
+                canonical_environment_measurement(
+                    &mut transaction,
+                    *environment_id,
+                    input.kind,
+                    input.measured_from,
+                    input.measured_until,
+                    measurement,
+                )
+                .await?
+            }
+            (ResourceUsageTarget::ResourceRequest { .. }, measurement) => measurement.clone(),
+        };
+        let settlement = match measurement {
             UsageMeasurement::Known { .. } => UsageSettlementState::Pending,
             UsageMeasurement::Unknown { .. } => UsageSettlementState::Unsettled,
         };
         let usage = ResourceUsageRecord {
             id: UsageRecordId::new(),
-            project_id: input.project_id,
-            course_id: input.course_id,
+            project_id,
+            course_id,
             kind: input.kind,
-            request_id: input.request_id,
-            lease_id: input.lease_id,
+            target,
             source_event_id: input.source_event_id,
             measured_from: input.measured_from,
             measured_until: input.measured_until,
-            measurement: input.measurement.clone(),
+            measurement,
             settlement,
             observed_at,
         };
         usage.validate().map_err(ResourceStoreError::Contract)?;
-
-        let mut transaction = self.pool.begin().await?;
-        let request_scope = sqlx::query(
-            "SELECT project_id, course_id, target_kind, task_run_id
-             FROM resource.resource_requests
-              WHERE request_id=$1 FOR UPDATE",
-        )
-        .bind(usage.request_id.as_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(ResourceStoreError::NotFound)?;
-        let request_project: uuid::Uuid = request_scope.try_get("project_id")?;
-        let request_course: Option<uuid::Uuid> = request_scope.try_get("course_id")?;
-        let target_kind: String = request_scope.try_get("target_kind")?;
-        let task_run_id: Option<uuid::Uuid> = request_scope.try_get("task_run_id")?;
-        if request_project != usage.project_id.as_uuid()
-            || request_course != usage.course_id.map(contracts::CourseId::as_uuid)
-        {
-            return Err(ResourceStoreError::ScopeConflict);
-        }
-        if let Some(authority) = authority {
-            let authorized = match target_kind.as_str() {
-                "environment" => {
-                    authority.caller.client_id == authority.environment_service_client_id
-                }
-                "task" => authority
-                    .task_service_client_ids
-                    .contains(&authority.caller.client_id),
-                _ => return Err(ResourceStoreError::ScopeConflict),
-            };
-            if !authorized {
-                tracing::warn!(
-                    event = "resource.usage.authority_mismatch",
-                    request_id = %usage.request_id,
-                    target_kind,
-                    caller_client_id = authority.caller.client_id,
-                    diagnostic_code = "LW_AUTH_USAGE_OWNER_MISMATCH",
-                );
-                return Err(ResourceStoreError::ScopeConflict);
-            }
-            if usage.lease_id.is_none()
-                || !matches!(target_kind.as_str(), "environment" | "task")
-                || (target_kind == "task" && task_run_id.is_none())
-                || (target_kind == "environment" && task_run_id.is_some())
-            {
-                return Err(ResourceStoreError::ScopeConflict);
-            }
-        }
-        if let Some(lease_id) = usage.lease_id {
-            let lease_row = sqlx::query(
-                "SELECT request_id, state FROM resource.resource_leases WHERE lease_id=$1",
-            )
-            .bind(lease_id.as_uuid())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or(ResourceStoreError::LeaseNotFound)?;
-            let lease_request: uuid::Uuid = lease_row.try_get("request_id")?;
-            let lease_state: String = lease_row.try_get("state")?;
-            if lease_request != usage.request_id.as_uuid() {
-                return Err(ResourceStoreError::ScopeConflict);
-            }
-            if authority.is_some()
-                && !matches!(
-                    lease_state.as_str(),
-                    "active" | "expiring" | "expired" | "revoked"
-                )
-            {
-                return Err(ResourceStoreError::ScopeConflict);
-            }
-        }
 
         if let Some(row) = sqlx::query(
             "SELECT contract FROM resource.resource_usage_records WHERE source_event_id=$1",
@@ -557,11 +725,21 @@ impl PgResourceStore {
         let overlaps: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                  SELECT 1 FROM resource.resource_usage_records
-                 WHERE request_id=$1 AND kind=$2
-                   AND measured_from < $4 AND measured_until > $3
+                  WHERE target_kind=$1
+                    AND (request_id IS NOT DISTINCT FROM $2
+                         AND environment_id IS NOT DISTINCT FROM $3)
+                    AND kind=$4
+                    AND measured_from < $6 AND measured_until > $5
              )",
         )
-        .bind(usage.request_id.as_uuid())
+        .bind(usage_target_kind(&usage.target))
+        .bind(usage.target.request_id().map(ResourceRequestId::as_uuid))
+        .bind(
+            usage
+                .target
+                .environment_id()
+                .map(contracts::EnvironmentId::as_uuid),
+        )
         .bind(&kind)
         .bind(usage.measured_from.get())
         .bind(usage.measured_until.get())
@@ -587,18 +765,20 @@ impl PgResourceStore {
             };
         sqlx::query(
             "INSERT INTO resource.resource_usage_records
-             (usage_record_id,project_id,course_id,request_id,lease_id,source_event_id,kind,
+             (usage_record_id,project_id,course_id,target_kind,environment_id,request_id,lease_id,source_event_id,kind,
               measured_from,measured_until,measurement_state,cpu_millicore_seconds,
               memory_byte_seconds,storage_byte_seconds,gpu_unit_seconds,unknown_reason,
               settlement,observed_at,contract)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::numeric,$12::numeric,$13::numeric,
-                     $14::numeric,$15,$16,$17,$18)",
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric,$14::numeric,
+                      $15::numeric,$16::numeric,$17,$18,$19,$20)",
         )
         .bind(usage.id.as_uuid())
         .bind(usage.project_id.as_uuid())
         .bind(usage.course_id.map(contracts::CourseId::as_uuid))
-        .bind(usage.request_id.as_uuid())
-        .bind(usage.lease_id.map(LeaseId::as_uuid))
+        .bind(usage_target_kind(&usage.target))
+        .bind(usage.target.environment_id().map(contracts::EnvironmentId::as_uuid))
+        .bind(usage.target.request_id().map(ResourceRequestId::as_uuid))
+        .bind(usage.target.lease_id().map(LeaseId::as_uuid))
         .bind(usage.source_event_id.as_uuid())
         .bind(kind)
         .bind(usage.measured_from.get())
@@ -718,6 +898,12 @@ impl PgResourceStore {
         usage_id: UsageRecordId,
     ) -> Result<Option<ResourceCharge>, ResourceStoreError> {
         let mut transaction = self.pool.begin().await?;
+        // Rate publication and closure take the exclusive form of this lock before
+        // touching a rate row.  Acquire the shared form before the usage row lock so
+        // settlement cannot deadlock with either rate mutation.
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended('resource_rates', 0))")
+            .execute(&mut *transaction)
+            .await?;
         let row = sqlx::query(
             "SELECT contract FROM resource.resource_usage_records
              WHERE usage_record_id=$1 FOR UPDATE",
@@ -967,6 +1153,104 @@ impl PgResourceStore {
         Ok(result)
     }
 
+    /// Ends one open rate at a future boundary without changing its price revision.
+    /// The idempotency hash includes the path rate ID so one key cannot be replayed for
+    /// another rate, and completed requests replay before validating the current time.
+    pub async fn end_rate(
+        &self,
+        rate_id: RateId,
+        idempotency_key: &str,
+        input: &EndResourceRateRequest,
+    ) -> Result<ResourceRate, ResourceStoreError> {
+        IdempotencyKey::parse(idempotency_key).map_err(|_| ResourceStoreError::IdempotencyKey)?;
+        let hash =
+            Sha256Digest::of_canonical(&(rate_id, input)).map_err(|_| ResourceStoreError::Wire)?;
+        let mut transaction = self.pool.begin().await?;
+        let result = match IdempotencyStore::reserve(
+            &mut transaction,
+            Domain::Resource,
+            "end_resource_rate",
+            idempotency_key,
+            hash,
+        )
+        .await?
+        {
+            IdempotencyDecision::Replay(value) => decode_rate(value)?,
+            IdempotencyDecision::Conflict => return Err(ResourceStoreError::IdempotencyConflict),
+            IdempotencyDecision::InProgress => {
+                return Err(ResourceStoreError::IdempotencyInProgress);
+            }
+            IdempotencyDecision::Reserved => {
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('resource_rates', 0))")
+                    .execute(&mut *transaction)
+                    .await?;
+                let row = sqlx::query(
+                    "SELECT contract FROM resource.resource_rates
+                     WHERE rate_id=$1 FOR UPDATE",
+                )
+                .bind(rate_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ResourceStoreError::NotFound)?;
+                let mut rate = decode_rate(row.try_get("contract")?)?;
+                if rate.effective_until.is_some() {
+                    return Err(ResourceStoreError::RateAlreadyEnded);
+                }
+                let now = database_now(&mut transaction).await?;
+                if input.effective_until <= rate.effective_from || input.effective_until <= now {
+                    return Err(ResourceStoreError::RateEndInvalid);
+                }
+                let settled_after_boundary: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM resource.resource_usage_records u
+                         JOIN resource.resource_charges c
+                           ON c.usage_record_id=u.usage_record_id
+                          AND c.adjustment_of IS NULL
+                         WHERE u.settlement='settled'
+                           AND u.measured_until > $1
+                           AND EXISTS (
+                               SELECT 1
+                               FROM jsonb_array_elements(c.lines) line
+                               WHERE line->>'rateId'=$2
+                           )
+                     )",
+                )
+                .bind(input.effective_until.get())
+                .bind(rate.id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+                if settled_after_boundary {
+                    return Err(ResourceStoreError::RateSettledConflict);
+                }
+                rate.effective_until = Some(input.effective_until);
+                rate.validate().map_err(ResourceStoreError::Contract)?;
+                sqlx::query(
+                    "UPDATE resource.resource_rates
+                     SET effective_until=$2, contract=$3
+                     WHERE rate_id=$1 AND effective_until IS NULL",
+                )
+                .bind(rate.id.as_uuid())
+                .bind(input.effective_until.get())
+                .bind(serde_json::to_value(&rate)?)
+                .execute(&mut *transaction)
+                .await?;
+                let value = serde_json::to_value(&rate)?;
+                IdempotencyStore::complete(
+                    &mut transaction,
+                    Domain::Resource,
+                    "end_resource_rate",
+                    idempotency_key,
+                    &value,
+                )
+                .await?;
+                rate
+            }
+        };
+        transaction.commit().await?;
+        Ok(result)
+    }
+
     /// Lists the active and inactive GPU catalog revisions.
     pub async fn list_gpu_catalog(&self) -> Result<Vec<GpuCatalogEntry>, ResourceStoreError> {
         let rows = sqlx::query(
@@ -987,6 +1271,10 @@ impl PgResourceStore {
     /// contract and SQL projections are checked together before they are exposed to
     /// the provider observer. No provider object is treated as owned from a label
     /// without a matching row returned here.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the claim and Environment reservation projections are validated together"
+    )]
     pub(crate) async fn list_active_gpu_reservations(
         &self,
     ) -> Result<Vec<ActiveGpuReservation>, ResourceStoreError> {
@@ -1013,7 +1301,8 @@ impl PgResourceStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
+        let mut reservations = rows
+            .into_iter()
             .map(|row| {
                 let request = decode_request(row.try_get("request_contract")?)?;
                 let claim = decode_claim(row.try_get("claim_contract")?)?;
@@ -1064,16 +1353,391 @@ impl PgResourceStore {
                 {
                     return Err(ResourceStoreError::CapacityReadbackInvalid);
                 }
+                let target = match request.target {
+                    ResourceTarget::Environment { environment_id, .. } => {
+                        ActiveReservationTarget::Environment { environment_id }
+                    }
+                    ResourceTarget::Task { task_run_id } => {
+                        ActiveReservationTarget::Task { task_run_id }
+                    }
+                };
                 Ok(ActiveGpuReservation {
-                    claim_id: claim.id,
                     entry_id: allocation.entry_id,
                     units,
                     allocation_binding,
                     namespace_name,
-                    target: request.target,
+                    target,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, ResourceStoreError>>()?;
+        let environment_rows = sqlx::query(
+            "SELECT contract FROM resource.environment_resource_reservations
+             WHERE state='reserved'
+             ORDER BY reservation_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in environment_rows {
+            let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+            if let Some(allocation) = reservation.allocation {
+                reservations.push(ActiveGpuReservation {
+                    entry_id: allocation.entry_id,
+                    units: allocation.count,
+                    allocation_binding: allocation.allocation_binding,
+                    namespace_name: None,
+                    target: ActiveReservationTarget::Environment {
+                        environment_id: reservation.environment_id,
+                    },
+                });
+            }
+        }
+        Ok(reservations)
+    }
+
+    /// Resolves and durably reserves one Experiment resource reservation for an Environment instance.
+    ///
+    /// Environment submits only a catalog class and count. Resource selects the exact catalog row,
+    /// allocation binding, mode, and provider binding from the active catalog and the current
+    /// capacity observation, so an unknown class, exhausted pool, or stale observation fails
+    /// closed. The reservation is keyed by `environment_id`, so a transport retry is idempotent
+    /// without double-counting capacity.
+    pub async fn resolve_environment_resource_reservation(
+        &self,
+        request: &contracts::environment::ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<EnvironmentResourceReservationResult, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let existing = sqlx::query(
+            "SELECT contract FROM resource.environment_resource_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+            if reservation.state == EnvironmentResourceReservationState::Reserved {
+                let matches_request = reservation.environment_id == request.environment_id
+                    && reservation.project_id == request.project_id
+                    && reservation.course_id == request.course_id
+                    && reservation.owner_actor_id == request.owner_actor_id
+                    && reservation.provider_binding == request.provider_binding
+                    && reservation.approved_resources == request.approved_resources
+                    && reservation.environment_generation == request.environment_generation
+                    && reservation
+                        .allocation
+                        .as_ref()
+                        .map(|allocation| (&allocation.class, allocation.count))
+                        == request.gpu.as_ref().map(|gpu| (&gpu.class, gpu.count));
+                if !matches_request {
+                    return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+                }
+                let result = reservation_result(&reservation, false);
+                transaction.commit().await?;
+                return Ok(result);
+            }
+            // An Environment identity is single-use. Once its reservation is released, a late
+            // retry must not resurrect capacity or overwrite the historical owner/snapshot.
+            return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+        }
+        let allocation = resolve_gpu_allocation(
+            &mut transaction,
+            &request.provider_binding,
+            request.gpu.as_ref(),
+        )
+        .await?;
+        let contract = EnvironmentResourceReservationContract {
+            environment_id: request.environment_id,
+            project_id: request.project_id,
+            course_id: request.course_id,
+            owner_actor_id: request.owner_actor_id,
+            provider_binding: request.provider_binding.clone(),
+            approved_resources: request.approved_resources.clone(),
+            allocation: allocation.clone(),
+            state: EnvironmentResourceReservationState::Reserved,
+            reservation_generation: 1,
+            environment_generation: request.environment_generation,
+            operation_id: Some(request.operation_id),
+        };
+        sqlx::query(
+            "INSERT INTO resource.environment_resource_reservations (
+                 reservation_id, environment_id, project_id, course_id, owner_actor_id,
+                 provider_binding, entry_id, allocation_binding, units, state, released_at,
+                 reservation_generation, environment_generation, operation_id, suspended_at, contract)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',NULL,1,$10,$11,NULL,$12)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(request.environment_id.as_uuid())
+        .bind(request.project_id.as_uuid())
+        .bind(request.course_id.map(contracts::CourseId::as_uuid))
+        .bind(request.owner_actor_id.as_uuid())
+        .bind(&request.provider_binding)
+        .bind(allocation.as_ref().map(|value| value.entry_id.as_uuid()))
+        .bind(allocation.as_ref().map(|value| value.allocation_binding.as_str()))
+        .bind(allocation.as_ref().map(|value| i32::try_from(value.count)).transpose()?)
+        .bind(i64::try_from(request.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
+        .bind(serde_json::to_value(&contract)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(EnvironmentResourceReservationResult {
+            state: ContractReservationState::Reserved,
+            reservation_generation: 1,
+            environment_generation: request.environment_generation,
+            allocation,
+            applied: true,
+        })
+    }
+
+    /// Revalidates the exact original allocation and reserves capacity before an Experiment
+    /// provider is started.  A suspended reservation can only be resumed with the same catalog
+    /// entry and binding; Resource never assigns a replacement GPU during resume.
+    pub async fn activate_environment_resource_reservation(
+        &self,
+        request: &contracts::environment::ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<EnvironmentResourceReservationResult, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let row = sqlx::query(
+            "SELECT contract, project_id, owner_actor_id
+             FROM resource.environment_resource_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ResourceStoreError::EnvironmentResourceReservationConflict)?;
+        let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+        ensure_environment_reservation_identity(
+            &reservation,
+            request.environment_id,
+            request.project_id,
+            request.course_id,
+            request.owner_actor_id,
+            &request.provider_binding,
+            &request.approved_resources,
+            request.expected_allocation.as_ref(),
+        )?;
+        if reservation.state == EnvironmentResourceReservationState::Released {
+            return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+        }
+        if reservation_fence_is_stale(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        ) {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let same_fence = reservation_fence_is_same(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        );
+        if same_fence && reservation.state == EnvironmentResourceReservationState::Reserved {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        if let Some(expected) = request.expected_allocation.as_ref() {
+            validate_existing_gpu_allocation(
+                &mut transaction,
+                expected,
+                Some(request.environment_id),
+            )
+            .await?;
+        }
+        let mut activated = reservation;
+        activated.state = EnvironmentResourceReservationState::Reserved;
+        activated.environment_generation = request.environment_generation;
+        activated.operation_id = Some(request.operation_id);
+        if !same_fence {
+            activated.reservation_generation = activated
+                .reservation_generation
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?;
+        }
+        let contract = serde_json::to_value(&activated)?;
+        sqlx::query(
+            "UPDATE resource.environment_resource_reservations
+             SET state='reserved', suspended_at=NULL, reservation_generation=$2,
+                 environment_generation=$3, operation_id=$4, contract=$5
+             WHERE environment_id=$1",
+        )
+        .bind(request.environment_id.as_uuid())
+        .bind(i64::try_from(activated.reservation_generation)?)
+        .bind(i64::try_from(activated.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
+        .bind(contract)
+        .execute(&mut *transaction)
+        .await?;
+        let result = reservation_result(&activated, true);
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    /// Releases GPU capacity after a successful physical stop while retaining the reservation
+    /// identity and immutable allocation for accounting and a later fenced resume.
+    pub async fn suspend_environment_resource_reservation(
+        &self,
+        request: &contracts::environment::SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<EnvironmentResourceReservationResult, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_gpu_admission(&mut transaction).await?;
+        let row = sqlx::query(
+            "SELECT contract, project_id, owner_actor_id
+             FROM resource.environment_resource_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ResourceStoreError::EnvironmentResourceReservationConflict)?;
+        let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+        ensure_environment_reservation_owner(
+            &reservation,
+            request.environment_id,
+            request.project_id,
+            request.owner_actor_id,
+        )?;
+        if reservation.state == EnvironmentResourceReservationState::Released {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        if reservation_fence_is_stale(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        ) {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let same_fence = reservation_fence_is_same(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        );
+        if same_fence && reservation.state == EnvironmentResourceReservationState::Suspended {
+            let result = reservation_result(&reservation, false);
+            transaction.commit().await?;
+            return Ok(result);
+        }
+        let mut suspended = reservation;
+        suspended.state = EnvironmentResourceReservationState::Suspended;
+        suspended.environment_generation = request.environment_generation;
+        suspended.operation_id = Some(request.operation_id);
+        if !same_fence {
+            suspended.reservation_generation = suspended
+                .reservation_generation
+                .checked_add(1)
+                .ok_or(ResourceStoreError::NumericOverflow)?;
+        }
+        let contract = serde_json::to_value(&suspended)?;
+        sqlx::query(
+            "UPDATE resource.environment_resource_reservations
+             SET state='suspended', suspended_at=clock_timestamp(), reservation_generation=$2,
+                 environment_generation=$3, operation_id=$4, contract=$5
+             WHERE environment_id=$1",
+        )
+        .bind(request.environment_id.as_uuid())
+        .bind(i64::try_from(suspended.reservation_generation)?)
+        .bind(i64::try_from(suspended.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
+        .bind(contract)
+        .execute(&mut *transaction)
+        .await?;
+        let result = reservation_result(&suspended, true);
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    /// Releases the durable Experiment resource reservation for one Environment instance.
+    ///
+    /// Release is idempotent: a missing or already-released reservation returns `false` instead of
+    /// failing, while a mismatched project or owner identity is rejected. The capacity is
+    /// immediately available to the next admission.
+    pub async fn release_environment_resource_reservation(
+        &self,
+        request: &contracts::environment::ReleaseEnvironmentResourceReservationRequest,
+    ) -> Result<bool, ResourceStoreError> {
+        request
+            .validate()
+            .map_err(|_| ResourceStoreError::EnvironmentResourceReservationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT contract, project_id, owner_actor_id
+             FROM resource.environment_resource_reservations
+             WHERE environment_id=$1 FOR UPDATE",
+        )
+        .bind(request.environment_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+        let project_id: uuid::Uuid = row.try_get("project_id")?;
+        let owner_actor_id: uuid::Uuid = row.try_get("owner_actor_id")?;
+        if project_id != request.project_id.as_uuid()
+            || owner_actor_id != request.owner_actor_id.as_uuid()
+            || reservation.environment_id != request.environment_id
+        {
+            return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+        }
+        if reservation.state == EnvironmentResourceReservationState::Released {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        if reservation_fence_is_stale(
+            reservation.environment_generation,
+            reservation.operation_id,
+            request.environment_generation,
+            request.operation_id,
+        ) {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let mut released = reservation;
+        released.state = EnvironmentResourceReservationState::Released;
+        released.environment_generation = request.environment_generation;
+        released.operation_id = Some(request.operation_id);
+        released.reservation_generation = released
+            .reservation_generation
+            .checked_add(1)
+            .ok_or(ResourceStoreError::NumericOverflow)?;
+        let result = sqlx::query(
+            "UPDATE resource.environment_resource_reservations
+             SET state='released', released_at=clock_timestamp(), suspended_at=NULL,
+                 reservation_generation=$2, environment_generation=$3, operation_id=$4, contract=$5
+             WHERE environment_id=$1 AND state IN ('reserved','suspended')",
+        )
+        .bind(request.environment_id.as_uuid())
+        .bind(i64::try_from(released.reservation_generation)?)
+        .bind(i64::try_from(released.environment_generation)?)
+        .bind(request.operation_id.as_uuid())
+        .bind(serde_json::to_value(&released)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Adds one immutable GPU catalog revision. Fresh capacity observations are recorded
@@ -1447,6 +2111,40 @@ impl PgResourceStore {
         rows.into_iter()
             .map(|row| decode_charge(row.try_get("contract")?))
             .collect()
+    }
+
+    /// Lists bounded usage observations for one project in newest-first order.
+    pub async fn list_usage(
+        &self,
+        project_id: ProjectId,
+        page: u32,
+        page_size: u16,
+        offset: u32,
+    ) -> Result<contracts::resource::ResourceUsagePage, ResourceStoreError> {
+        let limit = i64::from(page_size) + 1;
+        let rows = sqlx::query(
+            "SELECT contract FROM resource.resource_usage_records
+             WHERE project_id=$1
+             ORDER BY observed_at DESC, usage_record_id DESC
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(project_id.as_uuid())
+        .bind(limit)
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await?;
+        let has_more = rows.len() > usize::from(page_size);
+        let items = rows
+            .into_iter()
+            .take(usize::from(page_size))
+            .map(|row| decode_usage(row.try_get("contract")?))
+            .collect::<Result<Vec<_>, ResourceStoreError>>()?;
+        Ok(contracts::resource::ResourceUsagePage {
+            items,
+            page,
+            page_size,
+            has_more,
+        })
     }
 
     /// Appends an administrator adjustment without mutating the original charge.
@@ -2684,8 +3382,8 @@ impl PgResourceStore {
         lease_revision: contracts::Revision,
     ) -> Result<CapacityClaim, ResourceStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_revision
             || !matches!(
                 claim.state,
@@ -2732,7 +3430,8 @@ impl PgResourceStore {
              FROM resource.capacity_claims c \
              JOIN resource.resource_requests r ON r.request_id=c.request_id \
              JOIN resource.resource_leases l ON l.claim_id=c.claim_id \
-             WHERE c.state='handed_off' AND l.state='active' \
+             WHERE r.target_kind='environment' \
+               AND c.state='handed_off' AND l.state='active' \
                AND c.lease_synced_revision < l.revision \
              ORDER BY l.updated_at,l.lease_id LIMIT 1",
         )
@@ -2775,6 +3474,12 @@ impl PgResourceStore {
 
     /// Claims one due or explicitly revoked handed-off Lease. Natural expiry
     /// first enters the same durable `expiring` state used by revocation.
+    ///
+    /// Cleanup is eventual: a claim whose `expire_environment`/`release_capacity`
+    /// attempt is in `retry` or `failed` is still eligible once its `next_attempt_at`
+    /// backoff has passed, so a transient rejection (for example an Environment that
+    /// was still provisioning and has since become deletable) is retried instead of
+    /// leaking the Lease and its capacity reservation permanently.
     pub async fn next_lease_cleanup(
         &self,
         actor: contracts::ActorId,
@@ -2792,13 +3497,7 @@ impl PgResourceStore {
                  SELECT 1 FROM resource.capacity_attempts a \
                  WHERE a.claim_id=c.claim_id \
                    AND a.step IN ('expire_environment','release_capacity') \
-                   AND a.state='failed' \
-               )\
-               AND NOT EXISTS (\
-                 SELECT 1 FROM resource.capacity_attempts a \
-                 WHERE a.claim_id=c.claim_id \
-                   AND a.step IN ('expire_environment','release_capacity') \
-                   AND a.state='retry' \
+                   AND a.state IN ('retry','failed') \
                    AND a.next_attempt_at>clock_timestamp() \
                )\
              ORDER BY l.expires_at,l.updated_at FOR UPDATE OF c,l SKIP LOCKED LIMIT 1",
@@ -2893,9 +3592,9 @@ impl PgResourceStore {
     ) -> Result<ResourceLease, ResourceStoreError> {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_claim_revision
             || claim.state != CapacityClaimState::Releasing
             || lease.revision != expected_lease_revision
@@ -2953,6 +3652,150 @@ impl PgResourceStore {
         Ok(next_lease)
     }
 
+    /// Fails and releases a pre-handoff Environment claim when the owner rejects the request as
+    /// invalid. This path is terminal: a deterministic 4xx must not consume the transient retry
+    /// budget or leave an active Lease waiting for cleanup.
+    #[allow(clippy::too_many_lines)]
+    pub async fn fail_pre_handoff_capacity_handoff(
+        &self,
+        input: FailPreHandoffCapacityHandoff,
+    ) -> Result<(), ResourceStoreError> {
+        validate_trace(&input.trace_id)?;
+        if !valid_diagnostic(&input.diagnostic_code) {
+            return Err(ResourceStoreError::DiagnosticInvalid);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let lease = load_locked_lease(&mut transaction, input.lease_id).await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
+        let claim = load_locked_claim(&mut transaction, input.claim_id).await?;
+        if claim.revision != input.expected_claim_revision
+            || !matches!(
+                claim.state,
+                CapacityClaimState::Provisioning | CapacityClaimState::Ready
+            )
+            || lease.revision != input.expected_lease_revision
+            || lease.state != ResourceLeaseState::Active
+            || lease.claim_id != claim.id
+            || claim.request_id != request.id
+            || request.state != ResourceRequestState::Active
+            || !matches!(request.target, ResourceTarget::Environment { .. })
+        {
+            return Err(ResourceStoreError::CapacityClaimStateConflict);
+        }
+
+        let now = database_now(&mut transaction).await?;
+        let expiring_lease = ResourceLifecycle::begin_lease_expiry(
+            &lease,
+            input.expected_lease_revision,
+            now,
+            Some(input.diagnostic_code.clone()),
+        )?;
+        let revoked_lease = ResourceLifecycle::complete_lease_expiry(
+            &expiring_lease,
+            expiring_lease.revision,
+            now,
+        )?;
+        let expiring_request = ResourceLifecycle::begin_expiry(&request, request.revision, now)?;
+        let mut expired_request =
+            ResourceLifecycle::complete_expiry(&expiring_request, expiring_request.revision, now)?;
+        expired_request.diagnostic_code = Some(input.diagnostic_code.clone());
+        let releasing_claim = transition_claim(&claim, CapacityClaimState::Releasing)?;
+        let released_claim = transition_claim(&releasing_claim, CapacityClaimState::Released)?;
+
+        let attempt: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint + 1
+             FROM resource.capacity_attempts
+             WHERE claim_id=$1 AND step='handoff_environment'",
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resource.capacity_attempts
+             (claim_id,attempt,step,state,next_attempt_at,diagnostic_code)
+             VALUES ($1,$2,'handoff_environment','failed',clock_timestamp(),$3)",
+        )
+        .bind(claim.id.as_uuid())
+        .bind(attempt)
+        .bind(&input.diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+
+        update_claim(&mut transaction, &claim, &released_claim, None, None, None).await?;
+        sqlx::query(
+            "UPDATE resource.capacity_claims
+             SET last_diagnostic_code=$2,updated_at=clock_timestamp()
+             WHERE claim_id=$1",
+        )
+        .bind(claim.id.as_uuid())
+        .bind(&input.diagnostic_code)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE resource.gpu_capacity_reservations
+             SET state='released',released_at=clock_timestamp()
+             WHERE claim_id=$1 AND state='reserved'",
+        )
+        .bind(claim.id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+
+        update_lease(&mut transaction, &lease, &expiring_lease).await?;
+        update_lease(&mut transaction, &expiring_lease, &revoked_lease).await?;
+        update_request(&mut transaction, &request, &expiring_request).await?;
+        update_request(&mut transaction, &expiring_request, &expired_request).await?;
+        insert_transition(
+            &mut transaction,
+            &expiring_request,
+            expiring_request.revision.get(),
+            Some(request.state),
+            Some(input.actor),
+            &input.trace_id,
+        )
+        .await?;
+        insert_transition(
+            &mut transaction,
+            &expired_request,
+            expired_request.revision.get(),
+            Some(expiring_request.state),
+            Some(input.actor),
+            &input.trace_id,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &expiring_lease,
+            &expiring_request,
+            LEASE_EXPIRING_SUBJECT,
+            &input.trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &expiring_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            &input.trace_id,
+        )
+        .await?;
+        enqueue_lease_event(
+            &mut transaction,
+            &revoked_lease,
+            &expired_request,
+            LEASE_REVOKED_SUBJECT,
+            &input.trace_id,
+        )
+        .await?;
+        enqueue_request_event(
+            &mut transaction,
+            &expired_request,
+            REQUEST_STATE_CHANGED_SUBJECT,
+            &input.trace_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Completes a claim that never crossed the Environment handoff boundary.
     ///
     /// No external Environment cleanup readback is required here because the claim is only
@@ -2969,9 +3812,9 @@ impl PgResourceStore {
     ) -> Result<ResourceLease, ResourceStoreError> {
         validate_trace(trace_id)?;
         let mut transaction = self.pool.begin().await?;
-        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         let lease = load_locked_lease(&mut transaction, lease_id).await?;
         let request = load_locked(&mut transaction, lease.request_id).await?;
+        let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_claim_revision
             || claim.state != CapacityClaimState::Releasing
             || lease.revision != expected_lease_revision
@@ -3088,19 +3931,39 @@ impl PgResourceStore {
     }
 
     /// Bounds transient handoff failures. After three attempts the claim is retained as
-    /// `blocked` for an explicit administrator recovery instead of retrying indefinitely.
+    /// `blocked` for lease reclaim and a new request instead of retrying indefinitely.
     pub async fn retry_or_block_capacity_handoff(
         &self,
         claim_id: contracts::CapacityClaimId,
         expected_revision: contracts::Revision,
         diagnostic_code: &str,
+        actor: contracts::ActorId,
+        trace_id: &str,
     ) -> Result<CapacityClaim, ResourceStoreError> {
+        validate_trace(trace_id)?;
         if !valid_diagnostic(diagnostic_code) {
             return Err(ResourceStoreError::DiagnosticInvalid);
         }
         let mut transaction = self.pool.begin().await?;
+        // Locate immutable identities without taking the claim lock. Lease mutations lock
+        // Lease -> Request; handoff and its cleanup must follow that order before Claim.
+        let lease_id: uuid::Uuid =
+            sqlx::query_scalar("SELECT lease_id FROM resource.resource_leases WHERE claim_id=$1")
+                .bind(claim_id.as_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ResourceStoreError::LeaseNotFound)?;
+        let lease = load_locked_lease(
+            &mut transaction,
+            LeaseId::from_str(&lease_id.to_string()).map_err(|_| ResourceStoreError::Wire)?,
+        )
+        .await?;
+        let request = load_locked(&mut transaction, lease.request_id).await?;
         let claim = load_locked_claim(&mut transaction, claim_id).await?;
         if claim.revision != expected_revision
+            || lease.claim_id != claim.id
+            || claim.request_id != request.id
+            || !matches!(request.target, ResourceTarget::Environment { .. })
             || !matches!(
                 claim.state,
                 CapacityClaimState::Provisioning | CapacityClaimState::Ready
@@ -3123,6 +3986,37 @@ impl PgResourceStore {
             .bind(diagnostic_code)
             .execute(&mut *transaction)
             .await?;
+            if request.state == ResourceRequestState::Active
+                && lease.state == ResourceLeaseState::Active
+            {
+                let mut failed_request = request.clone();
+                failed_request.diagnostic_code = Some("LW_RESOURCE_WORK_ALLOCATION_BLOCKED".into());
+                failed_request.revision = Revision::new(
+                    request
+                        .revision
+                        .get()
+                        .checked_add(1)
+                        .ok_or(ResourceStoreError::RevisionOverflow)?,
+                )?;
+                failed_request.updated_at = database_now(&mut transaction).await?;
+                update_request(&mut transaction, &request, &failed_request).await?;
+                insert_transition(
+                    &mut transaction,
+                    &failed_request,
+                    failed_request.revision.get(),
+                    Some(request.state),
+                    Some(actor),
+                    trace_id,
+                )
+                .await?;
+                enqueue_request_event(
+                    &mut transaction,
+                    &failed_request,
+                    REQUEST_STATE_CHANGED_SUBJECT,
+                    trace_id,
+                )
+                .await?;
+            }
             transaction.commit().await?;
             return Ok(next);
         }
@@ -3426,31 +4320,51 @@ async fn load_usage_gpu_allocation(
     transaction: &mut Transaction<'_, Postgres>,
     usage: &ResourceUsageRecord,
 ) -> Result<GpuAllocation, ResourceStoreError> {
-    let row = if let Some(lease_id) = usage.lease_id {
-        sqlx::query(
-            "SELECT c.contract FROM resource.capacity_claims c
-             JOIN resource.resource_leases l ON l.claim_id=c.claim_id
-             WHERE l.lease_id=$1 AND c.request_id=$2",
-        )
-        .bind(lease_id.as_uuid())
-        .bind(usage.request_id.as_uuid())
-        .fetch_optional(&mut **transaction)
-        .await?
-    } else {
-        sqlx::query(
-            "SELECT contract FROM resource.capacity_claims
-             WHERE request_id=$1 ORDER BY created_at DESC, claim_id DESC LIMIT 1",
-        )
-        .bind(usage.request_id.as_uuid())
-        .fetch_optional(&mut **transaction)
-        .await?
-    };
-    let Some(row) = row else {
-        return Err(ResourceStoreError::GpuAllocationMissing);
-    };
-    decode_claim(row.try_get("contract")?)?
-        .gpu_allocation
-        .ok_or(ResourceStoreError::GpuAllocationMissing)
+    match usage.target {
+        ResourceUsageTarget::ExperimentEnvironment { environment_id } => {
+            let row = sqlx::query(
+                "SELECT contract FROM resource.environment_resource_reservations
+                 WHERE environment_id=$1",
+            )
+            .bind(environment_id.as_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(ResourceStoreError::GpuAllocationMissing)?;
+            decode_environment_resource_reservation(row.try_get("contract")?)?
+                .allocation
+                .ok_or(ResourceStoreError::GpuAllocationMissing)
+        }
+        ResourceUsageTarget::ResourceRequest {
+            request_id,
+            lease_id,
+        } => {
+            let row = if let Some(lease_id) = lease_id {
+                sqlx::query(
+                    "SELECT c.contract FROM resource.capacity_claims c
+                     JOIN resource.resource_leases l ON l.claim_id=c.claim_id
+                     WHERE l.lease_id=$1 AND c.request_id=$2",
+                )
+                .bind(lease_id.as_uuid())
+                .bind(request_id.as_uuid())
+                .fetch_optional(&mut **transaction)
+                .await?
+            } else {
+                sqlx::query(
+                    "SELECT contract FROM resource.capacity_claims
+                     WHERE request_id=$1 ORDER BY created_at DESC, claim_id DESC LIMIT 1",
+                )
+                .bind(request_id.as_uuid())
+                .fetch_optional(&mut **transaction)
+                .await?
+            };
+            let Some(row) = row else {
+                return Err(ResourceStoreError::GpuAllocationMissing);
+            };
+            decode_claim(row.try_get("contract")?)?
+                .gpu_allocation
+                .ok_or(ResourceStoreError::GpuAllocationMissing)
+        }
+    }
 }
 
 fn multiply_money(
@@ -3747,13 +4661,23 @@ async fn resolve_gpu_allocation(
     let Some(available) = available else {
         return Err(ResourceStoreError::GpuObservationStale);
     };
+    // Work claims and Experiment environment reservations share one physical allocation binding,
+    // so both durable reservation tables must be subtracted before admitting new capacity.
     let reserved: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(sum(reservation.units),0)::bigint
-         FROM resource.gpu_capacity_reservations reservation
-         JOIN resource.gpu_catalog_entries catalog
-           ON catalog.entry_id=reservation.entry_id
-         WHERE reservation.state='reserved'
-           AND catalog.allocation_binding=$1",
+        "SELECT COALESCE(sum(reserved.units),0)::bigint
+         FROM (
+             SELECT reservation.units AS units
+             FROM resource.gpu_capacity_reservations reservation
+             JOIN resource.gpu_catalog_entries catalog
+               ON catalog.entry_id=reservation.entry_id
+             WHERE reservation.state='reserved'
+               AND catalog.allocation_binding=$1
+             UNION ALL
+             SELECT reservation.units AS units
+             FROM resource.environment_resource_reservations reservation
+             WHERE reservation.state='reserved'
+               AND reservation.allocation_binding=$1
+         ) AS reserved",
     )
     .bind(&allocation_binding)
     .fetch_one(&mut **transaction)
@@ -3982,6 +4906,7 @@ fn transition_claim(
         ) | (
             CapacityClaimState::Reserved
                 | CapacityClaimState::Provisioning
+                | CapacityClaimState::Ready
                 | CapacityClaimState::Blocked
                 | CapacityClaimState::HandedOff,
             CapacityClaimState::Releasing
@@ -4194,12 +5119,79 @@ fn same_usage_intent(left: &ResourceUsageRecord, right: &ResourceUsageRecord) ->
     left.project_id == right.project_id
         && left.course_id == right.course_id
         && left.kind == right.kind
-        && left.request_id == right.request_id
-        && left.lease_id == right.lease_id
+        && left.target == right.target
         && left.source_event_id == right.source_event_id
         && left.measured_from == right.measured_from
         && left.measured_until == right.measured_until
         && left.measurement == right.measurement
+}
+
+fn usage_target_kind(target: &ResourceUsageTarget) -> &'static str {
+    match target {
+        ResourceUsageTarget::ResourceRequest { .. } => "resource_request",
+        ResourceUsageTarget::ExperimentEnvironment { .. } => "experiment_environment",
+    }
+}
+
+async fn canonical_environment_measurement(
+    transaction: &mut Transaction<'_, Postgres>,
+    environment_id: contracts::EnvironmentId,
+    kind: ResourceUsageKind,
+    measured_from: UtcTimestamp,
+    measured_until: UtcTimestamp,
+    measurement: &UsageMeasurement,
+) -> Result<UsageMeasurement, ResourceStoreError> {
+    let UsageMeasurement::Known { quantities } = measurement else {
+        return Ok(measurement.clone());
+    };
+    let row = sqlx::query(
+        "SELECT contract FROM resource.environment_resource_reservations
+         WHERE environment_id=$1 FOR UPDATE",
+    )
+    .bind(environment_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(ResourceStoreError::NotFound)?;
+    let reservation = decode_environment_resource_reservation(row.try_get("contract")?)?;
+    let resources = &reservation.approved_resources;
+    let millis = (measured_until.get() - measured_from.get())
+        .whole_milliseconds()
+        .max(1);
+    let millis = u128::try_from(millis).map_err(|_| ResourceStoreError::NumericOverflow)?;
+    let per_second = |value: u64| -> Result<u64, ResourceStoreError> {
+        u64::try_from(
+            u128::from(value)
+                .checked_mul(millis)
+                .ok_or(ResourceStoreError::NumericOverflow)?
+                / 1_000,
+        )
+        .map_err(|_| ResourceStoreError::NumericOverflow)
+    };
+    let expected = match kind {
+        ResourceUsageKind::Compute => ResourceUsageQuantities {
+            cpu_millicore_seconds: per_second(u64::from(resources.cpu_millicores))?,
+            memory_byte_seconds: per_second(resources.memory_bytes)?,
+            storage_byte_seconds: 0,
+            gpu_unit_seconds: per_second(
+                reservation
+                    .allocation
+                    .as_ref()
+                    .map_or(0, |allocation| u64::from(allocation.count)),
+            )?,
+        },
+        ResourceUsageKind::Storage => ResourceUsageQuantities {
+            cpu_millicore_seconds: 0,
+            memory_byte_seconds: 0,
+            storage_byte_seconds: per_second(resources.storage_bytes)?,
+            gpu_unit_seconds: 0,
+        },
+    };
+    if *quantities != expected {
+        return Err(ResourceStoreError::ScopeConflict);
+    }
+    Ok(UsageMeasurement::Known {
+        quantities: expected,
+    })
 }
 fn decode_rate(value: Value) -> Result<ResourceRate, ResourceStoreError> {
     let rate: ResourceRate = serde_json::from_value(value)?;
@@ -4210,6 +5202,163 @@ fn decode_gpu_catalog(value: Value) -> Result<GpuCatalogEntry, ResourceStoreErro
     let entry: GpuCatalogEntry = serde_json::from_value(value)?;
     entry.validate()?;
     Ok(entry)
+}
+fn decode_environment_resource_reservation(
+    value: Value,
+) -> Result<EnvironmentResourceReservationContract, ResourceStoreError> {
+    let reservation: EnvironmentResourceReservationContract = serde_json::from_value(value)?;
+    reservation.validate()?;
+    Ok(reservation)
+}
+
+fn reservation_result(
+    reservation: &EnvironmentResourceReservationContract,
+    applied: bool,
+) -> EnvironmentResourceReservationResult {
+    EnvironmentResourceReservationResult {
+        state: match reservation.state {
+            EnvironmentResourceReservationState::Reserved => ContractReservationState::Reserved,
+            EnvironmentResourceReservationState::Suspended => ContractReservationState::Suspended,
+            EnvironmentResourceReservationState::Released => ContractReservationState::Released,
+        },
+        reservation_generation: reservation.reservation_generation,
+        environment_generation: reservation.environment_generation,
+        allocation: reservation.allocation.clone(),
+        applied,
+    }
+}
+
+fn reservation_fence_is_same(
+    stored_generation: u64,
+    stored_operation: Option<OperationId>,
+    request_generation: u64,
+    request_operation: OperationId,
+) -> bool {
+    stored_generation == request_generation
+        && stored_operation.is_none_or(|operation| operation == request_operation)
+}
+
+fn reservation_fence_is_stale(
+    stored_generation: u64,
+    stored_operation: Option<OperationId>,
+    request_generation: u64,
+    request_operation: OperationId,
+) -> bool {
+    request_generation < stored_generation
+        || (request_generation == stored_generation
+            && stored_operation.is_some_and(|operation| operation != request_operation))
+}
+
+fn ensure_environment_reservation_owner(
+    reservation: &EnvironmentResourceReservationContract,
+    environment_id: contracts::EnvironmentId,
+    project_id: ProjectId,
+    owner_actor_id: contracts::ActorId,
+) -> Result<(), ResourceStoreError> {
+    if reservation.environment_id != environment_id
+        || reservation.project_id != project_id
+        || reservation.owner_actor_id != owner_actor_id
+    {
+        return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the identity fields are checked explicitly at the Resource authorization boundary"
+)]
+fn ensure_environment_reservation_identity(
+    reservation: &EnvironmentResourceReservationContract,
+    environment_id: contracts::EnvironmentId,
+    project_id: ProjectId,
+    course_id: Option<contracts::CourseId>,
+    owner_actor_id: contracts::ActorId,
+    provider_binding: &str,
+    approved_resources: &WorkloadResources,
+    expected_allocation: Option<&GpuAllocation>,
+) -> Result<(), ResourceStoreError> {
+    ensure_environment_reservation_owner(reservation, environment_id, project_id, owner_actor_id)?;
+    if reservation.course_id != course_id
+        || reservation.provider_binding != provider_binding
+        || reservation.approved_resources != *approved_resources
+        || reservation.allocation.as_ref() != expected_allocation
+    {
+        return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
+    }
+    Ok(())
+}
+
+async fn validate_existing_gpu_allocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    allocation: &GpuAllocation,
+    excluded_environment_id: Option<contracts::EnvironmentId>,
+) -> Result<(), ResourceStoreError> {
+    let row = sqlx::query(
+        "SELECT class,mode,provider_binding,capacity_units,allocation_binding,revision,active
+         FROM resource.gpu_catalog_entries WHERE entry_id=$1 FOR UPDATE",
+    )
+    .bind(allocation.entry_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(ResourceStoreError::GpuCatalogMissing)?;
+    let class: String = row.try_get("class")?;
+    let mode: String = row.try_get("mode")?;
+    let provider_binding: String = row.try_get("provider_binding")?;
+    let capacity_units: i32 = row.try_get("capacity_units")?;
+    let allocation_binding: String = row.try_get("allocation_binding")?;
+    let revision: i64 = row.try_get("revision")?;
+    let active: bool = row.try_get("active")?;
+    let mode: GpuAllocationMode = serde_json::from_value(Value::String(mode))
+        .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?;
+    if !active
+        || class != allocation.class
+        || mode != allocation.mode
+        || provider_binding != allocation.provider_binding
+        || allocation_binding != allocation.allocation_binding
+        || Revision::new(u64::try_from(revision)?)? != allocation.catalog_revision
+        || u32::try_from(capacity_units)? < allocation.count
+    {
+        return Err(ResourceStoreError::GpuCatalogRevisionConflict);
+    }
+    let available: Option<i64> = sqlx::query_scalar(
+        "SELECT available_units::bigint FROM resource.gpu_capacity_observations
+         WHERE entry_id=$1 AND valid_until > clock_timestamp()
+         ORDER BY observed_at DESC LIMIT 1",
+    )
+    .bind(allocation.entry_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let available = available.ok_or(ResourceStoreError::GpuObservationStale)?;
+    let reserved: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(reserved.units),0)::bigint
+         FROM (
+             SELECT reservation.units
+             FROM resource.gpu_capacity_reservations reservation
+             JOIN resource.gpu_catalog_entries catalog
+               ON catalog.entry_id=reservation.entry_id
+             WHERE reservation.state='reserved'
+               AND catalog.allocation_binding=$1
+             UNION ALL
+             SELECT reservation.units
+             FROM resource.environment_resource_reservations reservation
+             WHERE reservation.state='reserved'
+               AND reservation.allocation_binding=$1
+               AND ($2::uuid IS NULL OR reservation.environment_id<>$2)
+         ) AS reserved",
+    )
+    .bind(&allocation.allocation_binding)
+    .bind(excluded_environment_id.map(contracts::EnvironmentId::as_uuid))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if available
+        .min(i64::from(capacity_units))
+        .saturating_sub(reserved)
+        < i64::from(allocation.count)
+    {
+        return Err(ResourceStoreError::GpuCapacityExhausted);
+    }
+    Ok(())
 }
 fn decode_budget(value: Value) -> Result<ResourceBudget, ResourceStoreError> {
     let budget: ResourceBudget = serde_json::from_value(value)?;
@@ -4304,6 +5453,20 @@ pub(crate) fn safe_sqlstate_detail(error: &sqlx::Error) -> String {
     safe_sqlstate_value(code.as_deref())
 }
 
+pub(crate) fn is_retryable_database_error(error: &ResourceStoreError) -> bool {
+    let ResourceStoreError::Database(error) = error else {
+        return false;
+    };
+    let code = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code);
+    is_retryable_database_sqlstate(code.as_deref())
+}
+
+fn is_retryable_database_sqlstate(code: Option<&str>) -> bool {
+    matches!(code, Some("40P01"))
+}
+
 fn safe_sqlstate_value(code: Option<&str>) -> String {
     let Some(code) = code
         .filter(|code| code.len() == 5)
@@ -4352,6 +5515,10 @@ pub enum ResourceStoreError {
     UsageOverlap,
     #[error("LW_RESOURCE_RATE_DIMENSION_INVALID")]
     RateDimensionInvalid,
+    #[error("LW_RESOURCE_RATE_END_INVALID")]
+    RateEndInvalid,
+    #[error("LW_RESOURCE_RATE_ALREADY_ENDED")]
+    RateAlreadyEnded,
     #[error("LW_RESOURCE_RATE_OVERLAP")]
     RateOverlap,
     #[error("LW_RESOURCE_RATE_SETTLED_CONFLICT")]
@@ -4366,6 +5533,10 @@ pub enum ResourceStoreError {
     GpuObservationStale,
     #[error("LW_RESOURCE_GPU_ALLOCATION_MISSING")]
     GpuAllocationMissing,
+    #[error("LW_RESOURCE_ENVIRONMENT_GPU_RESERVATION_INVALID")]
+    EnvironmentResourceReservationInvalid,
+    #[error("LW_RESOURCE_ENVIRONMENT_GPU_RESERVATION_CONFLICT")]
+    EnvironmentResourceReservationConflict,
     #[error("LW_RESOURCE_GPU_CATALOG_REVISION_CONFLICT")]
     GpuCatalogRevisionConflict,
     #[error("LW_RESOURCE_GPU_CATALOG_MODE_COLLISION")]
@@ -4433,7 +5604,7 @@ mod tests {
     use contracts::resource::{CapacityClaim, CapacityClaimState, WorkloadResources};
     use contracts::{CapacityClaimId, ResourceApprovalId, ResourceRequestId, Revision};
 
-    use super::{safe_sqlstate_value, transition_claim};
+    use super::{is_retryable_database_sqlstate, safe_sqlstate_value, transition_claim};
 
     #[test]
     fn blocked_pre_handoff_claim_can_enter_release_readback() {
@@ -4475,5 +5646,13 @@ mod tests {
             "redacted_unclassified"
         );
         assert_eq!(safe_sqlstate_value(None), "redacted_unclassified");
+    }
+
+    #[test]
+    fn only_postgres_deadlocks_are_retryable_database_errors() {
+        assert!(is_retryable_database_sqlstate(Some("40P01")));
+        assert!(!is_retryable_database_sqlstate(Some("40001")));
+        assert!(!is_retryable_database_sqlstate(Some("23505")));
+        assert!(!is_retryable_database_sqlstate(None));
     }
 }

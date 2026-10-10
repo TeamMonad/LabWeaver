@@ -2,8 +2,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUTH_STATE,
   createProjectByUi,
-  createProjectPolicy,
-  csrfHeaders,
+  configureProjectPolicyByUi,
   expectJson,
   pollEnvironmentCandidate,
   pollJson,
@@ -23,25 +22,22 @@ import {
   readResumablePublishedExperiment,
   realProviderConfig,
   realExperimentResumeConfig,
+  waitForAuthoringRunWithResourceApproval,
   startExperimentRunByUi,
   uploadPackageDirectoryByUi,
   waitForEnvironment,
 } from '../support/real-experiment.mjs'
+import { deleteEnvironmentByUi } from '../support/environment-lifecycle.mjs'
+import { revokeEnvironmentAccessGrantByUi } from '../support/ssh-access.mjs'
 
 const REAL_CHAIN_TIMEOUT_MS = 3_600_000
-const REAL_PROVIDER_BUDGET = Object.freeze({
-  maxOutputTokens: 32_000,
-  timeoutMilliseconds: 300_000,
-  maxTransientRetries: 0,
-})
+// The real chain must prove a single uncontested provider attempt, so it opts out
+// of the shared harness retry. Everything else comes from the acceptance budget.
+const REAL_PROVIDER_BUDGET = Object.freeze({ maxTransientRetries: 0 })
 const config = realProviderConfig()
 const resume = realExperimentResumeConfig()
 
 test.describe.configure({ timeout: REAL_CHAIN_TIMEOUT_MS, retries: 0 })
-
-function terminalRunState(value) {
-  return ['succeeded', 'partially_succeeded', 'failed', 'cancelled'].includes(value)
-}
 
 function diagnosticCodes(run) {
   return run.tracks
@@ -57,14 +53,19 @@ function shellOctal(value) {
     .join('')
 }
 
-async function waitForExperimentRun(request, projectId, runId) {
-  const run = await pollJson(
+async function waitForExperimentRun(request, projectId, runId, adminPage, requesterId) {
+  const run = await waitForAuthoringRunWithResourceApproval({
     request,
-    `/api/v1/projects/${projectId}/agent-runs/${runId}`,
-    (value) => terminalRunState(value.state),
-    'REAL_EXPERIMENT_AGENT_RUN_STATUS_FAILED',
-    600_000,
-  )
+    adminPage,
+    projectId,
+    runId,
+    requesterId,
+    validateRun: (value) => {
+      if (value.purpose?.kind !== 'authoring' || value.purpose.environmentClass !== 'experiment') {
+        throw new Error('REAL_EXPERIMENT_AGENT_RUN_PURPOSE_INVALID')
+      }
+    },
+  })
   if (run.state !== 'succeeded') throw new Error(`REAL_EXPERIMENT_AGENT_RUN_FAILED:${run.state}:${diagnosticCodes(run)}`)
   const environment = run.tracks.find((track) => track.kind === 'environment')
   const evaluation = run.tracks.find((track) => track.kind === 'evaluation')
@@ -110,7 +111,7 @@ async function approveAndPublish(page, projectId, runId, packageData, environmen
   await expect(approvalButton).toBeDisabled()
   await page.getByRole('checkbox').check()
   await page.locator('textarea.reason-input').fill('已核对真实生成的 Environment、Evaluation、私有黄金基础镜像来源和构建产物摘要。')
-  await expect(approvalButton).toBeEnabled()
+  await expect(approvalButton).toBeEnabled({ timeout: 240_000 })
 
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
@@ -161,7 +162,10 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await page.goto(`/student/environments?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.getByRole('heading', { name: environmentId, exact: true })).toBeVisible({ timeout: 120_000 })
+  const environmentIdDetails = page.locator('details.environment-id-details')
+  await expect(environmentIdDetails).toBeVisible({ timeout: 120_000 })
+  await environmentIdDetails.locator('summary').click()
+  await expect(environmentIdDetails.locator('code')).toHaveText(environmentId, { timeout: 30_000 })
   await expect(page.getByRole('button', { name: '概览与访问', exact: true })).toBeVisible()
   const grantButton = page.getByRole('button', { name: '签发访问授权', exact: true })
   const grantCard = page.locator('.grant-card')
@@ -181,7 +185,7 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
   await pollJson(
     page.request,
     `/api/v1/environments/${environmentId}/access-grants?state=active&includeTerminal=false&limit=2`,
-    (value) => Array.isArray(value.items) && value.items.length === 1,
+    (value) => Array.isArray(value.items) && value.items.filter((item) => item.state === 'active').length === 1,
     'REAL_EXPERIMENT_ACCESS_GRANT_ACTIVE_TIMEOUT',
     120_000,
   )
@@ -192,20 +196,36 @@ async function issueTerminalAccessAndConnect(page, projectId, environmentId) {
     })
   })
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  const openTerminal = page.getByRole('button', { name: '打开终端', exact: true })
+  const consolePanel = page.locator('.console-panel')
+  await expect(consolePanel).toBeVisible({ timeout: 120_000 })
+  const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
   await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
   await openTerminal.click()
   const host = page.locator('.xterm-host')
   await expect(host).toBeVisible({ timeout: 120_000 })
   const input = page.locator('.xterm-helper-textarea')
-  await expect(input).toBeVisible({ timeout: 30_000 })
+  await expect(input).toBeAttached({ timeout: 30_000 })
   return { input, terminalFrames }
 }
 
 async function editThroughTerminal({ page, input, terminalFrames }) {
   await page.getByRole('button', { name: 'Web 控制台', exact: true }).click()
-  await expect(page.locator('.xterm-host')).toBeVisible({ timeout: 120_000 })
-  await expect(input).toBeVisible({ timeout: 30_000 })
+  const reconnect = page.getByRole('button', { name: /重新连接终端|重新签发授权并连接终端|立即签发授权并连接终端/ })
+  if (await reconnect.count() > 0) {
+    await expect(reconnect).toBeEnabled({ timeout: 120_000 })
+    await reconnect.click()
+  }
+  const consolePanel = page.locator('.console-panel')
+  await expect(consolePanel).toBeVisible({ timeout: 120_000 })
+  const openTerminal = consolePanel.getByRole('button', { name: '打开终端', exact: true })
+  if (await openTerminal.count() > 0) {
+    await expect(openTerminal).toBeEnabled({ timeout: 120_000 })
+    await openTerminal.click()
+  }
+  const host = page.locator('.xterm-host')
+  await expect(host).toBeVisible({ timeout: 120_000 })
+  await host.click()
+  await expect(input).toBeAttached({ timeout: 30_000 })
   await input.focus()
   await page.keyboard.type("sed -i 's/password_length == 0/password_length != sizeof(expected_password) - 1/' student/auth.c")
   await page.keyboard.press('Enter')
@@ -228,41 +248,20 @@ async function editThroughTerminal({ page, input, terminalFrames }) {
   ).toContain(matchPrefix)
 }
 
-async function waitForCleanupEnvironmentState(request, environmentId) {
-  let latest
-  await expect.poll(async () => {
-    const response = await request.get(`/api/v1/environments/${environmentId}`)
-    if (response.status() === 404) {
-      latest = { observedState: 'deleted' }
-      return true
-    }
-    latest = await expectJson(response, 'REAL_EXPERIMENT_ENVIRONMENT_CLEANUP_READ_FAILED')
-    return ['stopped', 'failed', 'deleting', 'deleted'].includes(latest.observedState)
-  }, { timeout: 240_000, intervals: [1000, 2000, 3000] }).toBe(true)
-  return latest
-}
-
-async function revokeEnvironmentAccessGrants(request, baseURL, environmentId) {
-  const listResponse = await request.get(`/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=100`)
+async function revokeEnvironmentAccessGrants(page, projectId, environmentId) {
+  const listResponse = await page.request.get(`/api/v1/environments/${environmentId}/access-grants?includeTerminal=false&limit=100`)
   if (listResponse.status() === 404) return
   const listed = await expectJson(listResponse, 'REAL_EXPERIMENT_ACCESS_GRANTS_CLEANUP_LIST_FAILED')
   if (!Array.isArray(listed.items)) throw new Error('REAL_EXPERIMENT_ACCESS_GRANTS_CLEANUP_LIST_INVALID')
   for (const item of listed.items) {
-    let grantResponse = await request.get(`/api/v1/access-grants/${item.id}`)
+    let grantResponse = await page.request.get(`/api/v1/access-grants/${item.id}`)
     if (grantResponse.status() === 404) continue
     let grant = await expectJson(grantResponse, 'REAL_EXPERIMENT_ACCESS_GRANT_CLEANUP_READ_FAILED')
     if (!['requested', 'active'].includes(grant.state)) continue
-    const revokeResponse = await request.post(`/api/v1/access-grants/${grant.id}/revoke`, {
-      headers: await csrfHeaders(request, baseURL, {
-        'Idempotency-Key': uuidv7(),
-        'If-Match': `"rev-${grant.revision}"`,
-      }),
-      data: { grantId: grant.id, reasonCode: 'real_experiment_cleanup' },
-    })
-    const revoked = await expectJson(revokeResponse, 'REAL_EXPERIMENT_ACCESS_GRANT_CLEANUP_REVOKE_FAILED')
-    expect(revoked).toMatchObject({ id: grant.id, state: 'revoked' })
+    if (grant.state === 'requested') throw new Error(`REAL_EXPERIMENT_ACCESS_GRANT_REQUESTED_NOT_VISIBLE:${grant.id}`)
+    await revokeEnvironmentAccessGrantByUi(page, projectId, environmentId, grant.id)
     grant = await pollJson(
-      request,
+      page.request,
       `/api/v1/access-grants/${grant.id}`,
       (value) => ['revoked', 'denied', 'expired'].includes(value.state),
       'REAL_EXPERIMENT_ACCESS_GRANT_CLEANUP_STATUS_FAILED',
@@ -272,75 +271,17 @@ async function revokeEnvironmentAccessGrants(request, baseURL, environmentId) {
   }
 }
 
-async function closeExperimentEnvironment(page, projectId, environmentId, baseURL) {
-  const request = page.request
-  await revokeEnvironmentAccessGrants(request, baseURL, environmentId)
-  const currentResponse = await request.get(`/api/v1/environments/${environmentId}`)
-  if (currentResponse.status() === 404) return
-  let current = await expectJson(currentResponse, 'REAL_EXPERIMENT_ENVIRONMENT_READ_FOR_CLEANUP_FAILED')
-  if (current.observedState === 'deleted') return
-
-  if (current.observedState === 'ready') {
-    const stopResponse = await request.post(`/api/v1/environments/${environmentId}/stop`, {
-      headers: await csrfHeaders(request, baseURL, {
-        'Idempotency-Key': uuidv7(),
-        'If-Match': `"rev-${current.revision}"`,
-      }),
-    })
-    const accepted = await expectJson(stopResponse, 'REAL_EXPERIMENT_ENVIRONMENT_STOP_FAILED')
-    const operation = await pollJson(
-      request,
-      accepted.statusUrl,
-      (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
-      'REAL_EXPERIMENT_ENVIRONMENT_STOP_STATUS_FAILED',
-      240_000,
-    )
-    if (operation.state !== 'succeeded') {
-      current = await waitForCleanupEnvironmentState(request, environmentId)
-      if (!['stopped', 'failed', 'deleting', 'deleted'].includes(current.observedState)) {
-        throw new Error(`REAL_EXPERIMENT_ENVIRONMENT_STOP_OPERATION_FAILED:${operation.state}`)
-      }
-    } else {
-      current = await waitForCleanupEnvironmentState(request, environmentId)
-    }
-  } else if (['stopping', 'expiring'].includes(current.observedState)) {
-    current = await waitForCleanupEnvironmentState(request, environmentId)
-  }
-
-  if (current.observedState === 'deleted') return
-  if (current.observedState === 'deleting') {
-    await waitForCleanupEnvironmentState(request, environmentId)
-    return
-  }
-
-  const latestResponse = await request.get(`/api/v1/environments/${environmentId}`)
-  if (latestResponse.status() === 404) return
-  current = await expectJson(latestResponse, 'REAL_EXPERIMENT_ENVIRONMENT_READ_BEFORE_DELETE_FAILED')
-  if (current.observedState === 'deleted') return
-  if (current.observedState === 'deleting') {
-    await waitForCleanupEnvironmentState(request, environmentId)
-    return
-  }
-  const deleteResponse = await request.delete(`/api/v1/environments/${environmentId}`, {
-    headers: await csrfHeaders(request, baseURL, {
-      'Idempotency-Key': uuidv7(),
-      'If-Match': `"rev-${current.revision}"`,
-    }),
+async function closeExperimentEnvironment(page, projectId, environmentId) {
+  await revokeEnvironmentAccessGrants(page, projectId, environmentId)
+  await deleteEnvironmentByUi(page, {
+    routePrefix: 'student',
+    projectId,
+    environmentId,
+    label: 'REAL_EXPERIMENT_ENVIRONMENT_DELETE',
   })
-  const accepted = await expectJson(deleteResponse, 'REAL_EXPERIMENT_ENVIRONMENT_DELETE_FAILED')
-  const operation = await pollJson(
-    request,
-    accepted.statusUrl,
-    (value) => ['succeeded', 'failed', 'cancelled'].includes(value.state),
-    'REAL_EXPERIMENT_ENVIRONMENT_DELETE_STATUS_FAILED',
-    240_000,
-  )
-  if (operation.state !== 'succeeded') throw new Error(`REAL_EXPERIMENT_ENVIRONMENT_DELETE_OPERATION_FAILED:${operation.state}`)
-  current = await waitForCleanupEnvironmentState(request, environmentId)
-  if (current.observedState !== 'deleted') throw new Error(`REAL_EXPERIMENT_ENVIRONMENT_NOT_DELETED:${current.observedState}`)
 }
 
-async function continueStudentAcceptance({ browser, teacherPage, baseURL, projectId, publication, testInfo }) {
+async function continueStudentAcceptance({ browser, teacherPage, baseURL, projectId, publication }) {
   let studentContext
   let studentPage
   let adminContext
@@ -352,7 +293,7 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     studentContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.student })
     studentPage = await studentContext.newPage()
     const studentActorId = await readActorId(studentContext.request)
-    await addProjectStudentByUi(teacherPage, projectId, studentActorId)
+    await addProjectStudentByUi(teacherPage, projectId)
     adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
     adminPage = await adminContext.newPage()
     await assertNoPendingEvaluationTaskResourceRequests(adminPage.request, projectId, studentActorId)
@@ -376,9 +317,9 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     })
     expect(beforeResult.awardedScore).toBeLessThan(beforeResult.maxScore)
 
+    await revokeEnvironmentAccessGrants(studentContext.request, baseURL, environmentId)
     const terminal = await issueTerminalAccessAndConnect(studentPage, projectId, environmentId)
     await editThroughTerminal({ page: studentPage, ...terminal })
-    await studentPage.screenshot({ path: testInfo.outputPath('environment-terminal.png'), fullPage: true })
     await assertNoPendingEvaluationTaskResourceRequests(adminPage.request, projectId, studentActorId)
     const afterRequestIds = await snapshotProjectResourceRequestIds(adminPage.request, projectId)
     const after = await freezeStudentSourceByUi(studentPage, projectId, environmentId)
@@ -433,7 +374,6 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
     await expect(studentPage).toHaveURL(
       (url) => url.pathname === '/student/results' && url.searchParams.get('projectId') === projectId,
     )
-    await studentPage.screenshot({ path: testInfo.outputPath('result.png'), fullPage: true })
   } catch (error) {
     hasPrimaryError = true
     primaryError = error
@@ -441,7 +381,7 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
 
   const cleanupErrors = []
   try {
-    if (studentPage && environmentId) await closeExperimentEnvironment(studentPage, projectId, environmentId, baseURL)
+    if (studentPage && environmentId) await closeExperimentEnvironment(studentPage, projectId, environmentId)
   } catch (error) {
     cleanupErrors.push(error)
   }
@@ -468,7 +408,7 @@ async function continueStudentAcceptance({ browser, teacherPage, baseURL, projec
   }
 }
 
-test('teacher publishes a real security experiment and student repairs it through the browser terminal', async ({ browser, page, baseURL }, testInfo) => {
+test('teacher publishes a real security experiment and student repairs it through the browser terminal', async ({ browser, page, baseURL }) => {
   test.skip(!config && !resume, 'Set the real provider settings for a full run or explicit resume project and approval IDs for the student continuation.')
   if (!baseURL || (!config && !resume)) throw new Error('REAL_EXPERIMENT_BASE_URL_AND_RESUME_CONTEXT_REQUIRED')
 
@@ -481,27 +421,28 @@ test('teacher publishes a real security experiment and student repairs it throug
       baseURL,
       projectId: resumed.project.id,
       publication: resumed.publication,
-      testInfo,
     })
     return
   }
 
   const packageCopy = await createSecurityControlledPackage(config.goldenBaseImage)
+  const teacherActorId = await readActorId(request)
+  const adminContext = await browser.newContext({ baseURL, storageState: AUTH_STATE.admin })
+  const adminPage = await adminContext.newPage()
   try {
     const project = await createProjectByUi(page, `real-security-${Date.now()}-${uuidv7().slice(0, 8)}`)
     await selectProjectByUi(page, project.id)
-    await createProjectPolicy(request, baseURL, project.id, REAL_PROVIDER_BUDGET)
+    await configureProjectPolicyByUi(page, project.id, REAL_PROVIDER_BUDGET)
     await page.goto(`/teacher/materials?projectId=${encodeURIComponent(project.id)}`, { waitUntil: 'domcontentloaded' })
     await selectProjectByUi(page, project.id)
-    await expect(page.getByRole('heading', { name: '材料上传与 AgentRun', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '材料上传与实验生成', exact: true })).toBeVisible()
     const packageData = await uploadPackageDirectoryByUi(page, packageCopy.directory)
-    await page.screenshot({ path: testInfo.outputPath('materials.png'), fullPage: true })
 
     const run = await startExperimentRunByUi(page, project.id)
     await expect(page).toHaveURL(new RegExp(`[?&]runId=${encodeURIComponent(run.id)}(?:&|$)`), { timeout: 30_000 })
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: '生成实验候选', exact: true })).toBeVisible()
-    const completed = await waitForExperimentRun(request, project.id, run.id)
+    const completed = await waitForExperimentRun(request, project.id, run.id, adminPage, teacherActorId)
     const built = await waitForBuiltCandidate(request, project.id, completed.environmentCandidateId)
     const published = await approveAndPublish(
       page,
@@ -512,16 +453,15 @@ test('teacher publishes a real security experiment and student repairs it throug
       completed.evaluationCandidateId,
       built.artifact,
     )
-    await page.screenshot({ path: testInfo.outputPath('approval.png'), fullPage: true })
     await continueStudentAcceptance({
       browser,
       teacherPage: page,
       baseURL,
       projectId: project.id,
       publication: published.publication,
-      testInfo,
     })
   } finally {
+    await adminContext.close()
     await packageCopy.cleanup()
   }
 })

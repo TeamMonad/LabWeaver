@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, net::Ipv4Addr, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use contracts::evaluation::FactAssertion;
+use contracts::{EnvironmentId, evaluation::FactAssertion};
 use evaluation_service::ansible_probe::{
     ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION, AnsibleProbeExecutionLimits,
     AnsibleProbeExecutionRequest, AnsibleProbeSshIdentity, AnsibleProbeTarget,
@@ -12,8 +12,8 @@ use evaluation_service::ansible_probe_job::{
     AnsibleProbeJobBinding, AnsibleProbeJobError, AnsibleProbeJobResources,
 };
 use evaluation_service::{
-    ARTIFACT_MATERIALIZER_SCHEMA_VERSION, MaterializeArtifact, MaterializeCommand,
-    MaterializeContent, MaterializeDestination,
+    ARTIFACT_MATERIALIZER_SCHEMA_VERSION, FROZEN_ARCHIVE_MEDIA_TYPE, MaterializeArtifact,
+    MaterializeCommand, MaterializeContent, MaterializeDestination,
 };
 use persistence_sqlx::Sha256Digest;
 use serde_json::{Value, json};
@@ -71,8 +71,13 @@ const OBJECT_STORE_EGRESS: &str = "10.96.0.0/12:9000";
 const OBJECT_STORE_POD_EGRESS: &str = "10.202.0.0/16:9000";
 
 fn binding() -> AnsibleProbeJobBinding {
+    let environment_id = match "01900000-0000-7000-8000-000000000001".parse::<EnvironmentId>() {
+        Ok(environment_id) => environment_id,
+        Err(error) => unreachable!("fixture environment id must parse: {error}"),
+    };
     AnsibleProbeJobBinding {
         namespace: "labweaver-evaluation-runs".to_owned(),
+        environment_id,
         service_account_name: "evaluation-ansible-probe".to_owned(),
         image_pull_secret_name: "harbor-labweaver-system-pull".to_owned(),
         worker_image: format!(
@@ -86,17 +91,28 @@ fn binding() -> AnsibleProbeJobBinding {
         ],
         materializer: MaterializeCommand {
             schema_version: ARTIFACT_MATERIALIZER_SCHEMA_VERSION.to_owned(),
-            artifacts: vec![MaterializeArtifact {
-                url: "https://objects.example.test/evaluator".to_owned(),
-                required_headers: BTreeMap::new(),
-                expected_sha256: Sha256Digest::of_bytes(b"approved-evaluator"),
-                expected_size_bytes: b"approved-evaluator".len() as u64,
-                media_type: "application/json".to_owned(),
-                destination: MaterializeDestination::Evaluator,
-                content: MaterializeContent::RawFile {
-                    path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
+            artifacts: vec![
+                MaterializeArtifact {
+                    url: "https://objects.example.test/evaluator".to_owned(),
+                    required_headers: BTreeMap::new(),
+                    expected_sha256: Sha256Digest::of_bytes(b"approved-evaluator"),
+                    expected_size_bytes: b"approved-evaluator".len() as u64,
+                    media_type: "application/json".to_owned(),
+                    destination: MaterializeDestination::Evaluator,
+                    content: MaterializeContent::RawFile {
+                        path: "linux-nginx-probe-v1/playbook.yml".to_owned(),
+                    },
                 },
-            }],
+                MaterializeArtifact {
+                    url: "https://objects.example.test/submission".to_owned(),
+                    required_headers: BTreeMap::new(),
+                    expected_sha256: Sha256Digest::of_bytes(b"approved-submission"),
+                    expected_size_bytes: b"approved-submission".len() as u64,
+                    media_type: FROZEN_ARCHIVE_MEDIA_TYPE.to_owned(),
+                    destination: MaterializeDestination::Submission,
+                    content: MaterializeContent::FrozenArchive,
+                },
+            ],
         },
         materializer_ca_bundle: Some(Arc::from(b"test-ca-bundle".as_slice())),
     }
@@ -216,7 +232,8 @@ fn job_plan_is_non_root_bounded_and_read_only() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-/// Asserts the probe container mounts only the read-only command and evaluator volumes.
+/// Asserts the worker sees immutable materialized inputs while the init container
+/// gets the two writable destinations required by the materializer command.
 fn assert_probe_container_mounts(job: &Value) {
     assert_eq!(
         pointer(job, "/spec/template/spec/containers/0/volumeMounts/0/name"),
@@ -226,15 +243,56 @@ fn assert_probe_container_mounts(job: &Value) {
         pointer(job, "/spec/template/spec/containers/0/volumeMounts/1/name"),
         "evaluator"
     );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/containers/0/volumeMounts/6/name"),
+        "submission"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/6/mountPath"
+        ),
+        "/input/submission"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/containers/0/volumeMounts/6/readOnly"
+        ),
+        &Value::Bool(true)
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/initContainers/0/volumeMounts/1/name"
+        ),
+        "evaluator"
+    );
+    assert_eq!(
+        pointer(
+            job,
+            "/spec/template/spec/initContainers/0/volumeMounts/2/name"
+        ),
+        "submission"
+    );
+    assert!(
+        pointer(
+            job,
+            "/spec/template/spec/initContainers/0/volumeMounts/2/readOnly"
+        )
+        .is_null(),
+        "materializer submission destination must remain writable"
+    );
 }
 
 #[test]
 fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::error::Error>> {
-    let resources = AnsibleProbeJobResources::build(&binding())?;
+    let binding = binding();
+    let resources = AnsibleProbeJobResources::build(&binding)?;
     let policy = &resources.network_policy;
 
     // The materializer needs DNS and exactly the reviewed object-store CIDR;
-    // SSH remains scoped to the exact target IPv4.
+    // SSH is scoped to the exact frozen environment namespace and VM label.
     assert_eq!(pointer(policy, "/spec/policyTypes/0"), "Ingress");
     assert_eq!(pointer(policy, "/spec/policyTypes/1"), "Egress");
     assert_eq!(pointer(policy, "/spec/ingress"), &json!([]));
@@ -253,8 +311,34 @@ fn network_policy_allows_only_target_ssh_egress() -> Result<(), Box<dyn std::err
                 "to":[{"ipBlock":{"cidr":"10.202.0.0/16"}}],
                 "ports":[{"protocol":"TCP","port":9000}],
             },
-            {"to":[{"ipBlock":{"cidr":"192.168.56.10/32"}}],"ports":[{"protocol":"TCP","port":22}]},
+            {
+                "to":[{
+                    "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"lw-env-01900000-0000-7000-8000-000000000001"}},
+                    "podSelector":{"matchLabels":{"labweaver.io/environment-id":"01900000-0000-7000-8000-000000000001"}},
+                }],
+                "ports":[{"protocol":"TCP","port":22}],
+            },
         ])
+    );
+    let target_peer = pointer(policy, "/spec/egress/3/to/0");
+    assert!(target_peer.pointer("/ipBlock").is_none());
+    assert_ne!(
+        pointer(
+            target_peer,
+            "/namespaceSelector/matchLabels/kubernetes.io~1metadata.name"
+        ),
+        &json!("lw-env-01900000-0000-7000-8000-000000000002")
+    );
+    assert_ne!(
+        pointer(
+            target_peer,
+            "/podSelector/matchLabels/labweaver.io~1environment-id"
+        ),
+        &json!("01900000-0000-7000-8000-000000000002")
+    );
+    assert_eq!(
+        pointer(policy, "/spec/egress/3/ports"),
+        &json!([{"protocol":"TCP","port":22}])
     );
     Ok(())
 }
@@ -314,6 +398,14 @@ fn ssh_identity_volumes_are_read_only_and_bounded() -> Result<(), Box<dyn std::e
     assert_eq!(
         pointer(job, "/spec/template/spec/volumes/6/emptyDir/sizeLimit"),
         "16Mi"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/volumes/7/name"),
+        "submission"
+    );
+    assert_eq!(
+        pointer(job, "/spec/template/spec/volumes/7/emptyDir/sizeLimit"),
+        "96Mi"
     );
     Ok(())
 }

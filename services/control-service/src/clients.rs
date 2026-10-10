@@ -14,7 +14,7 @@ use std::{
 
 use auth::ServiceTokenClient;
 
-use contracts::authoring::{AgentRun, AgentTrackKind};
+use contracts::authoring::{AgentRun, AgentRunHistoryPage, AgentTrackKind};
 use contracts::environment::{
     EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
 };
@@ -26,9 +26,10 @@ use contracts::http::{
     InternalAgentBuildStatusQuery, InternalAgentRunMutationRequest, InternalAgentRunOutcome,
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
-    InternalPlatformImageImportRequest, InternalPlatformImageRegistrationRequest,
+    InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
+    InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalPublishEvaluationReleaseRequest,
-    InternalWithdrawEvaluationReleaseRequest, PlatformImageCatalog, PlatformImageEntry,
+    InternalWithdrawEvaluationReleaseRequest, PageQuery, PlatformImageCatalog, PlatformImageEntry,
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
@@ -148,7 +149,7 @@ impl AccessClient {
             correlate(
                 self.client
                     .post(self.config.endpoint("internal/v1/auth/decision")?)
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -192,7 +193,7 @@ impl AgentClient {
                 self.client
                     .post(self.config.endpoint("internal/v1/agent-runs")?)
                     .header("Idempotency-Key", key.as_str())
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -213,6 +214,29 @@ impl AgentClient {
         .await
     }
 
+    /// Reads the Agent-owned bounded history projection for one project.
+    pub async fn list_project_runs(
+        &self,
+        project_id: contracts::ProjectId,
+        query: &PageQuery,
+    ) -> Result<AgentRunHistoryPage, DownstreamError> {
+        let page: AgentRunHistoryPage = send_json(
+            self.client
+                .get(
+                    self.config
+                        .endpoint(&format!("internal/v1/projects/{project_id}/agent-runs"))?,
+                )
+                .query(query),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await?;
+        if page.items.iter().any(|item| item.project_id != project_id) {
+            return Err(DownstreamError::IdentityMismatch);
+        }
+        Ok(page)
+    }
+
     pub async fn cancel(
         &self,
         run_id: AgentRunId,
@@ -228,7 +252,7 @@ impl AgentClient {
                             .endpoint(&format!("internal/v1/agent-runs/{run_id}/cancel"))?,
                     )
                     .header("Idempotency-Key", key.as_str())
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -257,7 +281,7 @@ impl AgentClient {
                         "internal/v1/agent-runs/{run_id}/tracks/{track}/retry"
                     ))?)
                     .header("Idempotency-Key", key.as_str())
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -355,17 +379,17 @@ impl AgentClient {
         Ok(metadata)
     }
 
-    /// Sends one fully fenced build cancellation over the existing Control mTLS identity.
+    /// Sends one fully fenced build cancellation over the authenticated Control service identity.
     pub async fn cancel_build(
         &self,
         build_request_id: BuildRequestId,
         request: &InternalAgentBuildCancellationRequest,
         key: &IdempotencyKey,
-    ) -> Result<InternalAgentBuildCancellationResult, DownstreamError> {
+    ) -> Result<InternalAgentBuildCancellationResult, AdminDownstreamError> {
         if request.build_request_id != build_request_id {
-            return Err(DownstreamError::IdentityMismatch);
+            return Err(DownstreamError::IdentityMismatch.into());
         }
-        send_json(
+        send_json_admin(
             self.client
                 .post(self.config.endpoint(&format!(
                     "internal/v1/build-requests/{build_request_id}/cancel"
@@ -383,8 +407,8 @@ impl AgentClient {
         &self,
         build_request_id: BuildRequestId,
         query: &InternalAgentBuildStatusQuery,
-    ) -> Result<InternalAgentBuildCancellationResult, DownstreamError> {
-        send_json(
+    ) -> Result<InternalAgentBuildCancellationResult, AdminDownstreamError> {
+        send_json_admin(
             self.client
                 .get(
                     self.config
@@ -524,22 +548,65 @@ impl AgentClient {
         .await
     }
 
-    /// Imports one Control-frozen OCI layout archive into the platform registry and catalog.
-    pub async fn import_platform_image(
+    /// Enqueues one Control-frozen OCI layout archive for the durable Agent import worker.
+    pub async fn enqueue_platform_image_import(
         &self,
-        request: &InternalPlatformImageImportRequest,
+        request: &InternalPlatformImageImportEnqueueRequest,
         key: &IdempotencyKey,
         headers: &reqwest::header::HeaderMap,
-    ) -> Result<PlatformImageEntry, AdminDownstreamError> {
+    ) -> Result<InternalPlatformImageImportJobStatus, AdminDownstreamError> {
         send_json_admin(
             correlate(
                 self.client
                     .post(
                         self.config
-                            .endpoint("internal/v1/platform-images/imports")?,
+                            .endpoint("internal/v1/platform-images/import-jobs")?,
                     )
                     .header("Idempotency-Key", key.as_str())
                     .json(request),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Reads one Agent-owned durable import job without holding a Control database transaction.
+    pub async fn get_platform_image_import(
+        &self,
+        upload_id: contracts::UploadSessionId,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<InternalPlatformImageImportJobStatus, AdminDownstreamError> {
+        send_json_admin(
+            correlate(
+                self.client.get(self.config.endpoint(&format!(
+                    "internal/v1/platform-images/import-jobs/{upload_id}"
+                ))?),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
+    /// Requests cancellation of one Agent-owned import job by its stable upload identity.
+    pub async fn cancel_platform_image_import(
+        &self,
+        upload_id: contracts::UploadSessionId,
+        key: &IdempotencyKey,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<InternalPlatformImageImportJobStatus, AdminDownstreamError> {
+        let request = InternalPlatformImageImportCancelRequest { upload_id };
+        send_json_admin(
+            correlate(
+                self.client
+                    .post(self.config.endpoint(&format!(
+                        "internal/v1/platform-images/import-jobs/{upload_id}/cancel"
+                    ))?)
+                    .header("Idempotency-Key", key.as_str())
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -758,7 +825,7 @@ impl EvaluationClient {
                         contracts::http::StrongEtag::from_revision(request.expected_revision)
                             .header_value(),
                     )
-                    .json(request),
+                    .json(&request),
                 headers,
             ),
             &self.service_token_client,
@@ -865,9 +932,9 @@ async fn send_json<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// Administrator-facing variant of [`send_json`] that preserves an upstream RFC 9457 diagnostic.
+/// Public-facing variant of [`send_json`] that preserves an upstream RFC 9457 diagnostic.
 ///
-/// The administrator gateway must not replace the Agent's stable diagnostic with a locally
+/// The public gateway must not replace the Agent's stable diagnostic with a locally
 /// inferred status class, so a decodable `application/problem+json` response is carried through
 /// payload-free. Any other failure keeps exactly the local classification of [`send_json`].
 async fn send_json_admin<T: serde::de::DeserializeOwned>(
@@ -974,7 +1041,7 @@ pub enum AdminDownstreamError {
     /// Payload-free local classification.
     #[error(transparent)]
     Transport(#[from] DownstreamError),
-    /// Preserved upstream diagnostic for the administrator boundary.
+    /// Preserved upstream diagnostic for the public boundary.
     #[error("{0}")]
     Problem(DownstreamProblem),
 }

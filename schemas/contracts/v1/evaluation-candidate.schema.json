@@ -114,6 +114,46 @@
       ],
       "type": "object"
     },
+    "ArtifactId": {
+      "description": "Strongly typed UUIDv7 identifier for `ArtifactId`.",
+      "type": "string"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Immutable object-store identity without a machine-local path or credential.",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable metadata identity resolved by the owning service."
+        },
+        "mediaType": {
+          "description": "Registered media type.",
+          "type": "string"
+        },
+        "objectVersion": {
+          "description": "Immutable backend object version.",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "description": "Raw object length.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "storeBinding": {
+          "description": "Explicit object-store binding from deployment configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "storeBinding",
+        "objectVersion",
+        "sizeBytes",
+        "mediaType"
+      ],
+      "type": "object"
+    },
     "CandidateId": {
       "description": "Strongly typed UUIDv7 identifier for `CandidateId`.",
       "type": "string"
@@ -846,6 +886,17 @@
     },
     "runId": {
       "$ref": "#/$defs/AgentRunId"
+    },
+    "runnerBuildContext": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Generated build context for this experiment's own Evaluation runner image.\n\nOnly Container experiments carry a runner image; deployment-owned VM evaluation leaves this\nabsent. Control resolves the object key from the Agent artifact authority before enqueueing\nthe second single-image build."
     },
     "spec": {
       "$ref": "#/$defs/EvaluationSpec"

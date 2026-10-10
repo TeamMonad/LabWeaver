@@ -167,7 +167,12 @@ impl FreezeService {
             BeginFreeze::Conflict => return Err(FreezeServiceError::IdempotencyConflict),
             BeginFreeze::InProgress => return Err(FreezeServiceError::InProgress),
         };
-        if request.retention.retain_until.get() <= lease.authority_now.get() {
+        let Some(retain_until) = request.retention.retain_until else {
+            self.fail_attempt(&lease, "LW_COLLECT_CONTRACT_INVALID", true)
+                .await?;
+            return Err(FreezeServiceError::ContractInvalid);
+        };
+        if retain_until.get() <= lease.authority_now.get() {
             self.fail_attempt(&lease, "LW_COLLECT_CONTRACT_INVALID", true)
                 .await?;
             return Err(FreezeServiceError::ContractInvalid);
@@ -240,12 +245,12 @@ impl FreezeService {
         self.store.mark_uploading(&lease, &object_key).await?;
         let verified = match self
             .object_store
-            .put_governance_locked(
+            .put_immutable(
                 &object_key,
                 &archive.bytes,
                 archive.media_type,
                 lease.authority_now,
-                request.retention.retain_until,
+                Some(retain_until),
             )
             .await
         {

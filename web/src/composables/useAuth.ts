@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
-import type { AuthSession } from '@/generated/contracts'
+import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
 
 interface BffUser {
@@ -24,6 +24,18 @@ const userManager = API_AUTH_MODE === 'bearer' && DIRECT_OIDC_ENABLED
 const user = ref<CurrentUser | null>(null)
 const isLoading = ref(false)
 const error = ref<Error | null>(null)
+type TopLevelNavigate = (url: string) => void
+
+const navigateTopLevel: TopLevelNavigate = (url) => {
+  window.location.assign(url)
+}
+const SESSION_EXPIRED_MESSAGE = '登录已失效，请重新登录'
+
+function sessionExpiredError(diagnostic: string): Error {
+  const error = new Error(SESSION_EXPIRED_MESSAGE)
+  Object.defineProperty(error, 'cause', { value: diagnostic, enumerable: false })
+  return error
+}
 
 function bffUser(session: AuthSession): BffUser {
   const expiresAt = Date.parse(session.expiresAt)
@@ -61,7 +73,7 @@ export async function getOidcAccessToken(): Promise<string | undefined> {
   return current.access_token
 }
 
-export function useAuth() {
+export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
   const isAuthenticated = computed(() => user.value?.expired === false)
 
   async function login() {
@@ -100,6 +112,7 @@ export function useAuth() {
   }
 
   async function logout() {
+    if (isLoading.value) return
     isLoading.value = true
     error.value = null
     try {
@@ -108,19 +121,32 @@ export function useAuth() {
           credentials: 'include',
           headers: { Accept: 'application/json, application/problem+json' },
         })
+        if (csrfResponse.status === 401) {
+          user.value = null
+          throw sessionExpiredError(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
+        }
         if (!csrfResponse.ok) throw new Error(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
         const csrf = await csrfResponse.json() as { csrfToken?: unknown }
         if (typeof csrf.csrfToken !== 'string' || !csrf.csrfToken) throw new Error('BFF returned an invalid CSRF token')
         const response = await fetch('/auth/logout', {
           method: 'POST',
           credentials: 'include',
-          headers: { 'X-CSRF-Token': csrf.csrfToken },
+          headers: {
+            Accept: 'application/json, application/problem+json',
+            'X-CSRF-Token': csrf.csrfToken,
+          },
         })
-        if (!response.ok && response.type !== 'opaqueredirect') {
-          throw new Error(`BFF logout failed with HTTP ${response.status}`)
+        if (response.status === 401) {
+          user.value = null
+          throw sessionExpiredError(`BFF logout failed with HTTP ${response.status}`)
+        }
+        if (!response.ok) throw new Error(`BFF logout failed with HTTP ${response.status}`)
+        const logout = await response.json() as LogoutBrowserSessionResponse
+        if (typeof logout.logoutUrl !== 'string' || !logout.logoutUrl) {
+          throw new Error('BFF returned an invalid provider logout URL')
         }
         user.value = null
-        window.location.assign('/')
+        navigate(logout.logoutUrl)
       } else if (userManager) {
         await userManager.signoutRedirect()
         user.value = null

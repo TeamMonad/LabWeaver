@@ -71,7 +71,7 @@
           v-model="requestSearch"
           class="text-input filter-input"
           type="search"
-          placeholder="ID、Request Key、申请人、项目或目标"
+          placeholder="申请标识、项目或目标"
           aria-label="按真实请求字段搜索"
         >
         <label
@@ -98,7 +98,7 @@
       </div>
 
       <p class="filter-hint">
-        可按请求 ID、申请人、课程、项目或目标标识筛选。结果只来自服务端返回的真实字段。
+        可按申请标识、账号、课程、项目或目标筛选。名称来自当前已加载的真实数据，内部标识也支持搜索。结果只来自服务端返回的真实字段。
       </p>
 
       <DiagnosticBanner
@@ -144,6 +144,21 @@
           >—</span>
         </template>
       </DataTable>
+
+      <div
+        v-if="hasNoResourceRequests"
+        class="request-empty-next-step"
+        role="status"
+      >
+        <strong>暂无资源申请</strong>
+        <p>用户需要先在资源申请页选择项目并提交请求；提交后刷新本页即可处理。</p>
+        <RouterLink
+          class="outlined-button"
+          :to="resourceRequestLocation"
+        >
+          打开资源申请
+        </RouterLink>
+      </div>
 
       <div
         v-if="hasFilteredRequestResults"
@@ -263,28 +278,24 @@
       >
         <div class="detail-meta">
           <div class="meta-row">
-            <span class="meta-label">申请 ID</span>
-            <code class="meta-value">{{ approval.selectedRequest.id }}</code>
-          </div>
-          <div class="meta-row">
-            <span class="meta-label">Request Key</span>
-            <code class="meta-value">{{ approval.selectedRequest.requestKey }}</code>
+            <span class="meta-label">申请</span>
+            <span class="meta-value">{{ requestDisplayLabel(approval.selectedRequest) }}</span>
           </div>
           <div class="meta-row">
             <span class="meta-label">申请人</span>
-            <span class="meta-value">{{ approval.selectedRequest.requesterId }}</span>
+            <span class="meta-value">{{ requesterDisplayLabel(approval.selectedRequest.requesterId) }}</span>
           </div>
           <div class="meta-row">
-            <span class="meta-label">课程 / 项目</span>
-            <span class="meta-value">{{ approval.selectedRequest.courseId }} / {{ approval.selectedRequest.projectId ?? '—' }}</span>
+            <span class="meta-label">所属项目</span>
+            <span class="meta-value">{{ projectDisplayLabel(approval.selectedRequest.projectId) }}</span>
           </div>
           <div class="meta-row">
             <span class="meta-label">目标</span>
-            <code class="meta-value">{{ targetEnvironment(approval.selectedRequest.target) }}</code>
+            <span class="meta-value">{{ targetDisplayLabel(approval.selectedRequest.target) }}</span>
           </div>
           <div class="meta-row">
             <span class="meta-label">模板版本</span>
-            <code class="meta-value">{{ targetRelease(approval.selectedRequest.target) }}</code>
+            <span class="meta-value">{{ targetReleaseDisplayLabel(approval.selectedRequest.target) }}</span>
           </div>
           <div class="meta-row">
             <span class="meta-label">资源规格</span>
@@ -309,13 +320,43 @@
             <span class="meta-label">创建 / 更新</span>
             <span class="meta-value">{{ formatTimestamp(approval.selectedRequest.createdAt) }} / {{ formatTimestamp(approval.selectedRequest.updatedAt) }}</span>
           </div>
-          <div
-            v-if="approval.selectedRequest.diagnosticCode"
-            class="meta-row"
+          <p
+            v-if="requestProgressMessage(approval.selectedRequest)"
+            role="status"
+            class="state-note"
           >
-            <span class="meta-label">Diagnostic</span>
-            <code class="meta-value">{{ approval.selectedRequest.diagnosticCode }}</code>
-          </div>
+            {{ requestProgressMessage(approval.selectedRequest) }}
+          </p>
+          <details class="advanced-details">
+            <summary>查看内部标识与诊断</summary>
+            <div class="advanced-detail-grid">
+              <span class="meta-label">申请 ID</span>
+              <code class="meta-value">{{ approval.selectedRequest.id }}</code>
+              <span class="meta-label">Request Key</span>
+              <code class="meta-value">{{ approval.selectedRequest.requestKey }}</code>
+              <span class="meta-label">申请人 Actor ID</span>
+              <code class="meta-value">{{ approval.selectedRequest.requesterId }}</code>
+              <span class="meta-label">课程 ID</span>
+              <code class="meta-value">{{ approval.selectedRequest.courseId ?? '—' }}</code>
+              <span class="meta-label">项目 ID</span>
+              <code class="meta-value">{{ approval.selectedRequest.projectId }}</code>
+              <span class="meta-label">目标标识</span>
+              <code class="meta-value">{{ targetIdentifier(approval.selectedRequest.target) }}</code>
+              <span class="meta-label">发布版本标识</span>
+              <code class="meta-value">{{ targetReleaseIdentifier(approval.selectedRequest.target) }}</code>
+              <template v-if="approval.selectedRequest.diagnosticCode">
+                <span class="meta-label">诊断代码</span>
+                <code class="meta-value">{{ approval.selectedRequest.diagnosticCode }}</code>
+              </template>
+            </div>
+          </details>
+          <p
+            v-if="resourceAllocationFailureMessage(approval.selectedRequest.diagnosticCode)"
+            role="alert"
+            class="state-note"
+          >
+            {{ resourceAllocationFailureMessage(approval.selectedRequest.diagnosticCode) }}<template v-if="approval.selectedRequest.state === 'active' || approval.selectedRequest.state === 'expiring'">可在资源使用授权中撤销这次授权。</template>
+          </p>
         </div>
 
         <div class="approval-controls">
@@ -507,13 +548,13 @@
             class="approval-buttons"
           >
             <button
-              v-if="approval.selectedRequest.state === 'allocating'"
+              v-if="approval.selectedRequest.state === 'rejected'"
               type="button"
               class="outlined-button"
               :disabled="!validReason || approval.acting !== null"
               @click="openRequestConfirm('retry')"
             >
-              重试分配
+              重新送审
             </button>
             <p
               v-else
@@ -620,6 +661,13 @@
             <span class="meta-label">撤销原因码</span>
             <code class="meta-value">{{ approval.selectedLease.revokeReasonCode }}</code>
           </div>
+          <p
+            v-if="approval.selectedLease.revokeReasonCode === 'task_owner_release'"
+            class="state-note"
+            role="status"
+          >
+            临时任务资源已回收，请查看任务结果；这不代表用户 Work 环境已释放。
+          </p>
         </div>
 
         <div class="approval-controls">
@@ -715,6 +763,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataTableColumn } from '@/components/common/DataTable.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
@@ -723,12 +772,14 @@ import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { requestFingerprint, useResourceApproval, type LeaseActionKind, type RequestActionKind, type BatchActionOutcome, type RequestActionItem } from '@/composables/useResourceApproval'
 import type { ResourceRequestSchema, ResourceRequestSchemaResourceTarget, ResourceRequestState, WorkloadResources } from '@/generated/contracts'
 import { formatBytes, formatTimestamp } from '@/utils/format'
-import { resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
+import { resourceAllocationFailureMessage, resourceRequestStateLabel, resourceLeaseStateLabel } from '@/utils/stateLabels'
+import { useProjects } from '@/composables/useProjects'
 
 const GIB = 1024 ** 3
 const DEFAULT_PROVIDER_BINDING = ''
 
 const approval = useResourceApproval()
+const projects = useProjects()
 
 interface RequestRow extends Record<string, unknown> {
   id: string
@@ -774,11 +825,19 @@ function formatDuration(seconds: number): string {
   return `${seconds} 秒`
 }
 
-function targetEnvironment(target: ResourceRequestSchemaResourceTarget): string {
+function targetDisplayLabel(target: ResourceRequestSchemaResourceTarget): string {
+  return target.kind === 'environment' ? '实验或 Work 环境' : '评测任务资源'
+}
+
+function targetIdentifier(target: ResourceRequestSchemaResourceTarget): string {
   return target.kind === 'environment' ? target.environmentId : `TaskRun ${target.taskRunId}`
 }
 
-function targetRelease(target: ResourceRequestSchemaResourceTarget): string {
+function targetReleaseDisplayLabel(target: ResourceRequestSchemaResourceTarget): string {
+  return target.kind === 'environment' ? `模板 v${target.releaseVersion}` : '不适用'
+}
+
+function targetReleaseIdentifier(target: ResourceRequestSchemaResourceTarget): string {
   return target.kind === 'environment' ? `${target.releaseId} · v${target.releaseVersion}` : '—'
 }
 
@@ -789,6 +848,47 @@ const selectedRequestIds = ref<string[]>([])
 const batchProviderBinding = ref('')
 const batchReason = ref('')
 const pendingBatchApproval = ref(false)
+
+const projectNameById = computed(() => {
+  const names = new Map<string, string>()
+  if (projects.projects.kind === 'success') {
+    for (const project of projects.projects.data) names.set(project.id, project.name)
+  }
+  return names
+})
+
+function requestDisplayLabel(request: ResourceRequestSchema): string {
+  return request.requestKey.trim() || targetDisplayLabel(request.target)
+}
+
+function requesterDisplayLabel(_requesterId: string): string {
+  return '账号资料待同步'
+}
+
+function projectDisplayLabel(projectId: string | null | undefined): string {
+  if (!projectId) return '未关联项目'
+  return projectNameById.value.get(projectId) ?? '项目资料待同步'
+}
+
+function requestProgressMessage(request: ResourceRequestSchema): string | null {
+  const allocationFailure = resourceAllocationFailureMessage(request.diagnosticCode)
+  if (allocationFailure) return allocationFailure
+  return {
+    draft: '申请尚未提交。',
+    submitted: '申请已提交，正在检查资源策略。',
+    policy_checked: '资源策略已通过，等待管理员审核。',
+    reviewing: '等待资源管理员审核。',
+    approved: '申请已批准，正在准备资源。',
+    allocating: '资源正在分配，等待容量确认。',
+    active: '资源已分配，可以继续使用。',
+    expiring: '资源正在进入释放流程，请及时保存工作。',
+    expired: '资源已释放，需要重新申请才能继续使用。',
+    rejected: '申请未获批准，可查看原因后重新送审。',
+    revoked: '资源使用授权已撤销。',
+    cancelled: '申请已取消。',
+    failed: '资源申请失败，请查看原因后重试。',
+  }[request.state] ?? null
+}
 
 const courseOptions = computed(() => {
   if (approval.requests.kind !== 'success') return []
@@ -802,7 +902,7 @@ const courseOptions = computed(() => {
 const requestColumns: DataTableColumn<RequestRow>[] = [
   { key: 'selection', title: '选择任务', width: '100px' },
   { key: 'requestKey', title: '申请标识' },
-  { key: 'environmentId', title: '环境' },
+  { key: 'environmentId', title: '目标' },
   { key: 'releaseVersion', title: '模板版本' },
   { key: 'resources', title: '资源规格' },
   { key: 'duration', title: '时长' },
@@ -822,7 +922,7 @@ const requestRows = computed<RequestRow[]>(() => {
       id: request.id,
       selection: '',
       requestKey: request.requestKey,
-      environmentId: targetEnvironment(request.target),
+      environmentId: targetDisplayLabel(request.target),
       releaseVersion: request.target.kind === 'environment' ? `v${request.target.releaseVersion}` : '—',
       resources: formatResources(request.requestedResources),
       duration: formatDuration(request.requestedDurationSeconds),
@@ -838,6 +938,12 @@ const hasFilteredRequestResults = computed(() => approval.requests.kind === 'suc
   && approval.requests.data.length > 0
   && requestRows.value.length === 0
   && Boolean(courseFilter.value || requestSearch.value.trim() || requestStateFilter.value))
+
+const hasNoResourceRequests = computed(() => approval.requests.kind === 'success' && approval.requests.data.length === 0)
+const resourceRequestLocation = computed(() => ({
+  path: '/researcher/resources',
+  ...(projects.selectedProjectId ? { query: { projectId: projects.selectedProjectId } } : {}),
+}))
 
 function clearRequestFilters() {
   courseFilter.value = ''
@@ -1114,7 +1220,7 @@ const requestConfirmTitle = computed(() => {
     case 'reject':
       return '确认拒绝资源申请'
     case 'retry':
-      return '确认重试分配'
+      return '确认重新送审'
     default:
       return ''
   }
@@ -1318,6 +1424,24 @@ async function onLeaseConfirmed() {
   font: var(--md-sys-body-small);
 }
 
+.request-empty-next-step {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface);
+}
+
+.request-empty-next-step p {
+  margin: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
 .selection-unavailable {
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -1426,6 +1550,26 @@ async function onLeaseConfirmed() {
   font: var(--md-sys-body-medium);
   color: var(--md-sys-color-on-surface);
   word-break: break-all;
+}
+
+.advanced-details {
+  margin-top: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.advanced-details summary {
+  cursor: pointer;
+}
+
+.advanced-detail-grid {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 8px 16px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container);
 }
 
 .approval-controls {

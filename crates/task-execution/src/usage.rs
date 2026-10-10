@@ -87,11 +87,11 @@ pub fn usage_deliveries(
             _ => return Err(UsageDeliveryError::TimingInvalid),
         };
     let compute = RecordResourceUsageRequest {
-        project_id: status.project_id,
-        course_id: status.request.course_id,
         kind: ResourceUsageKind::Compute,
-        request_id: status.request.id,
-        lease_id: Some(status.lease.id),
+        target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+            request_id: status.request.id,
+            lease_id: Some(status.lease.id),
+        },
         source_event_id: deterministic_usage_event_id(status.task_run_id, 0x01)?,
         measured_from,
         measured_until,
@@ -115,11 +115,11 @@ pub fn usage_deliveries(
             UsageMeasurement::Unknown { reason } => UsageMeasurement::Unknown { reason },
         };
         deliveries.push(RecordResourceUsageRequest {
-            project_id: status.project_id,
-            course_id: status.request.course_id,
             kind: ResourceUsageKind::Storage,
-            request_id: status.request.id,
-            lease_id: Some(status.lease.id),
+            target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                request_id: status.request.id,
+                lease_id: Some(status.lease.id),
+            },
             source_event_id: deterministic_usage_event_id(status.task_run_id, 0x02)?,
             measured_from,
             measured_until,

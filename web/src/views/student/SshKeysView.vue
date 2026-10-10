@@ -40,6 +40,19 @@
     <section aria-labelledby="list-heading">
       <h3 id="list-heading" class="section-title">已登记公钥</h3>
       <AsyncStateView :state="sshKeys.keys" @retry="sshKeys.load">
+        <template #empty>
+          <details class="ssh-key-guide">
+            <summary>还没有公钥？查看生成与添加指引</summary>
+            <div class="ssh-key-guide__content">
+              <p>在本机运行：</p>
+              <pre><code>ssh-keygen -t ed25519</code></pre>
+              <p>按提示选择并妥善保存私钥；如果默认路径已有密钥，请另选保存路径，避免覆盖已有私钥。</p>
+              <p>查看自己选定路径对应的 <code>.pub</code> 公钥文件，例如：</p>
+              <pre><code>cat /path/to/your-key.pub</code></pre>
+              <p>将输出的完整一行（以 <code>ssh-ed25519</code> 开头）粘贴到上方输入框。切勿粘贴或提交私钥。</p>
+            </div>
+          </details>
+        </template>
         <template #success="{ data }">
           <DataTable :columns="keyColumns" :rows="data" aria-label="已登记 SSH 公钥">
             <template #fingerprintSha256="{ row }">
@@ -219,6 +232,37 @@ async function confirmDelete() {
 
 .form-error {
   margin-top: 12px;
+}
+
+.ssh-key-guide {
+  margin-top: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+}
+
+.ssh-key-guide summary {
+  color: var(--md-sys-color-primary);
+  cursor: pointer;
+  font: var(--md-sys-label-large);
+}
+
+.ssh-key-guide__content {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.ssh-key-guide__content p {
+  margin: 0;
+}
+
+.ssh-key-guide__content pre {
+  margin: 0;
+  padding: 8px 12px;
+  overflow-x: auto;
+  border-radius: var(--md-sys-shape-small);
+  background: var(--md-sys-color-surface-container-low);
 }
 
 .tag {

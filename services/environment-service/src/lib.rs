@@ -5,6 +5,9 @@
     reason = "the public contract crate and focused contract document own field-level wire documentation"
 )]
 
+#[cfg(test)]
+extern crate self as environment_service;
+
 mod api;
 mod cdi_import;
 mod container_provider;
@@ -59,8 +62,9 @@ pub use kubevirt_provider::{
     KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtExecutorResponseEnvelope,
     KubeVirtObservationStore, KubeVirtObservationStoreError, KubeVirtProvider,
     KubeVirtProviderBackend, KubeVirtProviderConfiguration, KubeVirtResource,
-    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSshBootstrap,
-    KubeVirtStoppedObservation, NatsKubeVirtExecutorServer, NatsKubeVirtProviderBackend,
+    KubeVirtResourceBudget, KubeVirtResourcePlan, KubeVirtRunningObservation, KubeVirtSecretRef,
+    KubeVirtSshBootstrap, KubeVirtStoppedObservation, KubeVirtVmVgpuLicenseMode,
+    KubeVirtVmVgpuLicensingConfiguration, NatsKubeVirtExecutorServer, NatsKubeVirtProviderBackend,
     PgKubeVirtExecutorFenceStore, PgKubeVirtObservationStore, ResolvedVmBaseDisk,
     RuntimeVmBasePolicy,
 };
@@ -73,15 +77,19 @@ pub use messaging::{
     JetStreamReleaseConsumer, LifecycleCommandMessage, NatsAccessRevoker, NatsEnvironmentProvider,
     NatsMessagingError, NatsResourceLeaseVerifier, connect_nats_mtls,
 };
+pub use metering::{ExperimentResourceAllocator, ResourceUsageClientError};
 pub use outbox::{
     EnvironmentEventPublisher, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     PublishFailure,
 };
+mod kubevirt_execution;
+mod kubevirt_launcher_sizing;
+pub use kubevirt_execution::{KubeVirtExecutionInstance, KubeVirtExecutionPermit};
 pub use process::{EnvironmentProcessRuntime, EnvironmentProcessRuntimeError};
 pub use reconciler::{
     EnvironmentProvider, ProviderFailure, ProviderFailureCode, ProviderObservation,
-    ProviderRegistry, ReconcileAction, ReconcileError, ReconcileWorker, ReconcileWorkerError,
-    ReconcileWorkerOutcome, Reconciler, next_action,
+    ProviderOutcome, ProviderRegistry, ReconcileAction, ReconcileError, ReconcileWorker,
+    ReconcileWorkerError, ReconcileWorkerOutcome, Reconciler, next_action,
 };
 pub use resolver::{
     OwnerResolver, OwnerResolverError, authorize_endpoint_eligibility, authorize_owner_resolution,
@@ -106,3 +114,7 @@ pub use work_execution::{
     ContainerWorkExecutionBackend, ContainerWorkExecutionService, ContainerWorkExecutionTarget,
     KubernetesWorkExecutionBackend, WorkExecutionError, WorkExecutionOutcome,
 };
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;

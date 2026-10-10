@@ -1,0 +1,41 @@
+---
+# FastAPI-DLS is an optional cluster-internal licensing service. An external
+# NVIDIA license server remains supported by leaving this role disabled and
+# supplying fastapi_dls_client_license_url to the VM bootstrap configuration.
+fastapi_dls_enabled: false
+fastapi_dls_kubeconfig: /etc/kubernetes/admin.conf
+fastapi_dls_namespace: labweaver-gpu-license
+fastapi_dls_service_name: fastapi-dls
+fastapi_dls_image: collinwebdesigns/fastapi-dls:2.0.3@sha256:e5078363ef86548b41c998367dfa2641015c5b7ffb7b3db280332669f8b1b5f0
+fastapi_dls_proxy_image: nginxinc/nginx-unprivileged:1.29.5-alpine@sha256:42a7d7f2ee23e9f5a1dcdf3647ba5c585bbd18f79e79cd817e70e8cd61c55779
+fastapi_dls_service_port: 443
+fastapi_dls_url: "{{ fastapi_dls_service_name }}.{{ fastapi_dls_namespace }}.svc.cluster.local"
+fastapi_dls_timezone: UTC
+fastapi_dls_lease_expire_days: 90
+fastapi_dls_token_expire_days: 1
+fastapi_dls_instance_ref: 00000000-0000-0000-0000-000000000001
+fastapi_dls_database_url: sqlite:////app/database/db.sqlite
+fastapi_dls_debug: false
+fastapi_dls_storage_class: local-path
+fastapi_dls_storage_size: 4Gi
+fastapi_dls_data_pvc_name: fastapi-dls-data
+fastapi_dls_tls_secret_name: fastapi-dls-tls
+fastapi_dls_client_config_name: fastapi-dls-client
+fastapi_dls_client_license_url: ""
+# The internal addon owns these two references. It retains a valid long-lived
+# client token and refreshes it only when its service identity has changed.
+fastapi_dls_client_token_secret_name: fastapi-dls-client-token
+fastapi_dls_client_token_secret_namespace: "{{ fastapi_dls_namespace }}"
+fastapi_dls_client_token_secret_key: client-token
+fastapi_dls_signing_root_secret_name: fastapi-dls-signing-root
+fastapi_dls_signing_root_secret_namespace: "{{ fastapi_dls_namespace }}"
+fastapi_dls_signing_root_secret_key: ca.crt
+# Runtime VM namespaces are generated per environment. Their stable labels are
+# the policy boundary; do not enumerate namespace names or omit the pod match.
+fastapi_dls_allowed_client_namespace_selector:
+  labweaver.io/managed: "true"
+  labweaver.io/environment: "true"
+  app.kubernetes.io/name: labweaver-vm-runtime
+fastapi_dls_allowed_client_pod_selector:
+  app: runtime
+  labweaver.io/gpu-mode: vm_vgpu

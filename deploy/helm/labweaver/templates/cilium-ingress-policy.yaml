@@ -21,7 +21,10 @@ specs:
       matchLabels:
         app.kubernetes.io/name: openssh-gateway
     ingress:
-      - fromEntities: [world]
+      # The public node listener is a host-network TCP bridge. Keep the
+      # existing public path and admit only the node entities needed by that
+      # bridge in addition to external clients.
+      - fromEntities: [world, host, remote-node]
         toPorts:
           - ports:
               - {port: "2222", protocol: TCP}
@@ -37,4 +40,17 @@ specs:
               {{- range $port := .Values.network.kubernetesApiPorts }}
               - {port: {{ $port | quote }}, protocol: TCP}
               {{- end }}
+  {{- if .Values.internalIdentityProxy.enabled }}
+  - endpointSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: labweaver
+    egress:
+      - toEndpoints:
+          - matchLabels:
+              k8s:io.kubernetes.pod.namespace: {{ .Values.internalIdentityProxy.namespace }}
+              k8s:app: keycloak-internal-proxy
+        toPorts:
+          - ports:
+              - {port: "8080", protocol: TCP}
+  {{- end }}
 {{- end }}

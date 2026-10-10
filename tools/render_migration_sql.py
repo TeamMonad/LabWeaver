@@ -191,6 +191,7 @@ def render(
     release_id: str,
     include_bootstrap: bool = False,
     runtime_password_variables: Iterable[str] = (),
+    domains: Iterable[str] | None = None,
 ) -> tuple[str, str]:
     """Return the psql script and verified catalog hash."""
     if not executor_identity or len(executor_identity) > 256 or "\n" in executor_identity or "\r" in executor_identity:
@@ -198,7 +199,24 @@ def render(
     if not release_id or len(release_id) > 256 or "\n" in release_id or "\r" in release_id:
         raise MigrationRenderError("release ID is empty or contains a newline")
     catalog, root, catalog_hash = load_catalog(catalog_path)
+    requested_domains = tuple(domains) if domains is not None else DOMAIN_ORDER
+    if not requested_domains:
+        raise MigrationRenderError("at least one migration domain is required")
+    if len(set(requested_domains)) != len(requested_domains):
+        raise MigrationRenderError("duplicate migration domain selection")
+    unknown_domains = set(requested_domains) - set(DOMAIN_ORDER)
+    if unknown_domains:
+        raise MigrationRenderError(
+            "unknown migration domain: " + ", ".join(sorted(unknown_domains))
+        )
+    selected_domains = tuple(
+        entry for entry in catalog["domains"] if entry["name"] in requested_domains
+    )
     password_variables = _parse_assignments(runtime_password_variables, option="--runtime-password-variable")
+    if set(password_variables) - {entry["name"] for entry in selected_domains}:
+        raise MigrationRenderError(
+            "runtime password variable selected for an unrendered migration domain"
+        )
     lines = ["\\set ON_ERROR_STOP on", "BEGIN;"]
     if include_bootstrap:
         lines.append(Path(catalog["bootstrap"]["path"]).read_text(encoding="utf-8"))
@@ -207,7 +225,7 @@ def render(
         if variable:
             lines.append(f"ALTER ROLE lw_{domain}_runtime PASSWORD :'{variable}';")
 
-    for domain_entry in catalog["domains"]:
+    for domain_entry in selected_domains:
         domain = domain_entry["name"]
         migrations = domain_entry["migrations"]
         expected_rows = []
@@ -293,6 +311,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--executor-identity", required=True)
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--include-bootstrap", action="store_true")
+    parser.add_argument(
+        "--domain",
+        dest="domains",
+        action="append",
+        choices=DOMAIN_ORDER,
+        help="render only the selected migration domain; repeatable",
+    )
     parser.add_argument("--runtime-password-variable", action="append", default=[])
     args = parser.parse_args(argv)
     try:
@@ -302,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             release_id=args.release_id,
             include_bootstrap=args.include_bootstrap,
             runtime_password_variables=args.runtime_password_variable,
+            domains=args.domains,
         )
         if args.output is None:
             sys.stdout.write(script)

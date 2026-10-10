@@ -7,6 +7,7 @@ import TopAppBar from '@/components/layout/TopAppBar.vue'
 const authState = vi.hoisted(() => ({
   user: { value: null as { expired: boolean; profile: Record<string, unknown> } | null },
   isLoading: { value: false },
+  error: { value: null as Error | null },
   isAuthenticated: { value: false },
   login: vi.fn(),
   logout: vi.fn(),
@@ -57,6 +58,7 @@ describe('TopAppBar', () => {
   beforeEach(() => {
     authState.user.value = null
     authState.isLoading.value = false
+    authState.error.value = null
     authState.isAuthenticated.value = false
     projectsState.selectedProjectId = null
   })
@@ -85,6 +87,15 @@ describe('TopAppBar', () => {
 
     expect(wrapper.text()).toContain('已登录用户')
     expect(wrapper.text()).not.toContain('actor-1234567890')
+  })
+
+  it('shows authentication errors instead of hiding a failed logout', async () => {
+    authState.user.value = { expired: false, profile: { roles: ['teacher'] } }
+    authState.isAuthenticated.value = true
+    authState.error.value = new Error('BFF logout failed with HTTP 503')
+    const wrapper = await createWrapper()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain('BFF logout failed with HTTP 503')
   })
 
   it('emits toggleDrawer when menu button is clicked', async () => {

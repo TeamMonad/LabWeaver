@@ -331,6 +331,21 @@ async fn bootstrap_migrate_and_enforce_domain_boundaries() -> Result<(), Box<dyn
         IdempotencyDecision::Replay(json!({"id": "one"}))
     );
     replay.rollback().await?;
+    assert_eq!(
+        IdempotencyStore::lookup(control, Domain::Control, "create", "key-1", request_hash).await?,
+        Some(IdempotencyDecision::Replay(json!({"id": "one"})))
+    );
+    assert_eq!(
+        IdempotencyStore::lookup(
+            control,
+            Domain::Control,
+            "create",
+            "key-1",
+            Sha256Digest::of_bytes(b"different"),
+        )
+        .await?,
+        Some(IdempotencyDecision::Conflict)
+    );
 
     let aggregate_id = Uuid::now_v7();
     let first_event = Uuid::now_v7();

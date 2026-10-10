@@ -342,11 +342,8 @@ impl ResourceClient {
         record
             .validate()
             .map_err(|_| ResourceClientError::ResponseInvalid)?;
-        if record.project_id != request.project_id
-            || record.course_id != request.course_id
+        if record.target != request.target
             || record.kind != request.kind
-            || record.request_id != request.request_id
-            || record.lease_id != request.lease_id
             || record.source_event_id != request.source_event_id
             || record.measured_from != request.measured_from
             || record.measured_until != request.measured_until

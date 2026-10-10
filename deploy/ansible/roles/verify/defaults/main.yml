@@ -1,0 +1,3 @@
+---
+verify_kubectl_path: /usr/bin/kubectl
+verify_kubeconfig_path: /etc/kubernetes/admin.conf

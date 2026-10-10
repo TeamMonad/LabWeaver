@@ -62,8 +62,8 @@ use crate::materializer::{
     MaterializeCommand, MaterializeContent, MaterializeDestination,
 };
 use crate::oj::{
-    OjCaseBinding, OjCheckerKind, OjExecutionLimits, OjExecutionPhase, OjExecutionRequest,
-    OjFileBinding, OjTerminalStatus,
+    OjCaseBinding, OjCheckerKind, OjEvidenceReceipt, OjExecutionLimits, OjExecutionPhase,
+    OjExecutionRequest, OjFileBinding, OjTerminalStatus,
 };
 use crate::oj_executor::OjJobObservation;
 use crate::oj_executor::{OjExecutorConfiguration, OjExecutorError, OjKubernetesExecutor};
@@ -75,6 +75,10 @@ const DEFAULT_RESOURCE_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_ANSIBLE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_ANSIBLE_FACTS_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_ANSIBLE_OUTPUT_BYTES: u64 = 1024 * 1024;
+/// How long an OJ Job may stay missing before the step is reported as failed. Bounded on purpose:
+/// an observation that races the attempt's own cleanup must not decide the step.
+const OJ_JOB_MISSING_GRACE: Duration = Duration::from_mins(2);
+
 const DEFAULT_ANSIBLE_MAX_ASSERTIONS: u32 = 32;
 
 enum StartedExecution {
@@ -453,6 +457,7 @@ impl KubernetesEvaluationRunner {
                 input,
                 test_groups,
                 limits,
+                checker,
             } => {
                 self.start_program(
                     &context,
@@ -463,8 +468,9 @@ impl KubernetesEvaluationRunner {
                     &test_groups,
                     limits,
                     &admission,
+                    checker,
                 )
-                .await?
+                .await
             }
             StepExecutionPlan::AnsibleProbe {
                 playbook_profile,
@@ -479,7 +485,7 @@ impl KubernetesEvaluationRunner {
                     &assertions,
                     &admission,
                 )
-                .await?
+                .await
             }
             StepExecutionPlan::Advisory { .. } => {
                 return Err(ExecutionError::Backend(
@@ -491,6 +497,34 @@ impl KubernetesEvaluationRunner {
                     "file_assertion_resource_mismatch".to_owned(),
                 ));
             }
+        };
+        let started = match started {
+            Ok(started) => started,
+            Err(ExecutionError::EnvironmentBindingRejected) => {
+                let released = lifecycle
+                    .release(&resource_status)
+                    .await
+                    .map_err(|error| map_task_resource(error, "release_after_binding_rejection"))?;
+                if !released.cleanup_confirmed {
+                    return Err(ExecutionError::Backend(
+                        "resource_cleanup_not_confirmed".to_owned(),
+                    ));
+                }
+                tracing::warn!(
+                    event = "evaluation.execution.binding_rejected",
+                    run_id = %context.lease.run_id,
+                    step_run_id = %context.lease.step_run_id,
+                    task_run_id = %context.lease.task_run_id,
+                    diagnostic_code = "LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED",
+                    cleanup_verified = true,
+                    "Environment rejected the execution binding after Resource admission"
+                );
+                return TerminalResult::Failed(
+                    "LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED".to_owned(),
+                )
+                .into_completion();
+            }
+            Err(error) => return Err(error),
         };
         let recovery = started.recovery().clone();
         self.control
@@ -1283,6 +1317,7 @@ impl KubernetesEvaluationRunner {
         test_groups: &[contracts::evaluation::TestGroup],
         limits: contracts::evaluation::ExecutionLimits,
         admission: &crate::execution_backend::AdmittedExecution,
+        checker: OjCheckerKind,
     ) -> Result<StartedExecution, ExecutionError> {
         let (request, package, package_bytes, profile_file, profile) = self
             .build_program_request(
@@ -1293,6 +1328,7 @@ impl KubernetesEvaluationRunner {
                 input,
                 test_groups,
                 limits,
+                checker,
             )
             .await?;
         let intent = execution_resources(
@@ -1393,6 +1429,7 @@ impl KubernetesEvaluationRunner {
         input: &str,
         test_groups: &[contracts::evaluation::TestGroup],
         limits: contracts::evaluation::ExecutionLimits,
+        checker: OjCheckerKind,
     ) -> Result<
         (
             OjExecutionRequest,
@@ -1499,7 +1536,7 @@ impl KubernetesEvaluationRunner {
                 ProgramPhase::Compile => OjExecutionPhase::Compile,
                 ProgramPhase::Test => OjExecutionPhase::Test,
             },
-            checker: (phase == ProgramPhase::Test).then_some(OjCheckerKind::Exact),
+            checker: (phase == ProgramPhase::Test).then_some(checker),
             cases,
             score_max_points: if phase == ProgramPhase::Test {
                 context.lease.max_score
@@ -1556,6 +1593,7 @@ impl KubernetesEvaluationRunner {
             .await?;
         let binding = AnsibleProbeJobBinding {
             namespace: self.configuration.runner_namespace.clone(),
+            environment_id: frozen.environment.environment_id,
             service_account_name: self
                 .configuration
                 .ansible_probe_service_account_name
@@ -1718,26 +1756,59 @@ impl KubernetesEvaluationRunner {
         request: &OjExecutionRequest,
         recovery: Option<&EvaluationExecutionResources>,
     ) -> Result<(TerminalResult, ExecutionTiming), ExecutionError> {
+        let mut missing_since: Option<Instant> = None;
         loop {
             if context.cancellation.is_cancelled()
                 || self.run_is_cancelling(context.lease.run_id).await?
             {
                 return Ok((TerminalResult::Cancelled, ExecutionTiming::unknown()));
             }
-            let observation = match recovery {
-                Some(recovery) => self.oj.observe_recovery(recovery, request).await,
-                None => {
-                    self.oj
-                        .observe(
-                            resources.ok_or_else(|| {
-                                ExecutionError::Backend("oj_resources_missing".to_owned())
-                            })?,
-                            request,
-                        )
-                        .await
+            // A missing resource bundle is structural: the persisted checkpoint does not describe
+            // this attempt, so it fails immediately.
+            let started_resources = match (recovery, resources) {
+                (Some(_), _) => None,
+                (None, Some(resources)) => Some(resources),
+                (None, None) => {
+                    return Err(ExecutionError::Backend("oj_resources_missing".to_owned()));
                 }
-            }
-            .map_err(|_| ExecutionError::Backend("oj_observe_failed".to_owned()))?;
+            };
+            let observed = match recovery {
+                Some(recovery) => self.oj.observe_recovery(recovery, request).await,
+                None => match started_resources {
+                    Some(resources) => self.oj.observe(resources, request).await,
+                    None => return Err(ExecutionError::Backend("oj_resources_missing".to_owned())),
+                },
+            };
+            let observation = match observed {
+                Ok(observation) => observation,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "evaluation.oj.observe.transient",
+                        run_id = %context.lease.run_id,
+                        step_run_id = %context.lease.step_run_id,
+                        task_run_id = %context.lease.task_run_id,
+                        failure_stage = "oj.observe",
+                        error_kind = error.error_kind(),
+                        error = %error,
+                        "OJ observation failed transiently and is being retried",
+                    );
+                    let first_error = missing_since.get_or_insert_with(Instant::now);
+                    if first_error.elapsed() < OJ_JOB_MISSING_GRACE {
+                        tokio::time::sleep(Duration::from_millis(
+                            self.configuration
+                                .execution_observe_poll_interval_milliseconds,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    // The Job stayed unobservable for the whole window: fail the step with a
+                    // stable diagnostic instead of exiting the process.
+                    return Ok((
+                        TerminalResult::Failed("LW_OJ_OBSERVE_UNAVAILABLE".to_owned()),
+                        ExecutionTiming::unknown(),
+                    ));
+                }
+            };
             match observation {
                 OjJobObservation::Running => {
                     tokio::time::sleep(Duration::from_millis(
@@ -1747,21 +1818,36 @@ impl KubernetesEvaluationRunner {
                     .await;
                 }
                 OjJobObservation::Missing => {
-                    return Ok((
-                        TerminalResult::Failed("LW_OJ_JOB_MISSING".to_owned()),
-                        ExecutionTiming::unknown(),
-                    ));
+                    // A missing Job is not proof that the step failed: the platform deletes the
+                    // attempt's objects as part of the same lifecycle, so an observation landing in
+                    // the handoff window would otherwise kill the whole step (the lab's compile step
+                    // has `failurePolicy: stop`). Give the Job a bounded window to reappear and only
+                    // then report the terminal diagnostic. See runbook 12.2.
+                    let first_missing = missing_since.get_or_insert_with(Instant::now);
+                    if first_missing.elapsed() < OJ_JOB_MISSING_GRACE {
+                        tokio::time::sleep(Duration::from_millis(
+                            self.configuration
+                                .execution_observe_poll_interval_milliseconds,
+                        ))
+                        .await;
+                    } else {
+                        return Ok((
+                            TerminalResult::Failed("LW_OJ_JOB_MISSING".to_owned()),
+                            ExecutionTiming::unknown(),
+                        ));
+                    }
                 }
                 OjJobObservation::Completed {
                     receipt,
                     observation,
                 } => {
                     return Ok((
-                        oj_receipt_result(
+                        oj_receipt_terminal_result(
+                            context.lease.run_id.as_uuid(),
+                            context.lease.step_run_id.as_uuid(),
+                            context.lease.task_run_id.as_uuid(),
                             request.phase,
-                            receipt.terminal_status,
-                            receipt.awarded_points,
-                            receipt.diagnostic_code,
+                            &receipt,
                         ),
                         crate::execution_backend::observation_timing(&observation),
                     ));
@@ -1825,12 +1911,10 @@ impl KubernetesEvaluationRunner {
                     observation,
                 } => {
                     let timing = crate::execution_backend::observation_timing(&observation);
-                    if receipt.terminal_status
-                        == crate::ansible_probe::AnsibleProbeTerminalStatus::Succeeded
-                    {
-                        return Ok((TerminalResult::Succeeded { score: None }, timing));
-                    }
-                    return Ok((TerminalResult::Failed(receipt.diagnostic_code), timing));
+                    return Ok((
+                        probe_receipt_result(&context.step, request, &receipt),
+                        timing,
+                    ));
                 }
                 AnsibleProbeJobObservation::Failed {
                     diagnostic_code,
@@ -2188,6 +2272,9 @@ fn attempt_ssh_secret_names(attempt_id: Uuid) -> (String, String) {
 
 fn map_environment_binding_error(error: EnvironmentExecutionBindingClientError) -> ExecutionError {
     match error {
+        EnvironmentExecutionBindingClientError::Rejected => {
+            ExecutionError::EnvironmentBindingRejected
+        }
         EnvironmentExecutionBindingClientError::Configuration
         | EnvironmentExecutionBindingClientError::CredentialGeneration
         | EnvironmentExecutionBindingClientError::Clock => {
@@ -2202,6 +2289,37 @@ enum TerminalResult {
     Succeeded { score: Option<u32> },
     Failed(String),
     Cancelled,
+}
+
+/// Gate failure remains a failure. A scoring Probe produces the declared max
+/// only on complete success, or zero on a complete, typed value mismatch.
+/// Missing/ill-typed observations and infrastructure errors never become zero.
+fn probe_receipt_result(
+    step: &contracts::evaluation::EvaluationStep,
+    request: &AnsibleProbeExecutionRequest,
+    receipt: &crate::ansible_probe::AnsibleProbeEvidenceReceipt,
+) -> TerminalResult {
+    use crate::ansible_probe::AnsibleProbeTerminalStatus;
+    use contracts::evaluation::EvaluationStep;
+    if receipt.validate_for(request).is_err() {
+        return TerminalResult::Failed("LW_AP_EVIDENCE_INVALID".to_owned());
+    }
+    match (step, receipt.terminal_status) {
+        (EvaluationStep::Gate(_), AnsibleProbeTerminalStatus::Succeeded) => {
+            TerminalResult::Succeeded { score: None }
+        }
+        (EvaluationStep::Score(_), AnsibleProbeTerminalStatus::Succeeded) => {
+            TerminalResult::Succeeded {
+                score: step.score(),
+            }
+        }
+        (EvaluationStep::Score(_), AnsibleProbeTerminalStatus::AssertionsFailed)
+            if receipt.known_assertions == receipt.total_assertions =>
+        {
+            TerminalResult::Succeeded { score: Some(0) }
+        }
+        _ => TerminalResult::Failed(receipt.diagnostic_code.clone()),
+    }
 }
 
 fn oj_receipt_result(
@@ -2228,6 +2346,44 @@ fn oj_receipt_result(
         (_, OjTerminalStatus::Cancelled) => TerminalResult::Cancelled,
         _ => TerminalResult::Failed(diagnostic_code),
     }
+}
+
+fn oj_receipt_terminal_result(
+    run_id: Uuid,
+    step_run_id: Uuid,
+    task_run_id: Uuid,
+    phase: OjExecutionPhase,
+    receipt: &OjEvidenceReceipt,
+) -> TerminalResult {
+    let result = oj_receipt_result(
+        phase,
+        receipt.terminal_status,
+        receipt.awarded_points,
+        receipt.diagnostic_code.clone(),
+    );
+    let outcome = match &result {
+        TerminalResult::Succeeded { .. } => "succeeded",
+        TerminalResult::Failed(_) => "failed",
+        TerminalResult::Cancelled => "cancelled",
+    };
+    tracing::info!(
+        event = "evaluation.oj.terminal_receipt",
+        run_id = %run_id,
+        step_run_id = %step_run_id,
+        task_run_id = %task_run_id,
+        phase = ?phase,
+        terminal_status = ?receipt.terminal_status,
+        diagnostic_code = %receipt.diagnostic_code,
+        awarded_points = receipt.awarded_points,
+        max_points = receipt.max_points,
+        compile_exit_code = ?receipt.compile_exit_code,
+        compile_signal = ?receipt.compile_signal,
+        compile_timed_out = receipt.compile_timed_out,
+        compile_output_exceeded = receipt.compile_output_exceeded,
+        outcome,
+        "verified OJ receipt produced a terminal evaluation result",
+    );
+    result
 }
 
 fn advisory_completion(
@@ -2491,9 +2647,14 @@ mod tests {
     use super::{
         ExecutionError, OjExecutionPhase, OjExecutorError, OjTerminalStatus, TaskResourceError,
         TaskResourceFailure, TerminalResult, map_oj_start_error, map_task_resource,
-        oj_receipt_result, validate_advisory_receipt_hash,
+        oj_receipt_result, probe_receipt_result, validate_advisory_receipt_hash,
+    };
+    use crate::ansible_probe::{
+        ANSIBLE_PROBE_EVIDENCE_RECEIPT_SCHEMA_VERSION, ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION,
+        AnsibleProbeEvidenceReceipt, AnsibleProbeExecutionRequest, AnsibleProbeTerminalStatus,
     };
     use contracts::authoring::ProjectLlmEgressPolicy;
+    use contracts::evaluation::EvaluationStep;
     use contracts::http::{
         AgentLlmReviewFile, AgentLlmReviewRubric, AgentLlmReviewState,
         InternalAgentLlmReviewReceipt, InternalAgentLlmReviewRequest,
@@ -2504,6 +2665,125 @@ mod tests {
     use persistence_sqlx::Sha256Digest;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    fn probe_completion_fixture() -> Result<
+        (
+            EvaluationStep,
+            AnsibleProbeExecutionRequest,
+            AnsibleProbeEvidenceReceipt,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let assertions = json!([
+            {"fact": "host.reachable", "expected": true},
+            {"fact": "service.nginx.active", "expected": true}
+        ]);
+        let request: AnsibleProbeExecutionRequest = serde_json::from_value(json!({
+            "schemaVersion": ANSIBLE_PROBE_EXECUTION_SCHEMA_VERSION,
+            "runId": uuid::Uuid::now_v7(), "stepRunId": uuid::Uuid::now_v7(),
+            "attemptId": uuid::Uuid::now_v7(), "traceId": "probe-role-test",
+            "runnerImageDigest": format!("labweaver/probe@sha256:{}", "2".repeat(64)),
+            "playbookProfile": "probe/playbook.yml",
+            "moduleAllowlist": ["ansible.builtin.service_facts"],
+            "readOnly": true, "assertions": assertions,
+            "target": {"host": "192.168.56.10", "port": 22, "username": "lab"},
+            "sourceIdentity": "source-identity",
+            "sshIdentity": {
+                "privateKeySecret": "probe-key", "certificateSecret": "probe-cert",
+                "expectedHostKeySha256": Sha256Digest::of_bytes(b"host-key")
+            },
+            "limits": {"wallTimeSeconds": 60, "factsMaxBytes": 1024,
+                "outputMaxBytes": 1024, "maxAssertions": 8},
+            "evaluationSpecSha256": Sha256Digest::of_bytes(b"evaluation-spec")
+        }))?;
+        let step = serde_json::from_value(json!({
+            "role": "score", "id": "probe", "runner": {
+                "kind": "ansible_probe", "playbookProfile": request.playbook_profile,
+                "moduleAllowlist": request.module_allowlist, "readOnly": true,
+                "assertions": assertions
+            }, "checker": {"kind": "exit_code", "expected": 0},
+            "score": {"max": 37}, "failurePolicy": "continue"
+        }))?;
+        let receipt = AnsibleProbeEvidenceReceipt {
+            schema_version: ANSIBLE_PROBE_EVIDENCE_RECEIPT_SCHEMA_VERSION.to_owned(),
+            run_id: request.run_id,
+            step_run_id: request.step_run_id,
+            attempt_id: request.attempt_id,
+            trace_id: request.trace_id.clone(),
+            request_sha256: request.request_sha256()?,
+            evidence_sha256: Sha256Digest::of_bytes(b"evidence"),
+            evidence_size_bytes: 1,
+            terminal_status: AnsibleProbeTerminalStatus::Succeeded,
+            diagnostic_code: "LW_AP_SUCCEEDED".to_owned(),
+            passed_assertions: 2,
+            known_assertions: 2,
+            total_assertions: 2,
+        };
+        Ok((step, request, receipt))
+    }
+
+    #[test]
+    fn probe_score_uses_step_maximum_and_only_known_mismatches_yield_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (step, request, mut receipt) = probe_completion_fixture()?;
+        assert!(matches!(
+            probe_receipt_result(&step, &request, &receipt),
+            TerminalResult::Succeeded { score: Some(37) }
+        ));
+        receipt.terminal_status = AnsibleProbeTerminalStatus::AssertionsFailed;
+        receipt.diagnostic_code = receipt.terminal_status.diagnostic_code().to_owned();
+        receipt.passed_assertions = 1;
+        assert!(matches!(
+            probe_receipt_result(&step, &request, &receipt),
+            TerminalResult::Succeeded { score: Some(0) }
+        ));
+        // Unknown and wrong-type observations both remain outside the known
+        // count, including an incomplete set containing a real mismatch.
+        for (passed, known) in [(1, 1), (0, 1), (0, 0)] {
+            receipt.passed_assertions = passed;
+            receipt.known_assertions = known;
+            assert!(matches!(probe_receipt_result(&step, &request, &receipt),
+                TerminalResult::Failed(code) if code == "LW_AP_ASSERTION_FAILED"));
+        }
+        for status in [
+            AnsibleProbeTerminalStatus::HostUnreachable,
+            AnsibleProbeTerminalStatus::FactsMalformed,
+            AnsibleProbeTerminalStatus::InfrastructureError,
+        ] {
+            receipt.terminal_status = status;
+            receipt.diagnostic_code = status.diagnostic_code().to_owned();
+            assert!(matches!(probe_receipt_result(&step, &request, &receipt),
+                TerminalResult::Failed(code) if code == status.diagnostic_code()));
+        }
+        receipt.attempt_id = uuid::Uuid::now_v7();
+        assert!(matches!(probe_receipt_result(&step, &request, &receipt),
+            TerminalResult::Failed(code) if code == "LW_AP_EVIDENCE_INVALID"));
+        Ok(())
+    }
+
+    #[test]
+    fn probe_gate_passes_without_score_and_assertion_mismatch_still_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (score_step, request, mut receipt) = probe_completion_fixture()?;
+        let mut value = serde_json::to_value(score_step)?;
+        value["role"] = json!("gate");
+        value["failurePolicy"] = json!("stop");
+        value
+            .as_object_mut()
+            .ok_or("step must be an object")?
+            .remove("score");
+        let gate = serde_json::from_value(value)?;
+        assert!(matches!(
+            probe_receipt_result(&gate, &request, &receipt),
+            TerminalResult::Succeeded { score: None }
+        ));
+        receipt.terminal_status = AnsibleProbeTerminalStatus::AssertionsFailed;
+        receipt.diagnostic_code = receipt.terminal_status.diagnostic_code().to_owned();
+        receipt.passed_assertions = 1;
+        assert!(matches!(probe_receipt_result(&gate, &request, &receipt),
+            TerminalResult::Failed(code) if code == "LW_AP_ASSERTION_FAILED"));
+        Ok(())
+    }
 
     #[allow(clippy::expect_used)]
     fn advisory_request(deadline_at: UtcTimestamp) -> InternalAgentLlmReviewRequest {
@@ -2814,8 +3094,8 @@ mod probe_recovery_tests {
 
     use super::{
         EvaluationAttemptContext, EvaluationAttemptRunner, EvaluationExecutionConfiguration,
-        EvaluationExecutionKind, KubernetesEvaluationRunner, PgEvaluationControlStore,
-        PgFreezeStore, StepExecutionPlan,
+        EvaluationExecutionKind, FROZEN_ARCHIVE_MEDIA_TYPE, KubernetesEvaluationRunner,
+        PgEvaluationControlStore, PgFreezeStore, StepExecutionPlan,
     };
     use crate::{
         EvaluationReleaseReservation, EvaluationRunReservation, EvaluationStepLease,
@@ -2891,15 +3171,24 @@ mod probe_recovery_tests {
     use crate::resource_client::{ResourceClient, ResourceClientConfiguration};
 
     const NAMESPACE: &str = "evaluation-tests";
-    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOiJyZXNvdXJjZSJ9.sig";
+    const MOCK_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsicmVzb3VyY2UiLCJlbnZpcm9ubWVudCIsImNvbnRyb2wiLCJhZ2VudCJdfQ.sig";
 
     #[derive(Default)]
     struct MockHttpState {
         objects: BTreeMap<String, Value>,
+        s3_objects: BTreeMap<String, MockS3Object>,
         pods: Option<Value>,
+        resource_request: Option<Value>,
         resource_status: Option<Value>,
+        environment_binding_status: Option<StatusCode>,
         deleted: BTreeSet<String>,
         calls: Vec<(Method, String)>,
+    }
+
+    struct MockS3Object {
+        body: Vec<u8>,
+        content_type: String,
+        version_id: String,
     }
 
     struct MockCluster {
@@ -2972,6 +3261,7 @@ mod probe_recovery_tests {
                 terminal_status: crate::ansible_probe::AnsibleProbeTerminalStatus::Succeeded,
                 diagnostic_code: "LW_AP_SUCCEEDED".to_owned(),
                 passed_assertions: u32::try_from(request.assertions.len())?,
+                known_assertions: u32::try_from(request.assertions.len())?,
                 total_assertions: u32::try_from(request.assertions.len())?,
             };
             let pod = json!({
@@ -3079,6 +3369,126 @@ mod probe_recovery_tests {
                 .await,
             Err(crate::execution::ExecutionError::IdentityMismatch)
         ));
+        cluster.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_environment_binding_releases_resource_and_finishes_step()
+    -> Result<(), Box<dyn Error>> {
+        let mut cluster = spawn_cluster().await?;
+        let authority = spawn_authority().await?;
+        let temp = TempDir::new()?;
+        let fixture = DbFixture::start().await?;
+        let runner = build_runner(&cluster, &authority, &temp, &fixture.pool).await?;
+        let lease = fixture
+            .store
+            .claim_next_step("binding-rejection-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("probe step was not claimable")?;
+        let context = context(&fixture, &lease)?;
+        let status = resource_status(&lease, &fixture, false)?;
+        let binding = fixture
+            .store
+            .load_release_execution_binding(fixture.release.id)
+            .await?;
+        let package_file = binding
+            .package
+            .files
+            .first()
+            .ok_or("probe package file missing")?;
+        let archive = serde_json::to_vec(&json!({
+            "apiVersion": "evaluation.labweaver.io/frozen-submission-archive/v1",
+            "files": [{"path": "answer.txt", "contentBase64": "eA=="}],
+        }))?;
+        let content_sha256 = Sha256Digest::of_bytes(&archive).to_string();
+        let frozen_contract: Value = sqlx::query_scalar(
+            "SELECT contract FROM evaluation.frozen_submissions WHERE frozen_submission_id=$1",
+        )
+        .bind(fixture.run.frozen_submission_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?;
+        let mut frozen_contract = frozen_contract;
+        frozen_contract["contentSha256"] = json!(content_sha256);
+        frozen_contract["object"]["sizeBytes"] = json!(archive.len());
+        frozen_contract["object"]["mediaType"] = json!(FROZEN_ARCHIVE_MEDIA_TYPE);
+        sqlx::query(
+            "UPDATE evaluation.frozen_submissions SET content_sha256=$2, contract=$3 WHERE frozen_submission_id=$1",
+        )
+        .bind(fixture.run.frozen_submission_id.as_uuid())
+        .bind(&content_sha256)
+        .bind(&frozen_contract)
+        .execute(&fixture.pool)
+        .await?;
+        {
+            let mut state = cluster.state.lock().await;
+            state.resource_request = Some(serde_json::to_value(&status.request)?);
+            state.resource_status = Some(serde_json::to_value(&status)?);
+            state.environment_binding_status = Some(StatusCode::UNPROCESSABLE_ENTITY);
+            state.s3_objects.insert(
+                format!(
+                    "/test-bucket/evaluation-tests/frozen/{}",
+                    fixture.run.frozen_submission_id
+                ),
+                MockS3Object {
+                    body: archive,
+                    content_type: FROZEN_ARCHIVE_MEDIA_TYPE.to_owned(),
+                    version_id: "v1".to_owned(),
+                },
+            );
+            state.s3_objects.insert(
+                format!(
+                    "/test-package-bucket/{}",
+                    binding.object_locators[&package_file.object.artifact_id]
+                ),
+                MockS3Object {
+                    body: b"x".to_vec(),
+                    content_type: package_file.object.media_type.clone(),
+                    version_id: package_file.object.object_version.clone(),
+                },
+            );
+        }
+
+        let completion = runner.execute(context).await?;
+        assert_eq!(
+            completion.state,
+            EvaluationStepRunState::Failed,
+            "binding rejection must complete the step instead of escaping the worker"
+        );
+        assert_eq!(
+            completion
+                .diagnostic_code
+                .as_ref()
+                .map(contracts::DiagnosticCode::as_str),
+            Some("LW_EVALUATION_ENVIRONMENT_BINDING_REJECTED")
+        );
+        assert!(completion.cleanup_verified);
+        let calls = cluster.calls().await;
+        let release_path = format!("/internal/v1/task-resources/{}/release", lease.task_run_id);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| *method == Method::POST && path == &release_path)
+                .count(),
+            1,
+            "the acknowledged Resource claim must be released exactly once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| {
+                    *method == Method::POST && path.ends_with("/execution-binding/evaluation")
+                })
+                .count(),
+            1,
+            "the Environment binding must be requested once"
+        );
+        assert!(
+            calls.iter().all(|(_method, path)| {
+                !path.starts_with("/api/") && !path.starts_with("/apis/")
+            }),
+            "a rejected binding must not create a Kubernetes Job"
+        );
         cluster.stop().await;
         Ok(())
     }
@@ -3632,6 +4042,31 @@ mod probe_recovery_tests {
         }
         let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
         if segments.first() == Some(&"internal") {
+            if method == Method::POST && segments.as_slice() == ["internal", "v1", "task-resources"]
+            {
+                return state.resource_request.clone().map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    |request| (StatusCode::OK, Json(request)).into_response(),
+                );
+            }
+            if method == Method::GET && segments.last() == Some(&"request") {
+                return state.resource_request.clone().map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    |request| (StatusCode::OK, Json(request)).into_response(),
+                );
+            }
+            if method == Method::POST && matches!(segments.last(), Some(&("claim" | "ack"))) {
+                return state.resource_status.clone().map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    |status| (StatusCode::OK, Json(status)).into_response(),
+                );
+            }
+            if method == Method::POST && segments.last() == Some(&"evaluation") {
+                return state.environment_binding_status.map_or_else(
+                    || StatusCode::NOT_FOUND.into_response(),
+                    IntoResponse::into_response,
+                );
+            }
             if method == Method::GET && segments.len() == 4 {
                 return state.resource_status.clone().map_or_else(
                     || StatusCode::NOT_FOUND.into_response(),
@@ -3650,6 +4085,15 @@ mod probe_recovery_tests {
         if method == Method::GET {
             if state.deleted.contains(&path) {
                 return StatusCode::NOT_FOUND.into_response();
+            }
+            if let Some(object) = state.s3_objects.get(&path) {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", &object.content_type)
+                    .header("content-length", object.body.len())
+                    .header("x-amz-version-id", &object.version_id)
+                    .body(Body::from(object.body.clone()))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
             return state.objects.get(&path).cloned().map_or_else(
                 || StatusCode::NOT_FOUND.into_response(),
@@ -3836,7 +4280,7 @@ mod probe_recovery_tests {
                     upload_ttl_seconds: 60,
                     max_object_bytes: 1024 * 1024,
                     force_path_style: true,
-                    ca_bundle_file: None,
+                    ca_bundle_file: Some(ca_file.display().to_string()),
                 },
                 S3Credential {
                     access_key_id: "test-access".to_owned(),
@@ -3857,7 +4301,7 @@ mod probe_recovery_tests {
                     upload_ttl_seconds: 60,
                     max_object_bytes: 1024 * 1024,
                     force_path_style: true,
-                    ca_bundle_file: None,
+                    ca_bundle_file: Some(ca_file.display().to_string()),
                 },
                 S3Credential {
                     access_key_id: "test-access".to_owned(),
@@ -3883,7 +4327,7 @@ mod probe_recovery_tests {
             oj_service_account_name: "oj-runner".to_owned(),
             ansible_probe_service_account_name: "ansible-probe".to_owned(),
             image_pull_secret_name: "pull-secret".to_owned(),
-            object_store_egress: vec!["10.96.0.0/12:443".to_owned()],
+            object_store_egress: vec!["10.96.0.0/12:9000".to_owned()],
             resource_poll_interval_milliseconds: 100,
             resource_approval_timeout_seconds: 10,
             execution_observe_poll_interval_milliseconds: 100,
@@ -4246,7 +4690,7 @@ mod probe_recovery_tests {
                 policy_id: PolicyId::new(),
                 policy_revision: Revision::new(1)?,
                 class: RetentionClass::StudentSubmission,
-                retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+                retain_until: Some("2027-01-01T00:00:00.000Z".parse()?),
                 disposition: RetentionDisposition::Delete,
             },
             system_facts: BTreeMap::new(),
@@ -4274,7 +4718,7 @@ mod probe_recovery_tests {
         .bind(now)
         .bind(format!("freeze:{}", frozen.id))
         .bind(Sha256Digest::of_bytes(b"source-identity").to_string())
-        .bind(format!("frozen/{}", frozen.id))
+        .bind(format!("evaluation-tests/frozen/{}", frozen.id))
         .bind(&frozen.object.object_version)
         .execute(pool)
         .await?;
@@ -4333,7 +4777,7 @@ mod probe_recovery_tests {
                     policy_id: PolicyId::new(),
                     policy_revision: Revision::new(1)?,
                     class: RetentionClass::CourseMaterial,
-                    retain_until: "2027-01-01T00:00:00.000Z".parse()?,
+                    retain_until: Some("2027-01-01T00:00:00.000Z".parse()?),
                     disposition: RetentionDisposition::Delete,
                 },
                 completed_at: "2026-09-09T00:00:00.000Z".parse()?,

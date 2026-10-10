@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::access::{ConsoleKind, ConsoleLeaseFence, validate_ssh_public_key};
 use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
@@ -13,6 +13,18 @@ use crate::{
     EvaluationRunId, EvaluationStepRunId, LeaseId, OperationId, ProjectId, ReleaseId,
     ResourceRequestId, Revision, StreamSequence, UtcTimestamp,
 };
+
+/// Requires nullable timestamps to be present on strict service-to-service DTOs.
+///
+/// The field may carry an explicit JSON `null` for a validated permanent material decision, while
+/// an omitted field remains a malformed older or incomplete response.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// Requested steady state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -74,7 +86,27 @@ pub struct EnvironmentCreateSpec {
     pub provider_binding: String,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
-    pub eligibility_expires_at: UtcTimestamp,
+    /// Resources approved by the immutable ReleaseProjection or Work lease.
+    /// Environment owns the lifecycle; Resource receives this snapshot only
+    /// through the trusted Environment resource reservation handoff.
+    pub approved_resources: WorkloadResources,
+    /// Resource-resolved Experiment GPU allocation held for this environment instance when the
+    /// approved resource snapshot includes GPU capacity.
+    ///
+    /// Experiment creation resolves this through Resource before the aggregate is accepted; Work
+    /// environments keep their allocation on the Lease authorization instead and leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_allocation: Option<GpuAllocation>,
+    /// Immutable material retention decision that authorizes the eligibility boundary below.
+    pub retention: crate::RetentionSnapshot,
+    /// Material eligibility deadline. `None` is the explicit permanent CourseMaterial form;
+    /// Work instances are later bounded by their Resource lease fence.
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
 }
 
 /// Explicit immutable target selected for one reset operation.
@@ -440,6 +472,302 @@ fn validate_gpu_allocation(
     }
 }
 
+/// Environment-owned request to resolve and durably hold one Experiment resource reservation.
+///
+/// The caller submits only a policy-catalogued class and count. Resource selects the exact
+/// allocation binding, mode, and provider binding from its active catalog and current capacity
+/// observation; an unknown class, exhausted pool, or stale observation fails closed.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveEnvironmentResourceReservationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub provider_binding: String,
+    pub approved_resources: WorkloadResources,
+    pub gpu: Option<crate::resource::GpuRequest>,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
+    pub trace_id: String,
+}
+
+impl ResolveEnvironmentResourceReservationRequest {
+    /// Validates the trusted Environment command before any capacity side effect.
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.provider_binding.is_empty()
+            || self.provider_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        self.approved_resources
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        if let Some(gpu) = &self.gpu {
+            gpu.validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        if self.approved_resources.gpu.as_ref() != self.gpu.as_ref() {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource-authoritative resolution returned to Environment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveEnvironmentResourceReservationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub provider_binding: String,
+    pub allocation: Option<GpuAllocation>,
+    pub state: EnvironmentResourceReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+}
+
+impl ResolveEnvironmentResourceReservationResponse {
+    /// Validates the resolved allocation against the requesting Environment identity.
+    pub fn validate_for(
+        &self,
+        request: &ResolveEnvironmentResourceReservationRequest,
+    ) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.environment_id != request.environment_id
+            || self.provider_binding != request.provider_binding
+            || self
+                .allocation
+                .as_ref()
+                .map(|value| (&value.class, value.count))
+                != request
+                    .gpu
+                    .as_ref()
+                    .map(|value| (&value.class, value.count))
+            || self.environment_generation != request.environment_generation
+            || self.reservation_generation == 0
+            || self.state != EnvironmentResourceReservationState::Reserved
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        Ok(())
+    }
+}
+
+/// Durable state of an Environment-owned Resource reservation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentResourceReservationState {
+    Reserved,
+    Suspended,
+    Released,
+}
+
+/// Environment request to revalidate and activate an existing Experiment reservation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivateEnvironmentResourceReservationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub course_id: Option<CourseId>,
+    pub owner_actor_id: ActorId,
+    pub provider_binding: String,
+    pub approved_resources: WorkloadResources,
+    pub gpu: Option<crate::resource::GpuRequest>,
+    pub expected_allocation: Option<GpuAllocation>,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
+    pub trace_id: String,
+}
+
+impl ActivateEnvironmentResourceReservationRequest {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.provider_binding.is_empty()
+            || self.provider_binding.len() > 120
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        self.approved_resources
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        if self.approved_resources.gpu.as_ref() != self.gpu.as_ref() {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.expected_allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        if self
+            .expected_allocation
+            .as_ref()
+            .map(|allocation| (&allocation.class, allocation.count))
+            != self.gpu.as_ref().map(|gpu| (&gpu.class, gpu.count))
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource readback for a fenced activate operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivateEnvironmentResourceReservationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub state: EnvironmentResourceReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+    pub allocation: Option<GpuAllocation>,
+    pub applied: bool,
+}
+
+impl ActivateEnvironmentResourceReservationResponse {
+    pub fn validate_for(
+        &self,
+        request: &ActivateEnvironmentResourceReservationRequest,
+    ) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.environment_id != request.environment_id
+            || self.reservation_generation == 0
+            || self.environment_generation > request.environment_generation
+            || self.state == EnvironmentResourceReservationState::Released
+            || self
+                .allocation
+                .as_ref()
+                .map(|value| (&value.class, value.count))
+                != request
+                    .gpu
+                    .as_ref()
+                    .map(|value| (&value.class, value.count))
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        Ok(())
+    }
+}
+
+/// Environment request to release GPU capacity while retaining the reservation identity.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuspendEnvironmentResourceReservationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub owner_actor_id: ActorId,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
+    pub trace_id: String,
+}
+
+impl SuspendEnvironmentResourceReservationRequest {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Resource readback for a fenced suspend operation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SuspendEnvironmentResourceReservationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub state: EnvironmentResourceReservationState,
+    pub reservation_generation: u64,
+    pub environment_generation: u64,
+    pub allocation: Option<GpuAllocation>,
+    pub applied: bool,
+}
+
+impl SuspendEnvironmentResourceReservationResponse {
+    pub fn validate_for(
+        &self,
+        request: &SuspendEnvironmentResourceReservationRequest,
+    ) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.environment_id != request.environment_id
+            || self.reservation_generation == 0
+            || self.environment_generation > request.environment_generation
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
+        }
+        Ok(())
+    }
+}
+
+/// Environment-owned request to release one durable Experiment resource reservation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseEnvironmentResourceReservationRequest {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub project_id: ProjectId,
+    pub owner_actor_id: ActorId,
+    pub operation_id: OperationId,
+    pub environment_generation: u64,
+    pub trace_id: String,
+}
+
+impl ReleaseEnvironmentResourceReservationRequest {
+    /// Validates the trusted Environment release command.
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.version != 1
+            || self.trace_id.is_empty()
+            || self.trace_id.len() > 128
+            || self.trace_id.chars().any(char::is_control)
+            || self.environment_generation == 0
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        Ok(())
+    }
+}
+
+/// Idempotent Resource release readback. `released` is false when no reservation remained.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseEnvironmentResourceReservationResponse {
+    pub version: u8,
+    pub environment_id: EnvironmentId,
+    pub released: bool,
+}
+
 /// Resource-authoritative Lease update for an existing Work aggregate.
 ///
 /// Environment accepts this only from the authenticated Resource service after
@@ -695,7 +1023,12 @@ pub struct EnvironmentSummary {
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
     pub revision: Revision,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
     pub created_at: UtcTimestamp,
     pub updated_at: UtcTimestamp,
     pub last_changed_stream_sequence: StreamSequence,
@@ -799,6 +1132,7 @@ pub struct EnvironmentInstance {
     pub release_version: u64,
     pub lease_id: Option<LeaseId>,
     pub capacity_binding: Option<String>,
+    pub approved_resources: WorkloadResources,
     pub provider_binding: String,
     pub desired_state: DesiredEnvironmentState,
     pub observed_state: ObservedEnvironmentState,
@@ -806,7 +1140,21 @@ pub struct EnvironmentInstance {
     pub generation: u64,
     pub observed_generation: u64,
     pub operation: EnvironmentOperation,
-    pub eligibility_expires_at: UtcTimestamp,
+    /// Resource-resolved Experiment GPU allocation held while this instance exists, when present.
+    ///
+    /// Work environments never use this field; their allocation remains on the Lease
+    /// authorization. A present value is validated against the immutable instance identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_allocation: Option<GpuAllocation>,
+    /// Set only after Environment has released its Resource reservation at terminal deletion.
+    #[serde(default)]
+    pub resource_reservation_released: bool,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
     pub endpoints: Vec<EnvironmentEndpoint>,
     pub last_diagnostic_code: Option<String>,
     pub failed_phase: Option<ObservedEnvironmentState>,
@@ -844,6 +1192,9 @@ impl EnvironmentInstance {
         {
             return Err(EnvironmentError::InvalidAggregate);
         }
+        self.approved_resources
+            .validate()
+            .map_err(|_| EnvironmentError::InvalidAggregate)?;
         for code in [
             self.last_diagnostic_code.as_deref(),
             self.operation.diagnostic_code.as_deref(),
@@ -862,6 +1213,8 @@ impl EnvironmentInstance {
             }
             EnvironmentClass::Work
                 if self.lease_id.is_none()
+                    || self.gpu_allocation.is_some()
+                    || self.resource_reservation_released
                     || self
                         .capacity_binding
                         .as_deref()
@@ -870,6 +1223,17 @@ impl EnvironmentInstance {
                 return Err(EnvironmentError::LeaseRequired);
             }
             _ => {}
+        }
+        if self.resource_reservation_released
+            && (self.class != EnvironmentClass::Experiment
+                || self.observed_state != ObservedEnvironmentState::Deleted)
+        {
+            return Err(EnvironmentError::InvalidAggregate);
+        }
+        if let Some(allocation) = &self.gpu_allocation {
+            allocation
+                .validate()
+                .map_err(|_| EnvironmentError::InvalidAggregate)?;
         }
         if (self.observed_state == ObservedEnvironmentState::Failed) != self.failed_phase.is_some()
         {
@@ -960,7 +1324,7 @@ impl EnvironmentInstance {
                 State::Provisioning | State::Failed | State::Deleting
             ) | (
                 State::Provisioning,
-                State::Ready | State::Stopped | State::Failed | State::Deleting
+                State::Ready | State::Stopping | State::Stopped | State::Failed | State::Deleting
             ) | (
                 State::Ready,
                 State::Provisioning
@@ -1016,7 +1380,7 @@ impl EnvironmentInstance {
             }
             Operation::Retry | Operation::Recover => state == State::Failed,
             Operation::Cancel => !matches!(state, State::Deleted | State::Deleting),
-            Operation::Expire => matches!(state, State::Ready | State::Stopped | State::Failed),
+            Operation::Expire => !matches!(state, State::Deleted | State::Deleting),
             Operation::Delete => state != State::Deleted,
             Operation::Cleanup => {
                 matches!(state, State::Expiring | State::Deleting | State::Failed)
@@ -1188,7 +1552,13 @@ pub struct EnvironmentOwnerResolution {
     pub course_id: Option<CourseId>,
     pub owner_actor_id: ActorId,
     pub environment_revision: Revision,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
+    pub lease_fence: Option<ConsoleLeaseFence>,
 }
 
 /// Control-to-Environment request for the authoritative Work execution target.
@@ -1298,7 +1668,12 @@ pub struct EnvironmentConsoleEligibility {
     pub environment_revision: Revision,
     pub release_id: ReleaseId,
     pub release_version: u64,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
     pub lease_fence: Option<ConsoleLeaseFence>,
     pub binding: EnvironmentConsoleBinding,
 }
@@ -1311,9 +1686,7 @@ impl EnvironmentConsoleEligibility {
     ) -> Result<(), EnvironmentError> {
         let lease_valid = match (self.environment_class, &self.lease_fence) {
             (EnvironmentClass::Experiment, None) => true,
-            (EnvironmentClass::Work, Some(fence)) => {
-                fence.expires_at >= self.eligibility_expires_at
-            }
+            (EnvironmentClass::Work, Some(fence)) => fence.expires_at > now,
             _ => false,
         };
         let binding_valid = match (&self.binding, self.runtime_kind) {
@@ -1331,7 +1704,9 @@ impl EnvironmentConsoleEligibility {
                 && self.owner_actor_id != request.actor_id)
             || self.environment_revision != request.expected_revision
             || self.release_version == 0
-            || self.eligibility_expires_at <= now
+            || self
+                .eligibility_expires_at
+                .is_some_and(|deadline| deadline <= now)
             || !lease_valid
         {
             return Err(EnvironmentError::ConsoleEligibilityInvalid);
@@ -1358,7 +1733,13 @@ pub struct EnvironmentEndpointEligibility {
     pub course_id: Option<CourseId>,
     pub owner_actor_id: ActorId,
     pub environment_revision: Revision,
-    pub eligibility_expires_at: UtcTimestamp,
+    #[schemars(
+        required,
+        schema_with = "crate::foundation::required_nullable_timestamp_schema"
+    )]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub eligibility_expires_at: Option<UtcTimestamp>,
+    pub lease_fence: Option<ConsoleLeaseFence>,
     pub endpoints: Vec<EnvironmentEndpoint>,
 }
 
@@ -1386,7 +1767,13 @@ impl EnvironmentEndpointEligibility {
             || (request.subject_kind == EnvironmentAccessSubjectKind::Owner
                 && self.owner_actor_id != request.actor_id)
             || self.environment_revision != request.expected_revision
-            || self.eligibility_expires_at <= now
+            || self
+                .eligibility_expires_at
+                .is_some_and(|deadline| deadline <= now)
+            || self
+                .lease_fence
+                .as_ref()
+                .is_some_and(|fence| fence.expires_at <= now)
             || requested != returned
             || self
                 .endpoints
@@ -1446,9 +1833,10 @@ mod tests {
     use super::{
         EnvironmentAccessSubjectKind, EnvironmentConsoleBinding, EnvironmentConsoleEligibility,
         EnvironmentConsoleEligibilityRequest, EnvironmentInstance, EnvironmentOperationKind,
-        EnvironmentOwnerResolverClientConfig, EnvironmentWorkConfigurationTarget,
-        EnvironmentWorkConfigurationTargetQuery, ObservedEnvironmentState, ResourceWorkCleanup,
-        ResourceWorkHandoff, ResourceWorkLeaseUpdate,
+        EnvironmentOwnerResolution, EnvironmentOwnerResolverClientConfig,
+        EnvironmentWorkConfigurationTarget, EnvironmentWorkConfigurationTargetQuery,
+        ObservedEnvironmentState, ResourceWorkCleanup, ResourceWorkHandoff,
+        ResourceWorkLeaseUpdate,
     };
     use crate::authoring::{EnvironmentClass, RuntimeKind, TerminalSpec};
     use crate::{
@@ -1500,6 +1888,32 @@ mod tests {
     }
 
     #[test]
+    fn environment_material_deadline_requires_explicit_null() {
+        let environment_id = EnvironmentId::new();
+        let project_id = ProjectId::new();
+        let owner_actor_id = ActorId::new();
+        let base = serde_json::json!({
+            "environmentId": environment_id,
+            "projectId": project_id,
+            "courseId": null,
+            "ownerActorId": owner_actor_id,
+            "environmentRevision": 1,
+            "eligibilityExpiresAt": null
+        });
+        let resolution: EnvironmentOwnerResolution =
+            serde_json::from_value(base.clone()).expect("explicit nullable deadline");
+        assert_eq!(resolution.eligibility_expires_at, None);
+        let mut missing = base.as_object().expect("object").clone();
+        missing.remove("eligibilityExpiresAt");
+        assert!(
+            serde_json::from_value::<EnvironmentOwnerResolution>(serde_json::Value::Object(
+                missing
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn console_binding_matches_the_authoritative_runtime_without_exposing_a_vmi_locator() {
         let environment_id = EnvironmentId::new();
         let project_id = ProjectId::new();
@@ -1525,7 +1939,7 @@ mod tests {
             environment_revision: Revision::new(3).expect("revision"),
             release_id: ReleaseId::new(),
             release_version: 1,
-            eligibility_expires_at: expires,
+            eligibility_expires_at: Some(expires),
             lease_fence: None,
             binding: EnvironmentConsoleBinding::Novnc,
         };
@@ -1578,7 +1992,11 @@ mod tests {
                         State::Provisioning | State::Failed | State::Deleting
                     ) | (
                         State::Provisioning,
-                        State::Ready | State::Stopped | State::Failed | State::Deleting
+                        State::Ready
+                            | State::Stopping
+                            | State::Stopped
+                            | State::Failed
+                            | State::Deleting
                     ) | (
                         State::Ready,
                         State::Provisioning
@@ -1635,9 +2053,7 @@ mod tests {
                     }
                     Operation::Retry | Operation::Recover => state == State::Failed,
                     Operation::Cancel => !matches!(state, State::Deleted | State::Deleting),
-                    Operation::Expire => {
-                        matches!(state, State::Ready | State::Stopped | State::Failed)
-                    }
+                    Operation::Expire => !matches!(state, State::Deleted | State::Deleting),
                     Operation::Delete => state != State::Deleted,
                     Operation::Cleanup => {
                         matches!(state, State::Expiring | State::Deleting | State::Failed)

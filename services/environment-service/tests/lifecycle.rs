@@ -78,6 +78,102 @@ fn stop_is_accepted_without_claiming_provider_convergence() -> Result<(), Box<dy
 }
 
 #[test]
+fn stopped_reset_reconciles_through_stop_before_completion_and_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let current = ready_instance();
+    let stopped_plan = plan_command(
+        &current,
+        &command(&current, EnvironmentOperationKind::Stop),
+        OperationId::new(),
+    )?;
+    let stopped = apply_provider_observation(
+        &stopped_plan,
+        stopped_plan.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Stopped,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: true,
+        },
+    )?;
+    let reset_plan = plan_command(
+        &stopped,
+        &command(&stopped, EnvironmentOperationKind::Reset),
+        OperationId::new(),
+    )?;
+    assert_eq!(reset_plan.desired_state, DesiredEnvironmentState::Stopped);
+    assert_eq!(
+        reset_plan.observed_state,
+        ObservedEnvironmentState::Provisioning
+    );
+
+    let mut provider_endpoints = reset_plan.endpoints.clone();
+    for endpoint in &mut provider_endpoints {
+        endpoint.health = EndpointHealth::Healthy;
+    }
+
+    // Providers report the newly reset runtime as Ready. Environment records a non-terminal
+    // Stopping checkpoint so Resource capacity remains held until the next Stop action.
+    let stopping = apply_provider_observation(
+        &reset_plan,
+        reset_plan.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Ready,
+            endpoints: provider_endpoints,
+            cleanup_evidence: None,
+            operation_complete: true,
+        },
+    )?;
+    assert_eq!(stopping.observed_state, ObservedEnvironmentState::Stopping);
+    assert_eq!(stopping.operation.state, OperationState::Running);
+    assert!(stopping.endpoints.is_empty());
+    assert_eq!(
+        stopping.operation.provider_step,
+        reset_plan.operation.provider_step + 1
+    );
+
+    let stopped = apply_provider_observation(
+        &stopping,
+        stopping.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Stopped,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: true,
+        },
+    )?;
+    assert_eq!(stopped.observed_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(stopped.operation.state, OperationState::Succeeded);
+
+    let reset_failed = apply_provider_failure(
+        &reset_plan,
+        reset_plan.operation.id,
+        "LW_ENVIRONMENT_PROVIDER_REJECTED",
+    )?;
+    let recovered_plan = plan_command(
+        &reset_failed,
+        &command(&reset_failed, EnvironmentOperationKind::Retry),
+        OperationId::new(),
+    )?;
+    let recovered_stopping = apply_provider_observation(
+        &recovered_plan,
+        recovered_plan.operation.id,
+        ProviderObservation {
+            next_state: ObservedEnvironmentState::Ready,
+            endpoints: Vec::new(),
+            cleanup_evidence: None,
+            operation_complete: true,
+        },
+    )?;
+    assert_eq!(
+        recovered_stopping.observed_state,
+        ObservedEnvironmentState::Stopping
+    );
+    assert_eq!(recovered_stopping.operation.state, OperationState::Running);
+    Ok(())
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one lifecycle scenario verifies the full start and failed-phase recovery sequence"
@@ -601,7 +697,7 @@ fn work_commands_require_active_exact_lease_and_unexpired_eligibility()
                 contracts::environment::EnvironmentError::LeaseAuthorizationInvalid
             ))
         ));
-        candidate.eligibility_expires_at = timestamp("2026-07-14T01:59:59.000Z");
+        candidate.eligibility_expires_at = Some(timestamp("2026-07-14T01:59:59.000Z"));
         assert!(matches!(
             plan_command_authorized(
                 &candidate,

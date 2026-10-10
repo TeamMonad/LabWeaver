@@ -4,6 +4,7 @@ import {
   archiveProject,
   createProject,
   getProject,
+  listOrganizationUsers,
   listProjectMemberships,
   listProjects,
   removeProjectMembership,
@@ -11,6 +12,7 @@ import {
 } from '@/generated/contracts'
 import type {
   AddProjectMembershipRequestSchema,
+  OrganizationUserPage,
   ProjectMembershipSchema,
   ProjectSchema,
   UpdateProjectRequestSchema,
@@ -23,13 +25,29 @@ function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: strin
   return makeDiagnostic(problem?.diagnosticCode ?? fallbackCode, problem?.detail ?? fallbackMessage, problem?.retryable ?? true)
 }
 
+function directoryDiagnostic(error: unknown): DiagnosticViewModel {
+  const result = diagnostic(error, 'DIRECTORY_USERS_LIST_FAILED', '查找组织账号失败')
+  return result.code === 'LW_ACCESS_DIRECTORY_UNAVAILABLE'
+    ? { ...result, message: '平台账号目录暂时不可用，请稍后重试。已创建的项目和材料会保留。' }
+    : result
+}
+
 export interface ProjectMutationResult {
   kind: 'success' | 'error'
   diagnostic: DiagnosticViewModel
 }
 
+function persistedProjectId(): string | null {
+  if (typeof localStorage === 'undefined') return null
+  const value = localStorage.getItem('labweaver_project_id')
+  const projectId = value?.trim()
+  return projectId || null
+}
+
 const projects = ref<AsyncState<ProjectSchema[]>>({ kind: 'idle' })
-const selectedProjectId = ref<string | null>(null)
+// Restore the browser's existing project context before the first async list
+// response so project-scoped links remain scoped during a page reload.
+const selectedProjectId = ref<string | null>(persistedProjectId())
 const acting = ref<string | null>(null)
 const outcome = ref<ProjectMutationResult | null>(null)
 let loadGeneration = 0
@@ -44,7 +62,7 @@ function preserveSelection(items: ProjectSchema[]) {
     selectedProjectId.value = null
     return
   }
-  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('labweaver_project_id') : null
+  const saved = persistedProjectId()
   if (!selectedProjectId.value || !items.some((project) => project.id === selectedProjectId.value)) {
     selectedProjectId.value = saved && items.some((project) => project.id === saved) ? saved : items[0].id
   }
@@ -256,6 +274,52 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
   }
 
   return reactive({ memberships, acting, outcome, load, add, remove })
+}
+
+const ORGANIZATION_DIRECTORY_PAGE_SIZE = 25
+
+/**
+ * Search the issuer-backed organization directory for membership selection.
+ * The page is server-authoritative; local state only tracks the latest query
+ * and ignores responses for an older query or page.
+ */
+export function useOrganizationDirectoryUsers() {
+  const users = ref<AsyncState<OrganizationUserPage>>({ kind: 'idle' })
+  let loadGeneration = 0
+
+  async function load(search: string, page = 1) {
+    const generation = ++loadGeneration
+    const query = search.trim()
+    if (!query || query.length > 128 || !Number.isInteger(page) || page < 1) {
+      users.value = query.length > 128
+        ? { kind: 'error', diagnostic: makeDiagnostic('DIRECTORY_QUERY_TOO_LONG', '搜索内容不能超过 128 个字符。', false) }
+        : { kind: 'idle' }
+      return
+    }
+    users.value = { kind: 'loading', message: '查找组织账号…' }
+    const result = await listOrganizationUsers({
+      query: {
+        query,
+        page,
+        pageSize: ORGANIZATION_DIRECTORY_PAGE_SIZE,
+      },
+    })
+    if (generation !== loadGeneration) return
+    if (result.error) {
+      users.value = { kind: 'error', diagnostic: directoryDiagnostic(result.error) }
+      return
+    }
+    users.value = { kind: 'success', data: result.data }
+  }
+
+  function clear() {
+    loadGeneration += 1
+    users.value = { kind: 'idle' }
+  }
+
+  onScopeDispose(() => { loadGeneration += 1 })
+
+  return reactive({ users, load, clear })
 }
 
 export async function loadProject(projectId: string) {

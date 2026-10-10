@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "PlatformImageId": {
+      "description": "Strongly typed UUIDv7 identifier for `PlatformImageId`.",
+      "type": "string"
+    },
+    "PlatformImageImportJobState": {
+      "description": "Agent-owned lifecycle state for one durable platform image import job.",
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UploadSessionId": {
+      "description": "Strongly typed UUIDv7 identifier for `UploadSessionId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Short Agent response used by Control while polling a durable import job.",
+  "properties": {
+    "catalogId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformImageId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diagnostic": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision"
+    },
+    "state": {
+      "$ref": "#/$defs/PlatformImageImportJobState"
+    },
+    "uploadId": {
+      "$ref": "#/$defs/UploadSessionId"
+    }
+  },
+  "required": [
+    "uploadId",
+    "state",
+    "revision"
+  ],
+  "title": "InternalPlatformImageImportJobStatus",
+  "type": "object"
+}

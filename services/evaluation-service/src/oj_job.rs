@@ -10,7 +10,6 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use task_execution::SANDBOX_RUNTIME_CLASS;
 use task_execution::kubernetes::{parse_egress_destination, reviewed_egress_rule};
 use thiserror::Error;
 
@@ -218,7 +217,15 @@ impl OjJobResources {
                     "metadata":{"labels":labels,"annotations":annotations},
                     "spec":{
                         "restartPolicy":"Never",
-                        "runtimeClassName":SANDBOX_RUNTIME_CLASS,
+                        // RLIMIT_NPROC counts threads by real UID, so each attempt needs
+                        // its own host UID mapping rather than sharing it with other pods.
+                        "hostUsers":false,
+                        // No sandbox RuntimeClass here on purpose: the OJ worker restricts itself with
+                        // a Landlock ruleset ("CompatLevel::HardRequirement", "FullyEnforced"), and the
+                        // shared gVisor class does not implement the Landlock syscalls at all
+                        // (landlock_create_ruleset returns ENOSYS there), which turned every OJ step
+                        // into LW_OJ_SANDBOX_UNAVAILABLE. The program sandbox is this container's own
+                        // Landlock ruleset, so the pod runs on the node's default runtime.
                         "serviceAccountName":binding.service_account_name,
                         "automountServiceAccountToken":false,
                         "terminationGracePeriodSeconds":5,

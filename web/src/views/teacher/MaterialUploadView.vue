@@ -1,9 +1,9 @@
 <template>
   <div class="material-upload">
     <header class="page-header">
-      <h2>材料上传与 AgentRun</h2>
+      <h2>材料上传与实验生成</h2>
       <p class="page-subtitle">
-        上传题面、Starter 和样例，确认项目 LLM 出站策略后启动 AgentRun。
+        上传题面、Starter 和样例，确认项目 LLM 出站策略后启动实验生成任务。
       </p>
     </header>
 
@@ -30,6 +30,12 @@
     >
       建议：{{ diagnosticAction(restoreDiagnostic.code) }}
     </p>
+
+    <ProjectAgentRunHistory
+      :project-id="projectId"
+      scope="experiment"
+      @open="openHistoryRun"
+    />
 
     <section
       class="policy-section"
@@ -100,6 +106,17 @@
             </details>
           </div>
         </template>
+        <template #empty>
+          <div class="policy-missing" data-testid="material-policy-missing">
+            <p>当前项目没有已激活的项目 AI 设置。完成配置后才能上传材料并启动实验生成任务。</p>
+            <RouterLink
+              class="outlined-button"
+              :to="{ path: '/researcher/ai-policy', query: { projectId } }"
+            >
+              打开项目 AI 设置
+            </RouterLink>
+          </div>
+        </template>
       </AsyncStateView>
     </section>
 
@@ -118,6 +135,26 @@
         />
         材料包
       </h3>
+
+      <fieldset
+        class="retention-choice"
+        :disabled="!retentionChoiceEditable"
+        aria-describedby="retention-choice-help"
+        data-testid="material-retention-choice"
+      >
+        <legend>材料保留策略</legend>
+        <label>
+          <input v-model="retentionChoice" type="radio" value="finite">
+          <span>有限保留（默认）</span>
+        </label>
+        <label>
+          <input v-model="retentionChoice" type="radio" value="permanent">
+          <span>不过期，直到明确撤回</span>
+        </label>
+        <p id="retention-choice-help" class="retention-choice__help">
+          选择会写入新材料包的保留决策；上传开始后不能修改。默认有限保留，长期课程材料才选择不过期。
+        </p>
+      </fieldset>
 
       <div
         class="drop-zone"
@@ -192,18 +229,6 @@
             </button>
           </template>
         </DataTable>
-        <details class="technical-details file-integrity-details">
-          <summary>查看文件完整性详情</summary>
-          <ul class="file-integrity-list">
-            <li
-              v-for="row in upload.files"
-              :key="row.path"
-            >
-              <span>{{ row.path }}</span>
-              <code :title="row.sha256">{{ row.sha256 }}</code>
-            </li>
-          </ul>
-        </details>
       </div>
 
       <div
@@ -233,10 +258,7 @@
           :disabled="!canUpload"
           @click="upload.createSession"
         >
-          <template v-if="upload.state.kind === 'hashing'">
-            计算哈希中…
-          </template>
-          <template v-else-if="upload.state.kind === 'loading'">
+          <template v-if="upload.state.kind === 'loading'">
             读取已归档材料包…
           </template>
           <template v-else-if="upload.state.kind === 'creating'">
@@ -273,7 +295,7 @@
         />
         <div>
           <strong>材料包已归档</strong>
-          <span>可以启动实验候选生成。</span>
+          <span>可以启动实验候选生成。保留策略：{{ packageRetentionLabel(uploadedPackage.retention) }}。</span>
         </div>
         <details class="technical-details package-technical-details">
           <summary>查看材料包引用</summary>
@@ -316,7 +338,7 @@
         :disabled="!canStartRun"
         @click="startRun"
       >
-        {{ agent.acting === 'start' ? '提交中…' : '启动 AgentRun' }}
+        {{ agent.acting === 'start' ? '提交中…' : '启动实验生成' }}
       </button>
       <p
         v-if="agent.run.kind === 'success' && runIsInFlight(agent.run.data.state)"
@@ -377,7 +399,7 @@
               v-else
               class="run-tracks-empty"
             >
-              AgentRun 尚未产生轨道尝试明细。
+              生成任务尚未产生轨道尝试明细。
             </p>
             <details class="technical-details run-technical-details">
               <summary>查看生成任务详情</summary>
@@ -429,6 +451,7 @@
                 v-if="data.state === 'running' || data.state === 'requested'"
                 type="button"
                 class="text-button"
+                :disabled="agent.acting !== null"
                 @click="agent.cancel"
               >
                 取消
@@ -437,6 +460,7 @@
                 <button
                   type="button"
                   class="text-button"
+                  :disabled="agent.acting !== null"
                   @click="agent.retryTrack('environment')"
                 >
                   重试环境轨道
@@ -444,6 +468,7 @@
                 <button
                   type="button"
                   class="text-button"
+                  :disabled="agent.acting !== null"
                   @click="agent.retryTrack('evaluation')"
                 >
                   重试评测轨道
@@ -503,11 +528,17 @@ import { useProjectAgentRun } from '@/composables/useProjectAgentRun'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import DataTable from '@/components/common/DataTable.vue'
+import ProjectAgentRunHistory from '@/components/common/ProjectAgentRunHistory.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import { agentTrackKindLabel } from '@/utils/stateLabels'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
-import type { AgentRunSchema } from '@/generated/contracts'
+import type {
+  AgentRunHistoryItem,
+  AgentRunSchema,
+  ProblemPackageRetentionChoice,
+  ProblemPackageSchemaRetentionSnapshot,
+} from '@/generated/contracts'
 import type { UploadFile } from '@/composables/useProjectProblemPackageUpload'
 import { makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 
@@ -518,8 +549,9 @@ const projectId = computed(() => projects.selectedProjectId)
 const courseId = computed(() => projects.selectedProject?.courseId ?? null)
 const policy = useActiveProjectLlmPolicy(projectId)
 const policyRevision = computed(() => (policy.state.kind === 'success' ? policy.state.data.revision : undefined))
-const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId)
-const agent = useProjectAgentRun(projectId)
+const retentionChoice = ref<ProblemPackageRetentionChoice>('finite')
+const upload = useProjectProblemPackageUpload(projectId, policyRevision, courseId, retentionChoice)
+const agent = useProjectAgentRun(projectId, { kind: 'authoring', environmentClass: 'experiment' })
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
@@ -544,6 +576,11 @@ const restoreDiagnostic = ref<DiagnosticViewModel | null>(null)
 
 const packageDone = computed(() => upload.state.kind === 'done')
 const uploadedPackage = computed(() => (upload.state.kind === 'done' ? upload.state.package : null))
+const retentionChoiceEditable = computed(() => (
+  upload.session === null
+  && !packageDone.value
+  && ['idle', 'ready', 'error'].includes(upload.state.kind)
+))
 const IN_FLIGHT_RUN_STATES = ['requested', 'running', 'cancelling', 'awaiting_approval'] as const
 
 const displayRun = computed(() => {
@@ -584,7 +621,7 @@ function diagnosticAction(code: string): string | null {
     case 'LW_ACCESS_DENIED':
       return '请确认当前账号仍有该项目的教师权限，并从可访问项目重新开始。'
     case 'LW_CANDIDATE_NOT_FOUND':
-      return '候选可能仍在服务端同步，点击重试继续读取；超时后请重新打开该 AgentRun。'
+      return '候选可能仍在服务端同步，点击重试继续读取；超时后请重新打开该生成任务。'
     case 'PROJECT_APPROVAL_RUN_KIND_UNSUPPORTED':
       return '请从材料上传页启动实验候选生成，不要使用 Work 配置或其他用途的运行记录。'
     case 'PROJECT_RUN_STALE_CONTEXT':
@@ -607,12 +644,27 @@ function updateAuthoringRoute(next: { packageId?: string; runId?: string }) {
   void router.replace({ query })
 }
 
+function openHistoryRun(item: AgentRunHistoryItem) {
+  updateAuthoringRoute({ runId: item.id })
+}
+
 function clearAuthoring() {
   restoreGeneration += 1
   restoredContextKey = ''
   restoreDiagnostic.value = null
   upload.clear()
+  retentionChoice.value = 'finite'
   updateAuthoringRoute({})
+}
+
+function packageRetentionLabel(retention: ProblemPackageSchemaRetentionSnapshot): string {
+  return retention.retainUntil === null && retention.disposition === 'retain_until_revoked'
+    ? '不过期'
+    : '有限保留'
+}
+
+function packageRetentionChoice(packageData: NonNullable<typeof uploadedPackage.value>): ProblemPackageRetentionChoice {
+  return packageRetentionLabel(packageData.retention) === '不过期' ? 'permanent' : 'finite'
 }
 
 function attemptDiagnostic(track: AgentRunSchema['tracks'][number]): string | null {
@@ -638,7 +690,16 @@ async function restoreAuthoringContext(generation = ++restoreGeneration) {
   if (runId) {
     await agent.load(runId)
     if (!isCurrent()) return
-    if (agent.run.kind !== 'success') return
+    if (agent.run.kind !== 'success') {
+      if (agent.run.kind === 'error' && agent.run.diagnostic.code === 'PROJECT_RUN_PURPOSE_MISMATCH') {
+        restoreDiagnostic.value = makeDiagnostic(
+          'PROJECT_APPROVAL_RUN_KIND_UNSUPPORTED',
+          '该运行记录不是实验包生成任务，已停止恢复。请从材料页启动实验候选生成。',
+          false,
+        )
+      }
+      return
+    }
     if (agent.run.data.id !== runId || agent.run.data.projectId !== id) {
       upload.clear()
       restoreDiagnostic.value = makeDiagnostic(
@@ -701,6 +762,13 @@ watch(
   { immediate: true },
 )
 
+watch(routeProjectId, (id) => {
+  if (!id || projects.projects.kind !== 'success') return
+  if (projects.projects.data.some((project) => project.id === id) && projects.selectedProjectId !== id) {
+    projects.select(id)
+  }
+})
+
 watch([projectId, routePackageId, routeRunId], () => void restoreAuthoringContext(), { immediate: true })
 
 watch(projectId, (id, previousId) => {
@@ -710,6 +778,7 @@ watch(projectId, (id, previousId) => {
   restoredContextKey = ''
   restoreDiagnostic.value = null
   upload.clear()
+  retentionChoice.value = 'finite'
   if (followsRouteProject) void restoreAuthoringContext()
   else updateAuthoringRoute({})
 })
@@ -718,6 +787,7 @@ watch(
   () => upload.state,
   (state) => {
     if (state.kind !== 'done' || !projectId.value) return
+    retentionChoice.value = packageRetentionChoice(state.package)
     const packageId = state.package.id
     const currentRun = agent.run.kind === 'success' ? agent.run.data : null
     const runId = routeRunId.value
@@ -807,6 +877,40 @@ onUnmounted(() => {
   margin: 0 0 12px;
 }
 
+.retention-choice {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  color: var(--md-sys-color-on-surface);
+}
+
+.retention-choice legend {
+  padding: 0 4px;
+  font: var(--md-sys-label-large);
+}
+
+.retention-choice label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: var(--md-sys-body-medium);
+  cursor: pointer;
+}
+
+.retention-choice__help {
+  margin: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-small);
+  line-height: 1.5;
+}
+
+.retention-choice:disabled {
+  opacity: .7;
+}
+
 .section-subtitle {
   font: var(--md-sys-title-small);
   color: var(--md-sys-color-on-surface);
@@ -820,6 +924,20 @@ onUnmounted(() => {
   border-radius: var(--md-sys-shape-medium);
   background: var(--md-sys-color-surface-container-low);
 }
+
+.policy-missing {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-medium);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font: var(--md-sys-body-medium);
+}
+
+.policy-missing p { margin: 0; }
 
 .policy-primary,
 .run-header {
@@ -1014,30 +1132,6 @@ onUnmounted(() => {
 
 .file-list {
   margin-top: 16px;
-}
-
-.file-integrity-details {
-  margin-top: 12px;
-}
-
-.file-integrity-list {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
-  color: var(--md-sys-color-on-surface-variant);
-  font: var(--md-sys-body-small);
-}
-
-.file-integrity-list li {
-  display: grid;
-  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr);
-  gap: 12px;
-}
-
-.file-integrity-list code {
-  overflow-wrap: anywhere;
 }
 
 .file-path {

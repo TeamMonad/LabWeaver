@@ -208,6 +208,22 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
         create_rate["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
         "../contracts/v1/resource-rate.schema.json"
     );
+    let end_rate = assert_operation(
+        "/api/v1/resource/rates/{rateId}/end",
+        "post",
+        "endResourceRate",
+        "resource_rate:write",
+        "global",
+    );
+    assert_eq!(
+        end_rate["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/http/end-resource-rate-request.schema.json"
+    );
+    assert_eq!(
+        end_rate["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/resource-rate.schema.json"
+    );
+    assert!(end_rate["responses"]["200"].get("headers").is_none());
 
     let budget_path = "/api/v1/projects/{projectId}/resource-budget";
     let budget = assert_operation(
@@ -247,6 +263,17 @@ fn generated_openapi_exposes_project_resource_finance_and_options_endpoints()
     assert_eq!(
         charges["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
         "../contracts/v1/resource-charge.schema.json"
+    );
+    let usage = assert_operation(
+        "/api/v1/projects/{projectId}/usage",
+        "get",
+        "listProjectResourceUsage",
+        "resource_charge:read",
+        "project",
+    );
+    assert_eq!(
+        usage["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "../contracts/v1/resource-usage-page.schema.json"
     );
     let adjustment = assert_operation(
         "/api/v1/projects/{projectId}/charges/{chargeId}/adjustments",
@@ -317,7 +344,11 @@ fn resource_option_reads_allow_all_authenticated_platform_roles()
         assert_eq!(operation.scope, contracts::http::OperationScopeKind::Global);
         assert_eq!(operation.security, contracts::http::Security::BffSession);
     }
-    for operation_id in ["createResourceGpuCatalogEntry", "createResourceRate"] {
+    for operation_id in [
+        "createResourceGpuCatalogEntry",
+        "createResourceRate",
+        "endResourceRate",
+    ] {
         let operation = operation_contract(operation_id).ok_or("resource option operation")?;
         assert_eq!(operation.allowed_roles, &[PlatformRole::PlatformAdmin]);
     }

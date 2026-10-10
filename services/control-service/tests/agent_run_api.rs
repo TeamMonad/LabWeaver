@@ -60,13 +60,16 @@ use tower::ServiceExt;
 const SERVICE_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJhdWQiOlsibGFid2VhdmVyLWFjY2VzcyIsImxhYndlYXZlci1hZ2VudCIsImxhYndlYXZlci1lbnZpcm9ubWVudCIsImxhYndlYXZlci1ldmFsdWF0aW9uIl19.signature";
 
 #[derive(Clone)]
-struct AccessState;
+struct AccessState {
+    denied_actor_id: ActorId,
+}
 
 #[derive(Clone)]
 struct AgentState {
     run: AgentRun,
     approved_run: AgentRun,
     artifact: GeneratedArtifactRecord,
+    builds: Arc<tokio::sync::Mutex<Vec<contracts::http::InternalAgentBuildCancellationResult>>>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +127,7 @@ async fn project_agent_run_routes_use_live_agent_state_and_exact_scope()
     let now = "2026-07-16T08:00:00.000Z".parse::<UtcTimestamp>()?;
     let later = "2099-01-01T00:00:00.000Z".parse::<UtcTimestamp>()?;
     let actor_id = ActorId::new();
+    let denied_actor = ActorId::new();
     let project_id = ProjectId::new();
     let other_project_id = ProjectId::new();
     let course_id = CourseId::new();
@@ -164,6 +168,31 @@ async fn project_agent_run_routes_use_live_agent_state_and_exact_scope()
     projected.tracks[0].attempts.clear();
     projected.validate()?;
     insert_projection(&pool, &projected).await?;
+    let candidate_id = contracts::CandidateId::new();
+    let evaluation_id = contracts::CandidateId::new();
+    let mut build_tasks = Vec::new();
+    for (candidate, kind, target) in [
+        (candidate_id, "environment", "environment"),
+        (evaluation_id, "evaluation", "evaluation_runner"),
+    ] {
+        let id = contracts::BuildRequestId::new();
+        let hash = Sha256Digest::of_bytes(candidate.as_uuid().as_bytes()).to_string();
+        sqlx::query("INSERT INTO control.candidates(candidate_id,candidate_kind,project_id,course_id,revision,state,content_sha256,contract) VALUES($1,$2,$3,$4,1,'generated',$5,'{}')")
+            .bind(candidate.as_uuid()).bind(kind).bind(project_id.as_uuid()).bind(course_id.as_uuid()).bind(&hash).execute(&pool).await?;
+        sqlx::query("INSERT INTO control.container_build_projections(build_request_id,project_id,course_id,candidate_id,candidate_revision,candidate_sha256,command_sha256,state,contract,created_at,target) VALUES($1,$2,$3,$4,1,$5,$5,'requested','{}',clock_timestamp(),$6)")
+            .bind(id.as_uuid()).bind(project_id.as_uuid()).bind(course_id.as_uuid()).bind(candidate.as_uuid()).bind(hash).bind(target).execute(&pool).await?;
+        build_tasks.push(contracts::http::InternalAgentBuildCancellationResult {
+            project_id,
+            course_id: Some(course_id),
+            build_request_id: id,
+            state: contracts::http::InternalAgentBuildState::Running,
+            revision: Revision::new(2)?,
+            cancellation_requested: false,
+            diagnostic_code: None,
+            cleanup_verified: None,
+        });
+    }
+    let builds = Arc::new(tokio::sync::Mutex::new(build_tasks));
 
     let artifact = GeneratedArtifactRecord {
         artifact: script_artifact.clone(),
@@ -185,13 +214,14 @@ async fn project_agent_run_routes_use_live_agent_state_and_exact_scope()
     let ca_path = temp_dir.path().join("control-api-test-ca.pem");
     std::fs::write(&ca_path, &ca_pem)?;
     let authority = spawn_authority(jwk).await?;
-    let access_server = spawn_access_server(&leaf_pem, &leaf_key_pem).await?;
+    let access_server = spawn_access_server(&leaf_pem, &leaf_key_pem, denied_actor).await?;
     let agent_server = spawn_agent_server(
         &leaf_pem,
         &leaf_key_pem,
         run.clone(),
         approved_run.clone(),
         artifact,
+        Arc::clone(&builds),
     )
     .await?;
     let service_token_client = Arc::new(service_token_client(&authority.issuer).await?);
@@ -302,6 +332,7 @@ async fn project_agent_run_routes_use_live_agent_state_and_exact_scope()
     assert_eq!(approved.revision, Revision::new(3)?);
 
     let mismatch_response = app
+        .clone()
         .oneshot(public_request(
             format!(
                 "/api/v1/projects/{}/agent-runs/{}/work-configuration/plan",
@@ -313,6 +344,172 @@ async fn project_agent_run_routes_use_live_agent_state_and_exact_scope()
         )?)
         .await?;
     assert_eq!(mismatch_response.status(), StatusCode::BAD_GATEWAY);
+    let forbidden =
+        format!("/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/environment");
+    assert_eq!(
+        app.clone()
+            .oneshot(public_request(
+                forbidden,
+                denied_actor,
+                BffSessionId::new(),
+                None
+            )?)
+            .await?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    // A valid project member can act without being the project creator; each target is exact.
+    let member = ActorId::new();
+    for (candidate, target, index) in [
+        (candidate_id, "environment", 0),
+        (evaluation_id, "evaluation_runner", 1),
+    ] {
+        let uri = format!("/api/v1/projects/{project_id}/candidates/{candidate}/builds/{target}");
+        let response = app
+            .clone()
+            .oneshot(public_request(
+                uri.clone(),
+                member,
+                BffSessionId::new(),
+                None,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let task: contracts::http::CandidateBuildTask =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(
+            task.status.build_request_id,
+            builds.lock().await[index].build_request_id
+        );
+        assert_eq!(
+            task.status.state,
+            contracts::http::InternalAgentBuildState::Running
+        );
+        let body = json!({"buildRequestId":task.status.build_request_id,"expectedState":"running","expectedRevision":2});
+        let mut missing_id = public_request(
+            format!("{uri}/cancel"),
+            member,
+            BffSessionId::new(),
+            Some(serde_json::to_vec(
+                &json!({"expectedState":"running", "expectedRevision":2}),
+            )?),
+        )?;
+        missing_id
+            .headers_mut()
+            .insert("If-Match", HeaderValue::from_static("\"rev-2\""));
+        assert_eq!(
+            app.clone().oneshot(missing_id).await?.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let make_cancel =
+            |key: &str, revision: &str| -> Result<Request<Body>, Box<dyn std::error::Error>> {
+                let mut request = public_request(
+                    format!("{uri}/cancel"),
+                    member,
+                    BffSessionId::new(),
+                    Some(serde_json::to_vec(&body)?),
+                )?;
+                request
+                    .headers_mut()
+                    .insert("If-Match", HeaderValue::from_str(revision)?);
+                request
+                    .headers_mut()
+                    .insert("Idempotency-Key", HeaderValue::from_str(key)?);
+                Ok(request)
+            };
+        assert_eq!(
+            app.clone()
+                .oneshot(make_cancel("wrong-revision", "\"rev-1\"")?)
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let mut wrong_id = public_request(
+            format!("{uri}/cancel"),
+            member,
+            BffSessionId::new(),
+            Some(serde_json::to_vec(
+                &json!({"buildRequestId": contracts::BuildRequestId::new(), "expectedState":"running", "expectedRevision":2}),
+            )?),
+        )?;
+        wrong_id
+            .headers_mut()
+            .insert("If-Match", HeaderValue::from_static("\"rev-2\""));
+        wrong_id.headers_mut().insert(
+            "Idempotency-Key",
+            HeaderValue::from_static("wrong-build-identity"),
+        );
+        assert_eq!(
+            app.clone().oneshot(wrong_id).await?.status(),
+            StatusCode::CONFLICT
+        );
+        let key = format!("candidate-cancel-{index}");
+        let response = app.clone().oneshot(make_cancel(&key, "\"rev-2\"")?).await?;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let cancelled: contracts::http::CandidateBuildTask =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert!(cancelled.status.cancellation_requested);
+        if index == 0 {
+            assert!(!builds.lock().await[1].cancellation_requested);
+        }
+        assert_eq!(cancelled.status.revision, Revision::new(3)?);
+        let replay = app.clone().oneshot(make_cancel(&key, "\"rev-2\"")?).await?;
+        assert_eq!(replay.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            serde_json::from_slice::<contracts::http::CandidateBuildTask>(
+                &to_bytes(replay.into_body(), usize::MAX).await?
+            )?,
+            cancelled
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(make_cancel("stale-new-command", "\"rev-2\"")?)
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+        builds.lock().await[index].state = contracts::http::InternalAgentBuildState::Cancelled;
+        builds.lock().await[index].cleanup_verified = Some(false);
+        let response = app
+            .clone()
+            .oneshot(public_request(uri, member, BffSessionId::new(), None)?)
+            .await?;
+        let terminal: contracts::http::CandidateBuildTask =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(terminal.status.cleanup_verified, Some(false));
+        let mut terminal_cancel = public_request(
+            format!("/api/v1/projects/{project_id}/candidates/{candidate}/builds/{target}/cancel"),
+            member,
+            BffSessionId::new(),
+            Some(serde_json::to_vec(
+                &json!({"buildRequestId":terminal.status.build_request_id,"expectedState":"cancelled","expectedRevision":3}),
+            )?),
+        )?;
+        terminal_cancel
+            .headers_mut()
+            .insert("If-Match", HeaderValue::from_static("\"rev-3\""));
+        terminal_cancel.headers_mut().insert(
+            "Idempotency-Key",
+            HeaderValue::from_str(&format!("terminal-cancel-{index}"))?,
+        );
+        assert_eq!(
+            app.clone().oneshot(terminal_cancel).await?.status(),
+            StatusCode::CONFLICT
+        );
+    }
+    for uri in [
+        format!("/api/v1/projects/{other_project_id}/candidates/{candidate_id}/builds/environment"),
+        format!("/api/v1/projects/{project_id}/candidates/{candidate_id}/builds/evaluation_runner"),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(public_request(uri, actor_id, BffSessionId::new(), None)?)
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
     Ok(())
 }
 
@@ -356,6 +553,7 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
             builder_binding: "buildkit-primary-v1".to_owned(),
             output_repository_prefix: "harbor.internal/labweaver-system".to_owned(),
             dockerfile_path: "Dockerfile".to_owned(),
+            runner_dockerfile_path: "evaluation/Dockerfile".to_owned(),
             network: BuildNetworkPolicy::DenyAll,
             max_duration_milliseconds: 600_000,
             max_cpu_millicores: 2_000,
@@ -383,6 +581,16 @@ fn config() -> Result<ControlConfig, Box<dyn std::error::Error>> {
         evaluation_runtime: EvaluationRuntimePolicy {
             provider_binding: "evaluation-primary-v1".to_owned(),
             runner_image: format!("runner@sha256:{}", "a".repeat(64)),
+        },
+        llm_policy_options: contracts::authoring::ProjectLlmPolicyOptions {
+            models: vec![contracts::authoring::ProjectLlmPolicyModelOption {
+                model: "fixture-provider-v1".to_owned(),
+                label: "Fixture model".to_owned(),
+            }],
+            default_model: "fixture-provider-v1".to_owned(),
+            runtime_binding: "claude-code-test".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
         },
     })
 }
@@ -450,7 +658,7 @@ fn package(
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
             class: RetentionClass::CourseMaterial,
-            retain_until: completed_at,
+            retain_until: Some(completed_at),
             disposition: RetentionDisposition::Delete,
         },
         completed_at,
@@ -673,11 +881,12 @@ async fn authority_token(
 async fn spawn_access_server(
     certificate_pem: &str,
     private_key_pem: &str,
+    denied_actor_id: ActorId,
 ) -> Result<TlsServiceHandle, Box<dyn std::error::Error>> {
     spawn_tls_service(
         Router::new()
             .route("/internal/v1/auth/decision", post(access_decision))
-            .with_state(AccessState),
+            .with_state(AccessState { denied_actor_id }),
         certificate_pem,
         private_key_pem,
     )
@@ -685,7 +894,7 @@ async fn spawn_access_server(
 }
 
 async fn access_decision(
-    State(AccessState): State<AccessState>,
+    State(state): State<AccessState>,
     Json(request): Json<AuthorizationDecisionRequest>,
 ) -> Result<Json<AuthorizationDecision>, StatusCode> {
     let valid_until = "2099-01-01T00:00:00.000Z"
@@ -701,7 +910,10 @@ async fn access_decision(
         authorization_revision: Revision::new(1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         scope_revision: Revision::new(1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         valid_until,
-        diagnostic_code: None,
+        diagnostic_code: (request.actor_id == state.denied_actor_id)
+            .then(|| contracts::DiagnosticCode::parse("LW_AUTH_SCOPE_DENIED"))
+            .transpose()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     }))
 }
 
@@ -711,14 +923,21 @@ async fn spawn_agent_server(
     run: AgentRun,
     approved_run: AgentRun,
     artifact: GeneratedArtifactRecord,
+    builds: Arc<tokio::sync::Mutex<Vec<contracts::http::InternalAgentBuildCancellationResult>>>,
 ) -> Result<TlsServiceHandle, Box<dyn std::error::Error>> {
     let state = AgentState {
         run,
         approved_run,
         artifact,
+        builds,
     };
     spawn_tls_service(
         Router::new()
+            .route("/internal/v1/build-requests/{build_id}", get(agent_build))
+            .route(
+                "/internal/v1/build-requests/{build_id}/cancel",
+                post(agent_cancel_build),
+            )
             .route("/internal/v1/agent-runs/{run_id}", get(agent_run))
             .route(
                 "/internal/v1/agent-runs/{run_id}/work-configuration/approve",
@@ -907,4 +1126,53 @@ impl ImmutableObjectStore for TestObjects {
     async fn delete_orphan(&self, _: &str, _: &str) -> Result<(), ObjectStoreError> {
         Err(ObjectStoreError::DeleteFailed)
     }
+}
+
+async fn agent_build(
+    State(state): State<AgentState>,
+    Path(id): Path<contracts::BuildRequestId>,
+    Query(query): Query<contracts::http::InternalAgentBuildStatusQuery>,
+) -> Result<Json<contracts::http::InternalAgentBuildCancellationResult>, StatusCode> {
+    state
+        .builds
+        .lock()
+        .await
+        .iter()
+        .find(|b| {
+            b.build_request_id == id
+                && b.project_id == query.project_id
+                && b.course_id == query.course_id
+        })
+        .cloned()
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn agent_cancel_build(
+    State(state): State<AgentState>,
+    Path(id): Path<contracts::BuildRequestId>,
+    Json(request): Json<contracts::http::InternalAgentBuildCancellationRequest>,
+) -> Result<Json<contracts::http::InternalAgentBuildCancellationResult>, StatusCode> {
+    let mut builds = state.builds.lock().await;
+    let build = builds
+        .iter_mut()
+        .find(|b| {
+            b.build_request_id == id
+                && b.project_id == request.project_id
+                && b.course_id == request.course_id
+        })
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !matches!(
+        build.state,
+        contracts::http::InternalAgentBuildState::Requested
+            | contracts::http::InternalAgentBuildState::Running
+    ) || build.revision != request.expected_revision
+        || build.state != request.expected_state
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    build.cancellation_requested = true;
+    build.revision =
+        Revision::new(build.revision.get() + 1).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(build.clone()))
 }

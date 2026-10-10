@@ -59,7 +59,132 @@ pub struct PgBuildStore {
     pool: PgPool,
 }
 
+struct TerminalBuildCleanup {
+    command: AgentBuildRequested,
+    fence: BuildExecutionFence,
+    stage_request_id: Option<String>,
+}
+
 impl PgBuildStore {
+    async fn reserve_terminal_cleanup(
+        &self,
+        delay: Duration,
+    ) -> Result<Option<TerminalBuildCleanup>, BuildStoreError> {
+        let delay_ms =
+            i64::try_from(delay.as_millis()).map_err(|_| BuildStoreError::ConfigurationInvalid)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT c.command,c.attempt,f.lease_token,f.deadline_at,f.last_response,f.last_stage,f.last_request_id, \
+                    a.build_identity,a.digest,a.repository \
+             FROM agent.build_commands c JOIN agent.build_executor_fences f USING(build_request_id) \
+             LEFT JOIN agent.build_executor_artifacts a USING(build_request_id) \
+             WHERE c.state IN ('failed','cancelled') AND c.cleanup_verified=false \
+               AND c.next_attempt_at<=clock_timestamp() AND c.attempt=f.highest_generation \
+               AND ((f.last_stage IN ('build','import') AND f.tombstone_generation IS NULL AND f.last_response->>'status'='built') \
+                 OR (f.last_stage='cleanup' AND f.tombstone_generation=f.highest_generation \
+                     AND (f.last_response->>'status'='cleaned' \
+                       OR (f.last_response->>'status'='failed' AND f.last_response->'failure'->>'retryable'='true' \
+                           AND f.last_response->'failure'->>'code' IN ('unavailable','timed_out'))))) \
+             ORDER BY c.created_at FOR UPDATE OF c SKIP LOCKED LIMIT 1",
+        ).fetch_optional(&mut *transaction).await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let command: AgentBuildRequested = serde_json::from_value(row.try_get("command")?)
+            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        command
+            .validate()
+            .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let receipt: crate::build_provider::BuildExecutorResponse =
+            serde_json::from_value(row.try_get("last_response")?)
+                .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let identity = Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes());
+        let stored_identity: Option<String> = row.try_get("build_identity")?;
+        let stored_digest: Option<String> = row.try_get("digest")?;
+        let stored_repository: Option<String> = row.try_get("repository")?;
+        let last_stage: String = row.try_get("last_stage")?;
+        let valid_receipt = match receipt {
+            crate::build_provider::BuildExecutorResponse::Built { candidate } => {
+                candidate.build_request_id == command.request.id
+                    && candidate.build_identity.0 == identity
+                    && candidate.repository == command.request.output_repository
+                    && Some(candidate.digest.as_str()) == stored_digest.as_deref()
+                    && stored_identity.as_deref() == Some(identity.to_string().as_str())
+            }
+            crate::build_provider::BuildExecutorResponse::Cleaned {
+                build_request_id,
+                build_identity,
+            } => build_request_id == command.request.id && build_identity.0 == identity,
+            crate::build_provider::BuildExecutorResponse::Failed { failure } => {
+                last_stage == "cleanup" && crate::build_provider::retryable_cleanup_failure(failure)
+            }
+            _ => false,
+        };
+        if !valid_receipt
+            || stored_identity
+                .as_ref()
+                .is_some_and(|value| *value != identity.to_string())
+            || stored_repository
+                .as_deref()
+                .is_some_and(|value| value != command.request.output_repository)
+        {
+            return Err(BuildStoreError::IdentityMismatch);
+        }
+        let fence = BuildExecutionFence::new(
+            u32::try_from(row.try_get::<i32, _>("attempt")?)
+                .map_err(|_| BuildStoreError::IdentityMismatch)?,
+            row.try_get("lease_token")?,
+            UtcTimestamp::from_utc(row.try_get("deadline_at")?)
+                .map_err(|_| BuildStoreError::ClockInvalid)?,
+        )
+        .map_err(|_| BuildStoreError::IdentityMismatch)?;
+        sqlx::query("UPDATE agent.build_commands SET next_attempt_at=clock_timestamp()+($2::bigint * interval '1 millisecond') WHERE build_request_id=$1")
+            .bind(command.request.id.as_uuid()).bind(delay_ms).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(Some(TerminalBuildCleanup {
+            command,
+            fence,
+            stage_request_id: if last_stage == "cleanup" {
+                Some(row.try_get("last_request_id")?)
+            } else {
+                None
+            },
+        }))
+    }
+
+    async fn complete_terminal_cleanup(
+        &self,
+        cleanup: &TerminalBuildCleanup,
+    ) -> Result<(), BuildStoreError> {
+        let command = &cleanup.command;
+        let fence = cleanup.fence;
+        let identity = Sha256Digest::of_bytes(command.request.id.as_uuid().as_bytes());
+        let receipt = serde_json::to_value(crate::build_provider::BuildExecutorResponse::Cleaned {
+            build_request_id: command.request.id,
+            build_identity: crate::build_pipeline::BuildIdentity(identity),
+        })
+        .map_err(|_| BuildStoreError::ContractInvalid)?;
+        let updated = sqlx::query(
+            "UPDATE agent.build_commands c SET cleanup_verified=true,revision=revision+1,updated_at=clock_timestamp() \
+             WHERE c.build_request_id=$1 AND c.attempt=$2 AND c.state IN ('failed','cancelled') AND c.cleanup_verified=false \
+             AND EXISTS(SELECT 1 FROM agent.build_executor_fences f WHERE f.build_request_id=c.build_request_id \
+                        AND f.highest_generation=$2 AND f.lease_token=$3 AND f.deadline_at=$4 \
+                        AND f.last_stage='cleanup' AND f.tombstone_generation=$2 \
+                        AND f.last_response=$5 AND ($6::text IS NULL OR f.last_request_id=$6)) \
+             AND (NOT EXISTS(SELECT 1 FROM agent.build_executor_artifacts a WHERE a.build_request_id=c.build_request_id) \
+                  OR EXISTS(SELECT 1 FROM agent.build_executor_artifacts a WHERE a.build_request_id=c.build_request_id \
+                            AND a.build_identity=$7 AND a.repository=$8 AND a.cleaned_at IS NOT NULL))",
+        ).bind(command.request.id.as_uuid()).bind(i32::try_from(fence.generation).map_err(|_| BuildStoreError::IdentityMismatch)?)
+            .bind(fence.lease_token).bind(fence.deadline_at.get()).bind(receipt).bind(&cleanup.stage_request_id)
+            .bind(identity.to_string()).bind(&command.request.output_repository)
+            .execute(&self.pool).await?;
+        if updated.rows_affected() != 1 {
+            return Err(BuildStoreError::FenceLost);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -234,13 +359,26 @@ impl PgBuildStore {
         .ok_or(BuildStoreError::FenceLost)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "terminal cancellation fence, artifact and outbox share one atomic boundary"
+    )]
     pub async fn complete(
         &self,
         lease: &BuildCommandLease,
         output: &BuildPipelineOutput,
+        started_at: UtcTimestamp,
         trace_id: &str,
-    ) -> Result<(), BuildStoreError> {
-        let _ = &output.build_identity;
+    ) -> Result<bool, BuildStoreError> {
+        let execution_deadline = add_duration(
+            started_at,
+            Duration::from_millis(lease.command.request.max_duration_milliseconds),
+        )?;
+        if output.build_identity.0
+            != Sha256Digest::of_bytes(lease.command.request.id.as_uuid().as_bytes())
+        {
+            return Err(BuildStoreError::IdentityMismatch);
+        }
         if output.registry_project.build_request_id != lease.command.request.id
             || output.registry_project.build_identity != output.build_identity
             || !output.registry_project.private
@@ -264,6 +402,58 @@ impl PgBuildStore {
         let mut transaction = self.pool.begin().await?;
         fence_running(&mut transaction, lease).await?;
         let authority_now = transaction_time(&mut transaction).await?;
+        let cancellation_requested: bool = sqlx::query_scalar(
+            "SELECT cancellation_requested FROM agent.build_commands WHERE build_request_id=$1",
+        )
+        .bind(lease.command.request.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if cancellation_requested {
+            // A cancellation accepted before this terminal transaction must not create an
+            // artifact or a late completion event. Verify the successful pipeline's durable
+            // cleanup receipt rather than treating its return value alone as cleanup authority.
+            let cleaned: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM agent.build_executor_fences f \
+                 JOIN agent.build_executor_artifacts a USING(build_request_id) \
+                 WHERE f.build_request_id=$1 AND f.highest_generation=$2 AND f.lease_token=$3 \
+                   AND f.last_stage='cleanup' AND f.tombstone_generation=$2 \
+                   AND f.last_response->>'status'='cleaned' \
+                   AND f.last_response->>'buildRequestId'=$4 AND f.last_response->>'buildIdentity'=$5 \
+                   AND a.build_identity=$5 AND a.repository=$6 AND a.cleaned_at IS NOT NULL \
+                   AND f.deadline_at=$7 AND a.candidate_tag=$8)",
+            ).bind(build_request_id.as_uuid())
+                .bind(i32::try_from(lease.attempt).map_err(|_| BuildStoreError::IdentityMismatch)?)
+                .bind(lease.lease_token).bind(build_request_id.to_string())
+                .bind(output.build_identity.0.to_string()).bind(&lease.command.request.output_repository)
+                .bind(execution_deadline.get()).bind(format!("candidate-{}", &output.build_identity.0.to_string()[..24]))
+                .fetch_one(&mut *transaction).await?;
+            let data = AgentBuildFailed {
+                build_request_id,
+                diagnostic_code: "LW_AGENT_BUILD_CANCELLED".to_owned(),
+                retryable: false,
+                cleanup_verified: cleaned,
+            };
+            terminal_update(
+                &mut transaction,
+                lease,
+                "cancelled",
+                Some(&data.diagnostic_code),
+                Some(false),
+                Some(cleaned),
+            )
+            .await?;
+            enqueue_terminal_event(
+                &mut transaction,
+                lease,
+                subjects::AGENT_BUILD_FAILED,
+                authority_now,
+                trace_id,
+                &data,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(false);
+        }
         sqlx::query(
             "INSERT INTO agent.image_artifacts \
              (image_artifact_id,build_request_id,image_digest,evidence_sha256,state,contract,registry_project_evidence) \
@@ -292,7 +482,7 @@ impl PgBuildStore {
         )
         .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn fail(
@@ -476,6 +666,8 @@ impl PgBuildStore {
             state,
             revision: next_revision,
             cancellation_requested: true,
+            diagnostic_code: None,
+            cleanup_verified: None,
         };
         let value = serde_json::to_value(&result).map_err(|_| BuildStoreError::ContractInvalid)?;
         IdempotencyStore::complete(
@@ -497,7 +689,7 @@ impl PgBuildStore {
         query: &InternalAgentBuildStatusQuery,
     ) -> Result<InternalAgentBuildCancellationResult, BuildStoreError> {
         let row = sqlx::query(
-            "SELECT project_id,course_id,command_sha256,state,revision,cancellation_requested \
+            "SELECT project_id,course_id,command_sha256,state,revision,cancellation_requested,diagnostic_code,cleanup_verified \
              FROM agent.build_commands WHERE build_request_id=$1",
         )
         .bind(build_request_id.as_uuid())
@@ -526,6 +718,12 @@ impl PgBuildStore {
             state: parse_build_state(&row.try_get::<String, _>("state")?)?,
             revision: revision_from_i64(row.try_get("revision")?)?,
             cancellation_requested: row.try_get("cancellation_requested")?,
+            diagnostic_code: row
+                .try_get::<Option<String>, _>("diagnostic_code")?
+                .map(contracts::DiagnosticCode::parse)
+                .transpose()
+                .map_err(|_| BuildStoreError::ContractInvalid)?,
+            cleanup_verified: row.try_get("cleanup_verified")?,
         })
     }
 }
@@ -568,6 +766,25 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
     }
 
     pub async fn run_once(&self, now: UtcTimestamp) -> Result<BuildWorkerOutcome, BuildStoreError> {
+        if let Some(cleanup) = self
+            .store
+            .reserve_terminal_cleanup(self.retry_delay)
+            .await?
+        {
+            match self
+                .pipeline
+                .recover_cleanup(&cleanup.command, cleanup.fence)
+                .await
+            {
+                Ok(()) => {
+                    self.store.complete_terminal_cleanup(&cleanup).await?;
+                }
+                Err(error) => {
+                    tracing::warn!(event="agent.build.cleanup_recovery_deferred", build_request_id=%cleanup.command.request.id, generation=cleanup.fence.generation, diagnostic_code=error.diagnostic_code());
+                }
+            }
+            return Ok(BuildWorkerOutcome::Idle);
+        }
         let Some(lease) = self
             .store
             .claim_due(&self.worker_id, self.lease_duration)
@@ -577,16 +794,25 @@ impl<P: BuildSupplyChainProvider> BuildWorker<P> {
         };
         match self.execute_with_heartbeat(&lease, now).await? {
             Ok(output) => {
-                self.store
+                let completed = self
+                    .store
                     .complete(
                         &lease,
                         &output,
+                        now,
                         &format!("build:{}", lease.command.request.id),
                     )
                     .await?;
-                Ok(BuildWorkerOutcome::Completed {
-                    build_request_id: lease.command.request.id,
-                })
+                if completed {
+                    Ok(BuildWorkerOutcome::Completed {
+                        build_request_id: lease.command.request.id,
+                    })
+                } else {
+                    Ok(BuildWorkerOutcome::Failed {
+                        build_request_id: lease.command.request.id,
+                        diagnostic_code: "LW_AGENT_BUILD_CANCELLED",
+                    })
+                }
             }
             Err(error)
                 if error.retryable

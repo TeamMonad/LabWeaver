@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ public_ingress_entry_name }}
-  namespace: {{ public_ingress_namespace }}
+  namespace: {{ public_ingress_entry_namespace }}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 data:
@@ -24,3 +24,8 @@ data:
       default_backend gateway_https
     backend gateway_https
       server gateway {{ public_ingress_gateway_vip }}:443
+    frontend ssh
+      bind 0.0.0.0:2222
+      default_backend gateway_ssh
+    backend gateway_ssh
+      server gateway {{ public_ingress_ssh_gateway_vip }}:2222

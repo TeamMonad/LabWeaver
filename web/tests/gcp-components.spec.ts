@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import GcpStatusPill from '@/components/common/GcpStatusPill.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import GcpFilterBar from '@/components/common/GcpFilterBar.vue'
@@ -27,7 +28,7 @@ const projects = [
     description: 'Second project',
     ownerActorId: 'teacher-1',
     courseId: 'ai201-model-engineering',
-    state: 'active' as const,
+    state: 'archived' as const,
     revision: 1,
     createdAt: '2026-07-11T10:00:00.000Z',
     updatedAt: '2026-07-11T10:00:00.000Z',
@@ -164,10 +165,16 @@ describe('GCP Console Components', () => {
   })
 
   describe('GcpProjectSelector', () => {
-    it('displays the selected project and its course association', async () => {
+    it('displays project names without exposing internal IDs in the normal selector view', async () => {
       const wrapper = mount(GcpProjectSelector)
       await vi.waitFor(() => expect(wrapper.text()).toContain('CS101 Operating Systems'))
-      expect(wrapper.text()).toContain('project-cs101')
+      expect(wrapper.text()).not.toContain('project-cs101')
+      await wrapper.find('.selector-trigger').trigger('click')
+      await vi.waitFor(() => expect(wrapper.find('.selector-menu').text()).toContain('AI201 Model Engineering'))
+      expect(wrapper.find('.selector-menu').text()).toContain('可用')
+      expect(wrapper.find('.selector-menu').text()).toContain('已归档')
+      expect(wrapper.find('.selector-menu').text()).not.toContain('运行中')
+      expect(wrapper.find('.selector-menu').text()).not.toContain('project-cs101')
     })
 
     it('opens dropdown when trigger is clicked', async () => {
@@ -185,6 +192,103 @@ describe('GCP Console Components', () => {
       expect(items.length).toBeGreaterThan(0)
       await items[1].trigger('click')
       expect(wrapper.find('.trigger-primary').text()).toBe('AI201 Model Engineering')
+    })
+
+    it('updates the current route and clears project-owned selections when switching projects', async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/researcher/software', component: { template: '<div />' } }],
+      })
+      await router.push({
+        path: '/researcher/software',
+        query: {
+          projectId: 'project-cs101',
+          mode: 'template',
+          filter: 'failed',
+          runId: 'run-old',
+          packageId: 'package-old',
+          releaseId: 'release-old',
+          environmentId: 'environment-old',
+          approvalId: 'approval-old',
+        },
+      })
+      await router.isReady()
+
+      const wrapper = mount(GcpProjectSelector, { global: { plugins: [router] } })
+      await wrapper.find('.selector-trigger').trigger('click')
+      await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+      await wrapper.findAll('.project-item')[1].trigger('click')
+      await vi.waitFor(() => expect(router.currentRoute.value.query.projectId).toBe('project-ai201'))
+
+      expect(router.currentRoute.value.query).toEqual(expect.objectContaining({ mode: 'template', filter: 'failed', projectId: 'project-ai201' }))
+      for (const key of ['runId', 'packageId', 'releaseId', 'environmentId', 'approvalId']) {
+        expect(router.currentRoute.value.query[key]).toBeUndefined()
+      }
+      wrapper.unmount()
+    })
+
+    it('returns a project-scoped detail route to its navigation list when switching projects', async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: '/student/results', component: { template: '<div />' } },
+          { path: '/student/results/:runId', component: { template: '<div />' } },
+        ],
+      })
+      await router.push({
+        path: '/student/results/result-old',
+        query: { projectId: 'project-cs101', mode: 'template', filter: 'failed', runId: 'result-old' },
+      })
+      await router.isReady()
+
+      const wrapper = mount(GcpProjectSelector, { global: { plugins: [router] } })
+      await wrapper.find('.selector-trigger').trigger('click')
+      await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+      await wrapper.findAll('.project-item')[1].trigger('click')
+      await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/student/results'))
+
+      expect(router.currentRoute.value.query).toEqual(expect.objectContaining({ mode: 'template', filter: 'failed', projectId: 'project-ai201' }))
+      expect(router.currentRoute.value.query.runId).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('keeps project-owned selections when selecting the already active project again', async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: '/student/results', component: { template: '<div />' } },
+          { path: '/student/results/:runId', component: { template: '<div />' } },
+        ],
+      })
+      await router.push({
+        path: '/student/results/result-current',
+        query: {
+          mode: 'template',
+          filter: 'failed',
+          runId: 'run-current',
+          releaseId: 'release-current',
+          environmentId: 'environment-current',
+        },
+      })
+      await router.isReady()
+
+      const wrapper = mount(ProjectContextHarness, { global: { plugins: [router] } })
+      ;(wrapper.vm as unknown as { projects: { select: (id: string) => void } }).projects.select('project-cs101')
+      await wrapper.find('.selector-trigger').trigger('click')
+      await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+      await wrapper.findAll('.project-item')[0].trigger('click')
+      await vi.waitFor(() => expect(router.currentRoute.value.query.projectId).toBe('project-cs101'))
+
+      expect(router.currentRoute.value.path).toBe('/student/results/result-current')
+      expect(router.currentRoute.value.query).toEqual(expect.objectContaining({
+        projectId: 'project-cs101',
+        mode: 'template',
+        filter: 'failed',
+        runId: 'run-current',
+        releaseId: 'release-current',
+        environmentId: 'environment-current',
+      }))
+      wrapper.unmount()
     })
 
     it('shares the authoritative catalog with existing project consumers after creation', async () => {

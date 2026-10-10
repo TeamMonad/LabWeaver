@@ -1,6 +1,9 @@
 //! Regression coverage for teacher authoring and Claude Code runtime bindings.
 
-use contracts::authoring::{AuthoringError, ProjectLlmEgressPolicy};
+use contracts::authoring::{
+    AuthoringError, ClaudeCodeBindingV1, EnvironmentSpec, ProjectLlmEgressPolicy,
+    ProjectLlmPolicyModelOption, ProjectLlmPolicyOptions,
+};
 use contracts::http::{HttpContractError, InternalImageArtifactResolution};
 use contracts::supply_chain::ImageArtifact;
 use contracts::{BuildRequestId, ImageArtifactId, PolicyId, ProjectId};
@@ -109,6 +112,53 @@ fn claude_code_binding_is_explicit_and_provider_opaque() -> Result<(), Box<dyn s
     assert_eq!(policy.binding.model, "claude-sonnet-4-6-20260601");
     assert_eq!(policy.binding.claude_code_version, "2.1.207");
     Ok(())
+}
+
+fn policy_options() -> ProjectLlmPolicyOptions {
+    ProjectLlmPolicyOptions {
+        models: vec![ProjectLlmPolicyModelOption {
+            model: "approved-model-v1".to_owned(),
+            label: "Approved model".to_owned(),
+        }],
+        default_model: "approved-model-v1".to_owned(),
+        runtime_binding: "claude-code-production".to_owned(),
+        claude_code_version: "2.1.207".to_owned(),
+        max_in_flight_per_worker: 2,
+    }
+}
+
+#[test]
+fn project_policy_options_allow_only_deployment_owned_binding_and_models() {
+    let options = policy_options();
+    assert!(options.validate().is_ok());
+    assert!(
+        options
+            .validate_policy_binding(&ClaudeCodeBindingV1 {
+                runtime_binding: "claude-code-production".to_owned(),
+                model: "approved-model-v1".to_owned(),
+                claude_code_version: "2.1.207".to_owned(),
+                max_in_flight_per_worker: 2,
+            })
+            .is_ok()
+    );
+    assert_eq!(
+        options.validate_policy_binding(&ClaudeCodeBindingV1 {
+            runtime_binding: "unreviewed-runtime".to_owned(),
+            model: "approved-model-v1".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
+        }),
+        Err(AuthoringError::RuntimeIdentityInvalid)
+    );
+    assert_eq!(
+        options.validate_policy_binding(&ClaudeCodeBindingV1 {
+            runtime_binding: "claude-code-production".to_owned(),
+            model: "unlisted-model".to_owned(),
+            claude_code_version: "2.1.207".to_owned(),
+            max_in_flight_per_worker: 2,
+        }),
+        Err(AuthoringError::ModelRequired)
+    );
 }
 
 #[test]
@@ -223,4 +273,102 @@ fn internal_artifact_resolution_requires_a_valid_exact_artifact_identity() {
         invalid_digest.validate(),
         Err(HttpContractError::InvalidInternalIdentity)
     ));
+}
+
+fn environment_spec_value(gpu: Option<Value>) -> Value {
+    let mut resources = json!({
+        "cpuMillicores": 1000,
+        "memoryBytes": 1_073_741_824_u64,
+        "storageBytes": 1_073_741_824_u64
+    });
+    if let Some(gpu) = gpu {
+        resources["gpu"] = gpu;
+    }
+    json!({
+        "apiVersion": "environment.labweaver.io/v1",
+        "kind": "EnvironmentSpec",
+        "name": "gpu-experiment",
+        "class": "experiment",
+        "resources": resources,
+        "network": {"mode": "deny_all"},
+        "entries": [{"name": "web", "protocol": "http", "servicePort": 8080}],
+        "security": {
+            "userPolicy": "non_root_required",
+            "rootFilesystemPolicy": "read_only_required",
+            "privilegeEscalationPolicy": "deny",
+            "publicExposurePolicy": "deny",
+            "securityProfileBinding": "restricted-v1"
+        },
+        "runtime": {
+            "kind": "container",
+            "provider_binding": "container-primary-v1",
+            "build_context": {
+                "artifactId": "00000000-0000-7000-8000-000000000001",
+                "storeBinding": "artifact-store-v1",
+                "objectVersion": "version-1",
+                "sizeBytes": 128,
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"
+            },
+            "service_port": 8080
+        },
+        "retention": {
+            "policyId": "00000000-0000-7000-8000-000000000002",
+            "policyRevision": 1,
+            "class": "run_evidence",
+            "retainUntil": "2026-08-16T08:00:00.000Z",
+            "disposition": "delete"
+        }
+    })
+}
+
+#[test]
+fn environment_spec_gpu_is_optional_and_validated() -> Result<(), Box<dyn std::error::Error>> {
+    let absent: EnvironmentSpec = serde_json::from_value(environment_spec_value(None))?;
+    assert!(absent.resources.gpu.is_none());
+
+    let valid: EnvironmentSpec = serde_json::from_value(environment_spec_value(Some(json!({
+        "class": "a100-exclusive",
+        "count": 2
+    }))))?;
+    let gpu = valid.resources.gpu.ok_or("gpu is present")?;
+    assert_eq!(gpu.class, "a100-exclusive");
+    assert_eq!(gpu.count, 2);
+
+    for invalid in [
+        json!({"class": "a100-exclusive", "count": 0}),
+        json!({"class": "A100-Exclusive", "count": 1}),
+        json!({"class": "nvidia.com/gpu", "count": 1}),
+        json!({"class": "", "count": 1}),
+        json!({"class": "-leading", "count": 1}),
+    ] {
+        assert!(
+            serde_json::from_value::<EnvironmentSpec>(environment_spec_value(Some(invalid)))
+                .is_err(),
+            "invalid gpu request must be rejected"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn course_policy_operation_exposes_optional_if_match() -> Result<(), Box<dyn std::error::Error>> {
+    let operation = contracts::http::operation_contract("createCourseLlmPolicy")
+        .ok_or("course policy operation missing")?;
+    assert_eq!(
+        operation.path,
+        "/api/v1/courses/{courseId}/llm-egress-policies"
+    );
+    assert_eq!(operation.scope, contracts::http::OperationScopeKind::Course);
+    let document: Value = serde_json::from_str(include_str!(
+        "../../../schemas/openapi/labweaver-public.v1.json"
+    ))?;
+    let parameters = document["paths"][operation.path]["post"]["parameters"]
+        .as_array()
+        .ok_or("course policy parameters missing")?;
+    assert!(parameters.iter().any(|parameter| {
+        parameter["name"] == "If-Match"
+            && parameter["in"] == "header"
+            && parameter["required"] == json!(false)
+    }));
+    Ok(())
 }
